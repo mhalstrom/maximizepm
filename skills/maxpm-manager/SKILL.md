@@ -55,6 +55,9 @@ Stop when the user tells you to, and tell the user what you did.
   (`--model`, `--effort`); the items' limits apply. **NO CODEX AGENT** (or
   another type): ready work there needs that agent type; run the launch line
   it prints (`maxpm launch --item <id> --agent Codex`).
+- **A release review nobody takes** (its authors are busy, or an author released it):
+  `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
+  folder of the release; a waiting session that worked on the release does not get it.
 - **NOT CONNECTED**: a session MaximizePM started ran no maxpm command. Tell the
   user (its terminal may wait on a prompt; for an agent in tmux the user reads
   and answers it with the agent's Terminal button on the page, and only a

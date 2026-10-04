@@ -220,6 +220,48 @@ class LaunchAgent(unittest.TestCase):
         r = server.dispatch_item(self.c, top, runner=sent.append)
         self.assertEqual((r["pushed_to"], len(sent)), ("idle", 1))  # a waiting session gets it; no new Terminal
 
+    def test_launch_starts_a_reviewer_for_a_ready_release_review_and_skips_its_authors(self):
+        # #902: launch --item <review> refused the review, and launch --project <deploy project> found nothing.
+        core.target_add(self.c, "web", "push, then smoke test")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        core.config_set(self.c, "review", "on")
+        for n in ("dev", "ops"):
+            core.register(self.c, n)
+        core.target_own(self.c, "web", "ops")
+        a = core.item_add(self.c, "site", "page")["id"]
+        core.claim(self.c, a, "dev")
+        dep = core.done(self.c, a, "commit", "dev", ship_it=True)["shipped_in"]
+        rv = next(i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "review")
+        deploy_project = core.item_show(self.c, rv)["project"]
+        self.assertIsNone(core._project(self.c, deploy_project)["path"])
+        self.assertEqual(core.release_authors(self.c, rv), {"dev"})
+        # Launch --project of the deploy project takes the review; the session opens in a folder of the release.
+        t = core.launch_target(self.c, deploy_project)
+        self.assertEqual((t["item"]["id"], t["project"], t["path"]), (rv, "site", core._project(self.c, "site")["path"]))
+        with self.assertRaisesRegex(RiverError, "only the owner of its target"):
+            core.launch_target(self.c, item=dep)  # the deploy item stays the owner's
+        # The author waits for work in the folder: it does not get the review; a new session does.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='waiting', waiting_in='site', waiting_since=? WHERE name='dev'",
+                           (core.iso(core.now()),))
+        sent = []
+        t = server.dispatch_item(self.c, rv, runner=sent.append)
+        self.assertNotIn("pushed_to", t)
+        self.assertEqual(len(sent), 1)
+        b = core.go(self.c, self.dir.name, t["session_name"], focus=f"item:{rv}")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", rv))
+        # Another session that waits there and wrote nothing in the release gets it pushed, as a reviewer.
+        core.release(self.c, rv, actor=t["session_name"])
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET reserved_for=NULL, reserved_until=NULL WHERE id=?", (rv,))
+        core.register(self.c, "other")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='waiting', waiting_in='site', waiting_since=? WHERE name='other'",
+                           (core.iso(core.now()),))
+        self.assertEqual(server.dispatch_item(self.c, rv, runner=sent.append)["pushed_to"], "other")
+        b = core.go(self.c, self.dir.name, "other")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", rv))
+
     def test_a_started_session_takes_its_item_or_says_why_and_one_that_never_connects_is_a_finding(self):
         core.project_add(self.c, "shop", path=self.dir.name)
         core.item_add(self.c, "shop", "first", priority=0)

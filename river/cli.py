@@ -531,8 +531,10 @@ def build_parser():
 
     x = sub.add_parser("launch", help="start an agent session in a new terminal tab, window, or tmux pane, like the page's Start")
     g = x.add_mutually_exclusive_group()
-    g.add_argument("--project", help="its most important ready item (default: first a project with no agent yet)")
-    g.add_argument("--item", type=int, help="this ready item (Dispatch)")
+    g.add_argument("--project", help="its most important ready item, a release review too "
+                                     "(default: first a project with no agent yet)")
+    g.add_argument("--item", type=int, help="this ready item (Dispatch); for a release review, a reviewer in a "
+                                            "folder of the release that wrote none of it")
     x.add_argument("--agent", help="a launch_agents label (default: the first)")
     x.add_argument("--model", help="model for the session (the item's limits apply)")
     x.add_argument("--effort", help="effort level for the session")

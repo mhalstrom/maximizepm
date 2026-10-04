@@ -6007,14 +6007,47 @@ def launch_migration_note(conn):
 
 def waiting_agent_for(conn, project, item_id=None):
     """An active session that waits for work in this project (maxpm wait), longest waiting first; with
-    item_id, only one whose model the item's limits allow."""
+    item_id, only one whose model the item's limits allow, and for a release review, none that worked on
+    the release (release_authors)."""
+    it = _item(conn, item_id) if item_id is not None else None
+    authors = release_authors(conn, it["id"]) if it is not None and it["kind"] == "review" else set()
     for r in conn.execute("SELECT name, waiting_in FROM agents WHERE role='waiting' AND kind='ai' "
                           "ORDER BY waiting_since").fetchall():
         a = agent_status(conn, r["name"])
         if a["state"] == "active" and not a["holds"] and project in (r["waiting_in"] or "").split(","):
-            if item_id is None or not _model_refusal(conn, _item(conn, item_id), r["name"]):
+            if r["name"] not in authors and (it is None or not _model_refusal(conn, it, r["name"])):
                 return r["name"]
     return None
+
+
+def release_authors(conn, review_id):
+    """The agents that worked on what a release review covers: whoever claimed or closed an item it ships.
+    A session started for the review is none of them."""
+    ids = [r["blocked_by"] for r in conn.execute(
+        "SELECT d.blocked_by FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND i.kind<>'review'",
+        (review_id,))]
+    if not ids:
+        return set()
+    marks = ",".join("?" * len(ids))
+    names = {r["assignee"] for r in conn.execute(f"SELECT assignee FROM items WHERE id IN ({marks})", ids) if r["assignee"]}
+    names |= {r["actor"] for r in conn.execute(
+        f"SELECT DISTINCT actor FROM events WHERE item_id IN ({marks}) AND (change LIKE 'claimed%' OR change LIKE 'done%')",
+        ids)}
+    return names
+
+
+def _review_folder(conn, item):
+    """Where a session for a release review opens: the review's project folder, else the folder of the first
+    project of its target, else of a project the release ships. None when none has one."""
+    p = _project(conn, item["project"])
+    if p["path"]:
+        return p
+    names = [r["name"] for r in conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 ORDER BY rank, id",
+                                             (item["target"],))] if item["target"] else []
+    names += [r["name"] for r in conn.execute(
+        "SELECT p.name FROM deps d JOIN items i ON i.id=d.blocked_by JOIN projects p ON p.id=i.project_id "
+        "WHERE d.item_id=? ORDER BY p.rank, p.id", (item["id"],))]
+    return next((q for q in (_project(conn, n) for n in names) if q["path"]), None)
 
 
 def covered_projects(conn, ann=None):
@@ -6057,7 +6090,8 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     project = _project(conn, project)["name"] if project else None
     own = conn.execute("SELECT 1 FROM items WHERE id=? AND reserved_for=? AND status='open'",
                        (int(item), actor)).fetchone() if item is not None and actor else None
-    pool = sorted((a for a in ann.values() if a["ready"] and a["doer"] != "human" and a["kind"] not in ("deploy", "review", "monitor")
+    # A ready release review is work for any agent (role REVIEWER); a deploy item is the target owner's.
+    pool = sorted((a for a in ann.values() if a["ready"] and a["doer"] != "human" and a["kind"] not in ("deploy", "monitor")
                    and (not a["reserved_for"] or (own and a["id"] == int(item))) and not a["project_archived"]
                    and (project is None or a["project"] == project)), key=lambda a: a["sort_key"])
     if item is not None:
@@ -6067,7 +6101,8 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
             held = a is not None and a["status"] == "open" and _item(conn, item)["reserved_for"]
             raise RiverError(f"#{item} is not ready for an agent" + (
                 "" if a is None else f" (status {a['status']}" + (f", reserved for {a['reserved_for']}" if a["reserved_for"] else "")
-                + (", for a person" if a["doer"] == "human" else "") + (", waits on open items" if not a["ready"] else "") + ")")
+                + (", for a person" if a["doer"] == "human" else "") + (", waits on open items" if not a["ready"] else "")
+                + (", a deploy item: only the owner of its target takes it" if a["kind"] == "deploy" else "") + ")")
                 + (f"; {_unreserve_hint(item)}" if held else ""))
     elif not pool:
         raise RiverError("nothing is ready for an agent" + (f" in {project}" if project else "")
@@ -6089,6 +6124,9 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         else:
             why = "every project with ready work has an agent, so the most important ready item"
     p = _project(conn, top["project"])
+    if not p["path"] and top["kind"] == "review":
+        # A deploy project has no folder: the reviewer starts in a folder of the release.
+        p = _review_folder(conn, top) or p
     if not p["path"]:
         raise RiverError(f"project {p['name']} has no folder, so MaximizePM cannot start a session there: "
                          f"maxpm project path {p['name']} <folder>")
@@ -6490,8 +6528,9 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             except RiverError as e:
                 brief["claim_refused"] = str(e)
                 continue
-            brief.update(role="worker", item=item, why=f"#{item['id']} is the first ready item in your queue")
-            _set_role_note(conn, actor, "worker", item["id"])
+            r = "reviewer" if item["kind"] == "review" else "worker"
+            brief.update(role=r, item=item, why=f"#{item['id']} is the first ready item in your queue")
+            _set_role_note(conn, actor, r, item["id"])
             return brief
         brief["queue_waiting"] = [e for e in queue_list(conn, actor)["entries"] if e.get("item")]
 
@@ -6539,8 +6578,9 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                 brief["focus_note"] = (f"THE PAGE STARTED THIS SESSION FOR #{f['id']} {f['title']}, BUT YOU CANNOT "
                                        f"TAKE IT: {e}. MaximizePM gives you other work instead; tell the user.")
             else:
-                brief.update(role="worker", item=item, why=f"the page started this session for #{f['id']}")
-                _set_role_note(conn, actor, "worker", item["id"])
+                r = "reviewer" if item["kind"] == "review" else "worker"
+                brief.update(role=r, item=item, why=f"the page started this session for #{f['id']}")
+                _set_role_note(conn, actor, r, item["id"])
                 return brief
         if f["status"] in OPEN_STATES and kind == "unblock":
             got = try_claim(unblocks=str(f["id"]))
@@ -6561,8 +6601,9 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             except RiverError as e:
                 brief["claim_refused"] = str(e)
                 continue
-            brief.update(role="worker", item=item, why=f"#{item['id']} was pushed to you by {a['reserved_by'] or 'someone'}")
-            _set_role_note(conn, actor, "worker", item["id"])
+            r = "reviewer" if item["kind"] == "review" else "worker"
+            brief.update(role=r, item=item, why=f"#{item['id']} was pushed to you by {a['reserved_by'] or 'someone'}")
+            _set_role_note(conn, actor, r, item["id"])
             return brief
     if role in (None, "deployer"):
         got = _deploy_claim(conn, actor, names, take_free=(role == "deployer"), brief=brief)
