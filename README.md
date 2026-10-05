@@ -569,6 +569,20 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   `maxpm review pass <id> --confirm all` (or the step ids) confirms the written
   steps, runs the commands, and records each result in the review's history.
   `review_prompt` and `review_cmd` still apply next to the steps.
+- Releases move by themselves: the running `maxpm serve` takes a release from
+  its review to its deploy with no manager. With `auto_review` on (the
+  default), a ready review goes to a session that waits for work in a project
+  of the release and worked on nothing in it; else serve starts a reviewer
+  session. For the deploy, each target has a deployer mode,
+  `maxpm target deployer <target> launch|standing|off`. `launch` (the
+  default): when the deploy item is ready, serve alerts the target owner, and
+  when there is no owner, or the owner cannot take it, it starts a deployer
+  session and gives it the target. `standing`: the deployer session starts as
+  soon as the release has a deploy item, so it waits during the review and
+  deploys when the review passes. `off`: serve starts nothing. `max_sessions`
+  (0, the default, is no limit) stops serve from starting a release session
+  while that many agent sessions are live. The item's history records each
+  start, push, alert, and failure.
 - Overviews: `maxpm status`, and `maxpm log` with a Done tab on the page.
 - Cleanup: `maxpm cleanup` lists open items that may be done or stale (a
   lease ran out without done, a commit names the item, a person's files
