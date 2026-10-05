@@ -262,6 +262,152 @@ class LaunchAgent(unittest.TestCase):
         b = core.go(self.c, self.dir.name, "other")
         self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", rv))
 
+    def _release(self, owner="ops", review="on"):
+        """A target web with one project, a release of one item by dev, and its review; returns (review, deploy)."""
+        core.target_add(self.c, "web", "push, then smoke test")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        core.config_set(self.c, "review", review)
+        core.register(self.c, "dev")
+        if owner:
+            core.register(self.c, owner)
+            core.target_own(self.c, "web", owner)
+        a = core.item_add(self.c, "site", "page")["id"]
+        core.claim(self.c, a, "dev")
+        dep = core.done(self.c, a, "commit", "dev", ship_it=True)["shipped_in"]
+        rv = next((i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "review"), None)
+        return rv, dep
+
+    def _wait(self, name, project="site"):
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='waiting', waiting_in=?, waiting_since=?, last_seen=? WHERE name=?",
+                           (project, core.iso(core.now()), core.iso(core.now()), name))
+
+    def _quiet(self, name, minutes):
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET last_seen=? WHERE name=?",
+                           (core.iso(core.now() - core.timedelta(minutes=minutes)), name))
+
+    def test_serve_gives_a_ready_review_to_a_waiting_agent_that_did_not_write_the_release_else_starts_one(self):
+        # #966: every review needed the manager to queue or launch a reviewer.
+        rv, dep = self._release()
+        self._wait("dev")  # the author waits in the folder: it never gets its own release's review
+        sent = []
+        r = server.auto_release(self.c, runner=sent.append)
+        name = r["started"][rv]
+        self.assertEqual((len(sent), r["pushed"]), (1, {}))
+        self.assertIn(f"MAXPM_FOCUS=item:{rv}", sent[0])
+        self.assertEqual(core._item(self.c, rv)["reserved_for"], name)
+        # The next passes start nothing more for it: it is reserved for the new session.
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["started"], {})
+        self.assertEqual(len(sent), 1)
+        b = core.go(self.c, self.dir.name, name, focus=f"item:{rv}")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", rv))
+        # Released again: another agent that waits there and wrote nothing in the release gets it pushed.
+        core.release(self.c, rv, actor=name)
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET reserved_for=NULL, reserved_until=NULL WHERE id=?", (rv,))
+            self.c.execute("DELETE FROM events WHERE item_id=? AND change LIKE 'release:%'", (rv,))
+        core.register(self.c, "other")
+        self._wait("other")
+        r = server.auto_release(self.c, runner=sent.append)
+        self.assertEqual((r["pushed"], len(sent)), ({rv: "other"}, 1))
+        # auto_review off: nothing.
+        core.release(self.c, core.go(self.c, self.dir.name, "other")["item"]["id"], actor="other")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET reserved_for=NULL, reserved_until=NULL WHERE id=?", (rv,))
+            self.c.execute("DELETE FROM events WHERE item_id=? AND change LIKE 'release:%'", (rv,))
+        core.config_set(self.c, "auto_review", "off")
+        self.assertEqual(server.auto_release(self.c, runner=sent.append), {"pushed": {}, "started": {}, "alerted": {}, "failed": {}})
+
+    def test_the_usual_release_pass_builds_no_graph(self):
+        core.target_add(self.c, "web")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        core.config_set(self.c, "review", "on")
+        core.ship(self.c, core.item_add(self.c, "site", "page")["id"])  # the release waits on open work
+        with mock.patch.object(core, "annotate", side_effect=AssertionError("no graph")):
+            self.assertEqual(server.auto_release(self.c, runner=[].append),
+                             {"pushed": {}, "started": {}, "alerted": {}, "failed": {}})
+
+    def test_serve_starts_no_release_session_past_max_sessions_and_does_not_repeat_a_failure(self):
+        rv, dep = self._release()
+        core.config_set(self.c, "max_sessions", "2")  # dev and ops are live
+        sent = []
+        r = server.auto_release(self.c, runner=sent.append)
+        self.assertEqual((r["started"], r["failed"], sent), ({}, {rv: "max_sessions 2"}, []))
+        hist = lambda: [e["change"] for e in core.item_show(self.c, rv)["events"] if e["change"].startswith("release:")]
+        server.auto_release(self.c, runner=sent.append)
+        self.assertEqual(len(hist()), 1)  # one line in the history, not one each pass
+        self.assertIn("max_sessions", hist()[0])
+        core.config_set(self.c, "max_sessions", "0")
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["started"], {})  # within RELEASE_GAP
+        with core.tx(self.c):
+            self.c.execute("UPDATE events SET at=? WHERE item_id=? AND change LIKE 'release:%'",
+                           (core.iso(core.now() - core.timedelta(seconds=server.RELEASE_GAP + 1)), rv))
+        self.assertIn(rv, server.auto_release(self.c, runner=sent.append)["started"])
+
+    def test_serve_alerts_the_owner_of_a_ready_deploy_once_and_starts_a_deployer_when_the_owner_cannot_take_it(self):
+        rv, dep = self._release()
+        core.register(self.c, "rev")
+        core.claim(self.c, rv, "rev")
+        core.review_pass(self.c, rv, "ok", "rev")
+        self._wait("ops")  # the owner waits for work: the alert wakes it
+        sent = []
+        r = server.auto_release(self.c, runner=sent.append)
+        self.assertEqual((r["alerted"], r["started"], sent), ({dep: "ops"}, {}, []))
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["alerted"], {})  # one alert
+        self.assertIn("you have messages", core.wait(self.c, self.dir.name, "ops", sleep=lambda s: None, step="1s")["why"])
+        b = core.go(self.c, self.dir.name, "ops")
+        self.assertEqual((b["role"], b["item"]["id"]), ("deployer", dep))
+        # The next release: the owner holds nothing and ran no command for a while: idle at its prompt.
+        core.done(self.c, dep, "v2", "ops")
+        a = core.item_add(self.c, "site", "header")["id"]
+        core.claim(self.c, a, "dev")
+        core.done(self.c, a, "commit", "dev", ship_it=True)
+        rv2 = next(i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "review")
+        dep2 = next(i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "deploy")
+        core.claim(self.c, rv2, "rev")
+        core.review_pass(self.c, rv2, "ok", "rev")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='idle' WHERE name='ops'")
+        self._quiet("ops", 5)
+        self.assertFalse(core.owner_can_deploy(self.c, "ops")[0])
+        r = server.auto_release(self.c, runner=sent.append)
+        name = r["started"][dep2]
+        self.assertTrue(name.startswith("deploy-web-"))
+        self.assertIn("MAXPM_FOCUS=deploy:web", sent[0])
+        self.assertIn(f"MAXPM_AGENT={name}", sent[0])
+        self.assertEqual(core.target_show(self.c, "web")["owner"], name)
+        self.assertIn("gave target web", core.inbox(self.c, "ops", mark_read=False)[-1]["body"])
+        # The new owner has connect_within to connect: no second session meanwhile.
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["started"], {})
+        b = core.go(self.c, self.dir.name, name, focus="deploy:web")
+        self.assertEqual((b["role"], b["item"]["id"]), ("deployer", dep2))
+
+    def test_a_target_with_no_owner_gets_a_deployer_standing_starts_it_during_the_review_and_off_starts_none(self):
+        rv, dep = self._release(owner=None)
+        sent = []
+        r = server.auto_release(self.c, runner=sent.append)
+        self.assertEqual(list(r["started"]), [rv])  # the review is not passed: launch waits for it
+        self.assertEqual(core.target_show(self.c, "web")["deployer"], "launch")
+        core.target_deployer(self.c, "web", "standing")
+        r = server.auto_release(self.c, runner=sent.append)
+        name = r["started"][dep]
+        self.assertEqual(core.target_show(self.c, "web")["owner"], name)
+        b = core.go(self.c, self.dir.name, name, focus="deploy:web")
+        self.assertEqual(b["role"], "idle")  # it owns the target and waits for the review
+        reviewer = core._item(self.c, rv)["reserved_for"]
+        core.claim(self.c, rv, reviewer)
+        core.review_pass(self.c, rv, "ok", reviewer)
+        self._wait(name)
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["alerted"], {dep: name})
+        # off: nothing for the deploy item, also with no owner.
+        with core.tx(self.c):
+            self.c.execute("UPDATE targets SET owner=NULL, owner_expires_at=NULL")
+        core.target_deployer(self.c, "web", "off")
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["started"], {})
+        with self.assertRaisesRegex(RiverError, "launch, standing, or off"):
+            core.target_deployer(self.c, "web", "always")
+
     def test_a_started_session_takes_its_item_or_says_why_and_one_that_never_connects_is_a_finding(self):
         core.project_add(self.c, "shop", path=self.dir.name)
         core.item_add(self.c, "shop", "first", priority=0)

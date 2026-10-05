@@ -55,7 +55,16 @@ Stop when the user tells you to, and tell the user what you did.
   (`--model`, `--effort`); the items' limits apply. **NO CODEX AGENT** (or
   another type): ready work there needs that agent type; run the launch line
   it prints (`maxpm launch --item <id> --agent Codex`).
-- **A release review nobody takes** (its authors are busy, or an author released it):
+- **Releases move by themselves**: `maxpm serve` gives a ready release review to a
+  session that waits in a project of the release and worked on nothing in it, else
+  starts a reviewer (`auto_review`). When the deploy item is ready, it alerts the
+  target owner once; with no owner, or an owner that cannot take it (gone, never
+  connected, or idle at its prompt), it starts a deployer session and gives it the
+  target (`maxpm target deployer <target> launch|standing|off`; standing starts the
+  deployer while the review runs). No session starts while `max_sessions` agent
+  sessions are live (0: no limit). Each start or failure is a `release:` line in the
+  item's history. Do not hand releases over yourself unless serve says it cannot.
+- **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
   `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
   folder of the release; a waiting session that worked on the release does not get it.
 - **NOT CONNECTED**: a session MaximizePM started ran no maxpm command. Tell the
@@ -67,8 +76,9 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm edit <id> --unreserve` ends a reservation by hand ("reserved for
   <agent>"), so every agent can take the item. An item reserved for you:
   `maxpm launch --item <id>` gives it to the new session.
-- **TARGET owner away or gone**: `maxpm target give <target> --to <agent>`
-  (an active agent in one of the target's projects).
+- **TARGET owner away or gone**: with a ready deploy, `maxpm serve` starts a deployer
+  and gives it the target (deployer mode launch or standing). Otherwise
+  `maxpm target give <target> --to <agent>` (an active agent in one of the target's projects).
 - **A goal that several agents must work on at the same time**: an owner
   reserves the goal's agent items, so one agent does them in sequence. When
   the user wants its items open to every agent, make the goal shared:

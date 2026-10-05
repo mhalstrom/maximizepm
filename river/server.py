@@ -1116,6 +1116,149 @@ def fresh_sessions(conn, runner=None):
     return out
 
 
+# A release needed the manager twice: to start a reviewer, and to wake the target owner after the review passed.
+# auto_release does both in each pass of maxpm serve. It writes each start (and each failure) into the item's
+# history with RELEASE_NOTE first, and starts nothing for the same item again within RELEASE_GAP of the last one:
+# a session needs a minute or two to connect, and a failure must not repeat every pass.
+RELEASE_NOTE = "release:"
+RELEASE_GAP = 600
+
+
+def _release_recent(conn, item_id):
+    r = conn.execute("SELECT at FROM events WHERE item_id=? AND change LIKE ? AND change NOT LIKE ? ORDER BY id DESC "
+                     "LIMIT 1", (item_id, RELEASE_NOTE + "%", RELEASE_NOTE + " alerted%")).fetchone()
+    return r is not None and (core.now() - core.parse_iso(r["at"])).total_seconds() < RELEASE_GAP
+
+
+def _release_event(conn, item_id, text):
+    with core.tx(conn):
+        core._event(conn, item_id, "maxpm", f"{RELEASE_NOTE} {text}")
+
+
+def start_deployer(conn, target, dep_id, why, runner=None):
+    """Start a deployer session for a target: river names it, gives it the target (the old owner is told), and
+    opens the agent in a folder of the target's projects with MAXPM_FOCUS=deploy:<target>, with the deploy
+    item's model and effort. Its maxpm go claims the deploy item when it is ready, else it waits for it."""
+    import secrets
+    it = core.annotate(conn)[dep_id]
+    p = _target_folder(conn, target)
+    label = core.agent_for_type(conn, it["agent"], p["id"]) if it["agent"] else _agent_for(conn, it["model"])[0]
+    opt = next((o for o in core.launch_options(conn) if o["label"] == label), None)
+    model = it["model"] if opt and any(x["name"] == it["model"] for x in opt["models"]) else None
+    effort = it["effort"] if opt and it["effort"] in opt["efforts"] else None
+    focus = f"deploy:{target}"
+    launch_in = core._launch_in(conn, p["id"])
+    _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go", launch_in)
+    title = core.focus_title(conn, focus)
+    t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": title,
+         **core._launch_agent_cmd(conn, p["id"], label, model, effort, None, title), "launch_in": launch_in}
+    name = f"deploy-{target}-{secrets.token_hex(2)}"
+    core.register(conn, name, note=f"{core.STARTED_NOTE} #{dep_id}")
+    with core.tx(conn):
+        core.target_handoff(conn, target, name, why)
+    _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": focus, **t["env"]}, runner)
+    return {**t, "session_name": name}
+
+
+def auto_release(conn, runner=None):
+    """One pass of the loop of maxpm serve (every notify_interval): releases move with no manager.
+    - A ready release review that nobody holds or has reserved (auto_review on): a session that waits for work in
+      a project of the release and worked on nothing in it (release_authors) gets it pushed; else a new session.
+    - A ready deploy item nobody holds, by its target's deployer mode (core.DEPLOYER_MODES): the target owner gets
+      one alert when it can take it (core.owner_can_deploy); with no owner, or one that cannot, a new deployer
+      session gets the target. With standing, that session starts while the release still waits on its review.
+    No session starts while max_sessions agent sessions are live. Returns {"pushed": {item: agent},
+    "started": {item: session}, "alerted": {item: owner}, "failed": {item: why}}."""
+    out = {"pushed": {}, "started": {}, "alerted": {}, "failed": {}}
+    ann = None
+    cap = int(core.setting(conn, "max_sessions") or 0)
+
+    def full(item_id):
+        if cap and core.live_sessions(conn) >= cap:
+            if not _release_recent(conn, item_id):
+                _release_event(conn, item_id, f"no session started: {cap} agent sessions are live (max_sessions)")
+            out["failed"][item_id] = f"max_sessions {cap}"
+            return True
+        return False
+    # Candidates by SQL first (nothing open before them), so the usual pass builds no graph (core.annotate).
+    clear = (f"NOT EXISTS (SELECT 1 FROM deps d JOIN items b ON b.id=d.blocked_by WHERE d.item_id=i.id "
+             f"AND d.kind<>'conflicts' AND b.status IN {core.OPEN_STATES})")
+    reviews = conn.execute(f"SELECT id FROM items i WHERE kind='review' AND status='open' AND assignee IS NULL "
+                           f"AND (reserved_for IS NULL OR reserved_until < ?) AND {clear} ORDER BY id",
+                           (core.iso(core.now()),)).fetchall()
+    if reviews:
+        with core.tx(conn):
+            core._sweep(conn)  # a push that ran out ends here, as in every river command
+    for r in reviews:
+        ann = ann or core.annotate(conn)
+        a = ann.get(r["id"])
+        if (a is None or not a["ready"] or a["reserved_for"] or a["project_archived"]
+                or core.setting(conn, "auto_review", item_id=a["id"]) != "on" or _release_recent(conn, a["id"])):
+            continue
+        projects = [a["project"]] + [ann[b]["project"] for b in a["waits_on"] if b in ann]
+        waiting = next((w for w in (core.waiting_agent_for(conn, p, a["id"]) for p in dict.fromkeys(projects)) if w),
+                       None)
+        if waiting:
+            try:
+                core.push(conn, a["id"], waiting, f"from maxpm serve: release {a['target']} waits on this review, "
+                          f"and you worked on nothing in it", "maxpm")
+            except RiverError as e:  # taken or reserved since the look above
+                out["failed"][a["id"]] = str(e)
+                continue
+            _release_event(conn, a["id"], f"pushed to {waiting}, who waits for work")
+            out["pushed"][a["id"]] = waiting
+            continue
+        if full(a["id"]):
+            continue
+        try:
+            name = start_fresh(conn, a["id"], "release review ready", runner)["session_name"]
+        except (RiverError, StopIteration) as e:
+            _release_event(conn, a["id"], f"no reviewer session: {e}")
+            out["failed"][a["id"]] = str(e)
+            continue
+        _release_event(conn, a["id"], f"started reviewer session {name}")
+        out["started"][a["id"]] = name
+        ann = None
+    deploys = conn.execute("SELECT i.id, i.status, i.target, t.owner, t.deployer FROM items i JOIN targets t ON t.name=i.target "
+                           f"WHERE i.kind='deploy' AND i.status IN {core.OPEN_STATES} AND t.deployer<>'off' "
+                           "ORDER BY i.id").fetchall()
+    seen = set()
+    for d in deploys:
+        if d["target"] in seen:
+            continue  # one deploy item at a time for each target: the first open one
+        seen.add(d["target"])
+        if d["status"] != "open" or (d["deployer"] != "standing" and not conn.execute(
+                f"SELECT 1 FROM items i WHERE id=? AND {clear}", (d["id"],)).fetchone()):
+            continue  # it runs already, or it waits on open work
+        ann = ann or core.annotate(conn)
+        a = ann.get(d["id"])
+        if a is None or a["project_archived"] or not (a["ready"] or d["deployer"] == "standing"):
+            continue
+        ok, why = core.owner_can_deploy(conn, d["owner"]) if d["owner"] else (False, "the target has no owner")
+        if ok:
+            note = f"{RELEASE_NOTE} alerted {d['owner']}"
+            if a["ready"] and not conn.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE ?",
+                                               (d["id"], note + ":%")).fetchone():
+                with core.tx(conn):
+                    core._send(conn, "alert", "maxpm", f"deploy #{d['id']} for {d['target']} is ready: take it now: "
+                               f"maxpm --as {d['owner']} go --role deployer", to=d["owner"], item_id=d["id"])
+                    core._event(conn, d["id"], "maxpm", f"{note}: the deploy is ready")
+                out["alerted"][d["id"]] = d["owner"]
+            continue
+        if _release_recent(conn, d["id"]) or full(d["id"]):
+            continue
+        reason = (f"deploy #{d['id']} is ready" if a["ready"] else "a standing deployer waits for the review") + f"; {why}"
+        try:
+            name = start_deployer(conn, d["target"], d["id"], reason, runner)["session_name"]
+        except RiverError as e:
+            _release_event(conn, d["id"], f"no deployer session: {e}")
+            out["failed"][d["id"]] = str(e)
+            continue
+        _release_event(conn, d["id"], f"started deployer session {name} ({reason})")
+        out["started"][d["id"]] = name
+    return out
+
+
 def terminal_keys(conn, agent, keys, who=None):
     """Type into an agent's tmux pane from the page: keys is a list of {"text": "..."} (typed as it is) and
     {"key": "Enter"} (a key in TERMINAL_KEYS). Only a person does this: an agent does not answer another

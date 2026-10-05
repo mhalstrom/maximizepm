@@ -166,6 +166,13 @@ DEFAULT_SETTINGS = {
     "review": "off",
     "review_prompt": "",
     "review_cmd": "",
+    # Releases move with no manager (maxpm serve, every notify_interval). auto_review on: a ready release review
+    # that nobody holds or has reserved goes to a session that waits for work in a project the release ships and
+    # worked on nothing in it (release_authors), else to a new session. What serve does for a deploy item is each
+    # target's deployer mode (maxpm target deployer). max_sessions: serve starts no session by itself for a release
+    # while this many agent sessions are live (0: no limit); a person's Start and maxpm launch do not count it.
+    "auto_review": "on",
+    "max_sessions": "0",
     # Models, weakest to strongest, one list per family ("family: a, b, c", families separated by ";").
     # There is no order across families: a limit compares only models of the same family.
     "model_ladder": "claude: haiku, sonnet, opus, fable; openai: luna, terra, sol, astra",
@@ -234,6 +241,7 @@ CREATE TABLE IF NOT EXISTS targets (
   name              TEXT NOT NULL UNIQUE,
   description       TEXT NOT NULL DEFAULT '',
   monitor           TEXT NOT NULL DEFAULT '',  -- what a session watches after each deploy (maxpm target monitor)
+  deployer          TEXT NOT NULL DEFAULT 'launch',  -- what maxpm serve starts for its deploys (maxpm target deployer)
   owner             TEXT,
   owner_expires_at  TEXT,
   created_at        TEXT NOT NULL
@@ -715,6 +723,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN replan INTEGER NOT NULL DEFAULT 0")
     if "monitor" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
         conn.execute("ALTER TABLE targets ADD COLUMN monitor TEXT NOT NULL DEFAULT ''")
+    if "deployer" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
+        conn.execute("ALTER TABLE targets ADD COLUMN deployer TEXT NOT NULL DEFAULT 'launch'")
     if "owner_lease" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN owner_lease TEXT")
     if "shared" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -809,7 +819,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             re.compile(value)
         except re.error as e:
             raise RiverError(f"prompt_pattern is a regular expression, and this one has an error: {e}")
-    elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "smtp_port"):
+    elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "smtp_port",
+                 "max_sessions"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "launch_agents":
@@ -833,8 +844,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         _check_model_name(value)
     elif key in ("default_min_model", "default_max_model") and value:
         _limit_list(parse_ladder(setting(conn, "model_ladder")), value, key)
-    elif key == "review" and value not in ("on", "off"):
-        raise RiverError("review is on or off")
+    elif key in ("review", "auto_review") and value not in ("on", "off"):
+        raise RiverError(f"{key} is on or off")
     elif key == "setup_done" and value not in ("on", "off"):
         raise RiverError("setup_done is on or off")
     elif key == "launch_in" and value not in ("auto", *LAUNCH_INS):
@@ -1693,6 +1704,69 @@ def target_monitor(conn, name, text, actor=None):
         conn.execute("UPDATE targets SET monitor=? WHERE name=?", (text.strip(), name))
         _event(conn, None, actor, f"target {name} monitor " + ("changed" if text.strip() else "removed"))
     return target_show(conn, name)
+
+
+# What maxpm serve starts for a target's deploys (maxpm target deployer):
+# launch: when the deploy item is ready, alert the target owner; when there is no owner, or the owner cannot take
+#   it (gone, stopped, never connected, or idle at its prompt), start a deployer session and give it the target.
+# standing: as launch, and the deployer session starts as soon as the release has a deploy item, so it owns the
+#   target and waits while the review runs, and deploys the moment the review passes.
+# off: serve starts nothing; the owner or a person runs the deploy.
+DEPLOYER_MODES = ("launch", "standing", "off")
+
+
+def target_deployer(conn, name, mode, actor=None):
+    if mode not in DEPLOYER_MODES:
+        raise RiverError("the deployer mode is launch, standing, or off")
+    with tx(conn):
+        name = _target(conn, name)["name"]
+        conn.execute("UPDATE targets SET deployer=? WHERE name=?", (mode, name))
+        _event(conn, None, actor, f"target {name} deployer {mode}")
+    return target_show(conn, name)
+
+
+def owner_can_deploy(conn, owner):
+    """Whether a target owner takes a ready deploy item when it gets an alert: (True, None), or (False, why).
+    It can when it waits for work (maxpm wait wakes on the alert), holds an item (its next command shows the
+    alert), is a person or the manager, ran a maxpm command within idle_after, or was just started and has
+    connect_within to connect. It cannot when it is gone or stopped, never connected, or holds nothing and ran
+    no command for idle_after: then it sits at its prompt, and river never types into it."""
+    a = conn.execute("SELECT * FROM agents WHERE name=?", (owner,)).fetchone()
+    if a is None:
+        return False, f"{owner} is not registered"
+    if a["kind"] == "human" or a["role"] == "manager":
+        return True, None
+    state = _agent_state(conn, a)
+    if state in ("gone", "stopped"):
+        return False, f"{owner} is {state}"
+    quiet = now() - parse_iso(a["last_seen"])
+    if a["last_seen"] == a["registered_at"]:
+        if quiet < parse_duration(setting(conn, "connect_within")):
+            return True, None
+        return False, f"{owner} never connected"
+    if a["role"] == "waiting" or quiet < parse_duration(setting(conn, "idle_after")):
+        return True, None
+    if conn.execute("SELECT 1 FROM items WHERE assignee=? AND status IN ('in_progress','held')", (owner,)).fetchone():
+        return True, None
+    return False, f"{owner} holds nothing and ran no maxpm command for {_short(quiet)}: idle at its prompt"
+
+
+def target_handoff(conn, name, to, why):
+    """maxpm serve gives a target to the deployer session it starts; the old owner, if any, is told. Inside a tx."""
+    t = _target(conn, name)
+    conn.execute("UPDATE targets SET owner=?, owner_expires_at=? WHERE name=?",
+                 (to, iso(now() + parse_duration(setting(conn, "owner_ttl", agent=to))), t["name"]))
+    _event(conn, None, "maxpm", f"target {t['name']} given to {to}" + (f" (was {t['owner']})" if t["owner"] else "")
+           + f": {why}")
+    if t["owner"] and t["owner"] != to:
+        _send(conn, "notice", "maxpm", f"maxpm serve gave target {t['name']} to {to}: {why}. You no longer run its "
+              f"deploys; a person can give it back: maxpm target give {t['name']} --to {t['owner']}", to=t["owner"])
+
+
+def live_sessions(conn):
+    """How many agent sessions are live now (not gone, not stopped), for max_sessions."""
+    return sum(1 for r in conn.execute("SELECT * FROM agents WHERE kind='ai'")
+               if _agent_state(conn, r) not in ("gone", "stopped"))
 
 
 def _add_monitor(conn, dep, actor):

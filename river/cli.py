@@ -411,6 +411,12 @@ def build_parser():
     x = tgs.add_parser("describe", help="set how a target deploys"); x.add_argument("name"); x.add_argument("text")
     x = tgs.add_parser("monitor", help="what a session watches after each deploy (health links, logs, for how long)")
     x.add_argument("name"); x.add_argument("text", nargs="?", help="the monitor text; \"\" removes it; none shows it")
+    x = tgs.add_parser("deployer", help="what maxpm serve starts for the target's deploys: launch (the default) "
+                       "alerts the owner when a deploy is ready, and starts a deployer session when there is no owner "
+                       "or the owner cannot take it (gone, or idle at its prompt); standing starts that session as "
+                       "soon as a release has a deploy item, so it waits during the review and deploys the moment the "
+                       "review passes; off starts nothing")
+    x.add_argument("name"); x.add_argument("mode", nargs="?", choices=core.DEPLOYER_MODES, help="none shows it")
     x = tgs.add_parser("show", help="a target, its owner, and its projects"); x.add_argument("name")
     x = tgs.add_parser("rename", help="give a target a new name; its projects, deploy items and deploy project follow")
     x.add_argument("name"); x.add_argument("new")
@@ -1434,6 +1440,8 @@ def dispatch(conn, a, actor):
             return core.target_rename(conn, a.name, a.new, actor)
         if a.tcmd == "monitor":
             return core.target_show(conn, a.name) if a.text is None else core.target_monitor(conn, a.name, a.text, actor)
+        if a.tcmd == "deployer":
+            return core.target_show(conn, a.name) if a.mode is None else core.target_deployer(conn, a.name, a.mode, actor)
         if a.tcmd == "own":
             return core.target_own(conn, a.name, actor, a.takeover)
         if a.tcmd == "release":
@@ -2384,6 +2392,12 @@ def render(a, res):
         print("  " + (res["description"] or f"(no description: maxpm target describe {res['name']} \"how it deploys\")"))
         print("  monitor: " + (res.get("monitor") or f"none (a session follows each deploy when you set one: "
                                                       f"maxpm target monitor {res['name']} \"<what to watch, for how long>\")"))
+        print("  deployer: " + {"launch": "launch (maxpm serve alerts the owner when a deploy is ready, and starts a "
+                                          "deployer session when the owner cannot take it)",
+                                "standing": "standing (maxpm serve keeps a deployer session that owns the target while "
+                                            "a release waits on its review)",
+                                "off": "off (maxpm serve starts nothing; the owner or a person deploys)"}[res["deployer"]]
+              + f"; change it: maxpm target deployer {res['name']} launch|standing|off")
         if res["owner"]:
             left = core._short(core.parse_iso(res["owner_expires_at"]) - core.now())
             print(f"  owner: {res['owner']} ({left} left; any command by {res['owner']} renews it)")
