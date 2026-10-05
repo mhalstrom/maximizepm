@@ -560,6 +560,9 @@ def build_parser():
     x.add_argument("--tidy", action="store_true",
                    help="first close the panes of sessions that are done: the agent CLI ended, or it stays open but "
                         "its agent left the queue, stopped, or is gone, and holds nothing; never a pane that shows a prompt")
+    x.add_argument("--orphans", action="store_true",
+                   help="list the tmux servers the tests left behind with their socket gone (only shells in their "
+                        "panes; never the server of the agents); with --tidy, end them. maxpm serve ends them every tidy_every")
     x = sub.add_parser("stop", help="ask an agent to stop: it commits, releases its item, and ends (not a kill)")
     x.add_argument("agent"); x.add_argument("--reason", required=True, help="why; the agent sees it")
     x.add_argument("--kill", action="store_true",
@@ -990,7 +993,7 @@ def _run(args, conn):
     core.record_session_url(conn, me, core.session_url_from_env())
     with core.tx(conn):
         core.sync_needs_you(conn)  # the command may have made a human item ready, or sent a question to a person
-    if (args.cmd == "view" and args.layout and res["show"] and res["panes"] and not args.json
+    if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json
             and sys.stdin.isatty() and sys.stdout.isatty()):
         conn.close()
         # tmux takes the screen next: these lines show again when the person leaves the view.
@@ -1403,6 +1406,8 @@ def dispatch(conn, a, actor):
                                    launch_in=a.launch_in, options=opts or None, prompt=a.prompt)
     if c == "view":
         from . import server
+        if a.orphans:
+            return server.tmux_orphans_view(end=a.tidy)
         return server.tmux_view(a.layout, a.tidy, conn)
     if c == "stop":
         if a.kill:
@@ -2324,6 +2329,15 @@ def render(a, res):
                   + (f"; tmux pane {res['tmux_pane']}: maxpm view shows it" if res.get("tmux_pane") else ""))
             if res.get("via_serve"):
                 print("  maxpm serve opened it: this session runs in a sandbox")
+        return
+    if c == "view" and "orphans" in res:
+        for o in res["orphans"]:
+            print(f"{'ended' if o.get('ended') else ('could not end' if res['ended'] else 'left behind')}: "
+                  f"tmux server PID {o['pid']} (session {o['session']}, {core._short(core.timedelta(seconds=o['age']))} old; socket gone: {o['socket']})")
+        if not res["orphans"]:
+            print("(no tmux server left behind)")
+        elif not res["ended"]:
+            print(f"maxpm view --orphans --tidy ends {'it' if len(res['orphans']) == 1 else 'them'}")
         return
     if c == "view":
         for p in res["closed"]:

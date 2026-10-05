@@ -1510,16 +1510,27 @@ class LaunchInTmux(unittest.TestCase):
         if not shutil.which("tmux"):
             self.skipTest("tmux is not installed")
         server.TMUX_RUNNER = None
-        conf = Path(self.dir.name, "tmux.conf")
+        # The server's socket gets a folder of its own: tearDown deletes self.dir before the cleanups run, and a
+        # server whose socket is gone keeps running, out of reach of kill-server (#946). The cleanups run last
+        # first: kill-server, then TMUX_CMD back, then the folder. They run also when the test fails.
+        sock = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, sock, True)
+        conf = Path(sock, "tmux.conf")
         conf.write_text("set -g default-shell /bin/sh\n")  # a shell that starts at once, and no profile of the user
-        cmd, server.TMUX_CMD = server.TMUX_CMD, ["tmux", "-S", str(Path(self.dir.name, "tmux.sock")), "-f", str(conf)]
+        cmd, server.TMUX_CMD = server.TMUX_CMD, ["tmux", "-S", str(Path(sock, "tmux.sock")), "-f", str(conf)]
         self.addCleanup(setattr, server, "TMUX_CMD", cmd)
+
+        def end_server():
+            try:
+                server._tmux("kill-server", check=False)
+            except RiverError:
+                pass  # a sandbox blocks the socket: then no server started either
+        self.addCleanup(end_server)  # before the start: a start that fails halfway may have started the server
         try:
             server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#1 first: a | b",
                                    "command": "sleep 60", "launch_in": "tmux"}, {"MAXPM_AGENT": "shop-aaaa"})
         except RiverError as e:
             self.skipTest(f"tmux cannot run here: {e}")  # a sandbox blocks its socket
-        self.addCleanup(server._tmux, "kill-server", check=False)
         for name, command in (("#2 second", "sleep 60"), ("needs you", "true")):
             server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": name, "command": command,
                                    "launch_in": "tmux"}, {"MAXPM_FOCUS": "needs:"})
@@ -1629,6 +1640,93 @@ class LaunchInTmux(unittest.TestCase):
             clock[0] += core.timedelta(minutes=1)
             self.assertEqual([c["name"] for c in server.auto_tidy(self.c)], ["#8 eighth"])
         self.assertEqual(sorted(p["name"] for p in server.tmux_view(None)["panes"]), ["#4 fourth", "#5 fifth"])
+
+
+class TmuxOrphans(unittest.TestCase):
+    """The tmux servers the tests left behind with their socket gone (#946): found by their exact command line, and
+    ended by maxpm serve every tidy_every and by maxpm view --orphans --tidy."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+        core.register(self.c, "mark", human=True)
+        self.gone = os.path.join(tempfile.gettempdir(), "tmpgone946x")  # never made
+        self.live = tempfile.mkdtemp()
+        Path(self.live, "tmux.sock").touch()  # a server that a tmux command still reaches
+        self.addCleanup(shutil.rmtree, self.live, True)
+        self.addCleanup(setattr, server, "ORPHAN_PS", None)
+        self.addCleanup(server.ORPHANS.update, at=None)
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def ps(self, *rows):
+        """rows: (pid, ppid, etime, args); the args of a test's server from (folder, session)."""
+        lines = []
+        for pid, ppid, age, args in rows:
+            if isinstance(args, tuple):
+                d, session = args
+                args = f"tmux -S {d}/tmux.sock -f {d}/tmux.conf new-session -d -s {session} -n #1 first: a | b -x 200"
+            lines.append(f"{pid:>6} {ppid:>6} {age:>12} {args}")
+        server.ORPHAN_PS = lambda: "\n".join(lines) + "\n"
+
+    def test_only_a_tests_server_with_its_socket_gone_and_only_shells(self):
+        elsewhere = os.path.join(os.path.expanduser("~"), "tmpgone946x")
+        self.ps((10, 1, "2-03:00:00", (self.gone, "maxpm")),
+                (11, 10, "2-03:00:00", "-sh"),
+                (12, 10, "2-03:00:00", "/bin/sh"),
+                (20, 1, "05:00", (self.gone, "river")),  # the session's first name
+                (30, 1, "05:00", (self.live, "maxpm")),  # its socket is there
+                (40, 1, "00:30", (self.gone + "y", "maxpm")),  # it may not have made its socket yet
+                (50, 1, "05:00", (self.gone + "z", "maxpm")),
+                (51, 50, "05:00", "-zsh"),
+                (52, 51, "04:00", "claude --name #9 work"),  # an agent CLI in a pane
+                (60, 1, "05:00", (elsewhere, "maxpm")),  # not in a temporary folder
+                (70, 1, "05:00", (self.gone + "w", "work")),  # another session
+                (80, 1, "05:00", (os.path.join(tempfile.gettempdir(), "mine"), "maxpm")),  # not a tmp* folder
+                (90, 1, "05:00", f"tmux -S {self.gone}v/tmux.sock -f /etc/tmux.conf new-session -d -s maxpm"),
+                (100, 1, "05:00", "/opt/homebrew/bin/tmux new-session -d -s maxpm -n #479 Write -x 200 -y 50"),
+                (110, 1, "05:00", f"tmux -S {self.gone}u/tmux.sock attach"))
+        self.assertEqual([(o["pid"], o["session"], o["age"]) for o in server.tmux_orphans()],
+                         [(10, "maxpm", 2 * 86400 + 3 * 3600), (20, "river", 300)])
+        self.assertEqual(server.tmux_orphans()[0]["socket"], self.gone + "/tmux.sock")
+
+    def test_serve_ends_them_every_tidy_every_and_the_command_lists_then_ends(self):
+        from river import cli
+        self.ps((10, 1, "1-00:00:00", (self.gone, "maxpm")), (30, 1, "05:00", (self.live, "maxpm")))
+        killed = []
+        with mock.patch.object(server.os, "kill", lambda pid, sig: killed.append(pid)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.run(["--as", "mark", "view", "--orphans"])
+            self.assertEqual(killed, [])
+            self.assertIn("left behind: tmux server PID 10 (session maxpm, 24h00m old", out.getvalue())
+            self.assertIn("maxpm view --orphans --tidy ends it", out.getvalue())
+            with contextlib.redirect_stdout(out):
+                cli.run(["--as", "mark", "view", "--orphans", "--tidy"])
+            self.assertEqual(killed, [10])
+            self.assertIn("ended: tmux server PID 10", out.getvalue())
+            clock = [core.now()]
+            with mock.patch.object(core, "now", lambda: clock[0]):
+                self.assertEqual([o["pid"] for o in server.auto_end_orphans(self.c)], [10])
+                clock[0] += core.timedelta(minutes=19)
+                self.assertEqual(server.auto_end_orphans(self.c), [])  # tidy_every 20m
+                clock[0] += core.timedelta(minutes=1)
+                self.assertEqual([o["pid"] for o in server.auto_end_orphans(self.c)], [10])
+                core.config_set(self.c, "tidy_every", "0s")
+                clock[0] += core.timedelta(hours=1)
+                self.assertEqual(server.auto_end_orphans(self.c), [])
+            self.assertEqual(killed, [10, 10, 10])
+        # No ps (a sandbox blocks it): the command says so; maxpm serve's pass finds nothing.
+        server.ORPHAN_PS = mock.Mock(side_effect=OSError("Operation not permitted"))
+        with self.assertRaisesRegex(RiverError, "sandbox"):
+            server.tmux_orphans()
+        core.config_set(self.c, "tidy_every", "20m")
+        server.ORPHANS.update(at=None)
+        self.assertEqual(server.auto_end_orphans(self.c), [])
 
 
 class Watched(unittest.TestCase):

@@ -724,6 +724,102 @@ def auto_tidy(conn):
     return closed
 
 
+# The tests start tmux servers of their own (TMUX_CMD: tmux -S <tmp>/tmux.sock -f <tmp>/tmux.conf). A test that
+# deleted its temporary folder before it ended its server left the server running with no socket, so no tmux
+# command reaches it again. maxpm serve ends such servers every tidy_every (auto_end_orphans), and maxpm view
+# --orphans lists them (--tidy ends them now). ORPHAN_PS (tests) returns the lines of ps: "pid ppid etime args".
+ORPHAN_SESSIONS = ("maxpm", "river")  # river: the session's name in the first versions
+ORPHAN_MIN_AGE = 60  # seconds: a server that just started may not have made its socket yet
+ORPHANS = {"at": None}
+ORPHAN_PS = None
+
+
+def _temp_folders():
+    """The folders where the tests' temporary folders are: the system's, also as their real paths."""
+    import tempfile
+    roots = {"/tmp", "/private/tmp", "/var/folders", "/private/var/folders", tempfile.gettempdir()}
+    return tuple(roots | {os.path.realpath(r) for r in roots})
+
+
+def tmux_orphans():
+    """The tmux servers a MaximizePM test started and left behind: [{"pid", "socket", "session", "age"}]. Only an
+    exact command line counts, tmux -S <D>/tmux.sock -f <D>/tmux.conf new-session -d -s maxpm|river, with D a folder
+    tmp* in a temporary folder of the system. And only when <D>/tmux.sock is gone, the server ran ORPHAN_MIN_AGE, and
+    each process below it is a shell. So never the default tmux server (where maxpm serve starts agents), a server
+    a tmux command still reaches, or one with an agent CLI or another command in a pane. RiverError with no ps."""
+    import subprocess
+    if core.PLATFORM == "win32" and ORPHAN_PS is None:
+        return []
+    try:
+        text = ORPHAN_PS() if ORPHAN_PS else subprocess.run(
+            ["ps", "-A", "-ww", "-o", "pid=,ppid=,etime=,args="], capture_output=True, text=True, timeout=10,
+            check=True).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RiverError(f"ps: {e}. A sandbox around this session may block it: run this command outside the sandbox")
+    procs, below = {}, {}
+    for line in text.splitlines():
+        f = line.split(None, 3)
+        try:
+            pid, ppid, age = int(f[0]), int(f[1]), core._elapsed(f[2])
+        except (IndexError, ValueError):
+            continue
+        procs[pid] = {"age": age, "args": f[3] if len(f) > 3 else ""}
+        below.setdefault(ppid, []).append(pid)
+    inside, out = tuple(r.rstrip("/") + "/" for r in _temp_folders()), []
+    for pid, p in procs.items():
+        a = p["args"].split()
+        if (len(a) < 9 or os.path.basename(a[0]) != "tmux" or a[1] != "-S" or a[3] != "-f"
+                or a[5:8] != ["new-session", "-d", "-s"]):
+            continue
+        folder, sock = os.path.split(a[2])
+        if (sock != "tmux.sock" or a[4] != os.path.join(folder, "tmux.conf") or a[8] not in ORPHAN_SESSIONS
+                or not os.path.basename(folder).startswith("tmp") or not folder.startswith(inside)
+                or os.path.exists(a[2]) or p["age"] < ORPHAN_MIN_AGE):
+            continue
+        todo, shells = list(below.get(pid, ())), True
+        while todo and shells:
+            child = todo.pop()
+            first = (procs[child]["args"].split() or [""])[0]
+            shells = os.path.basename(first).lstrip("-") in TMUX_SHELLS
+            todo += below.get(child, ())
+        if shells:
+            out.append({"pid": pid, "socket": a[2], "session": a[8], "age": p["age"]})
+    return sorted(out, key=lambda o: -o["age"])
+
+
+def end_tmux_orphans():
+    """End the servers tmux_orphans finds (SIGTERM: tmux closes its panes and exits). Returns them, each with
+    "ended": True, or False when the signal failed."""
+    import signal
+    found = tmux_orphans()
+    for o in found:
+        try:
+            os.kill(o["pid"], signal.SIGTERM)
+            o["ended"] = True
+        except OSError:
+            o["ended"] = False
+    return found
+
+
+def auto_end_orphans(conn):
+    """One pass of the loop of maxpm serve: every tidy_every (0s: never) it ends the tmux servers the tests left
+    behind (tmux_orphans). Returns the servers it ended."""
+    every = core.parse_duration(core.setting(conn, "tidy_every"))
+    t = core.now()
+    if not every.total_seconds() or (ORPHANS["at"] and t - ORPHANS["at"] < every):
+        return []
+    ORPHANS["at"] = t
+    try:
+        return [o for o in end_tmux_orphans() if o["ended"]]
+    except RiverError:
+        return []
+
+
+def tmux_orphans_view(end=False):
+    """maxpm view --orphans: the servers tmux_orphans finds; with end (--tidy), it ends them first."""
+    return {"orphans": end_tmux_orphans() if end else tmux_orphans(), "ended": end}
+
+
 # The keys the page may send to an agent's terminal by name (tmux's names); any other input is plain text.
 TERMINAL_KEYS = ("Enter", "Escape", "Tab", "BTab", "BSpace", "DC", "Space", "Up", "Down", "Left", "Right", "Home", "End",
                  "PPage", "NPage", *(f"C-{c}" for c in "abcdefghijklmnopqrstuvwxyz"))

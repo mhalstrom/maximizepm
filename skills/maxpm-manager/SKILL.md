@@ -86,7 +86,9 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm view` in a terminal (`--windows`: one window each; `--tidy`: close the panes of sessions that are done);
   `maxpm view --list` prints the panes for you. `maxpm serve` closes the panes of finished sessions by itself
   every `tidy_every` (20m; a pane where the agent CLI still runs only when its screen stays the same for
-  `idle_after`, never one with a prompt), so you need not tidy by hand. A sandbox around your session blocks Terminal and tmux, so
+  `idle_after`, never one with a prompt), so you need not tidy by hand. At the same time it ends the tmux servers
+  the tests left behind with their socket gone (only shells in their panes; never the server of the agents);
+  `maxpm view --orphans` lists them, and `--orphans --tidy` ends them now. A sandbox around your session blocks Terminal and tmux, so
   `maxpm launch` then asks the running `maxpm serve` to open the session. The sandbox must allow the host
   `127.0.0.1:<serve_port>` (8765) for that command (Claude Code: the command's `allowed_domains`); the error
   names it. `maxpm view` needs a terminal outside the sandbox.

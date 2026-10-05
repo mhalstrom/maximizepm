@@ -145,7 +145,8 @@ DEFAULT_SETTINGS = {
     "fresh_sessions": "on",
     "idle_end": "15m",
     # maxpm serve closes the tmux panes of sessions that are done every tidy_every, as maxpm view --tidy does; a pane
-    # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. 0s: never.
+    # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. It also
+    # ends the tmux servers the tests left behind with their socket gone (maxpm view --orphans). 0s: never.
     "tidy_every": "20m",
     # maxpm serve starts again by itself when the river code on disk is newer than the code it runs (a commit, a
     # pull), so no person restarts it: it looks every notify_interval, and starts again when the files stayed the
