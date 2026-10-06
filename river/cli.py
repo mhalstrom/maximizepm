@@ -254,6 +254,8 @@ def _print_show(a):
         print("  found while doing this:", ", ".join(f"#{d['id']} {d['title']} ({d['status']})" for d in a["found_here"]))
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
+    if a.get("usage"):
+        print(f"  usage:   {_usage_line(a['usage'])}")
     if a.get("shipped_in"):
         print(f"  ship requested: joins deploy item #{a['shipped_in']}")
     if a.get("now_ready"):
@@ -286,6 +288,34 @@ def _print_brief(a, n=240):
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
     print(f"  all of it: maxpm show {a['id']}")
+
+
+def _k(n):
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(round(n))
+
+
+def _usage_line(u):
+    """2 session(s) (fork+fresh), 48 turns: 732k eq in (read 5.1M, write 210k), 31k out, peak context 180k"""
+    return (f"{u['sessions']} session(s) ({u['started']}), {u['turns']} turns: {_k(u['eq'])} eq in "
+            f"(read {_k(u['cache_read'])}, write {_k(u['write_1h'] + u['write_5m'])}), {_k(u['output'])} out, "
+            f"peak context {_k(u['peak_context'])}")
+
+
+def render_usage(res, limit=20):
+    if not res["items"]:
+        print(f"(no measured items in {res['since']}: MaximizePM measures an item when it is done, from the "
+              f"transcripts of the Claude Code sessions that held it)")
+        return
+    print("eq = input + 0.1 x cache read + 2 x 1h cache write + 1.25 x 5m cache write (input-token equivalents)")
+    for g in res["groups"]:
+        print(f"  {g['started']:<11} {g['items']:>4} item(s): median {_k(g['median_eq'])} eq, "
+              f"{g['median_turns']:.0f} turns, {_k(g['median_output'])} out; {_k(g['eq_per_turn'])} eq per turn")
+    print()
+    for it in res["items"][:limit]:
+        print(f"  #{it['id']:<5} {_k(it['eq']):>6} eq {_k(it['output']):>5} out {it['turns']:>4} turns  "
+              f"{it['started']:<10} [{it['project']}] {_cut(it['title'], 50)}")
+    if len(res["items"]) > limit:
+        print(f"  ... {len(res['items']) - limit} more (--limit {len(res['items'])})")
 
 
 def _print_tree(n, prefix="", last=True, root=True):
@@ -517,6 +547,11 @@ def build_parser():
     x.add_argument("--human", help="only this person's (and those for anyone)"); x.add_argument("--all", action="store_true", help="closed ones too")
     x = sub.add_parser("status", help="overview: every project's counts, recent completions, who is working, open slots")
     x.add_argument("--recent", type=int, default=10, help="how many recent completions (default 10)")
+    x = sub.add_parser("usage", help="token cost of each done item, from its Claude Code sessions' transcripts, "
+                       "and the medians for fresh and forked sessions")
+    x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
+    x.add_argument("--measure", type=int, metavar="ID", help="read this item's usage from the transcripts again first")
+    x.add_argument("--limit", "-n", type=int, default=20, help="how many items to list (default 20)")
     x = sub.add_parser("log", help="completed work: done items with output, who, and when, by day")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
 
@@ -1016,14 +1051,16 @@ def _run(args, conn):
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
     if st and not args.json:
         print(_stop_banner(actor, st), file=sys.stderr)
+    core.record_claude_session(conn, actor, core.claude_session_from_env())  # before done measures the item
     res = dispatch(conn, args, actor)
     monitors = None
     if args.cmd in ("go", "claim", "next") and core.pending_monitors(conn):
         monitors = ask_server_for_monitors(conn)
         if isinstance(res, dict) and args.cmd == "go":
             res["monitors_opened"] = monitors
-    me = res.get("agent") if args.cmd in ("go", "plan") and isinstance(res, dict) else actor
+    me = res.get("agent") if args.cmd in ("go", "plan", "manage") and isinstance(res, dict) else actor
     core.record_session_url(conn, me, core.session_url_from_env())
+    core.record_claude_session(conn, me, core.claude_session_from_env())
     with core.tx(conn):
         core.sync_needs_you(conn)  # the command may have made a human item ready, or sent a question to a person
     if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json
@@ -1511,6 +1548,8 @@ def dispatch(conn, a, actor):
         return core.item_show(conn, a.id)
     if c == "status":
         return core.status(conn, a.recent)
+    if c == "usage":
+        return core.usage_report(conn, a.project, a.since, a.measure)
     if c == "needs-you":
         return core.needs_you(conn, a.human, a.all)
     if c == "prompt":
@@ -2272,6 +2311,8 @@ def render(a, res):
     c = a.cmd
     if c == "wait":
         return render_wait(res)
+    if c == "usage":
+        return render_usage(res, a.limit)
     if c == "show" and a.brief:
         return _print_brief(res)
     if c == "cleanup":

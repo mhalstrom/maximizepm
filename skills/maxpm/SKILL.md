@@ -352,6 +352,9 @@ example when your lease expired.
   (from each item's `--touches`); check it before you edit a shared file.
 - `maxpm blockers <id>`: the tree of open work an item waits on, with holders.
 - `maxpm capacity`: ready work versus active sessions.
+- `maxpm usage`: the token cost of each done item, read from the Claude Code
+  transcripts of the sessions that held it, and the medians for fresh and
+  forked sessions. `maxpm show <id>` has the item's usage line.
 - `maxpm list --project <name>`: open items in order.
 
 Add `--json` to any command for machine-readable output. Errors name the rule

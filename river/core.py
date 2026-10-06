@@ -6,10 +6,12 @@ plain dicts and lists, so the CLI and the web server share one code path.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import sqlite3
+import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -469,6 +471,57 @@ CREATE TABLE IF NOT EXISTS notifications (
   UNIQUE (event_id, channel)
 );
 
+-- Who held which item when (#1102): the trigger below keeps it for every path that changes an item's
+-- status or assignee, so the token usage of a session can be charged to the item its agent held.
+CREATE TABLE IF NOT EXISTS holds (
+  id          INTEGER PRIMARY KEY,
+  item_id     INTEGER NOT NULL,
+  agent       TEXT NOT NULL,
+  started_at  TEXT NOT NULL,
+  ended_at    TEXT
+);
+
+CREATE TRIGGER IF NOT EXISTS items_holds AFTER UPDATE OF status, assignee ON items
+WHEN (OLD.status IN ('in_progress','held')) <> (NEW.status IN ('in_progress','held'))
+     OR OLD.assignee IS NOT NEW.assignee
+BEGIN
+  UPDATE holds SET ended_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+   WHERE item_id = OLD.id AND ended_at IS NULL
+     AND (NEW.status NOT IN ('in_progress','held') OR agent IS NOT NEW.assignee);
+  INSERT INTO holds (item_id, agent, started_at)
+  SELECT NEW.id, NEW.assignee, strftime('%Y-%m-%dT%H:%M:%SZ','now')
+   WHERE NEW.status IN ('in_progress','held') AND NEW.assignee IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM holds WHERE item_id = NEW.id AND agent = NEW.assignee AND ended_at IS NULL);
+END;
+
+-- The Claude Code sessions (CLAUDE_CODE_SESSION_ID: the transcript's file name) each agent ran commands in.
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  agent       TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  first_seen  TEXT NOT NULL,
+  PRIMARY KEY (agent, session_id)
+);
+
+-- The token usage of each session charged to an item, read from its transcript when the item is done.
+-- started: fresh, or fork (the transcript starts with lines copied from another session).
+CREATE TABLE IF NOT EXISTS item_usage (
+  item_id       INTEGER NOT NULL,
+  session_id    TEXT NOT NULL,
+  agent         TEXT NOT NULL,
+  started       TEXT NOT NULL,
+  turns         INTEGER NOT NULL,
+  input         INTEGER NOT NULL,
+  cache_read    INTEGER NOT NULL,
+  write_1h      INTEGER NOT NULL,
+  write_5m      INTEGER NOT NULL,
+  output        INTEGER NOT NULL,
+  peak_context  INTEGER NOT NULL,
+  measured_at   TEXT NOT NULL,
+  PRIMARY KEY (item_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
+CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
 CREATE INDEX IF NOT EXISTS deps_blocked_by ON deps(blocked_by);
 CREATE INDEX IF NOT EXISTS events_item ON events(item_id);
@@ -652,6 +705,11 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _migrate(conn):
+    # Items held before the holds table existed: their hold starts at the claim.
+    conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
+                 "FROM items i WHERE i.status IN ('in_progress','held') AND i.assignee IS NOT NULL AND NOT EXISTS "
+                 "(SELECT 1 FROM holds h WHERE h.item_id=i.id AND h.agent=i.assignee AND h.ended_at IS NULL)",
+                 (iso(now()),))
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
     if "path" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN path TEXT")
@@ -4780,6 +4838,11 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synce
     """Close an item as done. Refused while an item it waits on is open; force (a reason) closes a
     non-deploy item anyway and records the reason."""
     res = _close(conn, item_id, "done", actor, output, note, force)
+    try:  # the cost of the item, from its sessions' transcripts on this computer; never stops a done
+        measure_usage(conn, res["id"])
+        res["usage"] = item_usage(conn, res["id"])
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+        pass
     if res["kind"] == "fixes":
         res["fixes_added"] = _approved_fixes(conn, _item(conn, item_id), actor)
     if synced_ and res["refs"]:
@@ -5312,6 +5375,205 @@ def reopen(conn, item_id, actor=None):
 
 # ---------------------------------------------------------------- reads
 
+# ---------------------------------------------------------------- token usage (#1102)
+
+# Anthropic bills a cache read at 0.1 of the input price, a 1-hour cache write at 2.0 and a 5-minute write at
+# 1.25. "eq" is input-token equivalents on that scale; output tokens are shown apart.
+EQ_READ, EQ_WRITE_1H, EQ_WRITE_5M = 0.1, 2.0, 1.25
+# A line this much older than the first line of a transcript was copied from the session a fork started from.
+FORK_SLACK = 30
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def claude_session_from_env(env=None):
+    """The Claude Code session id this command runs in (its transcript is <id>.jsonl), or None."""
+    sid = (env if env is not None else os.environ).get("CLAUDE_CODE_SESSION_ID", "").strip()
+    return sid if _SESSION_ID_RE.match(sid) else None
+
+
+def record_claude_session(conn, name, sid):
+    """Remember that agent `name` ran a command in Claude Code session `sid` (once per pair)."""
+    if not (name and sid) or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? AND session_id=?",
+                                          (name, sid)).fetchone():
+        return
+    if conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone():
+        with tx(conn):
+            conn.execute("INSERT OR IGNORE INTO agent_sessions (agent, session_id, first_seen) VALUES (?,?,?)",
+                         (name, sid, iso(now())))
+
+
+def transcripts_root():
+    """Where Claude Code keeps session transcripts: <config dir>/projects/<folder>/<session id>.jsonl."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+
+
+def _ts(s):
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def read_transcript(path):
+    """(requests, fork) of one transcript file. requests: {message id: (time, usage)}, each API request once
+    (Claude Code writes one line per content block, with the same usage). A fork (claude --resume <id>
+    --fork-session) starts with lines copied from its base, with the base's older times: they are left out,
+    and fork is True. Copied lines come before the session's own first request: a line there is copied when
+    it is FORK_SLACK older than the first line, or when the first user message is older than the queue line
+    before it (claude -p writes that line when it starts). Not the file's birth time: files are written again."""
+    reqs, first, fork, dequeued, leading, users = {}, None, False, None, True, 0
+    slack = timedelta(seconds=FORK_SLACK)
+    with open(path, errors="replace") as f:
+        for line in f:
+            if not leading and ('"usage"' not in line or '"assistant"' not in line):
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            t = _ts(d["timestamp"]) if isinstance(d, dict) and isinstance(d.get("timestamp"), str) else None
+            if t is None:
+                continue
+            if leading:
+                first = first or t
+                if d.get("type") == "queue-operation":
+                    dequeued = t
+                    continue
+                users += d.get("type") == "user"
+                before_queue = dequeued and t < dequeued - timedelta(seconds=1)
+                if t < first - slack or (before_queue and (fork or (users == 1 and d.get("type") == "user"))):
+                    fork = True
+                    continue
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            if d.get("type") == "assistant" and isinstance(msg.get("usage"), dict):
+                reqs.setdefault(msg.get("id") or d["timestamp"], (t, msg["usage"]))
+                leading = False
+    return reqs, fork
+
+
+def _session_requests(sid, root):
+    """All requests of a Claude Code session, its subagents' too, and whether it started as a fork; None
+    when no transcript of it is on this computer."""
+    mains = sorted(Path(root).glob(f"*/{sid}.jsonl"))
+    if not mains:
+        return None
+    reqs, fork = {}, False
+    for p in mains:
+        r, f = read_transcript(p)
+        reqs.update(r)
+        fork = fork or f
+        for sub in sorted(p.parent.glob(f"{sid}/subagents/*.jsonl")):
+            reqs.update(read_transcript(sub)[0])
+    return reqs, fork
+
+
+def usage_eq(u):
+    """Input-token equivalents of a usage row (or a transcript usage dict)."""
+    if "cache_read" in u:
+        return u["input"] + EQ_READ * u["cache_read"] + EQ_WRITE_1H * u["write_1h"] + EQ_WRITE_5M * u["write_5m"]
+    cc = u.get("cache_creation") or {}
+    w1, w5 = cc.get("ephemeral_1h_input_tokens"), cc.get("ephemeral_5m_input_tokens")
+    if w1 is None and w5 is None:
+        w1, w5 = u.get("cache_creation_input_tokens") or 0, 0
+    return ((u.get("input_tokens") or 0) + EQ_READ * (u.get("cache_read_input_tokens") or 0)
+            + EQ_WRITE_1H * (w1 or 0) + EQ_WRITE_5M * (w5 or 0))
+
+
+def measure_usage(conn, item_id, root=None):
+    """Read the token usage of the sessions that held the item from their Claude Code transcripts, and store
+    it (item_usage; a new measurement replaces the old one). A request is charged to the item when the
+    session's agent held it at that time; when the agent held several items, to the one it took last.
+    Returns the stored rows."""
+    root = Path(root) if root else transcripts_root()
+    end_now = now()
+    holds = lambda agent: [(parse_iso(h["started_at"]), parse_iso(h["ended_at"]) if h["ended_at"] else end_now,
+                            h["id"], h["item_id"]) for h in conn.execute(
+        "SELECT * FROM holds WHERE agent=? ORDER BY id", (agent,))]
+    rows = []
+    for (agent,) in conn.execute("SELECT DISTINCT agent FROM holds WHERE item_id=?", (item_id,)).fetchall():
+        mine = holds(agent)
+        for (sid,) in conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen",
+                                   (agent,)).fetchall():
+            got = _session_requests(sid, root)
+            if not got:
+                continue
+            reqs, fork = got
+            row = {"item_id": item_id, "session_id": sid, "agent": agent, "started": "fork" if fork else "fresh",
+                   "turns": 0, "input": 0, "cache_read": 0, "write_1h": 0, "write_5m": 0, "output": 0,
+                   "peak_context": 0}
+            for t, u in reqs.values():
+                active = [h for h in mine if h[0] <= t < h[1]]
+                if not active or max(active, key=lambda h: (h[0], h[2]))[3] != item_id:
+                    continue
+                cc = u.get("cache_creation") or {}
+                w1, w5 = cc.get("ephemeral_1h_input_tokens"), cc.get("ephemeral_5m_input_tokens")
+                if w1 is None and w5 is None:
+                    w1, w5 = u.get("cache_creation_input_tokens") or 0, 0
+                inp, read = u.get("input_tokens") or 0, u.get("cache_read_input_tokens") or 0
+                row["turns"] += 1
+                row["input"] += inp
+                row["cache_read"] += read
+                row["write_1h"] += w1 or 0
+                row["write_5m"] += w5 or 0
+                row["output"] += u.get("output_tokens") or 0
+                row["peak_context"] = max(row["peak_context"], inp + read + (w1 or 0) + (w5 or 0))
+            if row["turns"]:
+                rows.append(row)
+    with tx(conn):
+        conn.execute("DELETE FROM item_usage WHERE item_id=?", (item_id,))
+        for r in rows:
+            conn.execute("INSERT INTO item_usage (item_id, session_id, agent, started, turns, input, cache_read, "
+                         "write_1h, write_5m, output, peak_context, measured_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (r["item_id"], r["session_id"], r["agent"], r["started"], r["turns"], r["input"],
+                          r["cache_read"], r["write_1h"], r["write_5m"], r["output"], r["peak_context"], iso(now())))
+    return rows
+
+
+def item_usage(conn, item_id):
+    """The stored usage of one item, summed over its sessions; None when it was not measured."""
+    rows = [dict(r) for r in conn.execute("SELECT * FROM item_usage WHERE item_id=? ORDER BY session_id",
+                                          (item_id,))]
+    if not rows:
+        return None
+    total = {k: sum(r[k] for r in rows) for k in ("turns", "input", "cache_read", "write_1h", "write_5m", "output")}
+    starts = sorted({r["started"] for r in rows})
+    return {**total, "eq": round(usage_eq(total)), "sessions": len(rows), "started": "+".join(starts),
+            "forks": sum(r["started"] == "fork" for r in rows), "peak_context": max(r["peak_context"] for r in rows),
+            "rows": rows}
+
+
+def usage_report(conn, project=None, since="7d", measure=None, root=None):
+    """maxpm usage: the cost of each done item (measured on done), newest first, and the medians by how
+    its sessions started (fresh, fork, or both), so forks and fresh starts can be compared. measure: an item
+    id to read again from the transcripts first."""
+    if measure is not None:
+        _item(conn, measure)
+        measure_usage(conn, measure, root)
+    q = ("SELECT i.id, i.title, i.closed_at, p.name project FROM items i JOIN projects p ON p.id=i.project_id "
+         "WHERE i.id IN (SELECT item_id FROM item_usage)")
+    args = []
+    if project:
+        q += " AND p.id=?"
+        args.append(_project(conn, project)["id"])
+    if since and since != "all":
+        q += " AND COALESCE(i.closed_at, '') >= ?"
+        args.append(iso(now() - parse_duration(since)))
+    items = []
+    for r in conn.execute(q + " ORDER BY i.closed_at DESC, i.id DESC", args):
+        u = item_usage(conn, r["id"])
+        u.pop("rows")
+        items.append({**dict(r), **u})
+    groups = []
+    for g in ("fresh", "fork", "fork+fresh"):
+        rr = [x for x in items if x["started"] == g]
+        if rr:
+            med = lambda k: statistics.median(x[k] for x in rr)
+            groups.append({"started": g, "items": len(rr), "median_eq": round(med("eq")),
+                           "median_turns": med("turns"), "median_output": round(med("output")),
+                           "eq_per_turn": round(sum(x["eq"] for x in rr) / max(1, sum(x["turns"] for x in rr)))})
+    return {"items": items, "groups": groups, "since": since or "all"}
+
+
 def item_show(conn, item_id, ann=None):
     ann = ann or annotate(conn)
     iid = int(item_id)
@@ -5338,6 +5600,7 @@ def item_show(conn, item_id, ann=None):
     a["found_here"] = [{"id": r["id"], "title": ann[r["id"]]["title"], "status": label(r["id"])} for r in conn.execute(
         "SELECT id FROM items WHERE found_during=? ORDER BY id", (iid,))]
     a["message_count"] = conn.execute("SELECT COUNT(*) FROM messages WHERE item_id=?", (iid,)).fetchone()[0]
+    a["usage"] = item_usage(conn, iid)
     return a
 
 

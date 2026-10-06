@@ -890,6 +890,130 @@ class Status(Base):
         self.assertTrue(all(len(line) < 400 for line in brief.splitlines()))
 
 
+class Usage(Base):
+    """The token cost of each item, from the Claude Code transcripts of the sessions that held it (#1102)."""
+    SID, SID2, BASE = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
+                       "33333333-3333-4333-8333-333333333333")
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        for n in ("ag", "ag2"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        self.root = os.path.join(self.dir.name, "claude")
+        os.makedirs(os.path.join(self.root, "projects", "-work-a"))
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.root})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.t0 = core.now() - timedelta(hours=2)  # the holds trigger stamps the real time
+
+    def at(self, minutes):
+        return core.iso(self.t0 + timedelta(minutes=minutes))
+
+    def write(self, sid, lines, sub=None):
+        import json
+        folder = os.path.join(self.root, "projects", "-work-a")
+        if sub:
+            folder = os.path.join(folder, sid, "subagents")
+            os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, f"{sub or sid}.jsonl"), "w") as f:
+            for x in lines:
+                f.write(json.dumps(x) + "\n")
+
+    def req(self, minutes, mid, read=1000, w1=100, out=10, inp=5):
+        u = {"input_tokens": inp, "cache_read_input_tokens": read, "cache_creation_input_tokens": w1,
+             "cache_creation": {"ephemeral_1h_input_tokens": w1, "ephemeral_5m_input_tokens": 0}, "output_tokens": out}
+        return {"type": "assistant", "timestamp": self.at(minutes).replace("Z", ".500Z"),
+                "message": {"id": mid, "usage": u, "content": []}}
+
+    def hold(self, item, agent, start, end):
+        self.c.execute("UPDATE holds SET started_at=?, ended_at=? WHERE item_id=? AND agent=?",
+                       (self.at(start), end if end is None else self.at(end), item, agent))
+
+    def test_holds_follow_every_change_of_holder(self):
+        x = self.add("a", "x")
+        core.claim(self.c, x, "ag")
+        core.give(self.c, x, "ag2", actor="ag")
+        core.release(self.c, x, actor="ag2")
+        core.claim(self.c, x, "ag")
+        core.done(self.c, x, "ok", "ag")
+        rows = [(r["agent"], r["ended_at"] is not None) for r in self.c.execute(
+            "SELECT * FROM holds WHERE item_id=? ORDER BY id", (x,))]
+        self.assertEqual(rows, [("ag", True), ("ag2", True), ("ag", True)])
+
+    def test_done_measures_the_sessions_that_held_it(self):
+        x, y = self.add("a", "x"), self.add("a", "y")
+        core.claim(self.c, x, "ag")
+        core.record_claude_session(self.c, "ag", self.SID)
+        core.record_claude_session(self.c, "mark", self.SID2)  # a person: no transcript of theirs
+        self.assertEqual([r[0] for r in self.c.execute("SELECT agent FROM agent_sessions")], ["ag"])
+        self.write(self.SID, [
+            {"type": "queue-operation", "operation": "dequeue", "timestamp": self.at(0)},
+            {"type": "user", "timestamp": self.at(0), "message": {"content": "go"}},
+            self.req(1, "before"),               # before the claim: overhead, not x
+            self.req(5, "m1"), self.req(5, "m1"),  # one request, two content blocks
+            self.req(20, "m2", read=50000, w1=0, out=300),
+            self.req(40, "on-y"),                 # it took y later; y's
+            self.req(130, "after-done"),          # after done (now is minute 120)
+        ])
+        self.write(self.SID, [self.req(7, "sub1", read=10, w1=0, out=1)], sub="agent-1")
+        self.hold(x, "ag", 2, None)
+        self.c.execute("INSERT INTO holds (item_id, agent, started_at, ended_at) VALUES (?,?,?,?)",
+                       (y, "ag", self.at(30), self.at(45)))
+        res = core.done(self.c, x, "ok", "ag")
+        u = res["usage"]
+        self.assertEqual((u["sessions"], u["started"], u["turns"]), (1, "fresh", 3))
+        self.assertEqual((u["cache_read"], u["write_1h"], u["output"], u["input"]), (51010, 100, 311, 15))
+        self.assertEqual(u["eq"], round(15 + 0.1 * 51010 + 2 * 100))
+        self.assertEqual(u["peak_context"], 50005)
+        self.assertEqual(core.item_show(self.c, x)["usage"]["eq"], u["eq"])
+        # y: the request while it held both went to y, the one it took last.
+        self.assertEqual([r["turns"] for r in core.measure_usage(self.c, y)], [1])
+
+    def test_a_fork_leaves_out_what_it_copied_and_the_report_compares(self):
+        from river import cli
+        x, z = self.add("a", "x"), self.add("a", "z")
+        for i, sid in ((x, self.SID), (z, self.SID2)):
+            core.claim(self.c, i, "ag" if i == x else "ag2")
+            core.record_claude_session(self.c, "ag" if i == x else "ag2", sid)
+        self.hold(x, "ag", 0, 30)
+        self.hold(z, "ag2", 0, 30)
+        self.write(self.SID, [{"type": "user", "timestamp": self.at(0), "message": {"content": "go"}},
+                              self.req(1, "a1"), self.req(2, "a2")])
+        # The fork: claude -p writes its queue line, then the base's lines with their older times.
+        copied = [{"type": "user", "timestamp": self.at(-5), "message": {"content": "base"}}, self.req(-4, "b1")]
+        self.write(self.SID2, [{"type": "queue-operation", "operation": "dequeue", "timestamp": self.at(0)}] + copied
+                   + [{"type": "user", "timestamp": self.at(1), "message": {"content": "work"}}, self.req(2, "f1")])
+        self.assertEqual(core.read_transcript(os.path.join(self.root, "projects", "-work-a", self.SID2 + ".jsonl"))[1], True)
+        for i in (x, z):
+            core.measure_usage(self.c, i)
+        self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id IN (?,?)", (core.iso(core.now()), x, z))
+        rep = core.usage_report(self.c)
+        self.assertEqual({g["started"]: (g["items"], g["median_turns"]) for g in rep["groups"]},
+                         {"fresh": (1, 2), "fork": (1, 1)})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_usage(rep)
+            cli._print_show(core.item_show(self.c, z))
+        self.assertIn(f"#{z}", out.getvalue())
+        self.assertIn("usage:   1 session(s) (fork), 1 turns", out.getvalue())
+        # A fresh session whose lines are a little out of order is no fork.
+        self.write(self.SID, [{"type": "attachment", "timestamp": self.at(0)},
+                              {"type": "user", "timestamp": self.at(-0.01), "message": {"content": "go"}},
+                              self.req(1, "a1")])
+        self.assertFalse(core.read_transcript(os.path.join(self.root, "projects", "-work-a", self.SID + ".jsonl"))[1])
+
+    def test_no_transcript_no_usage_and_the_session_id_from_the_environment(self):
+        x = self.add("a", "x")
+        core.claim(self.c, x, "ag")
+        core.record_claude_session(self.c, "ag", self.SID)
+        self.assertIsNone(core.done(self.c, x, "ok", "ag").get("usage"))
+        self.assertEqual(core.claude_session_from_env({"CLAUDE_CODE_SESSION_ID": self.SID}), self.SID)
+        self.assertIsNone(core.claude_session_from_env({"CLAUDE_CODE_SESSION_ID": "../x"}))
+        self.assertIsNone(core.claude_session_from_env({}))
+
+
 class Ship(Base):
     def setUp(self):
         super().setUp()
