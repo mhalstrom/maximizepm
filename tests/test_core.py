@@ -1345,6 +1345,36 @@ class GoalOwners(Base):
         self.assertTrue(any("release goal checkout without a current handoff: the goal is finished" in e["change"]
                             for e in core.recent_events(self.c)))
 
+    def test_subgoals_one_level_and_the_parent_handoff_comes_first(self):
+        from river import cli
+        core.project_add(self.c, "other")
+        core.goal_add(self.c, "shop", "checkout", "customers can pay", actor="t")
+        core.goal_add(self.c, "shop", "refunds", "customers get money back", actor="t", parent="checkout")
+        with self.assertRaisesRegex(RiverError, "one level. Use its parent: --parent checkout"):
+            core.goal_add(self.c, "shop", "partial", actor="t", parent="refunds")
+        with self.assertRaisesRegex(RiverError, "in its parent's project"):
+            core.goal_add(self.c, "other", "elsewhere", actor="t", parent="checkout")
+        self.assertEqual((core.goal_show(self.c, "refunds")["parent"], core.goal_show(self.c, "checkout")["subgoals"]),
+                         ("checkout", ["refunds"]))
+        core.goal_handoff(self.c, "checkout", "Payments use Stripe.", "t")
+        core.goal_handoff(self.c, "refunds", "Refunds go through the same client.", "t")
+        x = core.item_add(self.c, "shop", "refund button", goals=["refunds"])["id"]
+        # A worker on the sub-goal's item reads the parent's handoff, then the sub-goal's.
+        core.goal_edit(self.c, "refunds", shared=True, actor="t")
+        g = self.go("ag")
+        self.assertEqual((g["item"]["id"], [h["goal"] for h in g["handoffs"]]), (x, ["checkout", "refunds"]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(g)
+            cli.render(cli.build_parser().parse_args(["goal", "show", "refunds"]), core.goal_show(self.c, "refunds"))
+        text = out.getvalue()
+        self.assertLess(text.index("Payments use Stripe."), text.index("Refunds go through the same client."))
+        self.assertIn("sub-goal of checkout", text)
+        self.assertIn("parent goal checkout: HANDOFF v1", text)
+        self.assertEqual(core.context_brief(self.c, "refunds")["parent_handoff"]["text"], "Payments use Stripe.")
+        with self.assertRaisesRegex(RiverError, "open sub-goals: refunds"):
+            core.goal_done(self.c, "checkout", "done", "t")
+
     def test_waiting_goal_does_other_work_and_names_the_blocker_owner(self):
         core.goal_add(self.c, "shop", "g1", "one", actor="t")
         core.goal_add(self.c, "shop", "g2", "two", actor="t")

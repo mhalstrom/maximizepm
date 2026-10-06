@@ -147,6 +147,10 @@ without a goal stay in the normal queue.
   After `goal_lease` without a command the goal is free again, its items are
   open to every agent, and you get a notice. The goal is also free when your
   session is gone or ends.
+- A sub-goal (`maxpm goal add <project> <name> --parent <goal>`, one level,
+  same project) splits a large goal: its owner and its sessions read the
+  parent's handoff, then the sub-goal's own. A goal with open sub-goals is not
+  complete until they are.
 - A shared goal has no owner (`maxpm goal list` shows "shared: no owner"). A
   person or a manager decided that several agents work on it at the same time.
   `maxpm go` never makes you its owner, `maxpm goal own` refuses, and its

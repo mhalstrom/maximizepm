@@ -737,6 +737,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _migrate(conn):
+    if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
+        conn.execute("ALTER TABLE goals ADD COLUMN parent_id INTEGER REFERENCES goals(id)")
     if "no_goal_context" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN no_goal_context INTEGER NOT NULL DEFAULT 0")
     # Items held before the holds table existed: their hold starts at the claim.
@@ -1552,12 +1554,27 @@ def _goal_view(conn, g, ann=None):
     d["items_dropped"] = sorted(a["id"] for a in items if a["status"] == "dropped")
     h = _handoff(conn, g["id"])
     d["handoff"] = {k: h[k] for k in ("version", "by_agent", "created_at")} if h else None
+    d["parent"] = _goal_name(conn, g["parent_id"]) if g["parent_id"] else None
+    d["subgoals"] = [r["name"] for r in conn.execute("SELECT name FROM goals WHERE parent_id=? ORDER BY rank, id",
+                                                     (g["id"],))]
     due = _handoff_due(conn, g)
     d["handoff_due"] = due
     return d
 
 
 HANDOFF_MAX = 64_000  # characters: a handoff is read at the start of every session of the goal
+
+
+def _goal_name(conn, goal_id):
+    return conn.execute("SELECT name FROM goals WHERE id=?", (goal_id,)).fetchone()["name"]
+
+
+def parent_handoff(conn, g):
+    """The parent goal's latest handoff, with its goal name, for a sub-goal; else None."""
+    if not g["parent_id"]:
+        return None
+    h = _handoff(conn, g["parent_id"])
+    return dict(h, goal=_goal_name(conn, g["parent_id"])) if h else None
 
 
 def _handoff(conn, goal_id, version=None):
@@ -1631,17 +1648,31 @@ def _handoff_refusal(conn, g, verb, no_handoff, actor):
                      f"maxpm goal {verb} {g['name']} --no-handoff \"<why>\"")
 
 
-def goal_add(conn, project, name, outcome="", done_when="", actor=None, rank=None, shared=False):
+def goal_add(conn, project, name, outcome="", done_when="", actor=None, rank=None, shared=False, parent=None):
+    """A goal in a project. parent: a sub-goal of that goal (one level, same project): the context of a
+    sub-goal's sessions is the parent's handoff plus its own, so each owner's context stays small."""
     if not re.match(r"^[a-z0-9][a-z0-9._-]{0,63}$", name):
         raise RiverError("goal names use lower-case letters, digits, '.', '_', '-' (up to 64), like project names")
     with tx(conn):
         p = _project(conn, project)
         if conn.execute("SELECT 1 FROM goals WHERE name=?", (name,)).fetchone():
             raise RiverError(f"goal {name} already exists: maxpm goal show {name}")
+        up = _goal(conn, parent) if parent else None
+        if up is not None:
+            if up["parent_id"]:
+                raise RiverError(f"goal {parent} is a sub-goal itself; sub-goals have one level. Use its parent: "
+                                 f"--parent {_goal_name(conn, up['parent_id'])}")
+            if up["project_id"] != p["id"]:
+                raise RiverError(f"goal {parent} is in project {_project_name(conn, up['project_id'])}; a sub-goal is "
+                                 f"in its parent's project")
+            if up["status"] != "open":
+                raise RiverError(f"goal {parent} is complete; reopen it first: maxpm goal reopen {parent}")
         top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM goals WHERE project_id=?", (p["id"],)).fetchone()["m"]
-        conn.execute("INSERT INTO goals(project_id,name,outcome,done_when,rank,created_at,shared) VALUES (?,?,?,?,?,?,?)",
-                     (p["id"], name, outcome or "", done_when or "", top + 1, iso(now()), 1 if shared else 0))
-        _event(conn, None, actor, f"goal {name} added to {p['name']}" + (" (shared: no owner)" if shared else ""))
+        conn.execute("INSERT INTO goals(project_id,name,outcome,done_when,rank,created_at,shared,parent_id) "
+                     "VALUES (?,?,?,?,?,?,?,?)", (p["id"], name, outcome or "", done_when or "", top + 1, iso(now()),
+                                                  1 if shared else 0, up["id"] if up is not None else None))
+        _event(conn, None, actor, f"goal {name} added to {p['name']}" + (" (shared: no owner)" if shared else "")
+               + (f" as a sub-goal of {parent}" if parent else ""))
     if rank is not None:
         goal_rank(conn, name, rank, actor)
     return goal_show(conn, name)
@@ -1663,6 +1694,7 @@ def goal_show(conn, name):
     d = _goal_view(conn, g, ann)
     h = _handoff(conn, g["id"])
     d["handoff_text"] = h["text"] if h else None
+    d["parent_handoff"] = parent_handoff(conn, g)
     d["items"] = [{k: v for k, v in ann[i].items() if k != "sort_key"}
                   for i in sorted(d["items_open"] + d["items_done"] + d["items_dropped"],
                                   key=lambda i: (ann[i]["status"] in CLOSED_STATES, ann[i]["sort_key"]))]
@@ -1822,6 +1854,10 @@ def goal_done(conn, name, result, actor=None, drop_open=False):
         raise RiverError(f"goal {name} is already complete")
     if g["owner"] and actor and g["owner"] != actor:
         raise RiverError(f"goal {name} is owned by {g['owner']}; the owner declares it complete")
+    subs = [r["name"] for r in conn.execute("SELECT name FROM goals WHERE parent_id=? AND status='open'", (g["id"],))]
+    if subs:
+        raise RiverError(f"goal {name} has open sub-goals: {', '.join(subs)}. Complete them first "
+                         f"(maxpm goal done <sub-goal> --result \"...\")")
     still = _goal_view(conn, g)["items_open"]
     if still and not drop_open:
         raise RiverError(f"goal {name} has open items: {', '.join('#' + str(i) for i in still)}. Finish them, untag them "
@@ -5719,7 +5755,7 @@ def context_brief(conn, goal):
                     if r["item_id"] in ann), key=lambda a: a["sort_key"])
     live = [a for a in items if a["status"] in OPEN_STATES and a["doer"] != "human" and not a["no_goal_context"]]
     return {"goal": g["name"], "project": _project_name(conn, g["project_id"]), "outcome": g["outcome"],
-            "done_when": g["done_when"], "handoff": _handoff(conn, g["id"]),
+            "done_when": g["done_when"], "handoff": _handoff(conn, g["id"]), "parent_handoff": parent_handoff(conn, g),
             "items": [{"id": a["id"], "title": a["title"], "ready": a["ready"], "notes": a["notes"],
                        "context": a["context"], "touches": touches_list(a["touches"])} for a in live[:12]],
             "more": max(0, len(live) - 12), "base_max": setting(conn, "base_max", project_id=g["project_id"])}
@@ -7120,7 +7156,8 @@ def _goal_brief(conn, name, actor):
                             "assignee": a["assignee"], "doer": a["doer"]} for a in open_items],
             "items_done": len(g["items_done"]), "blockers_held": blockers,
             "lease": _short(_goal_lease(conn, _goal(conn, name), actor)),
-            "handoff": goal_handoff(conn, name)["handoff"], "handoff_due": g["handoff_due"]}
+            "handoff": goal_handoff(conn, name)["handoff"], "handoff_due": g["handoff_due"],
+            "parent_handoff": parent_handoff(conn, _goal(conn, name))}
 
 
 def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
@@ -7135,11 +7172,16 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         _set_role_note(conn, brief["agent"], "monitor", it["id"])
     if it:
         # The handoff of each open goal of the item: the goal's context, for a session that starts on it.
-        owned = (brief.get("goal") or {}).get("name")
-        brief["handoffs"] = [dict(goal_handoff(conn, r["name"])["handoff"], goal=r["name"]) for r in conn.execute(
-            "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.status='open' "
-            "AND EXISTS (SELECT 1 FROM goal_handoffs h WHERE h.goal_id=g.id) ORDER BY g.rank, g.id", (it["id"],))
-            if r["name"] != owned]
+        # A sub-goal's context is its parent's handoff, then its own.
+        gb = brief.get("goal") or {}  # the owner's briefing shows its goal's handoffs already
+        seen = {gb.get("name"), (gb.get("parent_handoff") or {}).get("goal")}
+        brief["handoffs"] = []
+        for r in conn.execute("SELECT g.* FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? "
+                              "AND g.status='open' ORDER BY g.rank, g.id", (it["id"],)).fetchall():
+            for h in (parent_handoff(conn, r), _handoff(conn, r["id"]) and dict(_handoff(conn, r["id"]), goal=r["name"])):
+                if h and h["goal"] not in seen:
+                    seen.add(h["goal"])
+                    brief["handoffs"].append(h)
         # Items of a shared goal have no owner who plans them: the agent tags the items it adds itself.
         brief["shared_goals"] = [r["name"] for r in conn.execute(
             "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "

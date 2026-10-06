@@ -101,7 +101,9 @@ def _fmt_goal(g):
     n_open, n_done = len(g["items_open"]), len(g["items_done"])
     state = "complete" if g["status"] == "complete" else (f"owner {g['owner']}" if g["owner"] else
                                                           "shared: no owner" if g.get("shared") else "no owner")
-    return (f"{g['name']} [{g['project']}] ({state}; {n_done} done, {n_open} open)"
+    return (f"{g['name']} [{g['project']}] ({state}; {n_done} done, {n_open} open"
+            + (f"; sub-goal of {g['parent']}" if g.get("parent") else "")
+            + (f"; sub-goals {', '.join(g['subgoals'])}" if g.get("subgoals") else "") + ")"
             + (f": {g['outcome']}" if g["outcome"] else ""))
 
 
@@ -463,6 +465,8 @@ def build_parser():
     x.add_argument("--rank", type=int, help="position among the project's goals (1 = first)")
     x.add_argument("--shared", action="store_true", help="no owner, ever: maxpm go gives the goal to no agent, and "
                    "its items stay open to every agent")
+    x.add_argument("--parent", help="a sub-goal of this goal (one level, same project): its sessions read the "
+                   "parent's handoff, then its own")
     x = gls.add_parser("list", help="open goals in order (--all: complete ones too)")
     x.add_argument("--project"); x.add_argument("--all", action="store_true")
     x = gls.add_parser("show", help="a goal, its owner, and its items"); x.add_argument("name")
@@ -1474,7 +1478,7 @@ def dispatch(conn, a, actor):
     if c == "goal":
         g = a.gcmd
         if g == "add":
-            return core.goal_add(conn, a.project, a.name, a.outcome, a.done_when, actor, a.rank, a.shared)
+            return core.goal_add(conn, a.project, a.name, a.outcome, a.done_when, actor, a.rank, a.shared, a.parent)
         if g == "list":
             return core.goal_list(conn, a.project, a.all)
         if g == "show":
@@ -2109,6 +2113,9 @@ def render_go(b):
                        + f"   ask: {r} ask \"...\" {to}   or offer help: {r} offer \"...\" --item {x['id']}")
         out.append(f"  You own this outcome: add the items it needs ({r} add \"<title>\" tags them with it), take them, "
                    f"and when done-when holds: {r} goal done {gb['name']} --result \"<one line>\"")
+        if gb.get("parent_handoff"):  # a sub-goal: the parent's handoff first
+            first, *rest = _handoff_lines(gb["parent_handoff"]["goal"], gb["parent_handoff"])
+            out += [f"  parent goal {gb['parent_handoff']['goal']}: {first.strip()}"] + rest
         out += _handoff_lines(gb["name"], gb.get("handoff"), gb.get("handoff_due"))
         out.append(f"  Keep the handoff current after each item ({r} goal handoff {gb['name']} --file <path>): "
                    f"the next owner starts from it, and goal release and give refuse while it is older than your last item.")
@@ -2133,6 +2140,9 @@ def render_go(b):
                 "  Workers of the goal start as forks of this session: they read what you read now from the cache.",
                 "  You edit no file and claim no item. Read only what the next items need, up to base_max "
                 f"{cx['base_max']} tokens of context.", ""]
+        if cx.get("parent_handoff"):  # a sub-goal: the parent's handoff first
+            first, *rest = _handoff_lines(cx["parent_handoff"]["goal"], cx["parent_handoff"])
+            out += [f"  parent goal {cx['parent_handoff']['goal']}: {first.strip()}"] + rest
         out += _handoff_lines(cx["goal"], cx["handoff"], indent="  ")
         out.append("  Its open agent items:")
         for x in cx["items"]:
@@ -2468,6 +2478,9 @@ def render(a, res):
                     print(f"  done when: {g['done_when']}")
                 if g["result"]:
                     print(f"  result: {g['result']}")
+                if g.get("parent_handoff"):
+                    first, *rest = _handoff_lines(g["parent"], g["parent_handoff"])
+                    print("\n".join([f"  parent goal {g['parent']}: {first.strip()}"] + rest))
                 print("\n".join(_handoff_lines(g["name"], g.get("handoff") and dict(
                     g["handoff"], text=g.get("handoff_text")), g.get("handoff_due"))))
                 for it in g.get("items", []):
