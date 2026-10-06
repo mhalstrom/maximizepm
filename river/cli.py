@@ -432,7 +432,7 @@ def build_parser():
     x.add_argument("words", nargs="*", metavar="[project] title")
     x.add_argument("--from", dest="plan_file", metavar="FILE",
                    help="add every line of a plan file (an outline) as an item; a line waits on the lines indented under it")
-    x.add_argument("--dry-run", action="store_true", help="with --from: show what would be added")
+    x.add_argument("--dry-run", action="store_true", help="with --from: show what would be added (refused without --from)")
     x.add_argument("--goal", action="append", help="goal this item works toward (repeatable; default: the goal you own in the item's project)")
     x.add_argument("--no-goal", action="store_true", help="no goal tag, even when you own a goal (a fix found in passing)")
     x.add_argument("--priority", "-p", type=int, default=2, help="0 highest .. 4 lowest (default 2)")
@@ -1458,6 +1458,9 @@ def dispatch(conn, a, actor):
             text = sys.stdin.read() if a.plan_file == "-" else Path(a.plan_file).expanduser().read_text()
             project = a.words[0] if a.words else core.project_for_add(conn, os.getcwd(), None)
             return core.add_plan(conn, project, text, actor, a.priority, a.doer, a.dry_run)
+        if a.dry_run:  # a one-item add has no preview: it would add the item
+            raise RiverError("--dry-run goes with --from <plan file>; a one-item maxpm add has no dry run. "
+                             "Leave out --dry-run to add the item")
         if not a.words:
             raise RiverError("give a title: maxpm add [project] \"title\"   (or a plan file: maxpm add --from plan.md)")
         if len(a.words) > 2:

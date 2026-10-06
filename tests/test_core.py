@@ -1004,6 +1004,13 @@ class PlanFile(Base):
         self.assertEqual(core.add_plan(self.c, "shop", "a\n  b\n", dry_run=True)["items"][1]["parent"], 0)
         self.assertEqual(len(core.item_list(self.c, "shop")), 6)
 
+    def test_add_dry_run_without_a_plan_file_is_refused_and_adds_nothing(self):
+        from river import cli
+        core.project_add(self.c, "shop")
+        with self.assertRaisesRegex(RiverError, "--dry-run goes with --from"):
+            cli.dispatch(self.c, cli.build_parser().parse_args(["add", "shop", "Try it", "--dry-run"]), "t")
+        self.assertEqual(core.item_list(self.c, "shop"), [])
+
 
 class Goals(Base):
     def setUp(self):
