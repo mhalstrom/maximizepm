@@ -12,7 +12,7 @@ most important item that is ready (nothing it waits on is open).
 ## Fastest start
 
 Run `maxpm go` in the project folder and follow the briefing. It names you,
-picks your role (owner, worker, unblocker, planner, deployer, idle), claims
+picks your role (owner, worker, unblocker, reviewer, deployer, monitor, planner, idle), claims
 an item when there is one, and ends with the command to run next. Pass `--as <your-name>` on
 every later command. When the briefing asks, record your Claude Code session
 name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents

@@ -22,8 +22,8 @@ Items live in projects and can wait on other items. `maxpm next` gives the
 most important ready item in the area you choose; `--claim` takes it.
 
 Agent sessions: run `maxpm go` in the project folder. It names the session,
-picks a role (worker, unblocker, planner, idle), claims an item, and prints a
-briefing. Run it again after each item. To plan work with the user instead,
+picks a role (owner, worker, unblocker, reviewer, deployer, monitor, planner,
+or idle), claims an item, and prints a briefing. Run it again after each item. To plan work with the user instead,
 run `maxpm plan`: an overview, the open questions, and the planner's rules.
 
 By hand:
