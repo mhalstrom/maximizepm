@@ -19,22 +19,18 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
 ## The loop
 
 1. Read NEEDS ATTENTION in the briefing and act on each line (below).
-2. Start `maxpm --as <you> inbox --wait` as a background command (Claude
-   Code: `run_in_background`, which wakes the session when it exits; Codex:
-   its background shell). It exits as soon as a message or question comes to
-   you, prints it, and marks it read; after 25 minutes with nothing it exits
-   too. Each time it exits, act on the messages and start it again. Skip it
-   when the briefing says MaximizePM delivers messages into your session itself
-   (`native_message`).
-3. Start `maxpm --as <you> manage --watch` as a background command too (Claude
+2. Start `maxpm --as <you> manage --watch` as a background command (Claude
    Code: `run_in_background` with a time limit above `manage_every`, 30m; in a
-   foreground shell with a 10-minute limit, add `--step 9m`). It exits when a
-   new finding needs you (an agent is stuck or gone, an agent waits longer than
-   `wait_too_long`, a project has ready agent work and no agent, a target owner
-   is away or gone, a question for the user). A finding it reported before
-   does not wake it again. With nothing new it exits after `manage_every` with
-   one line. Messages to you do not wake it: the inbox poller brings them.
-4. Act on what is new. Then start `manage --watch` again.
+   foreground shell with a 10-minute limit, add `--step 9m`). It is your only
+   watcher. It exits when a new finding needs you (an agent is stuck or gone,
+   an agent waits longer than `wait_too_long`, a project has ready agent work
+   and no agent, a target owner is away or gone, a question for the user), and
+   when a message or question comes to you: it prints the message and marks it
+   read. A finding it reported before does not wake it again. With nothing new
+   it exits after `manage_every` with one line. When the briefing says MaximizePM
+   delivers messages into your session itself (`native_message`), messages do
+   not wake the watch.
+3. Act on what is new. Then start `manage --watch` again.
 
 Stop when the user tells you to, and tell the user what you did.
 

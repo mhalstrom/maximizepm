@@ -62,6 +62,7 @@ your type from your CLI's environment.
    - `maxpm next --claim`: anything, most important first
    Leave out `--claim` to look first. Add `-n 5` to see five.
 2. `maxpm show <id>` for the notes, what it waits on, and what it unblocks.
+   `maxpm show <id> --brief` prints a few lines: no history, long text cut.
 3. Do the work. Every `maxpm` command renews your lease. If you work a long
    time without one, run `maxpm heartbeat` (default lease 30 minutes). MaximizePM
    also renews it while a command runs in your session (a long test run) or
@@ -345,7 +346,8 @@ example when your lease expired.
 
 ## Looking around
 
-- `maxpm who`: every agent and person, and what each one holds.
+- `maxpm who`: every agent and person, and what each one holds. Stopped and
+  gone agents that hold nothing are hidden; `--all` shows them.
   `maxpm who --file <path>`: who holds an item that touches that file or directory
   (from each item's `--touches`); check it before you edit a shared file.
 - `maxpm blockers <id>`: the tree of open work an item waits on, with holders.

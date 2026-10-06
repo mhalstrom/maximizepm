@@ -846,6 +846,49 @@ class Status(Base):
         self.assertEqual([a["holds"][0]["id"] for a in st["agents"] if a["name"] == "ag"], [y])
         self.assertNotEqual(w, h)
 
+    def test_who_and_status_hide_ended_agents_and_show_is_brief(self):
+        from river import cli
+        core.project_add(self.c, "a")
+        for n in ("live", "old", "gone", "holder"):
+            core.register(self.c, n)
+        x = self.add("a", "held by a gone agent")
+        y = self.add("a", "next step", after=[x])
+        core.item_edit(self.c, y, None, None, None, None, "t", "why " * 200)
+        core.claim(self.c, x, "holder")
+        core.register(self.c, "mark", human=True)
+        core.stop_agent(self.c, "old", "finished", actor="mark")
+        t = core.iso(core.now() - core.timedelta(days=2))
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name IN ('gone','holder')", (t,))
+        names = lambda rows: sorted(a["name"] for a in rows)
+        # A gone agent that holds an item stays: someone must act on it.
+        self.assertEqual(names(core.who(self.c, everyone=False)), ["holder", "live", "mark"])
+        self.assertEqual(names(core.who(self.c)), ["gone", "holder", "live", "mark", "old"])
+        st = core.status(self.c)
+        self.assertEqual((names(st["agents"]), st["ended"]), (["holder", "live", "mark"], 2))
+        old_env = os.environ.get("MAXPM_DB")
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(lambda: os.environ.pop("MAXPM_DB") if old_env is None else os.environ.update(MAXPM_DB=old_env))
+
+        def run(*words):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                cli.run(list(words))
+            return out.getvalue(), err.getvalue()
+        out, err = run("who")
+        self.assertNotIn("old (", out)
+        self.assertIn("2 stopped or gone agent(s) that hold nothing are hidden: maxpm who --all", err)
+        out, err = run("who", "--all")
+        self.assertIn("old (ai, stopped)", out)
+        self.assertNotIn("hidden", err)
+        self.assertIn("(2 stopped or gone agent(s) that hold nothing: maxpm who --all)", run("status")[0])
+        full, brief = run("show", str(y))[0], run("show", str(y), "--brief")[0]
+        self.assertIn("added to a", full)  # the history
+        self.assertNotIn("added to a", brief)
+        self.assertLess(len(brief), len(full) // 2)
+        self.assertIn(f"waits on: #{x} held by a gone agent (in_progress)", brief)
+        self.assertIn(f"all of it: maxpm show {y}", brief)
+        self.assertTrue(all(len(line) < 400 for line in brief.splitlines()))
+
 
 class Ship(Base):
     def setUp(self):
@@ -3317,15 +3360,43 @@ class Manager(Base):
         with self.assertRaisesRegex(RiverError, "not the manager"):
             core.manage_watch(self.c, "w1", step="0s")
 
-    def test_messages_wake_the_inbox_poller_not_the_watch(self):
+    def test_messages_wake_the_watch_so_one_watcher_is_enough(self):
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
         core.send(self.c, "note", "hello boss", to="boss", actor="w1")
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait with a message unread"))
+        self.assertEqual((w["result"], [m["body"] for m in w["messages"]]), ("messages", ["hello boss"]))
+        self.assertEqual(core.unread(self.c, "boss")["unread"], 0)  # marked read: the next watch blocks
+        # A message that comes while it watches ends the watch; an open question already read does not wake it.
+        w = core.manage_watch(self.c, "boss", step="1h",
+                              sleep=lambda s: core.send(self.c, "question", "which db?", to="boss", actor="w1"))
+        self.assertEqual(([m["body"] for m in w["messages"]], w["still_open"]), (["which db?"], 0))
         w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
-        self.assertEqual((w["result"], w["messages"]["unread"]), ("tick", 1))  # reported, but it did not wake
-        r = core.inbox_wait(self.c, "boss", "1m", sleep=lambda s: self.fail("no wait with a message unread"))
-        self.assertEqual((r["result"], [m["body"] for m in r["messages"]]), ("messages", ["hello boss"]))
-        self.assertEqual(core.unread(self.c, "boss")["unread"], 0)  # marked read: the next wait blocks
+        self.assertEqual((w["result"], w["messages"]), ("tick", []))
+        # The text says it is the only watcher, and shows the message itself.
+        from river import cli
+        core.send(self.c, "alert", "w2 is stuck", to="boss", actor="w1")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_manage(core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: None))
+            cli.render_manage(core.manage(self.c, self.dir.name, "boss"))
+        self.assertIn("NEW MESSAGES (1)", out.getvalue())
+        self.assertIn("w2 is stuck", out.getvalue())
+        self.assertIn("a new message to you (it prints it)", out.getvalue())
+        self.assertNotIn("inbox --wait", out.getvalue())
+        # With native delivery the platform brings messages: they do not wake the watch.
+        with mock.patch.object(core, "has_native", return_value=True):
+            core.send(self.c, "note", "native", to="boss", actor="w1")
+            w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        self.assertEqual((w["result"], w["messages"], w["unread"]), ("tick", [], 1))
+        core.inbox(self.c, "boss")
+        # A stop request ends the watch too.
+        core.stop_agent(self.c, "boss", "done for the day", actor="mark")
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait after a stop"))
+        self.assertEqual(w["result"], "stop")
+
+    def test_inbox_wait_still_works_for_any_agent(self):
+        core.manage(self.c, self.dir.name, "boss")
         # An open question already read does not wake it again; a timeout returns nothing.
         core.send(self.c, "question", "which db?", to="boss", actor="w1")
         core.inbox_wait(self.c, "boss", "1m")

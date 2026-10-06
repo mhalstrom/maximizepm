@@ -4428,10 +4428,19 @@ def _rel_path(path, root, cwd=None):
     return "" if p == "." else p
 
 
-def who(conn, item=None, project=None, file=None, cwd=None):
+def ended(a):
+    """A stopped or gone agent (an agent_status) that holds no item and owns no target: who and status
+    leave it out unless asked, because most registered sessions ended long ago."""
+    return a["state"] in ("stopped", "gone") and not a["holds"] and not a["owns"]
+
+
+def who(conn, item=None, project=None, file=None, cwd=None, everyone=True):
     """Every agent and what it holds; or only the holder of an item, the agents in a project, or the
-    agents whose held items touch a file or directory (each with the matching `touching` paths)."""
+    agents whose held items touch a file or directory (each with the matching `touching` paths).
+    everyone=False leaves out the ended agents (stopped or gone, holding and owning nothing)."""
     agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents ORDER BY name")]
+    if not everyone:
+        agents = [a for a in agents if not ended(a)]
     if file is not None:
         rows = conn.execute("SELECT i.id, i.title, i.assignee, i.touches, p.path FROM items i "
                             "JOIN projects p ON p.id=i.project_id "
@@ -5709,7 +5718,8 @@ def status(conn, recent=10):
         "recent": completed(conn, since=None)["items"][:recent],
         "agents": [{"name": a["name"], "kind": a["kind"], "state": a["state"], "note": a["note"],
                     "holds": a["holds"], "owns": [o["name"] for o in a["owns"]]}
-                   for a in agents if a["state"] != "gone"],
+                   for a in agents if not ended(a)],
+        "ended": sum(1 for a in agents if ended(a)),
         "human_waiting": [{"id": a["id"], "title": a["title"], "project": a["project"]}
                           for a in sorted(ann.values(), key=lambda a: a["sort_key"])
                           if a["ready"] and a["doer"] == "human" and not a["project_archived"]],
@@ -7317,9 +7327,11 @@ def manage(conn, cwd, actor=None, takeover=None):
 
 
 def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
-    """maxpm manage --watch: block until something new needs the manager (a new finding; messages come
-    through maxpm inbox --wait), at most manage_every (or step). Findings it reported before do not count
-    as new. Returns what changed."""
+    """maxpm manage --watch: block until something new needs the manager (a new finding, an unread message
+    or a stop request), at most manage_every (or step). Findings it reported before do not count as new;
+    the messages it returns are marked read, as maxpm inbox --wait does, so the manager needs one watcher.
+    With native_message the platform brings messages into the session, and they do not wake it. Returns
+    what changed."""
     import json
     import time
     sleep = sleep or time.sleep
@@ -7331,16 +7343,22 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     except (TypeError, ValueError):
         base = set()
     deadline = now() + parse_duration(step or setting(conn, "manage_every", agent=actor))
+    native = has_native(conn, actor)
     while True:
         f = manager_findings(conn)
         keys = set(_finding_keys(f))
-        # Messages do not wake the watch: maxpm inbox --wait (or native delivery) brings them, once.
-        if keys - base or now() >= deadline:
-            u = unread(conn, actor)
+        st = stop_request(conn, actor)
+        # Unread only: an open question already read would wake it at once, every time.
+        mail = not native and unread(conn, actor)["unread"]
+        if keys - base or mail or st or now() >= deadline:
+            rows = inbox(conn, actor) if mail else []
             with tx(conn):
                 conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(sorted(keys)), actor))
-            return {"agent": actor, "result": "change" if keys - base else "tick",
-                    "new": sorted(keys - base), "gone": sorted(base - keys), "findings": f, "messages": u}
+            return {"agent": actor,
+                    "result": "stop" if st else "change" if keys - base else "messages" if mail else "tick",
+                    "new": sorted(keys - base), "gone": sorted(base - keys), "findings": f, "stop": st,
+                    "messages": [m for m in rows if m["unread"]], "still_open": sum(1 for m in rows if not m["unread"]),
+                    "unread": unread(conn, actor)["unread"], "native": native}
         activity(conn, actor)
         sleep(poll)
 

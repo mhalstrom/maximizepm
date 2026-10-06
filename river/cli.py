@@ -265,6 +265,30 @@ def _print_show(a):
         print(f"  {e['at']} {e['actor']}: {e['change']}")
 
 
+def _print_brief(a, n=240):
+    """maxpm show --brief: what an agent needs to decide on an item, in a few lines (no history, no closed
+    links, long text cut). maxpm show prints all of it."""
+    flat = lambda t: " ".join(t.split())
+    print(_fmt_item(a, show_reason=False))
+    for label, text in (("context", a.get("context")), ("notes", a.get("notes")), ("output", a.get("output"))):
+        if text and text.strip():
+            print(f"  {label}: {_cut(flat(text), n)}")
+    if a.get("touches"):
+        print(f"  touches: {_cut(', '.join(a['touches']), n)}")
+    if a.get("check"):
+        print(f"  check:   {a['check']}")
+    for label, key in (("waits on", "waits_on_detail"), ("unblocks", "unblocks_detail")):
+        live = [d for d in a.get(key) or [] if d["status"] in core.OPEN_STATES]
+        if live:
+            print(f"  {label}: " + ", ".join(f"#{d['id']} {_cut(d['title'], 40)} ({d['status']})" for d in live[:3])
+                  + (f" and {len(live) - 3} more" if len(live) > 3 else ""))
+    if a.get("lease_expires_at"):
+        print("  lease until:", a["lease_expires_at"])
+    if a.get("message_count"):
+        print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
+    print(f"  all of it: maxpm show {a['id']}")
+
+
 def _print_tree(n, prefix="", last=True, root=True):
     left = f", {n['lease_seconds_left'] // 60}m left" if n["lease_seconds_left"] is not None else ""
     who = f", {n['assignee']}{left}" if n["assignee"] else ""
@@ -475,6 +499,8 @@ def build_parser():
     x.add_argument("--ref", help="only items linked to this tracker issue, closed ones too (jira:PROJ-123)")
 
     x = sub.add_parser("show", help="one item with its links and history"); x.add_argument("id", type=int)
+    x.add_argument("--brief", action="store_true", help="a few lines: the item, cut context and output, "
+                   "open links only, no history")
     nt = sub.add_parser("notify", help="send needs-you notifications: run, test a channel, status")
     nts = nt.add_subparsers(dest="ncmd", required=True)
     x = nts.add_parser("run", help="send what is due (loops every notify_interval unless --once)")
@@ -526,7 +552,7 @@ def build_parser():
 
     x = sub.add_parser("manage", help="start the manager session (one at a time): what needs attention, and its rules")
     x.add_argument("--takeover", metavar="REASON", help="take over from the active manager")
-    x.add_argument("--watch", action="store_true", help="block until a new finding needs the manager (at most manage_every); run it in the background")
+    x.add_argument("--watch", action="store_true", help="block until a new finding or a message needs the manager (at most manage_every); run it in the background")
     x.add_argument("--step", help="with --watch: return after this long at most (a foreground shell: below its time limit)")
     x.add_argument("--chat", action="store_true", default=os.environ.get("MAXPM_CHAT") == "1",
                    help="a chat app session with no folder (default $MAXPM_CHAT=1)")
@@ -714,6 +740,7 @@ def build_parser():
     x.add_argument("--item", type=int, help="the item it is about (without an agent: its holder)")
     x.add_argument("--goal", help="send the note to the owner of this goal")
     x = sub.add_parser("who", help="who is doing what"); x.add_argument("--item", type=int); x.add_argument("--project")
+    x.add_argument("--all", action="store_true", help="also stopped and gone agents that hold nothing")
     x.add_argument("--file", help="only agents whose held items touch this file or directory")
     sub.add_parser("heartbeat", help="renew your leases")
     sub.add_parser("capacity", help="how many agent sessions the graph can use now")
@@ -1664,7 +1691,12 @@ def dispatch(conn, a, actor):
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
         return core.agent_note(conn, actor, " ".join(a.words))
     if c == "who":
-        return core.who(conn, a.item, a.project, a.file, os.getcwd())
+        res = core.who(conn, a.item, a.project, a.file, os.getcwd(), everyone=a.all)
+        if not a.all and a.item is None and a.project is None and a.file is None and not a.json:
+            ended = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0] - len(res)
+            if ended:
+                print(f"({ended} stopped or gone agent(s) that hold nothing are hidden: maxpm who --all)", file=sys.stderr)
+        return res
     if c == "heartbeat":
         _record_process(conn, actor)
         return {"ok": True}
@@ -1702,11 +1734,13 @@ def render_status(res):
         by = f" by {it['by_agent']}" if it["by_agent"] not in (None, "?") else ""
         print(f"  {it['closed_at'][:16].replace('T', ' ')}  #{it['id']:<4} [{it['project']}] {_cut(it['title'])}{by}")
     print()
-    print("Working now:" if res["agents"] else "Working now: nobody registered")
+    print("Working now:" if res["agents"] else "Working now: nobody")
     for ag in res["agents"]:
         holds = ", ".join(f"#{h['id']} {_cut(h['title'], 60)}" for h in ag["holds"]) or "nothing"
         owns = f"; owns {', '.join(ag['owns'])}" if ag["owns"] else ""
         print(f"  {ag['name']} ({ag['kind']}, {ag['state']}): {holds}{owns}")
+    if res.get("ended"):
+        print(f"  ({res['ended']} stopped or gone agent(s) that hold nothing: maxpm who --all)")
     if res.get("due"):
         print()
         print("Due dates:")
@@ -1776,18 +1810,24 @@ def render_manage(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
     if "result" in b:  # --watch
+        if b["result"] == "stop":
+            print("STOP REQUESTED" + (f": {b['stop']['stop_reason']}" if b["stop"].get("stop_reason") else "")
+                  + f". Tell the user what you did, then run {r} go to end the session.")
+            return
         lines = _findings_lines(b["findings"], r)
-        print(("CHANGED: " + ", ".join(b["new"]) if b["new"] else "NOTHING NEW")
+        print(("CHANGED: " + ", ".join(b["new"]) if b["new"] else
+               f"NEW MESSAGES ({len(b['messages'])})" if b["messages"] else "NOTHING NEW")
               + (f"; resolved: {', '.join(b['gone'])}" if b["gone"] else ""))
-        if b["messages"]["unread"]:
-            print(f"  {b['messages']['unread']} unread message(s): {r} inbox   "
-                  f"(is {r} inbox --wait still running in the background?)")
+        for m in b["messages"]:
+            print(_fmt_msg(m, "  "))
+        if b.get("still_open"):
+            print(f"  and {b['still_open']} older message(s) still open: {r} inbox")
         if b["new"]:
             print("\n".join(lines))
-        elif any(b["findings"].values()):  # the standing findings: reported before
+        elif any(b["findings"].values()) and not b["messages"]:  # the standing findings: reported before
             print(f"  {len(lines)} standing finding(s), reported before: {r} manage lists them")
-        print((f"Act on what is new, then start {r} manage --watch again in the background." if b["new"] else
-               f"Start {r} manage --watch again in the background."))
+        print((f"Act on what is new, then start {r} manage --watch again in the background."
+               if b["new"] or b["messages"] else f"Start {r} manage --watch again in the background."))
         return
     out = [f"You are the MaximizePM MANAGER {me}" + (f" (you took over from {b['took_over']})" if b.get("took_over") else "") + "."]
     if b["new_name"]:
@@ -1811,13 +1851,11 @@ def render_manage(b):
             (f"In a chat, run {r} manage again when the user asks what changed (manage --watch is for a terminal)."
              if b.get("chat") else
              f"Then watch: keep {r} manage --watch running as a background command (Claude Code: run_in_background "
-             f"with a time limit above {b['every']}; a foreground shell: add --step 9m). It exits on a new finding, "
-             f"or after manage_every {b['every']} with one line; start it again each time."),
-            *([] if b.get("chat") else [
-            "Messages: MaximizePM delivers them into this session itself (native_message); you need no inbox poller."
-             if b.get("native") else f"Messages: keep {r} inbox --wait running as a background command (Claude Code: run_in_background; "
-             f"Codex: its background shell). It exits with the new messages at once and wakes you; act on them, "
-             f"then start it again."]),
+             f"with a time limit above {b['every']}; a foreground shell: add --step 9m). It exits on a new finding"
+             + (", " if b.get("native") else ", a new message to you (it prints it), ")
+             + f"or after manage_every {b['every']} with one line; start it again each time. It is your only watcher."),
+            *([] if b.get("chat") or not b.get("native") else [
+            "Messages: MaximizePM delivers them into this session itself (native_message); they do not wake the watch."]),
             "The rules: maxpm guide manager"]
     if b.get("chat"):
         out += [""] + _chat_lines(r, False)[:1] + [
@@ -2235,6 +2273,8 @@ def render(a, res):
     c = a.cmd
     if c == "wait":
         return render_wait(res)
+    if c == "show" and a.brief:
+        return _print_brief(res)
     if c == "cleanup":
         return render_cleanup(res, f"maxpm --as {a.actor}" if a.actor else "maxpm")
     if c == "done" and isinstance(res, dict) and res.get("refs"):
