@@ -133,7 +133,8 @@ DEFAULT_SETTINGS = {
     # An agent that ended its turn at its CLI's prompt runs no river command. maxpm serve never types into its
     # pane (a stale session continues a large context); it starts fresh sessions instead. An agent is idle at its
     # prompt when its tmux pane shows the agent CLI with the same screen and no prompt (prompt_pattern) for
-    # idle_after, and it ran no river command for idle_after.
+    # idle_after, and it ran no river command for idle_after. An agent with an open question to a person (maxpm ask)
+    # about an item it holds, or the deploy of a target it owns, is not idle: it waits on that person.
     # fresh_sessions on: work or an answer for an idle agent (a push, an item in its queue, a message, a
     # prerequisite done) goes to a new session: river takes the agent's items back, puts the news in their notes,
     # starts one session for each ready item (the item's model and effort), and ends the idle agent. A person who
@@ -1734,8 +1735,8 @@ def owner_can_deploy(conn, owner):
     a = conn.execute("SELECT * FROM agents WHERE name=?", (owner,)).fetchone()
     if a is None:
         return False, f"{owner} is not registered"
-    if a["kind"] == "human" or a["role"] == "manager":
-        return True, None
+    if a["kind"] == "human" or a["role"] == "manager" or owner in waits_on_person(conn, {owner}):
+        return True, None  # one that waits on a person's answer (a production approval) keeps the target
     state = _agent_state(conn, a)
     if state in ("gone", "stopped"):
         return False, f"{owner} is {state}"
@@ -1749,6 +1750,51 @@ def owner_can_deploy(conn, owner):
     if conn.execute("SELECT 1 FROM items WHERE assignee=? AND status IN ('in_progress','held')", (owner,)).fetchone():
         return True, None
     return False, f"{owner} holds nothing and ran no maxpm command for {_short(quiet)}: idle at its prompt"
+
+
+def waits_on_person(conn, names=None):
+    """{agent: question id} for the agents (among names; else every AI agent) that wait at their prompt for a
+    person's answer: an open question (maxpm ask) from the agent to a person, about an item it holds or the open
+    deploy item of a target it owns. The person may answer in the agent's terminal (an approval the auto mode
+    classifier refused to the agent), so such an agent is not idle: maxpm serve keeps its leases and its target,
+    takes nothing back, starts no other session for its work, and alerts the manager (tell_manager_waits). Not an
+    agent that is stopped, or whose process on this computer ended."""
+    out = {}
+    for r in conn.execute(
+            "SELECT m.id, m.from_agent, a.pid, a.host, a.stop_at FROM messages m "
+            "JOIN agents a ON a.name=m.from_agent AND a.kind='ai' JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
+            "JOIN items i ON i.id=m.item_id WHERE m.kind='question' AND m.state='open' "
+            "AND ((i.assignee=m.from_agent AND i.status IN ('in_progress','held')) OR (i.kind='deploy' "
+            "AND i.status IN ('open','in_progress','held') AND i.target IN (SELECT name FROM targets WHERE owner=m.from_agent))) "
+            "ORDER BY m.id").fetchall():
+        if (names is not None and r["from_agent"] not in names) or r["stop_at"] \
+                or (r["pid"] and r["host"] == this_host() and not pid_alive(r["pid"])):
+            continue
+        out.setdefault(r["from_agent"], r["id"])
+    return out
+
+
+def tell_manager_waits(conn, waiting):
+    """maxpm serve: for each agent that waits on a person's answer (waits_on_person) and ran no river command for
+    idle_after, the active manager gets one alert for that question. Returns the agents it told about."""
+    boss = active_manager(conn)
+    after = parse_duration(setting(conn, "idle_after"))
+    told = []
+    if not boss:
+        return told  # the person has the question (needs you); nobody else to tell
+    with tx(conn):
+        for agent, qid in sorted(waiting.items()):
+            a = conn.execute("SELECT last_seen FROM agents WHERE name=?", (agent,)).fetchone()
+            if not a or now() - parse_iso(a["last_seen"]) < after or conn.execute(
+                    "SELECT 1 FROM messages WHERE reply_to=? AND from_agent='maxpm' AND kind='alert'", (qid,)).fetchone():
+                continue
+            q = _message(conn, qid)
+            _send(conn, "alert", "maxpm", f"{agent} waits at its prompt for {q['to_agent']}'s answer to question #{qid} "
+                  f"(#{q['item_id']}): {q['body'][:200]}. maxpm keeps its lease and its target and starts no other "
+                  f"session for its work. {q['to_agent']} answers in its terminal, or: maxpm answer {qid} \"...\"",
+                  to=boss, item_id=q["item_id"], reply_to=qid)
+            told.append(agent)
+    return told
 
 
 def target_handoff(conn, name, to, why):
@@ -4027,14 +4073,15 @@ def busy_now(conn, names=None):
     return out
 
 
-def keep_busy(conn, names):
+def keep_busy(conn, names, waiting=()):
     """maxpm serve saw these agents busy with no river command (busy_now, or their tmux pane): their leases, holds,
-    goals and targets run from now, as after a river command. last_seen stays the time of the last river command."""
+    goals and targets run from now, as after a river command. last_seen stays the time of the last river command.
+    busy_max does not limit the agents in waiting (waits_on_person): a person's answer can take a night."""
     limit = parse_duration(setting(conn, "busy_max"))
     t, kept = now(), []
     with tx(conn):
         for r in conn.execute("SELECT name, last_seen FROM agents WHERE kind='ai'").fetchall():
-            if r["name"] in names and t - parse_iso(r["last_seen"]) < limit:
+            if r["name"] in waiting or (r["name"] in names and t - parse_iso(r["last_seen"]) < limit):
                 conn.execute("UPDATE agents SET busy_at=? WHERE name=?", (iso(t), r["name"]))
                 _renew(conn, r["name"], t)
                 kept.append(r["name"])
@@ -7066,7 +7113,7 @@ def end_idle(conn, agent, why):
     item or owns a target (it stays)."""
     with tx(conn):
         if conn.execute("SELECT 1 FROM items WHERE assignee=? AND status IN ('in_progress','held')", (agent,)).fetchone() \
-                or conn.execute("SELECT 1 FROM targets WHERE owner=?", (agent,)).fetchone():
+                or conn.execute("SELECT 1 FROM targets WHERE owner=?", (agent,)).fetchone() or waits_on_person(conn, {agent}):
             return None
         unread = conn.execute("SELECT id, kind, from_agent, item_id FROM messages WHERE to_agent=? AND from_agent<>'maxpm' "
                               "AND (read_at IS NULL OR (kind='question' AND state='open'))", (agent,)).fetchall()

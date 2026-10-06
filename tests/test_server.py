@@ -1506,6 +1506,83 @@ class LaunchInTmux(unittest.TestCase):
             # One start can still choose.
             self.assertEqual(core.launch_target(self.c, launch_in="window")["launch_in"], "window")
 
+    def _deploy_ready(self):
+        """Target web with project site; dev finished one item, so deploy item is ready. Returns its id."""
+        core.config_set(self.c, "launch_in", "tmux")
+        core.target_add(self.c, "web", "push, then smoke test")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "dev")
+        a = core.item_add(self.c, "site", "page")["id"]
+        core.claim(self.c, a, "dev")
+        return core.done(self.c, a, "commit", "dev", ship_it=True)["shipped_in"]
+
+    def test_a_deployer_that_waits_on_a_person_keeps_its_item_and_target_and_serve_starts_no_other(self):
+        # #1010: deployers asked mark for the production go in their pane (the auto mode classifier refused
+        # make prod-release). They looked idle: serve took the deploy back on a note, gave the target to a new
+        # deployer, and ended the one that waited, which closed its pane and the question in it.
+        dep = self._deploy_ready()
+        clock = [core.now()]
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+        self.addCleanup(server.IDLE.clear)
+        name = server.auto_release(self.c)["started"][dep]
+        pane = self.tmux.panes[-1]
+        # Each deployer has a session name of its own: two starts beside a live one of the same name never connected.
+        self.assertEqual(pane["name"], f"deploy web {name[-4:]}")
+        self.assertIn(f"claude --name 'deploy web {name[-4:]}' ", pane["keys"][0])
+        core.register(self.c, "boss")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        clock[0] += core.timedelta(seconds=1)
+        b = core.go(self.c, self.dir.name, name, focus="deploy:web")
+        self.assertEqual((b["role"], b["item"]["id"]), ("deployer", dep))
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn(f"ask <person> \"<what to approve>\" --item {dep}", out.getvalue())
+        q = core.send(self.c, "question", "make prod-release is ready: reply 'deploy' in my terminal", to="mark",
+                      item=dep, actor=name)["id"]
+        self.assertEqual(core.waits_on_person(self.c), {name: q})
+        clock[0] += core.timedelta(seconds=1)
+        core.send(self.c, "note", "send me a note when the next pin is written", to=name, item=dep, actor="dev")
+        pane["screen"] = "⏺ The release needs your approval: reply 'deploy'.\n\n╭────╮\n│ >  │\n╰────╯"
+        nothing = {"started": {}, "ended": {}, "failed": {}}
+        for _ in range(60):  # five hours at its prompt: past the lease, busy_max (4h), idle_end, and owner checks
+            clock[0] += core.timedelta(seconds=300)
+            core.activity(self.c, "boss")
+            server.watch_busy(self.c)
+            self.assertEqual(server.fresh_sessions(self.c), nothing)
+            self.assertEqual(server.auto_release(self.c)["started"], {})
+        it = core.item_show(self.c, dep)
+        self.assertEqual((it["status"], it["assignee"], core.target_show(self.c, "web")["owner"]), ("in_progress", name, name))
+        self.assertIn(pane, self.tmux.panes)
+        told = [m for m in core.inbox(self.c, "boss", mark_read=False) if m["reply_to"] == q]
+        self.assertEqual(len(told), 1)  # one alert for the question, not one each pass
+        self.assertIn(f"{name} waits at its prompt for mark's answer to question #{q} (#{dep})", told[0]["body"])
+        # mark answers in the terminal and the deploy is done: the question no longer holds anything.
+        clock[0] += core.timedelta(seconds=1)
+        core.done(self.c, dep, "release 7", name)
+        self.assertEqual(core.waits_on_person(self.c), {})
+        # A question about an item the agent does not hold, or to another agent, is no wait on a person.
+        x = core.item_add(self.c, "site", "other")["id"]
+        core.send(self.c, "question", "which header?", to="mark", item=x, actor=name)
+        core.send(self.c, "question", "which header?", to="dev", item=x, actor=name)
+        self.assertEqual(core.waits_on_person(self.c), {})
+
+    def test_serve_keeps_the_last_lines_of_a_session_that_ended_before_it_connected(self):
+        dep = self._deploy_ready()
+        name = server.auto_release(self.c)["started"][dep]
+        pane = self.tmux.panes[-1]
+        pane["running"], pane["screen"] = "zsh", "$ claude --name 'deploy web'\nError: could not start\n$"
+        self.assertEqual([p["pane"] for p in server.auto_tidy(self.c)], [pane["id"]])
+        last = core.item_show(self.c, dep)["events"]
+        self.assertTrue(any(e["change"].startswith(f"{name} ended before it ran a maxpm command; the last lines of its "
+                                                   f"pane {pane['id']}: ") and "Error: could not start" in e["change"]
+                            for e in last))
+
     def test_work_for_an_agent_idle_at_its_prompt_goes_to_a_fresh_session(self):
         import threading
         from unittest import mock

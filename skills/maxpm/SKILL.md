@@ -226,6 +226,14 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   `human_wait_max` (30m). Then MaximizePM releases your item (it still waits on the
   person's item), reminds the person, and tells you to take other work:
   run `maxpm go`. When the person finishes, the item is ready for whoever runs go.
+- Only you can do the step once the person says yes (a deploy, a command the
+  auto mode classifier refused to you), so you must wait at your prompt: ask in
+  the queue first, as your last step before you stop:
+  `maxpm ask <person> "<what to approve>" --item <the item you hold>`. While the
+  question is open, `maxpm serve` keeps your lease (and your deploy target),
+  takes nothing back, starts no other session for your work, and alerts the
+  manager. The person answers in your terminal or with `maxpm answer`. A wait
+  that you only say in chat looks idle: `maxpm serve` gives your work to others.
 
 When you put a decision to the user in chat, use one form, one decision at a
 time (`maxpm guide decisions` prints it):

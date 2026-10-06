@@ -2034,7 +2034,11 @@ def render_go(b):
                 out.append(f"  next deploy #{n['id']} is collecting: " + (", ".join(f"#{d['id']}" for d in n["waits_on_detail"]) or "nothing yet"))
             out += ["",
                     "Deploy as the target description says, run its checks, then put the release id or",
-                    f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\""]
+                    f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\"",
+                    "A step needs a person's go (an approval, a command the auto mode classifier refuses): ask in the",
+                    f"queue before you stop at your prompt: {r} ask <person> \"<what to approve>\" --item {it['id']}",
+                    "While that question is open, maxpm serve keeps your lease and the target and starts no other",
+                    "deployer. The person answers in your terminal or with maxpm answer."]
         if b["role"] == "monitor":
             m = b["monitor"]
             d = m["deploy"]

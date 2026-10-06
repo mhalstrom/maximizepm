@@ -682,7 +682,10 @@ def auto_tidy(conn):
     """One pass of the loop of maxpm serve (every notify_interval): every tidy_every (0s: never) it closes the panes
     that maxpm view --tidy closes (_done_panes). A pane where the agent CLI still runs closes only when its screen
     stayed the same for idle_after: a screen that changes is a busy agent. Such a pane is read again on the next
-    passes, until it is idle or no longer done. Returns the panes it closed: [{"pane", "name", "why"}]."""
+    passes, until it is idle or no longer done. A pane whose agent CLI ended before its agent ran a river command
+    (a start that failed) leaves its last lines in the history of the item it was started for, so a person sees
+    why. Returns the panes it closed: [{"pane", "name", "why"}]."""
+    import re
     every = core.parse_duration(core.setting(conn, "tidy_every"))
     t = core.now()
     if not every.total_seconds() or (TIDY["at"] and t - TIDY["at"] < every):
@@ -696,7 +699,14 @@ def auto_tidy(conn):
         panes = [p for p in _tmux_panes() if p["name"]]
         done = _done_panes(conn, panes)
         open_cli = [p["pane"] for p in panes if p["pane"] in done and not p["ended"]]
-        texts = _pane_texts(open_cli) if open_cli else {}
+        failed = {}
+        for p in panes:
+            a = p["pane"] in done and p["ended"] and p["agent"] and conn.execute(
+                "SELECT note FROM agents WHERE name=? AND last_seen=registered_at", (p["agent"],)).fetchone()
+            if a:
+                m = re.search(r"#(\d+)", a["note"] or "")
+                failed[p["pane"]] = (p["agent"], int(m.group(1)) if m else None)
+        texts = _pane_texts(open_cli + sorted(failed)) if open_cli or failed else {}
     except RiverError:
         return []
     after = core.parse_duration(core.setting(conn, "idle_after"))
@@ -715,6 +725,14 @@ def auto_tidy(conn):
             if t - st["since"] < after:
                 busy = True
                 continue
+        if p["pane"] in failed and p["pane"] in texts:
+            agent, item = failed[p["pane"]]
+            tail = " | ".join(_prompt_tail(_plain(texts[p["pane"]]))[-8:])
+            with core.tx(conn):
+                known = item and conn.execute("SELECT 1 FROM items WHERE id=?", (item,)).fetchone()
+                core._event(conn, item if known else None, "maxpm",
+                            f"{agent} ended before it ran a maxpm command; the last lines of its pane {p['pane']}: "
+                            + (tail[-800:] or "(empty)"))
         if _tmux("kill-pane", "-t", p["pane"], check=False) is not None:
             closed.append({"pane": p["pane"], "name": p["name"], "why": why})
             screens.pop(p["pane"], None)
@@ -1005,20 +1023,25 @@ def watch_busy(conn):
     """One pass of the loop of maxpm serve (every notify_interval): the agents that hold work and are busy keep
     their leases (core.keep_busy). Busy: a command runs in the agent's session (core.busy_now), its tmux pane
     changed since the last pass, or its pane shows a prompt (prompt_pattern: the agent waits on a person, and
-    its work is in the folder). Returns the agents it kept."""
+    its work is in the folder). An agent that waits on a person's answer (core.waits_on_person) keeps its leases
+    and its target with no time limit while its agent CLI runs, and the manager gets an alert for it. Returns the
+    agents it kept."""
     import re
     names = {r["assignee"] for r in conn.execute(
         "SELECT DISTINCT assignee FROM items WHERE status IN ('in_progress','held') AND assignee IN "
         "(SELECT name FROM agents WHERE kind='ai')")}
     for agent in [a for a in BUSY if a not in names]:
         del BUSY[agent]
-    if not names or not core.parse_duration(core.setting(conn, "busy_max")).total_seconds():
+    waiting = core.waits_on_person(conn)
+    if not core.parse_duration(core.setting(conn, "busy_max")).total_seconds():
+        names = set()
+    if not names and not waiting:
         return []  # the usual pass with no agent at work: no ps and no tmux command
-    busy = core.busy_now(conn, names)
+    busy = core.busy_now(conn, names) if names else set()
     terminals = agent_terminals(conn) if TMUX_RUNNER is not None or _tmux_cmd() else {}
     pattern = core.setting(conn, "prompt_pattern").strip()
     rx = re.compile(pattern) if pattern else None
-    for agent in sorted(names):
+    for agent in sorted(names | set(waiting)):
         pane = terminals.get(agent)
         if not pane:
             BUSY.pop(agent, None)
@@ -1029,12 +1052,17 @@ def watch_busy(conn):
             continue  # the pane closed since the list
         if screen["ended"]:
             BUSY.pop(agent, None)  # a shell: the agent CLI ended
+            waiting.pop(agent, None)
+            continue
+        if agent not in names:
             continue
         text = _plain(screen["text"])
         if (agent in BUSY and BUSY[agent] != text) or (rx and any(rx.search(x) for x in _prompt_tail(text))):
             busy.add(agent)
         BUSY[agent] = text
-    return core.keep_busy(conn, busy) if busy else []
+    if waiting:
+        core.tell_manager_waits(conn, waiting)
+    return core.keep_busy(conn, busy, waiting) if busy or waiting else []
 
 
 def start_fresh(conn, item_id, why, runner=None):
@@ -1057,7 +1085,8 @@ def fresh_sessions(conn, runner=None):
     - An agent idle at its prompt (_idle_panes, idle_after) with news (core.idle_news): its work goes to fresh
       sessions (core.hand_over), and it ends.
     - An agent idle at its prompt with nothing in hand and no river command for idle_end: it ends.
-    An agent in whose session a command runs (core.busy_now) is not idle, whatever its screen shows.
+    An agent in whose session a command runs (core.busy_now) is not idle, whatever its screen shows; nor is one
+    that waits on a person's answer (core.waits_on_person): the person may answer in its terminal.
     An agent that ends is unregistered, and the tmux pane river started for it closes; that comes before the
     fresh sessions start, so two sessions never work on one item.
     Managers and planners are left alone: they wait at their prompt for a person or a watch command.
@@ -1092,6 +1121,8 @@ def fresh_sessions(conn, runner=None):
             cands[a["name"]] = news
     for agent in core.busy_now(conn, set(cands)) if cands else ():
         del cands[agent]  # a long command with a quiet screen: the agent works
+    for agent in core.waits_on_person(conn, set(cands)) if cands else ():
+        del cands[agent]  # it asked a person and waits for the answer, maybe in its terminal: not idle
     for agent, pane in _idle_panes(conn, cands, after).items():
         news, why = cands[agent], f"idle at its prompt with nothing in hand for {core.setting(conn, 'idle_end')}"
         ids = []
@@ -1149,10 +1180,13 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     focus = f"deploy:{target}"
     launch_in = core._launch_in(conn, p["id"])
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go", launch_in)
-    title = core.focus_title(conn, focus)
+    # Each deployer gets a session name of its own (claude --name, --remote-control): the one it replaces may still
+    # run, and #1010 saw both starts beside a live session of the same name end before they connected.
+    tag = secrets.token_hex(2)
+    title = f"{core._short_title(core.focus_title(conn, focus), 43)} {tag}"
     t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": title,
          **core._launch_agent_cmd(conn, p["id"], label, model, effort, None, title), "launch_in": launch_in}
-    name = f"deploy-{target}-{secrets.token_hex(2)}"
+    name = f"deploy-{target}-{tag}"
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{dep_id}")
     with core.tx(conn):
         core.target_handoff(conn, target, name, why)
