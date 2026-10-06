@@ -1837,11 +1837,12 @@ class LaunchInTmux(unittest.TestCase):
         # a fresh session for the work (a script stands for the agent CLI).
         from unittest import mock
         fake = Path(self.dir.name, "fake-agent")
-        fake.write_text('#!/bin/sh\necho "fake agent: $MAXPM_AGENT $MAXPM_FOCUS"\nexec sleep 60\n')
-        fake.chmod(0o755)
-        core.config_set(self.c, "launch_agents", f"Fake={fake}")
+        fake.write_text('echo "fake agent: $MAXPM_AGENT $MAXPM_FOCUS"\nexec sleep 60\n')
+        # /bin/sh runs it: macOS scans a new executable file before its first start (Gatekeeper; it took 13 s on a busy
+        # Mac, past the 10 s the panes get), and never a script that a system shell reads.
+        core.config_set(self.c, "launch_agents", f"Fake=/bin/sh {fake}")
         core.config_set(self.c, "launch_in", "tmux")
-        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#6 sixth", "command": str(fake),
+        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#6 sixth", "command": f"/bin/sh {fake}",
                                "launch_in": "tmux"}, {"MAXPM_AGENT": "shop-cccc"})
         sixth = panes(lambda p: p["name"] != "#6 sixth" or p["running"] == "sleep")["#6 sixth"]["pane"]
         core.register(self.c, "shop-cccc")
