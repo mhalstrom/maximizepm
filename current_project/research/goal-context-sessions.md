@@ -111,6 +111,28 @@ In another project's last 10 sessions, the first turn read about 29.8k from the
 cache and wrote about 25k. The sessions peaked at 112k to 308k tokens over 55
 to 309 turns.
 
+## Cost of each item, measured (#1096)
+
+From the transcripts of 148 agent sessions, 2026-09-27 to 2026-10-06. Each
+request goes to the item its agent held at that time (from the claim and done
+events). The groups are by session: the first item of a session, or a later
+item that is related to an earlier one (a link or a shared `touches` path),
+or unrelated to them.
+
+| Group | Items | Median eq | Median turns | Median mean context | eq per turn |
+|---|---:|---:|---:|---:|---:|
+| First item of a session | 91 | 732k | 49 | 107k | 20.6k |
+| Later item, related | 51 | 341k | 16 | 211k | 25.9k |
+| Later item, unrelated | 16 | 758k | 26 | 226k | 30.6k |
+| Later item, no `touches` to tell | 57 | 426k | 22 | 189k | 24.2k |
+
+- Of all 580M eq, items used 53%, manager sessions with no item 31% (34.8k
+  per turn), and agents with no item 16%.
+- Turns above 150k context used 77% of the cost.
+- The first turn after a wait (`maxpm wait` or `inbox --wait`) used about 7%.
+- A later unrelated item costs as much as a fresh start in half the turns: it
+  pays for context it does not use. A related one costs half.
+
 ## What costs the most
 
 Each turn costs about (context x 0.1) + (new tokens x 2.0). For example:
