@@ -12,7 +12,7 @@ most important item that is ready (nothing it waits on is open).
 ## Fastest start
 
 Run `maxpm go` in the project folder and follow the briefing. It names you,
-picks your role (owner, worker, unblocker, reviewer, deployer, monitor, planner, idle), claims
+picks your role (owner, worker, unblocker, reviewer, deployer, monitor, planner, context, idle), claims
 an item when there is one, and ends with the command to run next. Pass `--as <your-name>` on
 every later command. When the briefing asks, record your Claude Code session
 name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents
@@ -152,6 +152,21 @@ without a goal stay in the normal queue.
   `maxpm go` never makes you its owner, `maxpm goal own` refuses, and its
   items are normal work for every agent. Take them with `maxpm go`, and tag
   an item you add for it: `maxpm add "<title>" --goal <name>`.
+
+## Context sessions and forked workers
+
+With the setting `goal_context` on, `maxpm serve` starts a context session
+(role CONTEXT) for a goal with two or more ready agent items and no warm base.
+It reads the goal's handoff, the items' notes, and the files they touch, keeps
+the handoff current, runs `maxpm goal base <goal> --ready` as its last command,
+and ends. It edits no file and claims no item. A session that MaximizePM then
+starts for an item of the goal begins as a fork of that base
+(`claude --resume <base> --fork-session`) when the base has the same model and
+folder and a session used it less than `base_warm` (50m) ago: it reads the
+goal's context from the prompt cache. Its go briefing says so. An item that
+needs no goal context starts fresh: `maxpm add ... --no-goal-context` (or
+`maxpm edit <id> --no-goal-context`). `maxpm goal base <goal>` shows the base;
+`--clear` drops it.
 
 ## Adding work
 

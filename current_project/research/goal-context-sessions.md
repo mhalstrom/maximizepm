@@ -59,6 +59,25 @@ session that builds the same context costs about 75k eq: it writes its first
 message (16.4k) and the files it reads (18.9k). The saving grows with the
 size of the base.
 
+### 1b. An interactive fork with `--name` and `--remote-control` (#1104)
+
+The command that `maxpm serve` builds for a worker, with Haiku: a `-p` base
+read `river/notify.py`; two forks ran interactively in tmux,
+`claude --name forkm-N --model haiku --resume <base> --fork-session "Reply with the word two." --remote-control forkm-N`.
+
+| Request | Cache read | Cache write |
+|---|---:|---:|
+| Base, turn 2 | 27,212 | 5,123 |
+| Fork 1, first own turn | 32,335 | 4,873 |
+| Fork 2, first own turn | 32,335 | 4,875 |
+
+- Each fork reads the whole base from the cache. The session name and Remote
+  Control do not change the prefix.
+- An interactive fork starts its transcript with a file-history snapshot
+  (the fork's time inside it), then the base's lines with their older times.
+  `maxpm` uses that to tell a fork from a fresh start (#1102 found only `-p`
+  forks, by their queue line).
+
 ### 2. A fresh session's first turn, with and without the flags and a primer
 
 One-word prompt. Session 1 and session 2 ran in the project folder, session 3

@@ -137,6 +137,11 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
     core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
     _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner)
+    if t.get("fork_of"):  # it reads the goal's base from the cache, which keeps the base warm
+        core.base_used(conn, t["fork_of"]["session_id"])
+        with core.tx(conn):
+            core._event(conn, t["item"]["id"], actor or "maxpm", f"{name} starts as a fork of the base of goal "
+                        f"{t['fork_of']['goal']} (session {t['fork_of']['session_id'][:8]})")
     if t.get("custom_prompt"):  # what the session was told, for the people who read the item's history
         flat = " ".join(t["custom_prompt"].split())
         with core.tx(conn):
@@ -1063,6 +1068,26 @@ def watch_busy(conn):
     if waiting:
         core.tell_manager_waits(conn, waiting)
     return core.keep_busy(conn, busy, waiting) if busy or waiting else []
+
+
+def auto_context(conn, runner=None):
+    """One pass of the loop of maxpm serve (goal_context on): a goal with two or more ready agent items and no
+    warm base gets a context session (MAXPM_FOCUS=context:<goal>). It reads the goal's handoff, items and files,
+    records itself as the goal's base (maxpm goal base --ready), and ends; the goal's next workers start as
+    forks of it. Returns the goals it started one for."""
+    started = []
+    for w in core.context_wanted(conn):
+        p = core._project(conn, w["project"])
+        try:
+            label = _agent_for(conn, w["model"])[0] if w["model"] else None
+            t = _open_focused(conn, p, f"context:{w['goal']}", runner, label, w["model"])
+        except RiverError as e:
+            print(f"maxpm serve: no context session for goal {w['goal']}: {e}", flush=True)
+            continue
+        with core.tx(conn):
+            core._event(conn, None, "maxpm", f"context session started for goal {w['goal']} ({t['session_title']})")
+        started.append(w["goal"])
+    return started
 
 
 def start_fresh(conn, item_id, why, runner=None):

@@ -1004,6 +1004,21 @@ class Usage(Base):
                               self.req(1, "a1")])
         self.assertFalse(core.read_transcript(os.path.join(self.root, "projects", "-work-a", self.SID + ".jsonl"))[1])
 
+    def test_an_interactive_fork_is_known_by_its_snapshot_time(self):
+        path = os.path.join(self.root, "projects", "-work-a", self.SID + ".jsonl")
+        snap = lambda m: {"type": "file-history-snapshot", "snapshot": {"timestamp": self.at(m)}}
+        self.write(self.SID, [{"type": "custom-title", "customTitle": "w"}, snap(10),
+                              {"type": "user", "timestamp": self.at(2), "message": {"content": "base"}},
+                              self.req(3, "copied"),
+                              {"type": "user", "timestamp": self.at(10), "message": {"content": "go"}},
+                              self.req(11, "own")])
+        reqs, fork = core.read_transcript(path)
+        self.assertEqual((fork, sorted(reqs)), (True, ["own"]))
+        # A fresh interactive session: its first message comes just after its snapshot.
+        self.write(self.SID, [snap(0), {"type": "user", "timestamp": self.at(0.005), "message": {"content": "go"}},
+                              self.req(1, "own")])
+        self.assertFalse(core.read_transcript(path)[1])
+
     def test_no_transcript_no_usage_and_the_session_id_from_the_environment(self):
         x = self.add("a", "x")
         core.claim(self.c, x, "ag")

@@ -197,6 +197,54 @@ class LaunchAgent(unittest.TestCase):
                 os.environ["MAXPM_DB"] = old
         self.assertRegex(sent[0], r"MAXPM_DB=\S*q\.db'? MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ claude --name \S+ \S+ go")  # the path is quoted when it needs it
 
+    def test_goal_context_session_builds_a_base_and_workers_start_as_forks(self):
+        import json
+        from river import cli
+        sid = "44444444-4444-4444-8444-444444444444"
+        root = os.path.join(self.dir.name, "claude")
+        os.makedirs(os.path.join(root, "projects", "-shop"))
+        with open(os.path.join(root, "projects", "-shop", sid + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "assistant", "timestamp": core.iso(core.now()), "message": {"id": "m", "usage": {
+                "input_tokens": 3, "cache_read_input_tokens": 30000, "cache_creation_input_tokens": 9000}}}) + "\n")
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.goal_add(self.c, "shop", "checkout", "customers can pay", actor="t")
+        a = core.item_add(self.c, "shop", "pay button", goals=["checkout"])["id"]
+        b = core.item_add(self.c, "shop", "receipt mail", goals=["checkout"])["id"]
+        c = core.item_add(self.c, "shop", "fix a typo in the footer", goals=["checkout"])["id"]
+        core.item_goal_context(self.c, c, False, "t")
+        sent = []
+        self.assertEqual(server.auto_context(self.c, runner=sent.append), [])  # goal_context is off by default
+        core.config_set(self.c, "goal_context", "on")
+        self.assertEqual(server.auto_context(self.c, runner=sent.append), ["checkout"])
+        self.assertIn("MAXPM_FOCUS=context:checkout", sent[0])
+        self.assertEqual(server.auto_context(self.c, runner=sent.append), [])  # one start per CONTEXT_RETRY
+        # The context session: its own briefing, no claims, then it records itself as the base.
+        g = core.go(self.c, self.dir.name, focus="context:checkout")
+        me = g["agent"]
+        self.assertEqual((g["role"], [x["id"] for x in g["context"]["items"]]), ("context", [a, b]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(g)
+        self.assertIn(f"maxpm --as {me} goal base checkout --ready", out.getvalue())
+        with self.assertRaisesRegex(RiverError, "context session"):
+            core.claim(self.c, a, me)
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": root}):
+            r = core.goal_base(self.c, "checkout", me, ready=True, session=sid, cwd=self.dir.name)
+        self.assertEqual((r["base"]["tokens"], r["base"]["warm"], r["warning"]), (39003, True, None))
+        # A worker of the goal starts as a fork of the warm base; the fork keeps it warm.
+        t = server.dispatch_item(self.c, a, runner=sent.append)
+        self.assertEqual(t["fork_of"]["session_id"], sid)
+        self.assertIn(f"MAXPM_FORK_OF=checkout", sent[-1])
+        self.assertIn(f"claude --name checkout --resume {sid} --fork-session go --remote-control checkout", sent[-1])
+        self.assertEqual(core.goal_base(self.c, "checkout")["base"]["forks"], 1)
+        # Fresh instead: an item that needs no goal context, another model, a cold base.
+        self.assertIsNone(server.dispatch_item(self.c, c, runner=sent.append)["fork_of"])
+        self.assertNotIn("--fork-session", sent[-1])
+        self.assertIsNone(core.fork_base(self.c, core.annotate(self.c)[b], self.dir.name, "sonnet", "claude-code"))
+        self.assertIsNone(core.fork_base(self.c, core.annotate(self.c)[b], self.dir.name, None, "codex"))
+        self.c.execute("UPDATE goal_bases SET used_at=?", (core.iso(core.now() - core.timedelta(hours=1)),))
+        self.assertIsNone(server.dispatch_item(self.c, b, runner=sent.append)["fork_of"])
+
     def test_dispatch_starts_a_named_session_for_one_item(self):
         core.project_add(self.c, "shop", path=self.dir.name)
         top = core.item_add(self.c, "shop", "first", priority=0)["id"]

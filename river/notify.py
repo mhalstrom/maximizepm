@@ -292,6 +292,7 @@ def loop(stop, interval_s=None):
             server.watch_busy(conn)  # an agent that is busy with no river command keeps its leases
             server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session
             server.auto_release(conn)  # a ready review gets a reviewer, a ready deploy its deployer
+            server.auto_context(conn)  # goal_context on: a goal with ready work gets a context session (a base)
             server.auto_tidy(conn)  # every tidy_every: close the tmux panes of sessions that are done
             server.auto_end_orphans(conn)  # and end the tmux servers the tests left behind with no socket
             if core._channels(core.setting(conn, "notify_channels")):

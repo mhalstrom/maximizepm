@@ -183,6 +183,12 @@ DEFAULT_SETTINGS = {
     # What an item gets when it names none itself. Set them per project (--project) or per item kind
     # (--kind deploy); for example monitors: default_model sonnet, default_effort low, default_max_model sonnet.
     # A recommendation never blocks; min/max limits keep a session whose model is outside them off the item.
+    # Goal context sessions (#1104): goal_context on lets maxpm serve start a context session for a goal with
+    # two or more ready agent items and no warm base; a worker of the goal starts as a fork of a base that a
+    # session used less than base_warm ago (the prompt cache keeps it an hour); a base reads up to base_max tokens.
+    "goal_context": "off",
+    "base_warm": "50m",
+    "base_max": "80k",
     "default_model": "",
     "default_effort": "",
     "default_min_model": "",
@@ -344,6 +350,20 @@ CREATE TABLE IF NOT EXISTS goal_handoffs (
   by_agent    TEXT,
   created_at  TEXT NOT NULL,
   UNIQUE (goal_id, version)
+);
+
+-- A goal's base (#1104): a context session that read the goal's handoff, items and files and then ended.
+-- Workers of the goal start as forks of it (claude --resume <session> --fork-session) while it is warm.
+CREATE TABLE IF NOT EXISTS goal_bases (
+  goal_id     INTEGER PRIMARY KEY REFERENCES goals(id),
+  session_id  TEXT NOT NULL,
+  model       TEXT,
+  path        TEXT NOT NULL,
+  tokens      INTEGER,
+  by_agent    TEXT,
+  ready_at    TEXT NOT NULL,
+  used_at     TEXT NOT NULL,
+  forks       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS item_goals (
@@ -717,6 +737,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _migrate(conn):
+    if "no_goal_context" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
+        conn.execute("ALTER TABLE items ADD COLUMN no_goal_context INTEGER NOT NULL DEFAULT 0")
     # Items held before the holds table existed: their hold starts at the claim.
     conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
                  "FROM items i WHERE i.status IN ('in_progress','held') AND i.assignee IS NOT NULL AND NOT EXISTS "
@@ -4630,6 +4652,9 @@ def _claim_row(conn, item_id, actor):
         raise RiverError(f"refused: {actor} is asked to stop (by {ag['stop_by']}: {ag['stop_reason']}); it takes no "
                          f"new work. Commit finished work, release your item, then end the session")
     it0 = _item(conn, item_id)
+    if ag["role"] == "context":
+        raise RiverError(f"refused: {actor} is a context session: it reads a goal's handoff, items and files, "
+                         f"runs maxpm goal base <goal> --ready, and ends. It claims no item and edits no file")
     if ag["role"] in ("planner", "manager"):
         raise RiverError(f"refused: {actor} is a {ag['role']} session; it changes the plan and does not take work. "
                          f"To work instead, run: maxpm --as {actor} go" + (
@@ -5513,8 +5538,9 @@ def read_transcript(path):
     (Claude Code writes one line per content block, with the same usage). A fork (claude --resume <id>
     --fork-session) starts with lines copied from its base, with the base's older times: they are left out,
     and fork is True. Copied lines come before the session's own first request: a line there is copied when
-    it is FORK_SLACK older than the first line, or when the first user message is older than the queue line
-    before it (claude -p writes that line when it starts). Not the file's birth time: files are written again."""
+    it is FORK_SLACK older than the first line, or when the first user message is older than the start line
+    before it: claude -p writes a queue line when it starts, an interactive session a file-history snapshot
+    (its time inside the snapshot). Not the file's birth time: files are written again."""
     reqs, first, fork, dequeued, leading, users = {}, None, False, None, True, 0
     slack = timedelta(seconds=FORK_SLACK)
     with open(path, errors="replace") as f:
@@ -5525,7 +5551,13 @@ def read_transcript(path):
                 d = json.loads(line)
             except ValueError:
                 continue
-            t = _ts(d["timestamp"]) if isinstance(d, dict) and isinstance(d.get("timestamp"), str) else None
+            if not isinstance(d, dict):
+                continue
+            snap = d.get("snapshot") if d.get("type") == "file-history-snapshot" else None
+            if leading and isinstance(snap, dict) and isinstance(snap.get("timestamp"), str) and users == 0:
+                dequeued = _ts(snap["timestamp"]) or dequeued
+                continue
+            t = _ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
             if t is None:
                 continue
             if leading:
@@ -5666,6 +5698,135 @@ def usage_report(conn, project=None, since="7d", measure=None, root=None):
                            "median_turns": med("turns"), "median_output": round(med("output")),
                            "eq_per_turn": round(sum(x["eq"] for x in rr) / max(1, sum(x["turns"] for x in rr)))})
     return {"items": items, "groups": groups, "since": since or "all"}
+
+
+# ---------------------------------------------------------------- goal bases (#1104)
+
+def _k_tokens(text):
+    """80k -> 80000; 1.5M -> 1500000; a plain number as is."""
+    m = re.match(r"^\s*([0-9.]+)\s*([kKmM]?)\s*$", str(text))
+    if not m:
+        raise RiverError(f"{text!r}: a number of tokens, such as 80k")
+    return int(float(m.group(1)) * {"": 1, "k": 1000, "m": 1_000_000}[m.group(2).lower()])
+
+
+def context_brief(conn, goal):
+    """What a context session reads for a goal: the handoff, the open agent items with their notes and the
+    files they touch, and the limit base_max."""
+    g = _goal(conn, goal)
+    ann = annotate(conn)
+    items = sorted((ann[r["item_id"]] for r in conn.execute("SELECT item_id FROM item_goals WHERE goal_id=?", (g["id"],))
+                    if r["item_id"] in ann), key=lambda a: a["sort_key"])
+    live = [a for a in items if a["status"] in OPEN_STATES and a["doer"] != "human" and not a["no_goal_context"]]
+    return {"goal": g["name"], "project": _project_name(conn, g["project_id"]), "outcome": g["outcome"],
+            "done_when": g["done_when"], "handoff": _handoff(conn, g["id"]),
+            "items": [{"id": a["id"], "title": a["title"], "ready": a["ready"], "notes": a["notes"],
+                       "context": a["context"], "touches": touches_list(a["touches"])} for a in live[:12]],
+            "more": max(0, len(live) - 12), "base_max": setting(conn, "base_max", project_id=g["project_id"])}
+
+
+def _base_view(conn, g):
+    r = conn.execute("SELECT * FROM goal_bases WHERE goal_id=?", (g["id"],)).fetchone()
+    if not r:
+        return None
+    warm = parse_duration(setting(conn, "base_warm", project_id=g["project_id"]))
+    until = parse_iso(r["used_at"]) + warm
+    return {**dict(r), "warm": now() < until, "warm_until": iso(until)}
+
+
+def goal_base(conn, name, actor=None, ready=False, clear=False, session=None, model=None, cwd=None, root=None):
+    """A goal's base: show it; --ready records the context session this command runs in as the base (its
+    session id, model, folder, context size); --clear drops it."""
+    g = _goal(conn, name)
+    warn = None
+    if ready:
+        if not session:
+            raise RiverError("run maxpm goal base --ready inside the Claude Code context session: it records that "
+                             "session (CLAUDE_CODE_SESSION_ID) as the base")
+        got = _session_requests(session, Path(root) if root else transcripts_root())
+        reqs = sorted(got[0].values(), key=lambda r: r[0]) if got else []
+        last = reqs[-1][1] if reqs else {}
+        tokens = sum(last.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens",
+                                                 "cache_creation_input_tokens")) or None
+        limit = _k_tokens(setting(conn, "base_max", project_id=g["project_id"]))
+        if tokens and tokens > limit:
+            warn = (f"the base has {tokens} tokens, above base_max {limit}: each fork reads all of it. Next time "
+                    f"read less (the handoff and the files the next items touch)")
+        model = model or (agent_model(conn, actor) if actor else None)
+        with tx(conn):
+            conn.execute("INSERT OR REPLACE INTO goal_bases (goal_id, session_id, model, path, tokens, by_agent, "
+                         "ready_at, used_at, forks) VALUES (?,?,?,?,?,?,?,?,0)",
+                         (g["id"], session, model, os.path.realpath(cwd or os.getcwd()), tokens, actor,
+                          iso(now()), iso(now())))
+            _event(conn, None, actor, f"base of goal {name} ready: session {session[:8]}, model {model or '?'}, "
+                                      f"{tokens or '?'} tokens")
+    elif clear:
+        with tx(conn):
+            conn.execute("DELETE FROM goal_bases WHERE goal_id=?", (g["id"],))
+            _event(conn, None, actor, f"base of goal {name} dropped")
+    return {"goal": name, "base": _base_view(conn, g), "warning": warn, "ready": ready, "cleared": clear}
+
+
+def item_goal_context(conn, item_id, needed, actor=None):
+    """maxpm add/edit --no-goal-context (needed False): the item needs no goal context, so a session for it
+    starts fresh, never as a fork of its goal's base; --goal-context (True) undoes it."""
+    it = _item(conn, item_id)
+    with tx(conn):
+        conn.execute("UPDATE items SET no_goal_context=? WHERE id=?", (0 if needed else 1, it["id"]))
+        _event(conn, it["id"], actor, "needs goal context" if needed else "needs no goal context: starts fresh")
+    return item_show(conn, it["id"])
+
+
+def fork_base(conn, item, path, model, platform):
+    """The base a new session for this item starts from (claude --resume <base> --fork-session), or None: a
+    Claude Code session, an item of an open goal that needs goal context, a base in the same folder, of the
+    same model, that a session used less than base_warm ago."""
+    if platform != "claude-code" or not item.get("goals") or item.get("no_goal_context"):
+        return None
+    for name in item["goals"]:
+        g = conn.execute("SELECT * FROM goals WHERE name=? AND status='open'", (name,)).fetchone()
+        b = _base_view(conn, g) if g else None
+        if not b or not b["warm"] or b["path"] != os.path.realpath(path):
+            continue
+        want = model or setting(conn, "default_model", project_id=g["project_id"]) or None
+        if (b["model"] or None) == want:
+            return {"goal": name, "session_id": b["session_id"], "tokens": b["tokens"]}
+    return None
+
+
+def base_used(conn, session_id):
+    """A fork started from this base: it read the base from the cache, so the base stays warm longer."""
+    with tx(conn):
+        conn.execute("UPDATE goal_bases SET used_at=?, forks=forks+1 WHERE session_id=?", (iso(now()), session_id))
+
+
+CONTEXT_RETRY = timedelta(minutes=30)
+
+
+def context_wanted(conn):
+    """Goals that want a context session now (goal_context on): two or more ready agent items that need goal
+    context, no warm base, and no context session at work for it. [(goal, project, path)]"""
+    ann = annotate(conn)
+    out = []
+    for g in conn.execute("SELECT g.*, p.path, p.name project FROM goals g JOIN projects p ON p.id=g.project_id "
+                          "WHERE g.status='open' AND p.archived=0 ORDER BY p.rank, g.rank"):
+        if setting(conn, "goal_context", project_id=g["project_id"]) != "on" or not g["path"]:
+            continue
+        ready = [a for a in ann.values() if g["name"] in a["goals"] and a["ready"] and a["doer"] != "human"
+                 and not a["no_goal_context"] and a["kind"] not in ("deploy", "review", "monitor")]
+        b = _base_view(conn, g)
+        if len(ready) < 2 or (b and b["warm"]):
+            continue
+        busy = [r for r in conn.execute("SELECT * FROM agents WHERE role='context' AND note=?",
+                                        (f"role: context for goal {g['name']}",)) if _agent_state(conn, r) == "active"]
+        # One start per CONTEXT_RETRY: a session that has not run maxpm go yet, or ended without a base.
+        tried = conn.execute("SELECT 1 FROM events WHERE item_id IS NULL AND change LIKE ? AND at >= ?",
+                             (f"context session started for goal {g['name']} %", iso(now() - CONTEXT_RETRY))).fetchone()
+        if busy or tried:
+            continue
+        out.append({"goal": g["name"], "project": g["project"], "path": g["path"],
+                    "model": next((a["model"] for a in ready if a.get("model")), None)})
+    return out
 
 
 def item_show(conn, item_id, ann=None):
@@ -6724,9 +6885,13 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         if not ok:
             raise RiverError(f"#{top['id']} {why}; pick another model")
     name = session_title(top["goals"], top["id"], top["title"])
+    cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt)
+    base = fork_base(conn, top, p["path"], model, cmd["platform"])
+    if base:  # a worker of the goal starts from the warm base: it reads the goal's context from the cache
+        cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt, fork_of=base["session_id"])
+        cmd["env"] = {**cmd["env"], "MAXPM_FORK_OF": base["goal"]}  # its go briefing says what it is now
     return {"project": p["name"], "path": p["path"], "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
-            "ready": len(pool), "why": why, "session_title": name,
-            **_launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt),
+            "ready": len(pool), "why": why, "session_title": name, **cmd, "fork_of": base,
             "launch_in": _launch_in(conn, p["id"], launch_in)}
 
 
@@ -6757,7 +6922,8 @@ def _launch_in(conn, project_id, choice=None):
     return ("tmux" if tmux_path() else "tab") if where == "auto" else where
 
 
-def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=None, name=None, prompt=None):
+def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=None, name=None, prompt=None,
+                      fork_of=None):
     """The chosen launch_agents entry as a command: a profile builds it from its options (options: the
     launch dialog's choices) and gives the session its name, a custom command gets {model} and {effort}
     filled in. The session also gets MAXPM_MODEL. prompt (maxpm launch --prompt) follows the profile's
@@ -6783,6 +6949,8 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         built = opts
         if prof[0] == "claude-code" and opts.get("skill_prompt") == "on":
             built = {**opts, "args": skill_prompt_args(opts.get("args", ""))}
+        if fork_of and prof[0] == "claude-code":  # fork_base: start from a goal's warm base
+            built = {**built, "args": f"--resume {_shell_quote(fork_of)} --fork-session " + built.get("args", "")}
         cmd = build_command(prof[0], built, mid, effort or None, name)
     elif prompt:
         raise RiverError(f"{pick[0]} is a custom command ({pick[1]}), so it takes no --prompt; give it a profile "
@@ -6920,7 +7088,7 @@ def state(conn):
 
 # ---------------------------------------------------------------- go
 
-ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "planner", "manager", "idle")
+ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "planner", "manager", "context", "idle")
 
 
 def _owned_goal(conn, actor, names):
@@ -7141,6 +7309,13 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
     # Deploy now on the Targets tab: the session deploys (owning the free target) or reviews the release.
     if role is None and kind in ("deploy", "review"):
         role = "deployer" if kind == "deploy" else "reviewer"
+    if role in (None, "context") and kind == "context" and fid:
+        brief.update(role="context", item=None, context=context_brief(conn, fid),
+                     why=f"maxpm serve started this session to build the base of goal {fid}")
+        _set_role_note(conn, actor, "context", None)
+        with tx(conn):  # context_wanted reads it: one context session per goal
+            conn.execute("UPDATE agents SET note=? WHERE name=?", (f"role: context for goal {fid}", actor))
+        return brief
     if role is None and kind == "needs":
         person = _person(conn, person or None)
         brief.update(role="helper", item=None, help_prompt=prompt_for_all(conn, person),
