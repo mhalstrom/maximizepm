@@ -1272,6 +1272,64 @@ class GoalOwners(Base):
         b = self.go("bo")  # no free goal left: today's worker behavior
         self.assertNotEqual(b["role"], "owner")
 
+    def test_handoff_versions_briefings_and_release_give_need_a_current_one(self):
+        from river import cli
+        core.register(self.c, "mark", human=True)
+        core.goal_add(self.c, "shop", "checkout", "customers can pay", "a test order succeeds", "t")
+        a = core.item_add(self.c, "shop", "pay button", goals=["checkout"])["id"]
+        b = core.item_add(self.c, "shop", "receipt mail", goals=["checkout"])["id"]
+        core.goal_own(self.c, "checkout", "ag")
+        core.goal_release(self.c, "checkout", "ag")  # nothing finished yet: no handoff needed
+        core.goal_own(self.c, "checkout", "ag")
+        core.claim(self.c, a, "ag")
+        core.done(self.c, a, "ok", "ag")
+        with self.assertRaisesRegex(RiverError, r"handoff of goal checkout is missing; you finished #%d" % a):
+            core.goal_release(self.c, "checkout", "ag")
+        with self.assertRaisesRegex(RiverError, "--no-handoff"):
+            core.goal_give(self.c, "checkout", "bo", "ag")
+        with self.assertRaisesRegex(RiverError, "owned by ag, who keeps its handoff"):
+            core.goal_handoff(self.c, "checkout", "my view", "bo")
+        with self.assertRaisesRegex(RiverError, "empty"):
+            core.goal_handoff(self.c, "checkout", "  ", "ag")
+        core.goal_handoff(self.c, "checkout", "Stripe test keys in .env.\nLeft: receipts.", "ag")
+        self.assertIsNone(core.goal_show(self.c, "checkout")["handoff_due"])
+        # The next session on the goal's items reads it; the owner's briefing shows it too.
+        core.goal_give(self.c, "checkout", "bo", "ag")
+        g = self.go("bo")
+        self.assertEqual((g["role"], g["item"]["id"]), ("owner", b))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(g)
+        self.assertIn("HANDOFF v1 (ag, ", out.getvalue())
+        self.assertIn("    Left: receipts.", out.getvalue())
+        # An owner that finished nothing of the goal releases it with no new handoff.
+        core.release(self.c, b, actor="bo")
+        core.goal_release(self.c, "checkout", "bo")
+        # A person or the manager may write it; every version stays.
+        core.goal_handoff(self.c, "checkout", "v2 from mark", "mark")
+        h = core.goal_handoff(self.c, "checkout", version=1)
+        self.assertEqual((h["handoff"]["text"].splitlines()[0], [v["version"] for v in h["versions"]]),
+                         ("Stripe test keys in .env.", [1, 2]))
+        # A worker on an item of a goal it does not own reads the handoff in its item.
+        core.goal_edit(self.c, "checkout", shared=True, actor="mark")
+        g = self.go("cy")
+        self.assertEqual((g["item"]["id"], [(h["goal"], h["version"]) for h in g["handoffs"]]), (b, [("checkout", 2)]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(g)
+        self.assertIn("goal checkout: HANDOFF v2 (mark, ", out.getvalue())
+        # A reason lets an owner go without a current handoff, and it goes in the history.
+        core.goal_edit(self.c, "checkout", shared=False, actor="mark")
+        core.goal_own(self.c, "checkout", "cy")
+        self.c.execute("UPDATE goal_handoffs SET created_at=? WHERE version=2",
+                       (core.iso(core.now() - timedelta(minutes=1)),))
+        core.done(self.c, b, "ok", "cy")
+        with self.assertRaisesRegex(RiverError, r"\(v2, .*\) is older than #%d receipt mail" % b):
+            core.goal_release(self.c, "checkout", "cy")
+        core.goal_release(self.c, "checkout", "cy", no_handoff="the goal is finished; nothing to hand on")
+        self.assertTrue(any("release goal checkout without a current handoff: the goal is finished" in e["change"]
+                            for e in core.recent_events(self.c)))
+
     def test_waiting_goal_does_other_work_and_names_the_blocker_owner(self):
         core.goal_add(self.c, "shop", "g1", "one", actor="t")
         core.goal_add(self.c, "shop", "g2", "two", actor="t")

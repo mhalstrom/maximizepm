@@ -334,6 +334,18 @@ CREATE TABLE IF NOT EXISTS goals (
   completed_at      TEXT
 );
 
+-- A goal's handoff (#1103): what the goal is, the decisions so far, the files that matter, and what is left.
+-- The owner keeps it current; every version stays.
+CREATE TABLE IF NOT EXISTS goal_handoffs (
+  id          INTEGER PRIMARY KEY,
+  goal_id     INTEGER NOT NULL REFERENCES goals(id),
+  version     INTEGER NOT NULL,
+  text        TEXT NOT NULL,
+  by_agent    TEXT,
+  created_at  TEXT NOT NULL,
+  UNIQUE (goal_id, version)
+);
+
 CREATE TABLE IF NOT EXISTS item_goals (
   item_id  INTEGER NOT NULL REFERENCES items(id),
   goal_id  INTEGER NOT NULL REFERENCES goals(id),
@@ -1516,7 +1528,85 @@ def _goal_view(conn, g, ann=None):
     d["items_open"] = sorted(a["id"] for a in items if a["status"] in OPEN_STATES)
     d["items_done"] = sorted(a["id"] for a in items if a["status"] == "done")
     d["items_dropped"] = sorted(a["id"] for a in items if a["status"] == "dropped")
+    h = _handoff(conn, g["id"])
+    d["handoff"] = {k: h[k] for k in ("version", "by_agent", "created_at")} if h else None
+    due = _handoff_due(conn, g)
+    d["handoff_due"] = due
     return d
+
+
+HANDOFF_MAX = 64_000  # characters: a handoff is read at the start of every session of the goal
+
+
+def _handoff(conn, goal_id, version=None):
+    """The latest handoff of a goal (or one version), or None."""
+    r = conn.execute("SELECT * FROM goal_handoffs WHERE goal_id=? " + ("AND version=? " if version else "")
+                     + "ORDER BY version DESC LIMIT 1", (goal_id, version) if version else (goal_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def _handoff_due(conn, g):
+    """The owner's last finished item of the goal when it is newer than the goal's handoff (or the goal has
+    none): {"id", "title", "closed_at"}; else None. Only an agent owner keeps a handoff."""
+    if not g["owner"] or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (g["owner"],)).fetchone():
+        return None
+    h = _handoff(conn, g["id"])
+    for r in conn.execute("SELECT i.id, i.title, i.closed_at FROM items i JOIN item_goals ig ON ig.item_id=i.id "
+                          "WHERE ig.goal_id=? AND i.status='done' AND i.closed_at IS NOT NULL "
+                          "ORDER BY i.closed_at DESC, i.id DESC", (g["id"],)):
+        if h and r["closed_at"] <= h["created_at"]:
+            return None
+        if _done_by(conn, r["id"]) == g["owner"]:
+            return dict(r)
+    return None
+
+
+def goal_handoff(conn, name, text=None, actor=None, version=None):
+    """Read a goal's handoff (the latest, or one version), or store a new version of it (text). The owner
+    writes it; when nobody owns the goal (or it is shared), any agent; a person or the manager always."""
+    g = _goal(conn, name)
+    if text is not None:
+        text = text.strip()
+        if not text:
+            raise RiverError("the handoff is empty: say what the goal is, the decisions so far, the files that "
+                             "matter, and what is left")
+        if len(text) > HANDOFF_MAX:
+            raise RiverError(f"the handoff has {len(text)} characters; keep it under {HANDOFF_MAX}: every session "
+                             f"of the goal reads it. Point to files for the details")
+        who = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+        if g["owner"] and actor != g["owner"] and not (who and (who["kind"] == "human" or who["role"] == "manager")):
+            raise RiverError(f"goal {name} is owned by {g['owner']}, who keeps its handoff. Send what you know: "
+                             f"maxpm note \"...\" --goal {name}")
+        with tx(conn):
+            n = conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM goal_handoffs WHERE goal_id=?",
+                             (g["id"],)).fetchone()[0]
+            conn.execute("INSERT INTO goal_handoffs (goal_id, version, text, by_agent, created_at) VALUES (?,?,?,?,?)",
+                         (g["id"], n, text, actor, iso(now())))
+            _event(conn, None, actor, f"handoff v{n} for goal {name} ({len(text)} characters)")
+    h = _handoff(conn, g["id"], version)
+    if version and not h:
+        raise RiverError(f"goal {name} has no handoff version {version}: maxpm goal handoff {name} --versions")
+    versions = [dict(r) for r in conn.execute(
+        "SELECT version, by_agent, created_at, LENGTH(text) chars FROM goal_handoffs WHERE goal_id=? ORDER BY version",
+        (g["id"],))]
+    return {"goal": name, "handoff": h, "versions": versions, "due": _handoff_due(conn, _goal(conn, name))}
+
+
+def _handoff_refusal(conn, g, verb, no_handoff, actor):
+    """goal release and goal give refuse while the owner's last finished item of the goal is newer than its
+    handoff, unless the owner gives a reason (no_handoff), which goes in the history. Inside a tx."""
+    due = _handoff_due(conn, g)
+    if not due:
+        return
+    if no_handoff and no_handoff.strip():
+        _event(conn, None, actor, f"{verb} goal {g['name']} without a current handoff: {no_handoff.strip()}")
+        return
+    h = _handoff(conn, g["id"])
+    raise RiverError(f"refused: the handoff of goal {g['name']} " + (f"(v{h['version']}, {h['created_at']}) is older than"
+                     if h else "is missing; you finished") + f" #{due['id']} {due['title']} ({due['closed_at']}). "
+                     f"Write it first, for the next owner: maxpm goal handoff {g['name']} --file <path> (what the goal "
+                     f"is, the decisions so far, the files that matter, what is left). Or give the reason: "
+                     f"maxpm goal {verb} {g['name']} --no-handoff \"<why>\"")
 
 
 def goal_add(conn, project, name, outcome="", done_when="", actor=None, rank=None, shared=False):
@@ -1549,6 +1639,8 @@ def goal_show(conn, name):
     g = _goal(conn, name)
     ann = annotate(conn)
     d = _goal_view(conn, g, ann)
+    h = _handoff(conn, g["id"])
+    d["handoff_text"] = h["text"] if h else None
     d["items"] = [{k: v for k, v in ann[i].items() if k != "sort_key"}
                   for i in sorted(d["items_open"] + d["items_done"] + d["items_dropped"],
                                   key=lambda i: (ann[i]["status"] in CLOSED_STATES, ann[i]["sort_key"]))]
@@ -1651,11 +1743,12 @@ def goal_own(conn, name, actor=None, lease=None):
     return goal_show(conn, name)
 
 
-def goal_release(conn, name, actor=None):
+def goal_release(conn, name, actor=None, no_handoff=None):
     with tx(conn):
         g = _goal(conn, name)
         if g["owner"] != actor:
             raise RiverError(f"goal {name} is " + (f"owned by {g['owner']}" if g["owner"] else "not owned"))
+        _handoff_refusal(conn, g, "release", no_handoff, actor)
         conn.execute("UPDATE goals SET owner=NULL, owner_expires_at=NULL, owner_lease=NULL WHERE id=?", (g["id"],))
         _event(conn, None, actor, f"released goal {name}; its items are open to every agent")
     return goal_show(conn, name)
@@ -1669,7 +1762,7 @@ def _release_goals(conn, agent, why):
         _event(conn, None, "maxpm", f"goal {g['name']} released: {why}")
 
 
-def goal_give(conn, name, to, actor=None):
+def goal_give(conn, name, to, actor=None, no_handoff=None):
     """Hand a goal you own to another agent; they get a notice."""
     with tx(conn):
         g = _goal(conn, name)
@@ -1679,6 +1772,7 @@ def goal_give(conn, name, to, actor=None):
         rec = _agent(conn, to)
         if to == actor:
             raise RiverError("you own it already")
+        _handoff_refusal(conn, g, "give", no_handoff, actor)
         ttl = parse_duration(setting(conn, "goal_lease", agent=to))
         conn.execute("UPDATE goals SET owner=?, owner_expires_at=?, owner_lease=NULL WHERE id=?",
                      (rec["name"], iso(now() + ttl), g["id"]))
@@ -6857,7 +6951,8 @@ def _goal_brief(conn, name, actor):
             "items_open": [{"id": a["id"], "title": a["title"], "status": a["status"], "ready": a["ready"],
                             "assignee": a["assignee"], "doer": a["doer"]} for a in open_items],
             "items_done": len(g["items_done"]), "blockers_held": blockers,
-            "lease": _short(_goal_lease(conn, _goal(conn, name), actor))}
+            "lease": _short(_goal_lease(conn, _goal(conn, name), actor)),
+            "handoff": goal_handoff(conn, name)["handoff"], "handoff_due": g["handoff_due"]}
 
 
 def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
@@ -6871,6 +6966,12 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         brief["monitor"] = _monitor_brief(conn, it)
         _set_role_note(conn, brief["agent"], "monitor", it["id"])
     if it:
+        # The handoff of each open goal of the item: the goal's context, for a session that starts on it.
+        owned = (brief.get("goal") or {}).get("name")
+        brief["handoffs"] = [dict(goal_handoff(conn, r["name"])["handoff"], goal=r["name"]) for r in conn.execute(
+            "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.status='open' "
+            "AND EXISTS (SELECT 1 FROM goal_handoffs h WHERE h.goal_id=g.id) ORDER BY g.rank, g.id", (it["id"],))
+            if r["name"] != owned]
         # Items of a shared goal have no owner who plans them: the agent tags the items it adds itself.
         brief["shared_goals"] = [r["name"] for r in conn.execute(
             "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "

@@ -318,6 +318,35 @@ def render_usage(res, limit=20):
         print(f"  ... {len(res['items']) - limit} more (--limit {len(res['items'])})")
 
 
+def _handoff_lines(goal, h, due=None, indent="  "):
+    """The handoff of a goal for goal show and the go briefing; and a line when its owner should renew it."""
+    out = []
+    if h:
+        out.append(f"{indent}HANDOFF v{h['version']} ({h['by_agent'] or '?'}, {h['created_at']}):")
+        out += [f"{indent}  {line}" if line else "" for line in (h.get("text") or "").splitlines()]
+    else:
+        out.append(f"{indent}handoff: none yet (maxpm goal handoff {goal} --file <path>)")
+    if due:
+        out.append(f"{indent}The handoff is older than #{due['id']}, which its owner finished at {due['closed_at']}: "
+                   f"renew it (maxpm goal handoff {goal} --file <path>) before goal release or give.")
+    return out
+
+
+def render_handoff(res, a):
+    if a.versions:
+        if not res["versions"]:
+            print(f"(goal {res['goal']} has no handoff yet)")
+        for v in res["versions"]:
+            print(f"  v{v['version']}  {v['created_at']}  {v['by_agent'] or '?'}  {v['chars']} characters")
+        return
+    if a.text is not None or a.file:
+        h = res["handoff"]
+        print(f"goal {res['goal']}: handoff v{h['version']} stored ({len(h['text'])} characters). "
+              f"Sessions that start on its items read it.")
+        return
+    print("\n".join(_handoff_lines(res["goal"], res["handoff"], None if a.version else res["due"], indent="")))
+
+
 def _print_tree(n, prefix="", last=True, root=True):
     left = f", {n['lease_seconds_left'] // 60}m left" if n["lease_seconds_left"] is not None else ""
     who = f", {n['assignee']}{left}" if n["assignee"] else ""
@@ -451,7 +480,17 @@ def build_parser():
                        "items (default: the goal_lease setting, 4h)")
     x = gls.add_parser("give", help="hand a goal you own to another agent"); x.add_argument("name")
     x.add_argument("--to", required=True)
+    x.add_argument("--no-handoff", dest="no_handoff", metavar="WHY",
+                   help="give it although the handoff is older than your last finished item of the goal")
     x = gls.add_parser("release", help="stop owning a goal"); x.add_argument("name")
+    x.add_argument("--no-handoff", dest="no_handoff", metavar="WHY",
+                   help="release it although the handoff is older than your last finished item of the goal")
+    x = gls.add_parser("handoff", help="read a goal's handoff, or store a new version: what the goal is, the decisions "
+                       "so far, the files that matter, and what is left"); x.add_argument("name")
+    x.add_argument("text", nargs="?", help="the new handoff (or --file)")
+    x.add_argument("--file", help="read the new handoff from this file")
+    x.add_argument("--version", type=int, help="show this version")
+    x.add_argument("--versions", action="store_true", help="list the versions")
     x = gls.add_parser("done", help="declare a goal complete (refused while its items are open)"); x.add_argument("name")
     x.add_argument("--result", required=True, help="one line: what the goal achieved")
     x.add_argument("--drop-open", action="store_true", help="drop the goal's open items, with the result as the note")
@@ -1438,9 +1477,19 @@ def dispatch(conn, a, actor):
         if g in ("own", "take"):
             return core.goal_own(conn, a.name, actor, a.lease)
         if g == "give":
-            return core.goal_give(conn, a.name, a.to, actor)
+            return core.goal_give(conn, a.name, a.to, actor, a.no_handoff)
         if g == "release":
-            return core.goal_release(conn, a.name, actor)
+            return core.goal_release(conn, a.name, actor, a.no_handoff)
+        if g == "handoff":
+            if a.text is not None and a.file:
+                raise RiverError("give the handoff as text or --file, not both")
+            text = a.text
+            if a.file:
+                try:
+                    text = Path(a.file).expanduser().read_text()
+                except OSError as e:
+                    raise RiverError(f"cannot read {a.file}: {e.strerror}")
+            return core.goal_handoff(conn, a.name, text, actor, a.version)
         if g == "done":
             return core.goal_done(conn, a.name, a.result, actor, a.drop_open)
         if g == "reopen":
@@ -2039,6 +2088,9 @@ def render_go(b):
                        + f"   ask: {r} ask \"...\" {to}   or offer help: {r} offer \"...\" --item {x['id']}")
         out.append(f"  You own this outcome: add the items it needs ({r} add \"<title>\" tags them with it), take them, "
                    f"and when done-when holds: {r} goal done {gb['name']} --result \"<one line>\"")
+        out += _handoff_lines(gb["name"], gb.get("handoff"), gb.get("handoff_due"))
+        out.append(f"  Keep the handoff current after each item ({r} goal handoff {gb['name']} --file <path>): "
+                   f"the next owner starts from it, and goal release and give refuse while it is older than your last item.")
         out.append("")
     if b["role"] == "stopped":
         st = b["stop"]
@@ -2069,6 +2121,9 @@ def render_go(b):
         if it["notes"]:
             out.append(f"  notes: {it['notes']}")
         out += _context_lines(it)
+        for h in b.get("handoffs") or []:  # the context of the item's goals, from their owners
+            first, *rest = _handoff_lines(h["goal"], h)
+            out += [f"  goal {h['goal']}: {first.strip()}"] + rest
         for name in b.get("shared_goals") or []:
             out.append(f"  goal {name} is shared: it has no owner, and other agents work on its other items at the "
                        f"same time. Tag an item you add for it: {r} add \"<title>\" --goal {name}")
@@ -2341,6 +2396,8 @@ def render(a, res):
         if res["dry_run"]:
             print("Run it again without --dry-run to add them.")
         return
+    if c == "goal" and a.gcmd == "handoff":
+        return render_handoff(res, a)
     if c == "goal":
         rows = res if isinstance(res, list) else [res]
         if not rows:
@@ -2352,6 +2409,8 @@ def render(a, res):
                     print(f"  done when: {g['done_when']}")
                 if g["result"]:
                     print(f"  result: {g['result']}")
+                print("\n".join(_handoff_lines(g["name"], g.get("handoff") and dict(
+                    g["handoff"], text=g.get("handoff_text")), g.get("handoff_due"))))
                 for it in g.get("items", []):
                     print("  " + _fmt_item(it, show_reason=False))
                 if not g.get("items"):

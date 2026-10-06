@@ -1732,7 +1732,7 @@ OPS = {
                                                   a.get("shared")),
     "goal_rank": lambda c, a, who: core.goal_rank(c, a["name"], a["rank"], who),
     "goal_own": lambda c, a, who: core.goal_own(c, a["name"], who),
-    "goal_release": lambda c, a, who: core.goal_release(c, a["name"], who),
+    "goal_release": lambda c, a, who: core.goal_release(c, a["name"], who, a.get("no_handoff")),
     "goal_done": lambda c, a, who: core.goal_done(c, a["name"], a.get("result", ""), who, bool(a.get("drop_open"))),
     "goal_reopen": lambda c, a, who: core.goal_reopen(c, a["name"], who),
     "prio": lambda c, a, who: core.item_prio(c, a["id"], a["priority"], who),

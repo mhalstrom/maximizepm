@@ -136,7 +136,14 @@ without a goal stay in the normal queue.
 - Your goal's items, the items they wait on, and the deploy items of a target
   you own count against `goal_max_leases` (3), apart from `max_leases` (1).
   So you can take an urgent prerequisite of your goal while you hold other work.
+- Keep the goal's handoff current: after each item of the goal, run
+  `maxpm goal handoff <name> --file <path>` (or the text): what the goal is,
+  the decisions so far, the files that matter, and what is left. MaximizePM
+  keeps every version (`--versions`, `--version N`). The go briefing of the
+  next owner, and of any session that starts on an item of the goal, shows it.
 - Stop owning: `maxpm goal release <name>`, or `maxpm goal give <name> --to <agent>`.
+  Both refuse while the handoff is older than your last finished item of the
+  goal; write it first, or give the reason: `--no-handoff "<why>"`.
   After `goal_lease` without a command the goal is free again, its items are
   open to every agent, and you get a notice. The goal is also free when your
   session is gone or ends.
