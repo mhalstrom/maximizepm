@@ -6928,14 +6928,40 @@ def _set_role_note(conn, actor, role, item_id):
                      "waiting_in=CASE WHEN ? THEN waiting_in END WHERE name=?", (note, role, keep, keep, actor))
 
 
-def _work_for(conn, actor, names):
-    """Why this agent has something to do now, or None: a push to it, ready work it can take, or messages."""
+def focus_role(focus):
+    """The role a session's MAXPM_FOCUS gives each of its maxpm go: deployer (deploy:<target>), reviewer
+    (review:<target>), else None (the other focuses act on the first go only)."""
+    return {"deploy": "deployer", "review": "reviewer"}.get((focus or "").partition(":")[0])
+
+
+def _work_for(conn, actor, names, role=None):
+    """Why this agent has something to do now, or None: a push to it, ready work it can take, or messages. With
+    role (focus_role), only what maxpm go gives that role: a ready deploy item of a target the agent owns or
+    can own, or a ready release review; never a push or an item that go refuses to the role."""
+    note = conn.execute("SELECT kind, body FROM queue_entries WHERE agent=? AND kind<>'item' AND delivered_at IS NULL "
+                        "ORDER BY kind<>'stop', pos LIMIT 1", (actor,)).fetchone()
+    if role:
+        if note:
+            return f"your queue has {'a stop request' if note['kind'] == 'stop' else 'an instruction'}: {note['body']}"
+        ann = annotate(conn)
+        if role == "deployer":
+            targets = {r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=?", (actor,))} | {
+                r["name"] for r in conn.execute(
+                    f"SELECT t.name FROM targets t JOIN projects p ON p.target=t.name WHERE t.owner IS NULL "
+                    f"AND p.name IN ({','.join('?' * len(names))})", names)}
+            got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"])
+                        if a["kind"] == "deploy" and a["target"] in targets and a["ready"]), None)
+        else:
+            got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"]) if a["kind"] == "review"
+                        and a["ready"] and a["reserved_for"] in (None, actor)), None)
+        if got:
+            return f"#{got['id']} is ready: {got['title']}"
+        u = unread(conn, actor)
+        return "you have messages (maxpm inbox)" if u["unread"] or u["questions"] else None
     pushed = conn.execute("SELECT id FROM items WHERE reserved_for=? AND reserved_until IS NOT NULL "
                           "AND status='open'", (actor,)).fetchone()
     if pushed:
         return f"#{pushed['id']} was pushed to you"
-    note = conn.execute("SELECT kind, body FROM queue_entries WHERE agent=? AND kind<>'item' AND delivered_at IS NULL "
-                        "ORDER BY kind<>'stop', pos LIMIT 1", (actor,)).fetchone()
     if note:
         return f"your queue has {'a stop request' if note['kind'] == 'stop' else 'an instruction'}: {note['body']}"
     q = _queue_ready(conn, actor)
@@ -6953,8 +6979,11 @@ def _work_for(conn, actor, names):
     return None
 
 
-def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0):
+def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=None):
     """Block until this agent has work (a push, a ready item in its projects, a message), for at most wait_step.
+    A session whose focus gives every go a role (focus_role: a deployer, a reviewer) waits only for that work, as
+    go would give it (#1012: a deployer woke for a console item, and go answered IDLE); it waits in no project,
+    so no push of project work (Dispatch, maxpm serve) goes to it.
 
     Returns result work (run go), again (run wait again), or end: no work came within wait_max since the
     first wait, so river released the agent's goals and unregistered it, and the session should stop."""
@@ -6964,6 +6993,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0):
         raise RiverError("waiting needs an agent name: pass --as <name>")
     _agent(conn, actor)
     names = _names(conn, project) if project else projects_for_dir(conn, cwd)
+    role = focus_role(focus)
 
     def stopped():
         st = stop_request(conn, actor)
@@ -6979,7 +7009,9 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0):
             raise RiverError(f"{actor} holds {', '.join('#' + str(r['id']) for r in held)}; finish or release it "
                              f"before you wait: maxpm --as {actor} go")
         conn.execute("UPDATE agents SET waiting_since=COALESCE(waiting_since, ?), role='waiting', waiting_in=?, "
-                     "note='waiting for work (maxpm wait)' WHERE name=?", (iso(now()), ",".join(names), actor))
+                     "note=? WHERE name=?", (iso(now()), None if role else ",".join(names),
+                                             f"waiting for {role} work (maxpm wait)" if role else "waiting for work (maxpm wait)",
+                                             actor))
     since = parse_iso(_agent(conn, actor)["waiting_since"])
     limit = parse_duration(setting(conn, "wait_max", agent=actor))
     step = parse_duration(step or setting(conn, "wait_step", agent=actor))
@@ -6988,7 +7020,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0):
         st = stopped()
         if st:
             return st
-        why = _work_for(conn, actor, names)
+        why = _work_for(conn, actor, names, role)
         if why:
             return {"result": "work", "why": why, "agent": actor}
         if now() >= deadline:

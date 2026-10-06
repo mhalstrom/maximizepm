@@ -383,6 +383,42 @@ class LaunchAgent(unittest.TestCase):
         b = core.go(self.c, self.dir.name, name, focus="deploy:web")
         self.assertEqual((b["role"], b["item"]["id"]), ("deployer", dep2))
 
+    def test_a_deployer_session_waits_only_for_what_go_gives_a_deployer(self):
+        # #1012: a deployer (MAXPM_FOCUS=deploy:<target>) waited while its deploy waited on the review; maxpm wait
+        # said WORK for a console item, maxpm go said IDLE (the focus makes every go a deployer's), and so on.
+        rv, dep = self._release()
+        x = core.item_add(self.c, "site", "walk the new screen")["id"]
+        nap = dict(sleep=lambda s: None, step="1s")
+        core.inbox(self.c, "ops")  # the deployer read the notices about its release
+        r = core.wait(self.c, self.dir.name, "ops", focus="deploy:web", **nap)
+        self.assertEqual(r["result"], "again")
+        self.assertEqual(core.go(self.c, self.dir.name, "ops", focus="deploy:web")["role"], "idle")
+        # It waits in no project, so Dispatch and maxpm serve push no project work to it.
+        core.wait(self.c, self.dir.name, "ops", focus="deploy:web", **nap)
+        self.assertIsNone(core.waiting_agent_for(self.c, "site", x))
+        self.assertNotIn("pushed_to", server.dispatch_item(self.c, x, runner=[].append))
+        # The review passes: the deploy wakes it, and go gives it.
+        core.register(self.c, "rev")
+        core.claim(self.c, rv, "rev")
+        core.review_pass(self.c, rv, "ok", "rev")
+        self.assertEqual(core.wait(self.c, self.dir.name, "ops", focus="deploy:web", **nap)["why"],
+                         f"#{dep} is ready: Deploy web")
+        self.assertEqual(core.go(self.c, self.dir.name, "ops", focus="deploy:web")["item"]["id"], dep)
+        # A reviewer session (review:<target>) wakes for a ready review only; with no focus, the item wakes an agent.
+        core.done(self.c, dep, "v1", "ops")
+        y = core.item_add(self.c, "site", "footer")["id"]
+        core.claim(self.c, y, "dev")
+        core.done(self.c, y, "commit", "dev", ship_it=True)
+        rv2 = next(i for i in core.item_show(self.c, y)["unblocks"] if core._item(self.c, i)["kind"] == "review")
+        core.register(self.c, "checker")
+        self.assertEqual(core.wait(self.c, self.dir.name, "checker", focus="review:web", **nap)["why"],
+                         f"#{rv2} is ready: {core._item(self.c, rv2)['title']}")
+        core.claim(self.c, rv2, "rev")
+        self.assertEqual(core.wait(self.c, self.dir.name, "checker", focus="review:web", **nap)["result"], "again")
+        z = core.item_add(self.c, "site", "about page")["id"]
+        core.register(self.c, "plain")
+        self.assertEqual(core.wait(self.c, self.dir.name, "plain", **nap)["why"], f"#{z} is ready: about page")
+
     def test_a_target_with_no_owner_gets_a_deployer_standing_starts_it_during_the_review_and_off_starts_none(self):
         rv, dep = self._release(owner=None)
         sent = []

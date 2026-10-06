@@ -590,7 +590,8 @@ def build_parser():
     x.add_argument("--note", help="why an agent may close a person's item (required then; the user is told)")
     x.add_argument("--synced", action="store_true", help="you already posted the result to its tracker issues")
     x.add_argument("--force", metavar="REASON", help="close it although items it waits on are still open (not a deploy)")
-    x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to wait_step)")
+    x = sub.add_parser("wait", help="no work now: block until a push, a ready item, or a message comes (up to wait_step); "
+                       "a deployer or reviewer session (MAXPM_FOCUS deploy:/review:) waits only for a deploy or a review")
     x.add_argument("--project", help="project name(s) to wait on (default: this folder's)")
     x.add_argument("--step", help="return after this long (default: the wait_step setting)")
     x = sub.add_parser("cleanup", help="open items that may be done or stale: expired leases, commits that name them, ...")
@@ -1558,7 +1559,7 @@ def dispatch(conn, a, actor):
     if c == "cleanup":
         return core.cleanup(conn, a.project, not a.no_git)
     if c == "wait":
-        return core.wait(conn, os.getcwd(), actor, a.project, a.step)
+        return core.wait(conn, os.getcwd(), actor, a.project, a.step, focus=os.environ.get("MAXPM_FOCUS"))
     if c == "check":
         return core.check(conn, a.id, a.result, a.note, actor)
     if c == "ship":
