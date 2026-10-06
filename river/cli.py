@@ -575,7 +575,7 @@ def build_parser():
                    help="emergency only: end its process on this host now and release what it holds (uncommitted work is lost)")
     q = sub.add_parser("queue", help="one agent's own ordered queue: items it takes first, and instructions")
     qs = q.add_subparsers(dest="qcmd", required=True)
-    x = qs.add_parser("add", help="add an item (at the end, --first, or --before <id>) or an instruction (--message)")
+    x = qs.add_parser("add", help="add an item (at the end, --first, or --before <id>) or an instruction (--message); a push of the item to another agent ends, and that agent hears it")
     x.add_argument("agent"); x.add_argument("id", type=int, nargs="?")
     x.add_argument("--message", help="an instruction the agent reads first, at the top of its maxpm go")
     x.add_argument("--first", action="store_true"); x.add_argument("--before", type=int)

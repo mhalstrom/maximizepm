@@ -2930,6 +2930,32 @@ class AgentQueue(Base):
         self.assertEqual([e["item"] for e in core.queue_list(self.c, "s1")["entries"]], [waits, other])
         self.assertNotEqual(top, later)
 
+    def test_a_queue_and_a_push_never_hold_one_item_for_two_agents(self):
+        # #989: serve pushed an item to a waiting session, a manager then queued it for another; the push stayed,
+        # so go in the queued session said idle (the claim was refused) until the pushed session declined.
+        x = self.add("a", "pushed, then queued")
+        core.push(self.c, x, "s2", actor="mark")
+        core.queue_add(self.c, "s1", x, actor="mark")
+        it = core.item_show(self.c, x)
+        self.assertEqual((it["reserved_for"], it["reserved_until"]), ("s1", None))  # the queue's, not the push's
+        self.assertIn("push to s2 ended: queued for s1", [e["change"] for e in it["events"]])
+        self.assertTrue(any("in the queue of s1 now" in m["body"] for m in core.inbox(self.c, "s2")))
+        with self.assertRaisesRegex(RiverError, "not pushed to s2"):
+            core.accept(self.c, x, "s2")
+        b = core.go(self.c, self.dir.name, "s1", focus="item:999")
+        self.assertEqual((b["role"], b["item"]["id"]), ("worker", x))
+        # The other way round: a push of a queued item to another agent is refused.
+        y = self.add("a", "queued, then pushed")
+        core.queue_add(self.c, "s1", y, actor="mark")
+        with self.assertRaisesRegex(RiverError, "in the queue of s1; remove it there first: maxpm queue remove s1"):
+            core.push(self.c, y, "s2", actor="mark")
+        core.push(self.c, y, "s1", actor="mark")  # to the agent whose queue holds it: fine
+        # A reservation with no end (a kept prerequisite) is not ended by a queue.
+        z = self.add("a", "kept for s2")
+        self.c.execute("UPDATE items SET reserved_for='s2' WHERE id=?", (z,))
+        with self.assertRaisesRegex(RiverError, "reserved for s2; that agent, a person, or a manager ends"):
+            core.queue_add(self.c, "s1", z, actor="mark")
+
     def test_instructions_are_read_first_and_only_people_or_managers_change_queues(self):
         x = self.add("a", "x")
         with self.assertRaisesRegex(RiverError, "a person or a manager changes queues"):

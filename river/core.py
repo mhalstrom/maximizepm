@@ -2623,6 +2623,10 @@ def push(conn, item_id, to, note=None, actor=None):
         if it["reserved_for"] and it["reserved_for"] not in (to, actor):  # its own reservation, the actor hands on
             raise RiverError(f"#{item_id} is already reserved for {it['reserved_for']}"
                              + (" (pushed)" if it["reserved_until"] else "") + f"; {_unreserve_hint(item_id)}")
+        q = conn.execute("SELECT agent FROM queue_entries WHERE item_id=?", (it["id"],)).fetchone()
+        if q and q["agent"] != to:  # a push would hold it against the queue, and nobody could claim it
+            raise RiverError(f"#{item_id} is in the queue of {q['agent']}; remove it there first: "
+                             f"maxpm queue remove {q['agent']} {item_id}")
         ttl = parse_duration(setting(conn, "reserve_ttl", item_id=it["id"], agent=to))
         until = now() + ttl
         conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
@@ -3264,6 +3268,7 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
         _deliver_entry(conn, eid)
         return queue_list(conn, agent)
     with tx(conn):
+        _sweep(conn)  # a push that ran out ends here
         it = _item(conn, item)
         if it["status"] in CLOSED_STATES:
             raise RiverError(f"#{it['id']} is {it['status']}")
@@ -3277,6 +3282,19 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
                 "" if q["agent"] == agent else f"; remove it there first: maxpm queue remove {q['agent']} {it['id']}"))
         if it["status"] != "open" and it["assignee"] != agent:
             raise RiverError(f"#{it['id']} is {it['status']} by {it['assignee']}")
+        to = it["reserved_for"] if it["status"] == "open" and it["reserved_for"] != agent else None
+        if to and not it["reserved_until"]:
+            raise RiverError(f"#{it['id']} is reserved for {to}; {_unreserve_hint(it['id'])}")
+        if to:
+            # A queue is a person's or a manager's choice: it ends a push to another agent, which hears it.
+            # Else that agent's push and this agent's queue both hold the item, and neither can claim it.
+            conn.execute("UPDATE items SET reserved_for=NULL, reserved_until=NULL, reserved_by=NULL WHERE id=?",
+                         (it["id"],))
+            conn.execute("UPDATE messages SET state='declined', read_at=COALESCE(read_at, ?) "
+                         "WHERE kind='alert' AND item_id=? AND to_agent=? AND state='open'", (t, it["id"], to))
+            _event(conn, it["id"], actor, f"push to {to} ended: queued for {agent}")
+            _send(conn, "notice", actor or "maxpm", f"the push of #{it['id']} {it['title']} to you ended: it is in "
+                  f"the queue of {agent} now", to=to, item_id=it["id"])
         conn.execute("INSERT INTO queue_entries(agent,pos,item_id,kind,added_by,created_at) VALUES (?,?,?,'item',?,?)",
                      (agent, _queue_pos(conn, agent, first, before), it["id"], actor, t))
         _event(conn, it["id"], actor, f"queued for {agent}")
