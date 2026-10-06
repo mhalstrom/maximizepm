@@ -2427,6 +2427,32 @@ class ReleaseReview(Base):
         g = core.go(self.c, self.dir.name, "ops")
         self.assertEqual((g["role"], g["item"]["id"]), ("deployer", self.deploy))
 
+    def test_the_agent_that_wrote_the_release_never_gets_its_review(self):
+        # #1027: the author's go after maxpm ship claimed the new review four times in one night.
+        b = core.go(self.c, self.dir.name, "dev")
+        self.assertNotEqual(b["role"], "reviewer")
+        self.assertNotIn("claim_refused", b)
+        self.assertEqual(core.go(self.c, self.dir.name, "dev", role="reviewer")["role"], "idle")
+        skipped = []
+        self.assertEqual(core.next_item(self.c, None, claim=True, actor="dev", limit=5, skipped=skipped), [])
+        self.assertIn((self.review, "you worked on the release it reviews"), [(x["id"], x["why"]) for x in skipped])
+        names = ["site"]
+        self.assertIsNone(core._work_for(self.c, "dev", names, role="reviewer"))
+        self.assertIsNotNone(core._work_for(self.c, "rev", names, role="reviewer"))
+        core.register(self.c, "mark", human=True)
+        for f in (lambda: core.claim(self.c, self.review, "dev"),
+                  lambda: core.push(self.c, self.review, "dev", actor="ops"),
+                  lambda: core.queue_add(self.c, "dev", self.review, actor="mark")):
+            with self.assertRaises(RiverError) as e:
+                f()
+            self.assertIn("worked on what release review", str(e.exception))
+        self.assertEqual(core._item(self.c, self.review)["status"], "open")
+        # Another agent takes it; so may a person.
+        b = core.go(self.c, self.dir.name, "rev")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
+        core.release(self.c, self.review, actor="rev")
+        self.assertEqual(core.claim(self.c, self.review, "mark")["assignee"], "mark")
+
     def test_fail_adds_fixes_the_review_waits_on(self):
         core.claim(self.c, self.review, "rev")
         res = core.review_fail(self.c, self.review, ["escape the form input"], "XSS in form", actor="rev")

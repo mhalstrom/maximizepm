@@ -2673,6 +2673,9 @@ def push(conn, item_id, to, note=None, actor=None):
         if q and q["agent"] != to:  # a push would hold it against the queue, and nobody could claim it
             raise RiverError(f"#{item_id} is in the queue of {q['agent']}; remove it there first: "
                              f"maxpm queue remove {q['agent']} {item_id}")
+        if author_refusal(conn, it, to):
+            raise RiverError(f"refused: {to} worked on what release review #{item_id} covers; push it to an agent "
+                             f"that did not, or let maxpm serve start one")
         ttl = parse_duration(setting(conn, "reserve_ttl", item_id=it["id"], agent=to))
         until = now() + ttl
         conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
@@ -3322,6 +3325,9 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
             raise RiverError(f"{agent} is a person; a queue is for an agent session")
         if it["doer"] == "human":
             raise RiverError(f"#{it['id']} is for a person")
+        if author_refusal(conn, it, agent):
+            raise RiverError(f"refused: {agent} worked on what release review #{it['id']} covers; queue it for an "
+                             f"agent that did not")
         q = conn.execute("SELECT agent FROM queue_entries WHERE item_id=?", (it["id"],)).fetchone()
         if q:
             raise RiverError(f"#{it['id']} is already in the queue of {q['agent']}" + (
@@ -4587,12 +4593,16 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
             if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
                 skipped.append({"id": a["id"], "title": a["title"], "why": f"{still[a['id']]} still works on it in its session"})
         pool = [a for a in pool if still.get(a["id"], actor) == actor]
+        for a in [a for a in pool if author_refusal(conn, a, actor)]:
+            if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
+                skipped.append({"id": a["id"], "title": a["title"], "why": "you worked on the release it reviews"})
+            pool.remove(a)
         # The agent's own queue comes first, in its order and from any project; then items pushed to it.
         # The sort is stable, so graph order holds inside each group.
         qpos = {r["item_id"]: n for n, r in enumerate(conn.execute(
             "SELECT item_id FROM queue_entries WHERE agent=? AND item_id IS NOT NULL ORDER BY pos", (actor,)))}
         have = {a["id"] for a in pool}
-        pool = [a for a in _queue_ready(conn, actor) if a["id"] not in have] + pool
+        pool = [a for a in _queue_ready(conn, actor) if a["id"] not in have and not author_refusal(conn, a, actor)] + pool
         pool = fits(pool)
         if folderless:
             for a in [a for a in pool if needs_folder(a)]:
@@ -4636,6 +4646,9 @@ def claim(conn, item_id, actor=None):
                         f"(both edit the same files)" if a["busy_conflicts"] and a["status"] == "open"
                    else f"status is {a['status']}" + (f" (held by {a['assignee']})" if a["assignee"] else ""))
             raise RiverError(f"item {item_id} is not ready: {why}. See: maxpm blockers {item_id}")
+        why = author_refusal(conn, a, actor)
+        if why:
+            raise RiverError(f"refused: {why}. Take other work: maxpm go")
         first = still_worked(conn).get(a["id"], actor)
         if first != actor:
             raise RiverError(f"refused: the lease on #{item_id} ran out, but {first} still works on it in its session "
@@ -5057,6 +5070,8 @@ def _review_claim(conn, actor, names, any_project=False, brief=None):
     ready = []
     for a in ann.values():
         if a["kind"] != "review" or not a["ready"] or a["reserved_for"] not in (None, actor):
+            continue
+        if author_refusal(conn, a, actor):  # the author's go after maxpm ship: serve starts another reviewer
             continue
         if any_project or any(ann[b]["project"] in names for b in a["waits_on"]):
             ready.append(a)
@@ -6176,6 +6191,15 @@ def release_authors(conn, review_id):
     return names
 
 
+def author_refusal(conn, item, agent):
+    """Why this agent may not take this release review, or None: an agent session that worked on what the review
+    covers (release_authors) does not review its own work. A person may; maxpm serve starts a reviewer that did not."""
+    if item["kind"] != "review" or not _is_ai(conn, agent) or agent not in release_authors(conn, item["id"]):
+        return None
+    return (f"you worked on what release review #{item['id']} covers; a review needs an agent that did not write the "
+            f"release (maxpm serve starts one)")
+
+
 def _review_folder(conn, item):
     """Where a session for a release review opens: the review's project folder, else the folder of the first
     project of its target, else of a project the release ships. None when none has one."""
@@ -6953,7 +6977,7 @@ def _work_for(conn, actor, names, role=None):
                         if a["kind"] == "deploy" and a["target"] in targets and a["ready"]), None)
         else:
             got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"]) if a["kind"] == "review"
-                        and a["ready"] and a["reserved_for"] in (None, actor)), None)
+                        and a["ready"] and a["reserved_for"] in (None, actor) and not author_refusal(conn, a, actor)), None)
         if got:
             return f"#{got['id']} is ready: {got['title']}"
         u = unread(conn, actor)

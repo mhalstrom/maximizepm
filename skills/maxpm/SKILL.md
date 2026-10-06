@@ -85,7 +85,8 @@ your type from your CLI's environment.
    a person's item with a proposed rollback. It never rolls back by itself.
    With the setting `review` on, the deploy item first waits on one review
    of the whole release. `maxpm go` gives a ready review before new work
-   (role REVIEWER; `--role reviewer` takes any). Follow the review process in
+   (role REVIEWER; `--role reviewer` takes any), but never to an agent that
+   claimed or finished an item the release ships. Follow the review process in
    its context and the review steps the brief lists for each project, then
    `maxpm review pass <id> --confirm all --output "<what you checked>"`
    (confirms the written steps; runs the command steps and `review_cmd`, which
