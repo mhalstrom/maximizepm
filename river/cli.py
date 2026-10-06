@@ -13,8 +13,7 @@ from . import __version__, core
 from .core import RiverError
 
 # Agent guides: inside the package when installed (the wheel copies skills/ there), else the repository's skills/.
-GUIDES = next((p for p in (Path(__file__).resolve().parent / "skills", Path(__file__).resolve().parent.parent / "skills")
-               if p.is_dir()), Path(__file__).resolve().parent / "skills")
+GUIDES = core.GUIDES
 
 QUICKSTART = """MaximizePM (the maxpm command): a shared work queue for people and agent sessions.
 

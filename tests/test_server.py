@@ -175,6 +175,7 @@ class LaunchAgent(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
         self.c = core.connect()
+        core.config_set(self.c, "claude_skill_prompt", "off")  # exact commands; LaunchProfiles tests the skill file
 
     def tearDown(self):
         core.PLATFORM = self.platform
@@ -848,7 +849,7 @@ class LaunchAgent(unittest.TestCase):
         self.assertTrue(opts["Codex"]["takes_model"] and opts["Codex"]["takes_effort"])
         self.assertTrue(all(m["note"] for o in ("Claude Code", "Codex") for m in opts[o]["models"]))
         self.assertEqual((opts["Mine"]["family"], len(opts["Mine"]["models"]), opts["Mine"]["takes_model"]), (None, 8, False))
-        self.assertEqual([o["name"] for o in opts["Claude Code"]["options"]], ["remote_control", "permission_mode"])
+        self.assertEqual([o["name"] for o in opts["Claude Code"]["options"]], ["remote_control", "permission_mode", "skill_prompt"])
         self.assertEqual([o["name"] for o in opts["Codex"]["options"]], ["sandbox", "approval"])
         self.assertEqual(opts["Mine"]["options"], [])
         c = core.fill_launch_command('codex -m {model} -c model_reasoning_effort={effort} "go"', "sol", "xhigh")
@@ -2153,6 +2154,7 @@ class LaunchProfiles(unittest.TestCase):
         self.platform = core.PLATFORM
         core.PLATFORM = "darwin"
         core.project_add(self.c, "shop", path=self.dir.name)
+        core.config_set(self.c, "claude_skill_prompt", "off")  # exact commands; test_the_skill_goes_in_the_system_prompt
 
     def tearDown(self):
         core.PLATFORM = self.platform
@@ -2226,7 +2228,39 @@ class LaunchProfiles(unittest.TestCase):
         self.assertEqual((opts["Grok"]["options"], opts["Grok"]["takes_model"]), ([], False))
         (prof,) = server.setup_status(self.c)["launch_profiles"]
         self.assertEqual([o["setting"] for o in prof["options"]],
-                         ["claude_remote_control", "claude_permission_mode", "claude_model_ids", "claude_args", "claude_prompt"])
+                         ["claude_remote_control", "claude_permission_mode", "claude_model_ids", "claude_args",
+                          "claude_skill_prompt", "claude_prompt"])
+
+    def test_the_skill_goes_in_the_system_prompt(self):
+        pid = core._project(self.c, "shop")["id"]
+        core.config_unset(self.c, "claude_skill_prompt")  # the default: on
+        cmd = core._launch_agent_cmd(self.c, pid, None)["command"]
+        m = re.search(r"--append-system-prompt-file (\S+) go --remote-control$", cmd)
+        self.assertIsNotNone(m, cmd)
+        f = Path(m.group(1))
+        self.assertEqual(f.parent, Path(core.river_dir()) / "prompts")
+        text = f.read_text()
+        self.assertTrue(text.startswith(core.SKILL_PROMPT_HEAD))
+        self.assertIn("maxpm go", text)
+        self.assertNotIn("\nname: maxpm", text)  # the skill's front matter stays out
+        # The same skill gives the same file, so every launch sends the same bytes (a prompt cache read).
+        self.assertEqual(core._launch_agent_cmd(self.c, pid, None)["command"], cmd)
+        # A primer that claude_args names goes in the same file, first; the other arguments stay.
+        primer = Path(self.dir.name) / "primer.md"
+        primer.write_text("# Primer\nThe map of the shop.\n")
+        core.config_set(self.c, "claude_args", f"--verbose --append-system-prompt-file {primer}", project="shop")
+        cmd2 = core._launch_agent_cmd(self.c, pid, None)["command"]
+        self.assertEqual(cmd2.count("--append-system-prompt-file"), 1)
+        self.assertIn("claude --verbose --append-system-prompt-file ", cmd2)
+        text2 = Path(re.search(r"--append-system-prompt-file (\S+)", cmd2).group(1)).read_text()
+        self.assertTrue(text2.startswith("# Primer\nThe map of the shop.\n\n" + core.SKILL_PROMPT_HEAD))
+        # A primer that cannot be read: the arguments stay as they are, and the skill stays out.
+        core.config_set(self.c, "claude_args", "--append-system-prompt-file /no/such/primer.md", project="shop")
+        self.assertIn("--append-system-prompt-file /no/such/primer.md go", core._launch_agent_cmd(self.c, pid, None)["command"])
+        # Off: no file.
+        core.config_set(self.c, "claude_skill_prompt", "off", project="shop")
+        self.assertNotIn("--append-system-prompt-file /", core._launch_agent_cmd(self.c, pid, None)["command"].replace(
+            "/no/such/primer.md", ""))
 
     def test_items_choose_an_agent_type(self):
         c = self.c

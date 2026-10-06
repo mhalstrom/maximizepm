@@ -211,6 +211,10 @@ LAUNCH_PLATFORMS = {
                       "text": "the id Claude Code gets for a model_ladder name (name=id, ...); a name with no "
                               "entry goes as it is: claude --model takes haiku, sonnet, opus, and fable"},
         "args": {"kind": "text", "default": "", "text": "more arguments, put before the prompt"},
+        "skill_prompt": {"kind": "toggle", "default": "on",
+                         "text": "the maxpm skill in the system prompt (--append-system-prompt-file, with the file "
+                                 "args names, if any): each session reads it from the prompt cache, and does not "
+                                 "load it again"},
         "prompt": {"kind": "text", "default": "go", "text": "the first prompt"},
     }},
     "codex": {"label": "Codex", "exe": "codex", "family": "openai", "prefix": "codex_", "options": {
@@ -5999,6 +6003,55 @@ def focus_title(conn, focus):
     return _short_title(f"{kind} {ref}")
 
 
+# The packaged agent guides, as cli.GUIDES finds them: inside the package when installed, else the repository's.
+GUIDES = next((p for p in (Path(__file__).resolve().parent / "skills", Path(__file__).resolve().parent.parent / "skills")
+               if p.is_dir()), Path(__file__).resolve().parent / "skills")
+
+SKILL_PROMPT_HEAD = ("# The maxpm skill (already loaded)\n\n"
+                     "This is the whole maxpm skill. It is already in your context: do not load it with the Skill "
+                     "tool.\n\n")
+
+
+def skill_prompt_args(args):
+    """args (the claude_args setting) with one --append-system-prompt-file: a file of the primer that args names
+    (if any), then the maxpm skill. The file's name is a hash of its text, so every launch with the same primer
+    and skill passes the same bytes, and Claude Code reads that system prompt from the prompt cache. args stays
+    as it is when the skill or the primer cannot be read."""
+    import hashlib
+    import shlex
+    try:
+        words = shlex.split(args or "")
+    except ValueError:
+        return args
+    rest, primer = [], None
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w == "--append-system-prompt-file" and i + 1 < len(words):
+            primer, i = words[i + 1], i + 2
+            continue
+        if w.startswith("--append-system-prompt-file="):
+            primer = w.split("=", 1)[1]
+        else:
+            rest.append(w)
+        i += 1
+    try:
+        skill = (GUIDES / "maxpm" / "SKILL.md").read_text()
+        head = (Path(primer).expanduser().read_text().rstrip() + "\n\n") if primer else ""
+    except OSError:
+        return args
+    if skill.startswith("---"):
+        skill = skill.split("---", 2)[2]
+    text = head + SKILL_PROMPT_HEAD + skill.strip() + "\n"
+    f = Path(river_dir()) / "prompts" / (hashlib.sha256(text.encode()).hexdigest()[:16] + ".md")
+    if not f.is_file():
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_name(f.name + f".{os.getpid()}.tmp")
+        tmp.write_text(text)
+        tmp.replace(f)
+    return " ".join([_shell_quote(w) for w in rest] + ["--append-system-prompt-file", _shell_quote(str(f))])
+
+
 def build_command(platform, opts, model=None, effort=None, name=None):
     """The command line that starts a platform's CLI with these options. name: the session's name, for a
     CLI that takes one (claude --name, and the Remote Control session name); Codex has no flag for it."""
@@ -6370,7 +6423,10 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         opts = profile_options(conn, prof[0], prof[1], project_id, options)
         if prompt:
             opts = {**opts, "prompt": join_prompt(opts["prompt"], prompt)}
-        cmd = build_command(prof[0], opts, mid, effort or None, name)
+        built = opts
+        if prof[0] == "claude-code" and opts.get("skill_prompt") == "on":
+            built = {**opts, "args": skill_prompt_args(opts.get("args", ""))}
+        cmd = build_command(prof[0], built, mid, effort or None, name)
     elif prompt:
         raise RiverError(f"{pick[0]} is a custom command ({pick[1]}), so it takes no --prompt; give it a profile "
                          f"in launch_agents (@claude-code or @codex) for one")
