@@ -2286,7 +2286,7 @@ class LaunchProfiles(unittest.TestCase):
         cmd = core._launch_agent_cmd(self.c, pid, None)["command"]
         m = re.search(r"--append-system-prompt-file (\S+) go --remote-control$", cmd)
         self.assertIsNotNone(m, cmd)
-        f = Path(m.group(1))
+        f = Path(m.group(1).strip("'"))  # quoted on Windows: the test's platform is darwin, the path has backslashes
         self.assertEqual(f.parent, Path(core.river_dir()) / "prompts")
         text = f.read_text()
         self.assertTrue(text.startswith(core.SKILL_PROMPT_HEAD))

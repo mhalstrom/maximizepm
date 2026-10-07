@@ -788,14 +788,15 @@ def tmux_orphans():
             continue
         procs[pid] = {"age": age, "args": f[3] if len(f) > 3 else ""}
         below.setdefault(ppid, []).append(pid)
-    inside, out = tuple(r.rstrip("/") + "/" for r in _temp_folders()), []
+    # normpath: on Windows the command line has D/tmux.sock, and os.path joins with a backslash.
+    inside, out = tuple(os.path.join(os.path.normpath(r), "") for r in _temp_folders()), []
     for pid, p in procs.items():
         a = p["args"].split()
         if (len(a) < 9 or os.path.basename(a[0]) != "tmux" or a[1] != "-S" or a[3] != "-f"
                 or a[5:8] != ["new-session", "-d", "-s"]):
             continue
-        folder, sock = os.path.split(a[2])
-        if (sock != "tmux.sock" or a[4] != os.path.join(folder, "tmux.conf") or a[8] not in ORPHAN_SESSIONS
+        folder, sock = os.path.split(os.path.normpath(a[2]))
+        if (sock != "tmux.sock" or os.path.normpath(a[4]) != os.path.join(folder, "tmux.conf") or a[8] not in ORPHAN_SESSIONS
                 or not os.path.basename(folder).startswith("tmp") or not folder.startswith(inside)
                 or os.path.exists(a[2]) or p["age"] < ORPHAN_MIN_AGE):
             continue

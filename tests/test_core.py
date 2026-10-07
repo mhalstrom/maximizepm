@@ -2755,9 +2755,16 @@ class ReleaseReview(Base):
     def test_review_cmd_past_review_timeout_is_stopped_with_its_children(self):
         # A gate that runs past review_timeout stops, with the processes it started, and the error names
         # the setting; the reviewer's lease stays renewed while it runs (#1142).
+        # The gate is a Python script, so the same command runs in sh and in cmd.exe (Windows).
         pidfile = os.path.join(self.dir.name, "child.pid")
-        self.c.execute("UPDATE items SET \"check\"=? WHERE id=?",
-                       (f"sleep 30 & echo $! > {pidfile}; echo started; wait", self.review))
+        gate = os.path.join(self.dir.name, "gate.py")
+        with open(gate, "w") as f:
+            f.write("import subprocess, sys\n"
+                    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                    f"open({pidfile!r}, 'w').write(str(p.pid))\n"
+                    "print('started', flush=True)\n"
+                    "p.wait()\n")
+        self.c.execute("UPDATE items SET \"check\"=? WHERE id=?", (f'"{sys.executable}" "{gate}"', self.review))
         core.config_set(self.c, "review_timeout", "2s")
         core.claim(self.c, self.review, "rev")
         self.c.execute("UPDATE items SET lease_expires_at='2000-01-01T00:00:00Z' WHERE id=?", (self.review,))
@@ -2778,15 +2785,13 @@ class ReleaseReview(Base):
         with open(pidfile) as f:
             pid = int(f.read())
         for _ in range(40):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not core.pid_alive(pid):
                 break
             time.sleep(0.05)
         else:
             self.fail("the review command's child process still runs")
         core.config_set(self.c, "review_timeout", "0s")  # no limit
-        self.c.execute("UPDATE items SET \"check\"='true' WHERE id=?", (self.review,))
+        self.c.execute("UPDATE items SET \"check\"=? WHERE id=?", (f'"{sys.executable}" -c "pass"', self.review))
         self.assertEqual(core.review_pass(self.c, self.review, None, "rev")["status"], "done")
 
     def test_review_steps_add_edit_move_remove(self):
