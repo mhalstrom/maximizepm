@@ -382,8 +382,13 @@ class LaunchAgent(unittest.TestCase):
         core.done(self.c, b, "commit 1c8bf", "writer")
         d = core.item_add(self.c, "site", "half done")["id"]
         core.claim(self.c, d, "busy")
-        core.config_set(self.c, "release_commits", f"printf 'Fix the page (#{b})\\n\\nPart of #{d}; see #99999\\n'")
-        self.assertEqual(core.release_commit_items(self.c, core._item(self.c, rv)), {b, d})
+        core.project_add(self.c, "elsewhere")
+        other = core.item_add(self.c, "elsewhere", "issue with the same number")["id"]
+        core.claim(self.c, other, "writer")
+        core.done(self.c, other, "x", "writer")
+        core.config_set(self.c, "release_commits",
+                        f"printf 'Fix the page (#{b})\\n\\nPart of #{d}, issue #{other}; see #99999\\n'")
+        self.assertEqual(core.release_commit_items(self.c, core._item(self.c, rv)), {b, d, other})
         self.assertEqual(core.release_authors(self.c, rv), {"dev", "writer", "busy"})
         for n in ("writer", "busy"):
             self._wait(n)
@@ -396,6 +401,7 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn(b, waits(rv))
         self.assertIn(b, waits(dep))
         self.assertNotIn(d, waits(rv))
+        self.assertNotIn(other, waits(rv), "an item of a project with another target joins nothing")
         self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE '%they join the release%'",
                                        (rv,)).fetchone())
         with self.assertRaisesRegex(RiverError, "you worked on what release review"):

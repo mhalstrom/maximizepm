@@ -178,7 +178,8 @@ DEFAULT_SETTINGS = {
     # for example git log --format=%B <last release>..<pinned commit>. Its environment has MAXPM_LAST_RELEASE (the
     # output of the target's last done deploy item), MAXPM_TARGET, and MAXPM_REVIEW. Every #<id> it prints is an
     # item of the release: whoever claimed or finished it does not review the release (release_authors), and a done
-    # one joins the release review and deploy item (maxpm serve). Empty: only the items sent with maxpm ship count.
+    # one of a project with this target joins the release review and deploy item (maxpm serve). Empty: only the
+    # items sent with maxpm ship count.
     "release_commits": "",
     # Releases move with no manager (maxpm serve, every notify_interval). auto_review on: a ready release review
     # that nobody holds or has reserved goes to a session that waits for work in a project the release ships and
@@ -6961,6 +6962,9 @@ def release_join_commits(conn, review_id, actor="maxpm"):
             it = _item(conn, item_id)
             if it["status"] != "done":
                 continue  # an open item would hold the release back; its authors are kept out all the same
+            target = conn.execute("SELECT target FROM projects WHERE id=?", (it["project_id"],)).fetchone()[0]
+            if target != review["target"]:
+                continue  # a number that names an item of another product (an issue number, say) joins nothing
             new = False
             for owner in [review_id] + deploys:
                 if not conn.execute("SELECT 1 FROM deps WHERE item_id=? AND blocked_by=?", (owner, item_id)).fetchone():
