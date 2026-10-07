@@ -1255,6 +1255,11 @@ def auto_release(conn, runner=None):
         if (a is None or not a["ready"] or a["reserved_for"] or a["project_archived"]
                 or core.setting(conn, "auto_review", item_id=a["id"]) != "on" or _release_recent(conn, a["id"])):
             continue
+        joined = core.release_join_commits(conn, a["id"])  # what the release's commits name (release_commits)
+        if joined:  # not a "release:" event: that would hold the next pass back (_release_recent)
+            with core.tx(conn):
+                core._event(conn, a["id"], "maxpm", "commits of the release name "
+                            + ", ".join(f"#{i}" for i in joined) + "; they join the release (release_commits)")
         projects = [a["project"]] + [ann[b]["project"] for b in a["waits_on"] if b in ann]
         waiting = next((w for w in (core.waiting_agent_for(conn, p, a["id"]) for p in dict.fromkeys(projects)) if w),
                        None)

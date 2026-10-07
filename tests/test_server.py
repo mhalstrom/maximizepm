@@ -369,6 +369,62 @@ class LaunchAgent(unittest.TestCase):
         core.config_set(self.c, "auto_review", "off")
         self.assertEqual(server.auto_release(self.c, runner=sent.append), {"pushed": {}, "started": {}, "alerted": {}, "failed": {}})
 
+    def test_serve_keeps_the_review_from_authors_of_items_that_the_release_commits_name(self):
+        # #1236: the covered list held only shipped items; the commits up to the release pin named more, and serve
+        # pushed the review to agents who wrote some of them.
+        core._RELEASE_COMMITS.clear()
+        self.addCleanup(core._RELEASE_COMMITS.clear)
+        rv, dep = self._release()
+        for n in ("writer", "busy", "fresh"):
+            core.register(self.c, n)
+        b = core.item_add(self.c, "site", "fix written but not shipped")["id"]
+        core.claim(self.c, b, "writer")
+        core.done(self.c, b, "commit 1c8bf", "writer")
+        d = core.item_add(self.c, "site", "half done")["id"]
+        core.claim(self.c, d, "busy")
+        core.config_set(self.c, "release_commits", f"printf 'Fix the page (#{b})\\n\\nPart of #{d}; see #99999\\n'")
+        self.assertEqual(core.release_commit_items(self.c, core._item(self.c, rv)), {b, d})
+        self.assertEqual(core.release_authors(self.c, rv), {"dev", "writer", "busy"})
+        for n in ("writer", "busy"):
+            self._wait(n)
+        sent = []
+        r = server.auto_release(self.c, runner=sent.append)
+        self.assertEqual(r["pushed"], {})  # both waiting agents wrote part of the release
+        self.assertEqual(len(sent), 1)
+        # The done item joins the release review and the deploy item; the open one does not hold the release back.
+        waits = lambda i: {r["blocked_by"] for r in self.c.execute("SELECT blocked_by FROM deps WHERE item_id=?", (i,))}
+        self.assertIn(b, waits(rv))
+        self.assertIn(b, waits(dep))
+        self.assertNotIn(d, waits(rv))
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE '%they join the release%'",
+                                       (rv,)).fetchone())
+        with self.assertRaisesRegex(RiverError, "you worked on what release review"):
+            core.claim(self.c, rv, "writer")
+        # Another waiting agent that wrote nothing in the range gets the next one.
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET reserved_for=NULL, reserved_until=NULL WHERE id=?", (rv,))
+            self.c.execute("DELETE FROM events WHERE item_id=? AND change LIKE 'release:%'", (rv,))
+        self._wait("fresh")
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["pushed"], {rv: "fresh"})
+
+    def test_release_commits_reads_the_last_release_and_fails_quietly(self):
+        core._RELEASE_COMMITS.clear()
+        self.addCleanup(core._RELEASE_COMMITS.clear)
+        rv, dep = self._release()
+        old = core.item_add(self.c, "site", "old work")["id"]
+        with core.tx(self.c):  # a done deploy of the same target: its output names the last release
+            self.c.execute("INSERT INTO items(project_id,title,rank,kind,target,status,output,created_at,closed_at) "
+                           "SELECT project_id,'Deploy web',rank+1,'deploy','web','done',?,created_at,? FROM items "
+                           "WHERE id=?",
+                           (f"Release 3 live: abc1234 (ships #{old})", core.iso(core.now()), dep))
+        core.config_set(self.c, "release_commits", 'printf "%s %s" "$MAXPM_LAST_RELEASE" "$MAXPM_TARGET"')
+        self.assertEqual(core.release_commit_items(self.c, core._item(self.c, rv)), {old})
+        core._RELEASE_COMMITS.clear()
+        core.config_set(self.c, "release_commits", f"echo '#{old}'; exit 3")
+        self.assertEqual(core.release_commit_items(self.c, core._item(self.c, rv)), set(), "a failed command names nothing")
+        core.config_set(self.c, "release_commits", "")
+        self.assertEqual(core.release_authors(self.c, rv), {"dev"})
+
     def test_the_usual_release_pass_builds_no_graph(self):
         core.target_add(self.c, "web")
         core.project_add(self.c, "site", target="web", path=self.dir.name)
@@ -2962,7 +3018,7 @@ class TerminalDialogLayout(unittest.TestCase):
 const post = (o) => navigator.sendBeacon("/result", JSON.stringify(o));
 try {
   const real = window.fetch;
-  window.fetch = (u, o) => (/^\/?api\//.test(String(u)) ? new Promise(() => {}) : real(u, o));
+  window.fetch = (u, o) => (String(u).replace(/^[/]/, "").startsWith("api/") ? new Promise(() => {}) : real(u, o));
   const t = await import("/components/terminalDialog.js");
   t.openTerminal("worker-1");
   const box = document.querySelector("#termDlg .box"), scr = document.querySelector("#termScreen");

@@ -174,6 +174,12 @@ DEFAULT_SETTINGS = {
     # process it started (0s: no limit). The reviewer's leases stay renewed while the command runs. Set it on the
     # deploy project (deploy-<target>) when one target's gate is slow.
     "review_timeout": "4h",
+    # A shell command, run in the release review's folder, that prints the messages of the commits a release ships,
+    # for example git log --format=%B <last release>..<pinned commit>. Its environment has MAXPM_LAST_RELEASE (the
+    # output of the target's last done deploy item), MAXPM_TARGET, and MAXPM_REVIEW. Every #<id> it prints is an
+    # item of the release: whoever claimed or finished it does not review the release (release_authors), and a done
+    # one joins the release review and deploy item (maxpm serve). Empty: only the items sent with maxpm ship count.
+    "release_commits": "",
     # Releases move with no manager (maxpm serve, every notify_interval). auto_review on: a ready release review
     # that nobody holds or has reserved goes to a session that waits for work in a project the release ships and
     # worked on nothing in it (release_authors), else to a new session. What serve does for a deploy item is each
@@ -6899,12 +6905,82 @@ def waiting_agent_for(conn, project, item_id=None):
     return None
 
 
+RELEASE_COMMITS_TTL = 120  # seconds a release_commits answer is reused (maxpm serve asks on every pass)
+_RELEASE_COMMITS = {}  # (review id, command) -> (monotonic time it runs out, item ids)
+
+
+def release_commit_items(conn, review):
+    """The items that the commits of a release name (setting release_commits): every #<id> the command prints, of
+    items that exist and are no review or deploy item. An empty set when the setting is empty or the command fails.
+    The covered list of a review holds only what agents sent with maxpm ship; a commit can name more (#1236)."""
+    import subprocess
+    import time
+    cmd = (setting(conn, "release_commits", item_id=review["id"]) or "").strip()
+    if not cmd or review["kind"] != "review":
+        return set()
+    key = (review["id"], cmd)
+    hit = _RELEASE_COMMITS.get(key)
+    if hit and hit[0] > time.monotonic():
+        return set(hit[1])
+    review = dict(review)
+    if "project" not in review:  # a row of items (_item) has the project id only
+        review["project"] = conn.execute("SELECT name FROM projects WHERE id=?", (review["project_id"],)).fetchone()[0]
+    folder = _review_folder(conn, review)
+    last = conn.execute("SELECT output FROM items WHERE kind='deploy' AND target IS ? AND status='done' "
+                        "ORDER BY closed_at DESC, id DESC LIMIT 1", (review["target"],)).fetchone()
+    env = {**os.environ, "MAXPM_LAST_RELEASE": (last["output"] or "") if last else "",
+           "MAXPM_TARGET": review["target"] or "", "MAXPM_REVIEW": str(review["id"])}
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=os.path.expanduser(folder["path"]) if folder else None, env=env,
+                           capture_output=True, text=True, timeout=60)
+        named = {int(x) for x in re.findall(r"#(\d+)\b", r.stdout)} if r.returncode == 0 else set()
+    except (OSError, subprocess.SubprocessError):
+        named = set()
+    ids = set()
+    if named:
+        marks = ",".join("?" * len(named))
+        ids = {row["id"] for row in conn.execute(
+            f"SELECT id FROM items WHERE id IN ({marks}) AND kind NOT IN ('review','deploy')", sorted(named))}
+    _RELEASE_COMMITS[key] = (time.monotonic() + RELEASE_COMMITS_TTL, frozenset(ids))
+    return ids
+
+
+def release_join_commits(conn, review_id, actor="maxpm"):
+    """Add the done items that the release's commits name (release_commit_items) to the release review and its deploy
+    item, as maxpm ship does, so the review checks them and the release lists them. Returns the ids added."""
+    review = _item(conn, review_id)
+    ids = release_commit_items(conn, review)
+    if not ids:
+        return []
+    added = []
+    with tx(conn):
+        deploys = [r["item_id"] for r in conn.execute(
+            "SELECT d.item_id FROM deps d JOIN items i ON i.id=d.item_id WHERE d.blocked_by=? AND i.kind='deploy'",
+            (review_id,))]
+        for item_id in sorted(ids):
+            it = _item(conn, item_id)
+            if it["status"] != "done":
+                continue  # an open item would hold the release back; its authors are kept out all the same
+            new = False
+            for owner in [review_id] + deploys:
+                if not conn.execute("SELECT 1 FROM deps WHERE item_id=? AND blocked_by=?", (owner, item_id)).fetchone():
+                    _dep_add(conn, owner, item_id, actor, alert=False)
+                    new = True
+            if new:
+                _event(conn, item_id, actor, f"joins release review #{review_id}: a commit of the release names it "
+                                             f"(release_commits)")
+                added.append(item_id)
+    return added
+
+
 def release_authors(conn, review_id):
-    """The agents that worked on what a release review covers: whoever claimed or closed an item it ships.
-    A session started for the review is none of them."""
+    """The agents that worked on what a release review covers: whoever claimed or closed an item it ships, or an
+    item that a commit of the release names (release_commits). A session started for the review is none of them."""
+    review = _item(conn, review_id)
     ids = [r["blocked_by"] for r in conn.execute(
         "SELECT d.blocked_by FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND i.kind<>'review'",
         (review_id,))]
+    ids = sorted(set(ids) | release_commit_items(conn, review))
     if not ids:
         return set()
     marks = ",".join("?" * len(ids))
