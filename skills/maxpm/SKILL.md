@@ -91,7 +91,8 @@ your type from your CLI's environment.
    its context and the review steps the brief lists for each project, then
    `maxpm review pass <id> --confirm all --output "<what you checked>"`
    (confirms the written steps; runs the command steps and `review_cmd`, which
-   must exit 0), or
+   must exit 0; a command still running after `review_timeout` (4h) is stopped
+   with every process it started, and the error names the setting), or
    `maxpm review fail <id> "<fix>" ... --note "<what you found>"`: MaximizePM adds
    the fixes as items the review waits on, and the review comes back after them.
    With `--ask`, the user approves the list first: MaximizePM adds one item for the

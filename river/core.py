@@ -169,6 +169,10 @@ DEFAULT_SETTINGS = {
     "review": "off",
     "review_prompt": "",
     "review_cmd": "",
+    # maxpm review pass stops a review command or a run step that takes longer than review_timeout, with every
+    # process it started (0s: no limit). The reviewer's leases stay renewed while the command runs. Set it on the
+    # deploy project (deploy-<target>) when one target's gate is slow.
+    "review_timeout": "4h",
     # Releases move with no manager (maxpm serve, every notify_interval). auto_review on: a ready release review
     # that nobody holds or has reserved goes to a session that waits for work in a project the release ships and
     # worked on nothing in it (release_authors), else to a new session. What serve does for a deploy item is each
@@ -911,7 +915,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "connect_within",
-            "prompt_wait", "idle_end", "tidy_every", "busy_max"):
+            "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout"):
         parse_duration(value)
     elif key == "prompt_pattern":
         try:
@@ -5219,11 +5223,23 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
                          + "\n".join(f"  step {s['id']} ({g['project']} {s['pos']}): {s['text']}" for g, s in missing)
                          + f"\nThen: maxpm review pass {item_id} --confirm all   (or --confirm "
                          + ",".join(str(s["id"]) for _, s in missing) + ")")
-    import subprocess
-    run = runner or (lambda c, d: subprocess.run(c, shell=True, cwd=d, capture_output=True, text=True, timeout=3600))
+    limit = parse_duration(setting(conn, "review_timeout", item_id=it["id"])).total_seconds()
+
+    def renew():
+        with tx(conn):
+            _touch_agent(conn, actor or it["assignee"])
+
+    run = runner or (lambda c, d: _run_command(c, d, limit, renew))
 
     def must_pass(cmd, where, what):
         r = run(cmd, where)
+        if getattr(r, "timed_out", False):
+            tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-15:])
+            proj = conn.execute("SELECT name FROM projects WHERE id=?", (it["project_id"],)).fetchone()["name"]
+            raise RiverError(f"{what} did not finish within review_timeout ({setting(conn, 'review_timeout', item_id=it['id'])}); "
+                             f"MaximizePM stopped it and the processes it started: {cmd}\n{tail}\n"
+                             f"Raise the limit (0s: none): maxpm config set review_timeout 8h --project {proj}\n"
+                             f"Then run it again: maxpm review pass {item_id}")
         if r.returncode != 0:
             tail = "\n".join(((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-15:])
             raise RiverError(f"{what} failed (exit {r.returncode}): {cmd}\n{tail}\n"
@@ -5253,6 +5269,71 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
     res["review_cmd"] = ran
     res["review_steps"] = results
     return res
+
+
+REVIEW_RENEW_EVERY = 60  # seconds between lease renewals while a review command runs; the tests make it short
+
+
+def _run_command(cmd, cwd, limit, renew=None):
+    """Run a shell command in its own process group and capture its output.
+
+    renew runs every REVIEW_RENEW_EVERY seconds while the command runs, so a long gate keeps the
+    reviewer's leases. After limit seconds (0: none) the whole group stops: SIGTERM, then SIGKILL
+    (taskkill /T on Windows), so no build is left running without an owner. The result has
+    returncode, stdout, stderr, and timed_out."""
+    import subprocess
+    import time
+    win = os.name == "nt"
+    kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if win else {"start_new_session": True}
+    p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
+    end = time.monotonic() + limit if limit > 0 else None
+    out = err = ""
+    while True:
+        wait = REVIEW_RENEW_EVERY if end is None else max(0.0, min(REVIEW_RENEW_EVERY, end - time.monotonic()))
+        try:
+            out, err = p.communicate(timeout=wait)
+            return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            pass
+        if end is not None and time.monotonic() >= end:
+            break
+        if renew:
+            try:
+                renew()
+            except sqlite3.Error:
+                pass  # a busy database: the next renewal tries again
+    _stop_group(p)
+    try:
+        out, err = p.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    r = subprocess.CompletedProcess(cmd, p.returncode, out or "", err or "")
+    r.timed_out = True
+    return r
+
+
+def _stop_group(p):
+    """Stop a process started by _run_command and every process in its group."""
+    import signal
+    import subprocess
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(p.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            p.wait(timeout=5)
+            if sig == signal.SIGTERM:
+                # The shell is gone; the rest of the group may still be running: make sure.
+                os.killpg(p.pid, signal.SIGKILL)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+        except (ProcessLookupError, PermissionError):
+            return
 
 
 def review_fail(conn, item_id, fixes, note=None, project=None, actor=None, ask=False):

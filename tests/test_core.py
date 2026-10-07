@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from datetime import timedelta
@@ -2750,6 +2751,43 @@ class ReleaseReview(Base):
         self.assertIn("1 failed", str(e.exception))
         res = core.review_pass(self.c, self.review, None, "rev", runner=lambda c, d: R(0))
         self.assertEqual((res["status"], res["review_cmd"]), ("done", "make test"))
+
+    def test_review_cmd_past_review_timeout_is_stopped_with_its_children(self):
+        # A gate that runs past review_timeout stops, with the processes it started, and the error names
+        # the setting; the reviewer's lease stays renewed while it runs (#1142).
+        pidfile = os.path.join(self.dir.name, "child.pid")
+        self.c.execute("UPDATE items SET \"check\"=? WHERE id=?",
+                       (f"sleep 30 & echo $! > {pidfile}; echo started; wait", self.review))
+        core.config_set(self.c, "review_timeout", "2s")
+        core.claim(self.c, self.review, "rev")
+        self.c.execute("UPDATE items SET lease_expires_at='2000-01-01T00:00:00Z' WHERE id=?", (self.review,))
+        old = core.REVIEW_RENEW_EVERY
+        core.REVIEW_RENEW_EVERY = 0.3
+        self.addCleanup(setattr, core, "REVIEW_RENEW_EVERY", old)
+        t = time.monotonic()
+        with self.assertRaises(RiverError) as e:
+            core.review_pass(self.c, self.review, None, "rev")
+        self.assertLess(time.monotonic() - t, 20)
+        msg = str(e.exception)
+        self.assertIn("review_timeout (2s)", msg)
+        self.assertIn("maxpm config set review_timeout", msg)
+        self.assertIn("started", msg)
+        it = core.item_show(self.c, self.review)
+        self.assertEqual(it["status"], "in_progress")
+        self.assertGreater(core.parse_iso(it["lease_expires_at"]), core.now())
+        with open(pidfile) as f:
+            pid = int(f.read())
+        for _ in range(40):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the review command's child process still runs")
+        core.config_set(self.c, "review_timeout", "0s")  # no limit
+        self.c.execute("UPDATE items SET \"check\"='true' WHERE id=?", (self.review,))
+        self.assertEqual(core.review_pass(self.c, self.review, None, "rev")["status"], "done")
 
     def test_review_steps_add_edit_move_remove(self):
         a = core.review_step_add(self.c, "site", "read every diff")
