@@ -11,7 +11,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core
+from . import core, relay
 from .core import RiverError
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -1738,6 +1738,9 @@ def _page_reason(a, who):
 
 
 OPS = {
+    # The page's Connect button for the relay: the device flow, finished in the background by maxpm serve.
+    "relay_connect": lambda conn, a, who: relay.connect_from_page(bool(a.get("replace"))),
+    "relay_disconnect": lambda conn, a, who: relay.disconnect(),
     "project_add": lambda c, a, who: core.project_add(c, a["name"], a.get("rank"), a.get("notes", ""), who),
     "project_rank": lambda c, a, who: core.project_rank(c, a["name"], a["rank"], who),
     "project_describe": lambda c, a, who: core.project_describe(c, a["name"], a["text"], who),
@@ -1877,6 +1880,7 @@ class Handler(BaseHTTPRequestHandler):
                 st["desktop"] = DESKTOP
                 st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
                 st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
+                st["relay"] = relay.status()
                 return self._send(200, st)
             finally:
                 conn.close()
@@ -2090,6 +2094,7 @@ def serve(port: int, open_browser=False, dev=False):
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()
     threading.Thread(target=notify.loop, args=(stop,), daemon=True, name="maxpm-notify").start()
+    relay.start(stop)  # keeps the relay socket open while relay.json exists (maxpm connect)
     if open_browser:
         webbrowser.open(url)
     try:

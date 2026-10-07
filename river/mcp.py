@@ -18,8 +18,9 @@ import os
 import re
 import sys
 import threading
+import time
 
-from . import __version__, cli
+from . import __version__, cli, core
 from .core import RiverError
 
 PROTOCOL = "2025-06-18"
@@ -88,11 +89,13 @@ class Server:
     """chat: a session with no folder (default: MAXPM_CHAT=1); go, plan, and manage get --chat. folders: whether a
     tool call may name a cwd (not over HTTP: a web chat has no folder on this computer)."""
 
-    def __init__(self, chat=None, folders=True):
+    def __init__(self, chat=None, folders=True, via=None):
         # Over HTTP the session is a new chat: not the agent whose environment started maxpm serve.
         self.agent = os.environ.get("MAXPM_AGENT") if folders else None
         self.chat = os.environ.get("MAXPM_CHAT") == "1" if chat is None else chat
         self.folders = folders
+        self.via = via  # "relay": the session came through the relay; its events say <agent>@relay
+        self.last_used = time.time()
 
     def argv(self, name, a):
         if name == "maxpm":
@@ -137,7 +140,11 @@ class Server:
         if a.get("cwd") and not self.folders:
             raise RiverError("this session has no folder on this computer; leave out cwd")
         with _CALL_LOCK:
-            return self._call(words, a)
+            token = core.EVENT_VIA.set(self.via)
+            try:
+                return self._call(words, a)
+            finally:
+                core.EVENT_VIA.reset(token)
 
     def _call(self, words, a):
         out, err = io.StringIO(), io.StringIO()
@@ -217,6 +224,7 @@ def serve(stdin=None, stdout=None):
 
 HTTP_SESSIONS = {}
 _SESSIONS_LOCK = threading.Lock()
+SESSION_IDLE = 7 * 24 * 3600  # an HTTP session unused this long is forgotten (relay sessions add up)
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 # Headers that proxies and tunnels add: a request that has one did not come from this computer directly.
 PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "cf-connecting-ip", "cf-ray",
@@ -248,9 +256,17 @@ def local_refusal(client_ip, headers, what="/mcp"):
     return None
 
 
-def http_post(body, session_id=None):
+def _expire_sessions():
+    """Inside _SESSIONS_LOCK."""
+    old = time.time() - SESSION_IDLE
+    for sid in [sid for sid, srv in HTTP_SESSIONS.items() if srv.last_used < old]:
+        del HTTP_SESSIONS[sid]
+
+
+def http_post(body, session_id=None, via=None):
     """One POST to /mcp: returns (status, reply or None, headers). A JSON-RPC request gets its reply; a
-    notification or a response gets 202 and no body. initialize starts a session (Mcp-Session-Id)."""
+    notification or a response gets 202 and no body. initialize starts a session (Mcp-Session-Id).
+    via="relay": the request came over the relay socket (relay.py); its sessions are apart from local ones."""
     import secrets
     try:
         msg = json.loads(body or b"")
@@ -263,10 +279,15 @@ def http_post(body, session_id=None):
     if msg.get("method") == "initialize":
         session_id = secrets.token_urlsafe(24)
         with _SESSIONS_LOCK:
-            HTTP_SESSIONS[session_id] = Server(chat=True, folders=False)
+            _expire_sessions()
+            HTTP_SESSIONS[session_id] = Server(chat=True, folders=False, via=via)
         headers["Mcp-Session-Id"] = session_id
     with _SESSIONS_LOCK:
         srv = HTTP_SESSIONS.get(session_id) if session_id else None
+        if srv is not None and srv.via != via:
+            srv = None  # a local session id sent over the relay, or the other way round
+        if srv is not None:
+            srv.last_used = time.time()
     if srv is None:
         if not session_id:
             return 400, {"jsonrpc": "2.0", "id": msg.get("id"),
@@ -278,6 +299,10 @@ def http_post(body, session_id=None):
     return 200, srv.handle(msg), headers
 
 
-def http_delete(session_id):
+def http_delete(session_id, via=None):
     with _SESSIONS_LOCK:
-        return HTTP_SESSIONS.pop(session_id or "", None) is not None
+        srv = HTTP_SESSIONS.get(session_id or "")
+        if srv is None or srv.via != via:
+            return False
+        del HTTP_SESSIONS[session_id]
+        return True

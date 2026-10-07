@@ -6,6 +6,7 @@ plain dicts and lists, so the CLI and the web server share one code path.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -853,10 +854,18 @@ class tx:
         return False
 
 
+# How the running command reached MaximizePM, when not directly: "relay" while mcp.Server serves a session
+# that came over the relay (relay.py). _event then records the actor as <agent>@relay.
+EVENT_VIA: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_event_via", default=None)
+
+
 def _event(conn, item_id, actor, change):
     if actor and actor != "maxpm" and conn.execute(
             "SELECT 1 FROM agents WHERE name=? AND role='manager'", (actor,)).fetchone():
         change += f" (by manager {actor})"
+    via = EVENT_VIA.get()
+    if via and actor and not actor.endswith(f"@{via}"):
+        actor = f"{actor}@{via}"  # a command that came through the relay (mcp.Server.via): the history says so
     conn.execute("INSERT INTO events(item_id, at, actor, change) VALUES (?,?,?,?)",
                  (item_id, iso(now()), actor or "?", change))
 

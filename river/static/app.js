@@ -655,6 +655,7 @@ async function refresh() {
   const r = await fetch("/api/state"); S = await r.json();
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   renderSelects(); renderCapacity(); renderNext(); renderProjects(); renderWork(); renderStrip(); renderReady(); renderAgents(); renderManager(); renderEvents(); renderSettings(); renderTakeovers(); renderBlocked(); renderTargets();
+  renderRelay();
   renderGraph(false); renderLog(false); pollNeedsYou().catch(() => {}); pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);
@@ -1133,6 +1134,51 @@ async function openFromHash() {
   if (tabIn && tabIn !== tab) await setTab(tabIn, false);
 }
 window.addEventListener("hashchange", openFromHash);
+// Relay button: connects this MaximizePM to the relay (maxpm connect), so Claude and ChatGPT connectors reach it.
+// A click starts the sign-in: the relay page opens with a code to approve, and maxpm serve finishes it.
+let relayArmed = 0;  // a click on a connected relay asks again before it disconnects
+function renderRelay() {
+  const r = S.relay, b = $("#relayBtn");
+  if (!r) return b.classList.add("hidden");
+  b.classList.remove("hidden");
+  const armed = Date.now() - relayArmed < 4000;
+  b.classList.toggle("primary", !!r.pending || armed);
+  if (r.pending) {
+    b.textContent = `Relay code ${r.pending.code}`;
+    b.title = "Approve this code on the relay page. Click to open the page again.";
+  } else if (!r.configured) {
+    b.textContent = "Connect relay";
+    b.title = "Let Claude and ChatGPT connectors reach this MaximizePM through the relay"
+      + (r.error ? `\nLast try: ${r.error}` : "");
+  } else if (armed) {
+    b.textContent = "Disconnect?";
+    b.title = "Click again to disconnect this computer from the relay";
+  } else {
+    const who = r.account ? ` as ${r.account}` : "";
+    b.textContent = r.state === "connected" ? "Relay · on" : "Relay · off";
+    b.title = (r.state === "connected" ? `Connected${who} to ${r.url}` : `Not connected${who}: ${r.error || r.state}`)
+      + `\nConnector URL: ${r.url}/mcp\nClick to disconnect this computer.`;
+  }
+}
+$("#relayBtn").onclick = async () => {
+  const r = S.relay || {};
+  if (r.pending) return void window.open(r.pending.link, "_blank", "noopener");
+  if (!r.configured) {
+    try {
+      const got = await act("relay_connect", {});
+      window.open(got.link, "_blank", "noopener");
+      toast(`Approve code ${got.code} on the relay page`);
+    } catch (e) { /* toast shown */ }
+    return;
+  }
+  if (Date.now() - relayArmed > 4000) { relayArmed = Date.now(); renderRelay(); setTimeout(renderRelay, 4100); return; }
+  relayArmed = 0;
+  try {
+    const res = await act("relay_disconnect", {});
+    toast(res.revoked ? "Disconnected from the relay" : `Disconnected here; the relay did not confirm (${res.error})`, !res.revoked);
+  } catch (e) { /* toast shown */ }
+};
+
 // Update button: shows how many new commits the river clone is missing; a click pulls them and restarts the server.
 // It also says when the server itself is out of date: code changed on disk after it started (mode "restart"),
 // or the server is too old to know the update route (mode "old": only a manual restart helps).

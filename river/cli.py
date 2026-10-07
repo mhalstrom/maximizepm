@@ -859,6 +859,14 @@ def build_parser():
     dbs = db.add_subparsers(dest="dcmd", required=True)
     dbs.add_parser("path", help="print the database file MaximizePM uses")
     sub.add_parser("mcp", help="an MCP server on stdin/stdout, for agents that cannot run shell commands")
+    x = sub.add_parser("connect", help="connect this computer to the MaximizePM relay, so that Claude and ChatGPT "
+                                       "connectors reach this MaximizePM (maxpm serve keeps the connection open)")
+    x.add_argument("--off", action="store_true", help="disconnect: revoke this computer's relay token and forget it")
+    x.add_argument("--status", action="store_true", help="show the relay connection")
+    x.add_argument("--replace", action="store_true",
+                   help="take over the relay account from another computer that is connected to it now")
+    x.add_argument("--relay", metavar="URL", help="the relay (default https://relay.maximizepm.com, or $MAXPM_RELAY_URL)")
+    x.add_argument("--no-browser", action="store_true", help="print the link instead of opening the browser")
     x = sub.add_parser("guide", help="how to use MaximizePM: worker loop, planner, or agent setup")
     x.add_argument("which", nargs="?", default="worker",
                    choices=["worker", "planner", "manager", "setup", "decisions"])
@@ -1055,6 +1063,8 @@ def run(argv=None):
         from . import mcp
         mcp.serve()
         return 0
+    if args.cmd == "connect":
+        return connect_command(args)
     if args.cmd == "setup-agent":
         if args.claude_desktop and args.codex:
             raise RiverError("one app at a time: --claude-desktop or --chatgpt-desktop")
@@ -1617,7 +1627,8 @@ def dispatch(conn, a, actor):
     if c == "show":
         return core.item_show(conn, a.id)
     if c == "status":
-        return core.status(conn, a.recent)
+        from . import relay
+        return {**core.status(conn, a.recent), "relay": relay.saved_status()}
     if c == "usage":
         return core.usage_report(conn, a.project, a.since, a.measure)
     if c == "needs-you":
@@ -1826,6 +1837,52 @@ def dispatch(conn, a, actor):
     raise RiverError(f"unknown command {c}")
 
 
+def relay_line(st):
+    """One line about the relay connection, from relay.saved_status()."""
+    if not st["configured"]:
+        return "Relay: not connected (maxpm connect)"
+    who = f" as {st['account']}" if st.get("account") else ""
+    if st["state"] == "connected":
+        return f"Relay: connected{who} ({st['url']})"
+    if st["state"] == "serve not running":
+        return f"Relay: signed in{who}, not connected: maxpm serve is not running"
+    err = f": {st['error']}" if st.get("error") else ""
+    return f"Relay: signed in{who}, {st['state']}{err}"
+
+
+def connect_command(args):
+    from . import relay
+    if args.status:
+        print(relay_line(relay.saved_status()))
+        return 0
+    if args.off:
+        res = relay.disconnect()
+        if not res["was_connected"]:
+            print("This computer is not connected to the relay.")
+        elif res["revoked"]:
+            print("Disconnected: the relay revoked this computer's token, and relay.json is deleted.")
+        else:
+            print(f"relay.json is deleted, but the relay did not confirm the revoke ({res['error']}). "
+                  "Disconnect the computer on your relay account page too.")
+        return 0
+    dev = relay.start_device(args.relay)
+    print(f"Approve this computer on the relay:\n  {dev['verification_uri_complete']}\n"
+          f"Code: {dev['user_code']} (the page must show the same code)")
+    if not args.no_browser:
+        import webbrowser
+        try:
+            webbrowser.open(dev["verification_uri_complete"])
+        except Exception:
+            pass
+    print("Waiting for the approval (10 minutes at most)...", flush=True)
+    cfg = relay.finish_device(dev, replace=args.replace)
+    who = f" as {cfg['account']}" if cfg.get("account") else ""
+    print(f"Connected to {cfg['url']}{who}. maxpm serve keeps the connection open: it connects within a few "
+          "seconds when it runs (start it with maxpm serve).")
+    print("Then add the connector in Claude or ChatGPT: " + cfg["url"] + "/mcp")
+    return 0
+
+
 def render_status(res):
     rows = res["projects"]
     if not rows:
@@ -1865,6 +1922,9 @@ def render_status(res):
         print("Waiting on a human:")
         for h in res["human_waiting"]:
             print(f"  #{h['id']:<4} [{h['project']}] {_cut(h['title'])}")
+    if res.get("relay") and res["relay"]["configured"]:
+        print()
+        print(relay_line(res["relay"]))
     print()
     print(f"Open slots: {res['spare_slots']}   sessions with nothing to do: {res['excess_sessions']}")
     for adv in res["advice"]:
