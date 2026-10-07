@@ -3573,6 +3573,15 @@ class Manager(Base):
             core.register(self.c, n)
         core.register(self.c, "mark", human=True)
 
+    def test_manager_autocompact_takes_what_claude_takes(self):
+        # claude --autocompact takes auto or 100k to 1M; 200 is shorthand for 200k (#1312).
+        for v, n in (("200k", 200000), ("200000", 200000), ("200", 200000), ("1M", 1000000), ("auto", None)):
+            self.assertEqual(core.autocompact_tokens(v), n)
+            core.config_set(self.c, "manager_autocompact", v)
+        for v in ("50k", "2m", "lots", ""):
+            with self.assertRaisesRegex(RiverError, "100k to 1M"):
+                core.config_set(self.c, "manager_autocompact", v)
+
     def test_one_manager_at_a_time_and_it_takes_no_work(self):
         m = core.manage(self.c, self.dir.name, "boss")
         self.assertEqual((m["role"], core._agent(self.c, "boss")["role"]), ("manager", "manager"))

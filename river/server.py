@@ -280,7 +280,7 @@ def manage_command(cmd):
 
 def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=None, launch_in=None, options=None):
     """Start manager (the page's Manager section): the chosen agent with manage in place of go, in the folder
-    of the first project that has one. Refuses while a manager is active."""
+    of the first project that has one, compacted at manager_autocompact. Refuses while a manager is active."""
     import secrets
     other = core.active_manager(conn)
     if other:
@@ -291,7 +291,8 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     launch_in = core._launch_in(conn, p["id"], launch_in)
     _can_open_terminal(runner, f"cd {p['path']} && claude manage", launch_in)
     t = {"project": p["name"], "path": p["path"], "session_title": "maxpm manager",
-         **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, "maxpm manager"),
+         **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, "maxpm manager",
+                                  autocompact=core.autocompact_tokens(core.setting(conn, "manager_autocompact"))),
          "launch_in": launch_in}
     t["command"] = manage_command(t["command"])
     name = f"manager-{secrets.token_hex(2)}"

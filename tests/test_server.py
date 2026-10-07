@@ -920,8 +920,12 @@ class LaunchAgent(unittest.TestCase):
         self.assertIsNone(core.state(self.c)["manager"])
         sent = []
         t = server.start_manager(self.c, runner=sent.append, model="opus")
-        self.assertEqual(t["command"], "claude --name 'maxpm manager' --model opus manage --remote-control 'maxpm manager'")
-        self.assertIn(f"MAXPM_AGENT={t['session_name']} MAXPM_MODEL=opus claude --name 'maxpm manager' --model opus manage", sent[-1])
+        # The manager compacts at manager_autocompact (200k), in the same session (#1312).
+        self.assertEqual(t["command"], "claude --name 'maxpm manager' --model opus --autocompact 200000 manage "
+                                       "--remote-control 'maxpm manager'")
+        self.assertEqual(t["autocompact"], 200000)
+        self.assertIn(f"MAXPM_AGENT={t['session_name']} MAXPM_MODEL=opus claude --name 'maxpm manager' --model opus "
+                      f"--autocompact 200000 manage", sent[-1])
         with self.assertRaisesRegex(RiverError, "is the active manager"):
             server.start_manager(self.c, runner=sent.append)
         self.assertEqual(server.manage_command('codex "run maxpm go in this folder"'), 'codex "run maxpm manage in this folder"')
@@ -2490,8 +2494,14 @@ class LaunchProfiles(unittest.TestCase):
         t = server.dispatch_item(self.c, y, runner=sent.append, options={"permission_mode": "acceptEdits"})
         self.assertIn(f"claude --name '#{y} more' --permission-mode acceptEdits go --remote-control '#{y} more'", sent[-1])
         # A manager: manage in place of go, the options still apply.
+        # manager_autocompact auto: Claude Code's own point; an --autocompact in claude_args wins.
+        core.config_set(self.c, "manager_autocompact", "auto")
         t = server.start_manager(self.c, runner=sent.append, options={"remote_control": "off"})
         self.assertEqual(t["command"], "claude --name 'maxpm manager' manage")
+        core.config_set(self.c, "claude_args", "--autocompact 300k")
+        t = core._launch_agent_cmd(self.c, None, None, options={"remote_control": "off"}, autocompact=200000)
+        self.assertEqual((t["command"], t["autocompact"]), ("claude --autocompact 300k go", None))
+        core.config_unset(self.c, "claude_args")
         # Open chat says why a session has no web link.
         core.register(self.c, "w1")
         core.config_set(self.c, "claude_remote_control", "off")

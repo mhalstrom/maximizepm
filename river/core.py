@@ -165,6 +165,12 @@ DEFAULT_SETTINGS = {
     # count (a server that an agent left running would hold an item for ever). 0s: only river commands renew.
     "busy_max": "4h",
     "manage_every": "30m",
+    # The manager session's context: Claude Code compacts it at this size (claude --autocompact; 100k to 1M,
+    # for example 200k). The session stays the same, with the same name and Remote Control link, and the next
+    # maxpm manage briefing shows the queue again. A manager reads its whole context on each wake, so a small
+    # context costs less (#1312). auto: Claude Code's own point. A Claude Code launch profile only; an
+    # --autocompact in claude_args wins.
+    "manager_autocompact": "200k",
     # maxpm cleanup lists a ready item that nobody claimed for this long.
     "stale_after": "14d",
     "review": "off",
@@ -986,6 +992,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is on or off")
     elif key in ("fresh_sessions", "serve_reload") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
+    elif key == "manager_autocompact":
+        autocompact_tokens(value)
     elif key == "default_prerequisite_mode" and value not in ("keep", "release"):
         raise RiverError("default_prerequisite_mode is keep or release")
     elif key in ("email_to", "email_from") and value and not all(
@@ -6720,6 +6728,21 @@ def skill_prompt_args(args):
     return " ".join([_shell_quote(w) for w in rest] + ["--append-system-prompt-file", _shell_quote(str(f))])
 
 
+def autocompact_tokens(value):
+    """The manager_autocompact setting as a token count (None for auto), checked as claude --autocompact
+    checks it: 100k to 1M, written 200k, 200000, 1m, or 200 (thousands)."""
+    v = (value or "").strip().lower()
+    if v == "auto":
+        return None
+    m = re.match(r"^(\d+)(k|m)?$", v)
+    n = int(m.group(1)) * {"k": 1000, "m": 1000000}.get(m.group(2), 1) if m else 0
+    if m and not m.group(2) and n < 1000:
+        n *= 1000
+    if not 100000 <= n <= 1000000:
+        raise RiverError(f"manager_autocompact {value!r}: auto, or 100k to 1M tokens (for example 200k)")
+    return n
+
+
 def build_command(platform, opts, model=None, effort=None, name=None):
     """The command line that starts a platform's CLI with these options. name: the session's name, for a
     CLI that takes one (claude --name, and the Remote Control session name); Codex has no flag for it."""
@@ -7146,11 +7169,12 @@ def _launch_in(conn, project_id, choice=None):
 
 
 def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=None, name=None, prompt=None,
-                      fork_of=None):
+                      fork_of=None, autocompact=None):
     """The chosen launch_agents entry as a command: a profile builds it from its options (options: the
     launch dialog's choices) and gives the session its name, a custom command gets {model} and {effort}
     filled in. The session also gets MAXPM_MODEL. prompt (maxpm launch --prompt) follows the profile's
-    first prompt; a custom command has no prompt option to put it in."""
+    first prompt; a custom command has no prompt option to put it in. autocompact (tokens, the manager's
+    manager_autocompact): claude --autocompact, unless the profile's args already name one."""
     agents = parse_launch_agents(setting(conn, "launch_agents", project_id=project_id))
     pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
     if pick is None:
@@ -7174,6 +7198,10 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
             built = {**opts, "args": skill_prompt_args(opts.get("args", ""))}
         if fork_of and prof[0] == "claude-code":  # fork_base: start from a goal's warm base
             built = {**built, "args": f"--resume {_shell_quote(fork_of)} --fork-session " + built.get("args", "")}
+        if autocompact and prof[0] == "claude-code" and "--autocompact" not in built.get("args", ""):
+            built = {**built, "args": f"--autocompact {autocompact} " + built.get("args", "")}
+        else:
+            autocompact = None
         cmd = build_command(prof[0], built, mid, effort or None, name)
     elif prompt:
         raise RiverError(f"{pick[0]} is a custom command ({pick[1]}), so it takes no --prompt; give it a profile "
@@ -7182,9 +7210,10 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         raise RiverError(f"{pick[0]} is a custom command ({pick[1]}), so it has no launch options; "
                          f"give it a profile in launch_agents (@claude-code or @codex) for them")
     else:
-        opts, cmd = {}, fill_launch_command(pick[1], mid, effort or None, name)
+        opts, cmd, autocompact = {}, fill_launch_command(pick[1], mid, effort or None, name), None
     return {"agent": pick[0], "command": cmd, "platform": prof[0] if prof else None, "options": opts,
             "model": model, "model_id": mid, "effort": effort or None, "custom_prompt": prompt,
+            "autocompact": autocompact,
             "env": {"MAXPM_MODEL": model} if model else {}}
 
 
