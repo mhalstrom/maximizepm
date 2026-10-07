@@ -1,6 +1,7 @@
 # Manager session cost (proposal, #1100)
 
-Status: proposal. Nothing here is built. A person approves it before work starts.
+Status: approved 2026-10-07 (order M2, M1, then measure; compaction at 200k; M3
+only if compaction loses too much). M2 and M1 are built (#1312).
 
 ## The problem
 
@@ -108,3 +109,46 @@ If the person finds that a compacted manager forgets too much:
 2. Is 200k the right compaction point for the manager (sessions near 500k
    still work well, but cost about 2.5 times as much for each request)?
 3. Is M3 needed now, or only if M2 loses context?
+
+## Built (#1312)
+
+- M2: setting `manager_autocompact` (default 200k; auto: Claude Code's own
+  point). Start manager adds `--autocompact 200000` to a Claude Code profile's
+  command, unless `claude_args` already has an `--autocompact`. It applies to a
+  manager started after the change: the manager that runs now keeps its old
+  point until it ends.
+- M1: `maxpm inbox --wait` refuses for the active manager and names
+  `manage --watch`. `manage --watch` waits `manage_settle` (default 2m) after
+  the first new finding and returns all new findings at once; a finding that
+  goes away in that time wakes nothing; a message or a stop returns at once.
+  The manager skill and the manage briefing say: one background command.
+
+## Measurement before (#1312)
+
+`agent_sessions` (the session ids of each agent) starts on 2026-10-06, so the
+script `manager_cost.py` (in this folder) measures from then. It reads the
+queue read-only and every transcript of an agent session. A session is a
+manager's when its agent's name starts with `manager-`. "Hours with requests"
+counts the clock hours in which the manager made at least one request.
+
+Before M1 and M2 (old manager setup), to 2026-10-07 19:45 UTC:
+
+| Day (UTC) | Manager eq | All agents eq | Share | Requests | eq per request | Mean context | Hours with requests | eq per hour |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2026-10-06 | 12.1M | 127.3M | 10% | 405 | 29.9k | 278k | 7 | 1.73M |
+| 2026-10-07 | 34.8M | 381.5M | 9% | 750 | 46.4k | 427k | 14 | 2.48M |
+
+The #1100 baseline above (2026-09-30 to 2026-10-06, other session mapping):
+34.8k eq for each request, mean context near 370k, 31% of all agent eq.
+
+The share depends on how much the workers run on that day, so compare eq per
+request, mean context, and eq per hour first.
+
+## Measurement after
+
+Run, after one day with a manager that started after both changes:
+
+    python3 current_project/research/manager_cost.py <manager start, UTC> <one day later>
+
+Expected (from the proposal): mean context near 130k, eq per request near a
+third of before, and fewer wakes.
