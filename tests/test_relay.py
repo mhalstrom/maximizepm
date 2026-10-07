@@ -10,6 +10,7 @@ import io
 import json
 import os
 import queue
+import re
 import socket
 import stat
 import struct
@@ -415,6 +416,36 @@ class Sessions(Base):
         mcp.HTTP_SESSIONS[h["Mcp-Session-Id"]].last_used -= 8 * 24 * 3600
         mcp.http_post(init, via="relay")
         self.assertNotIn(h["Mcp-Session-Id"], mcp.HTTP_SESSIONS)
+
+    def chat_go(self, **kw):
+        init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
+        _, _, h = mcp.http_post(init, **kw)
+        call = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "go", "arguments": {}}})
+        _, reply, _ = mcp.http_post(call.encode(), h["Mcp-Session-Id"], **kw)
+        text = reply["result"]["content"][0]["text"]
+        return re.search(r"You are MaximizePM agent (\S+?)\.", text).group(1)
+
+    def test_a_chat_takes_nothing_from_the_environment_of_serve(self):
+        from unittest import mock
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.project_add(conn, "web", None, "", "mark")
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "MAXPM_MODEL": "opus", "MAXPM_FOCUS": "manager"}):
+            name = self.chat_go(via="relay", client="claude")
+            local = self.chat_go()
+        row = dict(conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone())
+        self.assertEqual(row["via"], "relay claude")
+        self.assertIsNone(row["agent_type"], "not maxpm serve's Claude Code")
+        self.assertIsNone(row["model"])
+        self.assertIsNone(row["pid"])
+        self.assertIsNone(row["platform"])
+        self.assertEqual(conn.execute("SELECT via FROM agents WHERE name=?", (local,)).fetchone()[0], "http")
+        self.assertEqual(self.chat_go(via="relay", client="chatgpt") and
+                         conn.execute("SELECT via FROM agents ORDER BY rowid DESC").fetchone()[0], "relay chatgpt")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["who"])
+        self.assertIn("chat over MCP: relay claude", out.getvalue())
 
     def test_events_say_relay_only_inside_a_relay_call(self):
         conn = core.connect()

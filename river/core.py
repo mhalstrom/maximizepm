@@ -431,6 +431,7 @@ CREATE TABLE IF NOT EXISTS agents (
   session_url    TEXT,                       -- web link to the agent's session (Claude Code Remote Control)
   model          TEXT,                       -- the model the session runs (MAXPM_MODEL, maxpm go --model)
   agent_type     TEXT,                       -- the agent CLI it runs in (codex, claude-code), from its environment
+  via            TEXT,                       -- a chat over MCP HTTP: 'relay claude', 'relay chatgpt', 'relay', or 'http' (local /mcp)
   manage_seen    TEXT,                       -- the manager's findings it has seen (maxpm manage --watch)
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
@@ -771,6 +772,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_in TEXT")
     if "session_url" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN session_url TEXT")
+    if "via" not in acols:
+        conn.execute("ALTER TABLE agents ADD COLUMN via TEXT")
     if "model" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN model TEXT")
     if "agent_type" not in acols:
@@ -857,6 +860,16 @@ class tx:
 # How the running command reached MaximizePM, when not directly: "relay" while mcp.Server serves a session
 # that came over the relay (relay.py). _event then records the actor as <agent>@relay.
 EVENT_VIA: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_event_via", default=None)
+# Set while mcp.Server runs a command for a chat over MCP HTTP (local /mcp or the relay): how it came ('relay
+# claude', 'relay chatgpt', 'relay', or 'http'). The environment and the parent processes are maxpm serve's,
+# not the chat's, so go records no agent type, model, process, or native address from them.
+HTTP_CHAT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_http_chat", default=None)
+
+
+def set_via(conn, name, via):
+    """Record how a chat session reaches MaximizePM (HTTP_CHAT); the page and maxpm who show it."""
+    with tx(conn):
+        conn.execute("UPDATE agents SET via=? WHERE name=? AND via IS NOT ?", (via, name, via))
 
 
 def _event(conn, item_id, actor, change):

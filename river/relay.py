@@ -567,7 +567,8 @@ def handle(frame: dict) -> dict:
         if frame.get("method") == "DELETE":
             gone = mcp.http_delete(session, via="relay")
             return {"t": "res", "id": rid, "status": 204 if gone else 404, "session": None, "body": None}
-        status, reply, headers = mcp.http_post(json.dumps(frame.get("body")).encode(), session, via="relay")
+        status, reply, headers = mcp.http_post(json.dumps(frame.get("body")).encode(), session, via="relay",
+                                               client=frame.get("client"))
         return {"t": "res", "id": rid, "status": status, "session": headers.get("Mcp-Session-Id"), "body": reply}
     except Exception as e:  # never leave the relay without an answer
         body = frame.get("body") if isinstance(frame.get("body"), dict) else {}

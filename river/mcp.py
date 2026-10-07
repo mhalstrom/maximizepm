@@ -89,12 +89,13 @@ class Server:
     """chat: a session with no folder (default: MAXPM_CHAT=1); go, plan, and manage get --chat. folders: whether a
     tool call may name a cwd (not over HTTP: a web chat has no folder on this computer)."""
 
-    def __init__(self, chat=None, folders=True, via=None):
+    def __init__(self, chat=None, folders=True, via=None, client=None):
         # Over HTTP the session is a new chat: not the agent whose environment started maxpm serve.
         self.agent = os.environ.get("MAXPM_AGENT") if folders else None
         self.chat = os.environ.get("MAXPM_CHAT") == "1" if chat is None else chat
         self.folders = folders
         self.via = via  # "relay": the session came through the relay; its events say <agent>@relay
+        self.client = client  # over the relay: the app, "claude", "chatgpt", or "other"
         self.last_used = time.time()
 
     def argv(self, name, a):
@@ -139,12 +140,16 @@ class Server:
         words = self.argv(name, a)
         if a.get("cwd") and not self.folders:
             raise RiverError("this session has no folder on this computer; leave out cwd")
+        chat = None
+        if not self.folders:
+            chat = (f"relay {self.client}" if self.client in ("claude", "chatgpt") else "relay") if self.via else "http"
         with _CALL_LOCK:
-            token = core.EVENT_VIA.set(self.via)
+            token, chat_token = core.EVENT_VIA.set(self.via), core.HTTP_CHAT.set(chat)
             try:
                 return self._call(words, a)
             finally:
                 core.EVENT_VIA.reset(token)
+                core.HTTP_CHAT.reset(chat_token)
 
     def _call(self, words, a):
         out, err = io.StringIO(), io.StringIO()
@@ -263,7 +268,7 @@ def _expire_sessions():
         del HTTP_SESSIONS[sid]
 
 
-def http_post(body, session_id=None, via=None):
+def http_post(body, session_id=None, via=None, client=None):
     """One POST to /mcp: returns (status, reply or None, headers). A JSON-RPC request gets its reply; a
     notification or a response gets 202 and no body. initialize starts a session (Mcp-Session-Id).
     via="relay": the request came over the relay socket (relay.py); its sessions are apart from local ones."""
@@ -280,7 +285,7 @@ def http_post(body, session_id=None, via=None):
         session_id = secrets.token_urlsafe(24)
         with _SESSIONS_LOCK:
             _expire_sessions()
-            HTTP_SESSIONS[session_id] = Server(chat=True, folders=False, via=via)
+            HTTP_SESSIONS[session_id] = Server(chat=True, folders=False, via=via, client=client)
         headers["Mcp-Session-Id"] = session_id
     with _SESSIONS_LOCK:
         srv = HTTP_SESSIONS.get(session_id) if session_id else None

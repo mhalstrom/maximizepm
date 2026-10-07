@@ -1661,6 +1661,11 @@ def dispatch(conn, a, actor):
     if c == "log":
         return core.completed(conn, a.project, None if a.since == "all" else a.since)
     if c == "go":
+        http_chat = core.HTTP_CHAT.get()
+        if http_chat:  # a chat over MCP HTTP: maxpm serve's environment and processes are not the chat's
+            res = core.go(conn, os.getcwd(), actor, a.project, a.role, a.session, None, None, chat=a.chat)
+            core.set_via(conn, res["agent"], http_chat)
+            return res
         res = core.go(conn, os.getcwd(), actor, a.project, a.role, a.session, os.environ.get("MAXPM_FOCUS"), a.model,
                       chat=a.chat, agent_type=core.agent_type_from_env(os.environ))
         # The platform's own messaging reaches this session at once (native_message): record its address.
@@ -1675,10 +1680,11 @@ def dispatch(conn, a, actor):
                 raise RiverError("--watch needs the manager's name: maxpm --as <name> manage --watch")
             return core.manage_watch(conn, actor, a.step)
         res = core.manage(conn, os.getcwd(), actor, a.takeover)
-        core.set_native(conn, res["agent"], *core.native_from_env(conn, os.environ))
+        if not core.HTTP_CHAT.get():
+            core.set_native(conn, res["agent"], *core.native_from_env(conn, os.environ))
         return {**res, "native": core.has_native(conn, res["agent"]), "chat": a.chat}
     if c == "next":
-        if actor and conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone():
+        if actor and not core.HTTP_CHAT.get() and conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone():
             if a.model:
                 core.set_agent_model(conn, actor, a.model)
             core.set_agent_type(conn, actor, core.agent_type_from_env(os.environ))
@@ -1693,7 +1699,7 @@ def dispatch(conn, a, actor):
         return res
     if c == "claim":
         m = os.environ.get("MAXPM_MODEL")
-        if actor and conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone():
+        if actor and not core.HTTP_CHAT.get() and conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone():
             if m:
                 core.set_agent_model(conn, actor, m)
             core.set_agent_type(conn, actor, core.agent_type_from_env(os.environ))
@@ -2835,7 +2841,8 @@ def render(a, res):
             print(f"{ag['name']} ({ag['kind']}, {ag['state']}){note}"
                   + (f"\n    session: {ag['session']}" + (f" [{ag['session_ref']}]" if ag.get("session_ref") else "")
                      if ag.get("session") else "")
-                  + (f"\n    process: PID {ag['pid']} on {ag['host']}" if ag.get("pid") else "") + f"\n    holds: {holds}"
+                  + (f"\n    process: PID {ag['pid']} on {ag['host']}" if ag.get("pid") else "")
+                  + (f"\n    chat over MCP: {ag['via']}" if ag.get("via") else "") + f"\n    holds: {holds}"
                   + (f"\n    owns: {', '.join(o['name'] for o in ag['owns'])}" if ag.get("owns") else ""))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")

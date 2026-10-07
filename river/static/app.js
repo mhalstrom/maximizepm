@@ -164,8 +164,10 @@ function agentHolds(a) {
       ${S.items.filter(i => i.status === "open" && i.reserved_until && i.reserved_for === a.name).map(i => `<div class="st">pushed <span class="link" data-open="${i.id}">#${i.id} ${esc(i.title)}</span> · ${left(i.reserved_until)} left · <span class="link" data-unpush="${i.id}">cancel</span></div>`).join("")}
       ${queueHtml((S.queues || {})[a.name], a.name)}${agentButtons(a, S)}`;
 }
+// A chat that reaches MaximizePM over MCP HTTP (agents.via): through the relay from Claude or ChatGPT, or local /mcp.
+const VIA_LABEL = { "relay claude": "Claude via relay", "relay chatgpt": "ChatGPT via relay", "relay": "via relay", "http": "chat on this computer" };
 function agentSession(a) {
-  return `${a.model ? `<span class="chip c-p" title="the model this session runs (MAXPM_MODEL)">${esc(a.model)}</span> ` : ""}${a.session ? `<span title="Claude Code session">${esc(a.session)}${a.session_ref ? " [" + esc(a.session_ref) + "]" : ""}</span>` : ""}${a.session_url ? ` <a class="link" href="${esc(a.session_url)}" target="_blank" rel="noopener">open</a>` : ""}`;
+  return `${a.via ? `<span class="chip" title="a chat session that reaches MaximizePM over MCP (${esc(a.via)})">${esc(VIA_LABEL[a.via] || a.via)}</span> ` : ""}${a.model ? `<span class="chip c-p" title="the model this session runs (MAXPM_MODEL)">${esc(a.model)}</span> ` : ""}${a.session ? `<span title="Claude Code session">${esc(a.session)}${a.session_ref ? " [" + esc(a.session_ref) + "]" : ""}</span>` : ""}${a.session_url ? ` <a class="link" href="${esc(a.session_url)}" target="_blank" rel="noopener">open</a>` : ""}`;
 }
 
 // The monitor sessions that followed a deploy (maxpm target monitor).
