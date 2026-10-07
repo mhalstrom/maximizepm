@@ -6,18 +6,27 @@ table). While that file exists, `maxpm serve` keeps one outbound WebSocket to th
 request that comes over it with mcp.http_post and mcp.http_delete: the same code as the local /mcp. Events
 that a relay session writes carry the actor <agent>@relay. Standard library only.
 
+The relay also shows the person this computer's MaximizePM page (https://relay.maximizepm.com/app/): each
+page request comes over the same socket (req kind "http"), and river passes it to its own maxpm serve on
+127.0.0.1, with a header that marks it as relayed, so the page and its actions are the same as here.
+
 Protocol 1 (frames are JSON text):
-  river -> relay  hello {v, river, host, tools, instructions, replace}   res {id, status, session, body}
-  relay -> river  welcome {v, account, limits}   req {id, session, client, method, body}   bye {reason}
+  river -> relay  hello {v, river, host, tools, instructions, replace}
+  relay -> river  welcome {v, account, limits}   bye {reason}
+  relay -> river  req {id, session, client, method, body}            (MCP)   -> res {id, status, session, body}
+  relay -> river  req {id, kind: "http", method, path, headers, body_b64}  -> res {id, status, headers, body_b64}
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import http.client
 import json
 import os
 import random
+import secrets
 import socket
 import ssl
 import struct
@@ -37,6 +46,14 @@ PING_EVERY = 30  # seconds between WebSocket pings; the relay closes a socket si
 SILENT_LIMIT = 90  # no frame and no pong from the relay for this long: the connection is dead
 BACKOFF_MAX = 60
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+MAX_PAGE = 4 * 1024 * 1024  # the largest page answer river sends (the relay takes 8 MB frames)
+PAGE_REQUEST_HEADERS = ("content-type", "accept", "if-none-match", "if-modified-since")
+PAGE_ANSWER_HEADERS = ("content-type", "cache-control", "location", "content-disposition", "etag", "last-modified")
+# The header that marks a page request as relayed. Only this process knows the value, so no other program on
+# this computer can make maxpm serve record its actions as <name>@relay.
+PAGE_SECRET = secrets.token_urlsafe(24)
+PAGE_PORT = {"port": None}  # maxpm serve's port, for the relayed page requests
 
 # Test hooks: tests replace these.
 OPEN_SOCKET = None  # (url, headers) -> WebSocket
@@ -502,9 +519,49 @@ class Link:
             pass  # the socket is gone; the relay answers the app for it
 
 
+def page_request(headers) -> bool:
+    """Whether a request to maxpm serve came from the relay thread (handle_page)."""
+    value = headers.get("X-Maxpm-Relay") or ""
+    return bool(value) and hmac.compare_digest(value, PAGE_SECRET)
+
+
+def handle_page(frame: dict) -> dict:
+    """A page request from the relay -> its answer, from this computer's maxpm serve."""
+    rid = frame.get("id")
+
+    def fail(status, text):
+        return {"t": "res", "id": rid, "status": status, "headers": {"content-type": "text/plain; charset=utf-8"},
+                "body_b64": base64.b64encode(text.encode()).decode()}
+
+    path, method = frame.get("path") or "/", frame.get("method") or "GET"
+    if not path.startswith("/") or method not in ("GET", "HEAD", "POST"):
+        return fail(400, "bad page request")
+    if not PAGE_PORT["port"]:
+        return fail(502, "maxpm serve has no port")
+    headers = {k: v for k, v in (frame.get("headers") or {}).items() if k.lower() in PAGE_REQUEST_HEADERS}
+    headers["X-Maxpm-Relay"] = PAGE_SECRET
+    body = base64.b64decode(frame.get("body_b64") or "")
+    conn = http.client.HTTPConnection("127.0.0.1", PAGE_PORT["port"], timeout=55)
+    try:
+        conn.request(method, path, body=body or None, headers=headers)
+        res = conn.getresponse()
+        data = res.read(MAX_PAGE + 1)
+        if len(data) > MAX_PAGE:
+            return fail(502, "the answer is larger than the relay takes")
+        return {"t": "res", "id": rid, "status": res.status,
+                "headers": {k.lower(): v for k, v in res.getheaders() if k.lower() in PAGE_ANSWER_HEADERS},
+                "body_b64": base64.b64encode(data).decode()}
+    except OSError as e:
+        return fail(502, f"maxpm serve did not answer: {e}")
+    finally:
+        conn.close()
+
+
 def handle(frame: dict) -> dict:
-    """One req frame -> its res frame, with the code of the local /mcp."""
+    """One req frame -> its res frame: a page request, or MCP with the code of the local /mcp."""
     from . import mcp
+    if frame.get("kind") == "http":
+        return handle_page(frame)
     rid, session = frame.get("id"), frame.get("session")
     try:
         if frame.get("method") == "DELETE":
@@ -518,7 +575,8 @@ def handle(frame: dict) -> dict:
                 "body": {"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32603, "message": f"maxpm: {e}"}}}
 
 
-def start(stop: threading.Event) -> threading.Thread:
+def start(stop: threading.Event, port: int | None = None) -> threading.Thread:
+    PAGE_PORT["port"] = port
     t = threading.Thread(target=Link(stop).run, daemon=True, name="maxpm-relay")
     t.start()
     return t

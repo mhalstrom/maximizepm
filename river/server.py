@@ -2040,6 +2040,8 @@ class Handler(BaseHTTPRequestHandler):
             actor = body.get("actor") or None
             _same_queue(body.get("args", {}).get("db"))  # only a river command sends it (cli.ask_server)
             conn = core.connect()
+            # The page shown through the relay (relay.handle_page): its actions are recorded as <name>@relay.
+            via = core.EVENT_VIA.set("relay" if relay.page_request(self.headers) else None)
             try:
                 core.activity(conn, actor)
                 result = op(conn, body.get("args", {}), actor)
@@ -2052,6 +2054,7 @@ class Handler(BaseHTTPRequestHandler):
                         print(f"monitor: {e}", flush=True)
                 return self._send(200, {"ok": True, "result": result})
             finally:
+                core.EVENT_VIA.reset(via)
                 conn.close()
         except RiverError as e:
             return self._send(409, {"error": str(e)})
@@ -2094,7 +2097,7 @@ def serve(port: int, open_browser=False, dev=False):
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()
     threading.Thread(target=notify.loop, args=(stop,), daemon=True, name="maxpm-notify").start()
-    relay.start(stop)  # keeps the relay socket open while relay.json exists (maxpm connect)
+    relay.start(stop, port)  # keeps the relay socket open while relay.json exists (maxpm connect)
     if open_browser:
         webbrowser.open(url)
     try:

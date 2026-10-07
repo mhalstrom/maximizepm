@@ -11,7 +11,7 @@ export function toast(msg, err) {
   clearTimeout(t._h); t._h = setTimeout(() => (t.style.display = "none"), err ? 6000 : 2500);
 }
 export async function act(op, args) {
-  const r = await fetch("/api/action", { method: "POST", headers: {"Content-Type": "application/json"},
+  const r = await fetch("api/action", { method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({ op, args, actor: actor() }) });
   const j = await r.json();
   if (!r.ok) { toast(j.error || "failed", true); throw new Error(j.error); }

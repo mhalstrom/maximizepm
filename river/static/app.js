@@ -309,7 +309,7 @@ async function renderLog(force) {
   if (tab !== "done") return;
   const q = new URLSearchParams({ since: $("#logSince").value });
   if ($("#logProject").value) q.set("project", $("#logProject").value);
-  const r = await fetch("/api/log?" + q); if (!r.ok) return;
+  const r = await fetch("api/log?" + q); if (!r.ok) return;
   const L = await r.json(), sig = JSON.stringify(L);
   if (!force && sig === logSig) return;
   logSig = sig;
@@ -432,7 +432,7 @@ async function openDrawer(id, fresh = false) {
   // A new entry when no item was open (Back closes it); another item replaces the open one.
   if (hashItem() == null) history.pushState({ item: id }, "", pageHash(tab, id));
   else if (hashItem() !== id) history.replaceState(history.state && history.state.item != null ? { item: id } : null, "", pageHash(tab, id));
-  const r = await fetch(`/api/item/${id}`); if (!r.ok) return;
+  const r = await fetch(`api/item/${id}`); if (!r.ok) return;
   drawer.show(id, itemDrawerHtml(await r.json(), { S, me: actor() }), fresh);
 }
 
@@ -485,7 +485,7 @@ async function pollInbox() {
   const me = actor();
   $("#inboxPanel").classList.toggle("hidden", !me);
   if (!me) return;
-  const r = await fetch(`/api/inbox?agent=${encodeURIComponent(me)}${$("#inboxAll").checked ? "&all=1" : ""}`); if (!r.ok) return;
+  const r = await fetch(`api/inbox?agent=${encodeURIComponent(me)}${$("#inboxAll").checked ? "&all=1" : ""}`); if (!r.ok) return;
   IB = (await r.json()).messages;
   renderInbox();
 }
@@ -566,7 +566,7 @@ async function inboxAction(t) {
 async function toggleThread(msg) {
   const box = $("#thr-" + msg); if (!box) return;
   if (!box.classList.contains("hidden")) return box.classList.add("hidden");
-  const r = await fetch(`/api/thread/${msg}`); if (!r.ok) return;
+  const r = await fetch(`api/thread/${msg}`); if (!r.ok) return;
   box.innerHTML = (await r.json()).messages.map(msgLine).join("");
   box.classList.remove("hidden");
   const row = inboxTable && inboxTable.tabulator.getRow(msg); if (row) row.normalizeHeight();
@@ -579,7 +579,7 @@ function humanActor() { const a = S && S.agents.find(x => x.name === actor()); r
 
 async function pollNeedsYou() {
   const h = humanActor();
-  const r = await fetch("/api/needs-you" + (h ? "?human=" + encodeURIComponent(h) : "")); if (!r.ok) return;
+  const r = await fetch("api/needs-you" + (h ? "?human=" + encodeURIComponent(h) : "")); if (!r.ok) return;
   NY = (await r.json()).events;
   renderNeedsYou(); notifyNew();
 }
@@ -652,7 +652,7 @@ async function needsYouAction(t) {
 }
 
 async function refresh() {
-  const r = await fetch("/api/state"); S = await r.json();
+  const r = await fetch("api/state"); S = await r.json();
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   renderSelects(); renderCapacity(); renderNext(); renderProjects(); renderWork(); renderStrip(); renderReady(); renderAgents(); renderManager(); renderEvents(); renderSettings(); renderTakeovers(); renderBlocked(); renderTargets();
   renderRelay();
@@ -729,8 +729,8 @@ document.addEventListener("click", async (e) => {
   if (t.id === "sendGo") return sendForm();
   if (t.dataset.offer) { const n = +t.dataset.offer, body = $("#offer-" + n).value.trim(); if (!body) return toast("Say what you can take", true);
     return act("offer", { item: n, body }).then(() => toast(`Offer sent to the holder of #${n}`)).catch(() => {}); }
-  if (t.dataset.copyPrompt) return copyPrompt(`/api/item/${t.dataset.copyPrompt}/prompt`);
-  if (t.id === "copyAll") return copyPrompt("/api/prompt-all");
+  if (t.dataset.copyPrompt) return copyPrompt(`api/item/${t.dataset.copyPrompt}/prompt`);
+  if (t.id === "copyAll") return copyPrompt("api/prompt-all");
   if (t.dataset.deploy) {
     if (t.dataset.busy) return; t.dataset.busy = "1"; setTimeout(() => delete t.dataset.busy, 4000);
     const ch = await chooseLaunch(S, { title: t.dataset.review ? "Review and deploy" : "Deploy now", go: "Start",
@@ -952,7 +952,7 @@ $("#readyDlg").addEventListener("click", async (e) => {
 $("#projFolderForm").innerHTML = folderForm();
 wireFolderForms(() => { if (setupDialog.isOpen()) openSetup(); });
 async function openSetup() {
-  const r = await fetch("/api/setup"); if (!r.ok) return;
+  const r = await fetch("api/setup"); if (!r.ok) return;
   renderSetup(await r.json()); setupDialog.open();
 }
 const setupDialog = makeDialog($("#setup"));
@@ -1185,7 +1185,7 @@ $("#relayBtn").onclick = async () => {
 const RESTART_BY_HAND = "This page is newer than its server. Stop maxpm serve (Ctrl-C in its terminal) and start it again.";
 let updateMode = "update";
 async function checkUpdate() {
-  const r = await fetch("/api/update"), b = $("#updateBtn");
+  const r = await fetch("api/update"), b = $("#updateBtn");
   const u = r.ok ? await r.json() : {};
   if (!r.ok) {
     updateMode = "old";
@@ -1207,7 +1207,7 @@ async function checkUpdate() {
 async function waitForRestart(boot) {
   for (let i = 0; i < 60; i++) {  // wait for the restarted server, then load the new page
     await new Promise(res => setTimeout(res, 500));
-    try { const s = await (await fetch("/api/update?fetch=0")).json(); if (s.boot !== boot) return location.reload(); } catch (e) {}
+    try { const s = await (await fetch("api/update?fetch=0")).json(); if (s.boot !== boot) return location.reload(); } catch (e) {}
   }
   toast("The server did not come back; run maxpm serve again", true);
 }
@@ -1215,8 +1215,8 @@ $("#updateBtn").onclick = async () => {
   if (updateMode === "old") return toast(RESTART_BY_HAND, true);
   const b = $("#updateBtn"); b.disabled = true; b.textContent = updateMode === "restart" ? "Restarting…" : "Updating…";
   try {
-    const boot = (await (await fetch("/api/update?fetch=0")).json()).boot;
-    const r = await fetch("/api/action", { method: "POST", headers: {"Content-Type": "application/json"},
+    const boot = (await (await fetch("api/update?fetch=0")).json()).boot;
+    const r = await fetch("api/action", { method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ op: updateMode, args: {}, actor: actor() }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || updateMode + " failed");
@@ -1232,7 +1232,7 @@ checkUpdate().catch(() => {}); setInterval(() => { if (!document.hidden) checkUp
 // A stale server is cheap to spot (no git fetch), so look for it more often than for new commits.
 setInterval(() => {
   if (document.hidden || updateMode !== "update") return;  // hidden, or already asking for a restart
-  fetch("/api/update?fetch=0").then(r => r.ok ? r.json() : null).then(u => { if (u && u.stale) checkUpdate(); }).catch(() => {});
+  fetch("api/update?fetch=0").then(r => r.ok ? r.json() : null).then(u => { if (u && u.stale) checkUpdate(); }).catch(() => {});
 }, 60 * 1000);
 refresh().then(openFromHash).then(maybeSetup); setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
 // A hidden tab stops the full refresh but keeps asking what needs a person, so notifications still arrive.

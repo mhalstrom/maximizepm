@@ -2962,7 +2962,7 @@ class TerminalDialogLayout(unittest.TestCase):
 const post = (o) => navigator.sendBeacon("/result", JSON.stringify(o));
 try {
   const real = window.fetch;
-  window.fetch = (u, o) => (String(u).startsWith("/api/") ? new Promise(() => {}) : real(u, o));
+  window.fetch = (u, o) => (/^\/?api\//.test(String(u)) ? new Promise(() => {}) : real(u, o));
   const t = await import("/components/terminalDialog.js");
   t.openTerminal("worker-1");
   const box = document.querySelector("#termDlg .box"), scr = document.querySelector("#termScreen");

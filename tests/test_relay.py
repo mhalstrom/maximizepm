@@ -280,15 +280,19 @@ class LinkTest(Base):
         self.fake = FakeRelay()
         self.addCleanup(self.fake.close)
         self.stop = threading.Event()
-        self.addCleanup(self.stop.set)
-        self.addCleanup(time.sleep, 1.1)  # after stop: the link ends its recv (1 s timeout) and closes
         self.conn = core.connect()
         self.addCleanup(self.conn.close)
 
     def start(self, **cfg):
         relay.save({"url": self.fake.url, "token": "tok", "account": "Alice", "host": "mac", **cfg})
         self.link = relay.Link(self.stop)
-        threading.Thread(target=self.link.run, daemon=True).start()
+        thread = threading.Thread(target=self.link.run, daemon=True)
+        thread.start()
+
+        def end():  # before the temporary folder goes: the link writes relay-state.json as it stops
+            self.stop.set()
+            thread.join(5)
+        self.addCleanup(end)
 
     def hello(self):
         side = self.fake.side()
@@ -422,6 +426,64 @@ class Sessions(Base):
             core.EVENT_VIA.reset(token)
         core.project_add(conn, "b", None, "", "bob")
         self.assertEqual([r[0] for r in conn.execute("SELECT actor FROM events ORDER BY rowid")], ["bob@relay", "bob"])
+
+
+class PageRelay(Base):
+    """Page requests that come over the relay socket go to this computer's maxpm serve."""
+
+    def setUp(self):
+        super().setUp()
+        from river import server
+        try:
+            self.httpd = server._Server(("127.0.0.1", 0), server.Handler)
+        except PermissionError:
+            self.skipTest("no local port here (a sandbox)")
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        relay.PAGE_PORT["port"] = self.httpd.server_port
+        self.addCleanup(relay.PAGE_PORT.__setitem__, "port", None)
+
+    def page(self, method, path, body=None):
+        frame = {"t": "req", "id": "p1", "kind": "http", "method": method, "path": path,
+                 "headers": {"content-type": "application/json", "origin": "https://evil.example"},
+                 "body_b64": base64.b64encode(json.dumps(body).encode()).decode() if body is not None else ""}
+        res = relay.handle(frame)
+        self.assertEqual(res["id"], "p1")
+        return res["status"], res["headers"], base64.b64decode(res["body_b64"])
+
+    def test_the_same_page_and_api(self):
+        status, headers, html = self.page("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers["content-type"])
+        self.assertIn(b'id="relayBtn"', html)
+        self.assertNotIn(b'"/api/', html)
+        status, _, app_js = self.page("GET", "/app.js")
+        self.assertEqual(status, 200)
+        self.assertNotIn(b'fetch("/api/', app_js, "relative paths, so the page works under /app/ on the relay")
+        status, _, state = self.page("GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertIn("relay", json.loads(state))
+
+    def test_actions_through_the_relay_are_marked(self):
+        status, _, out = self.page("POST", "/api/action", {"op": "project_add", "args": {"name": "web"}, "actor": "mark"})
+        self.assertEqual(status, 200, out)
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        self.assertEqual(conn.execute("SELECT actor FROM events").fetchone()[0], "mark@relay")
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{self.httpd.server_port}/api/action", method="POST",
+                                     data=json.dumps({"op": "project_add", "args": {"name": "app"}, "actor": "mark"}).encode(),
+                                     headers={"content-type": "application/json", "X-Maxpm-Relay": "guessed"})
+        urllib.request.urlopen(req).close()
+        self.assertEqual(conn.execute("SELECT actor FROM events ORDER BY rowid DESC").fetchone()[0], "mark",
+                         "a wrong secret marks nothing")
+
+    def test_bad_frames_and_no_serve(self):
+        self.assertEqual(self.page("GET", "api/state")[0], 400)
+        self.assertEqual(self.page("DELETE", "/")[0], 400)
+        relay.PAGE_PORT["port"] = None
+        self.assertEqual(self.page("GET", "/")[0], 502)
 
 
 class PageConnect(Base):

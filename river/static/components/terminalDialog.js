@@ -135,7 +135,7 @@ async function send(k) {
   try {
     while (pending.length && agent) {
       const keys = pending.splice(0, pending.length);
-      const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json" },
+      const r = await fetch("api/action", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ op: "terminal_keys", args: { agent, keys }, actor: actor() }) });
       if (!r.ok) { pending = []; toast(((await r.json().catch(() => ({}))).error) || "the keys did not go", true); }
     }
@@ -162,7 +162,7 @@ async function tick() {
   const who = agent;
   let wait = document.hidden ? 3000 : 500;
   try {
-    const r = await fetch("/api/terminal?agent=" + encodeURIComponent(who));
+    const r = await fetch("api/terminal?agent=" + encodeURIComponent(who));
     const j = await r.json();
     if (who !== agent) return;
     if (!r.ok) { $("#termNote").textContent = j.error || "no terminal"; wait = 3000; }
