@@ -164,8 +164,8 @@ function agentHolds(a) {
       ${S.items.filter(i => i.status === "open" && i.reserved_until && i.reserved_for === a.name).map(i => `<div class="st">pushed <span class="link" data-open="${i.id}">#${i.id} ${esc(i.title)}</span> · ${left(i.reserved_until)} left · <span class="link" data-unpush="${i.id}">cancel</span></div>`).join("")}
       ${queueHtml((S.queues || {})[a.name], a.name)}${agentButtons(a, S)}`;
 }
-// A chat that reaches MaximizePM over MCP HTTP (agents.via): through the relay from Claude or ChatGPT, or local /mcp.
-const VIA_LABEL = { "relay claude": "Claude via relay", "relay chatgpt": "ChatGPT via relay", "relay": "via relay", "http": "chat on this computer" };
+// A chat over the local /mcp of maxpm serve (agents.via).
+const VIA_LABEL = { "http": "chat on this computer" };
 function agentSession(a) {
   return `${a.via ? `<span class="chip" title="a chat session that reaches MaximizePM over MCP (${esc(a.via)})">${esc(VIA_LABEL[a.via] || a.via)}</span> ` : ""}${a.model ? `<span class="chip c-p" title="the model this session runs (MAXPM_MODEL)">${esc(a.model)}</span> ` : ""}${a.session ? `<span title="Claude Code session">${esc(a.session)}${a.session_ref ? " [" + esc(a.session_ref) + "]" : ""}</span>` : ""}${a.session_url ? ` <a class="link" href="${esc(a.session_url)}" target="_blank" rel="noopener">open</a>` : ""}`;
 }
@@ -1136,7 +1136,7 @@ async function openFromHash() {
   if (tabIn && tabIn !== tab) await setTab(tabIn, false);
 }
 window.addEventListener("hashchange", openFromHash);
-// Relay button: connects this MaximizePM to the relay (maxpm connect), so Claude and ChatGPT connectors reach it.
+// Relay button: connects this MaximizePM to the relay (maxpm connect), so its page opens from any browser.
 // A click starts the sign-in: the relay page opens with a code to approve, and maxpm serve finishes it.
 let relayArmed = 0;  // a click on a connected relay asks again before it disconnects
 function renderRelay() {
@@ -1150,7 +1150,7 @@ function renderRelay() {
     b.title = "Approve this code on the relay page. Click to open the page again.";
   } else if (!r.configured) {
     b.textContent = "Connect relay";
-    b.title = "Let Claude and ChatGPT connectors reach this MaximizePM through the relay"
+    b.title = "Open this MaximizePM's page from any browser, through the relay"
       + (r.error ? `\nLast try: ${r.error}` : "");
   } else if (armed) {
     b.textContent = "Disconnect?";
@@ -1159,7 +1159,7 @@ function renderRelay() {
     const who = r.account ? ` as ${r.account}` : "";
     b.textContent = r.state === "connected" ? "Relay · on" : "Relay · off";
     b.title = (r.state === "connected" ? `Connected${who} to ${r.url}` : `Not connected${who}: ${r.error || r.state}`)
-      + `\nConnector URL: ${r.url}/mcp\nClick to disconnect this computer.`;
+      + `\nFrom anywhere: ${r.url}/app/\nClick to disconnect this computer.`;
   }
 }
 $("#relayBtn").onclick = async () => {

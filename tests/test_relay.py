@@ -208,7 +208,7 @@ class Connect(Base):
             cli.run(["connect", "--off"])
         self.assertIn("not connected", again.getvalue())
 
-    def test_connect_prints_the_code_and_the_connector_url(self):
+    def test_connect_prints_the_code_and_the_page_url(self):
         relay.URLOPEN = relay_answers({
             "/river/device": [(200, DEVICE)],
             "/river/device/token": [(200, {"river_token": "t", "account": "Alice"})]}, [])
@@ -219,7 +219,7 @@ class Connect(Base):
         text = out.getvalue()
         self.assertIn("BCDF-GHJK", text)
         self.assertIn("https://r.example/river/link?code=BCDF-GHJK", text)
-        self.assertIn("https://r.example/mcp", text)
+        self.assertIn("https://r.example/app/", text)
         self.assertEqual(relay.load()["url"], "https://r.example")
 
     def test_status_says_when_serve_does_not_run(self):
@@ -308,42 +308,19 @@ class LinkTest(Base):
             time.sleep(0.01)
         self.fail(f"waited for {what}: {relay.STATE}")
 
-    def test_serves_relay_requests_with_the_local_mcp_code(self):
-        core.project_add(self.conn, "web", None, "", "mark")
+    def test_says_hello_and_answers_page_requests(self):
         self.start()
         side, hello = self.hello()
-        self.assertEqual(hello["t"], "hello")
-        self.assertEqual(hello["v"], 1)
-        self.assertEqual(hello["host"], "mac")
-        self.assertEqual([t["name"] for t in hello["tools"]], [t["name"] for t in mcp.TOOLS])
-        self.assertEqual(hello["instructions"], mcp.CHAT_INSTRUCTIONS)
-        self.assertFalse(hello["replace"])
+        self.assertEqual(hello, {"t": "hello", "v": 1, "river": relay.__version__, "host": "mac", "replace": False})
         side.send_json({"t": "welcome", "v": 1, "account": "Alice", "limits": {}})
         self.until(lambda: relay.STATE.get("state") == "connected", "connected")
-
-        side.send_json({"t": "req", "id": "q1", "session": None, "client": "claude", "method": "POST",
-                        "body": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}})
+        # No maxpm serve port in this test: the answer says so (PageRelay checks a real one).
+        side.send_json({"t": "req", "id": "q1", "kind": "http", "method": "GET", "path": "/", "headers": {},
+                        "body_b64": ""})
         res = side.recv_json()
-        self.assertEqual((res["t"], res["id"], res["status"]), ("res", "q1", 200))
-        session = res["session"]
-        self.assertTrue(session)
-        self.assertEqual(res["body"]["result"]["serverInfo"]["name"], "maximizepm")
-
-        side.send_json({"t": "req", "id": "q2", "session": session, "client": "claude", "method": "POST",
-                        "body": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                            "name": "maxpm", "arguments": {"args": ["--as", "bob", "add", "web", "From Cowork"]}}}})
-        res = side.recv_json()
-        self.assertFalse(res["body"]["result"]["isError"], res)
-        actors = [r[0] for r in self.conn.execute("SELECT actor FROM events")]
-        self.assertIn("bob@relay", actors, "a relay session's events say @relay")
-        self.assertNotIn("bob", actors)
-
-        side.send_json({"t": "req", "id": "q3", "session": "unknown", "client": "claude", "method": "POST",
-                        "body": {"jsonrpc": "2.0", "id": 3, "method": "ping"}})
-        self.assertEqual(side.recv_json()["status"], 404)
-        side.send_json({"t": "req", "id": "q4", "session": session, "client": "claude", "method": "DELETE",
-                        "body": None})
-        self.assertEqual(side.recv_json()["status"], 204)
+        self.assertEqual((res["t"], res["id"], res["status"]), ("res", "q1", 502))
+        side.send_json({"t": "req", "id": "q2", "method": "POST", "body": {"jsonrpc": "2.0", "id": 1}})
+        self.assertEqual(side.recv_json()["status"], 400, "only page requests come over the socket")
 
     def test_pings_and_reconnects_after_the_socket_drops(self):
         relay.PING_EVERY, old = 0.1, relay.PING_EVERY
@@ -399,29 +376,11 @@ class LinkTest(Base):
 
 
 class Sessions(Base):
-    def test_relay_and_local_sessions_stay_apart(self):
+    def chat_go(self):
         init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
-        ping = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode()
-        _, _, local = mcp.http_post(init)
-        _, _, remote = mcp.http_post(init, via="relay")
-        self.assertEqual(mcp.http_post(ping, local["Mcp-Session-Id"], via="relay")[0], 404)
-        self.assertEqual(mcp.http_post(ping, remote["Mcp-Session-Id"])[0], 404)
-        self.assertEqual(mcp.http_post(ping, remote["Mcp-Session-Id"], via="relay")[0], 200)
-        self.assertFalse(mcp.http_delete(remote["Mcp-Session-Id"]))
-        self.assertTrue(mcp.http_delete(remote["Mcp-Session-Id"], via="relay"))
-
-    def test_unused_sessions_expire_after_7_days(self):
-        init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
-        _, _, h = mcp.http_post(init, via="relay")
-        mcp.HTTP_SESSIONS[h["Mcp-Session-Id"]].last_used -= 8 * 24 * 3600
-        mcp.http_post(init, via="relay")
-        self.assertNotIn(h["Mcp-Session-Id"], mcp.HTTP_SESSIONS)
-
-    def chat_go(self, **kw):
-        init = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
-        _, _, h = mcp.http_post(init, **kw)
+        _, _, h = mcp.http_post(init)
         call = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "go", "arguments": {}}})
-        _, reply, _ = mcp.http_post(call.encode(), h["Mcp-Session-Id"], **kw)
+        _, reply, _ = mcp.http_post(call.encode(), h["Mcp-Session-Id"])
         text = reply["result"]["content"][0]["text"]
         return re.search(r"You are MaximizePM agent (\S+?)\.", text).group(1)
 
@@ -431,23 +390,19 @@ class Sessions(Base):
         self.addCleanup(conn.close)
         core.project_add(conn, "web", None, "", "mark")
         with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "MAXPM_MODEL": "opus", "MAXPM_FOCUS": "manager"}):
-            name = self.chat_go(via="relay", client="claude")
-            local = self.chat_go()
+            name = self.chat_go()
         row = dict(conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone())
-        self.assertEqual(row["via"], "relay claude")
+        self.assertEqual(row["via"], "http")
         self.assertIsNone(row["agent_type"], "not maxpm serve's Claude Code")
         self.assertIsNone(row["model"])
         self.assertIsNone(row["pid"])
         self.assertIsNone(row["platform"])
-        self.assertEqual(conn.execute("SELECT via FROM agents WHERE name=?", (local,)).fetchone()[0], "http")
-        self.assertEqual(self.chat_go(via="relay", client="chatgpt") and
-                         conn.execute("SELECT via FROM agents ORDER BY rowid DESC").fetchone()[0], "relay chatgpt")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.run(["who"])
-        self.assertIn("chat over MCP: relay claude", out.getvalue())
+        self.assertIn("chat over MCP: http", out.getvalue())
 
-    def test_events_say_relay_only_inside_a_relay_call(self):
+    def test_events_say_relay_only_while_a_relayed_action_runs(self):
         conn = core.connect()
         self.addCleanup(conn.close)
         token = core.EVENT_VIA.set("relay")
@@ -479,7 +434,7 @@ class PageRelay(Base):
         frame = {"t": "req", "id": "p1", "kind": "http", "method": method, "path": path,
                  "headers": {"content-type": "application/json", "origin": "https://evil.example"},
                  "body_b64": base64.b64encode(json.dumps(body).encode()).decode() if body is not None else ""}
-        res = relay.handle(frame)
+        res = relay.handle_page(frame)
         self.assertEqual(res["id"], "p1")
         return res["status"], res["headers"], base64.b64decode(res["body_b64"])
 

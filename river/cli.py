@@ -859,8 +859,8 @@ def build_parser():
     dbs = db.add_subparsers(dest="dcmd", required=True)
     dbs.add_parser("path", help="print the database file MaximizePM uses")
     sub.add_parser("mcp", help="an MCP server on stdin/stdout, for agents that cannot run shell commands")
-    x = sub.add_parser("connect", help="connect this computer to the MaximizePM relay, so that Claude and ChatGPT "
-                                       "connectors reach this MaximizePM (maxpm serve keeps the connection open)")
+    x = sub.add_parser("connect", help="connect this computer to the MaximizePM relay, so that you can open this "
+                                       "MaximizePM's page from any browser (maxpm serve keeps the connection open)")
     x.add_argument("--off", action="store_true", help="disconnect: revoke this computer's relay token and forget it")
     x.add_argument("--status", action="store_true", help="show the relay connection")
     x.add_argument("--replace", action="store_true",
@@ -1885,7 +1885,7 @@ def connect_command(args):
     who = f" as {cfg['account']}" if cfg.get("account") else ""
     print(f"Connected to {cfg['url']}{who}. maxpm serve keeps the connection open: it connects within a few "
           "seconds when it runs (start it with maxpm serve).")
-    print("Then add the connector in Claude or ChatGPT: " + cfg["url"] + "/mcp")
+    print("Then open your MaximizePM from any browser: " + cfg["url"] + "/app/")
     return 0
 
 

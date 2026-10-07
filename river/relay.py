@@ -1,19 +1,15 @@
-"""The MaximizePM relay: Claude and ChatGPT connectors reach this computer's MaximizePM through it.
+"""The MaximizePM relay: the person opens this computer's MaximizePM page from any browser.
 
 `maxpm connect` signs this computer in to the relay once (a device flow: the person approves a code in the
 browser) and keeps the river token in relay.json next to the database (mode 0600, never in the settings
-table). While that file exists, `maxpm serve` keeps one outbound WebSocket to the relay open, and serves each
-request that comes over it with mcp.http_post and mcp.http_delete: the same code as the local /mcp. Events
-that a relay session writes carry the actor <agent>@relay. Standard library only.
-
-The relay also shows the person this computer's MaximizePM page (https://relay.maximizepm.com/app/): each
-page request comes over the same socket (req kind "http"), and river passes it to its own maxpm serve on
-127.0.0.1, with a header that marks it as relayed, so the page and its actions are the same as here.
+table). While that file exists, `maxpm serve` keeps one outbound WebSocket to the relay open. The relay shows
+the page at https://relay.maximizepm.com/app/: each page request comes over the socket, and river passes it
+to its own maxpm serve on 127.0.0.1 with a header that marks it as relayed, so the page and its actions are the
+same as here, and the actions are recorded as <name>@relay. Standard library only.
 
 Protocol 1 (frames are JSON text):
-  river -> relay  hello {v, river, host, tools, instructions, replace}
+  river -> relay  hello {v, river, host, replace}
   relay -> river  welcome {v, account, limits}   bye {reason}
-  relay -> river  req {id, session, client, method, body}            (MCP)   -> res {id, status, session, body}
   relay -> river  req {id, kind: "http", method, path, headers, body_b64}  -> res {id, status, headers, body_b64}
 """
 
@@ -461,9 +457,7 @@ class Link:
         opener = OPEN_SOCKET or WebSocket.open
         ws = opener(ws_url, {"Authorization": f"Bearer {cfg['token']}", "User-Agent": f"maxpm/{__version__}"})
         try:
-            from . import mcp
             ws.send_text(json.dumps({"t": "hello", "v": PROTOCOL, "river": __version__, "host": cfg.get("host"),
-                                     "tools": mcp.TOOLS, "instructions": mcp.CHAT_INSTRUCTIONS,
                                      "replace": bool(cfg.get("replace"))}))
             ws.sock.settimeout(15)
             kind, data = ws.recv()
@@ -512,7 +506,7 @@ class Link:
                 raise Bye(frame.get("reason") or "no reason")
 
     def serve_request(self, ws: WebSocket, frame: dict) -> None:
-        answer = handle(frame)
+        answer = handle_page(frame)
         try:
             ws.send_text(json.dumps(answer))
         except OSError:
@@ -534,7 +528,7 @@ def handle_page(frame: dict) -> dict:
                 "body_b64": base64.b64encode(text.encode()).decode()}
 
     path, method = frame.get("path") or "/", frame.get("method") or "GET"
-    if not path.startswith("/") or method not in ("GET", "HEAD", "POST"):
+    if frame.get("kind") != "http" or not path.startswith("/") or method not in ("GET", "HEAD", "POST"):
         return fail(400, "bad page request")
     if not PAGE_PORT["port"]:
         return fail(502, "maxpm serve has no port")
@@ -555,25 +549,6 @@ def handle_page(frame: dict) -> dict:
         return fail(502, f"maxpm serve did not answer: {e}")
     finally:
         conn.close()
-
-
-def handle(frame: dict) -> dict:
-    """One req frame -> its res frame: a page request, or MCP with the code of the local /mcp."""
-    from . import mcp
-    if frame.get("kind") == "http":
-        return handle_page(frame)
-    rid, session = frame.get("id"), frame.get("session")
-    try:
-        if frame.get("method") == "DELETE":
-            gone = mcp.http_delete(session, via="relay")
-            return {"t": "res", "id": rid, "status": 204 if gone else 404, "session": None, "body": None}
-        status, reply, headers = mcp.http_post(json.dumps(frame.get("body")).encode(), session, via="relay",
-                                               client=frame.get("client"))
-        return {"t": "res", "id": rid, "status": status, "session": headers.get("Mcp-Session-Id"), "body": reply}
-    except Exception as e:  # never leave the relay without an answer
-        body = frame.get("body") if isinstance(frame.get("body"), dict) else {}
-        return {"t": "res", "id": rid, "status": 500, "session": None,
-                "body": {"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32603, "message": f"maxpm: {e}"}}}
 
 
 def start(stop: threading.Event, port: int | None = None) -> threading.Thread:

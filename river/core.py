@@ -438,7 +438,7 @@ CREATE TABLE IF NOT EXISTS agents (
   session_url    TEXT,                       -- web link to the agent's session (Claude Code Remote Control)
   model          TEXT,                       -- the model the session runs (MAXPM_MODEL, maxpm go --model)
   agent_type     TEXT,                       -- the agent CLI it runs in (codex, claude-code), from its environment
-  via            TEXT,                       -- a chat over MCP HTTP: 'relay claude', 'relay chatgpt', 'relay', or 'http' (local /mcp)
+  via            TEXT,                       -- 'http': a chat over the local /mcp of maxpm serve
   manage_seen    TEXT,                       -- the manager's findings it has seen (maxpm manage --watch)
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
@@ -864,12 +864,12 @@ class tx:
         return False
 
 
-# How the running command reached MaximizePM, when not directly: "relay" while mcp.Server serves a session
-# that came over the relay (relay.py). _event then records the actor as <agent>@relay.
+# How the running command reached MaximizePM, when not directly: "relay" while maxpm serve answers an action
+# from the page shown through the relay (relay.handle_page). _event then records the actor as <name>@relay.
 EVENT_VIA: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_event_via", default=None)
-# Set while mcp.Server runs a command for a chat over MCP HTTP (local /mcp or the relay): how it came ('relay
-# claude', 'relay chatgpt', 'relay', or 'http'). The environment and the parent processes are maxpm serve's,
-# not the chat's, so go records no agent type, model, process, or native address from them.
+# 'http' while mcp.Server runs a command for a chat over the local /mcp of maxpm serve. The environment and the
+# parent processes are maxpm serve's, not the chat's, so go records no agent type, model, process, or native
+# address from them, and records via='http'.
 HTTP_CHAT: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_http_chat", default=None)
 
 
