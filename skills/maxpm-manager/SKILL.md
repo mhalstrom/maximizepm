@@ -26,10 +26,14 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    an agent waits longer than `wait_too_long`, a project has ready agent work
    and no agent, a target owner is away or gone, a question for the user), and
    when a message or question comes to you: it prints the message and marks it
-   read. A finding it reported before does not wake it again. With nothing new
+   read. After the first new finding it waits `manage_settle` (2m) more and
+   returns every finding that came meanwhile, so a group of findings wakes you
+   once. A finding it reported before does not wake it again. With nothing new
    it exits after `manage_every` with one line. When the briefing says MaximizePM
    delivers messages into your session itself (`native_message`), messages do
-   not wake the watch.
+   not wake the watch. Run no second background command: each wake reads your
+   whole context again, so a second watcher doubles the cost. MaximizePM refuses
+   `maxpm inbox --wait` from the active manager.
 3. Act on what is new. Then start `manage --watch` again.
 
 Stop when the user tells you to, and tell the user what you did.

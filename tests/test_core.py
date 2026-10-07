@@ -3628,8 +3628,10 @@ class Manager(Base):
         w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
         self.assertEqual((w["result"], w["new"]), ("tick", []))
         self.add("b", "new work")
+        core.config_set(self.c, "manage_settle", "0s")
         w = core.manage_watch(self.c, "boss", step="1m", sleep=lambda s: None)
         self.assertEqual((w["result"], w["new"]), ("change", ["uncovered:b"]))
+        core.config_unset(self.c, "manage_settle")
         # A finding it reported before does not wake it again: it waits the whole manage_every.
         self.assertEqual(core.DEFAULT_SETTINGS["manage_every"], "30m")
         t0, naps = core.now(), []
@@ -3638,6 +3640,43 @@ class Manager(Base):
         self.assertEqual((w["result"], w["new"], len(naps)), ("tick", [], 3))  # 30m, not the 9m wait_step
         with self.assertRaisesRegex(RiverError, "not the manager"):
             core.manage_watch(self.c, "w1", step="0s")
+
+    def test_a_group_of_findings_wakes_the_watch_once(self):
+        # After the first new finding the watch waits manage_settle (2m), then returns the whole group (#1312).
+        core.manage(self.c, self.dir.name, "boss")
+        self.assertEqual(core.DEFAULT_SETTINGS["manage_settle"], "2m")
+        t0, naps = core.now(), []
+
+        def nap(s):
+            naps.append(s)
+            if len(naps) == 1:
+                self.add("a", "first")
+            elif len(naps) == 2:
+                self.add("b", "second")
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
+            w = core.manage_watch(self.c, "boss", sleep=nap)
+        self.assertEqual((w["result"], w["new"], len(naps)), ("change", ["uncovered:a", "uncovered:b"], 3))
+        # A finding that goes away before manage_settle wakes nothing.
+        ids = []
+
+        def come_and_go(s):
+            naps.append(s)
+            if not ids:
+                ids.append(self.add("a", "brief"))
+            elif len(ids) == 1:
+                core.drop(self.c, ids[0], note="not needed", actor="mark")
+                ids.append(None)
+        t0, naps = core.now(), []
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
+            w = core.manage_watch(self.c, "boss", step="5m", sleep=come_and_go)
+        self.assertEqual((w["result"], w["new"]), ("tick", []))
+        # A message does not wait for the settle time.
+        self.add("b", "third")
+        core.send(self.c, "note", "now", to="boss", actor="w1")
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no settle wait for a message"))
+        self.assertEqual(w["result"], "messages")
+        with self.assertRaisesRegex(RiverError, "bad duration"):
+            core.config_set(self.c, "manage_settle", "soon")
 
     def test_messages_wake_the_watch_so_one_watcher_is_enough(self):
         core.manage(self.c, self.dir.name, "boss")
@@ -3674,20 +3713,25 @@ class Manager(Base):
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait after a stop"))
         self.assertEqual(w["result"], "stop")
 
-    def test_inbox_wait_still_works_for_any_agent(self):
+    def test_inbox_wait_works_for_any_agent_but_the_active_manager(self):
         core.manage(self.c, self.dir.name, "boss")
+        # The active manager has one watcher, manage --watch: a second one doubled its wakes (#1312).
+        with self.assertRaisesRegex(RiverError, "only watcher.*boss manage --watch"):
+            core.inbox_wait(self.c, "boss", "1m")
         # An open question already read does not wake it again; a timeout returns nothing.
-        core.send(self.c, "question", "which db?", to="boss", actor="w1")
-        core.inbox_wait(self.c, "boss", "1m")
+        core.send(self.c, "question", "which db?", to="w1", actor="w2")
+        core.inbox_wait(self.c, "w1", "1m")
         naps = []
-        r = core.inbox_wait(self.c, "boss", "0s", sleep=naps.append)
+        r = core.inbox_wait(self.c, "w1", "0s", sleep=naps.append)
         self.assertEqual((r["result"], r["messages"], naps), ("timeout", [], []))
         # A message that comes while it waits ends the wait.
-        r = core.inbox_wait(self.c, "boss", "1h", sleep=lambda s: core.send(self.c, "alert", "now", to="boss", actor="w1"))
+        r = core.inbox_wait(self.c, "w1", "1h", sleep=lambda s: core.send(self.c, "alert", "now", to="w1", actor="w2"))
         self.assertEqual([m["body"] for m in r["messages"]], ["now"])
-        core.stop_agent(self.c, "boss", "done for today", actor="mark")
-        self.assertEqual(core.inbox_wait(self.c, "boss", "1h")["result"], "stop")
+        core.stop_agent(self.c, "w1", "done for today", actor="mark")
+        self.assertEqual(core.inbox_wait(self.c, "w1", "1h")["result"], "stop")
+        # A manager that was taken over is no longer the active one: it may wait, and reads the alert.
         self.assertFalse(core.manage(self.c, self.dir.name, "boss2", takeover="x")["native"])
+        self.assertIn("took over as manager", core.inbox_wait(self.c, "boss", "0s")["messages"][0]["body"])
 
 
 class BusyLease(Base):

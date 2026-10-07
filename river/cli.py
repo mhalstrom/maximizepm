@@ -2026,8 +2026,11 @@ def render_manage(b):
              if b.get("chat") else
              f"Then watch: keep {r} manage --watch running as a background command (Claude Code: run_in_background "
              f"with a time limit above {b['every']}; a foreground shell: add --step 9m). It exits on a new finding"
+             + (f" (after manage_settle {b['settle']}, with the findings that came meanwhile)"
+                if b.get("settle") and core.parse_duration(b["settle"]).total_seconds() else "")
              + (", " if b.get("native") else ", a new message to you (it prints it), ")
-             + f"or after manage_every {b['every']} with one line; start it again each time. It is your only watcher."),
+             + f"or after manage_every {b['every']} with one line; start it again each time. It is your only "
+               f"watcher: MaximizePM refuses a second wait for your messages."),
             *([] if b.get("chat") or not b.get("native") else [
             "Messages: MaximizePM delivers them into this session itself (native_message); they do not wake the watch."]),
             "The rules: maxpm guide manager"]

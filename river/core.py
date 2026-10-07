@@ -165,6 +165,11 @@ DEFAULT_SETTINGS = {
     # count (a server that an agent left running would hold an item for ever). 0s: only river commands renew.
     "busy_max": "4h",
     "manage_every": "30m",
+    # maxpm manage --watch waits this long after the first new finding, and then returns all new findings at
+    # once: they often come in groups (an agent ends, then its lease runs out), and each wake makes the manager
+    # read its whole context again (#1312). A finding that goes away in this time wakes nothing. Messages and a
+    # stop request still return at once. 0s: return at the first finding.
+    "manage_settle": "2m",
     # The manager session's context: Claude Code compacts it at this size (claude --autocompact; 100k to 1M,
     # for example 200k). The session stays the same, with the same name and Remote Control link, and the next
     # maxpm manage briefing shows the queue again. A manager reads its whole context on each wake, so a small
@@ -949,7 +954,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     if key not in DEFAULT_SETTINGS:
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
-            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "connect_within",
+            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "connect_within",
             "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout"):
         parse_duration(value)
     elif key == "prompt_pattern":
@@ -6193,6 +6198,9 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
     if not actor:
         raise RiverError("the inbox needs an agent name: set MAXPM_AGENT or pass --as <name>")
     _agent(conn, actor)
+    if active_manager(conn) == actor:  # a second watcher woke the manager twice for each message (#1312)
+        raise RiverError(f"{actor} is the active manager, and maxpm manage --watch is its only watcher: it returns "
+                         f"for messages too. Run maxpm --as {actor} manage --watch instead of inbox --wait")
     deadline = now() + parse_duration(timeout or INBOX_WAIT)
     while True:
         st = stop_request(conn, actor)
@@ -8174,7 +8182,8 @@ def manage(conn, cwd, actor=None, takeover=None):
     with tx(conn):  # what the manager has seen: manage --watch reports what is new after this
         conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(_finding_keys(f)), actor))
     return {"agent": actor, "new_name": new_name, "role": "manager", "status": status(conn), "findings": f,
-            "took_over": other, "every": setting(conn, "manage_every"), "wait_too_long": setting(conn, "wait_too_long"),
+            "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
+            "wait_too_long": setting(conn, "wait_too_long"),
             "tidy_every": setting(conn, "tidy_every"),
             "native": has_native(conn, actor)}
 
@@ -8183,8 +8192,9 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     """maxpm manage --watch: block until something new needs the manager (a new finding, an unread message
     or a stop request), at most manage_every (or step). Findings it reported before do not count as new;
     the messages it returns are marked read, as maxpm inbox --wait does, so the manager needs one watcher.
-    With native_message the platform brings messages into the session, and they do not wake it. Returns
-    what changed."""
+    After the first new finding it waits manage_settle more, so a group of findings wakes the manager once;
+    a message or a stop request returns at once. With native_message the platform brings messages into the
+    session, and they do not wake it. Returns what changed."""
     import json
     import time
     sleep = sleep or time.sleep
@@ -8196,14 +8206,20 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     except (TypeError, ValueError):
         base = set()
     deadline = now() + parse_duration(step or setting(conn, "manage_every", agent=actor))
+    settle = parse_duration(setting(conn, "manage_settle", agent=actor))
     native = has_native(conn, actor)
+    settled = None  # when the first new finding has waited manage_settle
     while True:
         f = manager_findings(conn)
         keys = set(_finding_keys(f))
         st = stop_request(conn, actor)
         # Unread only: an open question already read would wake it at once, every time.
         mail = not native and unread(conn, actor)["unread"]
-        if keys - base or mail or st or now() >= deadline:
+        if not keys - base:
+            settled = None  # a finding that went away again wakes nothing
+        elif settled is None:
+            settled = now() + settle
+        if (settled and now() >= settled) or mail or st or now() >= deadline:
             rows = inbox(conn, actor) if mail else []
             with tx(conn):
                 conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(sorted(keys)), actor))
