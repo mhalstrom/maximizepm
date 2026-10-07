@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2297,12 +2298,22 @@ class LaunchProfiles(unittest.TestCase):
         # A primer that claude_args names goes in the same file, first; the other arguments stay.
         primer = Path(self.dir.name) / "primer.md"
         primer.write_text("# Primer\nThe map of the shop.\n")
-        core.config_set(self.c, "claude_args", f"--verbose --append-system-prompt-file {primer}", project="shop")
+        core.config_set(self.c, "claude_args", f"--verbose --append-system-prompt-file {shlex.quote(str(primer))}",
+                        project="shop")
         cmd2 = core._launch_agent_cmd(self.c, pid, None)["command"]
         self.assertEqual(cmd2.count("--append-system-prompt-file"), 1)
         self.assertIn("claude --verbose --append-system-prompt-file ", cmd2)
-        text2 = Path(re.search(r"--append-system-prompt-file (\S+)", cmd2).group(1)).read_text()
+        text2 = Path(re.search(r"--append-system-prompt-file (\S+)", cmd2).group(1).strip("'")).read_text()
         self.assertTrue(text2.startswith("# Primer\nThe map of the shop.\n\n" + core.SKILL_PROMPT_HEAD))
+        # On Windows the arguments split the cmd.exe way: double quotes, and a path keeps its backslashes.
+        core.PLATFORM = "win32"
+        spaced = Path(self.dir.name) / "my primer.md"
+        spaced.write_text("# Spaced\n")
+        words = core.skill_prompt_args(f'--verbose --append-system-prompt-file "{spaced}"').split(
+            " --append-system-prompt-file ")
+        self.assertEqual(words[0], "--verbose")
+        self.assertTrue(Path(words[1].strip('"')).read_text().startswith("# Spaced\n\n" + core.SKILL_PROMPT_HEAD))
+        core.PLATFORM = "darwin"
         # A primer that cannot be read: the arguments stay as they are, and the skill stays out.
         core.config_set(self.c, "claude_args", "--append-system-prompt-file /no/such/primer.md", project="shop")
         self.assertIn("--append-system-prompt-file /no/such/primer.md go", core._launch_agent_cmd(self.c, pid, None)["command"])

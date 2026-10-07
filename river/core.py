@@ -6655,7 +6655,11 @@ def skill_prompt_args(args):
     import hashlib
     import shlex
     try:
-        words = shlex.split(args or "")
+        if PLATFORM == "win32":  # a POSIX split drops the backslashes of a Windows path
+            words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] == '"' else w
+                     for w in shlex.split(args or "", posix=False)]
+        else:
+            words = shlex.split(args or "")
     except ValueError:
         return args
     rest, primer = [], None
