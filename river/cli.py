@@ -2437,6 +2437,11 @@ def render_go(b):
                 f"  needs an item that exists: {r} dep {it['id']} --on <its id> --release   (a note alone is no link)",
                 f"  other work found:      {r} add \"<title>\" --found-during {it['id']}",
                 f"  a step for the user:   {r} add \"...\" --doer human --context \"...\" --blocks {it['id']}",
+                f"  a limit of the machine (disk, build stop, push freeze): keep the item, do the other parts, then "
+                f"{r} inbox --wait",
+                f"  a refused command:     a step for the user, with the command and the permission rule that allows it",
+                f"  the user should look at the result: push, done, then {r} add \"Look at ...\" --doer human "
+                f"--found-during {it['id']}",
                 f"  vague item: make a reasonable choice and say what you chose in --output.",
                 "",
             ]
@@ -2453,6 +2458,23 @@ def render_go(b):
                 f"    after a release with only a note such as \"waits on #12\", go gives this item to the next session).",
                 f"  - You find other work: {r} add \"<title>\" --found-during {it['id']}. Do not do it now.",
                 f"  - Waiting on something outside the queue: {r} blocked {it['id']} --reason \"<what>\", release, run go again.",
+                # The three rules of #1599 (research #1597: 30 stops and 11 stands at the prompt for limits of the
+                # machine, 10 stands after a refused command, an item held 6.5 hours for the word "push").
+                f"  - A limit of the machine (a full disk, a build stop, a push freeze, quiet time during a release gate) "
+                f"does not block the item:",
+                f"    do the parts that do not need the limited thing, commit, keep #{it['id']}, and wait for the "
+                f"manager's word that it ended:",
+                f"    {r} inbox --wait   (start it again when it ends with nothing). Take no other item that needs the "
+                f"same thing.",
+                f"  - A command is refused (the auto mode classifier, a permission prompt): do the parts you can. Then "
+                f"it is a step for the user",
+                f"    (below), with the exact command and the permission rule that allows it. Stand at your prompt only "
+                f"for a release to",
+                f"    production or a deletion of data: {r} ask <person> \"<what to approve>\" --item {it['id']}   first.",
+                f"  - The user should look at the finished result: push, {r} done {it['id']}, then "
+                f"{r} add \"Look at <result>\" --doer human --found-during {it['id']}.",
+                f"    Ask before the push only for public text, a release to production, a step that deletes data or "
+                f"costs money, or when the item says so.",
                 f"  - You need the user (a decision, an approval, an account or payment step): put it in the queue, not only in chat:",
                 f"    {r} add \"<what to decide or do>\" --doer human --context \"<exactly what, where the material is>\" --blocks {it['id']} --release",
                 *([f"    Commit what is finished, and say in the item's --context what is left. Then run go again: take other work, or",

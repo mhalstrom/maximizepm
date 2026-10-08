@@ -251,6 +251,15 @@ Name the item in commit messages (`Fix the header (#12)`), so a check finds it.
 - Waiting on something outside the queue: `maxpm blocked <id> --reason "<what>"`.
   Add `--until <time>` (`2h`, `2026-09-28T07:00`, `'mon 07:00 America/New_York'`)
   when you know when it ends: the item becomes ready by itself then.
+- A limit of the machine (a full disk, a build stop, Docker down, a push
+  freeze, quiet time while a release gate runs) does not block your item, and
+  `maxpm blocked` is not for it: the next item meets the same limit. Do the
+  parts that do not need the limited thing and commit them. Then keep the
+  item and wait for the manager's word that the limit ended:
+  `maxpm inbox --wait` in the foreground (start it again when it ends with
+  nothing; each start renews your lease). Then finish the item. Take no other
+  item that needs the same thing. Do not ask the user, and do not ask the
+  manager if the limit ended: the manager tells every session.
 
 ## When you need the user
 
@@ -279,14 +288,26 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   `human_wait_max` (30m). Then MaximizePM releases your item (it still waits on the
   person's item), reminds the person, and tells you to take other work:
   run `maxpm go`. When the person finishes, the item is ready for whoever runs go.
-- Only you can do the step once the person says yes (a deploy, a command the
-  auto mode classifier refused to you), so you must wait at your prompt: ask in
-  the queue first, as your last step before you stop:
+- A command is refused (the auto mode classifier, a permission prompt): do
+  the parts of the item that you can. Then add the person's item as above,
+  with the exact command and the permission rule that allows it
+  (`--blocks <id> --release`), and take other work. The person runs the
+  command or adds the rule, and a fresh session finishes the item. A yes in
+  one terminal does not reach the next session, and a rule does.
+- Wait at your prompt only for a step that must not run without the person's
+  yes each time: a release to production, or a deletion of data. Ask in the
+  queue first, as your last step before you stop:
   `maxpm ask <person> "<what to approve>" --item <the item you hold>`. While the
   question is open, `maxpm serve` keeps your lease (and your deploy target),
   takes nothing back, starts no other session for your work, and alerts the
   manager. The person answers in your terminal or with `maxpm answer`. A wait
   that you only say in chat looks idle: `maxpm serve` gives your work to others.
+- The user should look at a finished result (a page, a text, a design): push
+  first, close the item, and add `maxpm add "Look at <result>: <where>" --doer
+  human --found-during <id>`. What the user wants changed becomes new items.
+  Do not hold the item for the word "push". Ask before the push only for
+  public text (a README, a site), a release to production, a step that
+  deletes data or costs money, or when the item says "ask before the push".
 
 When you put a decision to the user in chat, use one form, one decision at a
 time (`maxpm guide decisions` prints it):

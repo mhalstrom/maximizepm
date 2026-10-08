@@ -118,6 +118,19 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm goal edit <name> --owned` undoes it.
 - **QUESTION** to the user or **WAITS ON THE USER**: tell the user in chat, one
   decision at a time (`maxpm guide decisions`). Do not answer for them.
+- **A command that agents are refused again and again** (the auto mode
+  classifier or a permission prompt refuses a normal step of the project: the
+  checkout of a review gate, the removal of an agent's own build folder, the
+  push of a finished item): each worker adds an item for the user with the
+  command and its permission rule. Collect the commands that repeat in one
+  item for the user for each project: "Allow these commands in the project
+  settings", with each exact command and rule. A yes in one terminal does not
+  reach the next session; one rule ends the stop for every later session.
+- **A limit of the machine** (a full disk, no builds, a push freeze, quiet
+  time during a release gate): tell every session one time when it starts and
+  one time when it ends. Workers keep their items, do the parts that do not
+  need the limited thing, and wait in `maxpm inbox --wait` for your word.
+  They do not ask you if it ended, so say it to each of them.
 
 ## Your tools
 

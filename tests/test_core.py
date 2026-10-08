@@ -277,6 +277,44 @@ class Go(Base):
         self.assertEqual(b["messages"]["unread"], 1)
         self.assertIn("Messages for you: inbox: 1 unread", text(b))
 
+    def test_the_briefing_has_the_rules_for_a_machine_limit_a_refused_command_and_a_look(self):
+        # #1599 (research #1597): workers stood at their prompts for a full disk, a refused command, and the
+        # word "push"; maxpm wait refuses while an item is held, so the wait for a limit is maxpm inbox --wait.
+        import re
+        from river import cli
+        x, y = self.add("web", "page"), self.add("web", "form")
+
+        def text(brief):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render_go(brief)
+            return re.sub(r"\s+", " ", out.getvalue())
+        b = core.go(self.c, self.web)
+        me, first = b["agent"], text(b)
+        self.assertEqual(b["item"]["id"], x)
+        self.assertIn(f"A limit of the machine (a full disk, a build stop, a push freeze, quiet time during a release "
+                      f"gate) does not block the item: do the parts that do not need the limited thing, commit, keep "
+                      f"#{x}, and wait for the manager's word that it ended: maxpm --as {me} inbox --wait", first)
+        self.assertIn("A command is refused (the auto mode classifier, a permission prompt): do the parts you can. "
+                      "Then it is a step for the user (below), with the exact command and the permission rule that "
+                      "allows it. Stand at your prompt only for a release to production or a deletion of data", first)
+        self.assertIn(f"The user should look at the finished result: push, maxpm --as {me} done {x}, then maxpm --as "
+                      f"{me} add \"Look at <result>\" --doer human --found-during {x}. Ask before the push only for "
+                      f"public text, a release to production, a step that deletes data or costs money, or when the "
+                      f"item says so.", first)
+        with self.assertRaisesRegex(RiverError, "finish or release it before you wait"):
+            core.wait(self.c, self.web, me, step="0s", sleep=lambda s: None)
+        # The short form of a later briefing keeps one line for each.
+        core.done(self.c, x, "done", me)
+        later = text(core.go(self.c, self.web, me))
+        self.assertIn("Rules as before. Short form:", later)
+        self.assertIn(f"a limit of the machine (disk, build stop, push freeze): keep the item, do the other parts, "
+                      f"then maxpm --as {me} inbox --wait", later)
+        self.assertIn("a refused command: a step for the user, with the command and the permission rule that allows it",
+                      later)
+        self.assertIn(f"the user should look at the result: push, done, then maxpm --as {me} add \"Look at ...\" "
+                      f"--doer human --found-during {y}", later)
+
     def test_a_project_linked_to_another_folder_moves_only_with_move(self):
         other = os.path.join(self.dir.name, "other")
         os.makedirs(other)
