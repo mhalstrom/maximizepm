@@ -784,6 +784,8 @@ def build_parser():
     x = sts.add_parser("move", help="move a step within its project"); x.add_argument("id", type=int)
     x.add_argument("to", type=int, help="new position (1 is first)")
     x = sub.add_parser("release", help="give a claimed item back"); x.add_argument("id", type=int); x.add_argument("--note")
+    x.add_argument("--author", metavar="COMMITS", help="a release review only: you wrote commits of the release (say "
+                   "which); maxpm go and maxpm serve give you this review no more, and another session takes it")
     x = sub.add_parser("drop", help="close an item without doing it"); x.add_argument("id", type=int)
     x.add_argument("--note", help="why (required when an agent drops a person's item)")
     x = sub.add_parser("takeover", help="an agent does a person's item itself (the user is told, and can undo)")
@@ -1780,7 +1782,7 @@ def dispatch(conn, a, actor):
             return core.review_step_move(conn, a.id, a.to, actor)
         return core.review_fail(conn, a.id, a.fixes, a.note, a.project, actor, a.ask)
     if c == "release":
-        return core.release(conn, a.id, a.note, actor)
+        return core.release(conn, a.id, a.note, actor, a.author)
     if c == "drop":
         return core.drop(conn, a.id, actor, a.note)
     if c == "takeover":
@@ -2393,6 +2395,8 @@ def render_go(b):
                     "                (MaximizePM adds the fixes as items the review waits on; the review comes back after them)",
                     "                Add --ask to let the user approve the list first (one item in Needs you).",
                     f"  Findings that do not block the release: {r} add \"<title>\" --found-during {it['id']} --project <name>",
+                    f"  A commit in the range you review is yours: {r} release {it['id']} --author \"<your commits>\"",
+                    "                (do not review your own work; MaximizePM gives this review to another session)",
                     "",
                     f"Then continue:  {r} go" + ("   at once, in the same turn." if b.get("auto_continue") else "")]
         elif b.get("has_history") and not b.get("new_name"):

@@ -109,6 +109,10 @@ your type from your CLI's environment.
    user with the proposed fixes; done adds the fixes still in its list, drop
    adds none. Findings that do not block the release are ordinary items:
    `maxpm add "<title>" --found-during <review-id>`, then pass.
+   A commit in the range you review is your own (the release pin moved after
+   the review came to you): do not review it, and do not release with a note
+   only. Run `maxpm release <review-id> --author "<your commits>"`: MaximizePM
+   gives you this review no more, and another session takes it.
 
 ## Owning a goal
 

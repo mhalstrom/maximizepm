@@ -5882,16 +5882,31 @@ def takeovers(conn, include_seen=False):
     return [dict(r) for r in conn.execute(sql + " ORDER BY i.takeover_at DESC")]
 
 
-def release(conn, item_id, note=None, actor=None):
+AUTHOR_RELEASE = "released as an author of the release"  # the event that release_authors reads (#1616)
+
+
+def release(conn, item_id, note=None, actor=None, author=None):
+    """Give a claimed item back. author (a release review only): the reviewer wrote commits of the release and
+    says which ones. MaximizePM sees the authors of a release up to the pin of that minute (release_commits);
+    the pin can move to a commit that holds the reviewer's own work. The event keeps this review from the
+    agent from then on (release_authors); maxpm serve starts another reviewer."""
     with tx(conn):
         it = _item(conn, item_id)
+        if author is not None and it["kind"] != "review":
+            raise RiverError(f"--author is for a release review, and #{item_id} is a {it['kind']} item; "
+                             f"release it with: maxpm release {item_id} --note \"<why>\"")
+        if author is not None and not author.strip():
+            raise RiverError(f"say which commits of the release you wrote: maxpm release {item_id} --author "
+                             f"\"<commit ids, items>\"")
         if it["status"] not in ("in_progress", "held"):
             raise RiverError(f"item {item_id} is {it['status']}; only a claimed item can be released" + (
                 f". It is reserved for {it['reserved_for']}; {_unreserve_hint(item_id)}"
                 if it["status"] == "open" and it["reserved_for"] else ""))
         if actor and it["assignee"] != actor:
             raise RiverError(f"item {item_id} is held by {it['assignee']}, not {actor}")
-        _unhold(conn, it["id"], actor, "released" + (f": {note}" if note else ""))
+        why = f"{AUTHOR_RELEASE}: {author.strip()}" + (f" ({note})" if note else "") if author is not None else (
+            "released" + (f": {note}" if note else ""))
+        _unhold(conn, it["id"], it["assignee"] if author is not None else actor, why)
     return item_show(conn, item_id)
 
 
@@ -7386,16 +7401,20 @@ def release_join_commits(conn, review_id, actor="maxpm"):
 
 def release_authors(conn, review_id):
     """The agents that worked on what a release review covers: whoever claimed or closed an item it ships, or an
-    item that a commit of the release names (release_commits). A session started for the review is none of them."""
+    item that a commit of the release names (release_commits), and a reviewer that said it wrote commits of the
+    release (maxpm release <review> --author). A session started for the review is none of them."""
     review = _item(conn, review_id)
+    # The reviewer's own word: the pin moved after the review went out, and holds its commits now (#1616).
+    names = {r["actor"].split("@")[0] for r in conn.execute(  # name@relay: the command came through the relay
+        "SELECT DISTINCT actor FROM events WHERE item_id=? AND change LIKE ?", (review_id, AUTHOR_RELEASE + "%"))}
     ids = [r["blocked_by"] for r in conn.execute(
         "SELECT d.blocked_by FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND i.kind<>'review'",
         (review_id,))]
     ids = sorted(set(ids) | release_commit_items(conn, review))
     if not ids:
-        return set()
+        return names
     marks = ",".join("?" * len(ids))
-    names = {r["assignee"] for r in conn.execute(f"SELECT assignee FROM items WHERE id IN ({marks})", ids) if r["assignee"]}
+    names |= {r["assignee"] for r in conn.execute(f"SELECT assignee FROM items WHERE id IN ({marks})", ids) if r["assignee"]}
     names |= {r["actor"] for r in conn.execute(
         f"SELECT DISTINCT actor FROM events WHERE item_id IN ({marks}) AND (change LIKE 'claimed%' OR change LIKE 'done%')",
         ids)}

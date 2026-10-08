@@ -3073,6 +3073,47 @@ class ReleaseReview(Base):
         g = core.go(self.c, self.dir.name, "ops")
         self.assertEqual((g["role"], g["item"]["id"]), ("deployer", self.deploy))
 
+    def test_a_reviewer_that_wrote_a_commit_of_the_release_says_so(self):
+        # #1616: the pin moved after the review went out and held commits of the reviewer. It released with a
+        # note, and go gave it the same review again seconds later.
+        from river import cli
+        core.register(self.c, "rev2")
+        b = core.go(self.c, self.dir.name, "rev")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn(f'release {self.review} --author "<your commits>"', out.getvalue())
+        with self.assertRaisesRegex(RiverError, "say which commits"):
+            core.release(self.c, self.review, actor="rev", author=" ")
+        with self.assertRaisesRegex(RiverError, "held by rev, not rev2"):
+            core.release(self.c, self.review, actor="rev2", author="abc123")
+        it = core.release(self.c, self.review, "the pin moved", "rev", author="abc123 (#9)")
+        self.assertEqual((it["status"], it["assignee"]), ("open", None))
+        self.assertEqual(core.recent_events(self.c, 1)[0]["change"],
+                         "released as an author of the release: abc123 (#9) (the pin moved)")
+        self.assertIn("rev", core.release_authors(self.c, self.review))
+        self.assertIn("worked on what release review", core.author_refusal(self.c, core._item(self.c, self.review), "rev"))
+        # go, a claim, a push, and a session that waits: this review goes to rev no more.
+        self.assertNotEqual(core.go(self.c, self.dir.name, "rev")["role"], "reviewer")
+        self.assertEqual(core.go(self.c, self.dir.name, "rev", role="reviewer")["role"], "idle")
+        for f in (lambda: core.claim(self.c, self.review, "rev"), lambda: core.push(self.c, self.review, "rev", actor="ops")):
+            with self.assertRaisesRegex(RiverError, "worked on what release review"):
+                f()
+        core.wait(self.c, self.dir.name, "rev", step="0s", sleep=lambda s: None)
+        core.wait(self.c, self.dir.name, "rev2", step="0s", sleep=lambda s: None)
+        self.assertEqual(core.waiting_agent_for(self.c, "site", self.review), "rev2")
+        # Another session takes it. A plain release keeps the reviewer (a review that failed comes back to it).
+        b = core.go(self.c, self.dir.name, "rev2")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
+        core.release(self.c, self.review, "a break", "rev2")
+        self.assertEqual(core.go(self.c, self.dir.name, "rev2")["item"]["id"], self.review)
+        # The flag is for a review only.
+        x = self.add("site", "other work")
+        core.claim(self.c, x, "rev")
+        with self.assertRaisesRegex(RiverError, "--author is for a release review"):
+            core.release(self.c, x, actor="rev", author="abc123")
+
     def test_the_agent_that_wrote_the_release_never_gets_its_review(self):
         # #1027: the author's go after maxpm ship claimed the new review four times in one night.
         b = core.go(self.c, self.dir.name, "dev")
