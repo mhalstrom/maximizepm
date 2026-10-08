@@ -388,3 +388,37 @@ Measure after one day with the new code:
     python3 current_project/research/manager_wakes.py <since> <until>
 
 Expected for a day like 2026-10-08: about 79 wakes in place of 181.
+
+### Changed (#1608): two levels and the flag blocked
+
+After one afternoon with the three levels, the person who approves chose a
+simpler form: "low priority, high priority, and then a blocked flag". The
+research of #1597 (`worker-stops.md`, section 6) gave the counts: after 78 of
+128 alerts and questions to the manager, the sender went on with its item, so
+an alert or a question by itself is no reason to wake the manager at once.
+
+- Levels: `high` (the default, also for an alert and a question) and `low`
+  (`--level low`, and the ship request notice). The names `urgent` and
+  `normal` are gone; `--level urgent` is refused with the text "leave it out
+  and add --blocked".
+- `--blocked` on `maxpm alert`, `ask`, `note`, and `send`: the sender's item
+  cannot move until the answer. `messages.blocked` holds who said so:
+  `sender` (the flag), `waits` (the sender ran `maxpm inbox --wait` within
+  three minutes after its alert or question), or `item` (the sender released
+  or blocked the item within three minutes before or after it). These two
+  signs showed 39 of the 50 past messages whose item stood still. `maxpm
+  wait` is not a sign: a worker also runs it after an item that is done.
+- Waits: a blocked message and a person's message wake the watch at once;
+  high after `manage_wait_high` (10m; the setting `manage_wait_normal` was
+  renamed); low after `manage_wait_low` (30m).
+- No question back to the sender. `maxpm alert` and `maxpm ask` to the
+  manager print how long the message waits and when to add `--blocked`.
+- `maxpm inbox` and the watch show "blocked", and the watch prints a blocked
+  message first. With `native_message`, only a blocked message and a
+  person's message go into the manager's session.
+- A stored level `urgent` became the flag, and `normal` became the default,
+  one time (`_migrate_levels`).
+
+For the measurement of #1598: count the wakes whose first message is blocked,
+and compare the senders' flags with what the senders did
+(`worker_stops.py`, section 5).

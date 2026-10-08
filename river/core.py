@@ -36,12 +36,20 @@ DEP_KINDS = ("blocks", "feeds", "conflicts")
 MESSAGE_KINDS = ("alert", "question", "answer", "note", "notice", "offer")
 SEND_KINDS = ("alert", "question", "note")
 MESSAGE_STATES = ("open", "accepted", "declined", "answered", "read")
-# The level of a message says how soon it wakes the manager's watch (maxpm manage --watch, #1583): urgent at
-# once, normal after manage_wait_normal, low after manage_wait_low. It comes from the kind unless the sender
-# gives one (--level). Someone waits on an alert, a question, an answer, or an offer; a note or a notice can wait.
-MESSAGE_LEVELS = ("urgent", "normal", "low")
-KIND_LEVELS = {"alert": "urgent", "question": "urgent", "answer": "urgent", "offer": "urgent",
-               "note": "normal", "notice": "normal"}
+# The level of a message says how soon it wakes the manager's watch (maxpm manage --watch, #1583, #1608): high
+# after manage_wait_high, low after manage_wait_low. A message is high unless the sender says low (--level) or
+# MaximizePM writes a low one (the ship request notice). A blocked message wakes the watch at once: the sender
+# says so (--blocked: its item cannot move until the answer), or MaximizePM sees it (BLOCKED_SIGNS). A person's
+# message always wakes it at once. On 2026-10-06 to 08, the sender went on with its item after 78 of 128 alerts
+# and questions to the manager (current_project/research/worker-stops.md, #1597).
+MESSAGE_LEVELS = ("high", "low")
+DEFAULT_LEVEL = "high"
+# What messages.blocked holds: who said that the message's item stands still. sender: the flag --blocked. waits:
+# the sender then ran maxpm inbox --wait. item: the sender released or blocked the item near the send.
+BLOCKED_SIGNS = ("sender", "waits", "item")
+# MaximizePM marks an alert or a question to a manager as blocked when its sign comes this long before or after
+# the send (#1597: one of the two signs showed 39 of the 50 messages whose item stood still).
+BLOCKED_WINDOW = timedelta(minutes=3)
 # New findings of these kinds wait manage_wait_low: an agent that waits ends by itself after wait_max, and a
 # person gets a notification for an item that is ready for them.
 LOW_FINDINGS = ("waiting", "human")
@@ -181,12 +189,13 @@ DEFAULT_SETTINGS = {
     # read its whole context again (#1312). A finding that goes away in this time wakes nothing. Messages and a
     # stop request still return at once. 0s: return at the first finding.
     "manage_settle": "2m",
-    # How long a message to the manager, or a new finding, of the level normal or low waits before it wakes
-    # maxpm manage --watch (#1583); an urgent one (an alert, a question, most findings) wakes it as before. The
-    # level of a message comes from its kind (a note and a notice: normal; a ship request notice: low) or from
-    # --level; the findings "an agent waits" and "an item is ready for a person" are low. A wake brings every
-    # message that waits. On 2026-10-08, 141 of 181 wakes of the manager were for normal and low events. 0s: at once.
-    "manage_wait_normal": "10m",
+    # How long a message to the manager of the level high or low waits before it wakes maxpm manage --watch
+    # (#1583, #1608). A message is high (also an alert and a question) unless the sender gives --level low; a
+    # ship request notice is low. A blocked message (--blocked, or MaximizePM sees that its item stands still)
+    # and a person's message wake the watch at once. The new findings "an agent waits" and "an item is ready
+    # for a person" wait manage_wait_low; another finding waits manage_settle. A wake brings every message that
+    # waits. On 2026-10-08, 141 of 181 wakes of the manager were for events that could wait. 0s: at once.
+    "manage_wait_high": "10m",
     "manage_wait_low": "30m",
     # The manager session's context: Claude Code compacts it at this size (claude --autocompact; 100k to 1M,
     # for example 200k). The session stays the same, with the same name and Remote Control link, and the next
@@ -508,7 +517,8 @@ CREATE TABLE IF NOT EXISTS messages (
   closed_at   TEXT,
   nudged_at   TEXT,
   native_status TEXT,
-  level       TEXT  -- urgent, normal, or low when the sender gave one; NULL: from the kind (KIND_LEVELS)
+  level       TEXT,  -- low when the sender or MaximizePM said so; NULL: high (DEFAULT_LEVEL)
+  blocked     TEXT   -- who said that its item stands still until the answer (BLOCKED_SIGNS); NULL: nobody
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -782,6 +792,7 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate(conn)
     _migrate_launch_agents(conn)
+    _migrate_levels(conn)
     return conn
 
 
@@ -866,6 +877,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE messages ADD COLUMN native_status TEXT")
     if "level" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN level TEXT")
+    if "blocked" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
+        conn.execute("ALTER TABLE messages ADD COLUMN blocked TEXT")
     if "fresh_start" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN fresh_start TEXT")
         conn.execute("DELETE FROM settings WHERE key='wake_after'")  # the pane wake of #729 is gone (#758)
@@ -1039,7 +1052,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     if key not in DEFAULT_SETTINGS:
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
-            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_normal", "manage_wait_low", "connect_within",
+            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
             "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout"):
         parse_duration(value)
     elif key == "prompt_pattern":
@@ -3176,6 +3189,8 @@ def _unhold(conn, parent, actor, why):
         for r in _open_prereqs(conn, parent):
             conn.execute("UPDATE items SET reserved_for=NULL WHERE id=? AND reserved_for=?", (r, it["assignee"]))
     _event(conn, parent, actor, why)
+    if actor and actor == it["assignee"]:  # what it just told the manager about this item cannot wait (#1608)
+        _raise_blocked(conn, actor, "item", parent)
 
 
 def _count_late(conn, parent, n, actor):
@@ -3467,7 +3482,7 @@ def _holder_of(conn, item_id):
 
 
 def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd=None, actor=None, goal=None,
-            level=None):
+            level=None, blocked=False):
     """The shortcuts maxpm alert / ask / note (design 7.4): to an agent, to the holder of an item, or
     (questions) to every agent whose held items touch a file. Returns the messages sent."""
     if sum(x is not None for x in (to, holder_of, file, goal)) > 1:
@@ -3480,14 +3495,14 @@ def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd
         targets = [a["name"] for a in who(conn, file=file, cwd=cwd) if a["name"] != actor]
         if not targets:
             raise RiverError(f"no agent holds an item that touches {file} (maxpm who --file {file})")
-        return [send(conn, kind, body, t, item, None, actor, level) for t in targets]
+        return [send(conn, kind, body, t, item, None, actor, level, blocked) for t in targets]
     if holder_of is not None:
         to = _holder_of(conn, holder_of)
         if item is None:
             item = holder_of
     if to is None and item is None:
         raise RiverError("say who gets it: an agent name, --holder-of <id>, or --item <id> (its holder)")
-    return [send(conn, kind, body, to, item, None, actor, level)]
+    return [send(conn, kind, body, to, item, None, actor, level, blocked)]
 
 
 def decline_message(conn, msg_id, note=None, actor=None):
@@ -3591,6 +3606,7 @@ def block(conn, item_id, reason=None, actor=None, until=None):
                      "blocked_at=COALESCE(CASE WHEN blocked_reason IS NOT NULL THEN blocked_at END, ?) WHERE id=?",
                      (reason, t, actor, iso(now()), it["id"]))
         _event(conn, it["id"], actor, f"blocked: {reason}" + (f" (until {show_time(t, zone)})" if t else ""))
+        _raise_blocked(conn, actor, "item", it["id"])  # what it just told the manager about this item (#1608)
     return item_show(conn, item_id)
 
 
@@ -6597,13 +6613,13 @@ def _message(conn, msg_id):
     return r
 
 
-def _send(conn, kind, sender, body, to=None, item_id=None, reply_to=None, level=None):
-    """Insert one message inside the caller's transaction and return its id. level: one of MESSAGE_LEVELS
-    when it is not the level of the kind."""
+def _send(conn, kind, sender, body, to=None, item_id=None, reply_to=None, level=None, blocked=None):
+    """Insert one message inside the caller's transaction and return its id. level: low when it is not
+    DEFAULT_LEVEL. blocked: one of BLOCKED_SIGNS when the message's item stands still until the answer."""
     t = iso(now())
     cur = conn.execute(
-        "INSERT INTO messages(kind,from_agent,to_agent,item_id,reply_to,thread_id,body,created_at,level) "
-        "VALUES (?,?,?,?,?,0,?,?,?)", (kind, sender, to, item_id, reply_to, body, t, level))
+        "INSERT INTO messages(kind,from_agent,to_agent,item_id,reply_to,thread_id,body,created_at,level,blocked) "
+        "VALUES (?,?,?,?,?,0,?,?,?,?)", (kind, sender, to, item_id, reply_to, body, t, level, blocked))
     mid = cur.lastrowid
     thread = _message(conn, reply_to)["thread_id"] if reply_to else mid
     conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (thread, mid))
@@ -6621,19 +6637,59 @@ def _msg_dict(r):
     m = dict(r)
     m["unread"] = m["read_at"] is None
     m["level_set"] = bool(m.get("level"))  # the sender gave it
-    m["level"] = m.get("level") or KIND_LEVELS[m["kind"]]
+    m["level"] = m.get("level") or DEFAULT_LEVEL
     return m
 
 
-def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None):
-    """Send an alert, question, or note to an agent, to the holder of an item, or as a reply. level (urgent,
-    normal, low) says how soon it wakes the manager's watch, when the kind's own level does not fit."""
+def _is_manager(conn, name):
+    return bool(name and conn.execute("SELECT 1 FROM agents WHERE name=? AND role='manager'", (name,)).fetchone())
+
+
+def _is_person(conn, name):
+    return bool(name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='human'", (name,)).fetchone())
+
+
+def _item_stands(conn, sender, item_id):
+    """Inside a tx, at the send. True when MaximizePM knows that the item of a message from sender stands
+    still: the sender blocked it or released it in the last BLOCKED_WINDOW. With no item on the message: an
+    item that the sender released or blocked in that time."""
+    since = iso(now() - BLOCKED_WINDOW)
+    about = "" if item_id is None else " AND item_id=?"
+    args = () if item_id is None else (item_id,)
+    if conn.execute(f"SELECT 1 FROM events WHERE actor=? AND at>=? AND change LIKE 'released%'{about} LIMIT 1",
+                    (sender, since) + args).fetchone():
+        return True
+    return bool(conn.execute(
+        "SELECT 1 FROM items WHERE blocked_reason IS NOT NULL AND blocked_set_by=? AND status IN ('open','in_progress','held') "
+        "AND " + ("blocked_at>=?" if item_id is None else "id=?") + " LIMIT 1",
+        (sender, since if item_id is None else item_id)).fetchone())
+
+
+def _raise_blocked(conn, sender, sign, item_id=None):
+    """Inside a tx. A sign came after the send that the sender's item stands still until the manager answers
+    (sign waits: it ran maxpm inbox --wait; sign item: it released or blocked item_id). Its alerts and questions
+    to a manager of the last BLOCKED_WINDOW that nobody read, about that item or about no item, become blocked:
+    the manager's watch returns for them at once (#1608). Returns how many."""
+    if not sender or _is_manager(conn, sender):
+        return 0
+    return conn.execute(
+        "UPDATE messages SET blocked=? WHERE from_agent=? AND blocked IS NULL AND read_at IS NULL "
+        "AND kind IN ('alert','question') AND created_at>=? AND (? IS NULL OR item_id IS NULL OR item_id=?) "
+        "AND to_agent IN (SELECT name FROM agents WHERE role='manager')",
+        (sign, sender, iso(now() - BLOCKED_WINDOW), item_id, item_id)).rowcount
+
+
+def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None, blocked=False):
+    """Send an alert, question, or note to an agent, to the holder of an item, or as a reply. For a message to
+    the manager, level (high, low) says how long it waits before it wakes the manager's watch, and blocked says
+    that the sender's item cannot move until the answer: the watch returns for it at once."""
     if not actor:
         raise RiverError("sending needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if kind not in SEND_KINDS:
         raise RiverError(f"send kind is one of {', '.join(SEND_KINDS)}; to answer a question: maxpm answer <message-id> \"...\"")
     if level is not None and level not in MESSAGE_LEVELS:
-        raise RiverError(f"the level is one of {', '.join(MESSAGE_LEVELS)}")
+        raise RiverError(f"the level is one of {', '.join(MESSAGE_LEVELS)}; for a message that cannot wait, "
+                         f"leave it out and add --blocked")
     if not body or not body.strip():
         raise RiverError("a message needs text")
     with tx(conn):
@@ -6652,8 +6708,12 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
             raise RiverError("say who gets it: --to <agent>, --item <id> (its holder), or --reply <message-id>")
         if to is not None:
             _agent(conn, to)
+        manager = _is_manager(conn, to)
+        # What MaximizePM knows without the flag: the sender released or blocked the item just before.
+        sign = "sender" if blocked else ("item" if manager and kind in ("alert", "question")
+                                         and _item_stands(conn, actor, item) else None)
         mid = _send(conn, kind, actor, body.strip(), to=to, item_id=item, reply_to=reply_to,
-                    level=level if level != KIND_LEVELS[kind] else None)
+                    level=level if level != DEFAULT_LEVEL else None, blocked=sign)
         if reply_to is not None:
             # Replying to a message means the sender read it.
             if conn.execute(f"SELECT 1 FROM messages m WHERE m.id=? AND {_TO_ME}", (reply_to, actor, actor)).fetchone():
@@ -6663,14 +6723,18 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
     got = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai' AND platform IS NOT NULL",
                        (to,)).fetchone() if to is not None else None
     if got:
-        lvl = level or KIND_LEVELS[kind]
-        # A message into the manager's session wakes it, so only an urgent one goes there; its watch brings
-        # the others when their wait ends (manage_wait_normal, manage_wait_low).
-        st = (f"waits: the manager's watch brings a {lvl} message after its wait" if got["role"] == "manager"
-              and lvl != "urgent" else deliver_native(conn, to, _native_text(kind, actor, body.strip())))
+        # A message into the manager's session wakes it, so only a blocked one or a person's goes there; its
+        # watch brings the others when their wait ends (manage_wait_high, manage_wait_low).
+        st = (f"waits: the manager's watch brings a {level or DEFAULT_LEVEL} message after its wait"
+              if got["role"] == "manager" and not sign and not _is_person(conn, actor)
+              else deliver_native(conn, to, _native_text(kind, actor, body.strip())))
         with tx(conn):
             conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
-    return message_show(conn, mid)
+    res = message_show(conn, mid)
+    if manager and not res["blocked"] and not _is_person(conn, actor):
+        # For the sender: how long the manager's watch lets it wait (the command says how to shorten that).
+        res["manager_wait"] = setting(conn, "manage_wait_" + res["level"], agent=to)
+    return res
 
 
 def answer(conn, msg_id, body, actor=None):
@@ -6741,7 +6805,17 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
         raise RiverError(f"{actor} is the active manager, and maxpm manage --watch is its only watcher: it returns "
                          f"for messages too. Run maxpm --as {actor} manage --watch instead of inbox --wait")
     deadline = now() + parse_duration(timeout or INBOX_WAIT)
+    raised = False
     while True:
+        if not raised:
+            # A sender that now waits for messages stands still until the manager answers (#1608). A locked
+            # queue never ends a wait (#1615): the next poll tries again.
+            try:
+                with tx(conn, tries=1):
+                    _raise_blocked(conn, actor, "waits")
+                raised = True
+            except RiverLocked:
+                pass
         st = stop_request(conn, actor)
         if st:
             return {"result": "stop", "agent": actor, "stop": st, "messages": []}
@@ -7405,6 +7479,21 @@ def profile_from_command(cmd):
         return None
     opts["prompt"] = prompt
     return platform, opts
+
+
+def _migrate_levels(conn):
+    """The three message levels of #1583 (urgent, normal, low) become two levels and a flag (#1608), one time:
+    a level urgent that a sender set becomes the flag blocked, normal becomes high (the default, so nothing is
+    stored), and the setting manage_wait_normal becomes manage_wait_high."""
+    if conn.execute("SELECT 1 FROM meta WHERE key='message_levels_1608'").fetchone():
+        return
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM meta WHERE key='message_levels_1608'").fetchone():
+            return  # another process ran it just now
+        conn.execute("INSERT INTO meta(key, value) VALUES ('message_levels_1608', ?)", (iso(now()),))
+        conn.execute("UPDATE messages SET blocked='sender', level=NULL WHERE level='urgent'")
+        conn.execute("UPDATE messages SET level=NULL WHERE level='normal'")
+        conn.execute("UPDATE OR REPLACE settings SET key='manage_wait_high' WHERE key='manage_wait_normal'")
 
 
 def _migrate_launch_agents(conn):
@@ -8749,7 +8838,7 @@ def manage(conn, cwd, actor=None, takeover=None):
         conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(_finding_keys(f)), actor))
     return {"agent": actor, "new_name": new_name, "role": "manager", "status": status(conn), "findings": f,
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
-            "wait_normal": setting(conn, "manage_wait_normal", agent=actor),
+            "wait_high": setting(conn, "manage_wait_high", agent=actor),
             "wait_low": setting(conn, "manage_wait_low", agent=actor),
             "wait_too_long": setting(conn, "wait_too_long"),
             "tidy_every": setting(conn, "tidy_every"),
@@ -8761,12 +8850,13 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     or a stop request), at most manage_every (or step). Findings it reported before do not count as new;
     the messages it returns are marked read, as maxpm inbox --wait does, so the manager needs one watcher.
     After the first new finding it waits manage_settle more, so a group of findings wakes the manager once.
-    Each event has a level (#1583): an urgent message (an alert, a question) or a stop request returns at
-    once; a normal message (a note) returns manage_wait_normal after it was sent, a low one (a ship request
-    notice) after manage_wait_low; a new finding of LOW_FINDINGS waits manage_wait_low from when the watch
-    saw it. A return for any reason brings every message and finding that waits, so no second wake follows.
-    With native_message the platform brings urgent messages into the session, and they do not wake it; the
-    watch brings the others. Returns what changed."""
+    Each message has a level and may be blocked (#1583, #1608): a blocked message (the sender's item cannot
+    move until the answer), a person's message, or a stop request returns at once; a high message (the
+    default, also an alert and a question) returns manage_wait_high after it was sent, a low one (a ship
+    request notice) after manage_wait_low; a new finding of LOW_FINDINGS waits manage_wait_low from when the
+    watch saw it. A return for any reason brings every message and finding that waits, so no second wake
+    follows. With native_message the platform brings blocked messages and a person's messages into the
+    session, and they do not wake it; the watch brings the others. Returns what changed."""
     import json
     import time
     sleep = sleep or time.sleep
@@ -8780,9 +8870,9 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     deadline = now() + parse_duration(step or setting(conn, "manage_every", agent=actor))
     settle = parse_duration(setting(conn, "manage_settle", agent=actor))
     native = has_native(conn, actor)
-    waits = {"urgent": timedelta(0), "normal": parse_duration(setting(conn, "manage_wait_normal", agent=actor)),
+    waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=actor)),
              "low": parse_duration(setting(conn, "manage_wait_low", agent=actor))}
-    settled = None  # when the first new urgent finding has waited manage_settle
+    settled = None  # when the first new finding that is not low has waited manage_settle
     low_due = None  # when the first new low finding has waited manage_wait_low
     while True:
         f = manager_findings(conn)
@@ -8791,10 +8881,13 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
         # Unread only: an open question already read would wake it at once, every time. Not what the platform
         # brought into the session already (native_message).
         waiting = [m for m in conn.execute(
-            f"SELECT m.kind, m.level, m.created_at, m.native_status FROM messages m WHERE {_TO_ME} "
+            f"SELECT m.level, m.blocked, m.created_at, m.native_status, a.kind sender FROM messages m "
+            f"LEFT JOIN agents a ON a.name=m.from_agent WHERE {_TO_ME} "
             f"AND m.from_agent<>? AND m.read_at IS NULL", (actor, actor, actor)).fetchall()
             if not (native and (m["native_status"] is None or m["native_status"] == "sent"))]
-        mail = any(parse_iso(m["created_at"]) + waits[m["level"] or KIND_LEVELS[m["kind"]]] <= now() for m in waiting)
+        # A blocked message and a person's message do not wait; MaximizePM may mark one blocked after the send.
+        mail = any(m["blocked"] or m["sender"] == "human"
+                   or parse_iso(m["created_at"]) + waits[m["level"] or DEFAULT_LEVEL] <= now() for m in waiting)
         low = {k for k in keys - base if k.partition(":")[0] in LOW_FINDINGS}
         if not keys - base - low:
             settled = None  # a finding that went away again wakes nothing
@@ -8819,7 +8912,9 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
             return {"agent": actor,
                     "result": "stop" if st else "change" if keys - base else "messages" if mail else "tick",
                     "new": sorted(keys - base), "gone": sorted(base - keys), "findings": f, "stop": st,
-                    "messages": [m for m in rows if m["unread"]], "still_open": sum(1 for m in rows if not m["unread"]),
+                    # A blocked message first: its sender stands still.
+                    "messages": sorted((m for m in rows if m["unread"]), key=lambda m: (not m["blocked"], m["id"])),
+                    "still_open": sum(1 for m in rows if not m["unread"]),
                     "unread": unread(conn, actor)["unread"], "native": native}
         poll_activity(conn, actor)
         sleep(poll)

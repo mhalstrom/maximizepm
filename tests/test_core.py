@@ -3923,23 +3923,29 @@ class NativeDelivery(Base):
         core.config_set(self.c, "native_message", "Mine=MINE_ID: mine send {address} {message}")
         self.assertEqual(core.native_from_env(self.c, {"MINE_ID": "7"}), ("Mine", "7"))
 
-    def test_only_an_urgent_message_goes_into_the_managers_session(self):
-        # #1583: a message into the manager's session wakes it; its watch brings a normal or a low one later.
+    def test_only_a_blocked_message_or_a_persons_goes_into_the_managers_session(self):
+        # #1583, #1608: a message into the manager's session wakes it; its watch brings the others later.
         core.manage(self.c, self.dir.name, "cx")
         core.set_native(self.c, "cx", "Codex", "thread-9")
         core.manage_watch(self.c, "cx", step="0s", sleep=lambda s: None)
         m = core.send(self.c, "note", "#12 is on main", to="cx", actor="cc")
         self.assertEqual((self.sent, m["native_status"]),
-                         ([], "waits: the manager's watch brings a normal message after its wait"))
-        self.assertEqual(core.send(self.c, "alert", "the build is red", to="cx", actor="cc")["native_status"], "sent")
+                         ([], "waits: the manager's watch brings a high message after its wait"))
+        # An alert without the flag waits too: its sender goes on with its item.
+        self.assertEqual(core.send(self.c, "alert", "the build is red", to="cx", actor="cc")["native_status"],
+                         "waits: the manager's watch brings a high message after its wait")
+        self.assertEqual(self.sent, [])
+        self.assertEqual(core.send(self.c, "question", "which db? I cannot go on", to="cx", actor="cc",
+                                   blocked=True)["native_status"], "sent")
         self.assertEqual(len(self.sent), 1)
-        self.assertEqual(core.send(self.c, "note", "now", to="cx", actor="cc", level="urgent")["native_status"], "sent")
-        # The watch does not return for what the platform brought; it returns for the note when its wait ends.
+        core.register(self.c, "mark", human=True)
+        self.assertEqual(core.send(self.c, "note", "stop the release", to="cx", actor="mark")["native_status"], "sent")
+        # The watch does not return for what the platform brought; it returns for the others when their wait ends.
         t0, naps = core.now(), []
         with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
             w = core.manage_watch(self.c, "cx", step="2h", sleep=naps.append)
         self.assertEqual((w["result"], len(naps)), ("messages", 10))
-        self.assertIn("#12 is on main", [x["body"] for x in w["messages"]])
+        self.assertLessEqual({"#12 is on main", "the build is red"}, {x["body"] for x in w["messages"]})
         # A worker gets every message at once, as before.
         core.set_native(self.c, "cc", "Codex", "thread-3")
         self.assertEqual(core.send(self.c, "note", "fyi", to="cc", actor="cx", level="low")["native_status"], "sent")
@@ -4176,9 +4182,9 @@ class Manager(Base):
         with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
             w = core.manage_watch(self.c, "boss", step="5m", sleep=come_and_go)
         self.assertEqual((w["result"], w["new"]), ("tick", []))
-        # An urgent message does not wait for the settle time.
+        # A blocked message does not wait for the settle time.
         self.add("b", "third")
-        core.send(self.c, "alert", "now", to="boss", actor="w1")
+        core.send(self.c, "alert", "now", to="boss", actor="w1", blocked=True)
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no settle wait for a message"))
         self.assertEqual(w["result"], "messages")
         with self.assertRaisesRegex(RiverError, "bad duration"):
@@ -4187,26 +4193,26 @@ class Manager(Base):
     def test_messages_wake_the_watch_so_one_watcher_is_enough(self):
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
-        core.send(self.c, "alert", "hello boss", to="boss", actor="w1")
+        core.send(self.c, "alert", "hello boss", to="boss", actor="w1", blocked=True)
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait with a message unread"))
         self.assertEqual((w["result"], [m["body"] for m in w["messages"]]), ("messages", ["hello boss"]))
         self.assertEqual(core.unread(self.c, "boss")["unread"], 0)  # marked read: the next watch blocks
         # A message that comes while it watches ends the watch; an open question already read does not wake it.
-        w = core.manage_watch(self.c, "boss", step="1h",
-                              sleep=lambda s: core.send(self.c, "question", "which db?", to="boss", actor="w1"))
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: core.send(
+            self.c, "question", "which db?", to="boss", actor="w1", blocked=True))
         self.assertEqual(([m["body"] for m in w["messages"]], w["still_open"]), (["which db?"], 0))
         w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
         self.assertEqual((w["result"], w["messages"]), ("tick", []))
         # The text says it is the only watcher, and shows the message itself.
         from river import cli
-        core.send(self.c, "alert", "w2 is stuck", to="boss", actor="w1")
+        core.send(self.c, "alert", "w2 is stuck", to="boss", actor="w1", blocked=True)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.render_manage(core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: None))
             cli.render_manage(core.manage(self.c, self.dir.name, "boss"))
         self.assertIn("NEW MESSAGES (1)", out.getvalue())
         self.assertIn("w2 is stuck", out.getvalue())
-        self.assertIn("a message to you (an alert or a question at once, a note after manage_wait_normal 10m, a low "
+        self.assertIn("a message to you (a blocked one or a person's at once, another after manage_wait_high 10m, a low "
                       "one after manage_wait_low 30m; it prints every message that waits)", out.getvalue())
         self.assertNotIn("inbox --wait", out.getvalue())
         # With native delivery the platform brings messages: they do not wake the watch.
@@ -4231,45 +4237,136 @@ class Manager(Base):
         # #1583: on 2026-10-08, 124 of 181 wakes of the manager were messages, most of them one note.
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
-        self.assertEqual((core.DEFAULT_SETTINGS["manage_wait_normal"], core.DEFAULT_SETTINGS["manage_wait_low"]),
-                         ("10m", "30m"))
-        # A note is normal: it wakes the watch ten minutes after it was sent.
+        self.assertEqual((core.MESSAGE_LEVELS, core.DEFAULT_SETTINGS["manage_wait_high"],
+                          core.DEFAULT_SETTINGS["manage_wait_low"]), (("high", "low"), "10m", "30m"))
+        # A note is high: it wakes the watch ten minutes after it was sent.
         m = core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
-        self.assertEqual((m["level"], m["level_set"]), ("normal", False))
+        self.assertEqual((m["level"], m["level_set"], m["blocked"], m["manager_wait"]), ("high", False, None, "10m"))
         w, minutes = self.watch_minutes(step="2h")
         self.assertEqual((w["result"], [x["body"] for x in w["messages"]], minutes), ("messages", ["#12 is on main"], 10))
         # A low message waits thirty minutes; the time limit of the watch (manage_every) brings it sooner.
         low = core.send(self.c, "note", "for your records", to="boss", actor="w1", level="low")
-        self.assertEqual((low["level"], low["level_set"]), ("low", True))
+        self.assertEqual((low["level"], low["level_set"], low["manager_wait"]), ("low", True, "30m"))
         w, minutes = self.watch_minutes(step="2h")
         self.assertEqual((w["result"], minutes), ("messages", 30))
         core.send(self.c, "note", "again for your records", to="boss", actor="w1", level="low")
         w, minutes = self.watch_minutes(step="20m")
         self.assertEqual((w["result"], [x["body"] for x in w["messages"]], minutes),
                          ("messages", ["again for your records"], 20))
-        # An urgent message wakes it at once, and brings the ones that wait: no second wake follows.
-        core.send(self.c, "note", "one", to="boss", actor="w1")
-        core.send(self.c, "note", "two", to="boss", actor="w2", level="low")
-        core.send(self.c, "question", "which db?", to="boss", actor="w1")
-        w, minutes = self.watch_minutes(step="2h")
-        self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["one", "two", "which db?"], 0))
-        self.assertEqual(self.watch_minutes(step="5m")[0]["result"], "tick")
-        # A sender raises one note; the level of the kind is not stored.
-        up = core.message(self.c, "note", "the disk is full", to="boss", actor="w1", level="urgent")[0]
-        self.assertEqual((up["level"], up["level_set"]), ("urgent", True))
-        self.assertEqual(self.watch_minutes(step="2h")[1], 0)
-        self.assertEqual(core.send(self.c, "alert", "x", to="w2", actor="w1", level="urgent")["level_set"], False)
-        with self.assertRaisesRegex(RiverError, "urgent, normal, low"):
-            core.send(self.c, "note", "x", to="boss", actor="w1", level="info")
+        # The level high is the default and is not stored; there is no third level.
+        self.assertEqual(core.send(self.c, "alert", "x", to="w2", actor="w1", level="high")["level_set"], False)
+        for old in ("urgent", "normal", "info"):
+            with self.assertRaisesRegex(RiverError, "the level is one of high, low"):
+                core.send(self.c, "note", "x", to="boss", actor="w1", level=old)
         # The waits are settings; 0s is at once.
         core.inbox(self.c, "boss")
-        core.config_set(self.c, "manage_wait_normal", "0s")
+        core.config_set(self.c, "manage_wait_high", "0s")
         core.send(self.c, "note", "three", to="boss", actor="w1")
         self.assertEqual(self.watch_minutes(step="2h")[1], 0)
         with self.assertRaisesRegex(RiverError, "bad duration"):
             core.config_set(self.c, "manage_wait_low", "later")
+        with self.assertRaisesRegex(RiverError, "unknown setting 'manage_wait_normal'"):
+            core.config_set(self.c, "manage_wait_normal", "5m")
 
-    def test_a_ship_request_notice_is_low_and_the_commands_take_a_level(self):
+    def test_an_alert_or_a_question_waits_unless_it_is_blocked(self):
+        # #1608: after 78 of 128 alerts and questions to the manager, the sender went on with its item (#1597).
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        a = core.send(self.c, "alert", "main is red since #12", to="boss", actor="w1")
+        q = core.send(self.c, "question", "may I also rename the table?", to="boss", actor="w1")
+        self.assertEqual([(m["level"], m["blocked"], m["manager_wait"]) for m in (a, q)], [("high", None, "10m")] * 2)
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual(([x["body"] for x in w["messages"]], minutes),
+                         (["main is red since #12", "may I also rename the table?"], 10))
+        # With the flag it wakes the watch at once, and brings the ones that wait, itself first: no second wake.
+        core.send(self.c, "note", "one", to="boss", actor="w1")
+        core.send(self.c, "note", "two", to="boss", actor="w2", level="low")
+        b = core.send(self.c, "question", "which db? I cannot go on", to="boss", actor="w1", blocked=True)
+        self.assertEqual((b["blocked"], "manager_wait" in b), ("sender", False))
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["which db? I cannot go on", "one", "two"], 0))
+        self.assertEqual(self.watch_minutes(step="5m")[0]["result"], "tick")
+        # A low message with the flag does not wait either; the shortcut commands pass the flag.
+        up = core.message(self.c, "note", "the disk is full", to="boss", actor="w1", level="low", blocked=True)[0]
+        self.assertEqual((up["level"], up["blocked"]), ("low", "sender"))
+        self.assertEqual(self.watch_minutes(step="2h")[1], 0)
+        # A person's message always wakes the manager at once.
+        core.register(self.c, "mark", human=True)
+        p = core.send(self.c, "note", "stop the release", to="boss", actor="mark")
+        self.assertEqual((p["blocked"], "manager_wait" in p), (None, False))
+        self.assertEqual(self.watch_minutes(step="2h")[1], 0)
+        # To a worker the flag is stored, and nothing waits.
+        self.assertEqual("manager_wait" in core.send(self.c, "alert", "x", to="w2", actor="w1"), False)
+
+    def test_maxpm_marks_a_message_blocked_when_it_sees_the_sender_stand_still(self):
+        # #1597: one of the two signs showed 39 of the 50 past messages whose item stood still.
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        blocked = lambda m: core.message_show(self.c, m["id"])["blocked"]
+        # Sign 1: the sender asks, then waits for messages. The watch returns at once.
+        q = core.send(self.c, "question", "which db?", to="boss", actor="w1")
+        n = core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
+        other = core.send(self.c, "alert", "main is red", to="boss", actor="w2")
+        core.inbox_wait(self.c, "w1", timeout="0s", sleep=lambda s: None)
+        self.assertEqual([blocked(m) for m in (q, n, other)], ["waits", None, None])  # not a note, not another sender
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual((w["messages"][0]["body"], minutes), ("which db?", 0))
+        # Not a message that is older than three minutes, and not one that the manager read.
+        old = core.send(self.c, "alert", "old news", to="boss", actor="w1")
+        read = core.send(self.c, "alert", "read", to="boss", actor="w1")
+        self.c.execute("UPDATE messages SET created_at=? WHERE id=?", (core.iso(core.now() - timedelta(minutes=4)), old["id"]))
+        self.c.execute("UPDATE messages SET read_at=? WHERE id=?", (core.iso(core.now()), read["id"]))
+        core.inbox_wait(self.c, "w1", timeout="0s", sleep=lambda s: None)
+        self.assertEqual([blocked(m) for m in (old, read)], [None, None])
+        core.inbox(self.c, "boss")
+        # Sign 2: the sender releases or blocks the item of the message, after the send or just before it.
+        x, y, z = self.add("a", "page"), self.add("a", "form"), self.add("a", "mail")
+        core.config_set(self.c, "max_leases", "3", agent="w1")
+        for i in (x, y, z):
+            core.claim(self.c, i, "w1")
+        about_x = core.send(self.c, "alert", "the review needs another agent", to="boss", item=x, actor="w1")
+        about_y = core.send(self.c, "alert", "y goes on", to="boss", item=y, actor="w1")
+        core.release(self.c, x, "I wrote a commit of this release", "w1")
+        self.assertEqual([blocked(about_x), blocked(about_y)], ["item", None])
+        self.assertEqual(self.watch_minutes(step="2h")[1], 0)  # it brought the alert about y too: read, so not raised
+        about_y = core.send(self.c, "alert", "y needs the vendor's key", to="boss", item=y, actor="w1")
+        core.block(self.c, y, "waits for the vendor's key", "w1")
+        self.assertEqual(blocked(about_y), "item")
+        after = core.send(self.c, "question", "who has the vendor's key?", to="boss", item=y, actor="w1")
+        self.assertEqual((after["blocked"], "manager_wait" in after), ("item", False))
+        # With no item on the message: an item that the sender released in the last three minutes.
+        self.assertEqual(core.send(self.c, "alert", "disk is full", to="boss", actor="w1")["blocked"], "item")
+        self.assertIsNone(core.send(self.c, "alert", "disk is full", to="boss", actor="w2")["blocked"])
+        self.assertIsNone(core.send(self.c, "alert", "z goes on", to="boss", item=z, actor="w1")["blocked"])
+        # A release by someone else (the manager takes the item back) is no sign of the holder.
+        core.release(self.c, z, "to another agent", None)
+        self.assertIsNone(blocked(core.send(self.c, "note", "fyi", to="boss", actor="w2")))
+        # The manager's own messages are never raised.
+        to_worker = core.send(self.c, "question", "is #9 done?", to="w1", actor="boss")
+        self.assertIsNone(to_worker["blocked"])
+
+    def test_the_three_levels_of_1583_become_two_levels_and_the_flag(self):
+        core.manage(self.c, self.dir.name, "boss")
+        ids = [core.send(self.c, "note", t, to="boss", actor="w1")["id"] for t in ("now", "later", "records")]
+        for i, lvl in zip(ids, ("urgent", "normal", "low")):
+            self.c.execute("UPDATE messages SET level=? WHERE id=?", (lvl, i))
+        self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'manage_wait_normal', '7m')")
+        self.c.execute("DELETE FROM meta WHERE key='message_levels_1608'")
+        self.c.commit()
+        c2 = core.connect(self.path)
+        self.addCleanup(c2.close)
+        self.assertEqual([(m["level"], m["level_set"], m["blocked"]) for m in map(lambda i: core.message_show(c2, i), ids)],
+                         [("high", False, "sender"), ("high", False, None), ("low", True, None)])
+        self.assertEqual(core.setting(c2, "manage_wait_high"), "7m")
+        self.assertEqual(c2.execute("SELECT count(*) FROM settings WHERE key='manage_wait_normal'").fetchone()[0], 0)
+        # One time only: a later level is not touched.
+        self.c.execute("UPDATE messages SET level='low' WHERE id=?", (ids[0],))
+        self.c.commit()
+        c3 = core.connect(self.path)
+        self.addCleanup(c3.close)
+        self.assertEqual(core.message_show(c3, ids[0])["level"], "low")
+
+    def test_a_ship_request_notice_is_low_and_the_commands_take_a_level_and_the_flag(self):
         from river import cli
         core.manage(self.c, self.dir.name, "boss")
         core.target_add(self.c, "web", "push")
@@ -4290,22 +4387,37 @@ class Manager(Base):
                     mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
                 cli.run(list(words))
             return out.getvalue()
-        run("--as", "w1", "note", "boss", "no action needed", "--level", "low")
-        run("--as", "w1", "send", "note", "read this now", "--to", "boss", "--level", "urgent")
-        run("--as", "w1", "alert", "boss", "an alert that can wait", "--level", "normal")
+        self.assertRegex(run("--as", "w1", "note", "boss", "no action needed", "--level", "low"), r"^sent #\d+ note to boss\n")
+        # An alert or a question to the manager says how long it waits, and how to make it not wait.
+        self.assertRegex(run("--as", "w1", "alert", "boss", "main is red"),
+                         r"^sent #\d+ alert to boss \(the manager's watch brings it within 10m; with --blocked at once: "
+                         r"use it when your item cannot move until the answer\)\n")
+        self.assertRegex(run("--as", "w1", "ask", "boss", "which db? I cannot go on", "--blocked"),
+                         r"^sent #\d+ question to boss, blocked\n")
+        self.assertRegex(run("--as", "w1", "send", "note", "read this now", "--to", "boss", "--blocked"), r"to boss, blocked\n")
+        self.assertRegex(run("--as", "w1", "alert", "w2", "to a worker"), r"^sent #\d+ alert to w2\n")
         out = run("--as", "boss", "inbox", "--peek")
         self.assertRegex(out, r"note from w1 to boss  \(.*, level low, new\)\n    no action needed")
-        self.assertRegex(out, r"note from w1 to boss  \(.*, level urgent, new\)\n    read this now")
-        self.assertRegex(out, r"alert from w1 to boss  \(.*, level normal, new\)")
+        self.assertRegex(out, r"alert from w1 to boss  \([^,]*, new\)\n    main is red")
+        self.assertRegex(out, r"question from w1 to boss  \(.*, open, blocked, new\)\n    which db\?")
+        self.assertRegex(out, r"note from w1 to boss  \([^,]*, blocked, new\)\n    read this now")
+        # A level of #1583 is refused with the way to say it now; MaximizePM shows what it saw.
+        with self.assertRaisesRegex(RiverError, "the level is one of high, low; for a message that cannot wait, "
+                                                "leave it out and add --blocked"):
+            run("--as", "w1", "note", "boss", "x", "--level", "urgent")
+        run("--as", "w1", "ask", "boss", "may I rename it?")
+        core.inbox_wait(self.c, "w1", timeout="0s", sleep=lambda s: None)
+        self.assertRegex(run("--as", "boss", "inbox", "--peek"),
+                         r"open, blocked \(the sender waits for messages\), new\)\n    may I rename it\?")
 
-    def test_a_low_finding_waits_and_an_urgent_one_brings_it(self):
+    def test_a_low_finding_waits_and_another_finding_brings_it(self):
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
         h = self.add("a", "sign the contract", doer="human")  # an item that is ready for a person: low
         self.assertEqual(core._finding_keys(core.manager_findings(self.c)), [f"human:{h}"])
         w, minutes = self.watch_minutes(step="2h")
         self.assertEqual((w["result"], w["new"], minutes), ("change", [f"human:{h}"], 30))
-        # With an urgent finding (ready agent work and no agent) it comes after manage_settle, with the low one.
+        # With another finding (ready agent work and no agent) it comes after manage_settle, with the low one.
         h2 = self.add("a", "pay the invoice", doer="human")
         self.add("b", "new work")
         w, minutes = self.watch_minutes(step="2h")
@@ -4646,7 +4758,7 @@ class Locked(Base):
             w = core.manage_watch(self.c, "boss", sleep=nap)
         self.assertEqual((w["result"], len(naps)), ("tick", 2))
         # Locked when a message is due: nothing is marked read, and the next poll returns with it.
-        core.send(self.c, "alert", "w1 is stuck", to="boss", actor="w2")
+        core.send(self.c, "alert", "w1 is stuck", to="boss", actor="w2", blocked=True)
         naps.clear()
         self.lock()
         w = core.manage_watch(self.c, "boss", sleep=nap)

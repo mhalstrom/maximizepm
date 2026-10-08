@@ -1836,7 +1836,7 @@ OPS = {
     "answer": lambda c, a, who: core.answer(c, int(a["msg"]), a["body"], who),
     "message_read": lambda c, a, who: _message_read(c, int(a["msg"])),
     "send": lambda c, a, who: core.send(c, a["kind"], a["body"], a.get("to"), a.get("item"), a.get("reply"), who,
-                                        a.get("level")),
+                                        a.get("level"), bool(a.get("blocked"))),
     "offer": lambda c, a, who: core.offer(c, a["body"], int(a["item"]), a.get("to"), who),
     "give": lambda c, a, who: core.give(c, int(a["id"]), a["to"], who),
     "split": lambda c, a, who: core.split(c, int(a["id"]), [t for t in a["titles"] if t.strip()], who),

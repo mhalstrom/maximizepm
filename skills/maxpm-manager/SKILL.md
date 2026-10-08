@@ -29,17 +29,22 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    read. After the first new finding it waits `manage_settle` (2m) more and
    returns every finding that came meanwhile, so a group of findings wakes you
    once. A finding it reported before does not wake it again. With nothing new
-   it exits after `manage_every` with one line. Each message and finding has a
-   level, and each level a wait before it wakes you: urgent at once (an alert,
-   a question, a stop, most findings), normal after `manage_wait_normal` (10m:
-   a note, a notice), low after `manage_wait_low` (30m: a ship request notice,
-   and the findings "an agent waits" and "an item is ready for a person").
-   Each exit of the watch brings every message and finding that waits, so
-   they do not wake you again. A sender sets another level with `--level
-   urgent|normal|low`; do so yourself for a note that needs no action. When
-   the briefing says MaximizePM delivers messages into your session itself
-   (`native_message`), only urgent messages come that way, and they do not
-   wake the watch. Run no second background command: each wake reads your
+   it exits after `manage_every` with one line. Each message has a level,
+   and each level a wait before it wakes you: high after `manage_wait_high`
+   (10m: the default, also an alert and a question), low after
+   `manage_wait_low` (30m: a ship request notice, and a message sent with
+   `--level low`). A blocked message wakes you at once: the sender set
+   `--blocked` because its item cannot move until your answer, or MaximizePM
+   saw that the sender stands still (it runs `maxpm inbox --wait`, or it
+   released or blocked the item). `maxpm inbox` shows "blocked" on such a
+   message: answer it first. A person's message always wakes you at once. The findings "an agent waits" and "an item is
+   ready for a person" wait `manage_wait_low`; another finding waits
+   `manage_settle`. Each exit of the watch brings every message and finding
+   that waits, so they do not wake you again. Send your own notes that need
+   no action with `--level low`. When the briefing says MaximizePM delivers
+   messages into your session itself (`native_message`), only a blocked
+   message and a person's message come that way, and they do not wake the
+   watch. Run no second background command: each wake reads your
    whole context again, so a second watcher doubles the cost. MaximizePM refuses
    `maxpm inbox --wait` from the active manager.
 3. Act on what is new. Then start `manage --watch` again.

@@ -457,6 +457,9 @@ def _fmt_msg(m, indent=""):
         head += f", {m['state']}"
     if m.get("level_set"):
         head += f", level {m['level']}"
+    if m.get("blocked"):  # with what MaximizePM saw, when the sender did not set the flag
+        head += {"waits": ", blocked (the sender waits for messages)",
+                 "item": ", blocked (the sender released or blocked its item)"}.get(m["blocked"], ", blocked")
     if m["unread"]:
         head += ", new"
     if m["reply_to"]:
@@ -466,8 +469,10 @@ def _fmt_msg(m, indent=""):
     return "\n".join(lines)
 
 
-LEVEL_HELP = ("how soon it wakes the manager's watch: urgent (at once), normal (after manage_wait_normal), or low "
-              "(after manage_wait_low); the default comes from the kind (an alert and a question: urgent; a note: normal)")
+LEVEL_HELP = ("to the manager: how long it waits before it wakes the manager's watch: high (the default; "
+              "manage_wait_high, 10m) or low (manage_wait_low, 30m); with --blocked it does not wait")
+BLOCKED_HELP = ("your item cannot move until the answer: you have no other part of it to do, and nobody else can do "
+                "the next step; it wakes the manager's watch at once")
 
 
 def build_parser():
@@ -838,7 +843,8 @@ def build_parser():
         x.add_argument("--holder-of", type=int, help="send it to whoever holds this item")
         x.add_argument("--item", type=int, help="the item it is about (without an agent: its holder)")
         x.add_argument("--goal", help="send it to the owner of this goal")
-        x.add_argument("--level", choices=core.MESSAGE_LEVELS, help=LEVEL_HELP)
+        x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
+        x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
         if kind == "ask":
             x.add_argument("--file", help="ask every agent whose held items touch this file")
     x = sub.add_parser("decline", help="hand a pushed item back, or with --message say no to an offer or alert")
@@ -866,7 +872,8 @@ def build_parser():
     x.add_argument("--to", help="agent name"); x.add_argument("--item", type=int, help="the item it is about; without --to it goes to the holder")
     x.add_argument("--reply", type=int, help="message id this replies to (goes to its sender)")
     x.add_argument("--goal", help="send it to the owner of this goal")
-    x.add_argument("--level", choices=core.MESSAGE_LEVELS, help=LEVEL_HELP)
+    x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
+    x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
     x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int); x.add_argument("text")
     x = sub.add_parser("inbox", help="your unread messages and questions waiting for your answer")
     x.add_argument("--all", action="store_true", help="read messages too")
@@ -889,7 +896,8 @@ def build_parser():
     x.add_argument("--holder-of", type=int, help="send the note to whoever holds this item")
     x.add_argument("--item", type=int, help="the item it is about (without an agent: its holder)")
     x.add_argument("--goal", help="send the note to the owner of this goal")
-    x.add_argument("--level", choices=core.MESSAGE_LEVELS, help=LEVEL_HELP)
+    x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
+    x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
     x = sub.add_parser("who", help="who is doing what"); x.add_argument("--item", type=int); x.add_argument("--project")
     x.add_argument("--all", action="store_true", help="also stopped and gone agents that hold nothing")
     x.add_argument("--file", help="only agents whose held items touch this file or directory")
@@ -1835,7 +1843,7 @@ def dispatch(conn, a, actor):
         to, text = (a.words[0], a.words[1]) if len(a.words) == 2 else (None, a.words[0])
         kind = {"ask": "question", "alert": "alert", "note": "note"}[c]
         return core.message(conn, kind, text, to, a.holder_of, a.item, getattr(a, "file", None), os.getcwd(), actor,
-                            a.goal, a.level)
+                            a.goal, a.level, a.blocked)
     if c == "decline":
         if a.message:
             return core.decline_message(conn, a.id, a.note, actor)
@@ -1858,7 +1866,7 @@ def dispatch(conn, a, actor):
         return core.blockers(conn, a.id)
     if c == "send":
         return core.send(conn, a.kind, a.text, a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
-                         a.item, a.reply, actor, a.level)
+                         a.item, a.reply, actor, a.level, a.blocked)
     if c == "answer":
         return core.answer(conn, a.id, a.text, actor)
     if c == "inbox":
@@ -2100,14 +2108,14 @@ def render_manage(b):
              + (f" (after manage_settle {b['settle']}, with the findings that came meanwhile)"
                 if b.get("settle") and core.parse_duration(b["settle"]).total_seconds() else "")
              + (", " if b.get("native") else
-                f", a message to you (an alert or a question at once, a note after manage_wait_normal "
-                f"{b.get('wait_normal', '10m')}, a low one after manage_wait_low {b.get('wait_low', '30m')}; it prints "
+                f", a message to you (a blocked one or a person's at once, another after manage_wait_high "
+                f"{b.get('wait_high', '10m')}, a low one after manage_wait_low {b.get('wait_low', '30m')}; it prints "
                 f"every message that waits), ")
              + f"or after manage_every {b['every']} with one line; start it again each time. It is your only "
                f"watcher: MaximizePM refuses a second wait for your messages."),
             *([] if b.get("chat") or not b.get("native") else [
-            "Messages: MaximizePM delivers urgent ones into this session itself (native_message); they do not wake "
-            "the watch. The watch brings a normal or a low message after its wait."]),
+            "Messages: MaximizePM delivers a blocked one and a person's into this session itself (native_message); "
+            "they do not wake the watch. The watch brings each other message after its wait."]),
             "The rules: maxpm guide manager"]
     if b.get("chat"):
         out += [""] + _chat_lines(r, False)[:1] + [
@@ -2911,7 +2919,14 @@ def render(a, res):
     if c == "send" or (c in ("alert", "ask", "note") and isinstance(res, list)):
         for m in res if isinstance(res, list) else [res]:
             to = m["to_agent"] or f"the next holder of #{m['item_id']} (nobody holds it now)"
-            print(f"sent #{m['id']} {m['kind']} to {to}" + (f" (native: {m['native_status']})" if m.get("native_status") else ""))
+            if m.get("manager_wait") and m["kind"] in ("alert", "question"):
+                # The place where a sender learns the flag (#1608): six of ten such messages came from a
+                # sender that went on with its item (#1597).
+                more = (f" (the manager's watch brings it within {m['manager_wait']}; with --blocked at once: use it "
+                        f"when your item cannot move until the answer)")
+            else:
+                more = f" (native: {m['native_status']})" if m.get("native_status") else ""
+            print(f"sent #{m['id']} {m['kind']} to {to}" + (", blocked" if m.get("blocked") else "") + more)
         return
     if c == "accept" and a.message:
         print(f"accepted alert #{res['id']}" + (f"; see: maxpm show {res['item_id']}" if res["item_id"] else "")
