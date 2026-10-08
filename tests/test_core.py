@@ -250,6 +250,31 @@ class Go(Base):
         core.project_add(self.c, "web", path=self.web)
         core.project_add(self.c, "api", path=self.api)
 
+    def test_the_push_alert_of_the_item_that_go_gives_is_not_a_message_to_read(self):
+        # #1605: the briefing said 'Messages for you: inbox: 1 unread, 1 alert', and the inbox was then empty.
+        from river import cli
+        core.register(self.c, "boss")
+        core.register(self.c, "w1")
+        x = self.add("web", "page")
+        core.push(self.c, x, "w1", "start here", "boss")
+        self.assertEqual(core.unread(self.c, "w1")["alerts"], 1)
+        b = core.go(self.c, self.web, "w1")
+        self.assertEqual((b["item"]["id"], b["messages"]["unread"], b["messages"]["alerts"]), (x, 0, 0))
+
+        def text(brief):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render_go(brief)
+            return out.getvalue()
+        self.assertNotIn("Messages for you", text(b))
+        self.assertEqual(core.inbox(self.c, "w1"), [])
+        # Another unread message still shows.
+        core.release(self.c, x, actor="w1")
+        core.send(self.c, "note", "read me", to="w1", actor="boss")
+        b = core.go(self.c, self.web, "w1")
+        self.assertEqual(b["messages"]["unread"], 1)
+        self.assertIn("Messages for you: inbox: 1 unread", text(b))
+
     def test_a_project_linked_to_another_folder_moves_only_with_move(self):
         other = os.path.join(self.dir.name, "other")
         os.makedirs(other)

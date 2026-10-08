@@ -7647,6 +7647,10 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         brief["shared_goals"] = [r["name"] for r in conn.execute(
             "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "
             "AND g.status='open' ORDER BY g.rank, g.id", (it["id"],))]
+    if "messages" in brief:
+        # Counted after the claim: it accepts the push alert of the item this briefing gives, so the alert is
+        # not unread any more. The count from before sent each started session to an empty inbox (#1605).
+        brief["messages"] = unread(conn, brief["agent"])
     return brief
 
 
