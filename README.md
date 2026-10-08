@@ -623,7 +623,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   (`ntfy_priority`), so the phone shows a banner; the ntfy app also needs the
   phone's permission for banners and the lock screen.
 - Planning and shipping: `maxpm plan`, deploy targets (`maxpm target add`,
-  `describe`, `own`, `release`, `give`, `show`, `list`), `maxpm ship`.
+  `describe`, `own`, `release`, `give`, `show`, `list`, `cadence`, `cut`,
+  `release-now`), `maxpm ship`.
 - Deploy monitoring: `maxpm target monitor <target> "<what to watch, for how
   long>"`. When a deploy item is claimed, MaximizePM adds a monitor item for that
   release (sonnet, low effort, at most sonnet, unless settings for
@@ -666,6 +667,25 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   (0, the default, is no limit) stops serve from starting a release session
   while that many agent sessions are live. The item's history records each
   start, push, alert, and failure.
+- Release cadence: `maxpm target cadence <target> 2h|6h|1d|1w|1mo|off` sets
+  the shortest time between two normal releases of a target (`2h` is at most
+  12 releases a day; `off`, the default, starts a release when the one before
+  it is done). Ship requests collect on the open deploy item, and its review
+  (the deploy item when there is no review) is ready only at the cut of the
+  last release plus the cadence. `maxpm ship` tells the worker with which
+  release its change goes out; `maxpm target show <target>` and the Targets
+  tab show when the next release can start and what waits for it. For a
+  release that cannot wait (a fix of a production defect, a person's
+  request), the target owner, the manager, or a person runs
+  `maxpm target release-now <target> --reason "<why>"`. The history of the
+  deploy item keeps the reason.
+- The cut of a release: from the cut on, the deploy item of a release holds a
+  fixed list of items. A ship request that comes later joins the next deploy
+  item, and that release starts when this one is done. The cut comes when a
+  reviewer takes the review of the release (the deployer, when there is no
+  review), or with `maxpm target cut <target> --rev <commit>` from the target
+  owner, the manager, or a person, for example when they pin the commit that
+  the release builds from.
 - Overviews: `maxpm status`, and `maxpm log` with a Done tab on the page.
 - Token usage: when an item is done, MaximizePM reads the Claude Code
   transcripts of the sessions that held it and records the tokens they spent
