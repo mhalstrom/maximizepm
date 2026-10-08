@@ -218,3 +218,82 @@ handover).
 manager also runs commands with the names of other agents, and the script
 then counted the manager's session for one of those. It also prints a second
 table: what started each turn, the watch commands, and the compactions.
+
+## What wakes the manager (#1582)
+
+The measurement after M1 and M2 found 14 wakes for each hour, at about 71k eq
+for each wake. This section counts their causes, with the script
+`manager_wakes.py` (in this folder), for the same 15.4 hours:
+
+    python3 current_project/research/manager_wakes.py 2026-10-08T04:33:10+00:00 2026-10-08T20:00:00+00:00
+
+Background commands that ended: 181 watches (`maxpm manage --watch`) and 39
+other commands (release steps that the manager ran as a target owner).
+
+| The watch returned for | Wakes |
+|---|---:|
+| Messages | 124 |
+| A finding | 55 |
+| The time limit (`manage_every`, 30m) | 2 |
+
+| Messages in the wakes | Messages | Wakes with only this one message |
+|---|---:|---:|
+| Note from an agent | 98 | 70 |
+| Ship request notice (the manager owns a target) | 48 | 18 |
+| Alert from an agent | 20 | 1 |
+| Question from an agent | 14 | 14 |
+| Other notice | 1 | 1 |
+
+| Findings in the wakes | Wakes |
+|---|---:|
+| waiting (an agent waits longer than `wait_too_long`) | 31 |
+| human (an item is ready for a person) | 16 |
+| question | 5 |
+| uncovered | 2 |
+| stuck | 1 |
+
+- Messages cause 69% of the wakes. A message returns the watch at once: the
+  settle time of M1 (`manage_settle`, 2m) applies only to findings.
+- Most message wakes carry one note. A note is a status line ("#12 is on
+  main"); the manager guide says that only an alert means "read now".
+- Half of the finding wakes are `waiting` and a quarter are `human`. An agent
+  that waits ends by itself after `wait_max`, and a person gets a
+  notification for a ready item. The manager seldom has to act on these at
+  once.
+- The time between two wakes is short: the median is 3.2 minutes, 72 of 180
+  are under 2 minutes, and 152 are under 10 minutes.
+
+### Proposal M4: the less urgent events wait
+
+Urgent events return the watch as now: an alert, a question, a stop request,
+and a finding other than `waiting` and `human` (after `manage_settle`). There
+were 40 urgent wakes in the 15.4 hours.
+
+The other events (a note, a notice, a `waiting` or `human` finding) wait
+for a new setting, `manage_quiet`, from the first one, and then go to the
+manager together. An urgent event in that time brings them along.
+
+Simulation on the 181 wakes (each wake as one event at its time; the real
+number can differ a little, because a later wake moves the next ones):
+
+| `manage_quiet` | Wakes | Ship request notices also never wake alone | `waiting` and `human` findings also never wake alone |
+|---|---:|---:|---:|
+| 0m (now) | 181 | 163 | 138 |
+| 2m | 140 | 131 | 111 |
+| 5m | 114 | 108 | 95 |
+| 10m | 86 | 85 | 79 |
+| 15m | 70 | 68 | 67 |
+| 30m | 55 | 55 | 54 |
+
+- 10m removes about 95 of 181 wakes (52%). At 71k eq for each wake that is
+  about 6.7M of the 19.6M eq of the period (34%).
+- 15m removes about 111 wakes (61%), about 7.9M eq (40%).
+- The price: the manager reads a note or a ship request up to that time
+  later. An agent that needs the manager now sends an alert or a question;
+  the agent guide says so already.
+- With a wait of 10m or more, the two other rules (ship request notices and
+  `waiting`/`human` findings never wake alone) add little, so one setting is
+  enough.
+
+Not in this proposal: the 39 wakes from other background commands. They are
+release steps, and the release cadence of a target (#1571) reduces them.
