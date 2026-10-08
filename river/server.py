@@ -1311,6 +1311,8 @@ def auto_release(conn, runner=None):
         a = ann.get(d["id"])
         if a is None or a["project_archived"] or not (a["ready"] or d["deployer"] == "standing"):
             continue
+        if not a["ready"] and core.cadence_holds(conn, d["id"]):
+            continue  # the release waits for the target's cadence: a standing deployer starts when it can start
         ok, why = core.owner_can_deploy(conn, d["owner"]) if d["owner"] else (False, "the target has no owner")
         if ok:
             note = f"{RELEASE_NOTE} alerted {d['owner']}"
@@ -1827,6 +1829,8 @@ OPS = {
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
     "deploy_now": lambda c, a, who: deploy_now(c, a["target"], bool(a.get("review")), agent=a.get("agent"), actor=who,
                                                **_launch_args(a)),
+    "target_cadence": lambda c, a, who: core.target_cadence(c, a["target"], a.get("cadence") or "off", who),
+    "release_now": lambda c, a, who: core.release_now(c, a["target"], a.get("reason"), who),
     "open_monitors": lambda c, a, who: open_monitors(c, db=a.get("db")),
     "queue_add": lambda c, a, who: core.queue_add(c, a["agent"], a.get("id"), a.get("message"), bool(a.get("first")),
                                                   a.get("before"), who),

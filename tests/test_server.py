@@ -556,6 +556,37 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "launch, standing, or off"):
             core.target_deployer(self.c, "web", "always")
 
+    def test_a_release_that_waits_for_the_cadence_starts_no_reviewer_and_no_standing_deployer(self):
+        # #1571: each ship request became a release of its own; the cadence makes them collect.
+        rv, dep = self._release(owner=None)
+        core.register(self.c, "dev2")
+        core.claim(self.c, rv, "dev2")
+        core.review_pass(self.c, rv, "ok", "dev2")
+        core.target_own(self.c, "web", "dev2")
+        core.claim(self.c, dep, "dev2")
+        core.done(self.c, dep, "release v1", "dev2")
+        core.target_release(self.c, "web", "dev2")
+        core.target_cadence(self.c, "web", "2h", "dev")
+        core.target_deployer(self.c, "web", "standing")
+        a = core.item_add(self.c, "site", "form")["id"]
+        core.claim(self.c, a, "dev")
+        nxt = core.done(self.c, a, "commit", "dev", ship_it=True)
+        rv2 = nxt["ship_release"]["start"]
+        self.assertEqual((nxt["ship_release"]["waits"], core._item(self.c, rv2)["kind"]), (True, "review"))
+        sent = []
+        self.assertEqual(server.auto_release(self.c, runner=sent.append),
+                         {"pushed": {}, "started": {}, "alerted": {}, "failed": {}})
+        self.assertEqual(sent, [])
+        # Release now from the page, with a reason: the reviewer and the standing deployer start.
+        core.register(self.c, "mark", human=True)
+        with self.assertRaisesRegex(RiverError, "say why"):
+            server.OPS["release_now"](self.c, {"target": "web"}, "mark")
+        r = server.OPS["release_now"](self.c, {"target": "web", "reason": "a fix of a production defect"}, "mark")
+        self.assertEqual((r["waits"], r["early"]), (False, "a fix of a production defect"))
+        started = server.auto_release(self.c, runner=sent.append)["started"]
+        self.assertEqual(sorted(started), sorted([rv2, nxt["shipped_in"]]))
+        self.assertEqual(server.OPS["target_cadence"](self.c, {"target": "web", "cadence": "off"}, "mark")["cadence"], "")
+
     def test_a_started_session_takes_its_item_or_says_why_and_one_that_never_connects_is_a_finding(self):
         core.project_add(self.c, "shop", path=self.dir.name)
         core.item_add(self.c, "shop", "first", priority=0)

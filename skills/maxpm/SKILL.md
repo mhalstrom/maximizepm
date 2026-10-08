@@ -77,7 +77,11 @@ your type from your CLI's environment.
    When someone adds a prerequisite to an item you hold, you get an alert: stop and wait for it.
    The change must go out, and the project has a deploy target: add `--ship`
    (or run `maxpm ship <id>` later). The item joins that target's next
-   deploy item, which only the target owner takes. The owner's `maxpm go`
+   deploy item, which only the target owner takes. When the target has a
+   release cadence (`maxpm target cadence <target> 2h`), ship requests collect
+   and the reply says when the next release can start; your item is done, so
+   take other work. Only a fix of a production defect or a person's request
+   goes out sooner: `maxpm target release-now <target> --reason "<why>"`. The owner's `maxpm go`
    gives it the ready deploy item first (role DEPLOYER), with what it ships;
    `maxpm go --role deployer` also takes a free target of the folder's projects.
    When the target has a monitor text (`maxpm target monitor`), claiming the

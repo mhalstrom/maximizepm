@@ -64,6 +64,13 @@ Stop when the user tells you to, and tell the user what you did.
   deployer while the review runs). No session starts while `max_sessions` agent
   sessions are live (0: no limit). Each start or failure is a `release:` line in the
   item's history. Do not hand releases over yourself unless serve says it cannot.
+- **Fewer, larger releases**: give the target a release cadence,
+  `maxpm target cadence <target> 2h|1d|1w|1mo|off`. Ship requests then collect on the
+  open deploy item, and its review (the deploy item, with no review) is ready only at
+  the end of the last release plus the cadence; `maxpm target show <target>` says
+  when, and what waits. Do not hold a cadence by hand (auto_review off, pinned
+  releases). A release that cannot wait (a fix of a production defect, a person asks):
+  `maxpm target release-now <target> --reason "<why>"`; the history keeps the reason.
 - **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
   `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
   folder of the release; a waiting session that worked on the release does not get it.

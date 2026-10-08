@@ -209,10 +209,33 @@ def _cut(text, n=70):
     return text if len(text) <= n else text[:n - 1].rstrip() + "…"
 
 
+def _release_lines(p):
+    """A target's release cadence, when its next release can start, and what waits for it (core.release_plan)."""
+    name = p["target"]
+    if not p["cadence"]:
+        return [f"release cadence: off (each release starts at once; set one: maxpm target cadence {name} 2h|1d|1w|1mo)"]
+    out = [f"{p['text']}; change it: maxpm target cadence {name} <time>|off"]
+    if p["last"]:
+        out.append(f"  last release: {p['last']['text']} (deploy #{p['last']['id']})")
+    if p["waits"]:
+        out.append(f"  waits for it: deploy #{p['deploy']} with "
+                   + "; ".join(f"#{x['id']} {x['title']} ({x['status'].replace('_', ' ')})" for x in p["ships"]))
+        out.append(f"  sooner, with a reason: maxpm target release-now {name} --reason \"<why>\"")
+    return out
+
+
+def _ship_line(p):
+    """For the worker that asked for a ship: when its change goes out (the target's release cadence)."""
+    return p["text"] + (f"; your change goes out with it. Sooner, with a reason: maxpm target release-now "
+                        f"{p['target']} --reason \"<why>\"" if p["waits"] else "")
+
+
 def _print_show(a):
     print(_fmt_item(a))
     if a.get("kind") == "deploy":
         print(f"  deploy item for target {a['target']} (owner: {a.get('target_owner') or 'nobody'}; only the owner takes it)")
+    if (a.get("release") or {}).get("text"):  # maxpm ship
+        print(f"  {_ship_line(a['release'])}")
     if a["notes"]:
         print("  notes:", a["notes"])
     for line in _context_lines(a):
@@ -260,6 +283,8 @@ def _print_show(a):
         print(f"  usage:   {_usage_line(a['usage'])}")
     if a.get("shipped_in"):
         print(f"  ship requested: joins deploy item #{a['shipped_in']}")
+        if (a.get("ship_release") or {}).get("text"):
+            print(f"  {_ship_line(a['ship_release'])}")
     if a.get("now_ready"):
         print("  now ready:", ", ".join(f"#{i}" for i in a["now_ready"]))
     if a.get("resumed"):
@@ -517,7 +542,15 @@ def build_parser():
                        "soon as a release has a deploy item, so it waits during the review and deploys the moment the "
                        "review passes; off starts nothing")
     x.add_argument("name"); x.add_argument("mode", nargs="?", choices=core.DEPLOYER_MODES, help="none shows it")
-    x = tgs.add_parser("show", help="a target, its owner, and its projects"); x.add_argument("name")
+    x = tgs.add_parser("cadence", help="how often the target releases (1h, 2h, 1d, 1w, 1mo; off: each release starts "
+                       "at once): ship requests collect on the open deploy item, and its review (the deploy item "
+                       "when there is no review) is ready at the end of the last release plus the cadence")
+    x.add_argument("name"); x.add_argument("cadence", nargs="?", help="a number and m, h, d, w, or mo; off; none shows it")
+    x = tgs.add_parser("release-now", help="start the collected release sooner than the cadence permits, with a "
+                       "reason (a fix of a production defect, a person's request); the history records it")
+    x.add_argument("name"); x.add_argument("--reason", required=True, help="why this release cannot wait")
+    x = tgs.add_parser("show", help="a target, its owner, its projects, and when its next release can start")
+    x.add_argument("name")
     x = tgs.add_parser("rename", help="give a target a new name; its projects, deploy items and deploy project follow")
     x.add_argument("name"); x.add_argument("new")
     x = tgs.add_parser("own", help="become the one owner of a target (runs its deploys)"); x.add_argument("name")
@@ -1581,6 +1614,10 @@ def dispatch(conn, a, actor):
             return core.target_show(conn, a.name) if a.text is None else core.target_monitor(conn, a.name, a.text, actor)
         if a.tcmd == "deployer":
             return core.target_show(conn, a.name) if a.mode is None else core.target_deployer(conn, a.name, a.mode, actor)
+        if a.tcmd == "cadence":
+            return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor)
+        if a.tcmd == "release-now":
+            return core.release_now(conn, a.name, a.reason, actor)
         if a.tcmd == "own":
             return core.target_own(conn, a.name, actor, a.takeover)
         if a.tcmd == "release":
@@ -2288,6 +2325,11 @@ def render_go(b):
                            f"\"<what to watch, for how long>\"")
             for n in b.get("next_deploy", []):
                 out.append(f"  next deploy #{n['id']} is collecting: " + (", ".join(f"#{d['id']}" for d in n["waits_on_detail"]) or "nothing yet"))
+            if (b.get("release") or {}).get("cadence"):
+                p = b["release"]
+                out.append(f"  release cadence {p['cadence']}: after this deploy is done, the next release of "
+                           f"{t['name']} can start {p['cadence']} later; ship requests collect until then "
+                           f"(sooner, with a reason: {r} target release-now {t['name']} --reason \"<why>\")")
             out += ["",
                     "Deploy as the target description says, run its checks, then put the release id or",
                     f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\"",
@@ -2676,6 +2718,16 @@ def render(a, res):
             print(f"  the old name {res['was']} does not work from now on; agents keep their names, and a new agent "
                   "gets the new name")
             return
+        if a.tcmd == "release-now":
+            it = res["item"]
+            print(f"release now: deploy #{res['deploy']} for {res['target']} goes out before the cadence "
+                  f"{res['cadence']} permits ({res['early']}); the history of #{res['deploy']} records it")
+            print(f"  it starts with #{it['id']} {it['title']}" + (
+                ", which is ready" if it["ready"] else ", which waits on "
+                + ", ".join(f"#{b}" for b in it["open_blockers"]) if it["open_blockers"] else f" ({it['status']})"))
+            for x in res["ships"]:
+                print(f"    ships #{x['id']} {x['title']} ({x['status'].replace('_', ' ')})")
+            return
         print(res["name"])
         print("  " + (res["description"] or f"(no description: maxpm target describe {res['name']} \"how it deploys\")"))
         print("  monitor: " + (res.get("monitor") or f"none (a session follows each deploy when you set one: "
@@ -2686,6 +2738,8 @@ def render(a, res):
                                             "a release waits on its review)",
                                 "off": "off (maxpm serve starts nothing; the owner or a person deploys)"}[res["deployer"]]
               + f"; change it: maxpm target deployer {res['name']} launch|standing|off")
+        for line in _release_lines(res["release"]):
+            print("  " + line)
         if res["owner"]:
             left = core._short(core.parse_iso(res["owner_expires_at"]) - core.now())
             print(f"  owner: {res['owner']} ({left} left; any command by {res['owner']} renews it)")

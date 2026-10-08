@@ -2575,6 +2575,222 @@ class DeployNow(Base):
         self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", r["review"]["id"]))
 
 
+class ReleaseCadence(Base):
+    """A target with a release cadence collects ship requests, and the first step of the release (its review, or
+    the deploy item with no review) waits until the end of the last release plus the cadence (#1571)."""
+
+    def setUp(self):
+        super().setUp()
+        core.target_add(self.c, "web", "push, then smoke test")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        for n in ("dev", "rev", "ops"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core.target_own(self.c, "web", "ops")
+        self.clock = [core.now()]
+        fake_now = mock.patch.object(core, "now", lambda: self.clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+
+    def later(self, **kw):
+        self.clock[0] += timedelta(**kw)
+        core.activity(self.c, "dev")  # every command runs the sweep
+
+    def shipped(self, title="page"):
+        """An item that dev finished and asked to ship; returns (item, the ship result)."""
+        a = self.add("site", title)
+        core.claim(self.c, a, "dev")
+        core.done(self.c, a, "commit", "dev")
+        return a, core.ship(self.c, a, "dev")
+
+    def release(self, review=True):
+        """One whole release of one item: returns its deploy item."""
+        a, dep = self.shipped("first")
+        if review:
+            rv = dep["release"]["start"]
+            core.claim(self.c, rv, "rev")
+            core.review_pass(self.c, rv, "fine", "rev", self.dir.name)
+        core.claim(self.c, dep["id"], "ops")
+        core.done(self.c, dep["id"], "release v1", "ops")
+        return dep["id"]
+
+    def test_cadence_values(self):
+        day = timedelta(days=1)
+        self.assertEqual([core.parse_cadence(x) for x in ("2h", " 1D ", "1w", "1mo", "off", "", "0")],
+                         [("2h", timedelta(hours=2)), ("1d", day), ("1w", 7 * day), ("1mo", 30 * day),
+                          ("", None), ("", None), ("", None)])
+        for bad in ("soon", "2", "0h", "1y"):
+            with self.assertRaisesRegex(RiverError, "bad cadence"):
+                core.target_cadence(self.c, "web", bad)
+        self.assertEqual(core.target_cadence(self.c, "web", "1w", "mark")["cadence"], "1w")
+        self.assertEqual(core.target_cadence(self.c, "web", "off", "mark")["cadence"], "")
+
+    def test_the_review_of_the_next_release_waits_until_the_last_release_plus_the_cadence(self):
+        core.config_set(self.c, "review", "on")
+        core.target_cadence(self.c, "web", "2h", "mark")
+        self.assertIn("can start now", core.target_show(self.c, "web")["release"]["text"])
+        first = self.release()  # no release before it: it starts at once
+        self.later(minutes=30)
+        a, dep = self.shipped("form")
+        p = dep["release"]
+        rv = p["start"]
+        self.assertEqual((p["waits"], p["deploy"], p["last"]["id"], core._item(self.c, rv)["kind"]),
+                         (True, dep["id"], first, "review"))
+        self.assertIn("(in 1h30m)", p["text"])
+        it = core.annotate(self.c)[rv]
+        self.assertEqual((it["ready"], it["blocked_until"]), (False, core.iso(self.clock[0] + timedelta(minutes=90))))
+        self.assertIn("release cadence 2h of target web", it["blocked_text"])
+        with self.assertRaisesRegex(RiverError, "release cadence 2h"):
+            core.claim(self.c, rv, "rev")
+        with self.assertRaisesRegex(RiverError, "release-now web"):
+            core.unblock(self.c, rv, "rev")
+        self.assertIsNone(core.go(self.c, self.dir.name, "rev", role="reviewer").get("item"))
+        # More ship requests collect on the same release, and do not move its time.
+        b, dep2 = self.shipped("footer")
+        self.assertEqual((dep2["id"], dep2["release"]["start"], [x["id"] for x in dep2["release"]["ships"]]),
+                         (dep["id"], rv, [a, b]))
+        self.assertEqual(core.done(self.c, self.add_done(), "c", "dev", ship_it=True)["ship_release"]["waits"], True)
+        t = core.target_show(self.c, "web")["release"]
+        self.assertEqual((t["waits"], t["cadence"], len(t["ships"])), (True, "2h", 3))
+        self.assertTrue(core.targets_view(self.c)[0]["release"]["waits"])
+        self.later(minutes=89)
+        self.assertFalse(core.annotate(self.c)[rv]["ready"])
+        self.later(minutes=1)
+        it = core.annotate(self.c)[rv]
+        self.assertEqual((it["ready"], it["blocked_reason"]), (True, None))
+        self.assertTrue(any(e["change"].startswith("release cadence: the wait ended")
+                            for e in core.item_show(self.c, rv)["events"]))
+        self.assertEqual(core.go(self.c, self.dir.name, "rev", role="reviewer")["item"]["id"], rv)
+        self.assertIn("has started", core.target_show(self.c, "web")["release"]["text"])
+
+    def add_done(self):
+        a = self.add("site", "more")
+        core.claim(self.c, a, "dev")
+        return a
+
+    def test_release_now_needs_a_reason_and_the_history_keeps_it(self):
+        core.config_set(self.c, "review", "on")
+        with self.assertRaisesRegex(RiverError, "no release cadence"):
+            core.release_now(self.c, "web", "now", "mark")
+        core.target_cadence(self.c, "web", "1d", "mark")
+        with self.assertRaisesRegex(RiverError, "nothing is collected"):
+            core.release_now(self.c, "web", "now", "mark")
+        self.release()
+        a, dep = self.shipped("fix")
+        rv = dep["release"]["start"]
+        with self.assertRaisesRegex(RiverError, "say why this release cannot wait"):
+            core.release_now(self.c, "web", " ", "mark")
+        r = core.release_now(self.c, "web", "login fails in production", "mark")
+        self.assertEqual((r["waits"], r["early"], r["item"]["id"], r["item"]["ready"]),
+                         (False, "login fails in production", rv, True))
+        self.assertTrue(any(e["actor"] == "mark" and e["change"].startswith("release now, before the cadence 1d")
+                            and e["change"].endswith(": login fails in production")
+                            for e in core.item_show(self.c, dep["id"])["events"]))
+        self.assertTrue(any("release now" in m["body"] and "login fails" in m["body"] for m in core.inbox(self.c, "ops")))
+        self.later(minutes=5)  # the sweep does not hold it again
+        self.assertTrue(core.annotate(self.c)[rv]["ready"])
+        with self.assertRaisesRegex(RiverError, "nothing waits for the cadence"):
+            core.release_now(self.c, "web", "again", "mark")
+        # The release after that one waits again, from the end of the early release.
+        core.claim(self.c, rv, "rev")
+        core.review_pass(self.c, rv, "fine", "rev", self.dir.name)
+        core.claim(self.c, dep["id"], "ops")
+        core.done(self.c, dep["id"], "release v2", "ops")
+        nxt = self.shipped("later")[1]["release"]
+        self.assertEqual((nxt["waits"], nxt["next_at"]), (True, core.iso(self.clock[0] + timedelta(days=1))))
+
+    def test_with_no_review_the_deploy_item_waits_and_deploy_now_is_refused(self):
+        core.target_cadence(self.c, "web", "1h", "mark")
+        self.release(review=False)
+        a, dep = self.shipped("form")
+        self.assertEqual((dep["release"]["start"], dep["release"]["waits"]), (dep["id"], True))
+        self.assertFalse(core.annotate(self.c)[dep["id"]]["ready"])
+        self.assertIsNone(core.go(self.c, self.dir.name, "ops", role="deployer").get("item"))
+        for review in (False, True):
+            with self.assertRaisesRegex(RiverError, "release cadence 1h.*release-now web"):
+                core.deploy_now(self.c, "web", review=review)
+        self.assertEqual(core.cadence_holds(self.c, dep["id"]), dep["id"])
+        self.later(hours=1)
+        self.assertIsNone(core.cadence_holds(self.c, dep["id"]))
+        self.assertEqual(core.go(self.c, self.dir.name, "ops", role="deployer")["item"]["id"], dep["id"])
+
+    def test_a_release_that_started_is_not_held_and_a_change_of_the_cadence_moves_the_wait(self):
+        core.config_set(self.c, "review", "on")
+        self.release()
+        a, dep = self.shipped("form")
+        rv = dep["release"]["start"]
+        self.assertTrue(core.annotate(self.c)[rv]["ready"])  # no cadence: at once
+        core.target_cadence(self.c, "web", "2h", "mark")  # it applies to the release that collects now
+        self.assertEqual(core._item(self.c, rv)["blocked_until"], core.iso(self.clock[0] + timedelta(hours=2)))
+        core.target_cadence(self.c, "web", "4h", "mark")
+        self.assertEqual(core._item(self.c, rv)["blocked_until"], core.iso(self.clock[0] + timedelta(hours=4)))
+        core.target_cadence(self.c, "web", "off", "mark")
+        self.assertTrue(core.annotate(self.c)[rv]["ready"])
+        # A review that a reviewer took once: the release has started, and a cadence set later does not hold it,
+        # also when the review comes back after its fixes.
+        core.claim(self.c, rv, "rev")
+        core.target_cadence(self.c, "web", "2h", "mark")
+        fix = core.review_fail(self.c, rv, ["null check"], actor="rev")["fixes"][0]["id"]
+        core.claim(self.c, fix, "dev")
+        core.done(self.c, fix, "fixed", "dev")
+        self.later(minutes=1)
+        it = core.annotate(self.c)[rv]
+        self.assertEqual((it["ready"], it["blocked_reason"]), (True, None))
+        self.assertEqual(core.target_show(self.c, "web")["release"]["started"], True)
+
+    def test_a_ship_request_while_a_deploy_runs_waits_for_it_and_then_for_the_cadence(self):
+        core.target_cadence(self.c, "web", "2h", "mark")
+        a, dep = self.shipped("first")
+        core.claim(self.c, dep["id"], "ops")
+        b, nxt = self.shipped("second")
+        p = nxt["release"]
+        self.assertEqual((p["waits"], p["running"], p["next_at"], nxt["id"] != dep["id"]), (True, dep["id"], None, True))
+        self.assertIn(f"deploy #{dep['id']} of web runs now", p["text"])
+        self.assertEqual(core._item(self.c, nxt["id"])["blocked_until"], None)
+        self.later(minutes=20)
+        self.assertFalse(core.annotate(self.c)[nxt["id"]]["ready"])
+        core.done(self.c, dep["id"], "release v1", "ops")
+        self.later(minutes=10)
+        self.assertEqual(core._item(self.c, nxt["id"])["blocked_until"], core.iso(self.clock[0] + timedelta(minutes=110)))
+        self.later(minutes=110)
+        self.assertTrue(core.annotate(self.c)[nxt["id"]]["ready"])
+
+    def test_a_blocker_that_a_person_set_on_the_release_stays(self):
+        core.target_cadence(self.c, "web", "1h", "mark")
+        self.release(review=False)
+        dep = self.shipped("form")[1]["id"]
+        core.block(self.c, dep, "the data centre moves this week", "mark")
+        self.later(hours=2)
+        it = core._item(self.c, dep)
+        self.assertEqual((it["blocked_reason"], it["blocked_set_by"]), ("the data centre moves this week", "mark"))
+        core.unblock(self.c, dep, "mark")
+        self.assertTrue(core.annotate(self.c)[dep]["ready"])
+
+    def test_the_commands_say_when_the_change_goes_out(self):
+        from river import cli
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+                cli.run(list(words))
+            return out.getvalue()
+        self.assertIn("release cadence: off", run("target", "show", "web"))
+        self.assertIn("release cadence 2h: the next release of web can start now", run("target", "cadence", "web", "2h"))
+        self.release(review=False)
+        a = self.add_done()
+        out = run("--as", "dev", "done", str(a), "--output", "c", "--ship")
+        self.assertRegex(out, r"release cadence 2h: the next release of web can start .* \(in 2h00m\); your change goes out "
+                              r"with it\. Sooner, with a reason: maxpm target release-now web --reason")
+        self.assertIn("your change goes out with it", run("--as", "dev", "ship", str(a)))
+        out = run("target", "show", "web")
+        self.assertIn("waits for it: deploy #", out)
+        self.assertIn(f"#{a} more (done)", out)
+        out = run("--as", "mark", "target", "release-now", "web", "--reason", "mark asked for it")
+        self.assertIn("goes out before the cadence 2h permits (mark asked for it)", out)
+        self.assertIn("which is ready", out)
+
+
 class DoneWaitsOnPrerequisites(Base):
     """Done is refused while an item it waits on is open; a new prerequisite alerts whoever must stop."""
 

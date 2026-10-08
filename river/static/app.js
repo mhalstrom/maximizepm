@@ -177,13 +177,18 @@ function monitorLines(d) {
 
 function renderTargets() {
   const T = S.targets || [];
+  const box = $("#targets");
+  if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // do not wipe a reason they type
   const shipList = (s) => s.map(x => `<span class="link" data-open="${x.id}">#${x.id}</span> ${esc(clip(x.title, 50))} <span class="muted">(${esc(x.status.replace("_", " "))})</span>`).join("; ") || '<span class="muted">nothing yet</span>';
   $("#targets").innerHTML = T.map(t => nyCard(`<b>${esc(t.name)}</b>
         ${ownerChip(t.owner)}${t.owner ? `<span class="muted" style="font-size:12px">${t.owner_expires_at ? left(t.owner_expires_at) + " left" : ""}</span>` : ""}
         <span class="muted" style="font-size:12px">${t.project_names.length ? "projects: " + t.project_names.map(esc).join(", ") : "no projects"}</span>`, `${t.description ? `<div class="ny-c">${esc(clip(t.description, 300))}</div>` : ""}
       <div class="muted" style="font-size:12px">${t.monitor ? "monitor after each deploy: " + esc(clip(t.monitor, 200)) : `no monitor (a session follows each deploy when you set one: maxpm target monitor ${esc(t.name)} "&lt;what to watch, for how long&gt;")`}</div>
       ${t.pending.map(d => `<div class="st" style="margin-top:4px"><span class="link" data-open="${d.id}">#${d.id}</span> ${d.ready ? "ready to deploy" : d.status === "open" ? "collecting" : esc(d.status.replace("_", " ")) + (d.assignee ? " · " + esc(d.assignee) : "")}: ${shipList(d.ships)}${d.review ? `<div class="muted" style="font-size:12px">first a review: <span class="link" data-open="${d.review.id}">#${d.review.id}</span> (${esc(d.review.status.replace("_", " "))}${d.review.assignee ? " · " + esc(d.review.assignee) : ""})</div>` : ""}${monitorLines(d)}</div>`).join("") || '<div class="st muted">No pending ship requests.</div>'}
-      <div class="actions" style="margin-top:6px">${t.pending.some(d => d.status === "open" && d.ships.length)
+      ${t.release && t.release.cadence ? `<div class="muted" style="font-size:12px">${esc(t.release.text)}${t.release.last ? ` · last release ${ago(t.release.last.at)}` : ""}</div>` : ""}
+      <div class="actions" style="margin-top:6px">${t.release && t.release.waits
+        ? `<input id="relwhy-${esc(t.name)}" placeholder="why this release cannot wait for the cadence" style="flex:1;min-width:180px"> <button class="btn" data-relnow="${esc(t.name)}" title="Start this release sooner than the cadence permits; the reason goes in the history of the deploy item">Release now</button>`
+        : t.pending.some(d => d.status === "open" && d.ships.length)
         ? agentStart(S.launch_agents, [
             { label: "Deploy now", cls: "btn primary", attrs: `data-deploy="${esc(t.name)}"`, title: "Start the deploy now: the owner gets an alert, or the chosen agent opens to take it" },
             { label: "Review and deploy", attrs: `data-deploy="${esc(t.name)}" data-review="1"`, title: "First one review of everything it ships (review steps per project), then the deploy" }])
@@ -733,6 +738,12 @@ document.addEventListener("click", async (e) => {
     return act("offer", { item: n, body }).then(() => toast(`Offer sent to the holder of #${n}`)).catch(() => {}); }
   if (t.dataset.copyPrompt) return copyPrompt(`api/item/${t.dataset.copyPrompt}/prompt`);
   if (t.id === "copyAll") return copyPrompt("api/prompt-all");
+  if (t.dataset.relnow) {
+    const name = t.dataset.relnow, why = document.getElementById("relwhy-" + name), reason = why ? why.value.trim() : "";
+    if (!reason) return toast("Say why this release cannot wait", true);
+    why.blur();
+    return act("release_now", { target: name, reason }).then(() => toast(`The release of ${name} can start now`)).catch(() => {});
+  }
   if (t.dataset.deploy) {
     if (t.dataset.busy) return; t.dataset.busy = "1"; setTimeout(() => delete t.dataset.busy, 4000);
     const ch = await chooseLaunch(S, { title: t.dataset.review ? "Review and deploy" : "Deploy now", go: "Start",

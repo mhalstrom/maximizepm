@@ -278,6 +278,7 @@ CREATE TABLE IF NOT EXISTS targets (
   description       TEXT NOT NULL DEFAULT '',
   monitor           TEXT NOT NULL DEFAULT '',  -- what a session watches after each deploy (maxpm target monitor)
   deployer          TEXT NOT NULL DEFAULT 'launch',  -- what maxpm serve starts for its deploys (maxpm target deployer)
+  cadence           TEXT NOT NULL DEFAULT '',  -- how often it releases: 2h, 1d, 1w, 1mo; '' is off (maxpm target cadence)
   owner             TEXT,
   owner_expires_at  TEXT,
   created_at        TEXT NOT NULL
@@ -850,6 +851,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE targets ADD COLUMN monitor TEXT NOT NULL DEFAULT ''")
     if "deployer" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
         conn.execute("ALTER TABLE targets ADD COLUMN deployer TEXT NOT NULL DEFAULT 'launch'")
+    if "cadence" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
+        conn.execute("ALTER TABLE targets ADD COLUMN cadence TEXT NOT NULL DEFAULT ''")
     if "owner_lease" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN owner_lease TEXT")
     if "shared" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -1986,6 +1989,183 @@ def target_deployer(conn, name, mode, actor=None):
     return target_show(conn, name)
 
 
+# The release cadence of a target (maxpm target cadence, #1571): how often it releases. Ship requests collect on
+# the open deploy item, and the first step of the release (its review; the deploy item itself when there is no
+# review) waits until the last release plus the cadence. The wait is an outside blocker with a time, set by
+# CADENCE_BY, so every reader of the queue (claims, maxpm go, maxpm serve, the page) holds the release the same way.
+CADENCE_BY = "maxpm cadence"
+_CADENCE = re.compile(r"^(\d+)\s*(mo|[smhdw])$")
+_CADENCE_UNITS = {"s": timedelta(seconds=1), "m": timedelta(minutes=1), "h": timedelta(hours=1),
+                  "d": timedelta(days=1), "w": timedelta(days=7), "mo": timedelta(days=30)}
+
+
+def parse_cadence(text):
+    """A release cadence as (the stored text, a timedelta); ("", None) for off. 1w is 7 days and 1mo is 30 days."""
+    text = (text or "").strip().lower()
+    if text in ("", "off", "none", "0"):
+        return "", None
+    m = _CADENCE.match(text)
+    if not m or not int(m.group(1)):
+        raise RiverError(f"bad cadence {text!r}: use a number and m, h, d, w, or mo (for example 1h, 2h, 1d, 1w, 1mo), "
+                         f"or off")
+    return f"{int(m.group(1))}{m.group(2)}", int(m.group(1)) * _CADENCE_UNITS[m.group(2)]
+
+
+def target_cadence(conn, name, value, actor=None):
+    """How often the target releases (2h, 1d, 1w, 1mo; off: each release starts at once). It applies from now
+    on, also to the release that collects ship requests now, unless that one has started."""
+    text, _ = parse_cadence(value)
+    with tx(conn):
+        name = _target(conn, name)["name"]
+        conn.execute("UPDATE targets SET cadence=? WHERE name=?", (text, name))
+        _event(conn, None, actor, f"target {name} release cadence {text or 'off'}")
+        _cadence_sync(conn)
+    return target_show(conn, name)
+
+
+def _span(td):
+    """A time left for a person: 45m, 3h20m, and 2d04h from two days on."""
+    h = max(0, int(td.total_seconds() // 3600))
+    return f"{h // 24}d{h % 24:02d}h" if h >= 48 else _short(td)
+
+
+def release_plan(conn, name):
+    """When the next release of a target can start and what waits for it: for maxpm ship, maxpm target show, the
+    deployer briefing, and the page.
+
+    The cadence counts from the end of the last done deploy item. `deploy` is the open deploy item that collects
+    ship requests and `start` the first step of its release: its open review, else the deploy item. The release
+    has `started` when a review of it or the deploy item was claimed once; `early` is the reason of a maxpm
+    target release-now. `waits` says that the cadence holds `start` now."""
+    t = _target(conn, name)
+    name = t["name"]
+    text, cad = parse_cadence(t["cadence"])
+    last = conn.execute("SELECT id, closed_at FROM items WHERE kind='deploy' AND target=? AND status='done' "
+                        "AND closed_at IS NOT NULL ORDER BY closed_at DESC, id DESC LIMIT 1", (name,)).fetchone()
+    running = conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status IN ('in_progress','held') "
+                           "ORDER BY id LIMIT 1", (name,)).fetchone()
+    dep = conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open' ORDER BY id LIMIT 1",
+                       (name,)).fetchone()
+    zone = setting(conn, "timezone")
+    out = {"target": name, "cadence": text, "last": {"id": last["id"], "at": last["closed_at"],
+                                                     "text": show_time(last["closed_at"], zone)} if last else None,
+           "running": running["id"] if running else None, "deploy": dep["id"] if dep else None, "start": None,
+           "started": False, "early": None, "ships": [], "waits": False,
+           "next_at": iso(parse_iso(last["closed_at"]) + cad) if cad and last else None}
+    due = bool(cad) and (running is not None or (out["next_at"] is not None and out["next_at"] > iso(now())))
+    if dep:
+        revs = conn.execute("SELECT i.id, i.status FROM items i JOIN deps d ON d.blocked_by=i.id WHERE d.item_id=? "
+                            "AND i.kind='review' ORDER BY i.id", (dep["id"],)).fetchall()
+        ids = [dep["id"]] + [r["id"] for r in revs]
+        out["start"] = next((r["id"] for r in revs if r["status"] == "open"), dep["id"])
+        out["started"] = any(r["status"] in ("done", "in_progress", "held") for r in revs) or bool(conn.execute(
+            f"SELECT 1 FROM events WHERE item_id IN ({','.join('?' * len(ids))}) AND change LIKE 'claimed%' LIMIT 1",
+            ids).fetchone())
+        early = conn.execute("SELECT change FROM events WHERE item_id=? AND change LIKE 'release now%' "
+                             "ORDER BY id DESC LIMIT 1", (dep["id"],)).fetchone()
+        out["early"] = early["change"].partition(": ")[2] if early else None
+        out["ships"] = [dict(r) for r in conn.execute(
+            "SELECT i.id, i.title, i.status FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? "
+            "AND i.kind<>'review' ORDER BY i.id", (dep["id"],))]
+        out["waits"] = due and not out["started"] and not out["early"]
+    when = show_time(out["next_at"], zone) if out["next_at"] else ""
+    sooner = f"maxpm target release-now {name} --reason \"<why>\""
+    out["text"] = out["why"] = out["reason"] = ""  # for a person; for the history; the text of the blocker
+    if not cad:
+        return out
+    if dep and out["early"]:
+        out["text"] = f"release cadence {text}: this release of {name} goes out sooner ({out['early']})"
+    elif dep and out["started"]:
+        out["text"] = f"release cadence {text}: this release of {name} has started"
+    elif running is not None and due:
+        out["text"] = (f"release cadence {text}: deploy #{running['id']} of {name} runs now; the next release can "
+                       f"start {text} after it is done")
+        out["why"] = (f"release cadence {text} of target {name}: deploy #{running['id']} runs now, and the next "
+                      f"release can start {text} after it is done")
+    elif due:
+        out["text"] = (f"release cadence {text}: the next release of {name} can start {when} "
+                       f"(in {_span(parse_iso(out['next_at']) - now())})")
+        out["why"] = (f"release cadence {text} of target {name}: the last release ended {out['last']['text']} "
+                      f"(deploy #{last['id']})")
+    else:
+        out["text"] = f"release cadence {text}: the next release of {name} can start now"
+    if out["why"]:
+        out["reason"] = f"{out['why']}. A release sooner needs a reason: {sooner}"
+    return out
+
+
+def _cadence_sync(conn):
+    """Make the cadence waits match the targets, their releases, and the time. Inside a tx; every command runs it
+    (_sweep). The first step of a release that the cadence holds gets an outside blocker until the time; a wait
+    that no longer applies (the time passed, the release started, the cadence changed) is cleared. A blocker that
+    a person or an agent set on the same item stays."""
+    want = {}
+    for t in conn.execute("SELECT name FROM targets WHERE cadence<>''").fetchall():
+        p = release_plan(conn, t["name"])
+        if p["waits"]:
+            want[p["start"]] = (p["next_at"], p["reason"], p["why"])
+    t = iso(now())
+    for r in conn.execute("SELECT id, blocked_until FROM items WHERE blocked_set_by=?", (CADENCE_BY,)).fetchall():
+        if r["id"] not in want:
+            conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, blocked_set_by=NULL "
+                         "WHERE id=?", (r["id"],))
+            _event(conn, r["id"], "maxpm", "release cadence: the wait ended; the release can start"
+                   if r["blocked_until"] and r["blocked_until"] <= t else "release cadence: this item waits no more")
+    zone = setting(conn, "timezone")
+    for item_id, (until, reason, why) in want.items():
+        it = _item(conn, item_id)
+        mine = it["blocked_set_by"] == CADENCE_BY
+        if (it["blocked_reason"] and not mine) or (mine and it["blocked_until"] == until and it["blocked_reason"] == reason):
+            continue
+        conn.execute("UPDATE items SET blocked_reason=?, blocked_until=?, blocked_set_by=?, "
+                     "blocked_at=COALESCE(blocked_at, ?) WHERE id=?", (reason, until, CADENCE_BY, t, item_id))
+        if not mine or it["blocked_until"] != until:
+            _event(conn, item_id, "maxpm", why + (f"; this release waits until {show_time(until, zone)}" if until else ""))
+
+
+def cadence_holds(conn, dep_id):
+    """The item of this deploy item's release that waits for the cadence (its review, or itself), or None."""
+    r = conn.execute("SELECT id FROM items WHERE blocked_set_by=? AND status='open' AND (id=? OR id IN "
+                     "(SELECT blocked_by FROM deps WHERE item_id=?)) ORDER BY id LIMIT 1",
+                     (CADENCE_BY, dep_id, dep_id)).fetchone()
+    return r["id"] if r else None
+
+
+def release_now(conn, target, reason, actor=None):
+    """Start the collected release sooner than the cadence permits (maxpm target release-now): for a fix of a
+    production defect, or when a person asks. The reason goes in the history of the deploy item, and the target
+    owner is told. It counts for this release only; the cadence then counts from the end of this release."""
+    reason = (reason or "").strip()
+    with tx(conn):
+        _sweep(conn)
+        tg = _target(conn, target)
+        name = tg["name"]
+        plan = release_plan(conn, name)
+        if not plan["cadence"]:
+            raise RiverError(f"target {name} has no release cadence, so each release starts at once; "
+                             f"set one: maxpm target cadence {name} 2h")
+        if plan["deploy"] is None or not plan["ships"]:
+            raise RiverError(f"nothing is collected for {name}: ask for items to go out first "
+                             f"(maxpm ship <id>, or done --ship)")
+        if not plan["waits"]:
+            raise RiverError(f"{plan['text']}; nothing waits for the cadence. See: maxpm show {plan['start']}")
+        if not reason:
+            raise RiverError(f"say why this release cannot wait ({plan['text']}): "
+                             f"maxpm target release-now {name} --reason \"<why>\"")
+        due = (f"the next release was due {show_time(plan['next_at'], setting(conn, 'timezone'))}" if plan["next_at"]
+               else f"deploy #{plan['running']} runs now")
+        # "release now" at the start marks this deploy item for release_plan: the cadence holds it no more.
+        _event(conn, plan["deploy"], actor, f"release now, before the cadence {plan['cadence']} ({due}): {reason}")
+        conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, blocked_set_by=NULL "
+                     "WHERE id=? AND blocked_set_by=?", (plan["start"], CADENCE_BY))
+        if plan["start"] != plan["deploy"]:
+            _event(conn, plan["start"], actor, f"release cadence: released sooner: {reason}")
+        if tg["owner"] and tg["owner"] != actor:
+            _send(conn, "notice", actor or "maxpm", f"release now: deploy #{plan['deploy']} for {name} goes out before "
+                  f"the cadence {plan['cadence']} permits ({due}): {reason}", to=tg["owner"], item_id=plan["deploy"])
+    return dict(release_plan(conn, name), item=item_show(conn, plan["start"]))
+
+
 def owner_can_deploy(conn, owner):
     """Whether a target owner takes a ready deploy item when it gets an alert: (True, None), or (False, why).
     It can when it waits for work (maxpm wait wakes on the alert), holds an item (its next command shows the
@@ -2204,6 +2384,7 @@ def target_show(conn, name):
         "SELECT p.name, p.rank, p.notes, (SELECT COUNT(*) FROM items i WHERE i.project_id=p.id "
         "AND i.status IN ('open','in_progress','held')) open_items "
         "FROM projects p WHERE p.target=? AND p.archived=0 ORDER BY p.rank, p.id", (name,))]
+    t["release"] = release_plan(conn, name)
     return t
 
 
@@ -2233,6 +2414,7 @@ def targets_view(conn, ann=None):
             pending=[{"id": a["id"], "title": a["title"], "status": a["status"], "assignee": a["assignee"],
                       "ready": a["ready"], "ships": ships(a), "review": review(a),
                       "monitors": monitors.get(a["id"], [])} for a in pending],
+            release=release_plan(conn, t["name"]),
             last_deploy=({"id": last["id"], "title": last["title"], "closed_at": last["closed_at"],
                           "output": last["output"], "ships": ships(last)} if last else None),
             history=[{"id": a["id"], "title": a["title"], "closed_at": a["closed_at"], "output": a["output"],
@@ -2267,6 +2449,10 @@ def deploy_now(conn, target, review=False, actor=None):
         if not shipped:
             raise RiverError(f"nothing is collected for {tg['name']}: ask for items to go out first "
                              f"(maxpm ship <id>, or done --ship)")
+        plan = release_plan(conn, tg["name"])
+        if plan["waits"]:
+            raise RiverError(f"{plan['text']}. A release sooner needs a reason: "
+                             f"maxpm target release-now {tg['name']} --reason \"<why>\"")
         rv = _release_review(conn, dep, tg, actor, force=True) if review else None
         _event(conn, dep["id"], actor, "deploy now" + (" after a review" if review else ""))
     ann = annotate(conn)
@@ -3258,6 +3444,9 @@ def block(conn, item_id, reason=None, actor=None, until=None):
 def unblock(conn, item_id, actor=None):
     with tx(conn):
         it = _item(conn, item_id)
+        if it["blocked_set_by"] == CADENCE_BY:
+            raise RiverError(f"#{it['id']} waits for the release cadence of target {it['target']}; a release sooner "
+                             f"needs a reason: maxpm target release-now {it['target']} --reason \"<why>\"")
         conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, blocked_set_by=NULL "
                      "WHERE id=?", (it["id"],))
         _event(conn, it["id"], actor, "outside blocker cleared")
@@ -4174,8 +4363,9 @@ def _sweep(conn):
         for who in {r["reserved_for"], r["reserved_by"]} - {None}:
             _send(conn, "notice", "maxpm", f"the push of #{r['id']} {r['title']} to {r['reserved_for']} expired "
                   f"without an answer; it is open to every agent again", to=who, item_id=r["id"])
-    for r in conn.execute("SELECT id, title, blocked_reason, blocked_set_by, doer FROM items "
-                          "WHERE blocked_until <= ? AND blocked_reason IS NOT NULL", (t,)).fetchall():
+    _cadence_sync(conn)  # the waits of a release cadence end and move here, not in the loop below
+    for r in conn.execute("SELECT id, title, blocked_reason, blocked_set_by, doer FROM items WHERE blocked_until <= ? "
+                          "AND blocked_reason IS NOT NULL AND COALESCE(blocked_set_by,'')<>?", (t, CADENCE_BY)).fetchall():
         conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, blocked_set_by=NULL "
                      "WHERE id=?", (r["id"],))
         _event(conn, r["id"], "maxpm", f"wait ended ({r['blocked_reason']}); outside blocker cleared")
@@ -5050,7 +5240,8 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synce
         res = dict(synced(conn, item_id, actor=actor), now_ready=res["now_ready"], resumed=res["resumed"])
     res["tracker"] = setting(conn, "tracker", item_id=item_id) if res["refs"] else ""
     if ship_it:
-        res["shipped_in"] = ship(conn, item_id, actor)["id"]
+        shipped = ship(conn, item_id, actor)
+        res["shipped_in"], res["ship_release"] = shipped["id"], shipped["release"]
     return res
 
 
@@ -5094,16 +5285,17 @@ def ship(conn, item_id, actor=None):
         if rv is not None and not conn.execute("SELECT 1 FROM deps WHERE item_id=? AND blocked_by=?",
                                                (rv["id"], it["id"])).fetchone():
             _dep_add(conn, rv["id"], it["id"], actor)
-        if conn.execute("SELECT 1 FROM deps WHERE item_id=? AND blocked_by=?", (dep["id"], it["id"])).fetchone():
-            return item_show(conn, dep["id"])
-        _dep_add(conn, dep["id"], it["id"], actor, alert=False)  # the ship request notice below says it
-        if it["priority"] < dep["priority"]:
-            conn.execute("UPDATE items SET priority=? WHERE id=?", (it["priority"], dep["id"]))
-        _event(conn, it["id"], actor, f"ship requested in #{dep['id']} ({tg['name']})")
-        if tg["owner"] and tg["owner"] != actor:
-            _send(conn, "notice", actor or "maxpm", f"ship request: #{it['id']} {it['title']} joins deploy #{dep['id']} "
-                  f"for {tg['name']}", to=tg["owner"], item_id=dep["id"])
-    return item_show(conn, dep["id"])
+        if not conn.execute("SELECT 1 FROM deps WHERE item_id=? AND blocked_by=?", (dep["id"], it["id"])).fetchone():
+            _dep_add(conn, dep["id"], it["id"], actor, alert=False)  # the ship request notice below says it
+            if it["priority"] < dep["priority"]:
+                conn.execute("UPDATE items SET priority=? WHERE id=?", (it["priority"], dep["id"]))
+            _event(conn, it["id"], actor, f"ship requested in #{dep['id']} ({tg['name']})")
+            if tg["owner"] and tg["owner"] != actor:
+                _send(conn, "notice", actor or "maxpm", f"ship request: #{it['id']} {it['title']} joins deploy "
+                      f"#{dep['id']} for {tg['name']}", to=tg["owner"], item_id=dep["id"])
+        _cadence_sync(conn)  # a new release waits for the cadence from its first ship request
+    # release: when this release can start (the target's cadence), for the worker that asked.
+    return dict(item_show(conn, dep["id"]), release=release_plan(conn, tg["name"]))
 
 
 def _release_review(conn, dep, tg, actor, force=False):
@@ -7810,7 +8002,7 @@ def _deploy_brief(conn, item):
                        (item["id"],)).fetchone()
     return {"target": {"name": t["name"], "description": t["description"], "owner": t["owner"], "monitor": t["monitor"]},
             "monitor_item": dict(mon) if mon else None,
-            "ships": item["waits_on_detail"],
+            "ships": item["waits_on_detail"], "release": release_plan(conn, t["name"]),
             "next_deploy": [item_show(conn, r["id"]) for r in nxt]}
 
 
