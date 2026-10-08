@@ -68,7 +68,11 @@ your type from your CLI's environment.
    also renews it while a command runs in your session (a long test run) or
    your tmux pane changes, but do not count on that: it needs `maxpm serve`
    or a process it can see, and it stops `busy_max` (4h) after your last
-   maxpm command.
+   maxpm command. A background command or a subagent that your harness runs
+   for you (Claude Code: `run_in_background`) counts as work for up to
+   `busy_max`: `maxpm serve` keeps your lease and your item while it runs,
+   also when a message comes for you, and you read the message when the
+   harness wakes you. A loop that only renews the lease is not work.
 4. Finish: `maxpm done <id> --output "<one line: what changed, commit id>"`.
    The reply lists items that became ready.
    Cannot finish: `maxpm release <id> --note "<why>"`.

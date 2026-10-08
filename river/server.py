@@ -1040,8 +1040,8 @@ BUSY = {}
 def watch_busy(conn):
     """One pass of the loop of maxpm serve (every notify_interval): the agents that hold work and are busy keep
     their leases (core.keep_busy). Busy: a command runs in the agent's session (core.busy_now), its tmux pane
-    changed since the last pass, or its pane shows a prompt (prompt_pattern: the agent waits on a person, and
-    its work is in the folder). An agent that waits on a person's answer (core.waits_on_person) keeps its leases
+    changed since the last pass, its pane shows a prompt (prompt_pattern: the agent waits on a person, and
+    its work is in the folder), or a background command or subagent of its session runs (core.background_work). An agent that waits on a person's answer (core.waits_on_person) keeps its leases
     and its target with no time limit while its agent CLI runs, and the manager gets an alert for it. Returns the
     agents it kept."""
     import re
@@ -1078,9 +1078,31 @@ def watch_busy(conn):
         if (agent in BUSY and BUSY[agent] != text) or (rx and any(rx.search(x) for x in _prompt_tail(text))):
             busy.add(agent)
         BUSY[agent] = text
+    for agent in sorted(names - busy):
+        if core.background_work(conn, agent):
+            busy.add(agent)  # its own background command or subagent runs; the screen is quiet (#1611)
     if waiting:
         core.tell_manager_waits(conn, waiting)
     return core.keep_busy(conn, busy, waiting) if busy or waiting else []
+
+
+BACKGROUND = set()  # (agent, task id) that fresh_sessions wrote into the history: once for each task
+
+
+def _has_background(conn, agent, news):
+    """True when a background command or subagent runs in the agent's session (core.background_work): it is
+    not idle at its prompt. With news for it, the history of each item it holds says so, once for each task."""
+    work = core.background_work(conn, agent)
+    new = [w for w in work if (agent, w["id"]) not in BACKGROUND]
+    if work and news and new:
+        BACKGROUND.update((agent, w["id"]) for w in new)
+        what = "; ".join(f"{w['kind']} {w['what'] or w['id']}" for w in work[:3]) + (" ..." if len(work) > 3 else "")
+        with core.tx(conn):
+            for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                                  (agent,)).fetchall():
+                core._event(conn, r["id"], "maxpm", f"news came for {agent}, which waits for its own background work "
+                            f"({what}): maxpm serve leaves the item with it; it reads the news when that work ends")
+    return bool(work)
 
 
 def auto_context(conn, runner=None):
@@ -1124,7 +1146,9 @@ def fresh_sessions(conn, runner=None):
       sessions (core.hand_over), and it ends.
     - An agent idle at its prompt with nothing in hand and no river command for idle_end: it ends.
     An agent in whose session a command runs (core.busy_now) is not idle, whatever its screen shows; nor is one
-    that waits on a person's answer (core.waits_on_person): the person may answer in its terminal.
+    that waits on a person's answer (core.waits_on_person): the person may answer in its terminal; nor one that
+    waits for a background command or a subagent of its own (core.background_work): it reads its news when the
+    harness wakes it.
     An agent that ends is unregistered, and the tmux pane river started for it closes; that comes before the
     fresh sessions start, so two sessions never work on one item.
     Managers and planners are left alone: they wait at their prompt for a person or a watch command.
@@ -1161,6 +1185,8 @@ def fresh_sessions(conn, runner=None):
         del cands[agent]  # a long command with a quiet screen: the agent works
     for agent in core.waits_on_person(conn, set(cands)) if cands else ():
         del cands[agent]  # it asked a person and waits for the answer, maybe in its terminal: not idle
+    for agent in [a for a in cands if _has_background(conn, a, cands[a])]:
+        del cands[agent]  # it waits for its own background command or subagent: the harness wakes it (#1611)
     for agent, pane in _idle_panes(conn, cands, after).items():
         news, why = cands[agent], f"idle at its prompt with nothing in hand for {core.setting(conn, 'idle_end')}"
         ids = []

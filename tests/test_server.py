@@ -1784,6 +1784,60 @@ class LaunchInTmux(unittest.TestCase):
                                                    f"pane {pane['id']}: ") and "Error: could not start" in e["change"]
                             for e in last))
 
+    def test_a_session_that_waits_for_its_own_background_work_keeps_its_item_when_news_comes(self):
+        # #1611: four sessions waited for a test run or a subagent; a message came, and serve gave their item to
+        # a fresh session and closed their pane.
+        from tests.test_core import Transcript
+        sid = "55555555-5555-4555-8555-555555555555"
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mark", human=True)
+        item = core.item_add(self.c, "shop", "rename the field")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        pane, clock = self.tmux.panes[0], [core.now()]
+        root = tempfile.mkdtemp(dir=self.dir.name)
+        for cleanup in (server.IDLE.clear, server.BUSY.clear, server.BACKGROUND.clear, core._BG_CACHE.clear):
+            self.addCleanup(cleanup)
+        for patch in (mock.patch.object(core, "now", lambda: clock[0]),
+                      mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": root})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        def tick(after=30):
+            clock[0] += core.timedelta(seconds=after)
+            return server.fresh_sessions(self.c)
+        nothing = {"started": {}, "ended": {}, "failed": {}}
+        # The session takes the item, starts a long test run in the background, and ends its turn.
+        clock[0] += core.timedelta(seconds=1)
+        core.activity(self.c, name)
+        core.claim(self.c, item, name)
+        core.record_claude_session(self.c, name, sid)
+        tr = Transcript(root, sid)
+        use = tr.background(clock[0], "b1", "cargo test -p server", "Run the server tests")
+        pane["screen"] = "⏺ I wait for the test run to end.\n\n╭────╮\n│ >  │\n╰────╯\n  ? for shortcuts"
+        clock[0] += core.timedelta(seconds=1)
+        core.send(self.c, "note", "main moved: rebase before you push", to=name, actor="mark")
+        # News for it, a quiet screen, no river command: it keeps its item, and its pane stays.
+        self.assertEqual([tick() for _ in range(12)], [nothing] * 12)
+        it = core.item_show(self.c, item)
+        self.assertEqual((it["assignee"], pane in self.tmux.panes), (name, True))
+        told = [e["change"] for e in it["events"] if "waits for its own background work" in e["change"]]
+        self.assertEqual(len(told), 1)  # once for the task, not in each pass
+        self.assertIn("command Run the server tests", told[0])
+        # Its lease does not run out while the test run goes on (lease_ttl 30m).
+        for _ in range(8):
+            clock[0] += core.timedelta(minutes=5)
+            self.assertEqual(server.watch_busy(self.c), [name])
+            core.activity(self.c, "mark")  # any river command runs the sweep
+        self.assertEqual(core.item_show(self.c, item)["assignee"], name)
+        # The run ends and the harness wakes the session. If it then stays at its prompt with the news, the item
+        # goes to a fresh session, as before.
+        tr.ended(clock[0], "b1", use)
+        self.assertEqual(server.watch_busy(self.c), [])
+        r = [tick() for _ in range(6)]
+        started = [x["started"] for x in r if x["started"]]
+        self.assertEqual(([list(x) for x in started], pane in self.tmux.panes), ([[item]], False))
+        self.assertIn("main moved: rebase before you push", core.item_show(self.c, item)["notes"])
+
     def test_work_for_an_agent_idle_at_its_prompt_goes_to_a_fresh_session(self):
         import threading
         from unittest import mock

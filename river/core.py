@@ -168,7 +168,9 @@ DEFAULT_SETTINGS = {
     "serve_reload": "on",
     # A lease does not run out while its agent is busy. An agent is busy when a command runs in its session (a
     # process below the agent CLI that started after the agent's last river command: a test run, a build), when its
-    # tmux pane changes, or when its pane shows a prompt for a person. maxpm serve looks every notify_interval and
+    # tmux pane changes, when its pane shows a prompt for a person, or when its Claude Code transcript has a
+    # background command or subagent that has not ended (for busy_max after its start; such a session also keeps
+    # its item when news comes for it, #1611). maxpm serve looks every notify_interval and
     # renews the leases of a busy agent; a river command that finds a lease past its time renews it when a command
     # runs in the holder's session. busy_max: how long after an agent's last river command these signs still
     # count (a server that an agent left running would hold an item for ever). 0s: only river commands renew.
@@ -5986,6 +5988,112 @@ def read_transcript(path):
                 reqs.setdefault(msg.get("id") or d["timestamp"], (t, msg["usage"]))
                 leading = False
     return reqs, fork
+
+
+# The harness of Claude Code runs background tasks for a session: a command started with run_in_background, a
+# command that ran into its time limit and was moved to the background, and a background subagent. The session
+# ends its turn, and the harness wakes it when the task ends. To maxpm serve such a session looked idle at its
+# prompt: no river command, a quiet screen, and no process newer than its last river command (or no process at
+# all for a sandboxed session, which cannot run ps). The transcript has the start of each task (the tool result)
+# and its end (a task notification with a status, or TaskStop), so serve reads it there (#1611).
+_BG_STARTS = (("command", re.compile(r"Command running in background with ID: (\w+)")),
+              ("command", re.compile(r"Command [^\n]{0,200}?moved to the background \(ID: (\w+)\)")),
+              ("subagent", re.compile(r"Async agent launched successfully.*?agentId: (\w+)", re.S)))
+_BG_NOTE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+_BG_RIVER_WAIT = re.compile(r"\bmaxpm\b[^\n;|&]*\s(wait|--wait|--watch)\b")
+_BG_CACHE = {}  # transcript path -> (size, mtime, tasks): a session that waits writes nothing
+
+
+def _result_text(content):
+    if isinstance(content, str):
+        return content
+    return "\n".join(x.get("text", "") for x in content or [] if isinstance(x, dict) and x.get("type") == "text")
+
+
+def _background_tasks(path):
+    """The background tasks of one transcript that have a start and no end: [{id, kind (command or subagent),
+    at, what, command}]. A start counts only as the first words of a tool result, so text that quotes one (a
+    grep of another transcript) starts nothing."""
+    started, ended = {}, set()
+    with open(path, errors="replace") as f:
+        for line in f:
+            if "<task-notification>" in line and "<status>" in line:
+                for body in _BG_NOTE.findall(line):
+                    m = re.search(r"<task-id>(\w+)</task-id>", body)
+                    if m and "<status>" in body:
+                        ended.add(m.group(1))
+            start = '"tool_result"' in line and ("background" in line or "Async agent launched" in line)
+            stop = '"TaskStop"' in line or '"KillShell"' in line
+            if not (start or stop):
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
+            parts = msg.get("content") if isinstance(msg.get("content"), list) else []
+            t = _ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
+            for x in parts:
+                if not isinstance(x, dict):
+                    continue
+                if x.get("type") == "tool_use" and x.get("name") in ("TaskStop", "KillShell"):
+                    inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+                    ended.add(str(inp.get("task_id") or inp.get("shell_id") or ""))
+                elif x.get("type") == "tool_result" and d.get("type") == "user" and t is not None:
+                    text = _result_text(x.get("content")).lstrip()
+                    for kind, rx in _BG_STARTS:
+                        m = rx.match(text)
+                        if m:
+                            started[m.group(1)] = {"id": m.group(1), "kind": kind, "at": t, "use": x.get("tool_use_id"),
+                                                   "what": "", "command": ""}
+    tasks = [v for k, v in started.items() if k not in ended]
+    uses = {v["use"]: v for v in tasks if v["use"]}
+    if uses:  # what each one is: the description and the command of its tool call
+        with open(path, errors="replace") as f:
+            for line in f:
+                if '"tool_use"' not in line or not any(u in line for u in uses):
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                msg = d.get("message") if isinstance(d, dict) and isinstance(d.get("message"), dict) else {}
+                for x in msg.get("content") if isinstance(msg.get("content"), list) else []:
+                    if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("id") in uses:
+                        inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+                        v = uses[x["id"]]
+                        v["command"] = str(inp.get("command") or "")
+                        v["what"] = " ".join(str(inp.get("description") or v["command"]).split())[:80]
+    return tasks
+
+
+def background_work(conn, agent, root=None):
+    """The background tasks that run now in the agent's Claude Code session (its last one): a command or a
+    subagent that the harness started and that has not ended, at most busy_max old. Such a session is not idle:
+    the harness wakes it when the task ends, and it reads its news then. Not a river wait (maxpm wait,
+    inbox --wait, manage --watch) and not a loop that only renews the lease: these are waits, not work. An
+    empty list with no transcript on this computer (another agent CLI) or with busy_max 0s."""
+    limit = parse_duration(setting(conn, "busy_max"))
+    r = conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC LIMIT 1",
+                     (agent,)).fetchone()
+    if not r or not limit.total_seconds():
+        return []
+    out, t = [], now()
+    for path in sorted(Path(root or transcripts_root()).glob(f"*/{r['session_id']}.jsonl")):
+        try:
+            st = path.stat()
+            got = _BG_CACHE.get(str(path))
+            if not got or got[:2] != (st.st_size, st.st_mtime_ns):
+                got = _BG_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, _background_tasks(path))
+        except OSError:
+            continue
+        for task in got[2]:
+            cmd = task["command"]
+            if t - task["at"] >= limit or _BG_RIVER_WAIT.search(cmd) or ("maxpm" in cmd and "heartbeat" in cmd
+                                                                          and "sleep" in cmd):
+                continue
+            out.append({"id": task["id"], "kind": task["kind"], "what": task["what"], "at": iso(task["at"])})
+    return out
 
 
 def _session_requests(sid, root):

@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import sqlite3
 import sys
@@ -915,6 +916,116 @@ class Status(Base):
         self.assertIn(f"waits on: #{x} held by a gone agent (in_progress)", brief)
         self.assertIn(f"all of it: maxpm show {y}", brief)
         self.assertTrue(all(len(line) < 400 for line in brief.splitlines()))
+
+
+class Transcript:
+    """Writes a Claude Code transcript for a test: the lines that core.background_work reads."""
+
+    def __init__(self, root, sid, folder="-work-a"):
+        os.makedirs(os.path.join(root, "projects", folder), exist_ok=True)
+        self.path, self.n = os.path.join(root, "projects", folder, f"{sid}.jsonl"), 0
+
+    def add(self, when, kind, content=None, **more):
+        row = {"type": kind, "timestamp": when.strftime("%Y-%m-%dT%H:%M:%S.000Z"), **more}
+        if content is not None:
+            row["message"] = {"role": kind, "content": content}
+        with open(self.path, "a") as f:
+            f.write(json.dumps(row) + "\n")
+
+    def use(self, when, name, **inp):
+        """A tool call; returns its id."""
+        self.n += 1
+        self.add(when, "assistant", [{"type": "tool_use", "id": f"toolu_{self.n:04d}", "name": name, "input": inp}])
+        return f"toolu_{self.n:04d}"
+
+    def result(self, when, use, text):
+        self.add(when, "user", [{"type": "tool_result", "tool_use_id": use, "content": text}])
+
+    def background(self, when, task, command, description):
+        use = self.use(when, "Bash", command=command, description=description, run_in_background=True)
+        self.result(when, use, f"Command running in background with ID: {task}. Output is being written to: /tmp/x")
+        return use
+
+    def ended(self, when, task, use, status="completed", how="user"):
+        note = (f"<task-notification>\n<task-id>{task}</task-id>\n<tool-use-id>{use}</tool-use-id>\n"
+                f"<status>{status}</status>\n<summary>ended</summary>\n</task-notification>")
+        if how == "user":
+            self.add(when, "user", note)
+        elif how == "attachment":  # the form of a notification that comes in the middle of a turn
+            self.add(when, "attachment", attachment={"type": "queued_command", "prompt": note})
+        else:
+            self.add(when, "queue-operation", operation="enqueue", content=note)
+
+
+class BackgroundWork(Base):
+    """A session that waits for a background command or a subagent of its own is not idle: the transcript says
+    what the harness started and what ended (#1611)."""
+    SID = "44444444-4444-4444-8444-444444444444"
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        core.register(self.c, "ag")
+        self.root = os.path.join(self.dir.name, "claude")
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.root})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(core._BG_CACHE.clear)
+        self.t0 = core.now() - timedelta(minutes=30)
+        self.tr = Transcript(self.root, self.SID)
+        self.what = lambda: [(w["kind"], w["what"]) for w in core.background_work(self.c, "ag")]
+
+    def at(self, minutes):
+        return self.t0 + timedelta(minutes=minutes)
+
+    def test_a_command_or_a_subagent_that_has_not_ended_is_work(self):
+        self.assertEqual(self.what(), [])  # no session known
+        core.record_claude_session(self.c, "ag", self.SID)
+        self.assertEqual(self.what(), [])  # no transcript on this computer
+        # A command started in the background, and its end.
+        use = self.tr.background(self.at(1), "b1", "cargo test -p server", "Run the server tests")
+        self.assertEqual(self.what(), [("command", "Run the server tests")])
+        self.tr.ended(self.at(5), "b1", use)
+        self.assertEqual(self.what(), [])
+        # A command that ran into its time limit: the harness moved it to the background.
+        use = self.tr.use(self.at(6), "Bash", command="make check-all", description="Run the full gate")
+        self.tr.result(self.at(16), use, "Command did not complete within its 600s timeout and was moved to the "
+                                         "background (ID: b2). Output is being written to: /tmp/y")
+        self.assertEqual(self.what(), [("command", "Run the full gate")])
+        self.tr.ended(self.at(17), "b2", use, "failed", how="attachment")
+        self.assertEqual(self.what(), [])
+        # A background subagent; its notification can come as a queue line.
+        use = self.tr.use(self.at(18), "Agent", description="Review the pricing commits", prompt="...")
+        self.tr.result(self.at(18), use, [{"type": "text", "text": "Async agent launched successfully. (internal)\n"
+                                                                   "agentId: a77 (internal ID)"}])
+        self.assertEqual(self.what(), [("subagent", "Review the pricing commits")])
+        self.tr.ended(self.at(20), "a77", use, how="queue")
+        self.assertEqual(self.what(), [])
+        # A task that the session stopped itself.
+        self.tr.background(self.at(21), "b3", "npm run dev", "Run the dev server")
+        self.assertEqual(self.what(), [("command", "Run the dev server")])
+        self.tr.use(self.at(22), "TaskStop", task_id="b3")
+        self.assertEqual(self.what(), [])
+
+    def test_a_wait_a_lease_loop_an_old_task_and_quoted_text_are_not_work(self):
+        core.record_claude_session(self.c, "ag", self.SID)
+        self.tr.background(self.at(1), "b1", "maxpm --as ag inbox --wait", "Wait for messages")
+        self.tr.background(self.at(1), "b2", "cd /work && maxpm --as ag wait", "Wait for work")
+        self.tr.background(self.at(1), "b3", "for i in $(seq 1 18); do maxpm --as ag heartbeat; sleep 600; done",
+                           "Renew the item lease every 10 minutes")
+        self.assertEqual(self.what(), [])
+        # A tool result that quotes the words (a grep of another transcript) starts nothing.
+        use = self.tr.use(self.at(2), "Bash", command="grep background other.jsonl", description="Search")
+        self.tr.result(self.at(2), use, "other.jsonl: Command running in background with ID: b9. Output is ...")
+        self.assertEqual(self.what(), [])
+        # A real task counts for busy_max (4h) after its start, not for ever: its end can be lost.
+        self.tr.background(self.at(3), "b4", "pytest -q", "Run the tests")
+        self.assertEqual(self.what(), [("command", "Run the tests")])
+        late = core.now() + timedelta(hours=4)
+        with mock.patch.object(core, "now", lambda: late):
+            self.assertEqual(self.what(), [])
+        core.config_set(self.c, "busy_max", "0s")
+        self.assertEqual(self.what(), [])
 
 
 class Usage(Base):
