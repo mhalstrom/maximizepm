@@ -213,29 +213,41 @@ def _release_lines(p):
     """A target's release cadence, when its next release can start, and what waits for it (core.release_plan)."""
     name = p["target"]
     if not p["cadence"]:
-        return [f"release cadence: off (each release starts at once; set one: maxpm target cadence {name} 2h|1d|1w|1mo)"]
-    out = [f"{p['text']}; change it: maxpm target cadence {name} <time>|off"]
+        out = [f"release cadence: off (a release starts when the one before it is done; set one: "
+               f"maxpm target cadence {name} 2h|1d|1w|1mo)"] + ([p["text"]] if p["text"] else [])
+    else:
+        out = [f"{p['text']}; change it: maxpm target cadence {name} <time>|off"]
     if p["last"]:
-        out.append(f"  last release: {p['last']['text']} (deploy #{p['last']['id']})")
+        out.append(f"  last release: {'cut' if p['last']['cut'] else 'ended'} {p['last']['text']} (deploy #{p['last']['id']})")
+    ships = "; ".join(f"#{x['id']} {x['title']} ({x['status'].replace('_', ' ')})" for x in p["ships"])
     if p["waits"]:
-        out.append(f"  waits for it: deploy #{p['deploy']} with "
-                   + "; ".join(f"#{x['id']} {x['title']} ({x['status'].replace('_', ' ')})" for x in p["ships"]))
+        out.append(f"  waits for it: deploy #{p['deploy']} with {ships or 'nothing yet'}")
         out.append(f"  sooner (the target owner, the manager, or a person), with a reason: "
                    f"maxpm target release-now {name} --reason \"<why>\"")
+    elif p["deploy"] and ships:
+        out.append(f"  collected for the next release: deploy #{p['deploy']} with {ships}")
+        out.append(f"  the cut comes when a reviewer takes its review (the deployer, with no review), or: "
+                   f"maxpm target cut {name} --rev <commit>; later ship requests join the deploy item after it")
     return out
 
 
 def _ship_line(p):
-    """For the worker that asked for a ship: when its change goes out (the target's release cadence)."""
-    return p["text"] + ("; your change goes out with it. The target owner or the manager decides a release sooner "
-                        f"(maxpm target release-now {p['target']} --reason \"<why>\")" if p["waits"] else "")
+    """For the worker that asked for a ship: when its change goes out (the target's cut and release cadence)."""
+    if p.get("in_cut"):
+        return "a review of the release that is cut waits on this item: it goes out with that release"
+    return p["text"] + (f"; your change goes out with the next release (deploy #{p['deploy']}). The target owner or "
+                        f"the manager decides a release sooner (maxpm target release-now {p['target']} --reason "
+                        f"\"<why>\")" if p["waits"] else "")
 
 
 def _print_show(a):
     print(_fmt_item(a))
     if a.get("kind") == "deploy":
         print(f"  deploy item for target {a['target']} (owner: {a.get('target_owner') or 'nobody'}; only the owner takes it)")
-    if (a.get("release") or {}).get("text"):  # maxpm ship
+    if a.get("kind") == "deploy" and a.get("cut_at"):
+        print(f"  release cut {a['cut_at'][:16].replace('T', ' ')} UTC: it holds exactly these items; a later ship request "
+              f"joins the next deploy item")
+    if (a.get("release") or {}).get("text") or (a.get("release") or {}).get("in_cut"):  # maxpm ship
         print(f"  {_ship_line(a['release'])}")
     if a["notes"]:
         print("  notes:", a["notes"])
@@ -284,7 +296,7 @@ def _print_show(a):
         print(f"  usage:   {_usage_line(a['usage'])}")
     if a.get("shipped_in"):
         print(f"  ship requested: joins deploy item #{a['shipped_in']}")
-        if (a.get("ship_release") or {}).get("text"):
+        if (a.get("ship_release") or {}).get("text") or (a.get("ship_release") or {}).get("in_cut"):
             print(f"  {_ship_line(a['ship_release'])}")
     if a.get("now_ready"):
         print("  now ready:", ", ".join(f"#{i}" for i in a["now_ready"]))
@@ -554,6 +566,12 @@ def build_parser():
                        "deploy item, and its review (the deploy item when there is no review) is ready at the end of "
                        "the last release plus the cadence")
     x.add_argument("name"); x.add_argument("cadence", nargs="?", help="a number and m, h, d, w, or mo; off; none shows it")
+    x = tgs.add_parser("cut", help="fix the list of items of the collected release now (the target owner, the "
+                       "manager, or a person): later ship requests join the next deploy item, which waits until this "
+                       "release is done. The cut also comes by itself when a reviewer takes the review of the release")
+    x.add_argument("name")
+    x.add_argument("--rev", help="the commit that the release builds from, or any word for it: it goes into the history "
+                   "and the notes of the deploy item")
     x = tgs.add_parser("release-now", help="start the collected release sooner than the cadence permits, with a "
                        "reason (a fix of a production defect, a person's request); the target owner, the manager, "
                        "or a person decides it, and the history records it")
@@ -1632,6 +1650,8 @@ def dispatch(conn, a, actor):
             return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor)
         if a.tcmd == "release-now":
             return core.release_now(conn, a.name, a.reason, actor)
+        if a.tcmd == "cut":
+            return core.target_cut(conn, a.name, a.rev, actor)
         if a.tcmd == "own":
             return core.target_own(conn, a.name, actor, a.takeover)
         if a.tcmd == "release":
@@ -2343,11 +2363,13 @@ def render_go(b):
                            f"\"<what to watch, for how long>\"")
             for n in b.get("next_deploy", []):
                 out.append(f"  next deploy #{n['id']} is collecting: " + (", ".join(f"#{d['id']}" for d in n["waits_on_detail"]) or "nothing yet"))
-            if (b.get("release") or {}).get("cadence"):
-                p = b["release"]
-                out.append(f"  release cadence {p['cadence']}: after this deploy is done, the next release of "
-                           f"{t['name']} can start {p['cadence']} later; ship requests collect until then. You decide "
-                           f"a release sooner, with a reason: {r} target release-now {t['name']} --reason \"<why>\"")
+            p = b.get("release") or {}
+            if p.get("current"):
+                out.append(f"  this release was cut {p['current']['text']}: it holds exactly the items above. A later "
+                           f"ship request joins the next deploy item, which starts after this deploy is done"
+                           + (f", and not before {p['cadence']} after this cut (release cadence)" if p.get("cadence") else "")
+                           + f". You decide a release sooner, with a reason: {r} target release-now {t['name']} "
+                             f"--reason \"<why>\"")
             out += ["",
                     "Deploy as the target description says, run its checks, then put the release id or",
                     f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\"",
@@ -2741,10 +2763,17 @@ def render(a, res):
             print(f"  the old name {res['was']} does not work from now on; agents keep their names, and a new agent "
                   "gets the new name")
             return
+        if a.tcmd == "cut":
+            d, ships = res["cut"], res["items"]
+            print(f"release #{d['id']} of {res['name']} is cut with {len(ships)} item{'' if len(ships) == 1 else 's'}: "
+                  f"a later ship request joins the next deploy item, which starts after this release is done")
+            for x in ships:
+                print(f"    #{x['id']} {x['title']} ({x['status'].replace('_', ' ')})")
+            return
         if a.tcmd == "release-now":
             it = res["item"]
-            print(f"release now: deploy #{res['deploy']} for {res['target']} goes out before the cadence "
-                  f"{res['cadence']} permits ({res['early']}); the history of #{res['deploy']} records it")
+            print(f"release now: deploy #{res['deploy']} for {res['target']} goes out sooner "
+                  f"({res['early']}); the history of #{res['deploy']} records it")
             print(f"  it starts with #{it['id']} {it['title']}" + (
                 ", which is ready" if it["ready"] else ", which waits on "
                 + ", ".join(f"#{b}" for b in it["open_blockers"]) if it["open_blockers"] else f" ({it['status']})"))

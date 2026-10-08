@@ -81,9 +81,12 @@ your type from your CLI's environment.
    When someone adds a prerequisite to an item you hold, you get an alert: stop and wait for it.
    The change must go out, and the project has a deploy target: add `--ship`
    (or run `maxpm ship <id>` later). The item joins that target's next
-   deploy item, which only the target owner takes. When the target has a
-   release cadence (`maxpm target cadence <target> 2h`), ship requests collect
-   and the reply says when the next release can start; your item is done, so
+   deploy item, which only the target owner takes. A release that is cut (a
+   reviewer took its review, or the owner ran `maxpm target cut`) holds a
+   fixed list of items: your item then joins the deploy item after it. When
+   the target has a release cadence (`maxpm target cadence <target> 2h`), ship
+   requests collect. The reply says with which release your change goes out
+   and when that one can start; your item is done, so
    take other work. A release sooner (a fix of a production defect, a person's
    request) is a decision of the target owner or the manager: ask with
    `maxpm alert <owner> "<why it cannot wait>" --item <deploy id>`; they run

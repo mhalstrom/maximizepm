@@ -76,12 +76,20 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm target cadence <target> 2h|6h|1d|1w|1mo|off`: the shortest time between two
   normal releases (2h is at most 12 a day, 6h is four). Ship requests then collect on
   the open deploy item, and its review (the deploy item, with no review) is ready only
-  at the end of the last release plus the cadence; `maxpm target show <target>` says
+  at the cut of the last release plus the cadence; `maxpm target show <target>` says
   when, and what waits. Do not hold a cadence by hand (auto_review off, pinned
   releases). A release that cannot wait (a fix of a production defect, a person asks)
   is your decision or the target owner's, with no approval from a person:
   `maxpm target release-now <target> --reason "<why>"`; the history keeps the reason.
   A worker cannot run it; it asks you or the owner.
+- **A release has a cut**: from the cut on, its deploy item holds a fixed list of
+  items. A ship request that comes later joins the next deploy item, and that
+  release starts when this one is done (and, with a cadence, not before the cut
+  plus the cadence). The cut comes by itself when a reviewer takes the review
+  (the deployer, with no review). When you pin the commit of a release before
+  its review, cut it then: `maxpm target cut <target> --rev <commit>`; the commit
+  goes into the history and the notes of the deploy item. A fix that the review of
+  the cut release asks for still goes out with that release.
 - **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
   `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
   folder of the release; a waiting session that worked on the release does not get it.

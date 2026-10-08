@@ -1858,6 +1858,7 @@ OPS = {
                                                **_launch_args(a)),
     "target_cadence": lambda c, a, who: core.target_cadence(c, a["target"], a.get("cadence") or "off", who),
     "release_now": lambda c, a, who: core.release_now(c, a["target"], a.get("reason"), who),
+    "target_cut": lambda c, a, who: core.target_cut(c, a["target"], a.get("rev"), who),
     "open_monitors": lambda c, a, who: open_monitors(c, db=a.get("db")),
     "queue_add": lambda c, a, who: core.queue_add(c, a["agent"], a.get("id"), a.get("message"), bool(a.get("first")),
                                                   a.get("before"), who),

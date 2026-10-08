@@ -2798,7 +2798,9 @@ class ReleaseCadence(Base):
         self.assertTrue(any(e["change"].startswith("release cadence: the wait ended")
                             for e in core.item_show(self.c, rv)["events"]))
         self.assertEqual(core.go(self.c, self.dir.name, "rev", role="reviewer")["item"]["id"], rv)
-        self.assertIn("has started", core.target_show(self.c, "web")["release"]["text"])
+        now_runs = core.target_show(self.c, "web")["release"]  # the reviewer took the review: that is the cut
+        self.assertEqual((now_runs["current"]["id"], now_runs["deploy"], now_runs["waits"]), (dep["id"], None, False))
+        self.assertIn(f"release #{dep['id']} of web runs now", now_runs["text"])
 
     def add_done(self):
         a = self.add("site", "more")
@@ -2824,8 +2826,8 @@ class ReleaseCadence(Base):
         r = core.release_now(self.c, "web", "login fails in production", "mark")
         self.assertEqual((r["waits"], r["early"], r["item"]["id"], r["item"]["ready"]),
                          (False, "login fails in production", rv, True))
-        self.assertTrue(any(e["actor"] == "mark" and e["change"].startswith("release now, before the cadence 1d")
-                            and e["change"].endswith(": login fails in production")
+        self.assertTrue(any(e["actor"] == "mark" and e["change"].startswith("release now (the cadence 1d permits")
+                            and e["change"].endswith("): login fails in production")
                             for e in core.item_show(self.c, dep["id"])["events"]))
         self.assertTrue(any("release now" in m["body"] and "login fails" in m["body"] for m in core.inbox(self.c, "ops")))
         self.later(minutes=5)  # the sweep does not hold it again
@@ -2894,7 +2896,7 @@ class ReleaseCadence(Base):
         self.later(minutes=1)
         it = core.annotate(self.c)[rv]
         self.assertEqual((it["ready"], it["blocked_reason"]), (True, None))
-        self.assertEqual(core.target_show(self.c, "web")["release"]["started"], True)
+        self.assertEqual(core.target_show(self.c, "web")["release"]["current"]["id"], dep["id"])
 
     def test_a_ship_request_while_a_deploy_runs_waits_for_it_and_then_for_the_cadence(self):
         core.target_cadence(self.c, "web", "2h", "mark")
@@ -2902,15 +2904,21 @@ class ReleaseCadence(Base):
         core.claim(self.c, dep["id"], "ops")
         b, nxt = self.shipped("second")
         p = nxt["release"]
-        self.assertEqual((p["waits"], p["running"], p["next_at"], nxt["id"] != dep["id"]), (True, dep["id"], None, True))
-        self.assertIn(f"deploy #{dep['id']} of web runs now", p["text"])
-        self.assertEqual(core._item(self.c, nxt["id"])["blocked_until"], None)
+        cut = self.clock[0]  # the deployer took the deploy item: the cut, and the cadence counts from it
+        self.assertEqual((p["waits"], p["running"], p["next_at"], nxt["id"] != dep["id"]),
+                         (True, dep["id"], core.iso(cut + timedelta(hours=2)), True))
+        self.assertIn(f"release #{dep['id']} of web runs now", p["text"])
+        self.assertIn("release order of target web", core._item(self.c, nxt["id"])["blocked_reason"])
         self.later(minutes=20)
         self.assertFalse(core.annotate(self.c)[nxt["id"]]["ready"])
         core.done(self.c, dep["id"], "release v1", "ops")
         self.later(minutes=10)
-        self.assertEqual(core._item(self.c, nxt["id"])["blocked_until"], core.iso(self.clock[0] + timedelta(minutes=110)))
-        self.later(minutes=110)
+        it = core._item(self.c, nxt["id"])
+        self.assertEqual(it["blocked_until"], core.iso(cut + timedelta(hours=2)))
+        self.assertIn("release cadence 2h of target web: the last release was cut", it["blocked_reason"])
+        self.later(minutes=89)
+        self.assertFalse(core.annotate(self.c)[nxt["id"]]["ready"])
+        self.later(minutes=1)
         self.assertTrue(core.annotate(self.c)[nxt["id"]]["ready"])
 
     def test_a_blocker_that_a_person_set_on_the_release_stays(self):
@@ -2939,14 +2947,14 @@ class ReleaseCadence(Base):
         a = self.add_done()
         out = run("--as", "dev", "done", str(a), "--output", "c", "--ship")
         self.assertRegex(out, r"release cadence 2h: the next release of web can start .* \(in 2h00m\); your change goes out "
-                              r"with it\. The target owner or the manager decides a release sooner "
-                              r"\(maxpm target release-now web --reason")
-        self.assertIn("your change goes out with it", run("--as", "dev", "ship", str(a)))
+                              r"with the next release \(deploy #\d+\)\. The target owner or the manager decides a "
+                              r"release sooner \(maxpm target release-now web --reason")
+        self.assertIn("your change goes out with the next release", run("--as", "dev", "ship", str(a)))
         out = run("target", "show", "web")
         self.assertIn("waits for it: deploy #", out)
         self.assertIn(f"#{a} more (done)", out)
         out = run("--as", "mark", "target", "release-now", "web", "--reason", "mark asked for it")
-        self.assertIn("goes out before the cadence 2h permits (mark asked for it)", out)
+        self.assertIn("goes out sooner (mark asked for it)", out)
         self.assertIn("which is ready", out)
 
 
@@ -3253,16 +3261,77 @@ class ReleaseReview(Base):
         hist = [e["change"] for e in core.item_show(self.c, self.review)["events"]]
         self.assertTrue(any(f"review step {do['id']} (site) confirmed" in h for h in hist))
 
-    def test_after_a_passed_review_new_work_gets_a_new_review(self):
-        core.claim(self.c, self.review, "rev")
-        core.review_pass(self.c, self.review, "ok", "rev")
+    def test_after_the_cut_new_work_joins_the_next_release_with_a_review_of_its_own(self):
+        # #1619: nine late ship requests joined a release whose review had passed; it got a second review, and
+        # its deploy item could not close for the release that was live.
+        before = core.item_show(self.c, self.deploy)["waits_on"]
+        core.claim(self.c, self.review, "rev")  # the reviewer takes the review: the cut
+        cut = core._item(self.c, self.deploy)
+        self.assertTrue(cut["cut_at"])
+        self.assertTrue(any(e["change"].startswith("release cut with 2 items (rev took review")
+                            for e in core.item_show(self.c, self.deploy)["events"]))
         c = self.add("site", "late")
-        core.ship(self.c, c, "dev")
-        waits = core.item_show(self.c, self.deploy)["waits_on"]
-        reviews = [i for i in waits if core.item_show(self.c, i)["kind"] == "review"]
-        self.assertEqual(len(reviews), 2)
-        new = max(reviews)
+        core.claim(self.c, c, "dev")
+        core.done(self.c, c, "commit", "dev")
+        nxt = core.ship(self.c, c, "dev")
+        self.assertNotEqual(nxt["id"], self.deploy)
+        self.assertEqual(core.item_show(self.c, self.deploy)["waits_on"], before)  # exactly the items of the cut
+        (new,) = [i for i in nxt["waits_on"] if core.item_show(self.c, i)["kind"] == "review"]
         self.assertEqual(core.item_show(self.c, new)["waits_on"], [c])
+        # The next release starts after this one is done: its review is not ready, and go gives it to nobody.
+        core.register(self.c, "rev2")
+        it = core.annotate(self.c)[new]
+        self.assertEqual((it["ready"], it["blocked_until"]), (False, None))
+        self.assertIn(f"release order of target web: release #{self.deploy}", it["blocked_reason"])
+        self.assertIsNone(core.go(self.c, self.dir.name, "rev2", role="reviewer").get("item"))
+        p = nxt["release"]
+        self.assertEqual((p["waits"], p["current"]["id"], p["deploy"], p["in_cut"]), (True, self.deploy, nxt["id"], False))
+        # The release that is cut closes with its own items.
+        core.review_pass(self.c, self.review, "ok", "rev")
+        core.claim(self.c, self.deploy, "ops")
+        core.done(self.c, self.deploy, "release v1", "ops")
+        core.activity(self.c, "dev")  # any command runs the sweep
+        it = core.annotate(self.c)[new]
+        self.assertEqual((it["ready"], it["blocked_reason"]), (True, None))
+        self.assertEqual(core.go(self.c, self.dir.name, "rev2", role="reviewer")["item"]["id"], new)
+
+    def test_a_fix_that_the_review_of_a_cut_release_waits_on_goes_out_with_that_release(self):
+        core.claim(self.c, self.review, "rev")
+        fix = core.review_fail(self.c, self.review, ["null check in form"], actor="rev")["fixes"][0]["id"]
+        core.claim(self.c, fix, "dev")
+        r = core.done(self.c, fix, "fixed", "dev", ship_it=True)
+        self.assertEqual((r["shipped_in"], r["ship_release"]["in_cut"]), (self.deploy, True))
+        self.assertIn(fix, core.item_show(self.c, self.deploy)["waits_on"])
+        self.assertTrue(core.annotate(self.c)[self.review]["ready"])  # the review comes back, in the same release
+
+    def test_the_owner_cuts_a_release_with_a_command_before_the_review_starts(self):
+        from river import cli
+        core.register(self.c, "mark", human=True)
+        with self.assertRaisesRegex(RiverError, r"the target owner \(ops\), the manager, or a person cuts"):
+            core.target_cut(self.c, "web", "abc1234", "dev")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "ops", "target", "cut", "web", "--rev", "abc1234"])
+        self.assertIn(f"release #{self.deploy} of web is cut with 2 items", out.getvalue())
+        dep = core.item_show(self.c, self.deploy)
+        self.assertTrue(dep["cut_at"])
+        self.assertIn("abc1234", dep["notes"])
+        self.assertTrue(any("maxpm target cut by ops): abc1234" in e["change"] for e in dep["events"]))
+        self.assertTrue(core.annotate(self.c)[self.review]["ready"])  # the cut release goes on: its review is ready
+        with self.assertRaisesRegex(RiverError, f"nothing is collected for web.*Release #{self.deploy} is cut already"):
+            core.target_cut(self.c, "web", None, "ops")
+        c = self.add("site", "late")
+        core.claim(self.c, c, "dev")
+        core.done(self.c, c, "commit", "dev")
+        nxt = core.ship(self.c, c, "dev")
+        self.assertNotEqual(nxt["id"], self.deploy)
+        # The next release cannot be cut while this one runs; with a reason it can start sooner.
+        with self.assertRaisesRegex(RiverError, "runs now.*release-now web"):
+            core.target_cut(self.c, "web", "def5678", "ops")
+        r = core.release_now(self.c, "web", "a fix of a production defect", "mark")
+        self.assertEqual((r["waits"], r["item"]["ready"]), (False, True))
+        self.assertTrue(core.target_cut(self.c, "web", "def5678", "mark")["cut"]["cut_at"])
 
     def test_review_off_changes_nothing(self):
         core.config_set(self.c, "review", "off")
