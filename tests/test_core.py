@@ -3676,6 +3676,27 @@ class NativeDelivery(Base):
         core.config_set(self.c, "native_message", "Mine=MINE_ID: mine send {address} {message}")
         self.assertEqual(core.native_from_env(self.c, {"MINE_ID": "7"}), ("Mine", "7"))
 
+    def test_only_an_urgent_message_goes_into_the_managers_session(self):
+        # #1583: a message into the manager's session wakes it; its watch brings a normal or a low one later.
+        core.manage(self.c, self.dir.name, "cx")
+        core.set_native(self.c, "cx", "Codex", "thread-9")
+        core.manage_watch(self.c, "cx", step="0s", sleep=lambda s: None)
+        m = core.send(self.c, "note", "#12 is on main", to="cx", actor="cc")
+        self.assertEqual((self.sent, m["native_status"]),
+                         ([], "waits: the manager's watch brings a normal message after its wait"))
+        self.assertEqual(core.send(self.c, "alert", "the build is red", to="cx", actor="cc")["native_status"], "sent")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(core.send(self.c, "note", "now", to="cx", actor="cc", level="urgent")["native_status"], "sent")
+        # The watch does not return for what the platform brought; it returns for the note when its wait ends.
+        t0, naps = core.now(), []
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
+            w = core.manage_watch(self.c, "cx", step="2h", sleep=naps.append)
+        self.assertEqual((w["result"], len(naps)), ("messages", 10))
+        self.assertIn("#12 is on main", [x["body"] for x in w["messages"]])
+        # A worker gets every message at once, as before.
+        core.set_native(self.c, "cc", "Codex", "thread-3")
+        self.assertEqual(core.send(self.c, "note", "fyi", to="cc", actor="cx", level="low")["native_status"], "sent")
+
     def test_instructions_stops_and_messages_go_out_natively(self):
         core.set_native(self.c, "cx", "Codex", "thread-9")
         core.queue_add(self.c, "cx", message="commit and take #3 next", actor="mark")
@@ -3908,9 +3929,9 @@ class Manager(Base):
         with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
             w = core.manage_watch(self.c, "boss", step="5m", sleep=come_and_go)
         self.assertEqual((w["result"], w["new"]), ("tick", []))
-        # A message does not wait for the settle time.
+        # An urgent message does not wait for the settle time.
         self.add("b", "third")
-        core.send(self.c, "note", "now", to="boss", actor="w1")
+        core.send(self.c, "alert", "now", to="boss", actor="w1")
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no settle wait for a message"))
         self.assertEqual(w["result"], "messages")
         with self.assertRaisesRegex(RiverError, "bad duration"):
@@ -3919,7 +3940,7 @@ class Manager(Base):
     def test_messages_wake_the_watch_so_one_watcher_is_enough(self):
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
-        core.send(self.c, "note", "hello boss", to="boss", actor="w1")
+        core.send(self.c, "alert", "hello boss", to="boss", actor="w1")
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait with a message unread"))
         self.assertEqual((w["result"], [m["body"] for m in w["messages"]]), ("messages", ["hello boss"]))
         self.assertEqual(core.unread(self.c, "boss")["unread"], 0)  # marked read: the next watch blocks
@@ -3938,7 +3959,8 @@ class Manager(Base):
             cli.render_manage(core.manage(self.c, self.dir.name, "boss"))
         self.assertIn("NEW MESSAGES (1)", out.getvalue())
         self.assertIn("w2 is stuck", out.getvalue())
-        self.assertIn("a new message to you (it prints it)", out.getvalue())
+        self.assertIn("a message to you (an alert or a question at once, a note after manage_wait_normal 10m, a low "
+                      "one after manage_wait_low 30m; it prints every message that waits)", out.getvalue())
         self.assertNotIn("inbox --wait", out.getvalue())
         # With native delivery the platform brings messages: they do not wake the watch.
         with mock.patch.object(core, "has_native", return_value=True):
@@ -3950,6 +3972,108 @@ class Manager(Base):
         core.stop_agent(self.c, "boss", "done for the day", actor="mark")
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait after a stop"))
         self.assertEqual(w["result"], "stop")
+
+    def watch_minutes(self, **kw):
+        """Run the watch with a clock that moves one minute for each poll; returns (result, minutes waited)."""
+        t0, naps = core.now(), []
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
+            w = core.manage_watch(self.c, "boss", sleep=naps.append, **kw)
+        return w, len(naps)
+
+    def test_each_level_of_message_has_its_wait_and_a_wake_brings_all_that_waits(self):
+        # #1583: on 2026-10-08, 124 of 181 wakes of the manager were messages, most of them one note.
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        self.assertEqual((core.DEFAULT_SETTINGS["manage_wait_normal"], core.DEFAULT_SETTINGS["manage_wait_low"]),
+                         ("10m", "30m"))
+        # A note is normal: it wakes the watch ten minutes after it was sent.
+        m = core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
+        self.assertEqual((m["level"], m["level_set"]), ("normal", False))
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual((w["result"], [x["body"] for x in w["messages"]], minutes), ("messages", ["#12 is on main"], 10))
+        # A low message waits thirty minutes; the time limit of the watch (manage_every) brings it sooner.
+        low = core.send(self.c, "note", "for your records", to="boss", actor="w1", level="low")
+        self.assertEqual((low["level"], low["level_set"]), ("low", True))
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual((w["result"], minutes), ("messages", 30))
+        core.send(self.c, "note", "again for your records", to="boss", actor="w1", level="low")
+        w, minutes = self.watch_minutes(step="20m")
+        self.assertEqual((w["result"], [x["body"] for x in w["messages"]], minutes),
+                         ("messages", ["again for your records"], 20))
+        # An urgent message wakes it at once, and brings the ones that wait: no second wake follows.
+        core.send(self.c, "note", "one", to="boss", actor="w1")
+        core.send(self.c, "note", "two", to="boss", actor="w2", level="low")
+        core.send(self.c, "question", "which db?", to="boss", actor="w1")
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["one", "two", "which db?"], 0))
+        self.assertEqual(self.watch_minutes(step="5m")[0]["result"], "tick")
+        # A sender raises one note; the level of the kind is not stored.
+        up = core.message(self.c, "note", "the disk is full", to="boss", actor="w1", level="urgent")[0]
+        self.assertEqual((up["level"], up["level_set"]), ("urgent", True))
+        self.assertEqual(self.watch_minutes(step="2h")[1], 0)
+        self.assertEqual(core.send(self.c, "alert", "x", to="w2", actor="w1", level="urgent")["level_set"], False)
+        with self.assertRaisesRegex(RiverError, "urgent, normal, low"):
+            core.send(self.c, "note", "x", to="boss", actor="w1", level="info")
+        # The waits are settings; 0s is at once.
+        core.inbox(self.c, "boss")
+        core.config_set(self.c, "manage_wait_normal", "0s")
+        core.send(self.c, "note", "three", to="boss", actor="w1")
+        self.assertEqual(self.watch_minutes(step="2h")[1], 0)
+        with self.assertRaisesRegex(RiverError, "bad duration"):
+            core.config_set(self.c, "manage_wait_low", "later")
+
+    def test_a_ship_request_notice_is_low_and_the_commands_take_a_level(self):
+        from river import cli
+        core.manage(self.c, self.dir.name, "boss")
+        core.target_add(self.c, "web", "push")
+        core.project_target(self.c, "a", "web")
+        core.target_give(self.c, "web", "boss", "mark")
+        core.inbox(self.c, "boss")
+        x = self.add("a", "page")
+        core.ship(self.c, x, "w1")
+        got = [m for m in core.inbox(self.c, "boss", mark_read=False) if "ship request" in m["body"]]
+        self.assertEqual([(m["kind"], m["level"]) for m in got], [("notice", "low")])
+        core.manage(self.c, self.dir.name, "boss")  # the briefing shows the findings of now; the watch starts after it
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual((w["result"], minutes), ("messages", 30))
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+                cli.run(list(words))
+            return out.getvalue()
+        run("--as", "w1", "note", "boss", "no action needed", "--level", "low")
+        run("--as", "w1", "send", "note", "read this now", "--to", "boss", "--level", "urgent")
+        run("--as", "w1", "alert", "boss", "an alert that can wait", "--level", "normal")
+        out = run("--as", "boss", "inbox", "--peek")
+        self.assertRegex(out, r"note from w1 to boss  \(.*, level low, new\)\n    no action needed")
+        self.assertRegex(out, r"note from w1 to boss  \(.*, level urgent, new\)\n    read this now")
+        self.assertRegex(out, r"alert from w1 to boss  \(.*, level normal, new\)")
+
+    def test_a_low_finding_waits_and_an_urgent_one_brings_it(self):
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        h = self.add("a", "sign the contract", doer="human")  # an item that is ready for a person: low
+        self.assertEqual(core._finding_keys(core.manager_findings(self.c)), [f"human:{h}"])
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual((w["result"], w["new"], minutes), ("change", [f"human:{h}"], 30))
+        # With an urgent finding (ready agent work and no agent) it comes after manage_settle, with the low one.
+        h2 = self.add("a", "pay the invoice", doer="human")
+        self.add("b", "new work")
+        w, minutes = self.watch_minutes(step="2h")
+        self.assertEqual((w["result"], w["new"], minutes), ("change", [f"human:{h2}", "uncovered:b"], 2))
+        # A low finding that goes away wakes nothing.
+        h3 = self.add("a", "call the bank", doer="human")
+        t0, naps = core.now(), []
+
+        def nap(s):
+            naps.append(s)
+            if len(naps) == 5:
+                core.drop(self.c, h3, note="not needed", actor="mark")
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
+            w = core.manage_watch(self.c, "boss", step="45m", sleep=nap)
+        self.assertEqual((w["result"], w["new"], len(naps)), ("tick", [], 45))
 
     def test_inbox_wait_works_for_any_agent_but_the_active_manager(self):
         core.manage(self.c, self.dir.name, "boss")

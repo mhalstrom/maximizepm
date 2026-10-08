@@ -363,3 +363,28 @@ Form 3, with the waits urgent 0m, normal 10m, low 30m: 79 wakes in place of
 Not in this proposal: the 39 wakes from other background commands. They are
 release steps, and the release cadence of a target (#1571) reduces them.
 Nothing is built before the answer (#1584); #1583 builds the form chosen.
+
+### Built (#1583)
+
+The answer to #1584 was form A with the waits 0m, 10m, 30m.
+
+- `messages.level`: empty means the level of the kind (an alert, a question,
+  an answer, an offer: urgent; a note, a notice: normal). The ship request
+  notice has the level low. `--level urgent|normal|low` on `maxpm send`,
+  `note`, `alert`, and `ask` sets another level, and `maxpm inbox` shows a
+  level that the sender set.
+- Settings `manage_wait_normal` (10m) and `manage_wait_low` (30m). The wait of
+  a message counts from the time it was sent, so a watch that starts again
+  does not start the wait again.
+- `maxpm manage --watch`: an urgent message returns it at once, a normal or a
+  low one when its wait ends. A new finding `waiting` or `human` waits
+  `manage_wait_low`; another new finding waits `manage_settle` as before.
+  Each return brings every message and finding that waits.
+- With `native_message`, only an urgent message goes into the manager's
+  session; the watch brings the others.
+
+Measure after one day with the new code:
+
+    python3 current_project/research/manager_wakes.py <since> <until>
+
+Expected for a day like 2026-10-08: about 79 wakes in place of 181.

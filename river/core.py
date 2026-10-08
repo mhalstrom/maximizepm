@@ -36,6 +36,15 @@ DEP_KINDS = ("blocks", "feeds", "conflicts")
 MESSAGE_KINDS = ("alert", "question", "answer", "note", "notice", "offer")
 SEND_KINDS = ("alert", "question", "note")
 MESSAGE_STATES = ("open", "accepted", "declined", "answered", "read")
+# The level of a message says how soon it wakes the manager's watch (maxpm manage --watch, #1583): urgent at
+# once, normal after manage_wait_normal, low after manage_wait_low. It comes from the kind unless the sender
+# gives one (--level). Someone waits on an alert, a question, an answer, or an offer; a note or a notice can wait.
+MESSAGE_LEVELS = ("urgent", "normal", "low")
+KIND_LEVELS = {"alert": "urgent", "question": "urgent", "answer": "urgent", "offer": "urgent",
+               "note": "normal", "notice": "normal"}
+# New findings of these kinds wait manage_wait_low: an agent that waits ends by itself after wait_max, and a
+# person gets a notification for an item that is ready for them.
+LOW_FINDINGS = ("waiting", "human")
 
 DEFAULT_SETTINGS = {
     "lease_ttl": "30m",
@@ -170,6 +179,13 @@ DEFAULT_SETTINGS = {
     # read its whole context again (#1312). A finding that goes away in this time wakes nothing. Messages and a
     # stop request still return at once. 0s: return at the first finding.
     "manage_settle": "2m",
+    # How long a message to the manager, or a new finding, of the level normal or low waits before it wakes
+    # maxpm manage --watch (#1583); an urgent one (an alert, a question, most findings) wakes it as before. The
+    # level of a message comes from its kind (a note and a notice: normal; a ship request notice: low) or from
+    # --level; the findings "an agent waits" and "an item is ready for a person" are low. A wake brings every
+    # message that waits. On 2026-10-08, 141 of 181 wakes of the manager were for normal and low events. 0s: at once.
+    "manage_wait_normal": "10m",
+    "manage_wait_low": "30m",
     # The manager session's context: Claude Code compacts it at this size (claude --autocompact; 100k to 1M,
     # for example 200k). The session stays the same, with the same name and Remote Control link, and the next
     # maxpm manage briefing shows the queue again. A manager reads its whole context on each wake, so a small
@@ -488,7 +504,8 @@ CREATE TABLE IF NOT EXISTS messages (
   read_at     TEXT,
   closed_at   TEXT,
   nudged_at   TEXT,
-  native_status TEXT
+  native_status TEXT,
+  level       TEXT  -- urgent, normal, or low when the sender gave one; NULL: from the kind (KIND_LEVELS)
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -838,6 +855,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE queue_entries ADD COLUMN native_status TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN native_status TEXT")
+    if "level" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
+        conn.execute("ALTER TABLE messages ADD COLUMN level TEXT")
     if "fresh_start" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN fresh_start TEXT")
         conn.execute("DELETE FROM settings WHERE key='wake_after'")  # the pane wake of #729 is gone (#758)
@@ -957,7 +976,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     if key not in DEFAULT_SETTINGS:
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
-            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "connect_within",
+            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_normal", "manage_wait_low", "connect_within",
             "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout"):
         parse_duration(value)
     elif key == "prompt_pattern":
@@ -3326,7 +3345,8 @@ def _holder_of(conn, item_id):
     return it["assignee"]
 
 
-def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd=None, actor=None, goal=None):
+def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd=None, actor=None, goal=None,
+            level=None):
     """The shortcuts maxpm alert / ask / note (design 7.4): to an agent, to the holder of an item, or
     (questions) to every agent whose held items touch a file. Returns the messages sent."""
     if sum(x is not None for x in (to, holder_of, file, goal)) > 1:
@@ -3339,14 +3359,14 @@ def message(conn, kind, body, to=None, holder_of=None, item=None, file=None, cwd
         targets = [a["name"] for a in who(conn, file=file, cwd=cwd) if a["name"] != actor]
         if not targets:
             raise RiverError(f"no agent holds an item that touches {file} (maxpm who --file {file})")
-        return [send(conn, kind, body, t, item, None, actor) for t in targets]
+        return [send(conn, kind, body, t, item, None, actor, level) for t in targets]
     if holder_of is not None:
         to = _holder_of(conn, holder_of)
         if item is None:
             item = holder_of
     if to is None and item is None:
         raise RiverError("say who gets it: an agent name, --holder-of <id>, or --item <id> (its holder)")
-    return [send(conn, kind, body, to, item, None, actor)]
+    return [send(conn, kind, body, to, item, None, actor, level)]
 
 
 def decline_message(conn, msg_id, note=None, actor=None):
@@ -5303,8 +5323,9 @@ def ship(conn, item_id, actor=None):
                 conn.execute("UPDATE items SET priority=? WHERE id=?", (it["priority"], dep["id"]))
             _event(conn, it["id"], actor, f"ship requested in #{dep['id']} ({tg['name']})")
             if tg["owner"] and tg["owner"] != actor:
+                # low: the owner acts on it only when the release starts (the cadence), not at each request
                 _send(conn, "notice", actor or "maxpm", f"ship request: #{it['id']} {it['title']} joins deploy "
-                      f"#{dep['id']} for {tg['name']}", to=tg["owner"], item_id=dep["id"])
+                      f"#{dep['id']} for {tg['name']}", to=tg["owner"], item_id=dep["id"], level="low")
         _cadence_sync(conn)  # a new release waits for the cadence from its first ship request
     # release: when this release can start (the target's cadence), for the worker that asked.
     return dict(item_show(conn, dep["id"]), release=release_plan(conn, tg["name"]))
@@ -6274,12 +6295,13 @@ def _message(conn, msg_id):
     return r
 
 
-def _send(conn, kind, sender, body, to=None, item_id=None, reply_to=None):
-    """Insert one message inside the caller's transaction and return its id."""
+def _send(conn, kind, sender, body, to=None, item_id=None, reply_to=None, level=None):
+    """Insert one message inside the caller's transaction and return its id. level: one of MESSAGE_LEVELS
+    when it is not the level of the kind."""
     t = iso(now())
     cur = conn.execute(
-        "INSERT INTO messages(kind,from_agent,to_agent,item_id,reply_to,thread_id,body,created_at) "
-        "VALUES (?,?,?,?,?,0,?,?)", (kind, sender, to, item_id, reply_to, body, t))
+        "INSERT INTO messages(kind,from_agent,to_agent,item_id,reply_to,thread_id,body,created_at,level) "
+        "VALUES (?,?,?,?,?,0,?,?,?)", (kind, sender, to, item_id, reply_to, body, t, level))
     mid = cur.lastrowid
     thread = _message(conn, reply_to)["thread_id"] if reply_to else mid
     conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (thread, mid))
@@ -6296,15 +6318,20 @@ _TO_ME = ("(m.to_agent=? OR (m.to_agent IS NULL AND m.item_id IN "
 def _msg_dict(r):
     m = dict(r)
     m["unread"] = m["read_at"] is None
+    m["level_set"] = bool(m.get("level"))  # the sender gave it
+    m["level"] = m.get("level") or KIND_LEVELS[m["kind"]]
     return m
 
 
-def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None):
-    """Send an alert, question, or note to an agent, to the holder of an item, or as a reply."""
+def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=None):
+    """Send an alert, question, or note to an agent, to the holder of an item, or as a reply. level (urgent,
+    normal, low) says how soon it wakes the manager's watch, when the kind's own level does not fit."""
     if not actor:
         raise RiverError("sending needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if kind not in SEND_KINDS:
         raise RiverError(f"send kind is one of {', '.join(SEND_KINDS)}; to answer a question: maxpm answer <message-id> \"...\"")
+    if level is not None and level not in MESSAGE_LEVELS:
+        raise RiverError(f"the level is one of {', '.join(MESSAGE_LEVELS)}")
     if not body or not body.strip():
         raise RiverError("a message needs text")
     with tx(conn):
@@ -6323,16 +6350,22 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None):
             raise RiverError("say who gets it: --to <agent>, --item <id> (its holder), or --reply <message-id>")
         if to is not None:
             _agent(conn, to)
-        mid = _send(conn, kind, actor, body.strip(), to=to, item_id=item, reply_to=reply_to)
+        mid = _send(conn, kind, actor, body.strip(), to=to, item_id=item, reply_to=reply_to,
+                    level=level if level != KIND_LEVELS[kind] else None)
         if reply_to is not None:
             # Replying to a message means the sender read it.
             if conn.execute(f"SELECT 1 FROM messages m WHERE m.id=? AND {_TO_ME}", (reply_to, actor, actor)).fetchone():
                 _mark_read(conn, [reply_to])
         if item is not None:
             _event(conn, item, actor, f"{kind} #{mid} to {to or 'the next holder'}")
-    if to is not None and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai' AND platform IS NOT NULL",
-                                       (to,)).fetchone():
-        st = deliver_native(conn, to, _native_text(kind, actor, body.strip()))
+    got = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai' AND platform IS NOT NULL",
+                       (to,)).fetchone() if to is not None else None
+    if got:
+        lvl = level or KIND_LEVELS[kind]
+        # A message into the manager's session wakes it, so only an urgent one goes there; its watch brings
+        # the others when their wait ends (manage_wait_normal, manage_wait_low).
+        st = (f"waits: the manager's watch brings a {lvl} message after its wait" if got["role"] == "manager"
+              and lvl != "urgent" else deliver_native(conn, to, _native_text(kind, actor, body.strip())))
         with tx(conn):
             conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
     return message_show(conn, mid)
@@ -8387,6 +8420,8 @@ def manage(conn, cwd, actor=None, takeover=None):
         conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(_finding_keys(f)), actor))
     return {"agent": actor, "new_name": new_name, "role": "manager", "status": status(conn), "findings": f,
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
+            "wait_normal": setting(conn, "manage_wait_normal", agent=actor),
+            "wait_low": setting(conn, "manage_wait_low", agent=actor),
             "wait_too_long": setting(conn, "wait_too_long"),
             "tidy_every": setting(conn, "tidy_every"),
             "native": has_native(conn, actor)}
@@ -8396,9 +8431,13 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     """maxpm manage --watch: block until something new needs the manager (a new finding, an unread message
     or a stop request), at most manage_every (or step). Findings it reported before do not count as new;
     the messages it returns are marked read, as maxpm inbox --wait does, so the manager needs one watcher.
-    After the first new finding it waits manage_settle more, so a group of findings wakes the manager once;
-    a message or a stop request returns at once. With native_message the platform brings messages into the
-    session, and they do not wake it. Returns what changed."""
+    After the first new finding it waits manage_settle more, so a group of findings wakes the manager once.
+    Each event has a level (#1583): an urgent message (an alert, a question) or a stop request returns at
+    once; a normal message (a note) returns manage_wait_normal after it was sent, a low one (a ship request
+    notice) after manage_wait_low; a new finding of LOW_FINDINGS waits manage_wait_low from when the watch
+    saw it. A return for any reason brings every message and finding that waits, so no second wake follows.
+    With native_message the platform brings urgent messages into the session, and they do not wake it; the
+    watch brings the others. Returns what changed."""
     import json
     import time
     sleep = sleep or time.sleep
@@ -8412,19 +8451,33 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     deadline = now() + parse_duration(step or setting(conn, "manage_every", agent=actor))
     settle = parse_duration(setting(conn, "manage_settle", agent=actor))
     native = has_native(conn, actor)
-    settled = None  # when the first new finding has waited manage_settle
+    waits = {"urgent": timedelta(0), "normal": parse_duration(setting(conn, "manage_wait_normal", agent=actor)),
+             "low": parse_duration(setting(conn, "manage_wait_low", agent=actor))}
+    settled = None  # when the first new urgent finding has waited manage_settle
+    low_due = None  # when the first new low finding has waited manage_wait_low
     while True:
         f = manager_findings(conn)
         keys = set(_finding_keys(f))
         st = stop_request(conn, actor)
-        # Unread only: an open question already read would wake it at once, every time.
-        mail = not native and unread(conn, actor)["unread"]
-        if not keys - base:
+        # Unread only: an open question already read would wake it at once, every time. Not what the platform
+        # brought into the session already (native_message).
+        waiting = [m for m in conn.execute(
+            f"SELECT m.kind, m.level, m.created_at, m.native_status FROM messages m WHERE {_TO_ME} "
+            f"AND m.from_agent<>? AND m.read_at IS NULL", (actor, actor, actor)).fetchall()
+            if not (native and (m["native_status"] is None or m["native_status"] == "sent"))]
+        mail = any(parse_iso(m["created_at"]) + waits[m["level"] or KIND_LEVELS[m["kind"]]] <= now() for m in waiting)
+        low = {k for k in keys - base if k.partition(":")[0] in LOW_FINDINGS}
+        if not keys - base - low:
             settled = None  # a finding that went away again wakes nothing
         elif settled is None:
             settled = now() + settle
-        if (settled and now() >= settled) or mail or st or now() >= deadline:
-            rows = inbox(conn, actor) if mail else []
+        if not low:
+            low_due = None
+        elif low_due is None:
+            low_due = now() + waits["low"]
+        if (settled and now() >= settled) or (low_due and now() >= low_due) or mail or st or now() >= deadline:
+            rows = inbox(conn, actor) if waiting else []  # all that waits comes along
+            mail = any(m["unread"] for m in rows)
             with tx(conn):
                 conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(sorted(keys)), actor))
             return {"agent": actor,

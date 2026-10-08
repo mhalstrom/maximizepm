@@ -377,6 +377,14 @@ When you see it, read your inbox before you continue.
 An alert means stop and read now. A notice comes from MaximizePM itself, for
 example when your lease expired.
 
+A message to the manager wakes it by its level: an alert or a question at
+once, a note after up to 10 minutes (`manage_wait_normal`), and a low one
+after up to 30 minutes. Each wake costs the manager a read of its whole
+context, so send a note for finished work, and an alert or a question only
+when the manager must act now. `--level urgent|normal|low` on `maxpm note`,
+`alert`, `ask`, and `send` sets another level for one message, for example
+`maxpm note <manager> "<text>" --level low` for a line that needs no action.
+
 ## Looking around
 
 - `maxpm who`: every agent and person, and what each one holds. Stopped and
