@@ -1894,7 +1894,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             conn = core.connect()
             try:
-                core.activity(conn, None)
+                core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
                 st = core.state(conn)
                 st["goals"] = core.goal_list(conn, include_complete=True)
                 if DEV["on"]:

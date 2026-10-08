@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -4359,3 +4360,96 @@ class Rename(Base):
                 del os.environ["MAXPM_DB"]
             else:
                 os.environ["MAXPM_DB"] = old_env
+
+
+class Locked(Base):
+    """Other commands hold the write lock of the queue longer than busy_timeout (#1615)."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        for n in ("w1", "w2"):
+            core.register(self.c, n)
+        self.c.execute("PRAGMA busy_timeout=20")  # the tests wait 20 ms for the lock, not 10 s
+        self.other = core.connect(self.path)
+        self.addCleanup(self.other.close)
+
+    def lock(self):
+        self.other.execute("BEGIN IMMEDIATE")
+
+    def unlock(self):
+        if self.other.in_transaction:
+            self.other.execute("ROLLBACK")
+
+    def test_a_write_waits_again_and_then_refuses_with_the_next_step(self):
+        class Busy:
+            """A connection whose first `fails` BEGIN IMMEDIATE find the queue locked."""
+            def __init__(self, conn, fails, error="database is locked"):
+                self.conn, self.fails, self.error, self.begins = conn, fails, error, 0
+
+            def execute(self, sql, *args):
+                if sql == "BEGIN IMMEDIATE":
+                    self.begins += 1
+                    if self.begins <= self.fails:
+                        raise sqlite3.OperationalError(self.error)
+                return self.conn.execute(sql, *args)
+        busy = Busy(self.c, core.LOCK_TRIES - 1)
+        with core.tx(busy):
+            busy.execute("UPDATE agents SET note='x' WHERE name='w1'")
+        self.assertEqual((busy.begins, core.agent_status(self.c, "w1")["note"]), (core.LOCK_TRIES, "x"))
+        # Locked for every try: a refusal that says what to do, and nothing of the command ran.
+        self.lock()
+        with self.assertRaisesRegex(core.RiverLocked, "queue is busy.*Run the command again"):
+            core.agent_note(self.c, "w1", "y")
+        self.assertIsInstance(core.RiverLocked("x"), RiverError)  # the command prints 'maxpm: ...', no traceback
+        self.unlock()
+        self.assertEqual(core.agent_status(self.c, "w1")["note"], "x")
+        # Another error of the database is not a lock: no second try.
+        broken = Busy(self.c, 1, "disk I/O error")
+        with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+            with core.tx(broken):
+                pass
+        self.assertEqual(broken.begins, 1)
+
+    def test_a_locked_queue_never_ends_the_watch(self):
+        core.register(self.c, "mark", human=True)
+        core.manage(self.c, self.dir.name, "boss")
+        t0, naps = core.now(), []
+
+        def nap(s):
+            naps.append(s)
+            self.unlock()
+        # The renewal of a poll finds the queue locked: the watch skips it and goes on to its time limit.
+        self.lock()
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps) * 20)):
+            w = core.manage_watch(self.c, "boss", sleep=nap)
+        self.assertEqual((w["result"], len(naps)), ("tick", 2))
+        # Locked when a message is due: nothing is marked read, and the next poll returns with it.
+        core.send(self.c, "alert", "w1 is stuck", to="boss", actor="w2")
+        naps.clear()
+        self.lock()
+        w = core.manage_watch(self.c, "boss", sleep=nap)
+        self.assertEqual((w["result"], [m["body"] for m in w["messages"]], len(naps)), ("messages", ["w1 is stuck"], 1))
+        # Locked at the last write (the findings it saw): the watch still returns.
+        self.lock()
+        self.assertEqual(core.manage_watch(self.c, "boss", step="0s", sleep=nap)["result"], "tick")
+
+    def test_a_locked_queue_never_ends_a_wait(self):
+        core.wait(self.c, self.dir.name, "w1", step="0s", sleep=lambda s: None)
+        t0, naps = core.now(), []
+
+        def nap(s):  # the queue is locked from the first poll to the second
+            naps.append(s)
+            self.lock() if len(naps) == 1 else self.unlock()
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps) * 6)):
+            w = core.wait(self.c, self.dir.name, "w1", step="9m", sleep=nap)
+        self.assertEqual((w["result"], len(naps)), ("again", 2))
+        # maxpm inbox --wait: the messages come at the next poll.
+        core.send(self.c, "note", "freeze ended", to="w1", actor="w2")
+        naps.clear()
+        self.lock()
+        w = core.inbox_wait(self.c, "w1", sleep=lambda s: (naps.append(s), self.unlock()))
+        self.assertEqual((w["result"], [m["body"] for m in w["messages"]], len(naps)), ("messages", ["freeze ended"], 1))
+        # The page: the state read skips the sweep of a busy queue.
+        self.lock()
+        self.assertEqual(core.poll_activity(self.c, None), [])

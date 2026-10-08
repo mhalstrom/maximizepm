@@ -609,6 +609,10 @@ class RiverError(Exception):
     """A refusal. The message names the rule and, where possible, the next command."""
 
 
+class RiverLocked(RiverError):
+    """Other commands held the write lock of the queue for longer than a command waits (tx)."""
+
+
 def names_product(text):
     """True when the text names the product."""
     return PRODUCT in text
@@ -882,15 +886,29 @@ def _migrate(conn):
         conn.execute("DROP TABLE aliases")  # the old names of renamed projects and targets are gone (#810)
 
 
-class tx:
-    """BEGIN IMMEDIATE ... COMMIT, so two writers never interleave a claim."""
+LOCK_TRIES = 3  # a write waits busy_timeout (10s) this many times for the lock of the queue
 
-    def __init__(self, conn: sqlite3.Connection):
+
+class tx:
+    """BEGIN IMMEDIATE ... COMMIT, so two writers never interleave a claim. When other commands hold the write
+    lock longer than busy_timeout, it tries again (nothing of this transaction ran yet), `tries` times in all;
+    then it raises RiverLocked, a refusal with the next step, not a traceback (#1615). A command that polls
+    passes tries=1 and skips that one write."""
+
+    def __init__(self, conn: sqlite3.Connection, tries=None):
         self.conn = conn
+        self.tries = tries or LOCK_TRIES
 
     def __enter__(self):
-        self.conn.execute("BEGIN IMMEDIATE")
-        return self.conn
+        for _ in range(self.tries):
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+                return self.conn
+            except sqlite3.OperationalError as e:
+                if "database is locked" not in str(e):
+                    raise
+        raise RiverLocked("the queue is busy: other maxpm commands held its database for longer than this "
+                          "command waits; nothing changed. Run the command again")
 
     def __exit__(self, exc_type, exc, tb):
         self.conn.execute("ROLLBACK" if exc_type else "COMMIT")
@@ -4605,13 +4623,22 @@ def still_worked(conn):
     return out
 
 
-def activity(conn, actor):
+def activity(conn, actor, tries=None):
     """Run at the start of every command: expire old leases, then renew the actor's own."""
-    with tx(conn):
+    with tx(conn, tries):
         expired = _sweep(conn)
         _touch_agent(conn, actor)
         sync_needs_you(conn)
     return expired
+
+
+def poll_activity(conn, actor):
+    """activity for a command that polls (maxpm wait, maxpm manage --watch): when the queue stays locked for
+    one busy_timeout, skip this renewal and let the next poll try again. A lock never ends a wait (#1615)."""
+    try:
+        return activity(conn, actor, tries=1)
+    except RiverLocked:
+        return []
 
 
 def session_url_from_env(env=None):
@@ -6445,9 +6472,13 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
             return {"result": "stop", "agent": actor, "stop": st, "messages": []}
         # Unread only: an open question already read stays in the inbox and would wake it at once, every time.
         if unread(conn, actor)["unread"]:
-            rows = inbox(conn, actor)
-            return {"result": "messages", "agent": actor, "messages": [m for m in rows if m["unread"]],
-                    "still_open": sum(1 for m in rows if not m["unread"])}
+            try:
+                rows = inbox(conn, actor)
+            except RiverLocked:  # nothing is marked read: the next poll brings the messages
+                rows = None
+            if rows is not None:
+                return {"result": "messages", "agent": actor, "messages": [m for m in rows if m["unread"]],
+                        "still_open": sum(1 for m in rows if not m["unread"])}
         if now() >= deadline:
             return {"result": "timeout", "agent": actor, "messages": [], "waited": timeout or INBOX_WAIT}
         sleep(poll)
@@ -8161,7 +8192,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
             return {"result": "work", "why": why, "agent": actor}
         if now() >= deadline:
             break
-        activity(conn, actor)  # a waiting session is active: it takes work within seconds
+        poll_activity(conn, actor)  # a waiting session is active: it takes work within seconds
         sleep(poll)
     if now() < since + limit:
         return {"result": "again", "agent": actor, "left": _short(since + limit - now())}
@@ -8480,16 +8511,23 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
         elif low_due is None:
             low_due = now() + waits["low"]
         if (settled and now() >= settled) or (low_due and now() >= low_due) or mail or st or now() >= deadline:
-            rows = inbox(conn, actor) if waiting else []  # all that waits comes along
+            try:
+                rows = inbox(conn, actor) if waiting else []  # all that waits comes along
+            except RiverLocked:  # nothing is marked read: the next poll returns with the messages
+                sleep(poll)
+                continue
             mail = any(m["unread"] for m in rows)
-            with tx(conn):
-                conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(sorted(keys)), actor))
+            try:
+                with tx(conn):
+                    conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(sorted(keys)), actor))
+            except RiverLocked:
+                pass  # the messages are read already, so return them; the next watch names these findings again
             return {"agent": actor,
                     "result": "stop" if st else "change" if keys - base else "messages" if mail else "tick",
                     "new": sorted(keys - base), "gone": sorted(base - keys), "findings": f, "stop": st,
                     "messages": [m for m in rows if m["unread"]], "still_open": sum(1 for m in rows if not m["unread"]),
                     "unread": unread(conn, actor)["unread"], "native": native}
-        activity(conn, actor)
+        poll_activity(conn, actor)
         sleep(poll)
 
 
