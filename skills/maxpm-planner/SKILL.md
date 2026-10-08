@@ -66,7 +66,7 @@ maxpm target show <target>                             # its projects and owner
 maxpm target rename <target> <new>                     # with its deploy project deploy-<target>
 maxpm target own <target>                              # one owner per target runs its deploys
 maxpm target monitor <target> "<what to watch, for how long>"   # a session follows each deploy
-maxpm target cadence <target> 2h|1d|1w|1mo|off         # how often it releases; ship requests collect until then
+maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect
 maxpm target give <target> --to <agent>                # or: maxpm target release <target>
 ```
 

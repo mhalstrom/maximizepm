@@ -2090,7 +2090,8 @@ def release_plan(conn, name):
     else:
         out["text"] = f"release cadence {text}: the next release of {name} can start now"
     if out["why"]:
-        out["reason"] = f"{out['why']}. A release sooner needs a reason: {sooner}"
+        out["reason"] = (f"{out['why']}. The target owner, the manager, or a person can release sooner, with a "
+                         f"reason: {sooner}")
     return out
 
 
@@ -2133,8 +2134,10 @@ def cadence_holds(conn, dep_id):
 
 def release_now(conn, target, reason, actor=None):
     """Start the collected release sooner than the cadence permits (maxpm target release-now): for a fix of a
-    production defect, or when a person asks. The reason goes in the history of the deploy item, and the target
-    owner is told. It counts for this release only; the cadence then counts from the end of this release."""
+    production defect, or when a person asks. The target owner, the manager, or a person decides it, by itself:
+    no approval is necessary, but a worker cannot, or each one would send its own change out. The reason goes in
+    the history of the deploy item, and the target owner is told. It counts for this release only; the cadence
+    then counts from the end of this release."""
     reason = (reason or "").strip()
     with tx(conn):
         _sweep(conn)
@@ -2149,6 +2152,15 @@ def release_now(conn, target, reason, actor=None):
                              f"(maxpm ship <id>, or done --ship)")
         if not plan["waits"]:
             raise RiverError(f"{plan['text']}; nothing waits for the cadence. See: maxpm show {plan['start']}")
+        who = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+        if actor and actor != tg["owner"] and not (who and (who["kind"] == "human" or who["role"] == "manager")):
+            boss = active_manager(conn)
+            ask = tg["owner"] or boss
+            raise RiverError(
+                f"refused: a release of {name} sooner than its cadence {plan['cadence']} permits is a decision of the "
+                f"target owner ({tg['owner'] or 'nobody'}), the manager" + (f" ({boss})" if boss else "")
+                + ", or a person. " + (f"Ask: maxpm alert {ask} \"<why this release cannot wait>\" --item {plan['deploy']}"
+                                       if ask else f"Take the target first: maxpm target own {name}"))
         if not reason:
             raise RiverError(f"say why this release cannot wait ({plan['text']}): "
                              f"maxpm target release-now {name} --reason \"<why>\"")

@@ -2680,6 +2680,10 @@ class ReleaseCadence(Base):
         rv = dep["release"]["start"]
         with self.assertRaisesRegex(RiverError, "say why this release cannot wait"):
             core.release_now(self.c, "web", " ", "mark")
+        # A worker cannot: the target owner, the manager, or a person decides it.
+        with self.assertRaisesRegex(RiverError, rf"decision of the target owner \(ops\).*maxpm alert ops .* --item {dep['id']}"):
+            core.release_now(self.c, "web", "my change is urgent", "dev")
+        self.assertFalse(core.annotate(self.c)[rv]["ready"])
         r = core.release_now(self.c, "web", "login fails in production", "mark")
         self.assertEqual((r["waits"], r["early"], r["item"]["id"], r["item"]["ready"]),
                          (False, "login fails in production", rv, True))
@@ -2698,6 +2702,23 @@ class ReleaseCadence(Base):
         core.done(self.c, dep["id"], "release v2", "ops")
         nxt = self.shipped("later")[1]["release"]
         self.assertEqual((nxt["waits"], nxt["next_at"]), (True, core.iso(self.clock[0] + timedelta(days=1))))
+        # The target owner decides by itself, and so does the manager; no person approves.
+        self.assertEqual(core.release_now(self.c, "web", "a fix of a production defect", "ops")["waits"], False)
+        self.assertFalse(any("release now" in m["body"] and "production defect" in m["body"]
+                             for m in core.inbox(self.c, "ops")))  # no notice to itself
+
+    def test_the_manager_releases_sooner_by_its_own_decision(self):
+        core.target_cadence(self.c, "web", "6h", "mark")
+        self.release(review=False)
+        dep = self.shipped("fix")[1]["id"]
+        core.register(self.c, "boss")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        with self.assertRaisesRegex(RiverError, r"the manager \(boss\), or a person"):
+            core.release_now(self.c, "web", "urgent", "dev")
+        r = core.release_now(self.c, "web", "checkout is down", "boss")
+        self.assertEqual((r["item"]["id"], r["item"]["ready"]), (dep, True))
+        self.assertTrue(any("checkout is down" in m["body"] for m in core.inbox(self.c, "ops")))  # the owner is told
 
     def test_with_no_review_the_deploy_item_waits_and_deploy_now_is_refused(self):
         core.target_cadence(self.c, "web", "1h", "mark")
@@ -2781,7 +2802,8 @@ class ReleaseCadence(Base):
         a = self.add_done()
         out = run("--as", "dev", "done", str(a), "--output", "c", "--ship")
         self.assertRegex(out, r"release cadence 2h: the next release of web can start .* \(in 2h00m\); your change goes out "
-                              r"with it\. Sooner, with a reason: maxpm target release-now web --reason")
+                              r"with it\. The target owner or the manager decides a release sooner "
+                              r"\(maxpm target release-now web --reason")
         self.assertIn("your change goes out with it", run("--as", "dev", "ship", str(a)))
         out = run("target", "show", "web")
         self.assertIn("waits for it: deploy #", out)

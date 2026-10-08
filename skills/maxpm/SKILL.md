@@ -80,8 +80,10 @@ your type from your CLI's environment.
    deploy item, which only the target owner takes. When the target has a
    release cadence (`maxpm target cadence <target> 2h`), ship requests collect
    and the reply says when the next release can start; your item is done, so
-   take other work. Only a fix of a production defect or a person's request
-   goes out sooner: `maxpm target release-now <target> --reason "<why>"`. The owner's `maxpm go`
+   take other work. A release sooner (a fix of a production defect, a person's
+   request) is a decision of the target owner or the manager: ask with
+   `maxpm alert <owner> "<why it cannot wait>" --item <deploy id>`; they run
+   `maxpm target release-now <target> --reason "<why>"`. The owner's `maxpm go`
    gives it the ready deploy item first (role DEPLOYER), with what it ships;
    `maxpm go --role deployer` also takes a free target of the folder's projects.
    When the target has a monitor text (`maxpm target monitor`), claiming the

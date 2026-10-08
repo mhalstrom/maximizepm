@@ -220,14 +220,15 @@ def _release_lines(p):
     if p["waits"]:
         out.append(f"  waits for it: deploy #{p['deploy']} with "
                    + "; ".join(f"#{x['id']} {x['title']} ({x['status'].replace('_', ' ')})" for x in p["ships"]))
-        out.append(f"  sooner, with a reason: maxpm target release-now {name} --reason \"<why>\"")
+        out.append(f"  sooner (the target owner, the manager, or a person), with a reason: "
+                   f"maxpm target release-now {name} --reason \"<why>\"")
     return out
 
 
 def _ship_line(p):
     """For the worker that asked for a ship: when its change goes out (the target's release cadence)."""
-    return p["text"] + (f"; your change goes out with it. Sooner, with a reason: maxpm target release-now "
-                        f"{p['target']} --reason \"<why>\"" if p["waits"] else "")
+    return p["text"] + ("; your change goes out with it. The target owner or the manager decides a release sooner "
+                        f"(maxpm target release-now {p['target']} --reason \"<why>\")" if p["waits"] else "")
 
 
 def _print_show(a):
@@ -542,12 +543,14 @@ def build_parser():
                        "soon as a release has a deploy item, so it waits during the review and deploys the moment the "
                        "review passes; off starts nothing")
     x.add_argument("name"); x.add_argument("mode", nargs="?", choices=core.DEPLOYER_MODES, help="none shows it")
-    x = tgs.add_parser("cadence", help="how often the target releases (1h, 2h, 1d, 1w, 1mo; off: each release starts "
-                       "at once): ship requests collect on the open deploy item, and its review (the deploy item "
-                       "when there is no review) is ready at the end of the last release plus the cadence")
+    x = tgs.add_parser("cadence", help="the shortest time between two normal releases of the target (2h: at most 12 "
+                       "a day; 6h, 1d, 1w, 1mo; off: each release starts at once): ship requests collect on the open "
+                       "deploy item, and its review (the deploy item when there is no review) is ready at the end of "
+                       "the last release plus the cadence")
     x.add_argument("name"); x.add_argument("cadence", nargs="?", help="a number and m, h, d, w, or mo; off; none shows it")
     x = tgs.add_parser("release-now", help="start the collected release sooner than the cadence permits, with a "
-                       "reason (a fix of a production defect, a person's request); the history records it")
+                       "reason (a fix of a production defect, a person's request); the target owner, the manager, "
+                       "or a person decides it, and the history records it")
     x.add_argument("name"); x.add_argument("--reason", required=True, help="why this release cannot wait")
     x = tgs.add_parser("show", help="a target, its owner, its projects, and when its next release can start")
     x.add_argument("name")
@@ -2328,8 +2331,8 @@ def render_go(b):
             if (b.get("release") or {}).get("cadence"):
                 p = b["release"]
                 out.append(f"  release cadence {p['cadence']}: after this deploy is done, the next release of "
-                           f"{t['name']} can start {p['cadence']} later; ship requests collect until then "
-                           f"(sooner, with a reason: {r} target release-now {t['name']} --reason \"<why>\")")
+                           f"{t['name']} can start {p['cadence']} later; ship requests collect until then. You decide "
+                           f"a release sooner, with a reason: {r} target release-now {t['name']} --reason \"<why>\"")
             out += ["",
                     "Deploy as the target description says, run its checks, then put the release id or",
                     f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\"",
