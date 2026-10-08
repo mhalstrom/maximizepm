@@ -263,37 +263,103 @@ other commands (release steps that the manager ran as a target owner).
 - The time between two wakes is short: the median is 3.2 minutes, 72 of 180
   are under 2 minutes, and 152 are under 10 minutes.
 
-### Proposal M4: the less urgent events wait
+### Proposal M4, second version (#1586): a level for each event, a wait for each level
 
-Urgent events return the watch as now: an alert, a question, a stop request,
-and a finding other than `waiting` and `human` (after `manage_settle`). There
-were 40 urgent wakes in the 15.4 hours.
+The first version had one wait (`manage_quiet`) for all less urgent events:
+86 wakes at 10m, 70 at 15m, 55 at 30m (181 now). The person who approves
+asked for more: priorities. He named three forms and picked none.
 
-The other events (a note, a notice, a `waiting` or `human` finding) wait
-for a new setting, `manage_quiet`, from the first one, and then go to the
-manager together. An urgent event in that time brings them along.
+All three forms give each event that goes to the manager (a message or a
+finding) a level, and give each level a wait before it wakes the manager.
+They differ in where the level lives and in who can set it. In each form, a
+wake brings every event that waits, so no second wake follows.
 
-Simulation on the 181 wakes (each wake as one event at its time; the real
-number can differ a little, because a later wake moves the next ones):
+Three levels are enough for the events of 2026-10-08:
 
-| `manage_quiet` | Wakes | Ship request notices also never wake alone | `waiting` and `human` findings also never wake alone |
-|---|---:|---:|---:|
-| 0m (now) | 181 | 163 | 138 |
-| 2m | 140 | 131 | 111 |
-| 5m | 114 | 108 | 95 |
-| 10m | 86 | 85 | 79 |
-| 15m | 70 | 68 | 67 |
-| 30m | 55 | 55 | 54 |
+| Level | Events (default, from the kind) | Highest level in a wake, of 181 wakes |
+|---|---|---:|
+| urgent | An alert, a question, a stop request; the findings stuck, lost, target, unconnected, uncovered, question | 40 |
+| normal | A note; a notice other than a ship request | 91 |
+| low | A ship request notice; the findings waiting (an agent waits) and human (an item is ready for a person) | 48 |
 
-- 10m removes about 95 of 181 wakes (52%). At 71k eq for each wake that is
-  about 6.7M of the 19.6M eq of the period (34%).
-- 15m removes about 111 wakes (61%), about 7.9M eq (40%).
-- The price: the manager reads a note or a ship request up to that time
-  later. An agent that needs the manager now sends an alert or a question;
-  the agent guide says so already.
-- With a wait of 10m or more, the two other rules (ship request notices and
-  `waiting`/`human` findings never wake alone) add little, so one setting is
-  enough.
+Two wakes came from the time limit of the watch.
+
+#### Form 1: two inboxes, high and low
+
+- What it is: each message is in the high inbox or in the low inbox. High
+  wakes the manager at once. Low waits (he said about 30 minutes).
+- In the code: a column on `messages` for the inbox, a wait setting for the
+  low inbox, the wait in `manage_watch`, and `maxpm inbox` shows high first.
+  Findings need the same split.
+- For a sender: the kind decides (alert and question: high; note and notice:
+  low). To put a note in the high inbox, the sender adds a flag or sends an
+  alert.
+- Wakes: 55 with 30m (70% fewer). All notes then wait up to 30 minutes.
+- Limit: two levels cannot tell a note with finished work from a ship
+  request notice. Both wait the same time.
+
+#### Form 2: channels, the watch decides by kind
+
+- What it is: messages do not change. A setting says, for each kind of
+  message and finding, how long it waits before it wakes the manager.
+- In the code: the smallest change. One setting (for example
+  `manage_wake = "alert 0m, question 0m, note 10m, notice 30m, waiting 30m,
+  human 30m"`) and the wait in `manage_watch`. No change of the database.
+- For a sender: nothing changes. A sender cannot raise one message, except
+  that it sends an alert in place of a note.
+- Wakes: as in the table below, by the waits.
+- Limit: the level is not on the message, so `maxpm inbox` and the page cannot
+  show it, and a notice kind that must wake at once needs its own rule.
+
+#### Form 3: one inbox, a level on each message
+
+- What it is: each message has a level (urgent, normal, low; in his words:
+  major warning, warning, info). The level comes from the kind by default, as
+  in the table above. Each level has a wait.
+- In the code: a column `level` on `messages` (empty: from the kind), set in
+  `_send`; a flag `--level urgent|normal|low` on `maxpm send`, `note`,
+  `alert`, and `ask`; two settings, `manage_wait_normal` and
+  `manage_wait_low`; the wait in `manage_watch` (findings get their level from
+  the kind); `maxpm inbox` shows the level. With `native_message`, a message
+  to the manager goes into its session only when its wait ends.
+- For a sender: no new habit, because the default comes from the kind. A
+  sender can raise or lower one message: `maxpm note manager "<text>" --level
+  urgent`, or `--level low` for a line that needs no action.
+- Wakes: as in the table below.
+
+#### Wake counts for 2026-10-08
+
+Same method as the first version (each of the 181 wakes as one event at its
+time, with the levels of the table above; the script prints this table):
+
+| Wait of the normal level | Wait of the low level | Wakes | Fewer | Less manager cost (71k eq for each wake, 19.6M in the period) |
+|---|---|---:|---:|---:|
+| 0m (now) | 0m (now) | 181 | | |
+| 5m | 30m | 93 | 49% | 6.2M, 32% |
+| 10m | 30m | 79 | 56% | 7.2M, 37% |
+| 15m | 30m | 67 | 63% | 8.1M, 41% |
+| 30m | 30m (form 1, two inboxes) | 55 | 70% | 8.9M, 46% |
+| 10m | 60m | 79 | 56% | 7.2M, 37% |
+
+- The wait of the normal level decides the result: 91 wakes had a note as
+  their most urgent event.
+- A wait of the low level above 30m adds nothing. A low event seldom waits
+  that long, because a normal or an urgent wake brings it sooner.
+
+#### Recommendation
+
+Form 3, with the waits urgent 0m, normal 10m, low 30m: 79 wakes in place of
+181.
+
+- It contains the two other forms. The default from the kind is form 2 (a
+  sender needs no new habit). A level with a wait is an inbox of form 1; with
+  normal at 30m it gives the same 55 wakes.
+- Only form 3 lets a sender raise or lower one message, and lets the inbox
+  and the page show the level.
+- 10m for a note: the manager gets a worker's note with finished work in
+  time for its next step, and a note seldom wakes it alone. The waits are
+  settings, so 15m or 30m is a change of one line later.
 
 Not in this proposal: the 39 wakes from other background commands. They are
 release steps, and the release cadence of a target (#1571) reduces them.
+Nothing is built before the answer (#1584); #1583 builds the form chosen.

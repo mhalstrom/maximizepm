@@ -1,13 +1,15 @@
 """What wakes the manager (#1582): each end of a background `maxpm manage --watch` in the manager sessions'
 transcripts, by what the watch printed (new messages, new findings, the time limit), the kinds of messages and
-findings, and a simulation of rules that let the less urgent ones wait. Reads the queue read-only. Run from the
+findings, and two simulations of rules that let the less urgent ones wait: one wait for all of them, and a wait
+for each of two levels (normal: a note or another notice; low: a ship request notice, a waiting or human
+finding). Reads the queue read-only. Run from the
 repository: python3 current_project/research/manager_wakes.py [since [until]] (ISO times, UTC)."""
 import collections
 import json
 import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -70,7 +72,7 @@ for sid, agent in owner.items():
 
 ends = collections.Counter("watch" if is_watch(e[2]) else "other" for e in events if e[0] == "end")
 results, finding_kinds, message_kinds, alone = (collections.Counter() for _ in range(4))
-wakes = []  # (time, urgent, time limit, only ship request notices, only findings)
+wakes = []  # (time, urgent, time limit, only ship request notices, only findings, has normal, has low)
 for n, e in enumerate(events):
     if e[0] != "end" or not is_watch(e[2]):
         continue
@@ -97,7 +99,8 @@ for n, e in enumerate(events):
         alone[got[0]] += 1
     wakes.append((e[1], bool(set(got) & {"alert", "question"}) or bool(kinds & URGENT_FINDINGS) or head.startswith("STOP"),
                   head.startswith("NOTHING"), bool(got) and set(got) == {"ship request notice"} and not kinds,
-                  bool(kinds) and not got))
+                  bool(kinds) and not got, bool(set(got) & {"note", "notice", "answer", "offer"}),
+                  "ship request notice" in got or bool(kinds & {"waiting", "human"})))
 
 
 def simulate(wait, never=lambda w: False):
@@ -113,6 +116,21 @@ def simulate(wait, never=lambda w: False):
         elif first is None:
             first = w[0]
     return count + (first is not None)
+
+
+def levels(normal, low):
+    """Wakes when a normal event waits `normal` minutes and a low one `low` minutes; a wake brings all that wait."""
+    count, due = 0, None
+    for w in wakes:
+        if due is not None and w[0] >= due:
+            count, due = count + 1, None
+        if w[1] or w[2]:
+            count, due = count + 1, None
+            continue
+        ends = [w[0] + timedelta(minutes=m) for m, has in ((normal, w[5]), (low, w[6])) if has]
+        if ends:
+            due = min(ends + ([due] if due is not None else []))
+    return count + (due is not None)
 
 
 hours = (min(until, datetime.now(timezone.utc)) - since).total_seconds() / 3600
@@ -137,3 +155,8 @@ print("\n| The less urgent wait | Wakes | Ship request notices also never wake a
 for wait in (0, 2, 5, 10, 15, 30):
     print(f"| {wait}m | {simulate(wait)} | {simulate(wait, lambda w: w[3])} "
           f"| {simulate(wait, lambda w: w[3] or (w[4] and not w[1]))} |")
+print("\n| Wait of the normal level | Wait of the low level | Wakes |\n|---|---|---:|")
+for normal, low in ((2, 30), (5, 30), (10, 30), (15, 30), (30, 30), (5, 60), (10, 60), (15, 60), (10, 120)):
+    print(f"| {normal}m | {low}m | {levels(normal, low)} |")
+n = collections.Counter("urgent" if w[1] else "the time limit" if w[2] else "normal" if w[5] else "low" for w in wakes)
+print("\nHighest level in each wake: " + ", ".join(f"{k} {v}" for k, v in n.most_common()))
