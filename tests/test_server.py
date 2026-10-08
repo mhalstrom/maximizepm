@@ -2907,6 +2907,167 @@ class ServeReload(unittest.TestCase):
             self.assertEqual(len(tries), 2)
 
 
+class ServeLoop(unittest.TestCase):
+    """The loop of maxpm serve keeps running, says when it is late, and reloads beside files that are not code
+    (#1663: it ended on a queue that did not open, and nothing said so for 3 hours)."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def test_a_queue_that_does_not_open_fails_one_pass_and_not_the_loop(self):
+        import sqlite3
+        import threading
+        from river import notify
+
+        class Stop(threading.Event):
+            def wait(self, timeout=None):  # no sleep between the passes
+                return self.is_set()
+        stop, real, tries, between = Stop(), core.connect, [], []
+
+        def connect(*a, **k):
+            tries.append(1)
+            if len(tries) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real(*a, **k)
+
+        def look(c):
+            between.append(core.serve_loop(self.c))
+            stop.set()
+        said = io.StringIO()
+        with mock.patch.object(core, "connect", connect), mock.patch.object(server, "watch_prompts", look), \
+                contextlib.redirect_stdout(said):
+            notify.loop(stop, interval_s=1)
+        self.assertEqual(len(tries), 2)  # the second pass came
+        self.assertIn("maxpm notify: database is locked", said.getvalue())
+        # The pass that failed is on record, and the next complete pass clears it.
+        self.assertEqual((between[0]["error"], between[0]["last_pass"], between[0]["late"]),
+                         ("OperationalError: database is locked", None, False))
+        now = core.serve_loop(self.c)
+        self.assertEqual((now["error"], now["late"], now["pid"]), (None, False, os.getpid()))
+        self.assertIsNotNone(now["last_pass"])
+        # A terminal that is gone does not end the loop either.
+        stop.clear()
+        with mock.patch.object(core, "connect", mock.Mock(side_effect=[sqlite3.OperationalError("locked"), real()])), \
+                mock.patch.object(notify, "print", mock.Mock(side_effect=BrokenPipeError()), create=True), \
+                mock.patch.object(server, "watch_prompts", lambda c: stop.set()):
+            notify.loop(stop, interval_s=1)
+        self.assertIsNone(core.serve_loop(self.c)["error"])
+
+    def test_the_page_and_the_manager_see_a_loop_that_is_late(self):
+        from river import cli
+
+        def state():
+            h = server.Handler.__new__(server.Handler)
+            h.path, h.client_address, h.headers, out = "/api/state", ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}, {}
+            h._send = lambda code, body, ctype=None: out.update(body=body)
+            h.do_GET()
+            return out["body"]["loop"]
+        ago = lambda **k: core.iso(core.now() - core.timedelta(**k))
+        self.assertIsNone(state())  # no maxpm serve ran on this queue
+        self.assertEqual(core.manager_findings(self.c)["serve_loop"], [])
+        beat = lambda t, error=None: core.serve_loop_beat(
+            self.c, {"started": ago(hours=5), "last_pass": t, "last_try": ago(minutes=1), "error": error})
+        beat(ago(minutes=2))
+        self.assertEqual((state()["late"], core.manager_findings(self.c)["serve_loop"]), (False, []))
+        # No complete pass for 3 hours: the thread ended, a pass hangs, or every pass fails.
+        beat(ago(hours=3), "OperationalError: database is locked")
+        with mock.patch.object(core, "proc_info", lambda pid: (1, "python3", "python3 /x/bin/maxpm serve")):
+            self.assertEqual((state()["late"], state()["age"]), (True, "3h00m"))
+            f = core.manager_findings(self.c)
+            self.assertEqual(core._finding_keys(f), ["serve_loop"])  # a new finding: it wakes the manager
+            line = "\n".join(cli._findings_lines(f, "maxpm --as boss"))
+            self.assertRegex(line, r"SERVE LOOP LATE: maxpm serve made no complete pass for 3h00m \(last error: "
+                                   r"OperationalError: database is locked\).*maxpm serve --restart")
+            # A slow loop is not late: notify_interval 10m gives it 10 passes.
+            beat(ago(minutes=30))
+            self.assertTrue(state()["late"])
+            core.config_set(self.c, "notify_interval", "10m")
+            self.assertFalse(state()["late"])
+            core.config_unset(self.c, "notify_interval")
+            beat(ago(minutes=2))  # the next complete pass ends the finding
+            self.assertEqual(core.manager_findings(self.c)["serve_loop"], [])
+        # The file of a serve that is gone says nothing: its process ended, or another program has its id now.
+        beat(ago(hours=3))
+        with mock.patch.object(core, "proc_info", lambda pid: (1, "vim", "vim notes.txt")):
+            self.assertIsNone(state())
+        with mock.patch.object(core, "pid_alive", lambda pid: False):
+            self.assertIsNone(state())
+        # The page has a button for it.
+        js = (Path(server.STATIC) / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="loopLate"', (Path(server.STATIC) / "index.html").read_text(encoding="utf-8"))
+        self.assertRegex(js, r"S\.loop")
+
+    def test_serve_starts_the_loop_thread_again_when_it_ended(self):
+        import threading
+        from river import notify
+        ran, stop = [], threading.Event()
+        self.addCleanup(server.LOOP_THREAD.update, {"thread": None, "stop": None, "at": 0.0})
+        self.assertFalse(server.keep_loop())  # no maxpm serve here (a test server, maxpm notify run)
+        said = io.StringIO()
+        with mock.patch.object(notify, "loop", lambda s: ran.append(1)), contextlib.redirect_stdout(said):
+            server.LOOP_THREAD.update(thread=None, stop=stop)
+            self.assertTrue(server.keep_loop())
+            server.LOOP_THREAD["thread"].join(5)
+            self.assertEqual((server.LOOP_THREAD["thread"].name, ran), ("maxpm-notify", [1]))
+            self.assertFalse(server.keep_loop())  # it ended a moment ago: not twice a second
+            server.LOOP_THREAD["at"] -= server.LOOP_RESTART_S
+            self.assertTrue(server.keep_loop())
+            server.LOOP_THREAD["thread"].join(5)
+            self.assertEqual(ran, [1, 1])
+            self.assertEqual(said.getvalue().count("the loop thread ended; it starts again"), 1)
+            # A thread that runs stays; and after serve stops nothing starts.
+            hold = threading.Event()
+            with mock.patch.object(notify, "loop", lambda s: hold.wait(5)):
+                server.LOOP_THREAD["at"] -= server.LOOP_RESTART_S
+                self.assertTrue(server.keep_loop())
+                server.LOOP_THREAD["at"] -= server.LOOP_RESTART_S
+                self.assertFalse(server.keep_loop())
+                hold.set()
+                server.LOOP_THREAD["thread"].join(5)
+            stop.set()
+            server.LOOP_THREAD["at"] -= server.LOOP_RESTART_S
+            self.assertFalse(server.keep_loop())
+        # The server asks on every turn of serve_forever, and an error there does not stop the page.
+        with mock.patch.object(server, "keep_loop", mock.Mock(side_effect=RuntimeError("can't start new thread"))), \
+                contextlib.redirect_stdout(said):
+            server._Server.service_actions(None)
+        self.assertIn("the loop thread did not start: can't start new thread", said.getvalue())
+
+    def test_a_file_that_is_not_code_does_not_hold_the_reload(self):
+        repo = Path(self.dir.name, "clone")
+        (repo / "river").mkdir(parents=True)
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                                        check=True, capture_output=True)
+        git("init", "-q", "-b", "main")
+        (repo / "river" / "core.py").write_text("x = 1\n")
+        git("add", "."), git("commit", "-q", "-m", "one")
+        with mock.patch.object(server, "REPO", repo), mock.patch.object(server, "PKG", repo / "river"):
+            self.assertFalse(server._code_dirty())
+            # The Finder leaves a .DS_Store in the folder, also in a folder below; git does not track it.
+            (repo / "river" / ".DS_Store").write_bytes(b"\0")
+            (repo / "river" / "static").mkdir()
+            (repo / "river" / "static" / ".DS_Store").write_bytes(b"\0")
+            (repo / "river" / "notes.txt").write_text("a note\n")
+            self.assertFalse(server._code_dirty())
+            # New code that is not committed, and a change of a file git tracks, still hold it.
+            (repo / "river" / "static" / "new.py").write_text("y = 2\n")
+            self.assertTrue(server._code_dirty())
+            (repo / "river" / "static" / "new.py").unlink()
+            (repo / "river" / "core.py").write_text("x = 2\n")
+            self.assertTrue(server._code_dirty())
+            git("commit", "-q", "-am", "two")
+            self.assertFalse(server._code_dirty())
+        # And this clone ignores the file.
+        self.assertIn(".DS_Store", (Path(server.REPO) / ".gitignore").read_text().split())
+
+
 class PageUpdate(unittest.TestCase):
     """The Update button: status of the river clone against its upstream, and a fast-forward that restarts."""
 

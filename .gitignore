@@ -8,3 +8,4 @@ build/
 desktop/node_modules/
 desktop/out/
 desktop/build/
+.DS_Store

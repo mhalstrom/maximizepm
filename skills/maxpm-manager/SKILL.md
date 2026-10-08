@@ -104,6 +104,11 @@ Stop when the user tells you to, and tell the user what you did.
   person does that), stop it, and launch again. MaximizePM
   takes its push back after `connect_within`. A stop ends every reservation
   of the agent at once, and MaximizePM does the same for an agent that is gone.
+- **SERVE LOOP LATE**: `maxpm serve` made no complete pass of its loop for
+  5 minutes or more, so it closes no finished session, sends no notification,
+  starts no fresh session, and does not reload. Run `maxpm serve --restart`.
+  When the finding names an error and comes back after the restart, add an
+  item for the error.
   `maxpm edit <id> --unreserve` ends a reservation by hand ("reserved for
   <agent>"), so every agent can take the item. An item reserved for you:
   `maxpm launch --item <id>` gives it to the new session.

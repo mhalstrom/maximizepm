@@ -118,7 +118,17 @@ const giveChoice = {};
 // Agents and people as a table. Name and Holds always show; on a narrow panel the other columns
 // fold into a detail row (the ▸ at the start of the row). A row is a drop target for an item row.
 let agentsTable = null;
+// The loop of maxpm serve is late (S.loop.late): it does no automatic work. One button starts the server again.
+function renderLoop() {
+  const l = S.loop, b = $("#loopLate");
+  b.classList.toggle("hidden", !(l && l.late));
+  if (!l || !l.late) return;
+  b.textContent = `Automatic work stopped · ${l.age}`;
+  b.title = `maxpm serve made no complete pass of its loop for ${l.age}, so it closes no finished session, sends no notification, starts no fresh session and does not reload.`
+    + (l.error ? `\nLast error: ${l.error}` : "") + "\nClick to start the server again (maxpm serve --restart).";
+}
 function renderAgents() {
+  renderLoop();
   // The tmux panes of sessions that are done (S.tmux_done): one button closes them, as maxpm view --tidy does.
   const done = S.tmux_done || [];
   $("#tidyPanes").classList.toggle("hidden", !done.length);
@@ -1240,6 +1250,11 @@ $("#updateBtn").onclick = async () => {
     await waitForRestart(boot);
   } catch (e) { toast(e.message, true); }
   finally { b.disabled = false; checkUpdate().catch(() => {}); }
+};
+$("#loopLate").onclick = () => {
+  if (S.desktop) return toast("Quit the app and open it again: that starts its automatic work again", true);
+  if (updateMode !== "old") updateMode = "restart";
+  $("#updateBtn").onclick();
 };
 checkUpdate().catch(() => {}); setInterval(() => { if (!document.hidden) checkUpdate().catch(() => {}); }, 30 * 60 * 1000);
 // A stale server is cheap to spot (no git fetch), so look for it more often than for new commits.

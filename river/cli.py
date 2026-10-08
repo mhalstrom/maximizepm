@@ -2044,6 +2044,11 @@ def _findings_lines(f, r):
         out.append(f"  NOT CONNECTED {x['agent']}: started {x['since']} ago" + (f" for #{x['item']['id']} {_cut(x['item']['title'], 40)}" if x["item"] else "")
                    + f", and ran no maxpm command: its agent did not start or waits on a prompt in its terminal. "
                    f"Tell the user; then {r} stop {x['agent']} --reason \"did not start\" and launch again")
+    for x in f.get("serve_loop", []):
+        out.append(f"  SERVE LOOP LATE: maxpm serve made no complete pass for {x['age']}"
+                   + (f" (last error: {_cut(x['error'], 80)})" if x["error"] else "")
+                   + ", so it does none of its automatic work (tidy, notifications, fresh sessions, reload).  "
+                   "maxpm serve --restart")
     for x in f["uncovered"]:
         t = x.get("agent_type")
         out.append(f"  NO {t.upper() + ' ' if t else ''}AGENT in {x['project']}: {x['ready']} ready"

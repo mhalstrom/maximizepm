@@ -1468,9 +1468,12 @@ def _code_dirty():
     """True when git shows a change in the code folder that is not committed: someone is in the middle of an
     edit. False in a folder that is not a git clone (pip, the app): the files there change all at once."""
     try:
-        return bool(_git(REPO, "status", "--porcelain", "--", str(PKG), timeout=20))
+        lines = _git(REPO, "status", "--porcelain", "--untracked-files=all", "--", str(PKG), timeout=20).splitlines()
     except RiverError:
         return False
+    # A file that git does not track counts only when it is code: a .DS_Store of the Finder in the folder held
+    # every reload on a Mac (#1663).
+    return any(not ln.startswith("??") or ln.rstrip('"').endswith(".py") for ln in lines)
 
 
 # The code id maxpm serve saw on its last pass, and the one that did not load (it waits for the next change).
@@ -1930,6 +1933,7 @@ class Handler(BaseHTTPRequestHandler):
                 st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
                 st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
                 st["relay"] = relay.status()
+                st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
                 return self._send(200, st)
             finally:
                 conn.close()
@@ -2133,6 +2137,35 @@ class _Server(ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
+    def service_actions(self):
+        try:
+            keep_loop()  # serve_forever calls this twice a second
+        except Exception as e:  # the page must answer also when no thread can start
+            print(f"maxpm serve: the loop thread did not start: {e}", flush=True)
+
+
+# The loop thread of maxpm serve (notify.loop), its stop event, and when it started (time.monotonic).
+LOOP_THREAD = {"thread": None, "stop": None, "at": 0.0}
+LOOP_RESTART_S = 30  # a loop thread that ended starts again, but not more often than this
+
+
+def keep_loop():
+    """Start the loop thread of maxpm serve when it does not run: at the start of serve, and again when the
+    thread ended. No error of a pass ends it (notify.loop), but when it ended on 2026-10-08 the page still
+    answered and serve did none of its automatic work for 3 hours (#1663). True when it started one."""
+    t, stop = LOOP_THREAD["thread"], LOOP_THREAD["stop"]
+    if stop is None or stop.is_set() or (t is not None and t.is_alive()):
+        return False
+    if t is not None:
+        if time.monotonic() - LOOP_THREAD["at"] < LOOP_RESTART_S:
+            return False
+        print("maxpm serve: the loop thread ended; it starts again", flush=True)
+    from . import notify
+    LOOP_THREAD.update(at=time.monotonic(), thread=threading.Thread(
+        target=notify.loop, args=(stop,), daemon=True, name="maxpm-notify"))
+    LOOP_THREAD["thread"].start()
+    return True
+
 
 def serve(port: int, open_browser=False, dev=False):
     httpd = _Server(("127.0.0.1", port), Handler)
@@ -2145,7 +2178,8 @@ def serve(port: int, open_browser=False, dev=False):
     from . import notify
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()
-    threading.Thread(target=notify.loop, args=(stop,), daemon=True, name="maxpm-notify").start()
+    LOOP_THREAD.update(thread=None, stop=stop)
+    keep_loop()
     relay.start(stop, port)  # keeps the relay socket open while relay.json exists (maxpm connect)
     if open_browser:
         webbrowser.open(url)

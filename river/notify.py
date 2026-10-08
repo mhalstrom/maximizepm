@@ -17,6 +17,8 @@ from .core import RiverError
 
 ADAPTERS = {}
 SERVE_PORT = {"port": None}  # set by maxpm serve, so links point at the page that is running
+# The loop of this process: when it started, and its last complete pass. core.serve_loop reads it from a file.
+LOOP = {"started": None, "last_pass": None}
 
 
 def register_channel(name, make):
@@ -280,12 +282,25 @@ def status(conn):
             "batch_window": core.setting(conn, "notify_batch_window")}
 
 
+def _say(text):
+    """One line on the terminal of the loop. A terminal that is gone must not end the loop."""
+    try:
+        print(text, flush=True)
+    except Exception:
+        pass
+
+
 def loop(stop, interval_s=None):
-    """Run the dispatcher until stop (a threading.Event) is set. For maxpm serve and maxpm notify run."""
+    """Run the dispatcher until stop (a threading.Event) is set. For maxpm serve and maxpm notify run.
+    No error of a pass ends the loop: the next pass tries again. After each pass it records the time and the
+    error in serve-loop.json beside the queue, so the page and the manager see a loop that is late (#1663)."""
+    LOOP.update(started=core.iso(core.now()), last_pass=None)
     while not stop.is_set():
         wait = interval_s or 30
-        conn = core.connect()
+        conn = error = None
         try:
+            # Inside the try: a queue that is busy or cannot open fails this pass, not the thread (#1663).
+            conn = core.connect()
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
             from . import server
             server.watch_prompts(conn)  # an agent that waits on a prompt in its tmux pane: tell the person
@@ -301,8 +316,15 @@ def loop(stop, interval_s=None):
                 conn.close()
                 server.restart_now("the MaximizePM code changed")
         except Exception as e:  # keep the loop alive; the next pass retries
-            print(f"maxpm notify: {e}", flush=True)
-        finally:
-            conn.close()
+            error = f"{type(e).__name__}: {e}"
+            _say(f"maxpm notify: {e}")
+        t = core.iso(core.now())
+        if not error:
+            LOOP["last_pass"] = t
+        core.serve_loop_beat(conn, {**LOOP, "last_try": t, "error": error})
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
         stop.wait(max(1.0, wait))
-

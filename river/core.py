@@ -8720,9 +8720,60 @@ def active_manager(conn, but=None):
     return None
 
 
+# The loop of maxpm serve writes this file beside the queue after each pass (#1663): a file, so a pass costs
+# no write lock, and the pass that could not open the queue is recorded too.
+LOOP_FILE = "serve-loop.json"
+# The loop is late when its last complete pass is older than this many notify_interval, and than this time.
+LOOP_LATE_PASSES = 10
+LOOP_LATE_MIN = timedelta(minutes=5)
+
+
+def _beside_queue(conn, name):
+    """The path of a file beside the queue (conn, or with no connection the queue of db_path)."""
+    path = conn.execute("PRAGMA database_list").fetchone()[2] if conn is not None else str(db_path())
+    return Path(path).parent / name if path else None
+
+
+def serve_loop_beat(conn, beat):
+    """The loop of maxpm serve ran one pass: write what it says (started, last_pass, last_try, error) to
+    serve-loop.json beside the queue, with this process. conn is None when the pass could not open the queue.
+    Never an error of its own."""
+    try:
+        p = _beside_queue(conn, LOOP_FILE)
+        if p is None:
+            return
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({**beat, "pid": os.getpid(), "host": this_host()}))
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def serve_loop(conn):
+    """The loop of maxpm serve (watch, fresh sessions, tidy, notifications, reload) as its last pass left it:
+    last_pass (the last complete pass), error (of the last pass, or None), age, and late: no complete pass
+    for longer than LOOP_LATE_PASSES passes and LOOP_LATE_MIN. The thread ended, a pass hangs, or every pass
+    fails; on 2026-10-08 nothing said so for 3 hours (#1663). None when no maxpm serve runs on this queue."""
+    try:
+        d = json.loads(_beside_queue(conn, LOOP_FILE).read_text())
+        since = parse_iso(d.get("last_pass") or d["started"])
+        if d["host"] != this_host() or not pid_alive(d["pid"]):
+            return None
+    except (AttributeError, OSError, ValueError, TypeError, KeyError):
+        return None
+    age = now() - since
+    late = age > max(parse_duration(setting(conn, "notify_interval")) * LOOP_LATE_PASSES, LOOP_LATE_MIN)
+    if late:  # the file of a serve that is gone, and its process id belongs to another program now
+        info = proc_info(d["pid"])
+        if info and "serve" not in (info[2] or ""):
+            return None
+    return {"started": d.get("started"), "last_pass": d.get("last_pass"), "last_try": d.get("last_try"),
+            "error": d.get("error"), "pid": d["pid"], "age": _short(age), "late": late}
+
+
 def manager_findings(conn):
     """What a manager acts on: stuck agents, agents that wait too long, projects with ready agent work and no
-    agent, targets whose owner is away or gone, and what waits on the user."""
+    agent, targets whose owner is away or gone, a loop of maxpm serve that is late, and what waits on the user."""
     ann = annotate(conn)
     t = now()
     agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents WHERE kind='ai' ORDER BY name")]
@@ -8773,8 +8824,9 @@ def manager_findings(conn):
     questions = [dict(r) for r in conn.execute(
         f"SELECT id, from_agent, to_agent, body, item_id FROM messages WHERE kind='question' AND state='open' "
         f"AND to_agent IN ({','.join('?' * len(humans))}) ORDER BY id", humans)] if humans else []
+    loop = serve_loop(conn)
     return {"stuck": stuck, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
-            "not_connected": unconnected,
+            "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "targets": targets, "questions": questions,
             "human_ready": [{"id": x["id"], "title": x["title"]} for x in sorted(
                                (x for x in ann.values() if x["ready"] and x["doer"] == "human" and not x["project_archived"]),
@@ -8786,6 +8838,7 @@ def _finding_keys(f):
                   | {f"waiting:{x['agent']}" for x in f["waiting_too_long"]}
                   | {f"unconnected:{x['agent']}" for x in f.get("not_connected", [])} | {f"uncovered:{x['project']}" + (f":{x['agent_type']}" if x.get("agent_type") else "") for x in f["uncovered"]}
                   | {f"target:{x['target']}" for x in f["targets"]} | {f"question:{x['id']}" for x in f["questions"]}
+                  | {"serve_loop" for x in f.get("serve_loop", [])}
                   | {f"human:{x['id']}" for x in f["human_ready"]})
 
 
