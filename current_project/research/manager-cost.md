@@ -144,11 +144,77 @@ The #1100 baseline above (2026-09-30 to 2026-10-06, other session mapping):
 The share depends on how much the workers run on that day, so compare eq per
 request, mean context, and eq per hour first.
 
-## Measurement after
+## Measurement after (#1313)
 
-Run, after one day with a manager that started after both changes:
+The manager that has both changes started on 2026-10-08 at 04:33 UTC (setting
+`manager_autocompact` 200k). The numbers are its first 15.5 hours, to 20:00
+UTC: 1,171 requests, more than each day before. Command:
 
-    python3 current_project/research/manager_cost.py <manager start, UTC> <one day later>
+    python3 current_project/research/manager_cost.py 2026-10-08T04:33:10+00:00 2026-10-08T20:00:00+00:00
 
-Expected (from the proposal): mean context near 130k, eq per request near a
-third of before, and fewer wakes.
+| Day (UTC) | Manager eq | All agents eq | Share | Requests | eq per request | Mean context | Hours with requests | eq per hour |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2026-10-08 | 19.6M | 295.7M | 7% | 1,171 | 16.7k | 128k | 16 | 1.22M |
+
+The old manager ran until 04:22 UTC on 2026-10-08. From 2026-10-07 19:45 UTC
+it had M1 (the refusal is in the command) but not M2 (it kept its old
+compaction point). That gives three periods:
+
+| | Before (2026-10-06 to 2026-10-07 19:45) | M1 only (to 2026-10-08 04:33) | M1 and M2 (to 2026-10-08 20:00) |
+|---|---:|---:|---:|
+| Manager eq | 47.1M | 30.5M | 19.6M |
+| Share of all agents eq | 9% | 12% | 7% |
+| Hours with requests | 21 | 10 | 16 |
+| Requests | 1,162 | 725 | 1,171 |
+| eq per request | 40.5k | 42.1k | 16.7k |
+| Mean context | 278k and 425k | 382k and 418k | 128k |
+| eq per hour | 2.24M | 3.05M | 1.22M |
+| Requests per hour | 55 | 73 | 73 |
+| Turns that a message starts | 84 | 38 | 56 |
+| Turns that the end of a background command starts | 149 | 112 | 220 |
+| Turns per hour | 11 | 15 | 17 |
+| eq per turn | 202k | 203k | 71k |
+| `maxpm manage --watch` started | 149 | 132 | 224 |
+| `maxpm inbox --wait` started | 96 | 0 | 0 |
+| Compactions | 2 (at 667k to 682k) | 1 (at 667k) | 18 (at 167k to 169k) |
+
+The before column is the two rows of "Measurement before", measured again
+(the 2026-10-07 row is now 35.0M, 757 requests, 46.2k, 425k: a few requests
+more than at the first measurement).
+
+### Against the expected effect
+
+- Mean context: 128k. Expected: about 130k. Correct.
+- eq per request: 16.7k, 41% of before (40.5k) and 48% of the #1100 baseline
+  (34.8k). Expected: about a third. The difference: Claude Code starts a
+  compaction at about 167k, not at 200k, so a compaction comes each 65
+  requests, not each 150, and each one writes the cache again.
+- eq per hour: 1.22M, 54% of before and 40% of the M1-only period. The
+  proposal estimated 28% (178M to 50M). The manager made more requests for
+  each hour than before (73, before 55), so the cost for each hour fell less
+  than the cost for each request.
+- M1, one watcher: correct. The manager started no second wait for messages
+  (`inbox --wait`: 96 before, 0 after).
+- M1, fewer wakes: not seen. A background command woke the manager 14 times
+  for each hour (220 in 16 hours), against 7 before and 11 in the M1-only
+  period. These days had more worker sessions and more releases, so the
+  periods do not compare one to one, but the settle time of 2m did not bring
+  the number down. A wake now costs about 71k eq, before about 200k: the
+  saving comes from the smaller context.
+
+### Does the compacted manager forget too much?
+
+The transcripts cannot answer this. They show 18 compactions in 15.5 hours,
+one each 52 minutes on average (the shortest time between two: 15 minutes),
+and each one cuts the context from about 167k to about 21k. The person who
+works with the manager decides. If it forgets too much, there are two steps:
+a higher point (`maxpm config set manager_autocompact 300k`: fewer
+compactions, and a higher cost for each request), or M3 (an explicit
+handover).
+
+### Script change (#1313)
+
+`manager_cost.py` now gives a session to the agent that used it first. A
+manager also runs commands with the names of other agents, and the script
+then counted the manager's session for one of those. It also prints a second
+table: what started each turn, the watch commands, and the compactions.
