@@ -897,24 +897,64 @@ class tx:
     then it raises RiverLocked, a refusal with the next step, not a traceback (#1615). A command that polls
     passes tries=1 and skips that one write."""
 
-    def __init__(self, conn: sqlite3.Connection, tries=None):
+    def __init__(self, conn: sqlite3.Connection, tries=None, claims=False):
         self.conn = conn
         self.tries = tries or LOCK_TRIES
+        self.claims = claims  # the transaction claims an item (still_worked asks for the process list)
+        self.procs = None
 
     def __enter__(self):
+        # The process list that a sweep or a claim of this transaction reads (busy_now) is taken here, before
+        # the lock: no other command waits for the lock while ps runs (#1617).
+        self.procs = _PROCS.set(_processes_for_lock(self.conn, self.claims))
         for _ in range(self.tries):
             try:
                 self.conn.execute("BEGIN IMMEDIATE")
                 return self.conn
             except sqlite3.OperationalError as e:
                 if "database is locked" not in str(e):
+                    _PROCS.reset(self.procs)
                     raise
+        _PROCS.reset(self.procs)
+        _log_locked(self.conn, self.tries)
         raise RiverLocked("the queue is busy: other maxpm commands held its database for longer than this "
                           "command waits; nothing changed. Run the command again")
 
     def __exit__(self, exc_type, exc, tb):
+        _PROCS.reset(self.procs)
         self.conn.execute("ROLLBACK" if exc_type else "COMMIT")
         return False
+
+
+# The text of one ps call for the transaction that runs now (tx), or None: busy_now then asks ps itself.
+_PROCS: contextvars.ContextVar[str | None] = contextvars.ContextVar("maxpm_procs", default=None)
+
+
+def _processes_for_lock(conn, claims=False):
+    """The process list for the transaction that starts now, when it will ask which sessions run a command: a
+    lease ran out (the sweep keeps the item of a busy agent), or, in a transaction that claims, an item is open
+    whose lease ran out and whose agent may still work on it (still_worked). None when nothing asks, or when
+    the queue cannot say yet (a database of an older version, before its columns are added)."""
+    try:
+        if not (conn.execute("SELECT 1 FROM items WHERE status='in_progress' AND lease_expires_at < "
+                             "strftime('%Y-%m-%dT%H:%M:%SZ','now') LIMIT 1").fetchone()
+                or (claims and _lease_lost(conn))):
+            return None
+    except sqlite3.Error:
+        return None
+    return _process_list() or ""
+
+
+def _log_locked(conn, tries):
+    """One line in locked.log beside the queue for each write that gave up, so a person can count how often the
+    lock is too busy (#1617). Never an error of its own."""
+    try:
+        path = conn.execute("PRAGMA database_list").fetchone()[2]
+        if path:
+            with open(Path(path).parent / "locked.log", "a") as f:
+                f.write(f"{iso(now())} tries={tries} pid={os.getpid()} {' '.join(sys.argv[1:4])}\n")
+    except Exception:
+        pass
 
 
 # How the running command reached MaximizePM, when not directly: "relay" while maxpm serve answers an action
@@ -4535,24 +4575,36 @@ def _elapsed(text):
     return int(days or 0) * 86400 + sum(x * 60 ** n for n, x in enumerate(reversed(parts)))
 
 
+def _process_list():
+    """The output of one ps call (pid, parent, and age of every process), or None with no ps (Windows, a sandbox
+    that blocks it)."""
+    import subprocess
+    if PROC_RUNNER is None and os.name == "nt":
+        return None
+    try:
+        return PROC_RUNNER() if PROC_RUNNER else subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,etime="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def busy_now(conn, names=None):
     """The agents (among names; else every AI agent) in whose session a command runs now: the agent CLI process
     runs on this computer, and a process below it started after the agent's last river command (a test run, a
     build, a merge). The servers the CLI started with are older, and so is a maxpm wait, which renews last_seen
     itself. Only within busy_max of the last river command. One ps call; an empty set with no ps (Windows, a
     sandbox that blocks it)."""
-    import subprocess
     limit = parse_duration(setting(conn, "busy_max"))
     t, host = now(), this_host()
     rows = [r for r in conn.execute("SELECT name, pid, last_seen FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
                                     (host,)).fetchall()
             if (names is None or r["name"] in names) and t - parse_iso(r["last_seen"]) < limit]
-    if not rows or (PROC_RUNNER is None and os.name == "nt"):
+    if not rows:
         return set()
-    try:
-        text = PROC_RUNNER() if PROC_RUNNER else subprocess.run(
-            ["ps", "-A", "-o", "pid=,ppid=,etime="], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
+    text = _PROCS.get()  # taken before the write lock of the transaction that runs now (tx)
+    if text is None:
+        text = _process_list()
+    if not text:
         return set()
     below, started = {}, {}
     for line in text.splitlines():
@@ -4596,12 +4648,9 @@ def keep_busy(conn, names, waiting=()):
     return kept
 
 
-def still_worked(conn):
-    """{item: agent} for the open items whose lease ran out while the agent's session still works on them: nobody
-    claimed the item since, the agent is registered on this computer and is not asked to stop, and a command runs
-    in its session now, or maxpm serve saw it busy after the lease ran out and within the last lease_ttl. No
-    second agent takes such an item (two sessions in one folder); the first one claims it again, or a person or
-    a manager stops it."""
+def _lease_lost(conn):
+    """{item: (agent row, when)} for the open items whose lease ran out and that nobody claimed since, when the
+    agent is registered on this computer and is not asked to stop."""
     rows = conn.execute(
         "SELECT i.id, e.at, e.change FROM items i JOIN events e ON e.id=(SELECT MAX(id) FROM events WHERE item_id=i.id "
         "AND (change LIKE 'lease expired (was %' OR change LIKE 'claimed%')) "
@@ -4613,6 +4662,16 @@ def still_worked(conn):
                                "AND pid IS NOT NULL AND host=?", (m.group(1), this_host())).fetchone()
         if a:
             was[r["id"]] = (a, r["at"])
+    return was
+
+
+def still_worked(conn):
+    """{item: agent} for the open items whose lease ran out while the agent's session still works on them: nobody
+    claimed the item since, the agent is registered on this computer and is not asked to stop, and a command runs
+    in its session now, or maxpm serve saw it busy after the lease ran out and within the last lease_ttl. No
+    second agent takes such an item (two sessions in one folder); the first one claims it again, or a person or
+    a manager stops it."""
+    was = _lease_lost(conn)
     if not was:
         return {}
     busy, t = busy_now(conn, {a["name"] for a, _ in was.values()}), now()
@@ -4634,13 +4693,30 @@ def activity(conn, actor, tries=None):
     return expired
 
 
+POLL_SWEEP = timedelta(seconds=30)  # a command that polls runs the whole activity this often
+_POLL_SWEPT = {}  # database file -> when a poll of this process last ran the whole activity
+
+
 def poll_activity(conn, actor):
-    """activity for a command that polls (maxpm wait, maxpm manage --watch): when the queue stays locked for
-    one busy_timeout, skip this renewal and let the next poll try again. A lock never ends a wait (#1615)."""
+    """activity for a command that polls every few seconds (maxpm wait, maxpm manage --watch, the state read
+    of the page). Each poll only records that the actor is there and renews its leases, in one short
+    transaction; the sweep and sync_needs_you run each POLL_SWEEP, because every ordinary command and maxpm
+    serve run them too (#1617: ten polls held the write lock a large part of the time). When the queue stays
+    locked for one busy_timeout, the poll skips this renewal and the next one tries again: a lock never ends
+    a wait (#1615)."""
+    key, t = conn.execute("PRAGMA database_list").fetchone()[2], now()
+    last = _POLL_SWEPT.get(key)
     try:
-        return activity(conn, actor, tries=1)
+        if last is None or not timedelta(0) <= t - last < POLL_SWEEP:
+            out = activity(conn, actor, tries=1)
+            _POLL_SWEPT[key] = t
+            return out
+        if actor:
+            with tx(conn, 1):
+                _touch_agent(conn, actor)
     except RiverLocked:
-        return []
+        pass
+    return []
 
 
 def session_url_from_env(env=None):
@@ -5138,7 +5214,8 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
     if not claim:
         return [{k: v for k, v in a.items() if k != 'sort_key'}
                 for a in takeable(ready_list(conn, project, unblocks, doer_for, near=near, mine=who_mine, actor=actor))[:limit]]
-    with tx(conn):
+    _prime_release_commits(conn)
+    with tx(conn, claims=True):
         _sweep(conn)
         pool = takeable(ready_list(conn, project, unblocks, doer_for, near=near, mine=who_mine, actor=actor))
         if not pool:
@@ -5159,7 +5236,8 @@ def needs_folder(a):
 
 
 def claim(conn, item_id, actor=None):
-    with tx(conn):
+    _prime_release_commits(conn, item_id)
+    with tx(conn, claims=True):
         _sweep(conn)
         a = annotate(conn)[_item(conn, item_id)["id"]]
         if not ready_for(a, actor):
@@ -7366,6 +7444,21 @@ def release_commit_items(conn, review):
             f"SELECT id FROM items WHERE id IN ({marks}) AND kind NOT IN ('review','deploy')", sorted(named))}
     _RELEASE_COMMITS[key] = (time.monotonic() + RELEASE_COMMITS_TTL, frozenset(ids))
     return ids
+
+
+def _prime_release_commits(conn, item_id=None):
+    """Ask release_commits before a claim takes the write lock, for the release reviews that the claim can meet
+    (this one; else each open review that waits on nothing open). The answer stays RELEASE_COMMITS_TTL, so
+    author_refusal inside the transaction starts no process while other commands wait for the lock (#1617)."""
+    sql = ("SELECT i.*, p.name project FROM items i JOIN projects p ON p.id=i.project_id "
+           "WHERE i.kind='review' AND i.status='open' AND ")
+    if item_id is not None:
+        rows = conn.execute(sql + "i.id=?", (item_id,)).fetchall()
+    else:
+        rows = conn.execute(sql + "NOT EXISTS (SELECT 1 FROM deps d JOIN items b ON b.id=d.blocked_by WHERE "
+                            "d.item_id=i.id AND d.kind<>'conflicts' AND b.status NOT IN ('done','dropped'))").fetchall()
+    for r in rows:
+        release_commit_items(conn, dict(r))
 
 
 def release_join_commits(conn, review_id, actor="maxpm"):

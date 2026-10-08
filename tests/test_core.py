@@ -4605,3 +4605,77 @@ class Locked(Base):
         # The page: the state read skips the sweep of a busy queue.
         self.lock()
         self.assertEqual(core.poll_activity(self.c, None), [])
+        self.unlock()
+        # Each write that gave up left a line beside the queue (#1617).
+        with open(os.path.join(self.dir.name, "locked.log")) as f:
+            self.assertRegex(f.read(), r"(?m)^\d{4}-\d\d-\d\dT\S+Z tries=1 pid=\d+")
+
+    def test_a_poll_renews_the_agent_and_sweeps_each_half_minute(self):
+        # #1617: each poll of maxpm wait, manage --watch and the page ran the whole activity, every 3 s.
+        t0, clock = core.now(), [0]
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(seconds=clock[0])), \
+                mock.patch.object(core, "_sweep", wraps=core._sweep) as sweep, \
+                mock.patch.object(core, "sync_needs_you", wraps=core.sync_needs_you) as sync:
+            seen = []
+            for clock[0] in (0, 3, 27, 30, 33, 60):
+                core.poll_activity(self.c, "w1")
+                seen.append((sweep.call_count, sync.call_count, core._agent(self.c, "w1")["last_seen"]))
+            self.assertEqual([x[:2] for x in seen], [(1, 1), (1, 1), (1, 1), (2, 2), (2, 2), (3, 3)])
+            self.assertEqual([x[2] for x in seen], [core.iso(t0 + timedelta(seconds=n)) for n in (0, 3, 27, 30, 33, 60)])
+            # The page has no actor: between two sweeps it writes nothing.
+            clock[0] = 63
+            before = self.c.total_changes
+            core.poll_activity(self.c, None)
+            self.assertEqual((self.c.total_changes, sweep.call_count), (before, 3))
+
+    def test_the_process_list_and_the_release_commits_come_before_the_lock(self):
+        # ps for the sweep: a lease ran out.
+        self.c.execute("UPDATE agents SET pid=1000, host=? WHERE name='w1'", (core.this_host(),))
+        x = self.add("a", "a long test run")
+        core.claim(self.c, x, "w1")
+        asked = []
+
+        def ps():
+            asked.append(self.c.in_transaction)
+            return "  1000      1     2:00:00\n"
+        core.PROC_RUNNER = ps
+        self.addCleanup(setattr, core, "PROC_RUNNER", None)
+        core.activity(self.c, "w2")
+        self.assertEqual(asked, [])  # no lease ran out: nobody asks
+        self.c.execute("UPDATE items SET lease_expires_at=? WHERE id=?", (core.iso(core.now() - timedelta(minutes=1)), x))
+        core.activity(self.c, "w2")
+        self.assertEqual((asked, core.item_show(self.c, x)["status"]), ([False], "open"))
+        # ps for a claim: the item is open, and its first agent may still work on it.
+        del asked[:]
+        core.agent_note(self.c, "w2", "an ordinary write asks for no process list")
+        self.assertEqual(asked, [])
+        self.assertEqual(core.next_item(self.c, "a", claim=True, actor="w2")[0]["id"], x)
+        self.assertEqual(asked, [False])
+        # release_commits for a claim that can meet a release review.
+        core.target_add(self.c, "web", "push")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        core.config_set(self.c, "review", "on")
+        core.config_set(self.c, "release_commits", "echo nothing")
+        core.target_own(self.c, "web", "w1")
+        y = core.item_add(self.c, "site", "page", 2, "", "any", (), "t")["id"]
+        core.claim(self.c, y, "w1")
+        core.done(self.c, y, "commit", "w1", ship_it=True)
+        review = [i for i in core.item_show(self.c, y)["unblocks"] if core.item_show(self.c, i)["kind"] == "review"][0]
+        core._RELEASE_COMMITS.clear()
+        ran = []
+        import subprocess
+        real = subprocess.run
+
+        def run(cmd, *a, **kw):
+            if cmd == "echo nothing":
+                ran.append(self.c.in_transaction)
+            return real(cmd, *a, **kw)
+        core.register(self.c, "w3")
+        with mock.patch.object(subprocess, "run", run):
+            got = core.next_item(self.c, None, claim=True, actor="w3")
+            self.assertEqual(([i["id"] for i in got], ran), ([review], [False]))
+            core.release(self.c, review, actor="w3")
+            core._RELEASE_COMMITS.clear()
+            del ran[:]
+            self.assertEqual(core.claim(self.c, review, "w3")["assignee"], "w3")
+            self.assertEqual(ran, [False])
