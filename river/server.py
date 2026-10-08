@@ -430,7 +430,13 @@ TMUX_SESSION = "maxpm"
 TMUX_RUNNER = None
 TMUX_SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu"}
 # One line per pane: the free text (the session's name) comes last.
-_TMUX_PANE = "#{pane_id}|#{window_id}|#{@maxpm_tile}|#{window_panes}|#{pane_current_command}|#{pane_tty}|#{@maxpm_agent}|#{@maxpm_name}"
+_TMUX_PANE = "#{pane_id}|#{window_id}|#{@maxpm_tile}|#{window_panes}|#{pane_current_command}|#{pane_tty}|#{@maxpm_agent}|#{@maxpm_started}|#{@maxpm_name}"
+# A new pane shows a shell first: tmux starts the login shell, the shell reads its files, and only then it runs
+# the command line river typed. For START_GRACE seconds after river opened a pane, a shell there is a session
+# that starts, not one that ended. Without it, a tidy pass a few seconds after a start closed the pane before
+# the agent CLI ran: auto_tidy comes right after auto_release and fresh_sessions in the same pass of the loop,
+# so every tidy_every a session serve had just started never connected (#1011).
+START_GRACE = 60
 
 
 def _tmux_cmd():
@@ -480,16 +486,19 @@ def _tmux_env():
 
 
 def _tmux_panes(everywhere=False):
-    """The panes of the maxpm tmux session (everywhere: of every session); [] when there is none."""
+    """The panes of the maxpm tmux session (everywhere: of every session); [] when there is none. "ended": only
+    a shell runs there, and the pane is older than START_GRACE ("starting": it is not)."""
     out = _tmux("list-panes", *(["-a"] if everywhere else ["-s", "-t", "=" + TMUX_SESSION]), "-F", _TMUX_PANE,
                 check=False)
-    rows = []
+    rows, t = [], core.now().timestamp()
     for line in (out or "").splitlines():
-        f = line.split("|", 7)
-        if len(f) == 8:
+        f = line.split("|", 8)
+        if len(f) == 9:
+            shell = f[4].lstrip("-") in TMUX_SHELLS
+            starting = shell and f[7].isdigit() and t - int(f[7]) < START_GRACE
             rows.append({"pane": f[0], "window": f[1], "tile": f[2] == "1", "window_panes": int(f[3] or 1),
-                         "running": f[4].lstrip("-"), "ended": f[4].lstrip("-") in TMUX_SHELLS, "tty": f[5],
-                         "agent": f[6] or None, "name": f[7]})
+                         "running": f[4].lstrip("-"), "ended": shell and not starting, "starting": starting,
+                         "tty": f[5], "agent": f[6] or None, "name": f[8]})
     return rows
 
 
@@ -524,6 +533,7 @@ def _tmux_open(t, env, line):
                 _tmux("select-layout", "-t", tile, "tiled")
         pane = pane or _tmux("new-window", "-d", "-t", f"={TMUX_SESSION}:", "-n", name, *new)
     _tmux("set-option", "-p", "-t", pane, "@maxpm_name", name)
+    _tmux("set-option", "-p", "-t", pane, "@maxpm_started", str(int(core.now().timestamp())))
     if env.get("MAXPM_AGENT"):
         _tmux("set-option", "-p", "-t", pane, "@maxpm_agent", env["MAXPM_AGENT"])
     _tmux("send-keys", "-t", pane, "-l", line)
@@ -556,7 +566,8 @@ def _prompt_tail(text):
 
 def _done_panes(conn, panes, terminals=None):
     """{pane: why} for the panes whose session is done, which maxpm view --tidy closes. A pane is done when
-    only a shell runs there: the agent CLI ended. With the queue (conn) a pane is also done while the agent CLI
+    only a shell runs there: the agent CLI ended (a pane river opened less than START_GRACE ago still starts).
+    With the queue (conn) a pane is also done while the agent CLI
     stays open and idle, when the agent river named for it takes no work any more: it is not registered (its
     maxpm wait ended, or it unregistered), it ended after a stop (or ran no river command for away_after
     after one), or it is gone, and it holds and owns nothing.

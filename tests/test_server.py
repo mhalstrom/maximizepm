@@ -1054,11 +1054,16 @@ class FakeTmux:
         self.session, self.panes, self.windows, self.calls, self.n = False, [], {}, [], 0
         self.full = False  # True: no space for one more pane in a window
 
+    def end(self, pane):
+        """The agent CLI of this pane ended a long time after its start: a shell is all that runs there."""
+        pane["running"], pane["started"] = "zsh", "1"
+
     def _pane(self, window=None, name=None):
         if window is None:
             window = f"@{self.n}"
             self.windows[window] = {"name": name, "tile": ""}
-        pane = {"id": f"%{self.n}", "window": window, "name": "", "agent": "", "running": "claude", "keys": []}
+        pane = {"id": f"%{self.n}", "window": window, "name": "", "agent": "", "started": "", "running": "claude",
+                "keys": []}
         self.n += 1
         self.panes.append(pane)
         return pane["id"]
@@ -1089,7 +1094,7 @@ class FakeTmux:
         if cmd == "split-window":
             return None if self.full else self._pane(window=opt("-t"))
         if cmd == "set-option" and "-p" in a:
-            pane[{"@maxpm_name": "name", "@maxpm_agent": "agent"}[a[-2]]] = a[-1]
+            pane[{"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started"}[a[-2]]] = a[-1]
         elif cmd == "set-option" and "-w" in a and "@maxpm_tile" in a:
             self.windows[opt("-t")]["tile"] = "" if "-u" in a else "1"
         elif cmd == "send-keys":
@@ -1109,7 +1114,8 @@ class FakeTmux:
         elif cmd == "list-panes":
             return "\n".join("|".join([p["id"], p["window"], self.windows[p["window"]]["tile"],
                                        str(sum(q["window"] == p["window"] for q in self.panes)), p["running"],
-                                       "/dev/ttys00" + p["id"][1:], p["agent"], p["name"]]) for p in self.panes)
+                                       "/dev/ttys00" + p["id"][1:], p["agent"], p.get("started", ""), p["name"]])
+                             for p in self.panes)
         elif cmd == "show-options":
             return "C-b"
         elif cmd == "display-message":  # terminal_screen: the pane's size and cursor; else the text as it is
@@ -1207,7 +1213,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(server.tmux_view("tile")["left"], [self.tmux.panes[-1]["name"]])
         # --tidy closes a pane whose agent ended (a shell is all that runs there); --windows separates the others.
         ended = self.tmux.panes[1]["name"]
-        self.tmux.panes[1]["running"] = "zsh"
+        self.tmux.end(self.tmux.panes[1])
         v = server.tmux_view("windows", tidy=True)
         self.assertEqual(([c["name"] for c in v["closed"]], ended in [p["name"] for p in v["panes"]]), ([ended], False))
         self.assertEqual(len({p["window"] for p in v["panes"]}), len(v["panes"]))
@@ -1237,7 +1243,11 @@ class LaunchInTmux(unittest.TestCase):
         self.assertRegex(out, rf"%0  #{x} work  \[shop-\w+\]\n")
         self.assertIn("A person sees the agents with: maxpm view", out)
         self.assertNotIn("A person sees", river("view", "--list"))
+        # A new pane shows a shell before the agent CLI runs: for START_GRACE that is a start, not an end.
         self.tmux.panes[0]["running"] = "zsh"
+        self.assertNotIn("its agent ended", river("view", "--list"))
+        self.assertNotIn("closed", river("view", "--tidy"))
+        self.tmux.end(self.tmux.panes[0])
         self.assertIn("(its agent ended: maxpm view --tidy closes it)", river("view", "--list"))
         self.assertIn(f"closed (its agent ended): #{x} work", river("view", "--tidy"))
         # Open chat for an agent in a pane, with no web link, names maxpm view.
@@ -1315,7 +1325,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual({p["id"] for p in self.tmux.panes}, {panes[n]["id"] for n in (works, asks, again, other)} | {"%7", "%9"})
         self.assertEqual((server.tmux_done(self.c), server.tmux_view(None, tidy=True, conn=self.c)["closed"]), ([], []))
         # The person answered the prompt and the CLI ended: the shell that is left is done too, as before.
-        panes[asks]["running"] = "zsh"
+        self.tmux.end(panes[asks])
         self.assertIn(f"closed (its agent ended): {panes[asks]['name']}", river("view", "--list", "--tidy"))
         # With no pattern for a prompt, the screen is not read.
         core.config_set(self.c, "prompt_pattern", "")
@@ -1729,7 +1739,15 @@ class LaunchInTmux(unittest.TestCase):
         name = server.auto_release(self.c)["started"][dep]
         pane = self.tmux.panes[-1]
         pane["running"], pane["screen"] = "zsh", "$ claude --name 'deploy web'\nError: could not start\n$"
-        self.assertEqual([p["pane"] for p in server.auto_tidy(self.c)], [pane["id"]])
+        # The tidy pass comes right after auto_release in the same pass of the loop, and a new pane shows a shell
+        # until the agent CLI runs: the pass leaves the pane for START_GRACE (#1011: it closed bde9 and 98b5).
+        self.assertEqual(server.auto_tidy(self.c), [])
+        self.assertEqual(len(self.tmux.panes), 1)
+        self.assertFalse(any("ended before it ran" in e["change"] for e in core.item_show(self.c, dep)["events"]))
+        server.TIDY["at"] = None  # the next pass that is due
+        late = core.now() + core.timedelta(seconds=server.START_GRACE)
+        with mock.patch.object(core, "now", lambda: late):
+            self.assertEqual([p["pane"] for p in server.auto_tidy(self.c)], [pane["id"]])
         last = core.item_show(self.c, dep)["events"]
         self.assertTrue(any(e["change"].startswith(f"{name} ended before it ran a maxpm command; the last lines of its "
                                                    f"pane {pane['id']}: ") and "Error: could not start" in e["change"]
@@ -1917,6 +1935,12 @@ class LaunchInTmux(unittest.TestCase):
                     return got
                 time.sleep(0.1)
             self.fail(f"the panes did not get there: {got}")
+        # A pane river just opened shows a shell: for START_GRACE it starts, and no tidy closes it (#1011).
+        got = panes(lambda p: p["starting"] if p["name"] == "needs you" else p["running"] == "sleep")
+        self.assertEqual(([p["ended"] for p in got.values()], server.tmux_view(None, tidy=True)["closed"]),
+                         ([False, False, False], []))
+        self.addCleanup(setattr, server, "START_GRACE", server.START_GRACE)
+        server.START_GRACE = 0
         got = panes(lambda p: p["ended"] if p["name"] == "needs you" else p["running"] == "sleep")
         self.assertEqual([got[n]["agent"] for n in ("#1 first: a | b", "#2 second", "needs you")], ["shop-aaaa", None, None])
         self.assertEqual(len({p["window"] for p in got.values()}), 3)
