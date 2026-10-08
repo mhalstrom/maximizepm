@@ -228,6 +228,13 @@ Name the item in commit messages (`Fix the header (#12)`), so a check finds it.
   - `--release` (the default): it is large or better for someone else. Your
     item goes back to the queue, waiting on the new one. Run `maxpm go` again.
   `maxpm keep <id>` holds a released item again; `maxpm release <id>` ends a hold.
+- Something this item needs first is in the queue already (another item, or
+  the release that carries it): add the link, do not only name it in a note:
+  `maxpm dep <your-id> --on <other-id> --release`. Your item goes back to the
+  queue and is ready when the other one is done (`--keep`: you hold it while
+  you wait). After `maxpm release <id> --note "waits on #12"` with no link,
+  the item is ready at once, and `maxpm go` gives it to the next session,
+  which finds the same thing and releases it again.
 - Something unrelated: `maxpm add "<title>" --found-during <id>`.
   Do not do it inside your current item.
 - Waiting on something outside the queue: `maxpm blocked <id> --reason "<what>"`.
