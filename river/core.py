@@ -6053,11 +6053,31 @@ def takeovers(conn, include_seen=False):
 AUTHOR_RELEASE = "released as an author of the release"  # the event that release_authors reads (#1616)
 
 
+def _named_not_waited(conn, item_id, note):
+    """The open items that a note names as #<id> and that the item does not wait on, itself or through
+    another open item."""
+    named = {int(n) for n in re.findall(r"#(\d+)", note or "")} - {item_id}
+    if not named:
+        return []
+    waits, stack = set(), [item_id]
+    while stack:
+        for b in _open_prereqs(conn, stack.pop()):
+            if b not in waits:
+                waits.add(b)
+                stack.append(b)
+    return [r["id"] for r in conn.execute(
+        f"SELECT id FROM items WHERE id IN ({','.join('?' * len(named))}) AND status IN {OPEN_STATES} ORDER BY id",
+        sorted(named)) if r["id"] not in waits]
+
+
 def release(conn, item_id, note=None, actor=None, author=None):
     """Give a claimed item back. author (a release review only): the reviewer wrote commits of the release and
     says which ones. MaximizePM sees the authors of a release up to the pin of that minute (release_commits);
     the pin can move to a commit that holds the reviewer's own work. The event keeps this review from the
-    agent from then on (release_authors); maxpm serve starts another reviewer."""
+    agent from then on (release_authors); maxpm serve starts another reviewer.
+    A note that names an open item the released item does not wait on ("waits on #12", and no link) gets a
+    hint with the dep command: without the link go gives the item to the next session, which finds the same
+    thing and releases it again (#1613). Only a hint: a note can name an item for another reason."""
     with tx(conn):
         it = _item(conn, item_id)
         if author is not None and it["kind"] != "review":
@@ -6075,7 +6095,14 @@ def release(conn, item_id, note=None, actor=None, author=None):
         why = f"{AUTHOR_RELEASE}: {author.strip()}" + (f" ({note})" if note else "") if author is not None else (
             "released" + (f": {note}" if note else ""))
         _unhold(conn, it["id"], it["assignee"] if author is not None else actor, why)
-    return item_show(conn, item_id)
+        named = [] if author is not None else _named_not_waited(conn, it["id"], note)
+    res = item_show(conn, item_id)
+    if named:
+        ids = ", ".join(f"#{n}" for n in named)
+        res["hint"] = (f"the note names {ids}, but #{item_id} does not wait on {'it' if len(named) == 1 else 'them'}, "
+                       f"so go gives #{item_id} out again; add the link: "
+                       + " ; ".join(f"maxpm dep {item_id} --on {n}" for n in named))
+    return res
 
 
 def reopen(conn, item_id, actor=None):

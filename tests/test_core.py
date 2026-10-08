@@ -1828,6 +1828,43 @@ class KeepRelease(Base):
         self.assertEqual((st["status"], st["assignee"]), ("in_progress", "ag"))
         self.assertIsNotNone(st["lease_expires_at"])
 
+    def test_release_with_a_note_that_names_an_item_it_does_not_wait_on_gives_a_hint(self):
+        import contextlib
+        import io
+        from river import cli
+        other, far = self.add("a", "the other work"), self.add("a", "work behind a link")
+        gone = self.add("a", "finished work")
+        core.claim(self.c, gone, "bo")
+        core.done(self.c, gone, "ok", "bo")
+        res = core.release(self.c, self.p, f"waits on #{other}; see also #{gone}, #{self.p} and #9999", "ag")
+        self.assertEqual(res["hint"], f"the note names #{other}, but #{self.p} does not wait on it, so go gives "
+                                      f"#{self.p} out again; add the link: maxpm dep {self.p} --on {other}")
+        # ag holds the item again, also while it waits on another item.
+        hold = lambda: self.c.execute("UPDATE items SET status='in_progress', assignee='ag' WHERE id=?", (self.p,))
+        # Only a hint: the release went through, and no link was added.
+        st = core._item(self.c, self.p)
+        self.assertEqual((st["status"], st["assignee"], core._open_prereqs(self.c, self.p)), ("open", None, []))
+        # With the link, and through another open item, the item waits: no hint. Two names: both commands.
+        core.dep_add(self.c, self.p, [other])
+        core.dep_add(self.c, other, [far])
+        hold()
+        self.assertNotIn("hint", core.release(self.c, self.p, f"waits on #{other} and on #{far}", "ag"))
+        free, free2 = self.add("a", "free one"), self.add("a", "free two")
+        for note in (None, "no item named", f"only #{self.p} itself"):
+            hold()
+            self.assertNotIn("hint", core.release(self.c, self.p, note, "ag"))
+        hold()
+        res = core.release(self.c, self.p, f"needs #{free2} and #{free}", "ag")
+        self.assertIn(f"does not wait on them, so go gives #{self.p} out again; add the link: "
+                      f"maxpm dep {self.p} --on {free} ; maxpm dep {self.p} --on {free2}", res["hint"])
+        # The command prints it after the item.
+        hold()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            a = cli.build_parser().parse_args(["--as", "ag", "release", str(self.p), "--note", f"waits on #{free}"])
+            cli.render(a, cli.dispatch(self.c, a, "ag"))
+        self.assertIn(f"HINT: the note names #{free}, but #{self.p} does not wait on it", out.getvalue())
+
     def test_default_mode_releases(self):
         n = core.item_add(self.c, "a", "big", actor="ag", blocks=self.p)["id"]
         st = core._item(self.c, self.p)

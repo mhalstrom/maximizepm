@@ -2625,6 +2625,11 @@ def render(a, res):
             print()
             print("\n".join(lines))
         return
+    if c == "release" and isinstance(res, dict) and res.get("hint"):
+        _print_show(res)
+        print()
+        print("HINT: " + res["hint"])
+        return
     if c == "go":
         return render_go(res)
     if c == "plan":
