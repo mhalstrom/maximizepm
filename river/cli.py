@@ -2208,6 +2208,29 @@ def _chat_lines(r, has_item=True):
     return out
 
 
+def _look_rule(b, it, r, short=False):
+    """The briefing lines for a look of the user at the finished result. The item's project decides (setting
+    result_look, #1668): push first and add an item for the look, or ask first and wait for the yes."""
+    ask = b.get("result_look") == "ask_first"
+    if short:
+        if ask:
+            return [f"  the user should look at the result: this project asks first: commit, no push, {r} ask <person> "
+                    f"\"Look at ...\" --item {it['id']}, wait for the yes, then push and done"]
+        return [f"  the user should look at the result: push, done, then {r} add \"Look at ...\" --doer human "
+                f"--found-during {it['id']}"]
+    if ask:
+        return [f"  - The user should look at the finished result: this project asks first (setting result_look). "
+                f"Commit, do not push, and",
+                f"    {r} ask <person> \"Look at <result>: <where>. Push?\" --item {it['id']}   then wait at your "
+                f"prompt for the yes.",
+                f"    MaximizePM keeps your lease while the question is open. After the yes: push, then "
+                f"{r} done {it['id']}."]
+    return [f"  - The user should look at the finished result: push, {r} done {it['id']}, then "
+            f"{r} add \"Look at <result>\" --doer human --found-during {it['id']}.",
+            f"    Ask before the push only for public text, a release to production, a step that deletes data or "
+            f"costs money, or when the item says so."]
+
+
 def render_go(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
@@ -2445,8 +2468,7 @@ def render_go(b):
                 f"  a limit of the machine (disk, build stop, push freeze): keep the item, do the other parts, then "
                 f"{r} inbox --wait",
                 f"  a refused command:     a step for the user, with the command and the permission rule that allows it",
-                f"  the user should look at the result: push, done, then {r} add \"Look at ...\" --doer human "
-                f"--found-during {it['id']}",
+                *_look_rule(b, it, r, short=True),
                 f"  vague item: make a reasonable choice and say what you chose in --output.",
                 "",
             ]
@@ -2476,10 +2498,7 @@ def render_go(b):
                 f"    (below), with the exact command and the permission rule that allows it. Stand at your prompt only "
                 f"for a release to",
                 f"    production or a deletion of data: {r} ask <person> \"<what to approve>\" --item {it['id']}   first.",
-                f"  - The user should look at the finished result: push, {r} done {it['id']}, then "
-                f"{r} add \"Look at <result>\" --doer human --found-during {it['id']}.",
-                f"    Ask before the push only for public text, a release to production, a step that deletes data or "
-                f"costs money, or when the item says so.",
+                *_look_rule(b, it, r),
                 f"  - You need the user (a decision, an approval, an account or payment step): put it in the queue, not only in chat:",
                 f"    {r} add \"<what to decide or do>\" --doer human --context \"<exactly what, where the material is>\" --blocks {it['id']} --release",
                 *([f"    Commit what is finished, and say in the item's --context what is left. Then run go again: take other work, or",
@@ -2714,6 +2733,12 @@ def render(a, res):
             print("  " + (res["description"] or "(no description: maxpm project describe " + res["name"] + " \"...\")"))
             print("  target: " + (res.get("target") or "none (maxpm project target " + res["name"] + " <target>)"))
             print("  tracker: " + (res.get("tracker") or "none (maxpm project tracker " + res["name"] + " \"<tracker> <where> via <tool>\")"))
+            look = res.get("result_look", "push_first")
+            print("  look at a finished result: "
+                  + ("ask first (the worker shows the result and waits for the yes before the push)"
+                     if look == "ask_first" else "push, then ask (the worker pushes and adds an item for the look)")
+                  + f"; maxpm config set result_look {'push_first' if look == 'ask_first' else 'ask_first'} "
+                    f"--project {res['name']}")
             print("  items: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in res["counts"].items() if v))
             print("  working now: " + (", ".join(res["working_now"]) or "nobody"))
             if res["worked_recently"]:

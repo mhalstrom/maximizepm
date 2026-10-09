@@ -302,12 +302,21 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   takes nothing back, starts no other session for your work, and alerts the
   manager. The person answers in your terminal or with `maxpm answer`. A wait
   that you only say in chat looks idle: `maxpm serve` gives your work to others.
-- The user should look at a finished result (a page, a text, a design): push
-  first, close the item, and add `maxpm add "Look at <result>: <where>" --doer
-  human --found-during <id>`. What the user wants changed becomes new items.
-  Do not hold the item for the word "push". Ask before the push only for
-  public text (a README, a site), a release to production, a step that
-  deletes data or costs money, or when the item says "ask before the push".
+- The user should look at a finished result (a page, a text, a design): the
+  project's setting `result_look` decides, and the go briefing states the rule
+  of your item's project.
+  - `push_first`: push first, close the item, and add
+    `maxpm add "Look at <result>: <where>" --doer human --found-during <id>`.
+    What the user wants changed becomes new items. Do not hold the item for
+    the word "push". Ask before the push only for public text (a README, a
+    site), a release to production, a step that deletes data or costs money,
+    or when the item says "ask before the push".
+  - `ask_first`: commit, do not push, and ask in the queue:
+    `maxpm ask <person> "Look at <result>: <where>. Push?" --item <id>`. Then
+    wait at your prompt for the yes; `maxpm serve` keeps your lease while the
+    question is open. After the yes, push and close the item.
+  A person sets it: `maxpm config set result_look ask_first --project <name>`;
+  `maxpm project show <name>` shows it.
 
 When you put a decision to the user in chat, use one form, one decision at a
 time (`maxpm guide decisions` prints it):

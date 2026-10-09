@@ -315,6 +315,54 @@ class Go(Base):
         self.assertIn(f"the user should look at the result: push, done, then maxpm --as {me} add \"Look at ...\" "
                       f"--doer human --found-during {y}", later)
 
+    def test_the_project_decides_the_look_at_a_finished_result(self):
+        # #1668: one rule for all projects (push first, #1599) became a setting of each project.
+        import re
+        from river import cli
+        x, y, z = self.add("web", "page"), self.add("web", "form"), self.add("api", "route")
+
+        def text(brief):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render_go(brief)
+            return re.sub(r"\s+", " ", out.getvalue())
+
+        def shown(name):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render(cli.build_parser().parse_args(["project", "show", name]), core.project_show(self.c, name))
+            return out.getvalue()
+        with self.assertRaisesRegex(RiverError, "result_look is ask_first or push_first"):
+            core.config_set(self.c, "result_look", "ask", project="web")
+        core.config_set(self.c, "result_look", "ask_first", project="web")
+        # ask_first: the worker commits, asks in the queue, and waits for the yes before the push.
+        b = core.go(self.c, self.web)
+        me, first = b["agent"], text(b)
+        self.assertEqual((b["item"]["id"], b["result_look"]), (x, "ask_first"))
+        self.assertIn(f"The user should look at the finished result: this project asks first (setting result_look). "
+                      f"Commit, do not push, and maxpm --as {me} ask <person> \"Look at <result>: <where>. Push?\" "
+                      f"--item {x} then wait at your prompt for the yes. MaximizePM keeps your lease while the question "
+                      f"is open. After the yes: push, then maxpm --as {me} done {x}.", first)
+        self.assertNotIn("--doer human --found-during", first)
+        core.done(self.c, x, "done", me)
+        later = text(core.go(self.c, self.web, me))
+        self.assertIn(f"the user should look at the result: this project asks first: commit, no push, maxpm --as {me} "
+                      f"ask <person> \"Look at ...\" --item {y}, wait for the yes, then push and done", later)
+        self.assertEqual(core.project_show(self.c, "web")["result_look"], "ask_first")
+        self.assertIn("  look at a finished result: ask first (the worker shows the result and waits for the yes "
+                      "before the push); maxpm config set result_look push_first --project web\n", shown("web"))
+        # push_first (the default): a project that sets nothing keeps the rule of #1599.
+        b = core.go(self.c, self.api)
+        other, first = b["agent"], text(b)
+        self.assertEqual((b["item"]["id"], b["result_look"]), (z, "push_first"))
+        self.assertIn(f"The user should look at the finished result: push, maxpm --as {other} done {z}, then maxpm "
+                      f"--as {other} add \"Look at <result>\" --doer human --found-during {z}. Ask before the push only "
+                      f"for public text", first)
+        self.assertNotIn("asks first", first)
+        self.assertEqual(core.project_show(self.c, "api")["result_look"], "push_first")
+        self.assertIn("  look at a finished result: push, then ask (the worker pushes and adds an item for the look); "
+                      "maxpm config set result_look ask_first --project api\n", shown("api"))
+
     def test_a_project_linked_to_another_folder_moves_only_with_move(self):
         other = os.path.join(self.dir.name, "other")
         os.makedirs(other)

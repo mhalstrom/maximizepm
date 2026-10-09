@@ -97,6 +97,11 @@ DEFAULT_SETTINGS = {
     "email_batch_window": "10m",
     "timezone": "",
     "auto_continue": "on",
+    # The look of a person at a finished result (a page, a text, a design), for each project (#1668).
+    # push_first: the worker pushes, closes the item, and adds a person's item for the look. ask_first: the worker
+    # commits, asks in the queue (maxpm ask), and waits for the yes before the push. Under both, public text, a
+    # release to production, a step that deletes data or costs money, and an item that says so are asked first.
+    "result_look": "push_first",
     "due_warn_before": "3d",
     # Agents the page can start, as "Label=command" entries separated by ";". The first is the default.
     # "@claude-code" or "@codex" is a launch profile: river builds the command from the platform's options
@@ -1093,6 +1098,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("launch_in is auto, tab, window, or tmux")
     elif key == "auto_continue" and value not in ("on", "off"):
         raise RiverError("auto_continue is on or off")
+    elif key == "result_look" and value not in ("ask_first", "push_first"):
+        raise RiverError("result_look is ask_first or push_first")
     elif key in ("fresh_sessions", "serve_reload") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -1552,6 +1559,7 @@ def project_show(conn, name):
         worked_recently=recent,
         goals=goal_list(conn, name, include_complete=False),
         tracker=setting(conn, "tracker", project_id=p["id"]),
+        result_look=setting(conn, "result_look", project_id=p["id"]),
     )
     return p
 
@@ -8073,6 +8081,8 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         brief["monitor"] = _monitor_brief(conn, it)
         _set_role_note(conn, brief["agent"], "monitor", it["id"])
     if it:
+        # The rule of the item's project for a look at the finished result: ask first, or push and then ask.
+        brief["result_look"] = setting(conn, "result_look", item_id=it["id"])
         # The handoff of each open goal of the item: the goal's context, for a session that starts on it.
         # A sub-goal's context is its parent's handoff, then its own.
         gb = brief.get("goal") or {}  # the owner's briefing shows its goal's handoffs already
