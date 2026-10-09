@@ -95,6 +95,17 @@ Stop when the user tells you to, and tell the user what you did.
   its review, cut it then: `maxpm target cut <target> --rev <commit>`; the commit
   goes into the history and the notes of the deploy item. A fix that the review of
   the cut release asks for still goes out with that release.
+- **A hook runs a project's command on a release event**:
+  `maxpm target hook <target> <event> "<command>"` (events: release-cut,
+  review-passed, review-failed, deployed; `--clear` removes one; no event lists
+  them). The maxpm command that causes the event runs the hook before it
+  returns, in the folder of the target's project, with MAXPM_EVENT,
+  MAXPM_TARGET, MAXPM_REV (the commit of `maxpm target cut --rev`), MAXPM_ITEM,
+  and MAXPM_AGENT set. So a step such as "prepare the build folder at the cut,
+  clean it after the deploy" is a hook, not a line in a runbook that you run
+  by hand. A hook never undoes and never refuses its event: when it fails or
+  runs longer than `hook_timeout` (10m), the target owner (you, with no owner)
+  gets an alert with the exit code and the last lines of its output.
 - **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
   `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
   folder of the release; a waiting session that worked on the release does not get it.

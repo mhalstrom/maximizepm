@@ -3507,3 +3507,71 @@ console.log(JSON.stringify({{ shown: [...show], total, hidden, chars: g.text.len
         want = {x for i in mine for x in [i["id"], *i["waits_on"], *i["unblocks"]]}
         g = self.graph(q, project="project-03")
         self.assertEqual((set(g["shown"]), g["hidden"]), (want, 0))
+
+
+class PageHooks(unittest.TestCase):
+    """An action of the page that causes a release event: maxpm serve runs the hook after the answer."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+        core.register(self.c, "mark", human=True)
+        core.target_add(self.c, "web", "push")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        x = core.item_add(self.c, "site", "page", actor="mark")["id"]
+        self.deploy = core.done(self.c, x, "commit", "mark", ship_it=True)["shipped_in"]
+        self.log = os.path.join(self.dir.name, "hook.log")
+        script = os.path.join(self.dir.name, "hook.py")
+        with open(script, "w") as f:
+            f.write(f"import os\nopen({self.log!r}, 'a').write(os.environ['MAXPM_EVENT'] + ' ' + "
+                    "os.environ['MAXPM_REV'] + '\\n')\n")
+        self.cmd = f'"{sys.executable}" "{script}"'
+        quiet = contextlib.redirect_stdout(io.StringIO())  # the thread of maxpm serve prints each result
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def post(self, op, **args):
+        data = json.dumps({"op": op, "args": args, "actor": "mark"}).encode()
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.rfile, out = "/api/action", ("127.0.0.1", 5555), io.BytesIO(data), {}
+        h.headers = {"Host": "127.0.0.1:8765", "Content-Length": str(len(data))}
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        h.do_POST()
+        return out["code"], out["body"]
+
+    def ended(self):
+        import time
+        for _ in range(200):
+            rows = self.c.execute("SELECT ended_at FROM hook_runs").fetchall()
+            if rows and all(r["ended_at"] for r in rows) and not server.HOOKS["running"]:
+                return len(rows)
+            time.sleep(0.05)
+        self.fail("the hook did not run")
+
+    def test_a_page_action_sets_a_hook_and_its_event_runs_it_in_a_thread(self):
+        code, body = self.post("target_hook", target="web", event="release-cut", command=self.cmd)
+        self.assertEqual((code, body["result"]["changed"]), (200, "set"))
+        self.assertFalse(server.hooks_soon(self.c))  # nothing waits
+        code, body = self.post("target_cut", target="web", rev="abc1234")
+        self.assertEqual(code, 200)
+        self.assertEqual(self.ended(), 1)
+        with open(self.log) as f:
+            self.assertEqual(f.read(), "release-cut abc1234\n")
+        self.assertTrue(any(e["change"].startswith("hook release-cut: exit 0, ")
+                            for e in core.item_show(self.c, self.deploy)["events"]))
+
+    def test_the_loop_runs_a_hook_that_its_command_left_behind(self):
+        core.target_hook(self.c, "web", "release-cut", self.cmd, actor="mark")
+        core.target_cut(self.c, "web", "abc1234", "mark")  # a command that ends before it runs the hook
+        self.assertFalse(server.hooks_soon(self.c))  # that command may still run it
+        self.c.execute("UPDATE hook_runs SET queued_at='2000-01-01T00:00:00Z'")
+        self.assertTrue(server.hooks_soon(self.c))
+        self.assertEqual(self.ended(), 1)
+        with open(self.log) as f:
+            self.assertEqual(f.read(), "release-cut abc1234\n")

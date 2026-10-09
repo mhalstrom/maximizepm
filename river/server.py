@@ -837,6 +837,36 @@ def end_tmux_orphans():
     return found
 
 
+HOOKS = {"running": 0}  # the hooks that a thread of maxpm serve runs now; the loop does not start again meanwhile
+
+
+def hooks_soon(conn, token=None):
+    """Run the hooks that wait (core.run_hooks) in a thread of their own, and return whether one started. With a
+    token: those of the events that an action of the page caused, so the page gets its answer at once. With
+    none (one pass of the loop of maxpm serve): those whose command ended before it ran them. Each result goes to
+    the history of its deploy item, and a failure alerts the target owner."""
+    q = "SELECT 1 FROM hook_runs WHERE started_at IS NULL AND " + ("queued_by=?" if token else "queued_at<?")
+    old = core.iso(core.now() - core.timedelta(seconds=core.HOOK_ORPHAN_AFTER))
+    if conn.execute(q, (token or old,)).fetchone() is None:
+        return False
+
+    def work():
+        HOOKS["running"] += 1
+        try:
+            c = core.connect()
+            try:
+                for h in core.run_hooks(c, token=token, orphans=token is None):
+                    print(f"hook {h['event']} of target {h['target']}: {h['result']}: {h['command']}", flush=True)
+            finally:
+                c.close()
+        except Exception as e:  # a busy queue: the next pass of the loop takes the hook
+            print(f"hook: {e}", flush=True)
+        finally:
+            HOOKS["running"] -= 1
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
 def auto_end_orphans(conn):
     """One pass of the loop of maxpm serve: every tidy_every (0s: never) it ends the tmux servers the tests left
     behind (tmux_orphans). Returns the servers it ended."""
@@ -1862,6 +1892,8 @@ OPS = {
     "target_cadence": lambda c, a, who: core.target_cadence(c, a["target"], a.get("cadence") or "off", who),
     "release_now": lambda c, a, who: core.release_now(c, a["target"], a.get("reason"), who),
     "target_cut": lambda c, a, who: core.target_cut(c, a["target"], a.get("rev"), who),
+    "target_hook": lambda c, a, who: core.target_hook(c, a["target"], a.get("event"), a.get("command"),
+                                                     bool(a.get("clear")), who),
     "open_monitors": lambda c, a, who: open_monitors(c, db=a.get("db")),
     "queue_add": lambda c, a, who: core.queue_add(c, a["agent"], a.get("id"), a.get("message"), bool(a.get("first")),
                                                   a.get("before"), who),
@@ -2097,7 +2129,10 @@ class Handler(BaseHTTPRequestHandler):
             via = core.EVENT_VIA.set("relay" if relay.page_request(self.headers) else None)
             try:
                 core.activity(conn, actor)
-                result = op(conn, body.get("args", {}), actor)
+                try:
+                    result = op(conn, body.get("args", {}), actor)
+                finally:
+                    hooks_soon(conn, core.hook_token())  # a release event of this action: its hook runs after the answer
                 with core.tx(conn):
                     core.sync_needs_you(conn)
                 if body.get("op") in ("claim", "next_claim") and core.pending_monitors(conn):

@@ -247,6 +247,47 @@ def _release_lines(p):
     return out
 
 
+def _hook_lines(target, hooks):
+    """The hooks of a target (core.target_hooks), each with its last run."""
+    if not hooks:
+        return [f"hooks: none (a command that MaximizePM runs on a release event: "
+                f"maxpm target hook {target} {'|'.join(core.HOOK_EVENTS)} \"<command>\")"]
+    out = [f"hooks (MaximizePM runs each one when its event occurs; change: maxpm target hook {target} <event> "
+           f"\"<command>\" | --clear):"]
+    for h in hooks:
+        last = h.get("last")
+        if not last:
+            ran = "never ran"
+        elif not last["ended_at"]:
+            ran = f"last run for #{last['item_id']}: " + ("runs now" if last["started_at"] else "waits to run")
+        else:
+            ran = (f"last run for #{last['item_id']}: "
+                   + ("stopped at hook_timeout" if last["timed_out"] else "not started" if last["exit_code"] is None
+                      else f"exit {last['exit_code']}") + f", {last['ended_at']}")
+        out.append(f"  {h['event']}: {h['command']}   ({ran})")
+    return out
+
+
+def _hooks_brief(target, hooks):
+    """One line for a briefing: the hooks that MaximizePM runs by itself, so an agent does not run them by hand."""
+    return (f"hooks of target {target}: MaximizePM runs " + "; ".join(f"{h['event']}: {h['command']}" for h in hooks)
+            + f". Do not run these commands by hand (maxpm target hook {target})")
+
+
+def _hook_result_lines(hooks):
+    """What the hooks did that this command ran (core.run_hooks)."""
+    out = []
+    for h in hooks:
+        out.append(f"hook {h['event']} of target {h['target']}: {h['result']}: {h['command']}"
+                   + (f"   (in {h['folder']})" if h["folder"] else ""))
+        out += ["    " + line for line in (h["output"] or "").splitlines()]
+        if not h["ok"]:
+            out.append(f"    the hook failed; the event stands (a hook never undoes it)"
+                       + (f", and {h['alerted']} got an alert" if h["alerted"] else "")
+                       + f". History: maxpm show {h['deploy']}")
+    return out
+
+
 def _ship_line(p):
     """For the worker that asked for a ship: when its change goes out (the target's cut and release cadence)."""
     if p.get("in_cut"):
@@ -597,6 +638,15 @@ def build_parser():
     x.add_argument("name")
     x.add_argument("--rev", help="the commit that the release builds from, or any word for it: it goes into the history "
                    "and the notes of the deploy item")
+    x = tgs.add_parser("hook", help="a shell command that MaximizePM runs when an event of the target occurs: "
+                       + ", ".join(core.HOOK_EVENTS) + ". The maxpm command that causes the event runs it before it "
+                       "returns, in the folder of the target's project, with MAXPM_EVENT, MAXPM_TARGET, MAXPM_REV, "
+                       "MAXPM_ITEM, and MAXPM_AGENT in its environment, for at most hook_timeout. A hook never "
+                       "undoes and never refuses its event; a failure alerts the target owner")
+    x.add_argument("name")
+    x.add_argument("event", nargs="?", help="one of " + ", ".join(core.HOOK_EVENTS) + "; none lists the hooks")
+    x.add_argument("command", nargs="?", help="the command; none shows the hook")
+    x.add_argument("--clear", action="store_true", help="remove the hook of this event")
     x = tgs.add_parser("release-now", help="start the collected release sooner than the cadence permits, with a "
                        "reason (a fix of a production defect, a person's request); the target owner, the manager, "
                        "or a person decides it, and the history records it")
@@ -1207,7 +1257,16 @@ def _run(args, conn):
     if st and not args.json:
         print(_stop_banner(actor, st), file=sys.stderr)
     core.record_claude_session(conn, actor, core.claude_session_from_env())  # before done measures the item
-    res = dispatch(conn, args, actor)
+    try:
+        res = dispatch(conn, args, actor)
+    except RiverError:
+        # An event that occurred before the refusal still runs its hook.
+        for line in _hook_result_lines(core.run_hooks(conn, os.getcwd())):
+            print(line, file=sys.stderr)
+        raise
+    hooks = core.run_hooks(conn, os.getcwd())  # the events of this command (a release cut, a review, a deploy)
+    if hooks and isinstance(res, dict):
+        res["hooks_run"] = hooks
     monitors = None
     if args.cmd in ("go", "claim", "next") and core.pending_monitors(conn):
         monitors = ask_server_for_monitors(conn)
@@ -1234,6 +1293,8 @@ def _run(args, conn):
         print(json.dumps(res, indent=2, default=str))
     else:
         render(args, res)
+        for line in _hook_result_lines(hooks):
+            print(line)
     if monitors is not None and args.cmd != "go" and not args.json:
         for line in _monitor_lines(monitors):
             print(line, file=sys.stderr)
@@ -1677,6 +1738,8 @@ def dispatch(conn, a, actor):
             return core.target_show(conn, a.name) if a.mode is None else core.target_deployer(conn, a.name, a.mode, actor)
         if a.tcmd == "cadence":
             return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor)
+        if a.tcmd == "hook":
+            return core.target_hook(conn, a.name, a.event, a.command, a.clear, actor)
         if a.tcmd == "release-now":
             return core.release_now(conn, a.name, a.reason, actor)
         if a.tcmd == "cut":
@@ -2125,6 +2188,7 @@ def render_manage(b):
             f"  stop:    {r} stop <agent> --reason \"...\"   (stuck, or waited longer than wait_too_long {b['wait_too_long']})",
             f"  kill:    {r} stop <agent> --kill --reason \"...\"   emergency only, and only after the user says yes",
             f"  targets: {r} target give <target> --to <agent>",
+            *(f"  {_hooks_brief(t, h)}" for t, h in sorted((b.get("hooks") or {}).items())),
             f"  config:  {r} config set launch_agents|default_model|default_effort ...",
             (f"  tidy:    maxpm serve closes the tmux panes of finished sessions every tidy_every {b['tidy_every']}; "
              f"maxpm view --tidy does it now" if core.parse_duration(b["tidy_every"]).total_seconds() else
@@ -2447,6 +2511,8 @@ def render_go(b):
             elif not t.get("monitor"):
                 out.append(f"  no monitor: to have a session follow each deploy: {r} target monitor {t['name']} "
                            f"\"<what to watch, for how long>\"")
+            if b.get("hooks"):
+                out.append("  " + _hooks_brief(t["name"], b["hooks"]))
             for n in b.get("next_deploy", []):
                 out.append(f"  next deploy #{n['id']} is collecting: " + (", ".join(f"#{d['id']}" for d in n["waits_on_detail"]) or "nothing yet"))
             p = b.get("release") or {}
@@ -2884,6 +2950,20 @@ def render(a, res):
             for x in ships:
                 print(f"    #{x['id']} {x['title']} ({x['status'].replace('_', ' ')})")
             return
+        if a.tcmd == "hook":
+            if res["changed"]:
+                print(f"hook {res['event']} of target {res['target']} {res['changed']}")
+            print("\n".join(_hook_lines(res["target"], res["hooks"])))
+            if res["hooks"]:
+                print(f"  each runs in {res['folder'] or 'the folder of the command that causes the event'}, for at "
+                      f"most {res['timeout']} (hook_timeout), with MAXPM_EVENT, MAXPM_TARGET, MAXPM_REV, MAXPM_ITEM, "
+                      f"and MAXPM_AGENT set")
+            free = [e for e in res["events"] if e not in {h["event"] for h in res["hooks"]}]
+            if free:
+                print(f"  set one: maxpm target hook {res['target']} <event> \"<command>\"   events with no hook:")
+                for e in free:
+                    print(f"    {e}: {res['events'][e]}")
+            return
         if a.tcmd == "release-now":
             it = res["item"]
             print(f"release now: deploy #{res['deploy']} for {res['target']} goes out sooner "
@@ -2905,6 +2985,8 @@ def render(a, res):
                                 "off": "off (maxpm serve starts nothing; the owner or a person deploys)"}[res["deployer"]]
               + f"; change it: maxpm target deployer {res['name']} launch|standing|off")
         for line in _release_lines(res["release"]):
+            print("  " + line)
+        for line in _hook_lines(res["name"], res.get("hooks") or []):
             print("  " + line)
         if res["owner"]:
             left = core._short(core.parse_iso(res["owner_expires_at"]) - core.now())

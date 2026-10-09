@@ -310,9 +310,11 @@ def loop(stop, interval_s=None):
             server.auto_context(conn)  # goal_context on: a goal with ready work gets a context session (a base)
             server.auto_tidy(conn)  # every tidy_every: close the tmux panes of sessions that are done
             server.auto_end_orphans(conn)  # and end the tmux servers the tests left behind with no socket
+            server.hooks_soon(conn)  # a hook whose command ended before it ran it
             if core._channels(core.setting(conn, "notify_channels")):
                 run(conn)
-            if SERVE_PORT.get("port") and server.reload_ready(conn):  # maxpm serve only: run the new code
+            # maxpm serve only: run the new code, but not while one of its threads runs a hook
+            if SERVE_PORT.get("port") and not server.HOOKS["running"] and server.reload_ready(conn):
                 conn.close()
                 server.restart_now("the MaximizePM code changed")
         except Exception as e:  # keep the loop alive; the next pass retries

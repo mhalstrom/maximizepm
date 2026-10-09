@@ -83,6 +83,7 @@ maxpm target own <target>                              # one owner per target ru
 maxpm target monitor <target> "<what to watch, for how long>"   # a session follows each deploy
 maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect
 maxpm target cut <target> --rev <commit>               # fix the release's items now; later ships join the next one
+maxpm target hook <target> <event> "<command>"         # MaximizePM runs it on release-cut, review-passed, review-failed, or deployed
 maxpm target give <target> --to <agent>                # or: maxpm target release <target>
 ```
 

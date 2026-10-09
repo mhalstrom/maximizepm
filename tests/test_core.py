@@ -5043,3 +5043,261 @@ class Locked(Base):
             del ran[:]
             self.assertEqual(core.claim(self.c, review, "w3")["assignee"], "w3")
             self.assertEqual(ran, [False])
+
+
+class Hooks(Base):
+    """A hook is a command that MaximizePM runs when a release event of a target occurs (maxpm target hook)."""
+
+    def setUp(self):
+        super().setUp()
+        core.target_add(self.c, "web", "push, then smoke test")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        for n in ("dev", "rev", "ops"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "review", "on")
+        core.target_own(self.c, "web", "ops")
+        a = self.add("site", "page")
+        core.claim(self.c, a, "dev")
+        core.done(self.c, a, "commit", "dev", ship_it=True)
+        ids = core.item_show(self.c, a)["unblocks"]
+        self.review = [i for i in ids if core.item_show(self.c, i)["kind"] == "review"][0]
+        self.deploy = [i for i in ids if i != self.review][0]
+        self.log = os.path.join(self.dir.name, "hook.log")
+
+    def script(self, name, body):
+        """A hook as a Python script, so the same command runs in sh and in cmd.exe (Windows)."""
+        path = os.path.join(self.dir.name, name)
+        with open(path, "w") as f:
+            f.write(body)
+        return f'"{sys.executable}" "{path}"'
+
+    def recorder(self):
+        """A hook that appends its environment and its folder to the log, and prints one line."""
+        return self.script("record.py", "import json, os\n"
+                           f"with open({self.log!r}, 'a') as f:\n"
+                           "    f.write(json.dumps({k[6:].lower(): v for k, v in os.environ.items() if k in ('MAXPM_EVENT', "
+                           "'MAXPM_TARGET', 'MAXPM_REV', 'MAXPM_ITEM', 'MAXPM_DEPLOY', 'MAXPM_AGENT')} | "
+                           "{'cwd': os.path.realpath(os.getcwd())}) + '\\n')\n"
+                           "print('recorded', os.environ['MAXPM_EVENT'])\n")
+
+    def runs(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as f:
+            return [json.loads(line) for line in f]
+
+    def test_each_release_event_runs_its_hook_once_with_the_environment(self):
+        cmd = self.recorder()
+        for event in core.HOOK_EVENTS:
+            core.target_hook(self.c, "web", event, cmd, actor="mark")
+        here = os.path.realpath(self.dir.name)
+        core.target_cut(self.c, "web", "abc1234", "ops")
+        self.assertEqual(self.runs(), [])  # the hook runs after the transaction of the event, not inside it
+        r = core.run_hooks(self.c)
+        self.assertEqual([(h["event"], h["exit_code"], h["ok"], h["output"]) for h in r],
+                         [("release-cut", 0, True, "recorded release-cut")])
+        self.assertEqual(core.run_hooks(self.c), [])  # once
+        core.claim(self.c, self.review, "rev")
+        self.assertEqual(core.run_hooks(self.c), [])  # the release is cut already: the claim is no second cut
+        fix = core.review_fail(self.c, self.review, ["null check"], actor="rev")["fixes"][0]["id"]
+        self.assertEqual([h["event"] for h in core.run_hooks(self.c)], ["review-failed"])
+        core.claim(self.c, fix, "dev")
+        core.done(self.c, fix, "fixed", "dev")
+        self.assertEqual(core.run_hooks(self.c), [])  # an item that is no review and no deploy is no release event
+        core.claim(self.c, self.review, "rev")
+        core.review_pass(self.c, self.review, None, "rev")
+        self.assertEqual([h["event"] for h in core.run_hooks(self.c)], ["review-passed"])
+        core.claim(self.c, self.deploy, "ops")
+        core.done(self.c, self.deploy, "release 7", "ops")
+        self.assertEqual([h["event"] for h in core.run_hooks(self.c)], ["deployed"])
+        self.assertEqual(core.run_hooks(self.c), [])
+        d, v = str(self.deploy), str(self.review)
+        want = [("release-cut", d, "ops"), ("review-failed", v, "rev"), ("review-passed", v, "rev"), ("deployed", d, "ops")]
+        self.assertEqual([(x["event"], x["item"], x["agent"]) for x in self.runs()], want)
+        for x in self.runs():  # every event of the release: its target, its deploy item, the pinned revision, the folder
+            self.assertEqual((x["target"], x["deploy"], x["rev"], x["cwd"]), ("web", d, "abc1234", here))
+        history = [e["change"] for e in core.item_show(self.c, self.deploy)["events"]]
+        for event in core.HOOK_EVENTS:  # one line for each run, on the deploy item
+            self.assertEqual(len([c for c in history if c.startswith(f"hook {event}: exit 0, ")]), 1, history)
+        self.assertEqual([m for m in core.inbox(self.c, "ops") if "hook" in m["body"]], [])  # no alert: none failed
+
+    def test_a_cut_that_comes_with_a_claim_runs_the_hook_with_no_revision(self):
+        core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
+        core.claim(self.c, self.review, "rev")  # a reviewer took the review: that is the cut
+        self.assertEqual([h["event"] for h in core.run_hooks(self.c)], ["release-cut"])
+        x = self.runs()[0]
+        self.assertEqual((x["event"], x["item"], x["rev"], x["agent"]), ("release-cut", str(self.deploy), "", "rev"))
+
+    def test_an_event_of_a_target_with_no_hook_queues_nothing(self):
+        core.target_hook(self.c, "web", "deployed", self.recorder(), actor="mark")
+        core.target_cut(self.c, "web", "abc1234", "ops")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM hook_runs").fetchone()[0], 0)
+        self.assertEqual(core.run_hooks(self.c), [])
+
+    def test_a_failing_hook_does_not_stop_the_event_and_alerts_the_owner(self):
+        bad = self.script("bad.py", "import sys\nprint('no build folder')\nsys.exit(3)\n")
+        core.target_hook(self.c, "web", "release-cut", bad, actor="mark")
+        core.target_hook(self.c, "web", "deployed", bad, actor="mark")
+        res = core.target_cut(self.c, "web", "abc1234", "mark")  # a person cuts; ops owns the target
+        self.assertTrue(res["cut"]["cut_at"])
+        h = core.run_hooks(self.c)[0]
+        self.assertEqual((h["ok"], h["exit_code"], h["timed_out"], h["alerted"]), (False, 3, False, "ops"))
+        self.assertIn("no build folder", h["output"])
+        self.assertTrue(core.item_show(self.c, self.deploy)["cut_at"])  # the event stands
+        alerts = [m for m in core.inbox(self.c, "ops") if m["kind"] == "alert" and "hook release-cut" in m["body"]]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("exit 3", alerts[0]["body"])
+        self.assertIn("no build folder", alerts[0]["body"])
+        self.assertEqual(alerts[0]["item_id"], self.deploy)
+        self.assertTrue(any(e["change"].startswith("hook release-cut: exit 3, ")
+                            for e in core.item_show(self.c, self.deploy)["events"]))
+        # The owner's own command: it reads the result in the reply, and gets no alert from itself.
+        core.claim(self.c, self.review, "rev")
+        core.review_pass(self.c, self.review, None, "rev")
+        core.claim(self.c, self.deploy, "ops")
+        self.assertEqual(core.done(self.c, self.deploy, "release 7", "ops")["status"], "done")
+        h = core.run_hooks(self.c)[0]
+        self.assertEqual((h["event"], h["ok"], h["alerted"]), ("deployed", False, None))
+        self.assertEqual(core.item_show(self.c, self.deploy)["status"], "done")
+        # With no owner, the manager gets the alert.
+        core.target_release(self.c, "web", "ops")
+        core.manage(self.c, self.dir.name, "boss")
+        b = self.add("site", "form")
+        core.claim(self.c, b, "dev")
+        core.done(self.c, b, "commit", "dev", ship_it=True)
+        core.target_cut(self.c, "web", None, "mark")
+        self.assertEqual(core.run_hooks(self.c)[0]["alerted"], "boss")
+
+    def test_a_hook_whose_folder_is_gone_fails_and_the_event_stands(self):
+        core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
+        self.c.execute("UPDATE projects SET path=? WHERE name='site'", (os.path.join(self.dir.name, "gone"),))
+        core.target_cut(self.c, "web", None, "mark")
+        h = core.run_hooks(self.c)[0]
+        self.assertEqual((h["ok"], h["exit_code"], h["result"], h["alerted"]), (False, None, "not started", "ops"))
+        self.assertIn("does not exist", h["output"])
+        self.assertEqual(self.runs(), [])
+
+    def test_a_hook_past_hook_timeout_is_stopped_with_its_children(self):
+        pidfile = os.path.join(self.dir.name, "child.pid")
+        slow = self.script("slow.py", "import subprocess, sys\n"
+                           "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                           f"open({pidfile!r}, 'w').write(str(p.pid))\n"
+                           "print('started', flush=True)\n"
+                           "p.wait()\n")
+        core.target_hook(self.c, "web", "release-cut", slow, actor="mark")
+        with self.assertRaisesRegex(RiverError, "30m"):
+            core.config_set(self.c, "hook_timeout", "soon")
+        core.config_set(self.c, "hook_timeout", "2s", project="deploy-web")  # the hooks of this target only
+        self.assertEqual(core.target_hook(self.c, "web")["timeout"], "2s")
+        old = core.REVIEW_RENEW_EVERY
+        core.REVIEW_RENEW_EVERY = 0.3
+        self.addCleanup(setattr, core, "REVIEW_RENEW_EVERY", old)
+        core.target_cut(self.c, "web", None, "mark")
+        t = time.monotonic()
+        h = core.run_hooks(self.c)[0]
+        self.assertLess(time.monotonic() - t, 20)
+        self.assertEqual((h["ok"], h["timed_out"], h["alerted"]), (False, True, "ops"))
+        self.assertIn("stopped at hook_timeout (2s)", h["result"])
+        self.assertIn("started", h["output"])
+        with open(pidfile) as f:
+            pid = int(f.read())
+        for _ in range(40):
+            if not core.pid_alive(pid):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the hook's child process still runs")
+        self.assertTrue(any(e["change"].startswith("hook release-cut: stopped at hook_timeout (2s)")
+                            for e in core.item_show(self.c, self.deploy)["events"]))
+        self.assertTrue(core.item_show(self.c, self.deploy)["cut_at"])
+
+    def test_set_change_clear_and_list(self):
+        self.assertEqual(core.target_hook(self.c, "web")["hooks"], [])
+        r = core.target_hook(self.c, "web", "deployed", " scripts/after-release.sh ", actor="mark")
+        self.assertEqual((r["changed"], [(h["event"], h["command"], h["last"]) for h in r["hooks"]]),
+                         ("set", [("deployed", "scripts/after-release.sh", None)]))
+        core.target_hook(self.c, "web", "release-cut", "scripts/prepare.sh", actor="mark")
+        r = core.target_hook(self.c, "web", "deployed", "scripts/clean.sh", actor="mark")
+        self.assertEqual(r["changed"], "changed")
+        want = [("release-cut", "scripts/prepare.sh"), ("deployed", "scripts/clean.sh")]  # one for each event
+        self.assertEqual([(h["event"], h["command"]) for h in core.target_hook(self.c, "web")["hooks"]], want)
+        self.assertEqual([(h["event"], h["command"]) for h in core.target_show(self.c, "web")["hooks"]], want)
+        self.assertEqual(core.target_hook(self.c, "web", "deployed")["changed"], None)  # an event alone: a look
+        core.target_rename(self.c, "web", "www", "mark")  # the hooks follow a new name of the target
+        self.assertEqual([(h["event"], h["command"]) for h in core.target_hooks(self.c, "www")], want)
+        r = core.target_hook(self.c, "www", "release-cut", clear=True, actor="mark")
+        self.assertEqual((r["changed"], [h["event"] for h in r["hooks"]]), ("removed", ["deployed"]))
+        with self.assertRaisesRegex(RiverError, "has no release-cut hook"):
+            core.target_hook(self.c, "www", "release-cut", clear=True, actor="mark")
+        with self.assertRaisesRegex(RiverError, "a command or --clear, not both"):
+            core.target_hook(self.c, "www", "deployed", "x", clear=True, actor="mark")
+        with self.assertRaisesRegex(RiverError, "the command is empty"):
+            core.target_hook(self.c, "www", "deployed", "  ", actor="mark")
+        with self.assertRaisesRegex(RiverError, "no target 'nowhere'"):
+            core.target_hook(self.c, "nowhere", "deployed", "x")
+
+    def test_an_unknown_event_is_refused_with_the_names(self):
+        with self.assertRaises(RiverError) as e:
+            core.target_hook(self.c, "web", "item-done", "scripts/x.sh", actor="mark")
+        self.assertEqual(str(e.exception), "no hook event 'item-done'; the events: release-cut, review-passed, "
+                                           "review-failed, deployed")
+        with self.assertRaisesRegex(RiverError, "no hook event 'cut'"):
+            core.target_hook(self.c, "web", "cut", clear=True)
+        self.assertEqual(core.target_hook(self.c, "web")["hooks"], [])
+
+    def test_a_command_runs_the_hooks_of_its_own_events_and_serve_those_left_behind(self):
+        core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
+        core.target_cut(self.c, "web", None, "ops")
+        self.c.execute("UPDATE hook_runs SET queued_by='another-command'")
+        self.assertEqual(core.run_hooks(self.c), [])  # the command that caused the event runs it
+        self.assertEqual(core.run_hooks(self.c, orphans=True), [])  # and that command may still run
+        self.assertEqual(len(core.run_hooks(self.c, token="another-command")), 1)
+        self.c.execute("UPDATE hook_runs SET started_at=NULL, ended_at=NULL, queued_at='2000-01-01T00:00:00Z'")
+        self.assertEqual(len(core.run_hooks(self.c, orphans=True)), 1)  # it ended before it ran the hook
+        self.assertEqual(len(self.runs()), 2)
+
+    def test_the_commands_print_the_result_and_the_briefings_name_the_hooks(self):
+        from river import cli
+        env = {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, env):
+                cli.run(list(words))
+            return out.getvalue()
+        bad = self.script("bad.py", "import sys\nprint('no build folder')\nsys.exit(3)\n")
+        self.assertIn("hooks: none", run("target", "hook", "web"))
+        text = run("--as", "mark", "target", "hook", "web", "release-cut", self.recorder())
+        self.assertIn("hook release-cut of target web set", text)
+        self.assertIn("review-passed: the review of the release is done", text)  # the events that have no hook
+        run("--as", "mark", "target", "hook", "web", "deployed", bad)
+        with self.assertRaisesRegex(RiverError, "no hook event 'cut'; the events: release-cut"):
+            run("--as", "mark", "target", "hook", "web", "cut", "x")
+        text = run("--as", "ops", "target", "cut", "web", "--rev", "abc1234")
+        self.assertIn(f"release #{self.deploy} of web is cut", text)
+        self.assertIn("hook release-cut of target web: exit 0, ", text)
+        self.assertIn("    recorded release-cut", text)
+        self.assertEqual([x["rev"] for x in self.runs()], ["abc1234"])
+        text = run("target", "show", "web")
+        self.assertIn(f"(last run for #{self.deploy}: exit 0, ", text)
+        self.assertIn("deployed: ", text)
+        m = core.manage(self.c, self.dir.name, "boss")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_manage(m)
+        self.assertIn("hooks of target web: MaximizePM runs release-cut: ", out.getvalue())
+        self.assertIn("Do not run these commands by hand", out.getvalue())
+        core.claim(self.c, self.review, "rev")
+        core.review_pass(self.c, self.review, None, "rev")
+        b = core.go(self.c, self.dir.name, "ops")
+        self.assertEqual((b["role"], b["item"]["id"]), ("deployer", self.deploy))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn("hooks of target web: MaximizePM runs release-cut: ", out.getvalue())
+        text = run("--as", "ops", "--json", "done", str(self.deploy), "--output", "release 7")
+        res = json.loads(text)
+        self.assertEqual(res["status"], "done")  # a hook that fails does not refuse the done
+        self.assertEqual([(h["event"], h["exit_code"], h["output"]) for h in res["hooks_run"]],
+                         [("deployed", 3, "no build folder")])

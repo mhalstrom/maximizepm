@@ -219,6 +219,9 @@ DEFAULT_SETTINGS = {
     # process it started (0s: no limit). The reviewer's leases stay renewed while the command runs. Set it on the
     # deploy project (deploy-<target>) when one target's gate is slow.
     "review_timeout": "4h",
+    # A hook (maxpm target hook) that runs longer than hook_timeout is stopped, with every process it started
+    # (0s: no limit). Set it on the deploy project (deploy-<target>) when the hooks of one target are slow.
+    "hook_timeout": "10m",
     # A shell command, run in the release review's folder, that prints the messages of the commits a release ships,
     # for example git log --format=%B <last release>..<pinned commit>. Its environment has MAXPM_LAST_RELEASE (the
     # output of the target's last done deploy item), MAXPM_TARGET, and MAXPM_REVIEW. Every #<id> it prints is an
@@ -318,6 +321,37 @@ CREATE TABLE IF NOT EXISTS targets (
   created_at        TEXT NOT NULL
 );
 
+-- A command that MaximizePM runs when an event of a target occurs (maxpm target hook): one for each event.
+CREATE TABLE IF NOT EXISTS hooks (
+  id          INTEGER PRIMARY KEY,
+  target_id   INTEGER NOT NULL REFERENCES targets(id),
+  event       TEXT NOT NULL,             -- one of HOOK_EVENTS
+  command     TEXT NOT NULL,             -- a shell command
+  set_by      TEXT,
+  set_at      TEXT NOT NULL,
+  UNIQUE (target_id, event)
+);
+
+-- One row for each event that had a hook: queued in the transaction of the event, run after it (run_hooks).
+CREATE TABLE IF NOT EXISTS hook_runs (
+  id          INTEGER PRIMARY KEY,
+  target      TEXT NOT NULL,
+  event       TEXT NOT NULL,
+  command     TEXT NOT NULL,             -- the hook as it was when the event occurred
+  item_id     INTEGER,                   -- the deploy or the review item of the event (MAXPM_ITEM)
+  deploy_id   INTEGER,                   -- the deploy item of the release: its history gets the result
+  rev         TEXT,                      -- the revision that the cut of the release pinned (MAXPM_REV)
+  actor       TEXT,
+  queued_at   TEXT NOT NULL,
+  queued_by   TEXT,                      -- the process and thread of the command that caused the event
+  started_at  TEXT,
+  ended_at    TEXT,
+  exit_code   INTEGER,
+  timed_out   INTEGER NOT NULL DEFAULT 0,
+  seconds     REAL,
+  output      TEXT                       -- the last lines
+);
+
 CREATE TABLE IF NOT EXISTS projects (
   id          INTEGER PRIMARY KEY,
   name        TEXT NOT NULL UNIQUE,
@@ -370,6 +404,7 @@ CREATE TABLE IF NOT EXISTS items (
   needs_check       INTEGER NOT NULL DEFAULT 0,
   fresh_start       TEXT,                     -- maxpm serve starts a fresh session for it (an answer came)
   cut_at            TEXT,                     -- a deploy item: when its release was cut (its list of items is fixed)
+  cut_rev           TEXT,                     -- a deploy item: the revision its cut pinned (maxpm target cut --rev)
   model             TEXT,                     -- recommended model (NULL: the default_model setting)
   effort            TEXT,                     -- recommended effort level (NULL: default_effort)
   min_model         TEXT,                     -- hard limits, one model per family, comma list
@@ -868,6 +903,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN due_warned INTEGER NOT NULL DEFAULT 0")
     if "cut_at" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN cut_at TEXT")
+    if "cut_rev" not in icols:
+        conn.execute("ALTER TABLE items ADD COLUMN cut_rev TEXT")
     if "late_prereqs" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN late_prereqs INTEGER NOT NULL DEFAULT 0")
     for col in ("blocked_at", "blocked_until", "blocked_set_by"):
@@ -1060,7 +1097,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout"):
+            "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout"):
         parse_duration(value)
     elif key == "prompt_pattern":
         try:
@@ -1668,6 +1705,7 @@ def target_rename(conn, old, new, actor=None):
         conn.execute("UPDATE targets SET name=? WHERE id=?", (new, t["id"]))
         projects = conn.execute("UPDATE projects SET target=? WHERE target=?", (new, old)).rowcount
         items = conn.execute("UPDATE items SET target=? WHERE target=?", (new, old)).rowcount
+        conn.execute("UPDATE hook_runs SET target=? WHERE target=?", (new, old))
         for kind, was, now_ in (("deploy", f"Deploy {old}", f"Deploy {new}"),
                                 ("review", f"Review release {old}", f"Review release {new}")):
             conn.execute(f"UPDATE items SET title=? WHERE kind=? AND target=? AND title=? AND status IN {OPEN_STATES}",
@@ -2097,6 +2135,204 @@ def target_monitor(conn, name, text, actor=None):
     return target_show(conn, name)
 
 
+# The events that run a hook (maxpm target hook), each with when it occurs. A later event (an item is claimed,
+# an item is done, a goal is done) is one entry here and one _hook call in the transaction where it occurs.
+HOOK_EVENTS = {
+    "release-cut": "the release is cut: maxpm target cut, or a reviewer (the deployer, with no review) took it",
+    "review-passed": "the review of the release is done (maxpm review pass)",
+    "review-failed": "maxpm review fail sent the release back with fixes",
+    "deployed": "the deploy item of the release is done",
+}
+HOOK_ORPHAN_AFTER = 120  # seconds after which maxpm serve runs a queued hook whose command did not (it ended early)
+HOOK_TAIL = 15  # the lines of a hook's output that the command prints and the run keeps
+HOOK_RUNNER = None  # a test hook: (command, folder, limit, renew, env) -> a result like _run_command's
+
+
+def _hook_event(event):
+    if event not in HOOK_EVENTS:
+        raise RiverError(f"no hook event {event!r}; the events: {', '.join(HOOK_EVENTS)}")
+    return event
+
+
+def hook_token():
+    """Names the process and thread that run now: a command runs the hooks of the events that it caused."""
+    import threading
+    return f"{this_host()}:{os.getpid()}:{threading.get_ident()}"
+
+
+def target_hooks(conn, name):
+    """The hooks of a target in the order of HOOK_EVENTS, each with its last run (None: it never ran)."""
+    t = _target(conn, name)
+    rows = {r["event"]: dict(r) for r in conn.execute(
+        "SELECT event, command, set_by, set_at FROM hooks WHERE target_id=?", (t["id"],))}
+    out = []
+    for event in HOOK_EVENTS:
+        if event not in rows:
+            continue
+        last = conn.execute("SELECT queued_at, started_at, ended_at, exit_code, timed_out, seconds, deploy_id, item_id "
+                            "FROM hook_runs WHERE target=? AND event=? ORDER BY id DESC LIMIT 1", (t["name"], event)).fetchone()
+        out.append(dict(rows[event], last=dict(last) if last else None))
+    return out
+
+
+def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
+    """maxpm target hook: set, remove, or list the hooks of a target. A hook is a shell command that MaximizePM
+    runs when an event of the target occurs (HOOK_EVENTS), one for each event: a script can call more. The
+    command that causes the event runs it (run_hooks). A hook never undoes and never refuses its event."""
+    changed = None
+    with tx(conn):
+        t = _target(conn, name)
+        name = t["name"]
+        if event is None:
+            if clear or command is not None:
+                raise RiverError(f"name the event: maxpm target hook {name} <{'|'.join(HOOK_EVENTS)}> \"<command>\"")
+        else:
+            _hook_event(event)
+            has = conn.execute("SELECT command FROM hooks WHERE target_id=? AND event=?", (t["id"], event)).fetchone()
+            if clear:
+                if command is not None:
+                    raise RiverError(f"give a command or --clear, not both: maxpm target hook {name} {event} --clear")
+                if has is None:
+                    raise RiverError(f"target {name} has no {event} hook; its hooks: maxpm target hook {name}")
+                conn.execute("DELETE FROM hooks WHERE target_id=? AND event=?", (t["id"], event))
+                _event(conn, None, actor, f"target {name} hook {event} removed (was: {has['command']})")
+                changed = "removed"
+            elif command is not None:
+                command = command.strip()
+                if not command:
+                    raise RiverError(f"the command is empty; to remove the hook: maxpm target hook {name} {event} --clear")
+                conn.execute("INSERT INTO hooks(target_id,event,command,set_by,set_at) VALUES (?,?,?,?,?) "
+                             "ON CONFLICT(target_id,event) DO UPDATE SET command=excluded.command, "
+                             "set_by=excluded.set_by, set_at=excluded.set_at", (t["id"], event, command, actor, iso(now())))
+                _event(conn, None, actor, f"target {name} hook {event} {'changed' if has else 'set'}: {command}")
+                changed = "changed" if has else "set"
+    folder = _hook_folder(conn, name)
+    return {"target": name, "event": event, "changed": changed, "hooks": target_hooks(conn, name),
+            "events": dict(HOOK_EVENTS), "folder": folder,
+            "timeout": setting(conn, "hook_timeout", project_id=_deploy_project_id(conn, name))}
+
+
+def _deploy_project_id(conn, target):
+    r = conn.execute("SELECT id FROM projects WHERE name=?", (f"deploy-{target}",)).fetchone()
+    return r["id"] if r else None
+
+
+def _hook_folder(conn, target, deploy_id=None):
+    """Where a hook of a target runs: the folder of its deploy project (deploy-<target>), else of the first
+    project of the target that has one, else of a project the release ships. None when none has one."""
+    names = [f"deploy-{target}"] + [r["name"] for r in conn.execute(
+        "SELECT name FROM projects WHERE target=? AND archived=0 ORDER BY rank, id", (target,))]
+    if deploy_id:
+        names += [r["name"] for r in conn.execute(
+            "SELECT p.name FROM deps d JOIN items i ON i.id=d.blocked_by JOIN projects p ON p.id=i.project_id "
+            "WHERE d.item_id=? ORDER BY p.rank, p.id", (deploy_id,))]
+    for n in names:
+        r = conn.execute("SELECT path FROM projects WHERE name=?", (n,)).fetchone()
+        if r and r["path"]:
+            return r["path"]
+    return None
+
+
+def _hook(conn, event, target, item_id, actor, deploy_id=None):
+    """An event of a target occurred: when the target has a hook for it, queue one run. Inside the tx of the
+    event, so an event that did not occur queues nothing. The command that caused the event runs the hook after
+    that transaction (run_hooks): a hook can take minutes, and no command waits for the lock of the queue."""
+    _hook_event(event)
+    h = conn.execute("SELECT h.command FROM hooks h JOIN targets t ON t.id=h.target_id WHERE t.name=? AND h.event=?",
+                     (target, event)).fetchone() if target else None
+    if h is None:
+        return
+    deploy_id = deploy_id or item_id
+    rev = conn.execute("SELECT cut_rev FROM items WHERE id=?", (deploy_id,)).fetchone()
+    conn.execute("INSERT INTO hook_runs(target,event,command,item_id,deploy_id,rev,actor,queued_at,queued_by) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)", (target, event, h["command"], item_id, deploy_id,
+                                                rev["cut_rev"] if rev else None, actor, iso(now()), hook_token()))
+
+
+def _review_deploy(conn, review_id):
+    """The deploy item that waits on a release review, or None."""
+    r = conn.execute("SELECT i.id FROM deps d JOIN items i ON i.id=d.item_id WHERE d.blocked_by=? AND i.kind='deploy' "
+                     "ORDER BY i.id LIMIT 1", (review_id,)).fetchone()
+    return r["id"] if r else None
+
+
+def run_hooks(conn, cwd=None, token=None, orphans=False):
+    """Run the hooks that wait, one after the other, and return their results: those of the events that this
+    command caused (token: another thread's, for maxpm serve); with orphans, those that waited
+    HOOK_ORPHAN_AFTER because their command ended before it ran them. Each one runs once: the run is taken in a
+    transaction first. cwd: where a hook runs when no project of the target has a folder."""
+    token = token or hook_token()
+    old = iso(now() - timedelta(seconds=HOOK_ORPHAN_AFTER))
+    q = ("SELECT * FROM hook_runs WHERE started_at IS NULL AND (queued_by=?" + (" OR queued_at<?)" if orphans else ")")
+         + " ORDER BY id LIMIT 1")
+    args = (token, old) if orphans else (token,)
+    out = []
+    while conn.execute(q, args).fetchone() is not None:  # most commands queue none: no write, no lock
+        with tx(conn):
+            run = conn.execute(q, args).fetchone()
+            if run is None:
+                break
+            conn.execute("UPDATE hook_runs SET started_at=? WHERE id=?", (iso(now()), run["id"]))
+        out.append(_run_hook(conn, dict(run), cwd))
+    return out
+
+
+def _run_hook(conn, run, cwd=None):
+    """Run one hook and record the result: the run, one history line on the deploy item, and, when it failed or
+    reached hook_timeout, an alert to the owner of the target (with no owner: to the manager). Never an error:
+    the event stands."""
+    import time
+    target, event, cmd, actor = run["target"], run["event"], run["command"], run["actor"]
+    limit_text = setting(conn, "hook_timeout", item_id=run["deploy_id"])
+    limit = parse_duration(limit_text).total_seconds()
+    folder = _hook_folder(conn, target, run["deploy_id"])
+    where = os.path.expanduser(folder) if folder else cwd
+    env = {**os.environ, "MAXPM_EVENT": event, "MAXPM_TARGET": target, "MAXPM_REV": run["rev"] or "",
+           "MAXPM_ITEM": str(run["item_id"] or ""), "MAXPM_DEPLOY": str(run["deploy_id"] or ""),
+           "MAXPM_AGENT": actor or os.environ.get("MAXPM_AGENT", "")}
+
+    def renew():  # a long hook keeps the leases of the agent whose command runs it
+        if actor:
+            with tx(conn):
+                _touch_agent(conn, actor)
+
+    t0 = time.monotonic()
+    code, timed_out, text = None, False, ""
+    try:
+        if where and not os.path.isdir(where):
+            raise OSError(f"the folder {where} does not exist")
+        r = (HOOK_RUNNER or _run_command)(cmd, where, limit, renew, env)
+        code, timed_out = r.returncode, bool(getattr(r, "timed_out", False))
+        text = ((r.stdout or "") + (r.stderr or "")).strip()
+    except OSError as e:
+        text = f"the command did not start: {e}"
+    secs = time.monotonic() - t0
+    tail = "\n".join(text.splitlines()[-HOOK_TAIL:])
+    took = f"{secs:.0f}s" if secs < 90 else _short(timedelta(seconds=secs))
+    ok = code == 0 and not timed_out
+    result = (f"stopped at hook_timeout ({limit_text}) after {took}" if timed_out
+              else f"exit {code}, {took}" if code is not None else "not started")
+    out = {"id": run["id"], "target": target, "event": event, "command": cmd, "item": run["item_id"],
+           "deploy": run["deploy_id"], "rev": run["rev"], "folder": where, "exit_code": code, "timed_out": timed_out,
+           "seconds": round(secs, 1), "ok": ok, "result": result, "output": tail, "alerted": None}
+    with tx(conn):
+        conn.execute("UPDATE hook_runs SET ended_at=?, exit_code=?, timed_out=?, seconds=?, output=? WHERE id=?",
+                     (iso(now()), code, int(timed_out), round(secs, 1), tail, run["id"]))
+        if run["deploy_id"] and conn.execute("SELECT 1 FROM items WHERE id=?", (run["deploy_id"],)).fetchone():
+            _event(conn, run["deploy_id"], actor or "maxpm", f"hook {event}: {result}: {cmd}")
+        if not ok:
+            tg = conn.execute("SELECT owner FROM targets WHERE name=?", (target,)).fetchone()
+            to = (tg["owner"] if tg and tg["owner"] else None) or active_manager(conn)
+            if to and to != actor:
+                _send(conn, "alert", "maxpm", f"hook {event} of target {target} failed ({result}) for "
+                      f"#{run['item_id']}: {cmd}" + (f"\n{tail[-1500:]}" if tail else "")
+                      + f"\nThe event stands: a hook never undoes it. Find the cause; when the release needs the "
+                      f"command, run it by hand" + (f" in {where}" if where else "") + ".",
+                      to=to, item_id=run["deploy_id"])
+                out["alerted"] = to
+    return out
+
+
 # What maxpm serve starts for a target's deploys (maxpm target deployer):
 # launch: when the deploy item is ready, alert the target owner; when there is no owner, or the owner cannot take
 #   it (gone, stopped, never connected, or idle at its prompt), start a deployer session and give it the target.
@@ -2229,13 +2465,14 @@ def _release_cut(conn, dep_id, actor, why, rev=None):
     dep = _item(conn, dep_id)
     if dep["kind"] != "deploy" or dep["cut_at"]:
         return False
-    conn.execute("UPDATE items SET cut_at=? WHERE id=?", (iso(now()), dep_id))
+    conn.execute("UPDATE items SET cut_at=?, cut_rev=? WHERE id=?", (iso(now()), rev, dep_id))
     n = conn.execute("SELECT COUNT(*) FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? "
                      "AND i.kind NOT IN ('review','deploy')", (dep_id,)).fetchone()[0]
     _event(conn, dep_id, actor, f"release cut with {n} item{'' if n == 1 else 's'} ({why})" + (f": {rev}" if rev else "")
            + "; a later ship request joins the next deploy item")
     if rev:
         _add_note(conn, dep_id, f"[maxpm] release cut at {iso(now())}: {rev}")
+    _hook(conn, "release-cut", dep["target"], dep_id, actor)
     return True
 
 
@@ -2582,6 +2819,7 @@ def target_show(conn, name):
         "AND i.status IN ('open','in_progress','held')) open_items "
         "FROM projects p WHERE p.target=? AND p.archived=0 ORDER BY p.rank, p.id", (name,))]
     t["release"] = release_plan(conn, name)
+    t["hooks"] = target_hooks(conn, name)
     return t
 
 
@@ -2611,7 +2849,7 @@ def targets_view(conn, ann=None):
             pending=[{"id": a["id"], "title": a["title"], "status": a["status"], "assignee": a["assignee"],
                       "ready": a["ready"], "ships": ships(a), "review": review(a), "cut_at": a["cut_at"],
                       "monitors": monitors.get(a["id"], [])} for a in pending],
-            release=release_plan(conn, t["name"]),
+            release=release_plan(conn, t["name"]), hooks=target_hooks(conn, t["name"]),
             last_deploy=({"id": last["id"], "title": last["title"], "closed_at": last["closed_at"],
                           "output": last["output"], "ships": ships(last)} if last else None),
             history=[{"id": a["id"], "title": a["title"], "closed_at": a["closed_at"], "output": a["output"],
@@ -5400,6 +5638,10 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
                      "reserved_for=NULL, needs_check=0, output=COALESCE(?, output) WHERE id=?",
                      (status, iso(now()), output, it["id"]))
         _event(conn, it["id"], actor, status + (f": {output}" if output else ""))
+        if status == "done" and it["kind"] == "deploy":
+            _hook(conn, "deployed", it["target"], it["id"], actor)
+        elif status == "done" and it["kind"] == "review":
+            _hook(conn, "review-passed", it["target"], it["id"], actor, _review_deploy(conn, it["id"]))
         _goal_notice(conn, it["id"], actor, "finished" if status == "done" else status, output)
         newly, resumed = [], []
         if status in CLOSED_STATES:
@@ -5770,7 +6012,7 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
 REVIEW_RENEW_EVERY = 60  # seconds between lease renewals while a review command runs; the tests make it short
 
 
-def _run_command(cmd, cwd, limit, renew=None):
+def _run_command(cmd, cwd, limit, renew=None, env=None):
     """Run a shell command in its own process group and capture its output.
 
     renew runs every REVIEW_RENEW_EVERY seconds while the command runs, so a long gate keeps the
@@ -5781,7 +6023,8 @@ def _run_command(cmd, cwd, limit, renew=None):
     import time
     win = os.name == "nt"
     kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if win else {"start_new_session": True}
-    p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
+    p = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         **kw)
     end = time.monotonic() + limit if limit > 0 else None
     out = err = ""
     while True:
@@ -5860,6 +6103,8 @@ def review_fail(conn, item_id, fixes, note=None, project=None, actor=None, ask=F
                               "item the release waits on. Drop it to add no fixes; the review then comes back."))
         conn.execute("UPDATE items SET kind='fixes' WHERE id=?", (h["id"],))
         dep_add(conn, it["id"], [h["id"]], actor, mode="release")
+        with tx(conn):
+            _hook(conn, "review-failed", it["target"], it["id"], actor, _review_deploy(conn, it["id"]))
         res = item_show(conn, it["id"])
         res["asked"] = {"id": h["id"], "title": h["title"], "fixes": fixes}
         return res
@@ -5867,6 +6112,8 @@ def review_fail(conn, item_id, fixes, note=None, project=None, actor=None, ask=F
                       context=f"Found in the review of release {it['target']} (#{it['id']})" + (f": {note}" if note else ""))
              for t in fixes]
     dep_add(conn, it["id"], [a["id"] for a in added], actor, mode="release")
+    with tx(conn):
+        _hook(conn, "review-failed", it["target"], it["id"], actor, _review_deploy(conn, it["id"]))
     res = item_show(conn, it["id"])
     res["fixes"] = [{"id": a["id"], "title": a["title"], "project": project} for a in added]
     return res
@@ -8525,7 +8772,7 @@ def _deploy_brief(conn, item):
     mon = conn.execute("SELECT id, title, status, assignee FROM items WHERE kind='monitor' AND found_during=?",
                        (item["id"],)).fetchone()
     return {"target": {"name": t["name"], "description": t["description"], "owner": t["owner"], "monitor": t["monitor"]},
-            "monitor_item": dict(mon) if mon else None,
+            "monitor_item": dict(mon) if mon else None, "hooks": target_hooks(conn, t["name"]),
             "ships": item["waits_on_detail"], "release": release_plan(conn, t["name"]),
             "next_deploy": [item_show(conn, r["id"]) for r in nxt]}
 
@@ -8956,6 +9203,7 @@ def manage(conn, cwd, actor=None, takeover=None):
             "wait_low": setting(conn, "manage_wait_low", agent=actor),
             "wait_too_long": setting(conn, "wait_too_long"),
             "tidy_every": setting(conn, "tidy_every"),
+            "hooks": {t["name"]: h for t in target_list(conn) for h in [target_hooks(conn, t["name"])] if h},
             "native": has_native(conn, actor)}
 
 

@@ -97,6 +97,11 @@ your type from your CLI's environment.
    deploy adds a monitor item, and `maxpm serve` opens a session for it
    (role MONITOR): it watches, then finishes, or alerts the deployer and adds
    a person's item with a proposed rollback. It never rolls back by itself.
+   A target can have hooks (`maxpm target hook <target>` lists them): commands
+   that MaximizePM runs by itself when a release is cut, when its review passes
+   or fails, and when its deploy item is done. The reply of your command shows
+   the result of the hook. Do not run those commands by hand; a hook that
+   fails does not undo your command, and the target owner gets an alert.
    With the setting `review` on, the deploy item first waits on one review
    of the whole release. `maxpm go` gives a ready review before new work
    (role REVIEWER; `--role reviewer` takes any), but never to an agent that
