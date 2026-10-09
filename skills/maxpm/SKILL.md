@@ -289,11 +289,15 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   person's item), reminds the person, and tells you to take other work:
   run `maxpm go`. When the person finishes, the item is ready for whoever runs go.
 - A command is refused (the auto mode classifier, a permission prompt): do
-  the parts of the item that you can. Then add the person's item as above,
-  with the exact command and the permission rule that allows it
-  (`--blocks <id> --release`), and take other work. The person runs the
-  command or adds the rule, and a fresh session finishes the item. A yes in
-  one terminal does not reach the next session, and a rule does.
+  the parts of the item that you can, and do not try the command in another
+  form. Then add the person's item as above (`--blocks <id> --release`), with
+  the exact command, the reason that the refusal gave, and what is left of
+  the item, and take other work. The person decides: they run the command, or
+  they allow it in their settings for every later session (a yes in one
+  terminal does not reach the next session). Do not write the change of the
+  settings into the item, and do not plan there that a later session runs the
+  refused command: the classifier refuses such an item too. When the person
+  marks the item done, a fresh session finishes what is left.
 - Wait at your prompt only for a step that must not run without the person's
   yes each time: a release to production, or a deletion of data. Ask in the
   queue first, as your last step before you stop:

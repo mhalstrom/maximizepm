@@ -2467,7 +2467,7 @@ def render_go(b):
                 f"  a step for the user:   {r} add \"...\" --doer human --context \"...\" --blocks {it['id']}",
                 f"  a limit of the machine (disk, build stop, push freeze): keep the item, do the other parts, then "
                 f"{r} inbox --wait",
-                f"  a refused command:     a step for the user, with the command and the permission rule that allows it",
+                f"  a refused command:     a step for the user, with the exact command and the reason of the refusal",
                 *_look_rule(b, it, r, short=True),
                 f"  vague item: make a reasonable choice and say what you chose in --output.",
                 "",
@@ -2495,8 +2495,9 @@ def render_go(b):
                 f"same thing.",
                 f"  - A command is refused (the auto mode classifier, a permission prompt): do the parts you can. Then "
                 f"it is a step for the user",
-                f"    (below), with the exact command and the permission rule that allows it. Stand at your prompt only "
-                f"for a release to",
+                # Not the permission rule: the classifier refused the item that named it and a later session (#1669).
+                f"    (below), with the exact command and the reason of the refusal; the user runs it or allows it. "
+                f"Stand at your prompt only for a release to",
                 f"    production or a deletion of data: {r} ask <person> \"<what to approve>\" --item {it['id']}   first.",
                 *_look_rule(b, it, r),
                 f"  - You need the user (a decision, an approval, an account or payment step): put it in the queue, not only in chat:",

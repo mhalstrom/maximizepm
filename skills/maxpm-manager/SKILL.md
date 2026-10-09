@@ -127,7 +127,7 @@ Stop when the user tells you to, and tell the user what you did.
   classifier or a permission prompt refuses a normal step of the project: the
   checkout of a review gate, the removal of an agent's own build folder, the
   push of a finished item): each worker adds an item for the user with the
-  command and its permission rule. Collect the commands that repeat in one
+  command and the reason of the refusal. Collect the commands that repeat in one
   item for the user for each project: "Allow these commands in the project
   settings", with each exact command and rule. A yes in one terminal does not
   reach the next session; one rule ends the stop for every later session.

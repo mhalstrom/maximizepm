@@ -296,8 +296,9 @@ class Go(Base):
                       f"gate) does not block the item: do the parts that do not need the limited thing, commit, keep "
                       f"#{x}, and wait for the manager's word that it ended: maxpm --as {me} inbox --wait", first)
         self.assertIn("A command is refused (the auto mode classifier, a permission prompt): do the parts you can. "
-                      "Then it is a step for the user (below), with the exact command and the permission rule that "
-                      "allows it. Stand at your prompt only for a release to production or a deletion of data", first)
+                      "Then it is a step for the user (below), with the exact command and the reason of the refusal; "
+                      "the user runs it or allows it. Stand at your prompt only for a release to production or a "
+                      "deletion of data", first)
         self.assertIn(f"The user should look at the finished result: push, maxpm --as {me} done {x}, then maxpm --as "
                       f"{me} add \"Look at <result>\" --doer human --found-during {x}. Ask before the push only for "
                       f"public text, a release to production, a step that deletes data or costs money, or when the "
@@ -310,7 +311,7 @@ class Go(Base):
         self.assertIn("Rules as before. Short form:", later)
         self.assertIn(f"a limit of the machine (disk, build stop, push freeze): keep the item, do the other parts, "
                       f"then maxpm --as {me} inbox --wait", later)
-        self.assertIn("a refused command: a step for the user, with the command and the permission rule that allows it",
+        self.assertIn("a refused command: a step for the user, with the exact command and the reason of the refusal",
                       later)
         self.assertIn(f"the user should look at the result: push, done, then maxpm --as {me} add \"Look at ...\" "
                       f"--doer human --found-during {y}", later)
