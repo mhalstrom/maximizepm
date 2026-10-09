@@ -81,12 +81,20 @@ SETUP = """Setting up agents to use MaximizePM
    tmux|tab|window   (auto is the default).
 
 6. For each project, choose with the person how a finished result (a page, a
-   text, a design) gets the person's look. maxpm project add and maxpm init
-   print the value the project has:
-     maxpm config set result_look push_first --project <name>   the worker
-       pushes, closes the item, and adds an item for the look (the default)
-     maxpm config set result_look ask_first --project <name>    the worker
-       shows the result and waits for the person's yes before the push
+   text, a design) gets the person's look. No project gets its value in
+   silence: maxpm project add, maxpm init, and maxpm project show print the
+   value in force and the value to recommend. The one fact that decides: does
+   something stand between a push and the users?
+     push_first  the worker pushes, closes the item, and adds an item for the
+       look. Recommend it when a deploy target with a review or a release
+       step stands between a push and the users.
+     ask_first   the worker shows the result and waits for the person's yes
+       before the push. Recommend it when the project has no target, or a
+       push to main is live at once (a site, a public repository). A project
+       where nobody chose has this value.
+   Tell the person the recommendation and its reason, then store the answer:
+     maxpm project add <name> --result-look ask_first|push_first
+     maxpm config set result_look ask_first|push_first --project <name>
 
 7. Optional, the Claude desktop app: plan, manage, and answer what waits on
    you from a chat (MaximizePM runs it with no folder):
@@ -499,6 +507,10 @@ def build_parser():
                    help="what the project covers and what context helps (agents read this to pick an area)")
     x.add_argument("--path", help="folder this project lives in; maxpm go run there finds it")
     x.add_argument("--target", help="deploy target this project ships to (maxpm target list)")
+    x.add_argument("--result-look", choices=("ask_first", "push_first"),
+                   help="the look of the person at a finished result, as the person confirmed it: ask_first (the worker "
+                        "waits for the yes before the push; a project where nobody chose has it) or push_first (the "
+                        "worker pushes and adds an item for the look)")
     x = prs.add_parser("describe", help="set a project's description"); x.add_argument("name"); x.add_argument("text")
     x = prs.add_parser("path", help="link a project to a folder (maxpm go uses it)"); x.add_argument("name"); x.add_argument("path", nargs="?")
     x.add_argument("--move", action="store_true", help="move a project that is linked to another folder (the user decides)")
@@ -1539,7 +1551,7 @@ def init_folder(args):
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')
     if not core.setting(conn, "tracker", project_id=core._project(conn, shown)["id"]):
         lines.append(f'if it uses an issue tracker: maxpm project tracker {shown} "github owner/repo via gh"')
-    lines += look_setup_lines(shown, core.setting(conn, "result_look", project_id=core._project(conn, shown)["id"]))
+    lines += look_setup_lines(shown, core.look_setup(conn, shown))
     lines.append(f"next: add work (maxpm add {shown} \"...\") or open an agent here and say go")
     print("\n".join(lines))
     return 0
@@ -1549,7 +1561,7 @@ def dispatch(conn, a, actor):
     c = a.cmd
     if c == "project":
         if a.pcmd == "add":
-            return core.project_add(conn, a.name, a.rank, a.notes, actor, a.path, a.target)
+            return core.project_add(conn, a.name, a.rank, a.notes, actor, a.path, a.target, a.result_look)
         if a.pcmd == "rank":
             return core.project_rank(conn, a.name, a.rank, actor)
         if a.pcmd == "path":
@@ -2028,7 +2040,9 @@ def render_status(res):
 PLAN_RULES = """You are a PLANNER. Talk with the user about what they want done, then write it into the queue.
 Ask the user what outcome they want before you add items.
 Change the plan only; do not take or do the work (claims refuse for this session).
-  Projects:      {r} project add <name> --description "..." [--path <dir>] [--target <t>]   (describe, rank, target)
+  Projects:      {r} project add <name> --description "..." [--path <dir>] [--target <t>] --result-look ask_first|push_first
+                 (describe, rank, target). result_look is the user's choice: state your recommendation and its
+                 reason, and let the user confirm it. The reply of project add prints the rule.
   Items:         {r} add <project> "<title>" --doer ai|human --context "..." --touches <files> --check "<cmd>"
   Order:         {r} dep <id> --on <id> [--kind feeds|conflicts]   Importance: {r} prio <id> 0 (on the outcome only)
   Model:         --model sonnet|opus|fable --effort low..max (advice); --min-model/--max-model only when a wrong model is costly
@@ -2151,7 +2165,11 @@ def render_plan(b):
                 f"THIS FOLDER HAS NO PROJECT: {b['cwd']}",
                 "  The projects below are other work. Leave them alone unless the user names them.",
                 "  If the user's goal is about this folder, create its project first, then add items to it:",
-                f"  {r} project add <name> --description \"<what it covers>\" --path {b['cwd']}"]
+                f"  {r} project add <name> --description \"<what it covers>\" --path {b['cwd']} "
+                f"--result-look ask_first|push_first",
+                f"  --result-look is how a finished result gets the user's look: {LOOK_RULE}.",
+                f"  Tell the user your recommendation and its reason, and take the value the user confirms. With no "
+                f"value the project has ask_first."]
     if b["new_name"]:
         out.append(f"Your shell may not keep environment variables, so pass --as {me} on every maxpm command.")
     out += ["", PLAN_RULES.format(r=r)]
@@ -2217,14 +2235,27 @@ def _chat_lines(r, has_item=True):
     return out
 
 
-def look_setup_lines(name, value):
+LOOK_RULE = ("recommend push_first when a deploy target with a review or a release step stands between a push and "
+             "the users; recommend ask_first when the project has no target, or a push to main is live at once (a "
+             "site, a public repository)")
+
+
+def look_setup_lines(name, look):
     """What the agent that sets a project up reads about the setting result_look: the project's value, the two
-    values, and the command. mark: 'It should just be very clear to the agent when it's being set up.' (#1677)"""
+    values, the value to recommend with its reason, and the command. mark: 'It should just be very clear to the
+    agent when it's being set up.' (#1677) No project gets its value in silence: where nobody chose, ask_first
+    holds, and the agent puts the recommendation to the person (#1682)."""
+    value, rec = look["value"], look["recommended"]
     other = "push_first" if value == "ask_first" else "ask_first"
-    return [f"look at a finished result: project {name} has result_look {value}. Choose the value with the person now:",
-            "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the result.",
+    return [f"look at a finished result: project {name} has result_look {value} "
+            + ("(chosen for this project)." if look["chosen"] else "(nobody chose for this project yet)."),
             "  ask_first:  the worker shows the result, asks in the queue, and waits for the person's yes before the push.",
-            f"  set it: maxpm config set result_look {other} --project {name}   (maxpm project show {name} shows the value)"]
+            "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the result.",
+            f"  recommended here: {rec}, because {look['why']}. Also ask_first when a push to main is live at once "
+            f"(a site, a public repository).",
+            (f"  change it: maxpm config set result_look {other} --project {name}" if look["chosen"] else
+             f"  tell the person the recommendation and its reason; store their answer: "
+             f"maxpm config set result_look ask_first|push_first --project {name}")]
 
 
 def _look_rule(b, it, r, short=False):
@@ -2753,12 +2784,8 @@ def render(a, res):
             print("  " + (res["description"] or "(no description: maxpm project describe " + res["name"] + " \"...\")"))
             print("  target: " + (res.get("target") or "none (maxpm project target " + res["name"] + " <target>)"))
             print("  tracker: " + (res.get("tracker") or "none (maxpm project tracker " + res["name"] + " \"<tracker> <where> via <tool>\")"))
-            look = res.get("result_look", "push_first")
-            print("  look at a finished result: "
-                  + ("ask first (the worker shows the result and waits for the yes before the push)"
-                     if look == "ask_first" else "push, then ask (the worker pushes and adds an item for the look)")
-                  + f"; maxpm config set result_look {'push_first' if look == 'ask_first' else 'ask_first'} "
-                    f"--project {res['name']}")
+            if res.get("look"):
+                print("\n".join("  " + line for line in look_setup_lines(res["name"], res["look"])))
             print("  items: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in res["counts"].items() if v))
             print("  working now: " + (", ".join(res["working_now"]) or "nobody"))
             if res["worked_recently"]:
@@ -2775,8 +2802,8 @@ def render(a, res):
                   + (f"  [target {p['target']}]" if p.get("target") else ""))
             if p.get("notes"):
                 print(f"    {p['notes']}")
-            if p.get("result_look") and getattr(a, "pcmd", None) == "add":
-                print("\n".join(look_setup_lines(p["name"], p["result_look"])))
+            if p.get("look") and getattr(a, "pcmd", None) == "add":
+                print("\n".join(look_setup_lines(p["name"], p["look"])))
         return
     if c == "queue":
         _print_queue(res)

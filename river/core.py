@@ -101,7 +101,9 @@ DEFAULT_SETTINGS = {
     # push_first: the worker pushes, closes the item, and adds a person's item for the look. ask_first: the worker
     # commits, asks in the queue (maxpm ask), and waits for the yes before the push. Under both, public text, a
     # release to production, a step that deletes data or costs money, and an item that says so are asked first.
-    "result_look": "push_first",
+    # No project gets push_first in silence (#1682): the setup recommends a value (look_setup) and the person
+    # confirms it; a project where nobody chose has ask_first.
+    "result_look": "ask_first",
     "due_warn_before": "3d",
     # Agents the page can start, as "Label=command" entries separated by ";". The first is the default.
     # "@claude-code" or "@codex" is a launch profile: river builds the command from the platform's options
@@ -1447,9 +1449,27 @@ def _project(conn, name):
     return r
 
 
-def project_add(conn, name, rank=None, notes="", actor=None, path=None, target=None):
+def look_setup(conn, name):
+    """The setting result_look as the setup of a project shows it (#1682): the value in force, if someone chose
+    it for this project, and the value the setup recommends. The recommendation comes from one fact: does
+    something stand between a push and the users? A deploy target gives a release step, so push_first; with no
+    target a push can be live at once, so ask_first."""
+    p = _project(conn, name)
+    chosen = conn.execute("SELECT 1 FROM settings WHERE scope=? AND key='result_look'",
+                          (f"project:{p['name']}",)).fetchone() is not None
+    if p["target"]:
+        rec, why = "push_first", (f"it ships to the deploy target {p['target']}, so a release step stands between a "
+                                  f"push and the users")
+    else:
+        rec, why = "ask_first", "it has no deploy target, so a push can be live at once"
+    return {"value": setting(conn, "result_look", project_id=p["id"]), "chosen": chosen, "recommended": rec, "why": why}
+
+
+def project_add(conn, name, rank=None, notes="", actor=None, path=None, target=None, result_look=None):
     if not re.match(r"^[a-z0-9][a-z0-9._-]*$", name):
         raise RiverError("project names use lower-case letters, digits, '.', '_', '-'")
+    if result_look is not None and result_look not in ("ask_first", "push_first"):
+        raise RiverError("result_look is ask_first or push_first")
     with tx(conn):
         if conn.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone():
             raise RiverError(f"project {name!r} exists")
@@ -1463,9 +1483,10 @@ def project_add(conn, name, rank=None, notes="", actor=None, path=None, target=N
         project_path(conn, name, path, actor)
     if target:
         project_target(conn, name, target, actor)
-    p = dict(_project(conn, name))
+    if result_look:
+        config_set(conn, "result_look", result_look, project=name, actor=actor)
     # The agent that sets the project up sees the rule for a look at a finished result, and chooses with the person.
-    return {**p, "result_look": setting(conn, "result_look", project_id=p["id"])}
+    return {**dict(_project(conn, name)), "look": look_setup(conn, name)}
 
 
 def project_rank(conn, name, rank, actor=None):
@@ -1562,6 +1583,7 @@ def project_show(conn, name):
         goals=goal_list(conn, name, include_complete=False),
         tracker=setting(conn, "tracker", project_id=p["id"]),
         result_look=setting(conn, "result_look", project_id=p["id"]),
+        look=look_setup(conn, name),
     )
     return p
 

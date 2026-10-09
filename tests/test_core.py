@@ -283,6 +283,7 @@ class Go(Base):
         import re
         from river import cli
         x, y = self.add("web", "page"), self.add("web", "form")
+        core.config_set(self.c, "result_look", "push_first", project="web")  # the rule of #1599 is this value (#1668)
 
         def text(brief):
             out = io.StringIO()
@@ -335,8 +336,11 @@ class Go(Base):
             return out.getvalue()
         with self.assertRaisesRegex(RiverError, "result_look is ask_first or push_first"):
             core.config_set(self.c, "result_look", "ask", project="web")
-        core.config_set(self.c, "result_look", "ask_first", project="web")
-        # ask_first: the worker commits, asks in the queue, and waits for the yes before the push.
+        # ask_first: the worker commits, asks in the queue, and waits for the yes before the push. A project where
+        # nobody chose has this value (#1682).
+        self.assertEqual(core.look_setup(self.c, "web"), {
+            "value": "ask_first", "chosen": False, "recommended": "ask_first",
+            "why": "it has no deploy target, so a push can be live at once"})
         b = core.go(self.c, self.web)
         me, first = b["agent"], text(b)
         self.assertEqual((b["item"]["id"], b["result_look"]), (x, "ask_first"))
@@ -350,9 +354,14 @@ class Go(Base):
         self.assertIn(f"the user should look at the result: this project asks first: commit, no push, maxpm --as {me} "
                       f"ask <person> \"Look at ...\" --item {y}, wait for the yes, then push and done", later)
         self.assertEqual(core.project_show(self.c, "web")["result_look"], "ask_first")
-        self.assertIn("  look at a finished result: ask first (the worker shows the result and waits for the yes "
-                      "before the push); maxpm config set result_look push_first --project web\n", shown("web"))
-        # push_first (the default): a project that sets nothing keeps the rule of #1599.
+        self.assertIn("  look at a finished result: project web has result_look ask_first (nobody chose for this "
+                      "project yet).\n", shown("web"))
+        self.assertIn("    recommended here: ask_first, because it has no deploy target, so a push can be live at once. "
+                      "Also ask_first when a push to main is live at once (a site, a public repository).\n"
+                      "    tell the person the recommendation and its reason; store their answer: "
+                      "maxpm config set result_look ask_first|push_first --project web\n", shown("web"))
+        # push_first: the rule of #1599, for a project where the person chose it.
+        core.config_set(self.c, "result_look", "push_first", project="api")
         b = core.go(self.c, self.api)
         other, first = b["agent"], text(b)
         self.assertEqual((b["item"]["id"], b["result_look"]), (z, "push_first"))
@@ -361,8 +370,9 @@ class Go(Base):
                       f"for public text", first)
         self.assertNotIn("asks first", first)
         self.assertEqual(core.project_show(self.c, "api")["result_look"], "push_first")
-        self.assertIn("  look at a finished result: push, then ask (the worker pushes and adds an item for the look); "
-                      "maxpm config set result_look ask_first --project api\n", shown("api"))
+        self.assertIn("  look at a finished result: project api has result_look push_first (chosen for this project).\n",
+                      shown("api"))
+        self.assertIn("    change it: maxpm config set result_look ask_first --project api\n", shown("api"))
 
     def test_the_setup_of_a_project_shows_the_look_setting(self):
         # #1677, mark: 'It should just be very clear to the agent when it's being set up.'
@@ -374,20 +384,34 @@ class Go(Base):
             with contextlib.redirect_stdout(out):
                 cli.render(a, cli.dispatch(self.c, a, "ag"))
             return out.getvalue()
+        # #1682, mark's decision C: no silent default. Nobody chose: ask_first holds, and the reply says what to
+        # recommend and why. No deploy target: a push can be live at once.
         text = added("shop", "--description", "the shop")
-        self.assertIn("look at a finished result: project shop has result_look push_first. Choose the value with the "
-                      "person now:\n"
-                      "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the "
-                      "result.\n"
+        self.assertIn("look at a finished result: project shop has result_look ask_first (nobody chose for this "
+                      "project yet).\n"
                       "  ask_first:  the worker shows the result, asks in the queue, and waits for the person's yes "
                       "before the push.\n"
-                      "  set it: maxpm config set result_look ask_first --project shop   (maxpm project show shop "
-                      "shows the value)\n", text)
-        # The value the new project has comes from the global setting, and the command names the other value.
-        core.config_set(self.c, "result_look", "ask_first")
-        text = added("blog")
-        self.assertIn("project blog has result_look ask_first.", text)
-        self.assertIn("set it: maxpm config set result_look push_first --project blog", text)
+                      "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the "
+                      "result.\n"
+                      "  recommended here: ask_first, because it has no deploy target, so a push can be live at once. "
+                      "Also ask_first when a push to main is live at once (a site, a public repository).\n"
+                      "  tell the person the recommendation and its reason; store their answer: "
+                      "maxpm config set result_look ask_first|push_first --project shop\n", text)
+        # A deploy target puts a release step between a push and the users: recommend push_first. The value in
+        # force stays ask_first until the person confirms.
+        core.target_add(self.c, "prod", "rsync, then restart")
+        text = added("blog", "--target", "prod")
+        self.assertIn("project blog has result_look ask_first (nobody chose for this project yet).", text)
+        self.assertIn("  recommended here: push_first, because it ships to the deploy target prod, so a release step "
+                      "stands between a push and the users.", text)
+        # maxpm project add takes the value that the person confirmed.
+        text = added("docs", "--target", "prod", "--result-look", "push_first")
+        self.assertIn("project docs has result_look push_first (chosen for this project).", text)
+        self.assertIn("  change it: maxpm config set result_look ask_first --project docs\n", text)
+        self.assertEqual(core.setting(self.c, "result_look", project_id=core._project(self.c, "docs")["id"]), "push_first")
+        with self.assertRaisesRegex(RiverError, "result_look is ask_first or push_first"):
+            core.project_add(self.c, "wiki", result_look="push")
+        self.assertNotIn("wiki", [p["name"] for p in core.project_list(self.c)])
         # A list of projects stays short.
         a = cli.build_parser().parse_args(["project", "list"])
         out = io.StringIO()
@@ -395,7 +419,9 @@ class Go(Base):
             cli.render(a, cli.dispatch(self.c, a, "ag"))
         self.assertNotIn("result_look", out.getvalue())
         # The guides say it too.
-        self.assertIn("maxpm config set result_look ask_first --project <name>", cli.SETUP)
+        self.assertIn("maxpm project add <name> --result-look ask_first|push_first", cli.SETUP)
+        self.assertIn("A project\n       where nobody chose has this value.", cli.SETUP)
+        self.assertIn("--result-look ask_first|push_first", cli.PLAN_RULES)
 
     def test_a_project_linked_to_another_folder_moves_only_with_move(self):
         other = os.path.join(self.dir.name, "other")

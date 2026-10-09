@@ -42,13 +42,21 @@ rules in `maxpm guide manager`.)
    then run `maxpm project rank <name> 1`.
 7. **Make a new project** only for a separate area with its own folder or
    goal (`maxpm project add <name> --path <dir> --description "..."`).
-   The reply shows the project's setting `result_look`: how a finished
-   result (a page, a text, a design) gets the user's look. Ask the user which
-   value the project gets, and set it:
-   `maxpm config set result_look push_first|ask_first --project <name>`.
-   `push_first`: the worker pushes, closes the item, and adds an item for the
-   look. `ask_first`: the worker shows the result and waits for the user's
-   yes before the push. No project gets its value in silence.
+   Each project has the setting `result_look`: how a finished result (a
+   page, a text, a design) gets the user's look. `push_first`: the worker
+   pushes, closes the item, and adds an item for the look. `ask_first`: the
+   worker shows the result and waits for the user's yes before the push.
+   No project gets its value in silence. One fact decides what you
+   recommend: does something stand between a push and the users? A deploy
+   target with a review or a release step: recommend `push_first`. No target,
+   or a push to main that is live at once (a site, a public repository):
+   recommend `ask_first`. Tell the user the recommendation and its reason,
+   and store the value the user confirms: `--result-look ask_first|push_first`
+   on `maxpm project add`, or later
+   `maxpm config set result_look ask_first|push_first --project <name>`.
+   A project where nobody chose has `ask_first`. The reply of
+   `maxpm project add` and `maxpm project show <name>` print the value in
+   force and the recommendation.
    Otherwise add to the existing project. When `maxpm plan` says the folder
    has no project, the projects it lists are other work: leave them alone
    unless the user names them.
