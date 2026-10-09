@@ -80,7 +80,15 @@ SETUP = """Setting up agents to use MaximizePM
    terminal), else in a Terminal tab. To choose: maxpm config set launch_in
    tmux|tab|window   (auto is the default).
 
-6. Optional, the Claude desktop app: plan, manage, and answer what waits on
+6. For each project, choose with the person how a finished result (a page, a
+   text, a design) gets the person's look. maxpm project add and maxpm init
+   print the value the project has:
+     maxpm config set result_look push_first --project <name>   the worker
+       pushes, closes the item, and adds an item for the look (the default)
+     maxpm config set result_look ask_first --project <name>    the worker
+       shows the result and waits for the person's yes before the push
+
+7. Optional, the Claude desktop app: plan, manage, and answer what waits on
    you from a chat (MaximizePM runs it with no folder):
      maxpm setup-agent --claude-desktop    then quit and reopen the app
    The ChatGPT desktop app (Work and Codex modes) the same way:
@@ -1531,6 +1539,7 @@ def init_folder(args):
         lines.append(f'next: describe it for agents: maxpm project describe {shown} "what it covers, where, what helps"')
     if not core.setting(conn, "tracker", project_id=core._project(conn, shown)["id"]):
         lines.append(f'if it uses an issue tracker: maxpm project tracker {shown} "github owner/repo via gh"')
+    lines += look_setup_lines(shown, core.setting(conn, "result_look", project_id=core._project(conn, shown)["id"]))
     lines.append(f"next: add work (maxpm add {shown} \"...\") or open an agent here and say go")
     print("\n".join(lines))
     return 0
@@ -2208,6 +2217,16 @@ def _chat_lines(r, has_item=True):
     return out
 
 
+def look_setup_lines(name, value):
+    """What the agent that sets a project up reads about the setting result_look: the project's value, the two
+    values, and the command. mark: 'It should just be very clear to the agent when it's being set up.' (#1677)"""
+    other = "push_first" if value == "ask_first" else "ask_first"
+    return [f"look at a finished result: project {name} has result_look {value}. Choose the value with the person now:",
+            "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the result.",
+            "  ask_first:  the worker shows the result, asks in the queue, and waits for the person's yes before the push.",
+            f"  set it: maxpm config set result_look {other} --project {name}   (maxpm project show {name} shows the value)"]
+
+
 def _look_rule(b, it, r, short=False):
     """The briefing lines for a look of the user at the finished result. The item's project decides (setting
     result_look, #1668): push first and add an item for the look, or ask first and wait for the yes."""
@@ -2756,6 +2775,8 @@ def render(a, res):
                   + (f"  [target {p['target']}]" if p.get("target") else ""))
             if p.get("notes"):
                 print(f"    {p['notes']}")
+            if p.get("result_look") and getattr(a, "pcmd", None) == "add":
+                print("\n".join(look_setup_lines(p["name"], p["result_look"])))
         return
     if c == "queue":
         _print_queue(res)

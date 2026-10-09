@@ -364,6 +364,39 @@ class Go(Base):
         self.assertIn("  look at a finished result: push, then ask (the worker pushes and adds an item for the look); "
                       "maxpm config set result_look ask_first --project api\n", shown("api"))
 
+    def test_the_setup_of_a_project_shows_the_look_setting(self):
+        # #1677, mark: 'It should just be very clear to the agent when it's being set up.'
+        from river import cli
+
+        def added(*words):
+            a = cli.build_parser().parse_args(["project", "add", *words])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render(a, cli.dispatch(self.c, a, "ag"))
+            return out.getvalue()
+        text = added("shop", "--description", "the shop")
+        self.assertIn("look at a finished result: project shop has result_look push_first. Choose the value with the "
+                      "person now:\n"
+                      "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the "
+                      "result.\n"
+                      "  ask_first:  the worker shows the result, asks in the queue, and waits for the person's yes "
+                      "before the push.\n"
+                      "  set it: maxpm config set result_look ask_first --project shop   (maxpm project show shop "
+                      "shows the value)\n", text)
+        # The value the new project has comes from the global setting, and the command names the other value.
+        core.config_set(self.c, "result_look", "ask_first")
+        text = added("blog")
+        self.assertIn("project blog has result_look ask_first.", text)
+        self.assertIn("set it: maxpm config set result_look push_first --project blog", text)
+        # A list of projects stays short.
+        a = cli.build_parser().parse_args(["project", "list"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render(a, cli.dispatch(self.c, a, "ag"))
+        self.assertNotIn("result_look", out.getvalue())
+        # The guides say it too.
+        self.assertIn("maxpm config set result_look ask_first --project <name>", cli.SETUP)
+
     def test_a_project_linked_to_another_folder_moves_only_with_move(self):
         other = os.path.join(self.dir.name, "other")
         os.makedirs(other)

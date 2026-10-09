@@ -1463,7 +1463,9 @@ def project_add(conn, name, rank=None, notes="", actor=None, path=None, target=N
         project_path(conn, name, path, actor)
     if target:
         project_target(conn, name, target, actor)
-    return dict(_project(conn, name))
+    p = dict(_project(conn, name))
+    # The agent that sets the project up sees the rule for a look at a finished result, and chooses with the person.
+    return {**p, "result_look": setting(conn, "result_look", project_id=p["id"])}
 
 
 def project_rank(conn, name, rank, actor=None):

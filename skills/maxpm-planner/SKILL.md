@@ -42,6 +42,13 @@ rules in `maxpm guide manager`.)
    then run `maxpm project rank <name> 1`.
 7. **Make a new project** only for a separate area with its own folder or
    goal (`maxpm project add <name> --path <dir> --description "..."`).
+   The reply shows the project's setting `result_look`: how a finished
+   result (a page, a text, a design) gets the user's look. Ask the user which
+   value the project gets, and set it:
+   `maxpm config set result_look push_first|ask_first --project <name>`.
+   `push_first`: the worker pushes, closes the item, and adds an item for the
+   look. `ask_first`: the worker shows the result and waits for the user's
+   yes before the push. No project gets its value in silence.
    Otherwise add to the existing project. When `maxpm plan` says the folder
    has no project, the projects it lists are other work: leave them alone
    unless the user names them.
