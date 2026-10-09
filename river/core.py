@@ -8292,6 +8292,7 @@ def state(conn):
         "agents": [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents ORDER BY name")],
         "capacity": capacity(conn, ann),
         "targets": targets_view(conn, ann),
+        "hook_events": dict(HOOK_EVENTS),  # the Targets tab offers a hook for each event
         "launch_agents": [label for label, _ in parse_launch_agents(setting(conn, "launch_agents"))],
         "model_ladder": parse_ladder(setting(conn, "model_ladder")),
         "model_ids": model_ids(conn),

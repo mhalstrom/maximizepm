@@ -3566,6 +3566,45 @@ class PageHooks(unittest.TestCase):
         self.assertTrue(any(e["change"].startswith("hook release-cut: exit 0, ")
                             for e in core.item_show(self.c, self.deploy)["events"]))
 
+    @unittest.skipUnless(shutil.which("node"), "node is not on this machine")
+    def test_the_targets_tab_shows_each_hook_with_its_last_result(self):
+        """Node runs the page's own component (components/targetHooks.js) on the state of the queue (#1827)."""
+        def html():
+            comp = (Path(server.__file__).parent / "static" / "components" / "targetHooks.js").as_uri()
+            st = core.state(self.c)
+            code = (f"const {{ hooksHtml }} = await import({json.dumps(comp)});\n"
+                    f"console.log(hooksHtml({json.dumps(st['targets'][0])}, {json.dumps(st['hook_events'])}));")
+            r = subprocess.run(["node", "--input-type=module"], input=code, capture_output=True, encoding="utf-8", timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout
+        self.assertEqual(list(core.state(self.c)["hook_events"]), list(core.HOOK_EVENTS))
+        # No hook: the tab says what a hook is and offers each event.
+        h = html()
+        self.assertIn("none: a hook is a command", h)
+        for event in core.HOOK_EVENTS:
+            self.assertIn(f'data-hook="{event}" data-target="web" title="MaximizePM runs the command when ', h)
+        self.assertNotIn("data-clear", h)
+        # A hook that failed and one that never ran; the other two events are free.
+        bad = f'"{sys.executable}" -c "import sys; sys.exit(3)" # <b>'
+        core.target_hook(self.c, "web", "release-cut", bad, actor="mark")
+        core.target_hook(self.c, "web", "deployed", self.cmd, actor="mark")
+        core.target_cut(self.c, "web", "abc1234", "mark")
+        self.assertEqual([x["ok"] for x in core.run_hooks(self.c)], [False])
+        h = html()
+        cut, deployed, free = h.split('<div class="st" style="margin-top:4px">')[1:3] + [h.split("add a hook for: ")[1]]
+        self.assertIn("<b>release-cut</b>", cut)
+        self.assertIn("# &lt;b&gt;</code>", cut)  # the command is text, never markup
+        self.assertRegex(cut, rf'color:var\(--warn\)">\(last run for <span class="link" data-open="{self.deploy}">'
+                              rf'#{self.deploy}</span>: exit 3, \d+s ago\)')
+        self.assertIn('data-hook="release-cut" data-target="web" data-clear="1"', cut)
+        self.assertIn("<b>deployed</b>", deployed)
+        self.assertIn('<span class="muted" style="font-size:12px">(never ran)</span>', deployed)
+        self.assertEqual(re.findall(r'data-hook="([a-z-]+)"', free), ["review-passed", "review-failed"])
+        # The hook passes on the next run: the line is not a warning any more.
+        core.target_hook(self.c, "web", "release-cut", self.cmd, actor="mark")
+        self.c.execute("UPDATE hook_runs SET exit_code=0")
+        self.assertRegex(html(), r'class="muted" style="font-size:12px">\(last run for .*: exit 0, ')
+
     def test_the_loop_runs_a_hook_that_its_command_left_behind(self):
         core.target_hook(self.c, "web", "release-cut", self.cmd, actor="mark")
         core.target_cut(self.c, "web", "abc1234", "mark")  # a command that ends before it runs the hook
