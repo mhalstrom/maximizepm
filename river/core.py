@@ -2256,11 +2256,12 @@ def _review_deploy(conn, review_id):
     return r["id"] if r else None
 
 
-def run_hooks(conn, cwd=None, token=None, orphans=False):
+def run_hooks(conn, cwd=None, token=None, orphans=False, sandbox=False):
     """Run the hooks that wait, one after the other, and return their results: those of the events that this
     command caused (token: another thread's, for maxpm serve); with orphans, those that waited
     HOOK_ORPHAN_AFTER because their command ended before it ran them. Each one runs once: the run is taken in a
-    transaction first. cwd: where a hook runs when no project of the target has a folder."""
+    transaction first. cwd: where a hook runs when no project of the target has a folder. sandbox: this command
+    runs in the sandbox of an agent session, so the hook has the limits of that sandbox; a failure says so."""
     token = token or hook_token()
     old = iso(now() - timedelta(seconds=HOOK_ORPHAN_AFTER))
     q = ("SELECT * FROM hook_runs WHERE started_at IS NULL AND (queued_by=?" + (" OR queued_at<?)" if orphans else ")")
@@ -2273,11 +2274,17 @@ def run_hooks(conn, cwd=None, token=None, orphans=False):
             if run is None:
                 break
             conn.execute("UPDATE hook_runs SET started_at=? WHERE id=?", (iso(now()), run["id"]))
-        out.append(_run_hook(conn, dict(run), cwd))
+        out.append(_run_hook(conn, dict(run), cwd, sandbox))
     return out
 
 
-def _run_hook(conn, run, cwd=None):
+# What a failure of a hook says when the command that ran it was in the sandbox of an agent session (#1826).
+HOOK_SANDBOX = ("The command that caused the event ran in the sandbox of an agent session, so the hook had the limits "
+                "of that sandbox (the folders it can write, the network). When that is the cause, the script is not at "
+                "fault: a person or a session with the sandbox off runs the hook's command by hand")
+
+
+def _run_hook(conn, run, cwd=None, sandbox=False):
     """Run one hook and record the result: the run, one history line on the deploy item, and, when it failed or
     reached hook_timeout, an alert to the owner of the target (with no owner: to the manager). Never an error:
     the event stands."""
@@ -2314,12 +2321,14 @@ def _run_hook(conn, run, cwd=None):
               else f"exit {code}, {took}" if code is not None else "not started")
     out = {"id": run["id"], "target": target, "event": event, "command": cmd, "item": run["item_id"],
            "deploy": run["deploy_id"], "rev": run["rev"], "folder": where, "exit_code": code, "timed_out": timed_out,
-           "seconds": round(secs, 1), "ok": ok, "result": result, "output": tail, "alerted": None}
+           "seconds": round(secs, 1), "ok": ok, "result": result, "output": tail, "alerted": None,
+           "sandbox": bool(sandbox)}
     with tx(conn):
         conn.execute("UPDATE hook_runs SET ended_at=?, exit_code=?, timed_out=?, seconds=?, output=? WHERE id=?",
                      (iso(now()), code, int(timed_out), round(secs, 1), tail, run["id"]))
         if run["deploy_id"] and conn.execute("SELECT 1 FROM items WHERE id=?", (run["deploy_id"],)).fetchone():
-            _event(conn, run["deploy_id"], actor or "maxpm", f"hook {event}: {result}: {cmd}")
+            _event(conn, run["deploy_id"], actor or "maxpm", f"hook {event}: {result}"
+                   + (" (in the sandbox of an agent session)" if sandbox and not ok else "") + f": {cmd}")
         if not ok:
             tg = conn.execute("SELECT owner FROM targets WHERE name=?", (target,)).fetchone()
             to = (tg["owner"] if tg and tg["owner"] else None) or active_manager(conn)
@@ -2327,8 +2336,8 @@ def _run_hook(conn, run, cwd=None):
                 _send(conn, "alert", "maxpm", f"hook {event} of target {target} failed ({result}) for "
                       f"#{run['item_id']}: {cmd}" + (f"\n{tail[-1500:]}" if tail else "")
                       + f"\nThe event stands: a hook never undoes it. Find the cause; when the release needs the "
-                      f"command, run it by hand" + (f" in {where}" if where else "") + ".",
-                      to=to, item_id=run["deploy_id"])
+                      f"command, run it by hand" + (f" in {where}" if where else "") + "."
+                      + (f" {HOOK_SANDBOX}." if sandbox else ""), to=to, item_id=run["deploy_id"])
                 out["alerted"] = to
     return out
 

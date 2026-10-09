@@ -285,6 +285,8 @@ def _hook_result_lines(hooks):
             out.append(f"    the hook failed; the event stands (a hook never undoes it)"
                        + (f", and {h['alerted']} got an alert" if h["alerted"] else "")
                        + f". History: maxpm show {h['deploy']}")
+            if h.get("sandbox"):
+                out.append(f"    {core.HOOK_SANDBOX}.")
     return out
 
 
@@ -1261,10 +1263,11 @@ def _run(args, conn):
         res = dispatch(conn, args, actor)
     except RiverError:
         # An event that occurred before the refusal still runs its hook.
-        for line in _hook_result_lines(core.run_hooks(conn, os.getcwd())):
+        for line in _hook_result_lines(core.run_hooks(conn, os.getcwd(), sandbox=in_sandbox())):
             print(line, file=sys.stderr)
         raise
-    hooks = core.run_hooks(conn, os.getcwd())  # the events of this command (a release cut, a review, a deploy)
+    # The events of this command (a release cut, a review, a deploy): their hooks run now.
+    hooks = core.run_hooks(conn, os.getcwd(), sandbox=in_sandbox())
     if hooks and isinstance(res, dict):
         res["hooks_run"] = hooks
     monitors = None

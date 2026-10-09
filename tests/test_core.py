@@ -5169,6 +5169,29 @@ class Hooks(Base):
         core.target_cut(self.c, "web", None, "mark")
         self.assertEqual(core.run_hooks(self.c)[0]["alerted"], "boss")
 
+    def test_a_failure_in_the_sandbox_of_an_agent_session_says_so(self):
+        from river import cli
+        bad = self.script("bad.py", "import sys\nprint('Operation not permitted')\nsys.exit(1)\n")
+        core.target_hook(self.c, "web", "release-cut", bad, actor="mark")
+        core.target_hook(self.c, "web", "deployed", self.recorder(), actor="mark")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1", "SANDBOX_RUNTIME": "1"}):
+            cli.run(["--as", "rev", "claim", str(self.review)])  # an agent's command in its sandbox cuts the release
+        self.assertIn("hook release-cut of target web: exit 1, ", out.getvalue())
+        self.assertIn("ran in the sandbox of an agent session", out.getvalue())
+        alert = [m for m in core.inbox(self.c, "ops") if "hook release-cut" in m["body"]][0]
+        self.assertIn("the hook had the limits of that sandbox", alert["body"])
+        self.assertTrue(any(e["change"].startswith("hook release-cut: exit 1, ") and "(in the sandbox of an agent session)"
+                            in e["change"] for e in core.item_show(self.c, self.deploy)["events"]))
+        core.review_pass(self.c, self.review, None, "rev")
+        core.claim(self.c, self.deploy, "ops")
+        core.done(self.c, self.deploy, "release 7", "ops")
+        h = core.run_hooks(self.c, sandbox=True)[0]  # a hook that passes in the sandbox says nothing of it
+        self.assertEqual((h["ok"], h["sandbox"]), (True, True))
+        self.assertFalse(any("sandbox" in e["change"] and e["change"].startswith("hook deployed")
+                             for e in core.item_show(self.c, self.deploy)["events"]))
+
     def test_a_hook_whose_folder_is_gone_fails_and_the_event_stands(self):
         core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
         self.c.execute("UPDATE projects SET path=? WHERE name='site'", (os.path.join(self.dir.name, "gone"),))
