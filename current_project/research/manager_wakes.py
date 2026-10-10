@@ -3,11 +3,14 @@ transcripts, by what the watch printed (new messages, new findings, the time lim
 findings, and two simulations of rules that let the less urgent ones wait: one wait for all of them, and a wait
 for each of two levels (normal: a note or another notice; low: a ship request notice, a waiting or human
 finding). Reads the queue read-only. Run from the
-repository: python3 current_project/research/manager_wakes.py [since [until]] (ISO times, UTC)."""
+repository: python3 current_project/research/manager_wakes.py [since [until]] (ISO times, UTC).
+The last table (#1598) comes from the queue: how long each message to a manager waited from the send to the
+read, by its kind, its level, and its blocked mark (#1583, #1608)."""
 import collections
 import json
 import re
 import sqlite3
+import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +51,7 @@ def is_watch(summary):
 # In file order: ("end", time, summary) for the end of a background command, and ("out", time, first line, text)
 # for a tool result that holds the output of a watch.
 events = []
+queued = 0  # each end of a watch, also one that came while the manager was in a turn (it starts no turn)
 for sid, agent in owner.items():
     if not agent.startswith("manager-"):
         continue
@@ -58,7 +62,12 @@ for sid, agent in owner.items():
             except ValueError:
                 continue
             t = core._ts(r.get("timestamp") or "")
-            if r.get("type") != "user" or t is None or not since <= t < until:
+            if t is None or not since <= t < until:
+                continue
+            if r.get("type") == "queue-operation" and r.get("operation") == "enqueue":
+                m = re.search(r"<summary>(.*?)</summary>", str(r.get("content") or ""), re.S)
+                queued += bool(m and is_watch(m.group(1)))
+            if r.get("type") != "user":
                 continue
             content = (r.get("message") or {}).get("content")
             text = text_of(content)
@@ -135,6 +144,7 @@ def levels(normal, low):
 
 hours = (min(until, datetime.now(timezone.utc)) - since).total_seconds() / 3600
 print(f"Background commands that ended: {ends['watch']} watches, {ends['other']} other commands, in {hours:.1f} hours")
+print(f"Ends of a watch, with those that came while the manager was in a turn (they start no turn): {queued}")
 print("\n| The watch returned for | Wakes |\n|---|---:|")
 for k, v in results.most_common():
     print(f"| {k} | {v} |")
@@ -160,3 +170,24 @@ for normal, low in ((2, 30), (5, 30), (10, 30), (15, 30), (30, 30), (5, 60), (10
     print(f"| {normal}m | {low}m | {levels(normal, low)} |")
 n = collections.Counter("urgent" if w[1] else "the time limit" if w[2] else "normal" if w[5] else "low" for w in wakes)
 print("\nHighest level in each wake: " + ", ".join(f"{k} {v}" for k, v in n.most_common()))
+
+
+# From the queue (#1598): the time from the send of a message to a manager until a watch (or the manager) read it.
+def group(kind, level, blocked):
+    if blocked:
+        return "blocked: the flag of the sender" if blocked == "sender" else f"blocked: the sign {blocked}"
+    return f"{kind}, level low" if level == "low" else kind
+
+
+waited, unread = collections.defaultdict(list), 0
+for kind, level, blocked, sent, read in c.execute(
+        "SELECT kind, level, blocked, created_at, read_at FROM messages WHERE to_agent LIKE 'manager-%' "
+        "AND from_agent NOT LIKE 'manager-%' AND created_at>=? AND created_at<?", (core.iso(since), core.iso(until))):
+    if read:
+        waited[group(kind, level, blocked)].append((core.parse_iso(read) - core.parse_iso(sent)).total_seconds() / 60)
+    else:
+        unread += 1
+print("\n| Message to a manager | Messages | Median wait | Longest wait | Read in the first minute |\n|---|---:|---:|---:|---:|")
+for k, v in sorted(waited.items(), key=lambda kv: (kv[0].startswith("blocked"), -len(kv[1]))):
+    print(f"| {k} | {len(v)} | {statistics.median(v):.1f}m | {max(v):.1f}m | {sum(x <= 1 for x in v)} |")
+print(f"\nNot read: {unread}")

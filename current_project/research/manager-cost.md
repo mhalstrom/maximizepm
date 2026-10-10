@@ -383,11 +383,34 @@ The answer to #1584 was form A with the waits 0m, 10m, 30m.
 - With `native_message`, only an urgent message goes into the manager's
   session; the watch brings the others.
 
-Measure after one day with the new code:
-
-    python3 current_project/research/manager_wakes.py <since> <until>
-
 Expected for a day like 2026-10-08: about 79 wakes in place of 181.
+
+Measured after one day with the new code (#1598): the day 2026-10-09 UTC,
+against the 15.4 hours of 2026-10-08 before the change. The watch ran the two
+levels of #1608 for the whole day. The section "Measurement after (#1598)"
+below has the details.
+
+| | Before (2026-10-08, 04:33 to 20:00 UTC) | After (2026-10-09 UTC) | Change |
+|---|---:|---:|---:|
+| Hours | 15.4 | 24.0 | |
+| Messages that the manager read | 236 | 166 | |
+| Messages for each hour | 15.3 | 6.9 | 55% fewer |
+| Wakes (turns that the end of a watch started) | 181 | 58 | |
+| Wakes for each hour | 11.7 | 2.4 | 79% fewer |
+| Wakes for each 100 messages | 77 | 35 | 54% fewer |
+| The watch returned for messages | 124 | 20 | |
+| The watch returned for a finding | 55 | 29 | |
+| The watch returned for the time limit | 2 | 8 | |
+| Time between two wakes, median | 3.2m | 27.5m | |
+| Wakes less than 10 minutes after the wake before | 152 of 180 | 1 of 57 | |
+| Turns that the end of a background command started, for each hour | 14 | 3.8 | 72% fewer |
+| eq of the turns that a watch started | 11.3M | 5.5M | |
+| eq for each wake | 63k | 95k | 51% more |
+| Manager eq for each hour | 1.22M | 1.12M | 8% less |
+
+The expected 79 wakes are 56% fewer than 181. The day after had less than
+half the messages for each hour, so the count for each message is the fair
+one: 54% fewer wakes. The effect is as expected.
 
 ### Changed (#1608): two levels and the flag blocked
 
@@ -422,3 +445,173 @@ an alert or a question by itself is no reason to wake the manager at once.
 For the measurement of #1598: count the wakes whose first message is blocked,
 and compare the senders' flags with what the senders did
 (`worker_stops.py`, section 5).
+
+### Measurement after (#1598)
+
+The period is the day 2026-10-09 UTC, for the manager that started on
+2026-10-08 at 04:33 UTC (the same session as in "Measurement after (#1313)").
+Its watch ran the code of #1608: two levels and the flag blocked. The three
+levels of #1583 ran for about 40 minutes only, so no day measures them. The waits
+were the defaults: `manage_wait_high` 10m, `manage_wait_low` 30m,
+`manage_settle` 2m, `manage_every` 30m. Commands:
+
+    python3 current_project/research/manager_wakes.py 2026-10-09T00:00:00+00:00 2026-10-10T00:00:00+00:00
+    python3 current_project/research/manager_cost.py 2026-10-09T00:00:00+00:00 2026-10-10T00:00:00+00:00
+    python3 current_project/research/worker_stops.py 2026-10-09T00:00:00+00:00 2026-10-10T00:00:00+00:00
+
+#### The wakes
+
+Background commands that ended and started a turn: 58 watches and 33 other
+commands. 8 more watches ended while the manager was in a turn (before: 37),
+so the watch returned 66 times (before: 218).
+
+| The watch returned for | Wakes |
+|---|---:|
+| A finding | 29 |
+| Messages | 20 |
+| The time limit (`manage_every`, 30m) | 8 |
+| Not read (two commands ended at the same time) | 1 |
+
+| Findings in the wakes | Wakes |
+|---|---:|
+| human (an item is ready for a person) | 20 |
+| waiting (an agent waits longer than `wait_too_long`) | 13 |
+| uncovered | 3 |
+| question | 1 |
+
+| Messages in the wakes | Messages | Wakes with only this one message |
+|---|---:|---:|
+| Ship request notice | 44 | 1 |
+| Note from an agent | 43 | 3 |
+| Other notice | 15 | 0 |
+| Alert from an agent | 10 | 0 |
+| Question from an agent | 6 | 1 |
+
+- A wake now brings 2.0 messages on average (118 in 58 wakes). Before, it
+  brought 1.0 (181 in 181 wakes), and 70 wakes brought one note only.
+- The manager wakes at a steady pace of about 30 minutes: the wait of the
+  low level and the time limit of the watch are both 30m. In the quiet hours
+  of the day, 8 wakes brought nothing new.
+
+#### The cost
+
+`manager_cost.py` now prints the eq of the turns by what started them. "For
+each hour" divides by the hours with requests (16 before, 24 after).
+
+| Part of the manager cost | Before: eq | Before: for each hour | After: eq | After: for each hour |
+|---|---:|---:|---:|---:|
+| Turns that the end of a watch started | 11.3M | 0.71M | 5.5M | 0.23M |
+| Turns that a message started (the person, or another session) | 5.2M | 0.33M | 9.8M | 0.41M |
+| Turns that the end of another background command started | 2.5M | 0.16M | 3.4M | 0.14M |
+| Subagents of the manager | 0.5M | 0.03M | 8.2M | 0.34M |
+| All | 19.6M | 1.22M | 26.8M | 1.12M |
+
+- The watch part fell from 0.71M to 0.23M eq for each hour, 68% less. It is
+  now 21% of the manager cost (before: 58%).
+- For each message that the manager read, the watch part fell from 48k to 33k
+  eq, 31% less. For a day like 2026-10-08 that is about 3.5M, 18% of the
+  19.6M. The proposal estimated 7.2M, 37%.
+- The difference: the estimate gave each wake the same cost (71k eq). A wake
+  that brings two messages costs more: 95k eq and 5.3 requests (before: 63k
+  and 3.8). The work for each message stays; the wait saves the reads of the
+  context between the messages.
+- The manager cost for each hour fell only 8%, because two other parts grew.
+  The manager used subagents (8.2M, before 0.5M), and the turns that a
+  message started cost more (0.41M for each hour, before 0.33M). The waits do
+  not change these parts.
+- The other numbers of the day: 1,487 requests, 18.0k eq for each request,
+  mean context 122k, 28 compactions (at 166k to 207k), and no second wait for
+  messages.
+
+#### How long the messages waited
+
+From the queue: the time from the send of a message to a manager until a
+watch brought it (`manager_wakes.py` prints the table).
+
+| Message to the manager | Messages | Median wait | Longest wait | Read in the first minute |
+|---|---:|---:|---:|---:|
+| Ship request notice (level low) | 64 | 9.7m | 28.7m | 6 |
+| Note | 42 | 9.7m | 10.0m | 4 |
+| Other notice | 19 | 7.1m | 10.0m | 0 |
+| Alert, not blocked | 16 | 6.7m | 10.0m | 0 |
+| Note, level low (the sender set it) | 14 | 8.2m | 21.1m | 1 |
+| Question, not blocked | 3 | 0.2m | 10.0m | 2 |
+| Blocked: the flag of the sender | 4 | 0.0m | 0.1m | 4 |
+| Blocked: the sign item | 2 | 0.0m | 0.0m | 2 |
+| Blocked: the sign waits | 2 | 6.6m | 11.9m | 0 |
+
+- Before the change, 223 of 236 messages were read in the first minute, and
+  the longest wait was 5.7 minutes.
+- A note waited 9.7 minutes in the median and never more than 10.0. A note is
+  most often the event whose wait ends first, so it waits almost the full
+  `manage_wait_high`.
+- A message of the low level seldom waits 30 minutes: the median is 8 to 10
+  minutes, because a wake for a high message brings it too.
+- 9 more notices went to a manager that had ended before that day. Nobody
+  read them; they are not in the table.
+
+#### Blocked messages, and what the senders did (#1608)
+
+Workers sent the manager 27 alerts and questions. MaximizePM wrote 10 of the
+alerts itself ("a review was added before your deploy"); the 17 others came
+from a worker's own command. What each sender did after the send, from
+`worker_stops.py`, section 5, and from the senders' transcripts:
+
+| After the send | Messages | Blocked by the flag | Blocked by a sign | Not blocked |
+|---|---:|---:|---:|---:|
+| Waited at once (`maxpm inbox --wait` or `maxpm wait` in the foreground) | 6 | 2 | 2 (item) | 2 |
+| Worked 35 to 70 seconds more, then waited (`maxpm inbox --wait` in the foreground) | 2 | 0 | 2 (waits) | 0 |
+| Continued with its item | 7 | 2 | 0 | 5 |
+| Ended its turn until its own subagents reported | 2 | 0 | 0 | 2 |
+
+- MaximizePM saw each of the 8 senders that waited for the answer: 2 set the
+  flag, a sign marked 4, and a wake for another event brought the last 2 in
+  the first 15 seconds.
+- The sign waits was correct both times. `worker_stops.py` counts these two
+  senders as "continued", because it reads only the next tool call.
+- 8 messages were blocked. Six were read in at most 3 seconds, one 1.2
+  minutes after the send, when its sign came, and one after 11.9 minutes (see
+  below). Five of the 8 started a turn of the manager (5 of the 58 wakes);
+  three came while the manager was in a turn.
+- Two of the four flags came from a sender that continued with its item.
+  Those are two wakes that could have waited.
+- The 10 alerts that MaximizePM wrote waited 2 to 10 minutes. Nothing stood
+  still for them: `maxpm done` on the deploy item is refused while its review
+  is open.
+
+#### Did the manager miss something through a wait?
+
+No. The manager read each message to it, and no wait of a level held a
+message longer than its setting. The person's messages to the manager on
+that day (the first line of each) name no late or missed event. Two messages
+waited 10 minutes or more:
+
+1. A blocked question waited 11.9 minutes, and its sender stood in
+   `maxpm inbox --wait` for 10 minutes. The cause is not a wait of a level:
+   no watch ran for 16 minutes. The manager ended a turn and did not start
+   `manage --watch` again, until the end of another background command woke
+   it. This is the only time of the day with no watch for more than 2
+   minutes. A wait setting does not change it; a new item covers it (found
+   during #1598).
+2. One question without the flag waited the full 10.0 minutes. Its sender
+   continued with its item and read its inbox six times in that time. The
+   wait did what its setting says; the flag `--blocked` is the tool for a
+   sender that needs the answer sooner.
+
+So the waits stay: `manage_wait_high` 10m and `manage_wait_low` 30m. Shorter
+waits repair neither case, and they cost a wake for each note. Longer waits
+save little: the watch part is 0.23M of the 1.12M eq for each hour. The
+larger parts are now the turns that the person starts and the subagents of
+the manager.
+
+Not measured: how long a finding waited. The transcripts show when the watch
+returned for a finding, not when the finding began. A `waiting` or `human`
+finding waits at most `manage_wait_low` by the code.
+
+### Script changes (#1598)
+
+- `manager_wakes.py` counts each end of a watch, also one that came while the
+  manager was in a turn, and prints the wait of each message to a manager by
+  kind, level, and blocked mark (from the queue).
+- `manager_cost.py` prints the eq of the manager's turns by what started
+  them, and the eq of its subagents.
