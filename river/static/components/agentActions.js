@@ -15,6 +15,7 @@ export function managerHtml(S) {
   return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="dot ${esc(m.state)}"></span><b>${esc(m.name)}</b>
       ${m.platform ? chip("c-p", esc(m.platform)) : ""}${m.model ? chip("c-p", esc(m.model)) : ""}${chip(m.state === "active" ? "c-ready" : "c-waiting", esc(m.state))}
       <span class="spacer" style="flex:1"></span><button class="btn" data-chat="${esc(m.name)}">Open chat</button>${terminalButton(S, m.name)}</div>
+    ${m.no_watch ? `<div class="st" style="color:var(--warn)">runs no watch (maxpm manage --watch) for ${esc(m.no_watch)}: nothing wakes it at its prompt. Tell it in its terminal to start the watch again.</div>` : ""}
     ${(m.asked || []).map(q => `<div class="st">asks you: ${esc(q.body)}${q.item_id ? ` <span class="link" data-open="${q.item_id}">#${q.item_id}</span>` : ""}</div>`).join("")}
     ${(m.actions || []).map(e => `<div class="ev">${ago(e.at)} · ${esc(e.change.replace(/ \(by manager [^)]*\)$/, ""))}</div>`).join("")
       || '<div class="st muted">No actions yet.</div>'}`;

@@ -603,8 +603,9 @@ async function pollNeedsYou() {
   renderNeedsYou(); notifyNew();
 }
 
-// An alert river sent for an agent that waits on a prompt in its terminal (core.PROMPT_NOTE): its Terminal answers it.
-const promptAlert = e => e.message_kind === "alert" && (e.body || "").startsWith("waits on a prompt in its terminal");
+// An alert river sent for an agent that waits on a prompt in its terminal (core.PROMPT_NOTE), or for a manager that
+// runs no watch (core.WATCH_NOTE): its Terminal answers it.
+const promptAlert = e => e.message_kind === "alert" && ["waits on a prompt in its terminal", "runs no watch"].some(w => (e.body || "").startsWith(w));
 
 function renderNeedsYou() {
   document.title = NY.length ? `(${NY.length}) MaximizePM` : "MaximizePM";
@@ -622,7 +623,7 @@ function renderNeedsYou() {
       ? `<button class="btn" data-open="${e.item_id}">Open</button><button class="btn" data-ny="claim" data-id="${e.item_id}">Claim</button><button class="btn" data-copy-prompt="${e.item_id}" title="A prompt for an agent that explains this and helps you do it">Copy prompt</button>${agentStart(S && S.launch_agents, { label: "Open agent", attrs: `data-agent-help="${e.item_id}"`, title: "Open an agent session with that prompt, in the project folder" })}<button class="btn primary" data-ny="done" data-id="${e.item_id}">Done</button>`
       : (e.message_kind === "question"
           ? `<button class="btn primary" data-ny="answer" data-msg="${e.message_id}">Answer</button>`
-          : (promptAlert(e) ? `<button class="btn primary" data-terminal="${esc(e.from_agent)}" title="Read the prompt and answer it">Terminal</button>` : "")
+          : (promptAlert(e) ? `<button class="btn primary" data-terminal="${esc(e.from_agent)}" title="${(e.body || "").startsWith("runs no watch") ? "Tell the manager to start its watch again" : "Read the prompt and answer it"}">Terminal</button>` : "")
             + `<button class="btn" data-ny="read" data-msg="${e.message_id}">Mark read</button>`)
         + (e.item_id ? `<button class="btn" data-open="${e.item_id}">Open #${e.item_id}</button>` : "");
     // One line each; a click opens the details and the buttons (design: the Board fits one screen).

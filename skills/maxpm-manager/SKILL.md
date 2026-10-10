@@ -47,7 +47,11 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    watch. Run no second background command: each wake reads your
    whole context again, so a second watcher doubles the cost. MaximizePM refuses
    `maxpm inbox --wait` from the active manager.
-3. Act on what is new. Then start `manage --watch` again.
+3. Act on what is new. Then start `manage --watch` again. With no watch,
+   nothing wakes you at your prompt: a blocked message waits, and its sender
+   stands still. When a command of yours ends with `no watch runs`, start the
+   watch before you end your turn. After 5 minutes with no watch and a
+   message that is due, `maxpm serve` alerts each person.
 
 Stop when the user tells you to, and tell the user what you did.
 

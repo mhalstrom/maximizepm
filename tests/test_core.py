@@ -4409,6 +4409,65 @@ class Manager(Base):
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait after a stop"))
         self.assertEqual(w["result"], "stop")
 
+    def test_a_manager_with_no_watch_hears_it_and_the_person_too(self):
+        # #1898: on 2026-10-09 a manager ended a turn and started no watch: for 16 minutes nothing could wake
+        # it, and a blocked question waited 11.9 minutes.
+        from river import cli
+        core.manage(self.c, self.dir.name, "boss")
+        alerts = lambda: [dict(r) for r in self.c.execute(
+            "SELECT id, body, read_at FROM messages WHERE to_agent='mark' AND kind='alert' ORDER BY id")]
+        t0 = core.now()
+        at = lambda minutes: mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=minutes))
+        # A manager that never ran a watch (a manager in a chat) is not late.
+        with at(30):
+            core.send(self.c, "question", "which one?", to="boss", actor="w1", blocked=True)
+            self.assertIsNone(core.watch_gap(self.c, "boss"))
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": []})
+            w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("a blocked message does not wait"))
+            self.assertEqual(len(w["messages"]), 1)
+            self.assertIsNone(core.watch_gap(self.c, "boss"))  # the watch ran until now
+        # Two minutes after its watch ended, each command of the manager says so. No other agent hears it.
+        with at(32):
+            self.assertEqual(core._short(core.watch_gap(self.c, "boss")), "2m")
+            self.assertIsNone(core.watch_gap(self.c, "w1"))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cli._footer(self.c, "boss")
+                cli._footer(self.c, "w1")
+            self.assertEqual(err.getvalue().count("no watch runs"), 1)
+            self.assertIn("no watch runs for 2m: start maxpm --as boss manage --watch in the background", err.getvalue())
+            self.assertIsNone(core.manager_view(self.c)["no_watch"])
+        # After WATCH_LATE with nothing due, the page says it and the person gets no alert. A note waits its level first.
+        self.assertEqual(core.WATCH_LATE, timedelta(minutes=5))
+        with at(36):
+            core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
+            self.assertEqual(core.manager_view(self.c)["no_watch"], "6m")
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": []})
+        with at(47):  # the note is due (manage_wait_high, 10m)
+            r = core.tell_watch_late(self.c)
+            self.assertEqual((r["late"], r["told"], r["closed"]), ({"boss": 1}, ["boss"], []))
+            (a,) = alerts()
+            self.assertTrue(a["body"].startswith("runs no watch (maxpm manage --watch) for 17m: 1 message waits for it. "), a["body"])
+            self.assertIn("maxpm --as boss manage --watch", a["body"])
+            self.assertEqual(core.prompt_alert_agent(self.c, a["id"]), "boss")  # the link opens its Terminal
+            self.assertTrue(any(e.get("message_id") == a["id"] for e in core.needs_you(self.c)))
+            # One alert for each time with no watch, also when more comes.
+            core.send(self.c, "question", "may I run the probe?", to="boss", actor="w2", blocked=True)
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {"boss": 2}, "told": [], "closed": []})
+        # The watch runs again: the alert closes.
+        with at(48):
+            self.assertEqual(len(core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)["messages"]), 2)
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": [a["id"]]})
+            self.assertIsNotNone(alerts()[0]["read_at"])
+            self.assertFalse(any(e.get("message_id") == a["id"] for e in core.needs_you(self.c)))
+        # The next time, a blocked message is in the alert; a manager that is stopped gets none.
+        with at(60):
+            core.send(self.c, "alert", "the build is red", to="boss", actor="w1", blocked=True)
+            self.assertEqual(core.tell_watch_late(self.c)["told"], ["boss"])
+            self.assertIn("for 12m: 1 message waits for it, 1 blocked (the sender stands still). ", alerts()[1]["body"])
+            core.stop_agent(self.c, "boss", "done for the day", actor="mark")
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": [alerts()[1]["id"]]})
+
     def watch_minutes(self, **kw):
         """Run the watch with a clock that moves one minute for each poll; returns (result, minutes waited)."""
         t0, naps = core.now(), []

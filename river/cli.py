@@ -504,6 +504,10 @@ def _footer(conn, actor):
     msg = _unread_text(core.unread(conn, actor), actor)
     if msg:
         bits.append(msg)
+    gap = core.watch_gap(conn, actor)
+    if gap is not None:  # a manager whose watch ended: nothing wakes it at its prompt (#1898)
+        bits.append(f"no watch runs for {core._short(gap)}: start maxpm --as {actor} manage --watch in the "
+                    f"background before you end your turn")
     if bits:
         print(f"[{actor}: {'; '.join(bits)}]", file=sys.stderr)
 

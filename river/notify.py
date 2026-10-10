@@ -305,6 +305,7 @@ def loop(stop, interval_s=None):
             from . import server
             server.watch_prompts(conn)  # an agent that waits on a prompt in its tmux pane: tell the person
             server.watch_busy(conn)  # an agent that is busy with no river command keeps its leases
+            core.tell_watch_late(conn)  # a manager that runs no watch while a message is due: tell the person
             server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session
             server.auto_release(conn)  # a ready review gets a reviewer, a ready deploy its deployer
             server.auto_context(conn)  # goal_context on: a goal with ready work gets a context session (a base)

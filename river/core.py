@@ -522,6 +522,7 @@ CREATE TABLE IF NOT EXISTS agents (
   agent_type     TEXT,                       -- the agent CLI it runs in (codex, claude-code), from its environment
   via            TEXT,                       -- 'http': a chat over the local /mcp of maxpm serve
   manage_seen    TEXT,                       -- the manager's findings it has seen (maxpm manage --watch)
+  watch_seen     TEXT,                       -- the last poll or return of the manager's watch (maxpm manage --watch)
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
   host           TEXT,
@@ -866,6 +867,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_since TEXT")
     if "waiting_in" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_in TEXT")
+    if "watch_seen" not in acols:
+        conn.execute("ALTER TABLE agents ADD COLUMN watch_seen TEXT")
     if "session_url" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN session_url TEXT")
     if "via" not in acols:
@@ -5054,26 +5057,30 @@ POLL_SWEEP = timedelta(seconds=30)  # a command that polls runs the whole activi
 _POLL_SWEPT = {}  # database file -> when a poll of this process last ran the whole activity
 
 
-def poll_activity(conn, actor):
+def poll_activity(conn, actor, watch=False):
     """activity for a command that polls every few seconds (maxpm wait, maxpm manage --watch, the state read
     of the page). Each poll only records that the actor is there and renews its leases, in one short
     transaction; the sweep and sync_needs_you run each POLL_SWEEP, because every ordinary command and maxpm
     serve run them too (#1617: ten polls held the write lock a large part of the time). When the queue stays
     locked for one busy_timeout, the poll skips this renewal and the next one tries again: a lock never ends
-    a wait (#1615)."""
+    a wait (#1615). watch: the poll of a manager's watch, which also records that the watch runs (#1898)."""
     key, t = conn.execute("PRAGMA database_list").fetchone()[2], now()
     last = _POLL_SWEPT.get(key)
+    out = []
     try:
-        if last is None or not timedelta(0) <= t - last < POLL_SWEEP:
+        sweep = last is None or not timedelta(0) <= t - last < POLL_SWEEP
+        if sweep:
             out = activity(conn, actor, tries=1)
             _POLL_SWEPT[key] = t
-            return out
-        if actor:
+        if actor and (watch or not sweep):
             with tx(conn, 1):
-                _touch_agent(conn, actor)
+                if not sweep:
+                    _touch_agent(conn, actor)
+                if watch:
+                    conn.execute("UPDATE agents SET watch_seen=? WHERE name=?", (iso(t), actor))
     except RiverLocked:
         pass
-    return []
+    return out
 
 
 def session_url_from_env(env=None):
@@ -5327,13 +5334,23 @@ STARTED_NOTE = "started from the page for"
 # The first words of the alert river sends for an agent that waits on a prompt in its terminal
 # (server.watch_prompts); the page and the notification link open that agent's Terminal for it.
 PROMPT_NOTE = "waits on a prompt in its terminal"
+# The watch of a manager (maxpm manage --watch) records each poll and its return in agents.watch_seen (#1898).
+# On 2026-10-09 a manager ended a turn and did not start its watch again: nothing wakes a session at its prompt,
+# so for 16 minutes it heard of nothing, and a blocked question waited 11.9 minutes while its sender stood still.
+# A watch runs when its last poll is younger than WATCH_BEAT (a poll comes each 3s; a locked queue skips some).
+# After that, each command of the manager says that no watch runs. After WATCH_LATE with no watch and a message
+# that is due, maxpm serve tells each person (tell_watch_late): the first words of that alert are WATCH_NOTE.
+WATCH_BEAT = timedelta(minutes=1)
+WATCH_LATE = timedelta(minutes=5)
+WATCH_NOTE = "runs no watch"
 
 
 def prompt_alert_agent(conn, message_id):
-    """The agent whose terminal prompt this alert is about, or None for any other message."""
+    """The agent whose terminal this alert is about (a prompt that waits there, or a manager that runs no
+    watch: a person answers both in that terminal), or None for any other message."""
     r = conn.execute("SELECT from_agent, body FROM messages WHERE id=? AND kind='alert'", (message_id,)).fetchone() \
         if message_id is not None else None
-    return r["from_agent"] if r and r["body"].startswith(PROMPT_NOTE) else None
+    return r["from_agent"] if r and r["body"].startswith((PROMPT_NOTE, WATCH_NOTE)) else None
 
 
 def not_connected(conn, a):
@@ -9167,7 +9184,9 @@ def manager_view(conn):
         return None
     a = agent_status(conn, name)
     humans = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human'")]
+    gap = watch_gap(conn, name)
     return {"name": name, "platform": a.get("platform"), "model": a.get("model"), "state": a["state"],
+            "no_watch": _short(gap) if gap is not None and gap >= WATCH_LATE else None,  # nothing wakes it (#1898)
             "session_url": a.get("session_url"), "pid": a.get("pid"), "can_kill": a["can_kill"],
             "actions": [dict(r) for r in conn.execute(
                 "SELECT at, change, item_id FROM events WHERE actor=? AND change LIKE '%(by manager %' "
@@ -9228,7 +9247,9 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     request notice) after manage_wait_low; a new finding of LOW_FINDINGS waits manage_wait_low from when the
     watch saw it. A return for any reason brings every message and finding that waits, so no second wake
     follows. With native_message the platform brings blocked messages and a person's messages into the
-    session, and they do not wake it; the watch brings the others. Returns what changed."""
+    session, and they do not wake it; the watch brings the others. Each poll and the return record that the
+    watch runs (agents.watch_seen): a manager with no watch hears of nothing (watch_gap, #1898). Returns what
+    changed."""
     import json
     import time
     sleep = sleep or time.sleep
@@ -9250,16 +9271,8 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
         f = manager_findings(conn)
         keys = set(_finding_keys(f))
         st = stop_request(conn, actor)
-        # Unread only: an open question already read would wake it at once, every time. Not what the platform
-        # brought into the session already (native_message).
-        waiting = [m for m in conn.execute(
-            f"SELECT m.level, m.blocked, m.created_at, m.native_status, a.kind sender FROM messages m "
-            f"LEFT JOIN agents a ON a.name=m.from_agent WHERE {_TO_ME} "
-            f"AND m.from_agent<>? AND m.read_at IS NULL", (actor, actor, actor)).fetchall()
-            if not (native and (m["native_status"] is None or m["native_status"] == "sent"))]
-        # A blocked message and a person's message do not wait; MaximizePM may mark one blocked after the send.
-        mail = any(m["blocked"] or m["sender"] == "human"
-                   or parse_iso(m["created_at"]) + waits[m["level"] or DEFAULT_LEVEL] <= now() for m in waiting)
+        waiting, due = _watch_mail(conn, actor, native, waits)
+        mail = bool(due)
         low = {k for k in keys - base if k.partition(":")[0] in LOW_FINDINGS}
         if not keys - base - low:
             settled = None  # a finding that went away again wakes nothing
@@ -9277,8 +9290,9 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
                 continue
             mail = any(m["unread"] for m in rows)
             try:
-                with tx(conn):
-                    conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(sorted(keys)), actor))
+                with tx(conn):  # watch_seen: the watch ran until now (#1898)
+                    conn.execute("UPDATE agents SET manage_seen=?, watch_seen=? WHERE name=?",
+                                 (json.dumps(sorted(keys)), iso(now()), actor))
             except RiverLocked:
                 pass  # the messages are read already, so return them; the next watch names these findings again
             return {"agent": actor,
@@ -9288,8 +9302,76 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
                     "messages": sorted((m for m in rows if m["unread"]), key=lambda m: (not m["blocked"], m["id"])),
                     "still_open": sum(1 for m in rows if not m["unread"]),
                     "unread": unread(conn, actor)["unread"], "native": native}
-        poll_activity(conn, actor)
+        poll_activity(conn, actor, watch=True)
         sleep(poll)
+
+
+def _watch_mail(conn, actor, native, waits):
+    """(waiting, due) for the watch of the manager `actor`. waiting: its unread messages. Unread only: an open
+    question already read would wake it at once, every time. Not what the platform brought into the session
+    already (native: native_message). due: those the watch returns for now. A blocked message and a person's
+    message do not wait (MaximizePM may mark one blocked after the send); another one waits the time of its
+    level (waits: {"high": ..., "low": ...})."""
+    waiting = [m for m in conn.execute(
+        f"SELECT m.level, m.blocked, m.created_at, m.native_status, a.kind sender FROM messages m "
+        f"LEFT JOIN agents a ON a.name=m.from_agent WHERE {_TO_ME} "
+        f"AND m.from_agent<>? AND m.read_at IS NULL", (actor, actor, actor)).fetchall()
+        if not (native and (m["native_status"] is None or m["native_status"] == "sent"))]
+    return waiting, [m for m in waiting if m["blocked"] or m["sender"] == "human"
+                     or parse_iso(m["created_at"]) + waits[m["level"] or DEFAULT_LEVEL] <= now()]
+
+
+def watch_gap(conn, name):
+    """For how long the manager `name` runs no watch (maxpm manage --watch): a timedelta, or None while a
+    watch runs (its last poll is younger than WATCH_BEAT), for a manager that never ran one (a manager in a
+    chat has none), and for an agent that is no manager."""
+    r = conn.execute("SELECT watch_seen FROM agents WHERE name=? AND role='manager'", (name,)).fetchone()
+    if not r or not r["watch_seen"]:
+        return None
+    gap = now() - parse_iso(r["watch_seen"])
+    return gap if gap > WATCH_BEAT else None
+
+
+def tell_watch_late(conn):
+    """One pass of maxpm serve (#1898). A manager that runs no watch for WATCH_LATE, while a message for it is
+    due (a watch would return for it now), does not hear of the message: nothing wakes a session at its prompt.
+    Each person gets one alert in the manager's name (WATCH_NOTE), which opens a needs-you event; the page and
+    the notification link open the manager's Terminal for it. When the watch runs again, nothing is due any
+    more, or the manager is stopped or gone, MaximizePM marks the alert read, which closes the event. Returns
+    {"late": {manager: messages due}, "told": [managers], "closed": [message ids]}."""
+    late = {}
+    for a in conn.execute("SELECT * FROM agents WHERE role='manager' AND kind='ai' AND watch_seen IS NOT NULL").fetchall():
+        gap = watch_gap(conn, a["name"])
+        if gap is None or gap < WATCH_LATE or _agent_state(conn, a) not in ("active", "away"):
+            continue
+        waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=a["name"])),
+                 "low": parse_duration(setting(conn, "manage_wait_low", agent=a["name"]))}
+        due = _watch_mail(conn, a["name"], has_native(conn, a["name"]), waits)[1]
+        if due:
+            late[a["name"]] = (gap, due)
+    alerts = conn.execute("SELECT id, from_agent FROM messages WHERE kind='alert' AND read_at IS NULL AND body LIKE ?",
+                          (WATCH_NOTE + "%",)).fetchall()
+    closed = [m["id"] for m in alerts if m["from_agent"] not in late]
+    told = [name for name in late if not any(m["from_agent"] == name for m in alerts)]
+    if not told and not closed:
+        return {"late": {n: len(d) for n, (_, d) in late.items()}, "told": [], "closed": []}  # the usual pass: no write
+    with tx(conn):
+        _mark_read(conn, closed)
+        people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+        for name in told:
+            gap, due = late[name]
+            blocked = sum(1 for m in due if m["blocked"])
+            body = (f"{WATCH_NOTE} (maxpm manage --watch) for {_short(gap)}: {len(due)} message{'s' if len(due) != 1 else ''} "
+                    f"wait{'' if len(due) != 1 else 's'} for it"
+                    + (f", {blocked} blocked (the sender stands still)" if blocked else "")
+                    + f". Nothing wakes a session at its prompt. Tell it in its terminal to start the watch again: "
+                      f"maxpm --as {name} manage --watch")
+            for person in people:
+                _send(conn, "alert", name, body, to=person)
+        told = told if people else []  # with no person in the queue yet, the first one who registers gets it
+        if told or closed:
+            sync_needs_you(conn)
+    return {"late": {n: len(d) for n, (_, d) in late.items()}, "told": told, "closed": closed}
 
 
 def plan(conn, cwd, actor=None, project=None):
