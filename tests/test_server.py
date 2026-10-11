@@ -1564,10 +1564,14 @@ class LaunchInTmux(unittest.TestCase):
         server.PS_RUNNER = lambda pids: "".join(f" {p} ttys007\n" for p in pids)
         self.addCleanup(setattr, server, "PS_RUNNER", None)
         self.assertEqual(server.agent_terminals(self.c), {name: "%0", "other-agent": "%7"})
-        self.assertEqual(server.open_chat(self.c, name).get("hint", "")[:16], "No chat to open ")  # no process recorded for it
+        # Open chat (no web link) opens the same terminal on the page, on Linux too: the session that waits on a
+        # prompt before its first river command (no process recorded for it), and the one found by its terminal.
+        self.assertEqual(server.OPS["open_chat"](self.c, {"agent": name}, "mark")["tmux_pane"], "%0")
+        self.assertEqual(server.open_chat(self.c, "other-agent")["tmux_pane"], "%7")
         # The page's state lists them, and without tmux there are none.
         server.TMUX_RUNNER = lambda a: ""
         self.assertEqual(server.agent_terminals(self.c), {})
+        self.assertEqual(server.open_chat(self.c, name).get("hint", "")[:16], "No chat to open ")
 
     def test_an_agents_terminal_answers_this_computer_only(self):
         core.config_set(self.c, "launch_in", "tmux")
