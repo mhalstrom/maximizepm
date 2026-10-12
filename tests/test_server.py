@@ -951,12 +951,12 @@ class LaunchAgent(unittest.TestCase):
         self.assertIsNone(core.state(self.c)["manager"])
         sent = []
         t = server.start_manager(self.c, runner=sent.append, model="opus")
-        # The manager compacts at manager_autocompact (200k), in the same session (#1312).
-        self.assertEqual(t["command"], "claude --name 'maxpm manager' --model opus --autocompact 200000 manage "
+        # The manager compacts at manager_autocompact (250k), in the same session (#1312).
+        self.assertEqual(t["command"], "claude --name 'maxpm manager' --model opus --autocompact 250000 manage "
                                        "--remote-control 'maxpm manager'")
-        self.assertEqual(t["autocompact"], 200000)
+        self.assertEqual(t["autocompact"], 250000)
         self.assertIn(f"MAXPM_AGENT={t['session_name']} MAXPM_MODEL=opus claude --name 'maxpm manager' --model opus "
-                      f"--autocompact 200000 manage", sent[-1])
+                      f"--autocompact 250000 manage", sent[-1])
         with self.assertRaisesRegex(RiverError, "is the active manager"):
             server.start_manager(self.c, runner=sent.append)
         self.assertEqual(server.manage_command('codex "run maxpm go in this folder"'), 'codex "run maxpm manage in this folder"')

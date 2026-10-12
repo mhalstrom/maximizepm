@@ -209,7 +209,7 @@ DEFAULT_SETTINGS = {
     # maxpm manage briefing shows the queue again. A manager reads its whole context on each wake, so a small
     # context costs less (#1312). auto: Claude Code's own point. A Claude Code launch profile only; an
     # --autocompact in claude_args wins.
-    "manager_autocompact": "200k",
+    "manager_autocompact": "250k",
     # maxpm cleanup lists a ready item that nobody claimed for this long.
     "stale_after": "14d",
     "review": "off",
