@@ -5383,3 +5383,169 @@ class Hooks(Base):
         self.assertEqual(res["status"], "done")  # a hook that fails does not refuse the done
         self.assertEqual([(h["event"], h["exit_code"], h["output"]) for h in res["hooks_run"]],
                          [("deployed", 3, "no build folder")])
+
+
+class Backlog(Base):
+    """An item that nobody plans to take now (#2072): kept with its links, never offered."""
+
+    def setUp(self):
+        super().setUp()
+        self.web = os.path.join(self.dir.name, "web")
+        os.makedirs(self.web)
+        core.project_add(self.c, "web", path=self.web)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w1")
+
+    def cli(self, *words):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(list(words))
+        return out.getvalue()
+
+    def test_a_backlog_item_is_kept_but_never_offered(self):
+        x = self.add("web", "someday", 0)
+        y = self.add("web", "now", 3)
+        core.item_edit(self.c, x, notes="the notes stay", actor="t")
+        r = core.backlog(self.c, x, "no plans this quarter", "mark")
+        self.assertEqual(r["waiting"], [])
+        a = core.annotate(self.c)[x]
+        self.assertTrue(a["backlog"])
+        self.assertFalse(a["ready"])
+        self.assertEqual((a["status"], a["priority"], a["notes"]), ("open", 0, "the notes stay"))
+        self.assertEqual([i["id"] for i in core.ready_list(self.c)], [y])
+        self.assertEqual(core.capacity(self.c)["ready_for_agents"], [y])
+        b = core.go(self.c, self.web, "w1")
+        self.assertEqual(b["item"]["id"], y)
+        with self.assertRaisesRegex(RiverError, rf"#{x} is in the backlog .*maxpm activate {x}"):
+            core.claim(self.c, x, "w1")
+        with self.assertRaisesRegex(RiverError, "maxpm activate"):
+            core.launch_target(self.c, item=x)
+        with self.assertRaisesRegex(RiverError, "in the backlog"):
+            core.push(self.c, x, "w1", None, "mark")
+        with self.assertRaisesRegex(RiverError, "in the backlog"):
+            core.queue_add(self.c, "w1", x, actor="mark")
+        self.assertIn("moved to the backlog: no plans this quarter",
+                      [e["change"] for e in core.item_show(self.c, x)["events"]])
+
+    def test_the_counts_show_the_backlog_apart(self):
+        x = self.add("web", "someday")
+        self.add("web", "now")
+        core.backlog(self.c, x, "later", "mark")
+        p = core.status(self.c)["projects"][0]
+        self.assertEqual((p["open"], p["ready"], p["blocked"], p["backlog"]), (1, 1, 0, 1))
+        self.assertEqual(core.project_show(self.c, "web")["counts"]["backlog"], 1)
+        self.assertEqual(core.project_show(self.c, "web")["counts"]["open"], 1)
+        lst = core.project_list(self.c)[0]
+        self.assertEqual((lst["open_items"], lst["backlog_items"]), (1, 1))
+        self.assertNotIn(x, [i["id"] for i in core.item_list(self.c)])
+        self.assertIn(x, [i["id"] for i in core.item_list(self.c, include_closed=True)])
+        self.assertIn("(1 open, 1 in backlog)", self.cli("project", "list"))
+        self.assertRegex(self.cli("--as", "mark", "status"), r"backlog\nweb .* 1\n")
+
+    def test_a_person_backlog_item_sends_no_notification_and_leaves_needs_you(self):
+        x = self.add("web", "sign the contract", doer="human")
+        core.sync_needs_you(self.c)
+        self.assertEqual([n["item_id"] for n in core.needs_you(self.c)], [x])
+        core.backlog(self.c, x, "not this year", "mark")
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        self.assertEqual(core.needs_you(self.c), [])
+        self.assertEqual(self.c.execute("SELECT close_reason FROM needs_you WHERE item_id=?", (x,)).fetchone()[0],
+                         "moved to the backlog")
+        # A due date of a backlog item warns nobody.
+        self.c.execute("UPDATE items SET due=? WHERE id=?", (core.iso(core.now() - timedelta(hours=1)), x))
+        core.activity(self.c, "mark")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE kind='alert'").fetchone()[0], 0)
+        self.assertEqual(core.status(self.c)["human_waiting"], [])
+
+    def test_backlog_refuses_held_closed_and_release_items(self):
+        x = self.add("web", "taken")
+        core.claim(self.c, x, "w1")
+        with self.assertRaisesRegex(RiverError, "Release it first"):
+            core.backlog(self.c, x, "later", "mark")
+        core.done(self.c, x, "did it", "w1")
+        with self.assertRaisesRegex(RiverError, "is done"):
+            core.backlog(self.c, x, "later", "mark")
+        y = self.add("web", "open")
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.backlog(self.c, y, "", "mark")
+        core.backlog(self.c, y, "later", "mark")
+        with self.assertRaisesRegex(RiverError, "in the backlog already"):
+            core.backlog(self.c, y, "later", "mark")
+        with self.assertRaisesRegex(RiverError, "not in the backlog"):
+            core.activate(self.c, x, "mark")
+
+    def test_an_item_that_others_wait_on_needs_force_and_they_say_so(self):
+        pre = self.add("web", "prerequisite")
+        dep = self.add("web", "needs it", after=[pre])
+        with self.assertRaisesRegex(RiverError, rf"prerequisite of open items: #{dep} needs it.*--force"):
+            core.backlog(self.c, pre, "later", "mark")
+        r = core.backlog(self.c, pre, "later", "mark", force="the dependent waits too")
+        self.assertEqual(r["waiting"], [dep])
+        a = core.annotate(self.c)
+        self.assertFalse(a[dep]["ready"])  # still waits: the backlog item is not done
+        self.assertEqual(a[dep]["backlog_blockers"], [pre])
+        self.assertTrue(core.blockers(self.c, dep)["children"][0]["backlog"])
+        self.assertIn(f"a backlog item: later; maxpm activate {pre}", self.cli("blockers", str(dep)))
+        self.assertIn(f"waits on #{pre} (a backlog item)", self.cli("list"))
+        with self.assertRaisesRegex(RiverError, "would wait on a backlog item"):
+            core.item_add(self.c, "web", "x", blocks=dep, backlog="later")
+        self.assertEqual(core.backlog_list(self.c)[0]["waited_by"], [dep])
+        # Nothing in the project can move: go names the backlog item.
+        b = core.go(self.c, self.web, "w1")
+        self.assertEqual(b["waits_on_backlog"], [{"id": dep, "title": "needs it", "backlog": [pre]}])
+        r = core.activate(self.c, pre, "mark", "now we need it")
+        self.assertTrue(r["ready"])
+        self.assertFalse(core.annotate(self.c)[pre]["backlog"])
+
+    def test_add_backlog_list_and_activate_from_the_cli(self):
+        out = self.cli("--as", "mark", "add", "web", "dark mode", "--backlog", "after the launch", "-p", "1")
+        self.assertIn("backlog: after the launch", out)
+        self.cli("--as", "mark", "add", "web", "plain idea", "--backlog")
+        self.add("web", "now")
+        out = self.cli("backlog")
+        self.assertIn("web:\n  #1    P1 dark mode", out)
+        self.assertIn("why not now: after the launch", out)
+        self.assertIn("why not now: added to the backlog", out)
+        rows = json.loads(self.cli("--json", "backlog", "--project", "web"))["backlog"]
+        self.assertEqual([r["id"] for r in rows], [1, 2])
+        self.assertIn("#1 dark mode: open again, ready.", self.cli("--as", "mark", "activate", "1"))
+        self.assertIn("moved to the backlog (later)", self.cli("--as", "mark", "backlog", "3", "--note", "later"))
+        self.assertEqual([r["id"] for r in core.backlog_list(self.c)], [2, 3])
+
+    def test_a_goal_names_its_backlog_items_and_done_refuses_while_they_are_tagged(self):
+        core.goal_add(self.c, "web", "launch", "the site is live", actor="t")
+        x = core.item_add(self.c, "web", "polish", goals=["launch"], actor="t")["id"]
+        core.backlog(self.c, x, "after launch", "mark")
+        g = core.goal_show(self.c, "launch")
+        self.assertEqual((g["items_open"], g["items_backlog"]), ([], [x]))
+        self.assertEqual([i["id"] for i in g["items"]], [x])
+        with self.assertRaisesRegex(RiverError, rf"backlog items: #{x}"):
+            core.goal_done(self.c, "launch", "live", "mark")
+        core.goal_own(self.c, "launch", "w1")
+        gb = core._goal_brief(self.c, "launch", "w1")
+        self.assertEqual(gb["items_backlog"], [{"id": x, "title": "polish"}])
+        core.goal_done(self.c, "launch", "live", "w1", drop_open=True)
+        self.assertEqual(core.item_show(self.c, x)["status"], "dropped")
+        core.reopen(self.c, x, "mark")  # a closed item leaves the backlog: reopened, it is ready
+        self.assertTrue(core.annotate(self.c)[x]["ready"])
+
+    def test_planner_and_manager_skip_the_backlog(self):
+        x = self.add("web", "someday")
+        core.backlog(self.c, x, "later", "mark")
+        self.assertEqual(core.manager_findings(self.c)["uncovered"], [])
+        p = core.plan(self.c, self.web, "pl")
+        self.assertEqual(p["questions"]["backlog"], 1)
+        self.assertNotIn(x, [i["id"] for i in p["questions"]["items_without_notes"]])
+        self.assertEqual(core.go(self.c, self.web, "w1")["role"], "planner")  # nothing open: plan
+        self.assertEqual([s["id"] for s in core.cleanup(self.c)], [])
+
+    def test_the_columns_come_by_migration(self):
+        self.c.execute("ALTER TABLE items DROP COLUMN backlog_at")
+        self.c.execute("ALTER TABLE items DROP COLUMN backlog_note")
+        self.c.close()
+        self.c = core.connect(self.path)
+        cols = {r["name"] for r in self.c.execute("PRAGMA table_info(items)")}
+        self.assertTrue({"backlog_at", "backlog_note"} <= cols)

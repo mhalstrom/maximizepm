@@ -49,7 +49,7 @@ function offerHelpHtml(it, me) {
 // Open an agent session on this item (server open_agent_on): with the person on a person's item,
 // on what blocks an item that waits, or Dispatch on a ready item.
 function agentButton(it, S) {
-  if (["done", "dropped", "in_progress"].includes(it.status)) return "";
+  if (["done", "dropped", "in_progress"].includes(it.status) || it.backlog) return "";
   const [label, title] = it.doer === "human"
     ? ["Work on it with an agent", "Open an agent in the project folder that helps you do this item together"]
     : !it.ready ? ["Open an agent to unblock it", "Open an agent in the project folder that first takes what this item waits on"]
@@ -77,11 +77,14 @@ export function itemDrawerHtml(it, { S, me }) {
       ${(S.goals || []).some(g => g.status === "open" && !(it.goals || []).includes(g.name)) ? `<select id="dGoal">${(S.goals || []).filter(g => g.status === "open" && !(it.goals || []).includes(g.name)).sort((a, b) => (b.project === it.project) - (a.project === it.project)).map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.project !== it.project ? " (" + esc(g.project) + ")" : ""}</option>`).join("")}</select><button class="btn" data-do="tag">Add goal</button>` : ""}</div>
     ${(it.refs || []).length ? `<div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Tracker:</span>
       ${it.refs.map(r => /^https?:\/\//.test(r.url || "") ? `<a class="chip c-p" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.ref)} ↗</a>` : chip("c-p", esc(r.ref))).map((h, i) => h + (it.refs[i].synced_at ? '<span class="muted" style="font-size:12px">updated</span>' : ["done", "dropped"].includes(it.status) ? chip("c-human", "tracker not updated") : "")).join("")}</div>` : ""}
+    ${it.backlog ? `<div class="meta" style="margin-top:6px"><b>In the backlog</b> since ${ago(it.backlog_at)}: ${esc(it.backlog_note || "")}. Nobody is offered it until it is activated.</div>` : ""}
     <div class="meta" style="margin-top:6px">${esc(it.reason)}${it.lease_expires_at ? " · lease " + left(it.lease_expires_at) + " left" : ""}</div>
     <div class="actions">
-      ${it.status === "open" ? `<button class="btn primary" data-do="claim">Claim</button>` : ""}
+      ${it.backlog ? `<button class="btn primary" data-do="activate" title="Take it out of the backlog: open again, offered to agents and people when ready">Activate</button>` : ""}
+      ${it.status === "open" && !it.backlog ? `<button class="btn primary" data-do="claim">Claim</button>` : ""}
       ${["in_progress", "held"].includes(it.status) ? `<button class="btn primary" data-do="done">Done</button><button class="btn" data-do="release">Release</button>` : ""}
       ${it.status === "open" ? `<button class="btn" data-do="done">Mark done</button>` : ""}
+      ${it.status === "open" && !it.backlog && ["work", "fixes"].includes(it.kind) ? `<button class="btn" data-do="backlog" title="Keep it, but offer it to nobody until you activate it">To backlog</button>` : ""}
       ${!closed ? `<button class="btn" data-do="drop">Drop</button>` : `<button class="btn" data-do="reopen">Reopen</button>`}
       <button class="btn" data-do="save">Save details</button>
       ${agentButton(it, S)}
@@ -115,7 +118,7 @@ export function itemDrawerHtml(it, { S, me }) {
         <input id="dMsgBody" placeholder="${it.assignee ? "to " + esc(it.assignee) : "to whoever takes it next"}" style="flex:1"><button class="btn" data-do="msg">Send</button></div>
     </div>
     <div class="sec"><h4>Unblocks</h4>${it.unblocks_detail.map(w => `<div><span class="link" data-open="${w.id}">#${w.id} ${esc(w.title)}</span> <span class="muted">(${w.status})</span></div>`).join("") || '<div class="muted">nothing</div>'}</div>
-    ${it.status === "open" ? `<div class="sec"><h4>Push to agent</h4>
+    ${it.status === "open" && !it.backlog ? `<div class="sec"><h4>Push to agent</h4>
       ${it.reserved_until ? `<div>Pushed to <b>${esc(it.reserved_for)}</b> by ${esc(it.reserved_by || "?")} · ${left(it.reserved_until)} left · <span class="link" data-unpush="${it.id}">cancel</span></div>`
         : `<div class="actions"><select id="dPushTo">${S.agents.filter(a => a.name !== me).map(a => `<option>${esc(a.name)}</option>`).join("")}</select>
            <input id="dPushNote" placeholder="note (optional)" style="flex:1"><button class="btn" data-do="push">Push</button></div>

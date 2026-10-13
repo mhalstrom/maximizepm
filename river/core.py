@@ -410,6 +410,8 @@ CREATE TABLE IF NOT EXISTS items (
   min_model         TEXT,                     -- hard limits, one model per family, comma list
   max_model         TEXT,
   agent             TEXT,                     -- the agent type that takes it: a launch platform (codex, claude-code)
+  backlog_at        TEXT,                     -- in the backlog since then: kept, never offered (maxpm activate ends it)
+  backlog_note      TEXT,                     -- why not now
   created_at        TEXT NOT NULL,
   closed_at         TEXT
 );
@@ -844,6 +846,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE goals ADD COLUMN parent_id INTEGER REFERENCES goals(id)")
     if "no_goal_context" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN no_goal_context INTEGER NOT NULL DEFAULT 0")
+    if "backlog_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
+        conn.execute("ALTER TABLE items ADD COLUMN backlog_at TEXT")
+        conn.execute("ALTER TABLE items ADD COLUMN backlog_note TEXT")
     # Items held before the holds table existed: their hold starts at the claim.
     conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
                  "FROM items i WHERE i.status IN ('in_progress','held') AND i.assignee IS NOT NULL AND NOT EXISTS "
@@ -1615,7 +1620,9 @@ def project_show(conn, name):
         "ORDER BY e.id DESC LIMIT 20", (p["id"],))})
     p.update(
         description=p.pop("notes"),
-        counts={s: sum(1 for a in mine if a["status"] == s) for s in ("open", "in_progress", "held", "done", "dropped")},
+        counts={**{s: sum(1 for a in mine if a["status"] == s and not a["backlog"])
+                   for s in ("open", "in_progress", "held", "done", "dropped")},
+                "backlog": sum(1 for a in mine if a["backlog"])},
         ready=[{k: v for k, v in a.items() if k != "sort_key"} for a in ready[:5]],
         ready_count=len(ready),
         working_now=holders,
@@ -1630,8 +1637,9 @@ def project_show(conn, name):
 
 def project_list(conn):
     rows = [dict(r) for r in conn.execute(
-        "SELECT p.*, (SELECT COUNT(*) FROM items i WHERE i.project_id=p.id AND i.status IN ('open','in_progress','held')) open_items "
-        "FROM projects p WHERE archived=0 ORDER BY rank, id")]
+        "SELECT p.*, (SELECT COUNT(*) FROM items i WHERE i.project_id=p.id AND i.status IN ('open','in_progress','held') "
+        "AND i.backlog_at IS NULL) open_items, (SELECT COUNT(*) FROM items i WHERE i.project_id=p.id AND i.status='open' "
+        "AND i.backlog_at IS NOT NULL) backlog_items FROM projects p WHERE archived=0 ORDER BY rank, id")]
     for r in rows:
         r["tracker"] = setting(conn, "tracker", project_id=r["id"])
     return rows
@@ -1766,7 +1774,8 @@ def _goal_view(conn, g, ann=None):
     d["project"] = _project_name(conn, g["project_id"])
     ids = [r["item_id"] for r in conn.execute("SELECT item_id FROM item_goals WHERE goal_id=?", (g["id"],))]
     items = [ann[i] for i in ids if i in ann]
-    d["items_open"] = sorted(a["id"] for a in items if a["status"] in OPEN_STATES)
+    d["items_open"] = sorted(a["id"] for a in items if a["status"] in OPEN_STATES and not a["backlog"])
+    d["items_backlog"] = sorted(a["id"] for a in items if a["backlog"])
     d["items_done"] = sorted(a["id"] for a in items if a["status"] == "done")
     d["items_dropped"] = sorted(a["id"] for a in items if a["status"] == "dropped")
     h = _handoff(conn, g["id"])
@@ -1913,7 +1922,7 @@ def goal_show(conn, name):
     d["handoff_text"] = h["text"] if h else None
     d["parent_handoff"] = parent_handoff(conn, g)
     d["items"] = [{k: v for k, v in ann[i].items() if k != "sort_key"}
-                  for i in sorted(d["items_open"] + d["items_done"] + d["items_dropped"],
+                  for i in sorted(d["items_open"] + d["items_backlog"] + d["items_done"] + d["items_dropped"],
                                   key=lambda i: (ann[i]["status"] in CLOSED_STATES, ann[i]["sort_key"]))]
     return d
 
@@ -2075,10 +2084,14 @@ def goal_done(conn, name, result, actor=None, drop_open=False):
     if subs:
         raise RiverError(f"goal {name} has open sub-goals: {', '.join(subs)}. Complete them first "
                          f"(maxpm goal done <sub-goal> --result \"...\")")
-    still = _goal_view(conn, g)["items_open"]
+    view = _goal_view(conn, g)
+    still = view["items_open"] + view["items_backlog"]
     if still and not drop_open:
-        raise RiverError(f"goal {name} has open items: {', '.join('#' + str(i) for i in still)}. Finish them, untag them "
-                         f"(maxpm edit <id> --untag {name}), or drop them: maxpm goal done {name} --result \"...\" --drop-open")
+        raise RiverError(f"goal {name} has open items: {', '.join('#' + str(i) for i in view['items_open']) or 'none'}"
+                         + (f"; backlog items: {', '.join('#' + str(i) for i in view['items_backlog'])}"
+                            if view["items_backlog"] else "")
+                         + f". Finish them, untag them (maxpm edit <id> --untag {name}), or drop them: "
+                         f"maxpm goal done {name} --result \"...\" --drop-open")
     for i in still:
         drop(conn, i, actor, note=f"goal {name} completed without it: {result}")
     with tx(conn):
@@ -2944,8 +2957,12 @@ def touches_list(text):
 
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
-             goals=None, refs=None, models=None):
-    """Add an item. `after`: items it waits on. `feeds`: items it waits on and whose output it reads."""
+             goals=None, refs=None, models=None, backlog=None):
+    """Add an item. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
+    `backlog`: a note on why nobody takes it now; the item goes to the backlog at once."""
+    if backlog is not None and blocks is not None:
+        raise RiverError(f"refused: #{blocks} would wait on a backlog item. Add the item without --blocks, or "
+                         f"without --backlog")
     if doer not in DOERS:
         raise RiverError(f"doer is one of {', '.join(DOERS)}")
     if not (0 <= int(priority) <= 4):
@@ -2989,6 +3006,10 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         if blocks is not None:
             _dep_add(conn, int(blocks), iid, actor)
             _prereq_mode(conn, int(blocks), [iid], actor, mode)
+        if backlog is not None:
+            why = backlog.strip() or "added to the backlog"
+            conn.execute("UPDATE items SET backlog_at=?, backlog_note=? WHERE id=?", (iso(now()), why, iid))
+            _event(conn, iid, actor, f"moved to the backlog: {why}")
     a = item_show(conn, iid)
     if blocks is not None and doer == "human":
         parent = _item(conn, blocks)
@@ -3561,6 +3582,7 @@ def push(conn, item_id, to, note=None, actor=None):
         if it["status"] != "open":
             raise RiverError(f"#{item_id} is {it['status']}" + (f" by {it['assignee']}" if it["assignee"] else "")
                              + "; only an open item can be pushed")
+        _refuse_backlog(it, "pushed")
         if it["reserved_for"] and it["reserved_for"] not in (to, actor):  # its own reservation, the actor hands on
             raise RiverError(f"#{item_id} is already reserved for {it['reserved_for']}"
                              + (" (pushed)" if it["reserved_until"] else "") + f"; {_unreserve_hint(item_id)}")
@@ -3905,6 +3927,85 @@ def unblock(conn, item_id, actor=None):
     return item_show(conn, item_id)
 
 
+# ---------------------------------------------------------------- backlog
+
+def _refuse_backlog(it, verb):
+    if it["backlog_at"] and it["status"] == "open":
+        raise RiverError(f"refused: #{it['id']} is in the backlog, so it is not {verb}; a person or a planner makes "
+                         f"it open again first: maxpm activate {it['id']}")
+
+
+def _waiting_on(conn, item_id):
+    """Open items, not in the backlog themselves, that wait on this one (blocks or feeds links)."""
+    return [dict(r) for r in conn.execute(
+        f"SELECT i.id, i.title FROM deps d JOIN items i ON i.id=d.item_id WHERE d.blocked_by=? AND d.kind<>'conflicts' "
+        f"AND i.status IN {OPEN_STATES} AND i.backlog_at IS NULL ORDER BY i.id", (item_id,))]
+
+
+def backlog(conn, item_id, note=None, actor=None, force=None):
+    """Move an open item to the backlog: it keeps its notes, links, and priority, but go, next, launch, and
+    the notifications never offer it. Items that wait on it keep waiting, so a link needs `force`."""
+    if not (note or "").strip():
+        raise RiverError(f"say why nobody takes it now: maxpm backlog {item_id} --note \"<why not now>\"")
+    with tx(conn):
+        it = _item(conn, item_id)
+        if it["backlog_at"]:
+            raise RiverError(f"#{item_id} is in the backlog already (since {it['backlog_at'][:16]}); "
+                             f"maxpm activate {item_id} makes it open again")
+        if it["status"] in CLOSED_STATES:
+            raise RiverError(f"#{item_id} is {it['status']}; only an open item goes to the backlog "
+                             f"(maxpm reopen {item_id} first)")
+        if it["status"] != "open":
+            raise RiverError(f"refused: {it['assignee'] or 'an agent'} holds #{item_id} ({it['status'].replace('_', ' ')}). "
+                             f"Release it first (maxpm release {item_id} --note \"<why>\"), then move it to the backlog")
+        if it["kind"] in ("deploy", "review", "monitor"):
+            raise RiverError(f"refused: #{item_id} is a {it['kind']} item, which MaximizePM makes for a release; "
+                             f"only work items go to the backlog")
+        waiting = _waiting_on(conn, item_id)
+        if waiting and not (force or "").strip():
+            raise RiverError(f"#{item_id} is a prerequisite of open items: "
+                             + ", ".join(f"#{w['id']} {w['title']}" for w in waiting)
+                             + f". They cannot be ready while #{item_id} is in the backlog. Remove the links "
+                             f"(maxpm undep <id> --on {item_id}), move them to the backlog first, or say why they may "
+                             f"wait: maxpm backlog {item_id} --note \"...\" --force \"<why>\"")
+        t = iso(now())
+        conn.execute("UPDATE items SET backlog_at=?, backlog_note=?, reserved_for=NULL, reserved_until=NULL, "
+                     "reserved_by=NULL, fresh_start=NULL WHERE id=?", (t, note.strip(), item_id))
+        if conn.execute("DELETE FROM queue_entries WHERE item_id=?", (item_id,)).rowcount:
+            _event(conn, item_id, actor, "left the queue (moved to the backlog)")
+        _event(conn, item_id, actor, f"moved to the backlog: {note.strip()}"
+               + (f" (items wait on it: {', '.join('#' + str(w['id']) for w in waiting)}; {force.strip()})"
+                  if waiting else ""))
+    return {"id": item_id, "title": it["title"], "backlog_at": t, "note": note.strip(),
+            "waiting": [w["id"] for w in waiting]}
+
+
+def activate(conn, item_id, actor=None, note=None):
+    """Take an item out of the backlog: it is open again, and ready when nothing it waits on is open."""
+    with tx(conn):
+        it = _item(conn, item_id)
+        if not it["backlog_at"]:
+            raise RiverError(f"#{item_id} is not in the backlog (status {it['status'].replace('_', ' ')})")
+        conn.execute("UPDATE items SET backlog_at=NULL, backlog_note=NULL WHERE id=?", (item_id,))
+        _event(conn, item_id, actor, "taken from the backlog" + (f": {note.strip()}" if (note or "").strip() else ""))
+    a = annotate(conn)[item_id]
+    return {"id": item_id, "title": a["title"], "ready": a["ready"], "status": a["status"],
+            "open_blockers": a["open_blockers"]}
+
+
+def backlog_list(conn, project=None, ann=None):
+    """Backlog items by project rank, then priority and the queue order, with the open items that wait on each."""
+    ann = ann or annotate(conn)
+    names = _names(conn, project) if project else None
+    rows = sorted((a for a in ann.values() if a["backlog"] and not a["project_archived"]
+                   and (names is None or a["project"] in names)),
+                  key=lambda a: (a["project_rank"], a["project"], a["priority"], a["rank"], a["id"]))
+    return [{"id": a["id"], "title": a["title"], "project": a["project"], "priority": a["priority"],
+             "doer": a["doer"], "backlog_at": a["backlog_at"], "backlog_note": a["backlog_note"], "goals": a["goals"],
+             "waited_by": sorted(d for d in a["unblocks"] if ann[d]["status"] in OPEN_STATES and not ann[d]["backlog"])}
+            for a in rows]
+
+
 # ---------------------------------------------------------------- graph
 
 def _load_graph(conn):
@@ -3996,7 +4097,9 @@ def annotate(conn):
             if items[d]["priority"] < eff:
                 eff, source = items[d]["priority"], d
         busy = [c for c in conflicts[i] if items[c]["status"] in ("in_progress", "held")]
-        ready = it["status"] == "open" and not open_blockers and not it["blocked_reason"] and not busy
+        # A backlog item stays open, so the items that wait on it still wait; it is only never ready.
+        backlog = bool(it["backlog_at"]) and it["status"] == "open"
+        ready = it["status"] == "open" and not open_blockers and not it["blocked_reason"] and not busy and not backlog
         a = dict(it)
         a.update(
             touches=touches_list(it["touches"]),
@@ -4014,6 +4117,8 @@ def annotate(conn):
             effective_priority=eff,
             priority_from=source,
             ready=ready,
+            backlog=backlog,
+            backlog_blockers=sorted(b for b in open_blockers if items[b]["backlog_at"] and items[b]["status"] == "open"),
             depth=depth(i) if is_open[i] else None,
         )
         due, due_from = it["due"], None
@@ -4100,7 +4205,7 @@ def ready_for(a, actor):
     """Whether an agent can take an item now: it is ready, or only conflicts with items the agent holds
     itself keep it back. A conflict keeps two agents out of the same files; one agent edits them in turn."""
     return a["ready"] or bool(actor and a["status"] == "open" and not a["open_blockers"] and not a["blocked_reason"]
-                              and a["conflict_holders"] == [actor])
+                              and not a["backlog"] and a["conflict_holders"] == [actor])
 
 
 def ready_list(conn, project=None, unblocks=None, doer_for=None, ann=None, near=None, mine=None, actor=None):
@@ -4222,6 +4327,7 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
         it = _item(conn, item)
         if it["status"] in CLOSED_STATES:
             raise RiverError(f"#{it['id']} is {it['status']}")
+        _refuse_backlog(it, "queued")
         if ag["kind"] != "ai":
             raise RiverError(f"{agent} is a person; a queue is for an agent session")
         if it["doer"] == "human":
@@ -4881,7 +4987,7 @@ def _due_warnings(conn, t):
     zone = setting(conn, "timezone")
     humans = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
     for r in conn.execute(f"SELECT id, title, due, due_warned FROM items WHERE due IS NOT NULL "
-                          f"AND status IN {OPEN_STATES} AND due_warned < 2").fetchall():
+                          f"AND status IN {OPEN_STATES} AND backlog_at IS NULL AND due_warned < 2").fetchall():
         soon = iso(parse_iso(r["due"]) - parse_duration(setting(conn, "due_warn_before", item_id=r["id"])))
         stage = 2 if r["due"] <= t else 1 if soon <= t else 0
         if stage <= r["due_warned"]:
@@ -5156,6 +5262,7 @@ def sync_needs_you(conn):
             it = ann.get(ev["item_id"])
             why = (it["status"] if it and it["status"] in CLOSED_STATES
                    else "claimed" if it and it["status"] in ("in_progress", "held")
+                   else "moved to the backlog" if it and it["backlog"]
                    else "no longer ready")
             conn.execute("UPDATE needs_you SET closed_at=?, close_reason=? WHERE id=?", (t, why, ev["id"]))
         elif ev["kind"] == "message" and ev["message_id"] not in want_msgs:
@@ -5444,6 +5551,8 @@ def _claim_row(conn, item_id, actor):
                              f". #{item_id} is reserved for you: start a session for it (maxpm launch --item {item_id}), "
                              f"or open it to every agent (maxpm edit {item_id} --unreserve)"
                              if it0["reserved_for"] == actor and it0["status"] == "open" else ""))
+    if it0["backlog_at"] and it0["status"] == "open":
+        raise RiverError(_backlog_claim_refusal(it0))
     if it0["doer"] == "human" and ag["kind"] == "ai":
         raise RiverError(f"refused: #{item_id} is for a person. If you can do it or work around it, take it over "
                          f"(the user is told, and can undo it): maxpm takeover {item_id} --note \"<how you will do it>\"")
@@ -5611,11 +5720,19 @@ def needs_folder(a):
     return any(str(t).strip() for t in touches) or bool((a.get("check") or "").strip()) or a.get("kind") in ("deploy", "monitor")
 
 
+def _backlog_claim_refusal(it):
+    return (f"refused: #{it['id']} is in the backlog (nobody plans to take it now"
+            + (f": {it['backlog_note']}" if it["backlog_note"] else "")
+            + f"). Take other work (maxpm go); a person or a planner makes it open again: maxpm activate {it['id']}")
+
+
 def claim(conn, item_id, actor=None):
     _prime_release_commits(conn, item_id)
     with tx(conn, claims=True):
         _sweep(conn)
         a = annotate(conn)[_item(conn, item_id)["id"]]
+        if a["backlog"]:
+            raise RiverError(_backlog_claim_refusal(a))
         if not ready_for(a, actor):
             why = (f"waits on {', '.join('#' + str(b) for b in a['open_blockers'])}" if a["open_blockers"]
                    else a["blocked_text"] if a["blocked_reason"]
@@ -5661,8 +5778,8 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
         if it["assignee"] and actor and it["assignee"] != actor:
             raise RiverError(f"item {item_id} is held by {it['assignee']}; ask them, or release it first")
         conn.execute("UPDATE items SET status=?, closed_at=?, lease_expires_at=NULL, hold_expires_at=NULL, "
-                     "reserved_for=NULL, needs_check=0, output=COALESCE(?, output) WHERE id=?",
-                     (status, iso(now()), output, it["id"]))
+                     "reserved_for=NULL, needs_check=0, backlog_at=NULL, backlog_note=NULL, output=COALESCE(?, output) "
+                     "WHERE id=?", (status, iso(now()), output, it["id"]))
         _event(conn, it["id"], actor, status + (f": {output}" if output else ""))
         if status == "done" and it["kind"] == "deploy":
             _hook(conn, "deployed", it["target"], it["id"], actor)
@@ -6218,7 +6335,7 @@ def cleanup(conn, project=None, git=True):
     ann = annotate(conn)
     t = now()
     project = _project(conn, project)["name"] if project is not None else None
-    items = [a for a in ann.values() if a["status"] == "open" and not a["project_archived"]
+    items = [a for a in ann.values() if a["status"] == "open" and not a["project_archived"] and not a["backlog"]
              and (project is None or a["project"] == project) and a["kind"] == "work"]
     if project is not None:
         _project(conn, project)
@@ -6869,7 +6986,7 @@ def item_show(conn, item_id, ann=None):
     if iid not in ann:
         raise RiverError(f"no item {item_id}")
     a = {k: v for k, v in ann[iid].items() if k != "sort_key"}
-    label = lambda x: "ready" if ann[x]["ready"] else ann[x]["status"]
+    label = lambda x: "ready" if ann[x]["ready"] else "backlog" if ann[x]["backlog"] else ann[x]["status"]
     a["waits_on_detail"] = [{"id": b, "title": ann[b]["title"], "status": label(b),
                              "kind": "feeds" if b in a["fed_by"] else "blocks"} for b in a["waits_on"]]
     a["unblocks_detail"] = [{"id": d, "title": ann[d]["title"], "status": label(d)} for d in a["unblocks"]]
@@ -6909,8 +7026,9 @@ def item_list(conn, project=None, status=None, include_closed=False, goal=None, 
     if status is not None:
         rows = [a for a in rows if a["status"] == status]
     elif not include_closed:
-        rows = [a for a in rows if a["status"] in OPEN_STATES]
-    rows.sort(key=lambda a: (a["status"] in CLOSED_STATES, not a["ready"], a["sort_key"]))
+        # The backlog has its own list (maxpm backlog); --all shows it here too.
+        rows = [a for a in rows if a["status"] in OPEN_STATES and not a["backlog"]]
+    rows.sort(key=lambda a: (a["status"] in CLOSED_STATES, a["backlog"], not a["ready"], a["sort_key"]))
     return [{k: v for k, v in a.items() if k != "sort_key"} for a in rows]
 
 
@@ -6925,7 +7043,8 @@ def blockers(conn, item_id):
         if a["lease_expires_at"]:
             left = int((parse_iso(a["lease_expires_at"]) - now()).total_seconds())
         return {
-            "id": i, "title": a["title"], "status": a["status"], "assignee": a["assignee"],
+            "id": i, "title": a["title"], "status": a["status"], "assignee": a["assignee"], "backlog": a["backlog"],
+            "backlog_note": a["backlog_note"] if a["backlog"] else None,
             "ready": a["ready"], "blocked_reason": a["blocked_reason"], "blocked_text": a["blocked_text"], "lease_seconds_left": left,
             "busy_conflicts": [{"id": c, "title": ann[c]["title"], "assignee": ann[c]["assignee"]}
                                for c in a["busy_conflicts"]],
@@ -7248,7 +7367,7 @@ def capacity(conn, ann=None):
     # Width by depth: how many open items could run at each step if every earlier step finished.
     layers: dict[int, dict] = {}
     for a in live:
-        if a["status"] in OPEN_STATES and a["depth"] is not None:
+        if a["status"] in OPEN_STATES and a["depth"] is not None and not a["backlog"]:
             layer = layers.setdefault(a["depth"], {"depth": a["depth"], "ai": 0, "human": 0})
             layer["human" if a["doer"] == "human" else "ai"] += 1
     layer_list = [layers[k] for k in sorted(layers)]
@@ -7269,7 +7388,7 @@ def capacity(conn, ann=None):
                        f"{stuck_idle} session(s) have no work; stop them or give them other work."})
     if ready_human:
         advice.append({"kind": "human", "text": f"{len(ready_human)} ready item(s) wait on a human."})
-    if not ready and any(a["status"] == "open" for a in live) and not in_progress:
+    if not ready and any(a["status"] == "open" and not a["backlog"] for a in live) and not in_progress:
         advice.append({"kind": "stuck", "text": "Nothing is ready and nothing is in progress: "
                        "every open item is blocked. Check outside blockers (maxpm list)."})
     return {
@@ -7337,11 +7456,12 @@ def status(conn, recent=10):
         projects.append({
             "project": p["name"], "rank": p["rank"], "target": p.get("target"),
             "done": sum(a["status"] == "done" for a in mine),
-            "open": sum(a["status"] in OPEN_STATES for a in mine),
+            "open": sum(a["status"] in OPEN_STATES and not a["backlog"] for a in mine),
+            "backlog": sum(a["backlog"] for a in mine),
             "ready": sum(a["ready"] for a in mine),
             "in_progress": sum(a["status"] in ("in_progress", "held") for a in mine),
             "human_waiting": sum(a["ready"] and a["doer"] == "human" for a in mine),
-            "blocked": sum(a["status"] == "open" and not a["ready"] for a in mine),
+            "blocked": sum(a["status"] == "open" and not a["ready"] and not a["backlog"] for a in mine),
         })
     agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents ORDER BY name")]
     cap = capacity(conn, ann)
@@ -7358,7 +7478,7 @@ def status(conn, recent=10):
                           if a["ready"] and a["doer"] == "human" and not a["project_archived"]],
         "due": [{"id": a["id"], "title": a["title"], "project": a["project"], "due_text": a["due_text"],
                  "due_state": a["due_state"]} for a in sorted(ann.values(), key=lambda a: a["due"] or "")
-                if a["due"] and a["status"] in OPEN_STATES and not a["project_archived"]],
+                if a["due"] and a["status"] in OPEN_STATES and not a["backlog"] and not a["project_archived"]],
         "unsynced": unsynced(conn),
         "spare_slots": cap["spare_slots"],
         "excess_sessions": cap["excess_sessions"],
@@ -8083,7 +8203,9 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
             held = a is not None and a["status"] == "open" and _item(conn, item)["reserved_for"]
             raise RiverError(f"#{item} is not ready for an agent" + (
                 "" if a is None else f" (status {a['status']}" + (f", reserved for {a['reserved_for']}" if a["reserved_for"] else "")
-                + (", for a person" if a["doer"] == "human" else "") + (", waits on open items" if not a["ready"] else "")
+                + (", for a person" if a["doer"] == "human" else "")
+                + (f", in the backlog: maxpm activate {item} first" if a["backlog"] else
+                   ", waits on open items" if not a["ready"] else "")
                 + (", a deploy item: only the owner of its target takes it" if a["kind"] == "deploy" else "") + ")")
                 + (f"; {_unreserve_hint(item)}" if held else ""))
     elif not pool:
@@ -8361,7 +8483,9 @@ def _goal_brief(conn, name, actor):
                              "goal": other[0] if other else None, "goal_owner": owner})
     return {"name": g["name"], "project": g["project"], "outcome": g["outcome"], "done_when": g["done_when"],
             "items_open": [{"id": a["id"], "title": a["title"], "status": a["status"], "ready": a["ready"],
-                            "assignee": a["assignee"], "doer": a["doer"]} for a in open_items],
+                            "assignee": a["assignee"], "doer": a["doer"], "backlog_blockers": a["backlog_blockers"]}
+                           for a in open_items],
+            "items_backlog": [{"id": i, "title": ann[i]["title"]} for i in g["items_backlog"]],
             "items_done": len(g["items_done"]), "blockers_held": blockers,
             "lease": _short(_goal_lease(conn, _goal(conn, name), actor)),
             "handoff": goal_handoff(conn, name)["handoff"], "handoff_due": g["handoff_due"],
@@ -8471,7 +8595,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
     descs = {p["name"]: p["notes"] for p in project_list(conn) if p["name"] in names}
     trackers = {p["name"]: p["tracker"] for p in project_list(conn) if p["name"] in names and p["tracker"]}
     in_area = [a for a in ann.values() if a["project"] in names]
-    open_in_area = [a for a in in_area if a["status"] in OPEN_STATES]
+    open_in_area = [a for a in in_area if a["status"] in OPEN_STATES and not a["backlog"]]
     human_ready = sorted((a for a in in_area if a["ready"] and a["doer"] == "human"), key=lambda a: a["sort_key"])
     brief = {"agent": actor, "new_name": new_name, "projects": names, "descriptions": descs, "trackers": trackers,
              "human_waiting": [{"id": a["id"], "title": a["title"],
@@ -8747,11 +8871,15 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         return brief
     outside = [a for a in open_in_area if a["status"] == "open" and a["blocked_reason"]]
     held_by_others = [a for a in open_in_area if a["status"] in ("in_progress", "held")]
+    brief["backlog"] = sum(1 for a in in_area if a["backlog"])
+    brief["waits_on_backlog"] = [{"id": a["id"], "title": a["title"], "backlog": a["backlog_blockers"]}
+                                 for a in sorted(open_in_area, key=lambda a: a["sort_key"]) if a["backlog_blockers"]]
     needs_plan = not open_in_area or (not held_by_others and len(outside) == len([a for a in open_in_area if a["status"] == "open"]))
     if role == "planner" or (role is None and needs_plan):
         brief.update(role="planner", item=None,
                      open_items=[{"id": a["id"], "title": a["title"], "blocked_reason": a["blocked_reason"],
-                                  "blocked_text": a["blocked_text"], "open_blockers": a["open_blockers"]} for a in open_in_area],
+                                  "blocked_text": a["blocked_text"], "open_blockers": a["open_blockers"],
+                                  "backlog_blockers": a["backlog_blockers"]} for a in open_in_area],
                      why=("the project has no open items" if not open_in_area
                           else "every open item waits on something outside the queue"))
         _set_role_note(conn, actor, "planner", None)
@@ -9122,7 +9250,8 @@ def manager_findings(conn):
                           f"not seen for {_short(t - parse_iso(a['last_seen']))}",
                           "holds": [h["id"] for h in a["holds"]], "queued": queued.get(a["name"], 0)})
     lost = [{"id": x["id"], "title": x["title"], "project": x["project"]} for x in ann.values()
-            if x["needs_check"] and x["status"] == "open" and not x["reserved_until"] and not x["project_archived"]]
+            if x["needs_check"] and x["status"] == "open" and not x["reserved_until"] and not x["project_archived"]
+            and not x["backlog"]]
     too_long = parse_duration(setting(conn, "wait_too_long"))
     waiting = [{"agent": a["name"], "since": a["waiting_since"], "waited": _short(t - parse_iso(a["waiting_since"])),
                 "in": a["waiting_in"]} for a in agents
@@ -9395,7 +9524,8 @@ def plan(conn, cwd, actor=None, project=None):
     ann = annotate(conn)
     live = sorted((a for a in ann.values() if not a["project_archived"] and a["status"] in OPEN_STATES),
                   key=lambda a: a["sort_key"])
-    focus = [a for a in live if not names or a["project"] in names]
+    focus = [a for a in live if (not names or a["project"] in names) and not a["backlog"]]
+    backlog_here = [a for a in live if (not names or a["project"] in names) and a["backlog"]]
     brief_item = lambda a: {"id": a["id"], "project": a["project"], "title": a["title"]}
     no_notes = [a for a in focus if not a["notes"].strip() and not a["context"].strip() and a["kind"] != "deploy"]
     stuck = [dict(brief_item(a), reason=a["blocked_reason"], blocked_text=a["blocked_text"],
@@ -9418,5 +9548,8 @@ def plan(conn, cwd, actor=None, project=None):
             "due": [dict(brief_item(a), due_text=a["due_text"], due_state=a["due_state"],
                          open_before=len(a["open_blockers"])) for a in sorted(
                         (a for a in focus if a["due"]), key=lambda a: a["due"])],
+            "waits_on_backlog": [dict(brief_item(a), backlog=a["backlog_blockers"])
+                                 for a in focus if a["backlog_blockers"]],
+            "backlog": len(backlog_here),
         },
     }

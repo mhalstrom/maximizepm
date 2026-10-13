@@ -13,6 +13,7 @@ export function statusChip(it) {
 }
 function baseStatusChip(it) {
   if (it.status === "open") {
+    if (it.backlog) return chip("c-p", "backlog", it.backlog_note || "nobody plans to take it now");
     if (it.ready) return chip("c-ready", "ready");
     if (it.blocked_reason) return chip("c-blocked", it.blocked_until ? "blocked · " + left(it.blocked_until) : "blocked", it.blocked_text);
     return chip("c-waiting", "waits on " + it.open_blockers.map(b => "#" + b).join(","));

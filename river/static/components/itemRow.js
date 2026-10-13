@@ -20,7 +20,7 @@ export function itemRow(it, why) {
 export function itemTableRows(items) {
   return [...items].sort(itemOrder).map((it, order) => ({
     id: it.id, order, title: it.title, it,
-    status: it.status === "open" ? (it.ready ? "ready" : it.blocked_reason ? "blocked" : "waiting") : it.status.replace("_", " "),
+    status: it.status === "open" ? (it.backlog ? "backlog" : it.ready ? "ready" : it.blocked_reason ? "blocked" : "waiting") : it.status.replace("_", " "),
     prio: it.effective_priority,
     doer: it.doer === "any" ? "anyone" : it.doer === "human" ? "human" : "agent",
     due: it.effective_due && !["done", "dropped"].includes(it.status) ? it.effective_due : "",

@@ -114,10 +114,11 @@ HINTS = {
 
 
 def _fmt_goal(g):
-    n_open, n_done = len(g["items_open"]), len(g["items_done"])
+    n_open, n_done, n_back = len(g["items_open"]), len(g["items_done"]), len(g.get("items_backlog") or ())
     state = "complete" if g["status"] == "complete" else (f"owner {g['owner']}" if g["owner"] else
                                                           "shared: no owner" if g.get("shared") else "no owner")
     return (f"{g['name']} [{g['project']}] ({state}; {n_done} done, {n_open} open"
+            + (f", {n_back} in backlog" if n_back else "")
             + (f"; sub-goal of {g['parent']}" if g.get("parent") else "")
             + (f"; sub-goals {', '.join(g['subgoals'])}" if g.get("subgoals") else "") + ")"
             + (f": {g['outcome']}" if g["outcome"] else ""))
@@ -127,8 +128,11 @@ def _fmt_item(a, show_reason=True):
     flags = []
     if a["status"] != "open":
         flags.append(a["status"] + (f" by {a['assignee']}" if a.get("assignee") else ""))
+    elif a.get("backlog"):
+        flags.append("backlog" + (f": {a['backlog_note']}" if a.get("backlog_note") else ""))
     elif a["open_blockers"]:
-        flags.append("waits on " + ",".join(f"#{b}" for b in a["open_blockers"]))
+        flags.append("waits on " + ",".join(f"#{b}" + (" (a backlog item)" if b in (a.get("backlog_blockers") or ()) else "")
+                                            for b in a["open_blockers"]))
     elif a["blocked_reason"]:
         flags.append(a["blocked_text"])
     elif a.get("busy_conflicts"):
@@ -450,6 +454,8 @@ def _print_tree(n, prefix="", last=True, root=True):
     left = f", {n['lease_seconds_left'] // 60}m left" if n["lease_seconds_left"] is not None else ""
     who = f", {n['assignee']}{left}" if n["assignee"] else ""
     state = "ready" if n["ready"] else n["status"]
+    if n.get("backlog"):
+        state = f"a backlog item: {n['backlog_note']}; maxpm activate {n['id']} makes it open again"
     if n["blocked_reason"]:
         state += ", " + n["blocked_text"]
     for c in n.get("busy_conflicts", []):
@@ -697,6 +703,9 @@ def build_parser():
                    help="with --blocks: keep holding that item and do this one yourself now")
     g.add_argument("--release", dest="mode", action="store_const", const="release",
                    help="with --blocks: give that item back; anyone can do this one (the default)")
+    x.add_argument("--backlog", nargs="?", const="", metavar="WHY",
+                   help="add it to the backlog: kept, but nobody is offered it until maxpm activate <id> (put the "
+                        "title first: maxpm add \"title\" --backlog \"why not now\")")
 
     x = sub.add_parser("edit", help="change title, notes, doer, or project")
     x.add_argument("id", type=int); x.add_argument("--title"); x.add_argument("--notes")
@@ -891,6 +900,13 @@ def build_parser():
     x.add_argument("id", type=int); x.add_argument("--note", required=True, help="how you will do it without the user")
     x = sub.add_parser("undo-takeover", help="give a taken-over item back to the people"); x.add_argument("id", type=int)
     x = sub.add_parser("reopen", help="open a closed item again"); x.add_argument("id", type=int)
+    x = sub.add_parser("backlog", help="move an open item to the backlog (kept, never offered), or list the backlog")
+    x.add_argument("id", type=int, nargs="?", help="the item to move; without it, list the backlog")
+    x.add_argument("--note", help="why nobody takes it now (required with an id)")
+    x.add_argument("--force", metavar="WHY", help="move it although open items wait on it: say why they may wait")
+    x.add_argument("--project", help="list: only this project (a name or a comma list)")
+    x = sub.add_parser("activate", help="take an item out of the backlog: open again, offered when ready")
+    x.add_argument("id", type=int); x.add_argument("--note", help="why now")
     x = sub.add_parser("prio", help="set item priority"); x.add_argument("id", type=int); x.add_argument("priority", type=int)
     x = sub.add_parser("move", help="manual order inside a project")
     x.add_argument("id", type=int); g = x.add_mutually_exclusive_group(required=True)
@@ -1781,7 +1797,8 @@ def dispatch(conn, a, actor):
             project = core.project_for_add(conn, os.getcwd(), a.blocks if a.blocks is not None else a.found_during)
         res = core.item_add(conn, project, title, a.priority, a.notes, a.doer, a.after, actor,
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
-                            [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a))
+                            [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
+                            backlog=a.backlog)
         if a.no_goal_context:
             core.item_goal_context(conn, res["id"], False, actor)
         return res
@@ -1910,6 +1927,16 @@ def dispatch(conn, a, actor):
         return core.undo_takeover(conn, a.id, actor)
     if c == "reopen":
         return core.reopen(conn, a.id, actor)
+    if c == "backlog":
+        if a.id is None:
+            if a.note or a.force:
+                raise RiverError("name the item: maxpm backlog <id> --note \"<why not now>\"")
+            return {"backlog": core.backlog_list(conn, a.project)}
+        if a.project:
+            raise RiverError("--project goes with the list (maxpm backlog --project <name>), not with an item")
+        return core.backlog(conn, a.id, a.note, actor, a.force)
+    if c == "activate":
+        return core.activate(conn, a.id, actor, a.note)
     if c == "prio":
         return core.item_prio(conn, a.id, a.priority, actor)
     if c == "move":
@@ -2065,10 +2092,12 @@ def render_status(res):
         print("(no projects: maxpm project add <name>)")
     else:
         w = max(4, *(len(p["project"]) for p in rows))
-        print(f"{'project':<{w}}  {'done':>4} {'open':>4} {'ready':>5} {'working':>7} {'human':>5} {'waiting':>7}")
+        print(f"{'project':<{w}}  {'done':>4} {'open':>4} {'ready':>5} {'working':>7} {'human':>5} {'waiting':>7} "
+              f"{'backlog':>7}")
         for p in rows:
             print(f"{p['project']:<{w}}  {p['done']:>4} {p['open']:>4} {p['ready']:>5} {p['in_progress']:>7} "
-                  f"{p['human_waiting']:>5} {p['blocked']:>7}" + (f"  [{p['target']}]" if p["target"] else ""))
+                  f"{p['human_waiting']:>5} {p['blocked']:>7} {p.get('backlog', 0):>7}"
+                  + (f"  [{p['target']}]" if p["target"] else ""))
     print()
     print(f"Recently done ({len(res['recent'])}):" if res["recent"] else "Recently done: nothing yet")
     for it in res["recent"]:
@@ -2184,8 +2213,9 @@ def render_manage(b):
     if b["new_name"]:
         out.append(f"Pass --as {me} on every maxpm command.")
     st = b["status"]
-    out += ["", "Projects: " + ", ".join(f"{p['project']} {p['ready']} ready/{p['open']} open" for p in st["projects"][:12]
-                                          if p.get("open")),
+    out += ["", "Projects: " + ", ".join(f"{p['project']} {p['ready']} ready/{p['open']} open"
+                                          + (f" ({p['backlog']} in backlog)" if p.get("backlog") else "")
+                                          for p in st["projects"][:12] if p.get("open")),
             "", "NEEDS ATTENTION:"] + _findings_lines(b["findings"], r)
     out += ["",
             "Your job: plan with the user, and keep the other agents working together. You take no items.",
@@ -2284,10 +2314,15 @@ def render_plan(b):
     section("May be done or stale (check each, then maxpm check <id> done|partial|open)", q.get("suspect", []),
             lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  ({', '.join(x['reasons'])})")
     section("Waiting on a human", q["human_waiting"], lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'])}")
+    section("Wait on a backlog item: they cannot be ready (maxpm activate <backlog id>, or maxpm undep <id> --on <backlog id>)",
+            q.get("waits_on_backlog", []), lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  "
+            f"(waits on {', '.join('#' + str(b) for b in x['backlog'])})")
     section("Items with no notes or context", q["items_without_notes"],
             lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'])}")
     if len(out) == 2:
         out.append("(none)")
+    if q.get("backlog"):
+        out.append(f"\nBacklog: {q['backlog']} item(s) that nobody plans to take now (maxpm backlog).")
     print("\n".join(out))
 
 
@@ -2402,10 +2437,14 @@ def render_go(b):
                    f"{gb['lease']} (goal_lease), and your leases on its items last that long too.")
         def st(o):
             return ("ready" if o["ready"] else o["status"].replace("_", " ")
-                    + (f" by {o['assignee']}" if o["assignee"] else "")) + ("; human" if o["doer"] == "human" else "")
+                    + (f" by {o['assignee']}" if o["assignee"] else "")) + ("; human" if o["doer"] == "human" else "") + (
+                "".join(f"; waits on a backlog item #{b}" for b in o.get("backlog_blockers") or ()))
         out.append(f"  items: {gb['items_done']} done, {len(gb['items_open'])} open"
                    + (": " + ", ".join(f"#{o['id']} {_cut(o['title'], 40)} ({st(o)})" for o in gb["items_open"][:6])
                       if gb["items_open"] else ""))
+        if gb.get("items_backlog"):
+            out.append(f"  in the backlog (nobody takes them now; goal done refuses while they are tagged): "
+                       + ", ".join(f"#{o['id']} {_cut(o['title'], 40)}" for o in gb["items_backlog"][:6]))
         for x in gb["blockers_held"][:5]:
             to = (f"--goal {x['goal']}" if x["goal"] and x["goal_owner"] else f"--item {x['id']}")
             out.append(f"  held by another session: #{x['id']} {_cut(x['title'], 40)} ({x['assignee']}"
@@ -2660,7 +2699,11 @@ def render_go(b):
             for o in b["open_items"]:
                 why = o["blocked_text"] if o["blocked_reason"] else (
                     "waits on " + ",".join(f"#{x}" for x in o["open_blockers"]) if o["open_blockers"] else "held")
+                why += "".join(f"; waits on a backlog item #{x}" for x in o.get("backlog_blockers") or ())
                 out.append(f"  #{o['id']} {o['title']}  ({why})")
+        if b.get("backlog"):
+            out.append(f"{b['backlog']} item(s) in the backlog: nobody plans to take them now (maxpm backlog; "
+                       f"maxpm activate <id> makes one open again, with the user's yes for a person's item).")
         out += [
             "",
             "Steps:",
@@ -2681,6 +2724,11 @@ def render_go(b):
                 f"#{e['item']} {_cut(e['title'], 40)}" for e in b["queue_waiting"][:5]) + "; maxpm wait wakes you when one is.")
         for h in b.get("held_by_others", []):
             out.append(f"  #{h['id']} {h['title']}  (held by {h['assignee']})")
+        for w in b.get("waits_on_backlog", [])[:5]:
+            out.append(f"  #{w['id']} {_cut(w['title'], 50)}  (waits on a backlog item "
+                       + ",".join(f"#{x}" for x in w["backlog"]) + "; a person or a planner decides: maxpm activate <id>)")
+        if b.get("backlog"):
+            out.append(f"  {b['backlog']} item(s) here are in the backlog: nobody takes them now (maxpm backlog).")
         out += [
             "",
             f"Wait for work: {r} wait",
@@ -2859,7 +2907,7 @@ def render(a, res):
             print("  tracker: " + (res.get("tracker") or "none (maxpm project tracker " + res["name"] + " \"<tracker> <where> via <tool>\")"))
             if res.get("look"):
                 print("\n".join("  " + line for line in look_setup_lines(res["name"], res["look"])))
-            print("  items: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in res["counts"].items() if v))
+            print("  items: " + ", ".join(f"{v} {'in backlog' if k == 'backlog' else k.replace('_', ' ')}" for k, v in res["counts"].items() if v))
             print("  working now: " + (", ".join(res["working_now"]) or "nobody"))
             if res["worked_recently"]:
                 print("  worked here recently: " + ", ".join(res["worked_recently"]))
@@ -2871,7 +2919,8 @@ def render(a, res):
             return
         rows = res if isinstance(res, list) else [res]
         for p in rows:
-            print(f"{p['rank']:>2}. {p['name']}" + (f"  ({p['open_items']} open)" if "open_items" in p else "")
+            print(f"{p['rank']:>2}. {p['name']}" + (f"  ({p['open_items']} open" + (
+                f", {p['backlog_items']} in backlog" if p.get("backlog_items") else "") + ")" if "open_items" in p else "")
                   + (f"  [target {p['target']}]" if p.get("target") else ""))
             if p.get("notes"):
                 print(f"    {p['notes']}")
@@ -3005,6 +3054,34 @@ def render(a, res):
             print(f"    {p['name']}  ({p['open_items']} open)")
         if not res["projects"]:
             print(f"    (none: maxpm project target <project> {res['name']})")
+        return
+    if c == "backlog" and "backlog" in res:
+        rows = res["backlog"]
+        if not rows:
+            print("(the backlog is empty)")
+        project = None
+        for b in rows:
+            if b["project"] != project:
+                project = b["project"]
+                print(f"{project}:")
+            print(f"  #{b['id']:<4} P{b['priority']} {b['title']}" + (f"  ({b['doer']})" if b["doer"] != "any" else "")
+                  + (f"  [goal {','.join(b['goals'])}]" if b["goals"] else ""))
+            print(f"         why not now: {b['backlog_note'] or '-'} (since {b['backlog_at'][:10]})"
+                  + (f"; waited on by {', '.join('#' + str(w) for w in b['waited_by'])}" if b["waited_by"] else ""))
+        if rows:
+            print("Take one up: maxpm activate <id>")
+        return
+    if c == "backlog":
+        print(f"#{res['id']} {res['title']}: moved to the backlog ({res['note']}). Nobody is offered it until "
+              f"maxpm activate {res['id']}.")
+        if res["waiting"]:
+            print("  These open items wait on it and cannot be ready meanwhile: "
+                  + ", ".join("#" + str(w) for w in res["waiting"]))
+        return
+    if c == "activate":
+        print(f"#{res['id']} {res['title']}: open again, "
+              + ("ready." if res["ready"] else "waits on " + ", ".join("#" + str(b) for b in res["open_blockers"])
+                 if res["open_blockers"] else "not ready yet (maxpm show " + str(res["id"]) + ")."))
         return
     if c in ("list",):
         if not res:

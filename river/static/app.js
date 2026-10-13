@@ -51,14 +51,15 @@ function renderNext() {
 // Projects folded closed on the Projects tab, remembered in this browser.
 function projClosed() { try { return JSON.parse(store("river.projClosed") || "[]"); } catch (e) { return []; } }
 function renderProjects() {
-  const showDone = $("#showDone").checked;
+  const showDone = $("#showDone").checked, showBacklog = $("#showBacklog").checked;
   const G = goalSel(), goals = S.goals || [];
   const html = S.projects.map(p => {
     const pg = goals.filter(g => g.project === p.name && (g.status === "open" || showDone || g.name === G));
     const all = S.items.filter(i => i.project === p.name && inGoal(i));
     if (G && G !== "__none" && !all.length && !pg.some(g => g.name === G)) return "";
-    const open = all.filter(i => !["done", "dropped"].includes(i.status));
+    const open = all.filter(i => !["done", "dropped"].includes(i.status) && !i.backlog);
     const closed = all.filter(i => ["done", "dropped"].includes(i.status));
+    const backlog = all.filter(i => i.backlog);
     const ready = open.filter(i => i.ready).length, prog = open.filter(i => ["in_progress", "held"].includes(i.status)).length;
     const closedSet = projClosed(), isClosed = closedSet.includes(p.name);
     const who = [...new Set(open.filter(i => i.assignee && ["in_progress", "held"].includes(i.status)).map(i => i.assignee))];
@@ -67,13 +68,13 @@ function renderProjects() {
       p.target ? `deploys to <b>${esc(p.target)}</b>` : "", p.tracker ? `tracker ${esc(p.tracker)}` : ""].filter(Boolean);
     const me = actor();
     return projCard(p, isClosed, `<div class="pmeta">${meta.map(m => `<span>${m}</span>`).join("")}</div>
-      <div class="pcounts">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${countChip(open.length, "open", "c-p")}${countChip(closed.length, "done", "c-p")}${pg.length ? countChip(pg.length, pg.length === 1 ? "goal" : "goals", "c-p") : ""}</div>
+      <div class="pcounts">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${countChip(open.length, "open", "c-p")}${countChip(closed.length, "done", "c-p")}${backlog.length ? countChip(backlog.length, "in backlog", "c-p") : ""}${pg.length ? countChip(pg.length, pg.length === 1 ? "goal" : "goals", "c-p") : ""}</div>
       <div class="pbody">
         <div class="pdesc">${p.notes ? esc(p.notes) : '<span class="muted">No description.</span>'} <span class="link" data-describe="${esc(p.name)}">edit</span></div>
         <div class="pwho">${who.length ? "Working here now: " + who.map(n => `<b>${esc(n)}</b>`).join(", ") : "Nobody works here now."}</div>
         <div class="psec">Goals</div>
         <div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<span class="link" style="font-size:12px;align-self:center" data-addgoal="${esc(p.name)}">${pg.length ? "+ goal" : "No goals yet. + Add a goal"}</span></div>
-        <div class="psec">Open items (${open.length})${showDone && closed.length ? `, ${closed.length} done` : ""}</div>
+        <div class="psec">Open items (${open.length})${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}</div>
         <div class="ptable" data-ptable="${esc(p.name)}"></div>
       </div>`);
   }).join("");
@@ -91,7 +92,8 @@ function renderProjects() {
   }
   for (const [name, t] of projTables) {
     if (!box.contains(t.el)) { t.table.tabulator.destroy(); projTables.delete(name); continue; }
-    t.table.set(itemTableRows(S.items.filter(i => i.project === name && inGoal(i) && (showDone || !["done", "dropped"].includes(i.status)))));
+    t.table.set(itemTableRows(S.items.filter(i => i.project === name && inGoal(i) && (showDone || !["done", "dropped"].includes(i.status))
+      && (showBacklog || !i.backlog))));
   }
 }
 const projTables = new Map();
@@ -251,7 +253,7 @@ function workOpen() { try { return new Set(JSON.parse(store("river.work.open") |
 function renderWork() {
   const open = workOpen();
   $("#work").innerHTML = S.projects.map(p => {
-    const items = S.items.filter(i => i.project === p.name && !["done", "dropped"].includes(i.status));
+    const items = S.items.filter(i => i.project === p.name && !["done", "dropped"].includes(i.status) && !i.backlog);
     if (!items.length) return "";
     const ready = items.filter(i => i.ready).length, run = items.filter(i => ["in_progress", "held"].includes(i.status)).length;
     const hum = items.filter(i => i.ready && i.doer === "human").length;
@@ -464,6 +466,14 @@ async function drawerAction(what) {
     if (what === "release") await act("release", { id });
     if (what === "drop") await act("drop", { id });
     if (what === "reopen") await act("reopen", { id });
+    if (what === "activate") { await act("activate", { id }); toast(`#${id} is open again`); }
+    if (what === "backlog") {
+      const note = prompt(`Why does nobody take #${id} now? (one line)`); if (!note) return;
+      const waits = S.items.filter(i => i.waits_on.includes(id) && !["done", "dropped"].includes(i.status) && !i.backlog);
+      const force = waits.length ? (confirm(`${waits.map(i => "#" + i.id).join(", ")} wait on #${id} and cannot be ready while it is in the backlog. Move it anyway?`) ? "moved from the page; the waiting items may wait" : null) : undefined;
+      if (force === null) return;
+      await act("backlog", { id, note, force }); toast(`#${id} moved to the backlog`);
+    }
     if (what === "unblock") await act("unblock", { id });
     if (what === "replanned") await act("replanned", { id });
     if (what === "msg") { const body = $("#dMsgBody").value.trim(); if (!body) return; if (!actor()) return toast("Choose your name in 'You are' first", true); await act("send", { kind: $("#dMsgKind").value, body, item: id }); toast("Sent"); }
@@ -861,6 +871,7 @@ $("#goalGo").addEventListener("click", async () => {
 });
 $("#area").addEventListener("change", renderNext);
 $("#showDone").addEventListener("change", renderProjects);
+$("#showBacklog").addEventListener("change", renderProjects);
 $("#showIdle").addEventListener("change", renderAgents);
 $("#tidyPanes").addEventListener("click", async () => {
   const r = await act("tmux_tidy", {}).catch(() => null);

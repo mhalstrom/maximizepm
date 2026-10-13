@@ -182,6 +182,10 @@ Stop when the user tells you to, and tell the user what you did.
   for work, and the item's history records the first 200 characters. A custom launch_agents command (no
   profile) takes no `--prompt`.
 - `maxpm target give <target> --to <agent>`
+- `maxpm backlog`: items nobody plans to take now. They are no finding: no NO AGENT line, no launch,
+  no notification. `maxpm activate <id>` makes one open again when the user wants it now; a person's item
+  only with the person's yes. An item that waits on a backlog item never gets ready: the plan briefing
+  lists it ("Wait on a backlog item"); ask the user to activate the backlog item or remove the link.
 - Planning: everything in `maxpm guide planner` (add, dep, prio, edit).
 
 ## Rules

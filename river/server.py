@@ -158,6 +158,8 @@ def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=Non
     it = core.item_show(conn, item_id)
     if it["status"] not in core.OPEN_STATES:
         raise RiverError(f"#{item_id} is {it['status']}; there is nothing to open an agent on")
+    if it["backlog"]:
+        raise RiverError(f"#{item_id} is in the backlog; make it open again first (Activate, or maxpm activate {item_id})")
     mine = person and it["assignee"] == person  # a person claimed it (Claim next): help them do it
     if it["status"] == "in_progress" and not mine:
         raise RiverError(f"#{item_id} is in progress by {it['assignee']}; message them instead")
@@ -1864,6 +1866,8 @@ OPS = {
     "release": lambda c, a, who: core.release(c, a["id"], a.get("note"), who),
     "drop": lambda c, a, who: core.drop(c, a["id"], who),
     "reopen": lambda c, a, who: core.reopen(c, a["id"], who),
+    "backlog": lambda c, a, who: core.backlog(c, a["id"], a.get("note"), who, a.get("force")),
+    "activate": lambda c, a, who: core.activate(c, a["id"], who, a.get("note")),
     "block": lambda c, a, who: core.block(c, a["id"], a.get("reason"), who, a.get("until")),
     "unblock": lambda c, a, who: core.unblock(c, a["id"], who),
     "replanned": lambda c, a, who: core.replanned(c, a["id"], a.get("note"), who),

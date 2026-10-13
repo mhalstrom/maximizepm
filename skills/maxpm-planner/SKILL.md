@@ -193,7 +193,35 @@ maxpm edit <id> [--title] [--notes] [--doer] [--project] [--context] [--touches 
 maxpm blocked <id> --reason "..." [--until "mon 07:00 America/New_York"] / maxpm unblock <id>
 maxpm drop <id> / maxpm reopen <id>
 maxpm replanned <id> [--note "..."]   # clear the replan mark after you split or re-scope the item
+maxpm backlog <id> --note "<why not now>" [--force "<why the items that wait on it may wait>"]
+maxpm backlog [--project <name>]    # the backlog by project and priority
+maxpm activate <id> [--note "..."]  # out of the backlog: open again
+maxpm add ... --backlog ["<why not now>"]   # add it straight to the backlog
 ```
+
+### The backlog
+
+Move an item to the backlog when nobody plans to take it now: an idea for
+later, work after a launch, a nice-to-have. It keeps its notes, links,
+priority, and goal tags, but go, next, launch, capacity, the manager's
+findings, needs-you, and the notifications never offer it. The counts show it
+apart ("2 in backlog"). Do not use the backlog for work that waits on
+something: that is `maxpm blocked` (an outside reason) or `maxpm dep` (another
+item).
+
+- Only an open item goes there: an agent that holds it releases it first.
+  Release items (deploy, review, monitor) never do.
+- Items that wait on it cannot be ready while it is in the backlog, so
+  `maxpm backlog` names them and asks for `--force "<why>"`. Better: move them
+  to the backlog first, or remove the link. `maxpm blockers` and the go
+  briefing say "waits on a backlog item #N".
+- A person's item goes to the backlog only with the person's yes: ask first
+  (`maxpm ask <person> "Move #N to the backlog? <why>"`), as for a drop.
+- A goal names its backlog items apart, and `goal done` refuses while they
+  are tagged, as for open items: activate, untag, or `--drop-open`.
+- `maxpm plan` shows the backlog count. Look at the backlog with the user
+  when you plan the next stage, and run `maxpm activate <id>` for what now
+  has a plan.
 
 ## How the order works
 

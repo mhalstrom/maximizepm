@@ -252,7 +252,9 @@ Name the item in commit messages (`Fix the header (#12)`), so a check finds it.
   the item is ready at once, and `maxpm go` gives it to the next session,
   which finds the same thing and releases it again.
 - Something unrelated: `maxpm add "<title>" --found-during <id>`.
-  Do not do it inside your current item.
+  Do not do it inside your current item. An idea that nobody needs now goes
+  to the backlog: add `--backlog "<why not now>"`. Nobody is offered a backlog
+  item until a person or a planner runs `maxpm activate <id>`.
 - Waiting on something outside the queue: `maxpm blocked <id> --reason "<what>"`.
   Add `--until <time>` (`2h`, `2026-09-28T07:00`, `'mon 07:00 America/New_York'`)
   when you know when it ends: the item becomes ready by itself then.

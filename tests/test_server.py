@@ -107,6 +107,21 @@ class PageMessages(unittest.TestCase):
         self.assertEqual(len(body["messages"]), 2)
         self.assertEqual(self.get("/api/inbox")[0], 400)  # no agent named
 
+    def test_the_page_moves_an_item_to_the_backlog_and_activates_it(self):
+        x = core.item_add(self.c, "a", "someday", actor="mark")["id"]
+        y = core.item_add(self.c, "a", "after it", after=[x], actor="mark")["id"]
+        with self.assertRaisesRegex(core.RiverError, "--force"):
+            self.op("backlog", "mark", id=x, note="not now")
+        self.op("backlog", "mark", id=x, note="not now", force="moved from the page")
+        code, body = self.get("/api/state")
+        it = next(i for i in body["items"] if i["id"] == x)
+        self.assertEqual((it["backlog"], it["backlog_note"], it["ready"]), (True, "not now", False))
+        code, body = self.get(f"/api/item/{y}")
+        self.assertEqual(body["waits_on_detail"][0]["status"], "backlog")
+        with self.assertRaisesRegex(core.RiverError, "in the backlog"):
+            server.open_agent_on(self.c, x)
+        self.assertTrue(self.op("activate", "mark", id=x)["ready"])
+
 
 class PageGoals(unittest.TestCase):
     """Goals on the page: the state carries goals with progress; the goal ops and item tags work."""
