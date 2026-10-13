@@ -304,12 +304,19 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
 
 def open_chat(conn, agent, runner=None):
     """Bring the person into an agent's chat: its web link when the session has one (Claude Code with
-    --remote-control); else, on macOS, the Terminal tab that runs its process (by the tty of the PID river
-    recorded); else a hint that says why and what to do."""
+    --remote-control); else its tmux pane, on any system (the page opens its terminal view); else, on macOS,
+    the Terminal tab that runs its process (by the tty of the PID river recorded); else a hint that says why
+    and what to do."""
     import subprocess
     a = core.agent_status(conn, agent)
     if a.get("session_url"):
         return {"agent": agent, "url": a["session_url"]}
+    # The panes of the page's Terminal button (agent_terminals): on Linux too, where agents start only in tmux,
+    # and for a session that ran no river command yet (a folder trust prompt), which has no PID yet.
+    pane = agent_terminals(conn).get(agent)
+    if pane:
+        return {"agent": agent, "tmux_pane": pane,  # the page opens its terminal view
+                "hint": f"{agent} runs in tmux ({pane}): `maxpm view` in a terminal shows it."}
     why = ("it has no web link: Remote Control is off for Claude Code (maxpm config set claude_remote_control on)"
            if core.setting(conn, "claude_remote_control") == "off"
            else "it has no web link (start Claude Code with --remote-control for one)")
@@ -319,12 +326,10 @@ def open_chat(conn, agent, runner=None):
                                  timeout=5).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             tty = ""
-        if tty and tty not in ("??", "?") and (core.PLATFORM == "darwin" or runner or TERMINAL_RUNNER):
+        if tty and tty not in ("??", "?") and not (core.PLATFORM == "darwin" or runner or TERMINAL_RUNNER):
+            why = f"its terminal ({tty}) is not a tmux pane, and only a tmux pane shows on the page"
+        elif tty and tty not in ("??", "?"):
             dev = tty if tty.startswith("/dev/") else "/dev/" + tty
-            pane = _tmux_pane_of(dev)
-            if pane:
-                return {"agent": agent, "tmux_pane": pane["pane"],  # the page opens its terminal view
-                        "hint": f"{agent} runs in tmux ({pane['name'] or pane['pane']}): `maxpm view` in a terminal shows it."}
             script = "\n".join([
                 'tell application "Terminal"',
                 '  repeat with w in windows',
