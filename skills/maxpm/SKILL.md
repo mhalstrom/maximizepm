@@ -203,6 +203,22 @@ One command, no ids copied by hand. The project comes from the item you name
 with `--blocks` or `--found-during`, or from the folder you are in; name it
 first only when neither applies (`maxpm add <project> "<title>"`).
 
+Look first: `maxpm search "<words>"` lists the items, open, done, and
+dropped, that hold every word, newest first (`--status open`, `--since 30d`,
+`--project <name>`). The work may be in the queue already, or done last week.
+`maxpm add` checks too: when an open item, or one done in the last 14 days
+(`similar_days`), looks like the same work, it adds nothing and shows them.
+Then:
+
+- The same work: add what you found to it, not a new item:
+  `maxpm send note "<what you found>" --item <its id>`, or make your item wait
+  on it: `maxpm dep <your-id> --on <its id>`.
+- Different work (a follow-up, another part): add it again with
+  `--new "<how it differs>"`; the history keeps the reason.
+
+`maxpm show <id>` and the go briefing list the related items of an item (work
+like it that it is not linked to): read them before you start.
+
 - Needs to happen before your item: `maxpm add "<title>" --blocks <your-id> --keep|--release`
 - Found while working, not needed for your item: `maxpm add "<title>" --found-during <your-id>`
   (linked both ways in `maxpm show`; it does not block anything)
@@ -456,6 +472,7 @@ your alert or question blocked when it sees that you stand still: you run
   `maxpm who --file <path>`: who holds an item that touches that file or directory
   (from each item's `--touches`); check it before you edit a shared file.
 - `maxpm blockers <id>`: the tree of open work an item waits on, with holders.
+- `maxpm search "<words>"`: items in any state that hold every word.
 - `maxpm capacity`: ready work versus active sessions.
 - `maxpm usage`: the token cost of each done item, read from the Claude Code
   transcripts of the sessions that held it, and the medians for fresh and

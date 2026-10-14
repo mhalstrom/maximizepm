@@ -307,6 +307,57 @@ def _ship_line(p):
                         f"\"<why>\")" if p["waits"] else "")
 
 
+def _match_state(m):
+    """open | in progress by x | done 2026-10-12 | backlog: the state of a search or similar-item match."""
+    st = m["status"].replace("_", " ")
+    if m.get("assignee") and m["status"] in ("in_progress", "held"):
+        st += f" by {m['assignee']}"
+    if m["status"] in core.CLOSED_STATES and m.get("closed_at"):
+        st += f" {m['closed_at'][:10]}"
+    return st
+
+
+def _related_lines(rows, indent="  "):
+    out = []
+    for m in rows:
+        out.append(f"{indent}  #{m['id']} [{_match_state(m)}] {_cut(m['title'], 90)}  (score {m['score']:.2f})")
+        if m.get("output"):
+            out.append(f"{indent}      output: {_cut(' '.join(m['output'].split()), 160)}")
+    return out
+
+
+def render_search(res, limit):
+    q = res["query"]
+    if res["items"]:
+        print(f"{res['total']} item(s) with every word of \"{q}\", newest first:")
+        for m in res["items"]:
+            print(f"  #{m['id']:<5} [{_match_state(m)}] [{m['project']}] {m['title']}")
+            if m.get("output"):
+                print(f"         output: {_cut(' '.join(m['output'].split()), 160)}")
+        if res["total"] > len(res["items"]):
+            print(f"... {res['total'] - len(res['items'])} more (-n {res['total']}, or more words)")
+        return
+    if res["closest"]:
+        print(f"No item has every word of \"{q}\". The closest:")
+        for m in res["closest"]:
+            print(f"  #{m['id']:<5} [{_match_state(m)}] [{m['project']}] {m['title']}  (score {m['score']:.2f})")
+        return
+    print(f"No item like \"{q}\".")
+
+
+def render_duplicates(groups):
+    if not groups:
+        print("No open items look like the same work (similar_min).")
+        return
+    print(f"{len(groups)} group(s) of open items that look like the same work:")
+    for g in groups:
+        print(f"{g['project']} (score {g['score']:.2f}):")
+        for m in g["items"]:
+            print(f"  #{m['id']:<5} [{_match_state(m)}] {m['title']}" + ("  (a person's)" if m["doer"] == "human" else ""))
+    print("Merge the same work into the item that stays: maxpm merge <keep-id> <other-id> --note \"<why the same>\"")
+    print("Not the same work: link them (maxpm dep <id> --on <id>), or leave them.")
+
+
 def _print_show(a):
     print(_fmt_item(a))
     if a.get("kind") == "deploy":
@@ -359,6 +410,9 @@ def _print_show(a):
         print("  found while doing this:", ", ".join(f"#{d['id']} {d['title']} ({d['status']})" for d in a["found_here"]))
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
+    if a.get("related"):
+        print("  related (work like it, not linked; maxpm show <id>):")
+        print("\n".join(_related_lines(a["related"])))
     if a.get("usage"):
         print(f"  usage:   {_usage_line(a['usage'])}")
     if a.get("shipped_in"):
@@ -394,6 +448,8 @@ def _print_brief(a, n=240):
         print("  lease until:", a["lease_expires_at"])
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
+    if a.get("related"):
+        print("  related: " + ", ".join(f"#{m['id']} {_cut(m['title'], 40)} ({_match_state(m)})" for m in a["related"]))
     print(f"  all of it: maxpm show {a['id']}")
 
 
@@ -712,6 +768,25 @@ def build_parser():
     x.add_argument("--backlog", nargs="?", const="", metavar="WHY",
                    help="add it to the backlog: kept, but nobody is offered it until maxpm activate <id> (put the "
                         "title first: maxpm add \"title\" --backlog \"why not now\")")
+    x.add_argument("--new", metavar="HOW", help="add it although maxpm add found open or lately done items like it: "
+                   "say how it differs (the history keeps it)")
+
+    x = sub.add_parser("search", help="find items by words in their title, context, notes, and output: open, done, "
+                       "and dropped, newest first (run it before maxpm add)")
+    x.add_argument("words", nargs="+", help="every word must occur (a light stem: test finds tests)")
+    x.add_argument("--project", help="only this project (a name or a comma list)")
+    x.add_argument("--status", help="open, backlog, in_progress, held, done, dropped, closed, or all (default all)")
+    x.add_argument("--since", help="created or closed since: 30d, 2h, or a date (2026-10-01)")
+    x.add_argument("-n", "--limit", type=int, default=20, help="at most this many (default 20)")
+    x.add_argument("--all-kinds", dest="kinds", action="store_true",
+                   help="also deploy, review, monitor, and fixes items (default: work items only)")
+    x = sub.add_parser("duplicates", help="groups of open items that look like the same work (the score of the "
+                       "maxpm add check); merge them with maxpm merge")
+    x.add_argument("--project", help="only this project (a name or a comma list)")
+    x = sub.add_parser("merge", help="close an item as a duplicate of another: its notes, links, tags, messages, "
+                       "and queue places move to the kept item")
+    x.add_argument("keep", type=int, help="the item that stays"); x.add_argument("other", type=int, help="the duplicate")
+    x.add_argument("--note", help="why they are the same work (required)")
 
     x = sub.add_parser("edit", help="change title, notes, doer, or project")
     x.add_argument("id", type=int); x.add_argument("--title"); x.add_argument("--notes")
@@ -1827,7 +1902,7 @@ def dispatch(conn, a, actor):
         res = core.item_add(conn, project, title, a.priority, a.notes, a.doer, a.after, actor,
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
-                            backlog=a.backlog)
+                            backlog=a.backlog, check_similar=True, new=a.new)
         if a.no_goal_context:
             core.item_goal_context(conn, res["id"], False, actor)
         return res
@@ -1841,7 +1916,15 @@ def dispatch(conn, a, actor):
     if c == "list":
         return core.item_list(conn, a.project, a.status, a.all, a.goal, a.ref)
     if c == "show":
-        return core.item_show(conn, a.id)
+        res = core.item_show(conn, a.id)
+        res["related"] = core.related(conn, a.id)
+        return res
+    if c == "search":
+        return core.search(conn, " ".join(a.words), a.project, a.status, a.since, a.limit, a.kinds)
+    if c == "duplicates":
+        return {"duplicates": core.duplicates(conn, a.project)}
+    if c == "merge":
+        return core.merge(conn, a.keep, a.other, a.note, actor)
     if c == "status":
         from . import relay
         return {**core.status(conn, a.recent), "relay": relay.saved_status()}
@@ -2346,6 +2429,9 @@ def render_plan(b):
     section("Wait on a backlog item: they cannot be ready (maxpm activate <backlog id>, or maxpm undep <id> --on <backlog id>)",
             q.get("waits_on_backlog", []), lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  "
             f"(waits on {', '.join('#' + str(b) for b in x['backlog'])})")
+    section("Look like the same work (merge: maxpm merge <keep-id> <other-id> --note \"<why>\")",
+            q.get("duplicates", []), lambda g: f"[{g['project']}] " + "  =  ".join(
+                f"#{m['id']} {_cut(m['title'], 45)}" for m in g["items"]) + f"  (score {g['score']:.2f})")
     section("Items with no notes or context", q["items_without_notes"],
             lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'])}")
     if len(out) == 2:
@@ -2569,6 +2655,9 @@ def render_go(b):
             out.append("  unblocks: " + ", ".join(f"#{d['id']} {d['title']}" for d in it["unblocks_detail"]))
         if it.get("output"):
             out.append(f"  earlier output: {it['output']}")
+        if b.get("related"):
+            out.append(f"  RELATED (look first: some of it may be done or in progress; {r} show <id>):")
+            out += _related_lines(b["related"], "  ")
         if b["role"] == "deployer":
             t = b["target"]
             if not t["description"]:
@@ -2852,6 +2941,18 @@ def render(a, res):
         return
     if c == "go":
         return render_go(res)
+    if c == "search":
+        return render_search(res, a.limit)
+    if c == "duplicates":
+        return render_duplicates(res["duplicates"])
+    if c == "merge":
+        m = res["merged"]
+        print(f"#{m['id']} {m['title']}: dropped as a duplicate of #{res['id']}"
+              + (f"; moved to #{res['id']}: {', '.join(m['moved'])}" if m["moved"] else "") + ".")
+        if m["skipped"]:
+            print("  not moved (it would make a loop): " + ", ".join(m["skipped"]))
+        _print_show(res)
+        return
     if c == "plan":
         return render_plan(res)
     if c == "manage":

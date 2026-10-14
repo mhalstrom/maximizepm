@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 import os
 import re
 import shutil
@@ -67,6 +68,12 @@ DEFAULT_SETTINGS = {
     "owner_ttl": "8h",
     "reserve_ttl": "2h",
     "keep_prereq_limit": "3",
+    # maxpm add first looks for the same work (#2257): open items of the project, and items done in the last
+    # similar_days, whose score (0 to 1, words weighted by how rare they are) reaches similar_min. Then it adds
+    # nothing and shows them; maxpm add ... --new "<how it differs>" adds anyway. off: no check. maxpm duplicates
+    # groups open items with the same score.
+    "similar_min": "0.55",
+    "similar_days": "14d",
     "replan_threshold": "3",
     "default_prerequisite_mode": "release",
     "max_leases": "1",
@@ -668,6 +675,29 @@ class RiverError(Exception):
     """A refusal. The message names the rule and, where possible, the next command."""
 
 
+class SimilarWork(RiverError):
+    """maxpm add found the same work in the queue (similar_items) and added nothing. `matches` holds them."""
+
+    def __init__(self, matches):
+        self.matches = matches
+        lines = ["refused: the queue already has work like this, so nothing was added (similar_min; #2257):"]
+        for m in matches:
+            when = (m["closed_at"] or "")[:10]
+            state = m["status"].replace("_", " ") + (f" by {m['assignee']}" if m["assignee"] and m["status"] in (
+                "in_progress", "held") else "") + (f" {when}" if m["status"] == "done" else "")
+            lines.append(f"  #{m['id']} [{state}] {m['title']}  (score {m['score']:.2f})")
+            if m["output"]:
+                out = " ".join(m["output"].split())
+                lines.append(f"      output: {out[:200] + '...' if len(out) > 200 else out}")
+        first = matches[0]["id"]
+        lines += ["The same work: add what you found to it, do not add an item:",
+                  f"  maxpm send note \"<what you found>\" --item {first}   (reaches its holder, or its next holder)",
+                  f"  or let your item wait on it: maxpm dep <your item> --on {first}",
+                  "Different work (a follow-up, another part): add it again with",
+                  "  maxpm add ... --new \"<how it differs from #" + str(first) + ">\"   (the history keeps it)"]
+        super().__init__("\n".join(lines))
+
+
 class RiverLocked(RiverError):
     """Other commands held the write lock of the queue for longer than a command waits (tx)."""
 
@@ -1108,8 +1138,15 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout"):
+            "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "similar_days"):
         parse_duration(value)
+    elif key == "similar_min":
+        try:
+            ok = value == "off" or 0 < float(value) <= 1
+        except ValueError:
+            ok = False
+        if not ok:
+            raise RiverError("similar_min is a number above 0 and at most 1 (0.55), or off")
     elif key == "prompt_pattern":
         try:
             re.compile(value)
@@ -3023,9 +3060,11 @@ def touches_list(text):
 
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
-             goals=None, refs=None, models=None, backlog=None):
+             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None):
     """Add an item. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
-    `backlog`: a note on why nobody takes it now; the item goes to the backlog at once."""
+    `backlog`: a note on why nobody takes it now; the item goes to the backlog at once.
+    `check_similar` (maxpm add): refuse with SimilarWork when the same work is open or was done lately
+    (similar_items); `new` says how this item differs, and adds it anyway (the history keeps it)."""
     if backlog is not None and blocks is not None:
         raise RiverError(f"refused: #{blocks} would wait on a backlog item. Add the item without --blocks, or "
                          f"without --backlog")
@@ -3033,6 +3072,12 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         raise RiverError(f"doer is one of {', '.join(DOERS)}")
     if not (0 <= int(priority) <= 4):
         raise RiverError("priority is 0 (highest) to 4 (lowest)")
+    if new is not None and not new.strip():
+        raise RiverError("say how this item differs from the matches: --new \"<how it differs>\"")
+    like = similar_items(conn, project, title, context, touches, [blocks, found_during, *after, *(feeds or ())],
+                         actor) if check_similar or new else []
+    if like and check_similar and new is None:
+        raise SimilarWork(like)
     with tx(conn):
         if found_during is not None:
             _item(conn, found_during)
@@ -3045,6 +3090,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
              check or "", iso(now())))
         iid = cur.lastrowid
         _event(conn, iid, actor, f"added to {p['name']} at P{priority}")
+        if new is not None:
+            _event(conn, iid, actor, f"added as new work" + (f" although like {', '.join('#' + str(m['id']) for m in like)}"
+                                                             if like else "") + f": {new.strip()}")
         # Goal tags: the ones named, else the goal the actor owns in this item's project (if any).
         # goals=[] means no goal.
         names = list(goals) if goals is not None else [r["name"] for r in conn.execute(
@@ -4070,6 +4118,336 @@ def backlog_list(conn, project=None, ann=None):
              "doer": a["doer"], "backlog_at": a["backlog_at"], "backlog_note": a["backlog_note"], "goals": a["goals"],
              "waited_by": sorted(d for d in a["unblocks"] if ann[d]["status"] in OPEN_STATES and not ann[d]["backlog"])}
             for a in rows]
+
+
+# ---------------------------------------------------------------- search and similar items (#2257)
+#
+# One score for maxpm search, the check of maxpm add, the related items of show and go, and maxpm duplicates:
+# the cosine of two word vectors, each word weighted by how rare it is in the queue (idf). A title word counts
+# twice, a context word once. Measured on a live queue of 2,012 work items (2026-10-14): at 0.55, the check
+# stops 2.4% of adds and catches every known repeat (scores 0.59 to 0.80); at 0.45 it stops 6.9%.
+
+_STOP_WORDS = frozenset("""a an the and or but of to in on for with by from at as is are be was were it its this that
+these those not no do does done into than then when if so via per one two each every all any new add adds added
+make makes item items maxpm after before only also same can cannot has have""".split())
+SIMILAR_BATCH = timedelta(hours=2)  # items one author added this close together are a series, not repeats
+RELATED_MIN = 0.3                   # the score from which show and go list an item as related
+
+
+def _stem(w):
+    for s in ("ing", "ed", "es", "s"):
+        if len(w) > len(s) + 3 and w.endswith(s):
+            return w[:-len(s)]
+    return w
+
+
+def _words(text):
+    """The words of a text that tell items apart: lower case, no common words, a light stem (tests -> test)."""
+    return [_stem(w) for w in re.findall(r"[a-z0-9_]+", (text or "").lower())
+            if w not in _STOP_WORDS and (len(w) > 2 or w.isdigit())]
+
+
+def _text_rows(conn, where="1", params=()):
+    """Items with their words: `key` (title twice, context once) for the score, `all` (title, context, notes,
+    output) for a search."""
+    rows = []
+    for r in conn.execute("SELECT i.id, i.project_id, p.name project, p.path, i.title, i.context, i.notes, i.output, "
+                          "i.status, i.kind, i.doer, i.assignee, i.touches, i.created_at, i.closed_at, i.backlog_at, "
+                          "i.found_during FROM items i JOIN projects p ON p.id=i.project_id WHERE " + where, params):
+        d = dict(r)
+        title, context = _words(d["title"]), _words(d["context"])
+        d["key"] = title + title + sorted(set(context))
+        d["all"] = set(title) | set(context) | set(_words(d["notes"])) | set(_words(d["output"]))
+        rows.append(d)
+    return rows
+
+
+def _idf(conn):
+    """How rare each word is among the work items' titles and contexts."""
+    df, n = {}, 0
+    for r in conn.execute("SELECT title, context FROM items WHERE kind='work'"):
+        n += 1
+        for w in set(_words(r["title"]) + _words(r["context"])):
+            df[w] = df.get(w, 0) + 1
+    return lambda w: math.log((n + 1) / (df.get(w, 0) + 1)) + 1
+
+
+def _vector(words, idf):
+    v = {}
+    for w in words:
+        v[w] = v.get(w, 0) + idf(w)
+    return v
+
+
+def _cosine(a, b):
+    dot = sum(x * b[w] for w, x in a.items() if w in b)
+    if not dot:
+        return 0.0
+    return dot / (math.sqrt(sum(x * x for x in a.values())) * math.sqrt(sum(x * x for x in b.values())))
+
+
+def _state(d):
+    return "backlog" if d["backlog_at"] and d["status"] == "open" else d["status"]
+
+
+def _match(d, score):
+    return {"id": d["id"], "title": d["title"], "project": d["project"], "status": _state(d), "doer": d["doer"],
+            "assignee": d["assignee"], "output": d["output"], "created_at": d["created_at"],
+            "closed_at": d["closed_at"], "score": round(score, 2)}
+
+
+def _since(conn, text):
+    """--since 30d (a time back from now) or a date (2026-10-01)."""
+    try:
+        return iso(now() - parse_duration(text))
+    except RiverError:
+        return iso(parse_when(text, setting(conn, "timezone")))
+
+
+def search(conn, text, project=None, status=None, since=None, limit=20, kinds=False):
+    """Items whose title, context, notes, or output hold every word of the text, newest first: open, done,
+    and dropped. Only work items, unless kinds (deploy, review, monitor and fixes items too). No item with every
+    word: the closest items by the score, so a search never comes back empty-handed when something is near."""
+    want = _words(text)
+    if not want:
+        raise RiverError("give words to search for: maxpm search \"<words>\"")
+    states = {"open": ("open",), "in_progress": ("in_progress",), "held": ("held",), "done": ("done",),
+              "dropped": ("dropped",), "closed": CLOSED_STATES, "backlog": ("open",), "all": None}
+    if status and status not in states:
+        raise RiverError(f"--status is one of {', '.join(states)}")
+    where, params = ["1"], []
+    if not kinds:
+        where.append("i.kind='work'")
+    if project:
+        names = _names(conn, project)
+        where.append(f"p.name IN ({','.join('?' * len(names))})")
+        params += names
+    if status and states[status]:
+        where.append(f"i.status IN ({','.join('?' * len(states[status]))})")
+        params += states[status]
+        if status in ("open", "backlog"):
+            where.append("i.backlog_at IS " + ("NOT NULL" if status == "backlog" else "NULL"))
+    if since:
+        t = _since(conn, since)
+        where.append("(i.created_at>=? OR i.closed_at>=?)")
+        params += [t, t]
+    rows = _text_rows(conn, " AND ".join(where), params)
+    hits = sorted((d for d in rows if all(w in d["all"] for w in want)), key=lambda d: (d["created_at"], d["id"]),
+                  reverse=True)
+    res = {"query": text, "words": want, "total": len(hits), "items": [_match(d, 1) for d in hits[:limit]],
+           "closest": []}
+    for m in res["items"]:
+        del m["score"]
+    if not hits:
+        idf = _idf(conn)
+        q = _vector(want, idf)
+        near = sorted(((_cosine(q, _vector(d["key"], idf)), d) for d in rows), key=lambda x: -x[0])
+        res["closest"] = [_match(d, s) for s, d in near[:min(limit, 5)] if s >= 0.2]
+    return res
+
+
+def _recent_batch(conn, actor):
+    """Items this actor added in the last SIMILAR_BATCH: a planner's series, which the add check passes over."""
+    if not actor:
+        return set()
+    return {r["item_id"] for r in conn.execute(
+        "SELECT item_id FROM events WHERE actor=? AND change LIKE 'added to %' AND at>=?",
+        (actor, iso(now() - SIMILAR_BATCH)))}
+
+
+def similar_items(conn, project, title, context="", touches=None, linked=(), actor=None, limit=5):
+    """What maxpm add checks before it adds: open items of the project, and items done in the last similar_days,
+    whose score against the new title and context reaches similar_min. An open item whose touches overlap the new
+    ones scores 0.15 more. Items the new one names (--blocks, --after, --feeds, --found-during) and the series that
+    the same author added in the last two hours are left out: the author knows them."""
+    p = _project(conn, project)
+    floor = setting(conn, "similar_min", project_id=p["id"])
+    if floor == "off":
+        return []
+    floor = float(floor)
+    since = iso(now() - parse_duration(setting(conn, "similar_days", project_id=p["id"])))
+    rows = _text_rows(conn, f"i.project_id=? AND i.kind='work' AND (i.status IN {OPEN_STATES} "
+                            f"OR (i.status='done' AND i.closed_at>=?))", (p["id"], since))
+    skip = {int(x) for x in linked if x is not None} | _recent_batch(conn, actor)
+    idf = _idf(conn)
+    t = _words(title)
+    q = _vector(t + t + sorted(set(_words(context))), idf)
+    mine = _touch_keys(_touches(touches) or "", p["id"], p["path"])
+    out = []
+    for d in rows:
+        if d["id"] in skip:
+            continue
+        s = _cosine(q, _vector(d["key"], idf))
+        if mine and d["status"] in OPEN_STATES and d["touches"] and any(
+                _keys_overlap(x, y) for x in mine for y in _touch_keys(d["touches"], d["project_id"], d["path"])):
+            s += 0.15
+        if s >= floor:
+            out.append(_match(d, min(s, 1.0)))
+    out.sort(key=lambda m: -m["score"])
+    return out[:limit]
+
+
+def _linked_ids(conn, item_id):
+    ids = {r[0] for r in conn.execute("SELECT blocked_by FROM deps WHERE item_id=? UNION SELECT item_id FROM deps "
+                                      "WHERE blocked_by=? UNION SELECT id FROM items WHERE found_during=? UNION "
+                                      "SELECT found_during FROM items WHERE id=?", (item_id,) * 4)}
+    return ids - {None, item_id}
+
+
+def related(conn, item_id, n=3):
+    """The items most like this one in its project, in any state (not the ones it is linked to already), so a
+    worker sees earlier work before it starts."""
+    it = _item(conn, item_id)
+    skip = _linked_ids(conn, it["id"]) | {it["id"]}
+    idf = _idf(conn)
+    t = _words(it["title"])
+    q = _vector(t + t + sorted(set(_words(it["context"]))), idf)
+    scored = sorted(((_cosine(q, _vector(d["key"], idf)), d) for d in _text_rows(
+        conn, "i.project_id=? AND i.kind='work'", (it["project_id"],)) if d["id"] not in skip), key=lambda x: -x[0])
+    return [_match(d, s) for s, d in scored[:n] if s >= RELATED_MIN]
+
+
+def duplicates(conn, project=None):
+    """Groups of open items that match each other with the score of the add check (similar_min of the project),
+    for the manager and the planner to merge (maxpm merge). Items linked to each other, and a series that one
+    author added within two hours, are not duplicates."""
+    names = _names(conn, project) if project else None
+    rows = [d for d in _text_rows(conn, f"i.kind='work' AND i.status IN {OPEN_STATES}")
+            if (names is None or d["project"] in names)]
+    if not rows:
+        return []
+    idf = _idf(conn)
+    vec = {d["id"]: _vector(d["key"], idf) for d in rows}
+    ids = [d["id"] for d in rows]
+    links = {(r[0], r[1]) for r in conn.execute(
+        f"SELECT item_id, blocked_by FROM deps WHERE item_id IN ({','.join('?' * len(ids))})", ids)}
+    links |= {(d["id"], d["found_during"]) for d in rows if d["found_during"]}
+    added = {r["item_id"]: (r["actor"], parse_iso(r["at"])) for r in conn.execute(
+        f"SELECT item_id, actor, at FROM events WHERE change LIKE 'added to %' "
+        f"AND item_id IN ({','.join('?' * len(ids))})", ids)}
+    floors = {}
+    parent = {i: i for i in ids}
+    root = lambda i: i if parent[i] == i else root(parent[i])
+    pairs = []
+    for k, a in enumerate(rows):
+        f = floors.setdefault(a["project_id"], setting(conn, "similar_min", project_id=a["project_id"]))
+        if f == "off":
+            continue
+        for b in rows[k + 1:]:
+            if b["project_id"] != a["project_id"] or (a["id"], b["id"]) in links or (b["id"], a["id"]) in links:
+                continue
+            x, y = added.get(a["id"]), added.get(b["id"])
+            if x and y and x[0] and x[0] == y[0] and abs(x[1] - y[1]) < SIMILAR_BATCH:
+                continue
+            s = _cosine(vec[a["id"]], vec[b["id"]])
+            if s >= float(f):
+                pairs.append((a["id"], b["id"], round(s, 2)))
+                parent[root(b["id"])] = root(a["id"])
+    by = {d["id"]: d for d in rows}
+    groups = {}
+    for a, b, s in pairs:
+        groups.setdefault(root(a), {"items": set(), "pairs": []})
+        groups[root(a)]["items"] |= {a, b}
+        groups[root(a)]["pairs"].append({"a": a, "b": b, "score": s})
+    out = [{"project": by[min(g["items"])]["project"], "items": [_match(by[i], 1) for i in sorted(g["items"])],
+            "pairs": g["pairs"], "score": max(p["score"] for p in g["pairs"])} for g in groups.values()]
+    for g in out:
+        for m in g["items"]:
+            del m["score"]
+    return sorted(out, key=lambda g: (-g["score"], g["items"][0]["id"]))
+
+
+def _append(old, other_id, text):
+    old, text = (old or "").strip(), (text or "").strip()
+    if not text or text in old:
+        return old
+    return (old + "\n\n" if old else "") + f"[from #{other_id}] {text}"
+
+
+def merge(conn, keep, other, note, actor=None):
+    """Close `other` as a duplicate of `keep`. Its notes, context, touches, tracker links, goal tags, messages,
+    links (what it waits on, what waits on it), queue places, reservation, and found-during links move to `keep`;
+    `keep` takes the higher priority and the earlier due date. A person's item merges only with a person's item."""
+    if not (note or "").strip():
+        raise RiverError(f"say why they are the same work: maxpm merge {keep} {other} --note \"<why>\"")
+    keep, other = int(keep), int(other)
+    if keep == other:
+        raise RiverError("an item cannot merge into itself")
+    moved = []
+    with tx(conn):
+        k, o = _item(conn, keep), _item(conn, other)
+        for it in (k, o):
+            if it["status"] not in OPEN_STATES:
+                raise RiverError(f"#{it['id']} is {it['status']}; merge open items only (maxpm reopen {it['id']} first)")
+            if it["kind"] != "work":
+                raise RiverError(f"#{it['id']} is a {it['kind']} item; only work items merge")
+        if (k["doer"] == "human") != (o["doer"] == "human"):
+            raise RiverError(f"#{o['id']} is for {'a person' if o['doer'] == 'human' else 'an agent'} and #{k['id']} "
+                             f"is not: a person's item merges only with a person's item. Link them instead: "
+                             f"maxpm dep <id> --on <id>")
+        if o["assignee"] and o["status"] in ("in_progress", "held") and o["assignee"] != actor:
+            raise RiverError(f"#{o['id']} is held by {o['assignee']}; ask them to release it (maxpm ask "
+                             f"{o['assignee']} \"...\" --item {o['id']}), or keep #{o['id']} and merge #{k['id']} into it")
+        conn.execute("UPDATE items SET notes=?, context=?, touches=?, \"check\"=?, priority=?, due=? WHERE id=?",
+                     (_append(k["notes"], o["id"], o["notes"]), _append(k["context"], o["id"], o["context"]),
+                      _touches(touches_list(k["touches"]) + touches_list(o["touches"])) or "",
+                      k["check"] or o["check"] or "", min(k["priority"], o["priority"]),
+                      min(x for x in (k["due"], o["due"]) if x) if (k["due"] or o["due"]) else None, k["id"]))
+        for r in conn.execute("SELECT ref FROM item_refs WHERE item_id=?", (o["id"],)).fetchall():
+            if conn.execute("SELECT 1 FROM item_refs WHERE item_id=? AND ref=?", (k["id"], r["ref"])).fetchone():
+                conn.execute("DELETE FROM item_refs WHERE item_id=? AND ref=?", (o["id"], r["ref"]))
+            else:
+                conn.execute("UPDATE item_refs SET item_id=? WHERE item_id=? AND ref=?", (k["id"], o["id"], r["ref"]))
+                moved.append(r["ref"])
+        conn.execute("INSERT OR IGNORE INTO item_goals(item_id, goal_id) SELECT ?, goal_id FROM item_goals "
+                     "WHERE item_id=?", (k["id"], o["id"]))
+        conn.execute("DELETE FROM item_goals WHERE item_id=?", (o["id"],))
+        n = conn.execute("UPDATE messages SET item_id=? WHERE item_id=?", (k["id"], o["id"])).rowcount
+        if n:
+            moved.append(f"{n} message(s)")
+        # Links: delete the other's, then add each one again on the kept item (a loop is left out and named).
+        waits = conn.execute("SELECT blocked_by, kind FROM deps WHERE item_id=? AND auto=0", (o["id"],)).fetchall()
+        waited = conn.execute("SELECT item_id, kind FROM deps WHERE blocked_by=? AND auto=0", (o["id"],)).fetchall()
+        conn.execute("DELETE FROM deps WHERE item_id=? OR blocked_by=?", (o["id"], o["id"]))
+        skipped = []
+        for a, b, kind in [(k["id"], r["blocked_by"], r["kind"]) for r in waits] + \
+                          [(r["item_id"], k["id"], r["kind"]) for r in waited]:
+            if a == b or _link(conn, *sorted((a, b))):
+                continue
+            try:
+                _dep_add(conn, a, b, actor, kind, alert=False)
+                moved.append(f"#{a} waits on #{b}" if kind != "conflicts" else f"#{a} conflicts with #{b}")
+            except RiverError:
+                skipped.append(f"#{a} waits on #{b} (a loop)")
+        for r in conn.execute("SELECT id, agent FROM queue_entries WHERE item_id=?", (o["id"],)).fetchall():
+            if conn.execute("SELECT 1 FROM queue_entries WHERE item_id=? AND agent=?", (k["id"], r["agent"])).fetchone():
+                conn.execute("DELETE FROM queue_entries WHERE id=?", (r["id"],))
+            else:
+                conn.execute("UPDATE queue_entries SET item_id=? WHERE id=?", (k["id"], r["id"]))
+                moved.append(f"the queue place of {r['agent']}")
+        if o["reserved_for"] and not k["reserved_for"] and k["status"] == "open":
+            conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
+                         (o["reserved_for"], o["reserved_until"], o["reserved_by"], k["id"]))
+            moved.append(f"the reservation for {o['reserved_for']}")
+        conn.execute("UPDATE items SET found_during=? WHERE found_during=? AND id<>?", (k["id"], o["id"], k["id"]))
+        if o["found_during"] and not k["found_during"] and o["found_during"] != k["id"]:
+            conn.execute("UPDATE items SET found_during=? WHERE id=?", (o["found_during"], k["id"]))
+        _sync_conflicts(conn, k["id"], actor)
+        why = note.strip()
+        if o["doer"] == "human" and _is_ai(conn, actor):
+            _record_takeover(conn, o, "dropped", f"merged into #{k['id']}: {why}", actor)
+        conn.execute("UPDATE items SET status='dropped', closed_at=?, assignee=NULL, lease_expires_at=NULL, "
+                     "hold_expires_at=NULL, reserved_for=NULL, reserved_until=NULL, needs_check=0, backlog_at=NULL, "
+                     "backlog_note=NULL, touches='', output=? WHERE id=?",
+                     (iso(now()), f"duplicate of #{k['id']}: {why}", o["id"]))
+        _sync_conflicts(conn, o["id"], actor)
+        _event(conn, o["id"], actor, f"merged into #{k['id']} (a duplicate): {why}")
+        _event(conn, k["id"], actor, f"#{o['id']} {o['title']} merged into this item: {why}"
+               + (f"; moved {', '.join(moved)}" if moved else ""))
+        _goal_notice(conn, k["id"], actor, f"merged #{o['id']} into", why)
+    res = item_show(conn, k["id"])
+    res["merged"] = {"id": o["id"], "title": o["title"], "moved": moved, "skipped": skipped}
+    return res
 
 
 # ---------------------------------------------------------------- graph
@@ -8568,6 +8946,9 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         brief["role"] = "monitor"
         brief["monitor"] = _monitor_brief(conn, it)
         _set_role_note(conn, brief["agent"], "monitor", it["id"])
+    if it and it["kind"] == "work":
+        # Work like this item, open or done before, so the worker looks before it repeats it (#2257).
+        brief["related"] = related(conn, it["id"])
     if it:
         # The rule of the item's project for a look at the finished result: ask first, or push and then ask.
         brief["result_look"] = setting(conn, "result_look", item_id=it["id"])
@@ -9617,5 +9998,6 @@ def plan(conn, cwd, actor=None, project=None):
             "waits_on_backlog": [dict(brief_item(a), backlog=a["backlog_blockers"])
                                  for a in focus if a["backlog_blockers"]],
             "backlog": len(backlog_here),
+            "duplicates": duplicates(conn, ",".join(names)) if names else duplicates(conn),
         },
     }

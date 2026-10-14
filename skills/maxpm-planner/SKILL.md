@@ -197,7 +197,17 @@ maxpm backlog <id> --note "<why not now>" [--force "<why the items that wait on 
 maxpm backlog [--project <name>]    # the backlog by project and priority
 maxpm activate <id> [--note "..."]  # out of the backlog: open again
 maxpm add ... --backlog ["<why not now>"]   # add it straight to the backlog
+maxpm search "<words>" [--status open|done|...] [--since 30d] [--project <name>]   # before you add
+maxpm add ... --new "<how it differs>"   # add although add found work like it
+maxpm duplicates [--project <name>]      # open items that look like the same work
+maxpm merge <keep-id> <other-id> --note "<why the same>"   # drop the other as a duplicate, move its links
 ```
+
+Before you add work, search for it: the queue may hold it already, open or
+done. `maxpm add` refuses an item like an open one or one done in the last 14
+days, and shows them; add with `--new` only when it is different work. `maxpm
+plan` lists the open items that look like the same work ("Look like the same
+work"): merge them, or link them when they are different parts.
 
 ### The backlog
 

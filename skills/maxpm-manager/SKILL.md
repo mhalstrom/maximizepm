@@ -188,6 +188,10 @@ Stop when the user tells you to, and tell the user what you did.
   no notification. `maxpm activate <id>` makes one open again when the user wants it now; a person's item
   only with the person's yes. An item that waits on a backlog item never gets ready: the plan briefing
   lists it ("Wait on a backlog item"); ask the user to activate the backlog item or remove the link.
+- `maxpm duplicates`: groups of open items that look like the same work. Merge each group into the
+  item that stays: `maxpm merge <keep-id> <other-id> --note "<why the same>"` (the other is dropped as a
+  duplicate; its notes, links, tags, messages, and queue places move). A person's item merges only with a
+  person's item, and only with the person's yes. Not the same work: link them, or leave them.
 - Planning: everything in `maxpm guide planner` (add, dep, prio, edit).
 
 ## Rules

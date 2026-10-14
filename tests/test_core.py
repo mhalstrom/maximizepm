@@ -5624,3 +5624,202 @@ class Backlog(Base):
         self.c = core.connect(self.path)
         cols = {r["name"] for r in self.c.execute("PRAGMA table_info(items)")}
         self.assertTrue({"backlog_at", "backlog_note"} <= cols)
+
+
+class SimilarWork(Base):
+    """Find related items before work repeats (#2257): search, the check of add, related, duplicates, merge."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "web")
+        core.project_add(self.c, "api")
+        core.register(self.c, "mark", human=True)
+        for a in ("w1", "w2", "w3"):
+            core.register(self.c, a)
+        # Filler work, so the common words weigh less than the rare ones.
+        for t in ("Page header shows the logo", "Footer links to the terms", "Dark mode colors for the table",
+                  "Login form remembers the email", "Export the report as a spreadsheet", "Search box on the list page"):
+            core.item_add(self.c, "web", t, actor="w3")
+        self.at(-3 * 3600)  # the filler is no series of the actors below
+
+    def at(self, seconds):
+        """Move every add event back in time, so the batch rule (one author, two hours) passes over it."""
+        self.c.execute("UPDATE events SET at=? WHERE change LIKE 'added to %'",
+                       (core.iso(core.now() + timedelta(seconds=seconds)),))
+        self.c.commit()
+
+    def cli(self, *words):
+        from river import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            try:
+                cli.run(list(words))
+            except RiverError as e:
+                return out.getvalue() + str(e)
+        return out.getvalue() + err.getvalue()
+
+    def add(self, title, actor="w1", **kw):
+        return core.item_add(self.c, kw.pop("project", "web"), title, actor=actor, **kw)["id"]
+
+    def test_search_finds_every_word_in_any_state_newest_first(self):
+        a = self.add("Worktree script fails during a release", context="the hook refuses HEAD")
+        b = self.add("Release notes page")
+        c = self.add("Gate hook refuses the worktree", project="api")
+        core.claim(self.c, a, "w1")
+        core.done(self.c, a, "fixed in abc123", "w1")
+        core.drop(self.c, c, "w2")
+        r = core.search(self.c, "worktree hooks")
+        self.assertEqual([m["id"] for m in r["items"]], [c, a])  # newest first; the stem finds hooks
+        self.assertEqual(r["items"][1]["status"], "done")
+        self.assertEqual(r["items"][1]["output"], "fixed in abc123")
+        self.assertEqual([m["id"] for m in core.search(self.c, "worktree", project="web")["items"]], [a])
+        self.assertEqual([m["id"] for m in core.search(self.c, "worktree", status="dropped")["items"]], [c])
+        self.assertEqual(core.search(self.c, "release", status="open")["items"][0]["id"], b)
+        self.assertEqual(core.search(self.c, "worktree", since="1h")["total"], 2)
+        with self.assertRaises(RiverError):
+            core.search(self.c, "the a of")
+        none = core.search(self.c, "worktree spaceship")
+        self.assertEqual(none["items"], [])
+        self.assertIn(a, [m["id"] for m in none["closest"]])
+        out = self.cli("search", "worktree", "hook")
+        self.assertIn("2 item(s) with every word", out)
+        self.assertIn(f"#{a}", out)
+        self.assertIn("output: fixed in abc123", out)
+
+    def test_add_refuses_the_same_work_and_shows_it(self):
+        x = self.add("Worktree script fails with ref updates aborted by hook", context="gate lock")
+        core.claim(self.c, x, "w1")
+        out = self.cli("--as", "w2", "add", "web", "The worktree script fails: ref updates aborted by the hook")
+        self.assertIn("nothing was added", out)
+        self.assertIn(f"#{x} [in progress by w1]", out)
+        self.assertIn(f"--item {x}", out)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items").fetchone()[0], 7)
+        with self.assertRaises(core.SimilarWork) as e:
+            core.item_add(self.c, "web", "Worktree script fails, ref updates aborted by hook", actor="w2",
+                          check_similar=True)
+        self.assertEqual(e.exception.matches[0]["id"], x)
+        # Different work: --new adds it, and the history says why.
+        out = self.cli("--as", "w2", "add", "web", "Worktree script fails: ref updates aborted by hook on Windows",
+                       "--new", "the Windows path, not the gate lock")
+        y = max(r[0] for r in self.c.execute("SELECT id FROM items"))
+        self.assertNotIn("nothing was added", out)
+        changes = [e["change"] for e in core.item_show(self.c, y)["events"]]
+        self.assertTrue(any(f"although like #{x}" in ch and "Windows path" in ch for ch in changes), changes)
+        # Unlike work is added at once.
+        self.assertIn("Billing", self.cli("--as", "w2", "add", "web", "Billing email for a failed card"))
+
+    def test_the_check_passes_over_links_series_old_work_and_other_projects(self):
+        x = self.add("Onboarding test: Notion connector walk")
+        # The same author's series within two hours.
+        series = self.add("Onboarding test: Notion connector walk again", check_similar=True)
+        core.drop(self.c, series, "w1")
+        # Another author names it: --found-during and --blocks know it.
+        self.add("Onboarding test of the Notion connector walk", actor="w2", found_during=x, check_similar=True)
+        # Another project.
+        self.add("Onboarding test: Notion connector walk", actor="w2", project="api", check_similar=True)
+        # Done longer ago than similar_days.
+        old = self.add("Rotate the signing key of the mail sender")
+        core.claim(self.c, old, "w1")
+        core.done(self.c, old, None, "w1")
+        self.c.execute("UPDATE items SET closed_at=? WHERE id=?", (core.iso(core.now() - timedelta(days=20)), old))
+        self.at(-3 * 3600)
+        self.add("Rotate the signing key of the mail sender", actor="w2", check_similar=True)
+        # Done lately: refused.
+        new = self.add("Purge the cache of the image proxy")
+        core.claim(self.c, new, "w1")
+        core.done(self.c, new, "purged", "w1")
+        self.at(-3 * 3600)
+        with self.assertRaises(core.SimilarWork) as e:
+            self.add("Purge the cache of the image proxy", actor="w2", check_similar=True)
+        self.assertEqual(e.exception.matches[0]["status"], "done")
+        # The setting turns it off.
+        core.config_set(self.c, "similar_min", "off", project="web")
+        self.add("Purge the cache of the image proxy", actor="w2", check_similar=True)
+        with self.assertRaises(RiverError):
+            core.config_set(self.c, "similar_min", "2")
+        with self.assertRaises(RiverError):
+            core.config_set(self.c, "similar_days", "soon")
+
+    def test_a_persons_item_is_checked_too(self):
+        h = self.add("Approve the refund policy draft", doer="human", actor="w1")
+        self.at(-3 * 3600)
+        out = self.cli("--as", "w2", "add", "web", "Approve the refund policy draft (five decisions)", "--doer", "human")
+        self.assertIn(f"#{h} [open]", out)
+        self.assertIn("nothing was added", out)
+
+    def test_overlapping_touches_count(self):
+        x = self.add("Retry the upload of a large file", touches=["src/upload.py"])
+        self.at(-3 * 3600)
+        like = core.similar_items(self.c, "web", "Upload retry counts", touches=["src/upload.py"], actor="w2")
+        plain = core.similar_items(self.c, "web", "Upload retry counts", actor="w2")
+        self.assertEqual([m["id"] for m in like], [x])
+        self.assertEqual(plain, [])
+
+    def test_show_and_go_list_related_work(self):
+        x = self.add("Export the invoice list as CSV")
+        core.claim(self.c, x, "w1")
+        core.done(self.c, x, "csv export in a1b2", "w1")
+        self.at(-3 * 3600)
+        y = self.add("Export the invoice list as CSV with the tax column", actor="w2", new="the tax column", priority=0)
+        rel = core.related(self.c, y)
+        self.assertEqual(rel[0]["id"], x)
+        self.assertIn("related", self.cli("show", str(y)))
+        self.assertIn("csv export in a1b2", self.cli("show", str(y)))
+        # A linked item is shown as a link, not as related.
+        z = self.add("Invoice list CSV export follow-up", actor="w3", found_during=y)
+        self.assertNotIn(z, [m["id"] for m in core.related(self.c, y)])
+        b = core.go(self.c, os.getcwd(), "w2", project="web")
+        self.assertEqual(b["item"]["id"], y)
+        self.assertEqual(b["related"][0]["id"], x)
+
+    def test_duplicates_groups_open_items_and_merge_joins_them(self):
+        a = self.add("Dark mode for the settings page", context="colors from the theme", touches=["web/settings.css"])
+        self.at(-3 * 3600)
+        b = self.add("Settings page in dark mode", actor="w2", context="use the theme colors", notes="see the mock",
+                     new="test", touches=["web/theme.css"], refs=[("github:o/r#7", None)], priority=1)
+        c = self.add("Dark mode for the settings page", actor="w3", new="test", after=[a, b])  # linked: not a duplicate
+        g = core.duplicates(self.c)
+        self.assertEqual(len(g), 1)
+        self.assertEqual([m["id"] for m in g[0]["items"]], [a, b])
+        self.assertIn("1 group(s)", self.cli("duplicates"))
+        self.assertIn(f"#{a}", self.cli("duplicates", "--project", "web"))
+        self.assertTrue(core.plan(self.c, os.getcwd(), "planner-1", project="web")["questions"]["duplicates"])
+        core.send(self.c, "note", "about b", to="w2", item=b, actor="w1")
+        core.queue_add(self.c, "w2", item=b, actor="mark")
+        with self.assertRaises(RiverError):
+            core.merge(self.c, a, b, "", "mark")
+        r = core.merge(self.c, a, b, "the same dark mode work", "mark")
+        self.assertEqual(r["merged"]["id"], b)
+        o = core.item_show(self.c, b)
+        self.assertEqual(o["status"], "dropped")
+        self.assertIn(f"duplicate of #{a}", o["output"])
+        k = core.item_show(self.c, a)
+        self.assertEqual(k["priority"], 1)
+        self.assertIn(f"[from #{b}] see the mock", k["notes"])
+        self.assertIn("use the theme colors", k["context"])
+        self.assertEqual(sorted(k["touches"]), ["web/settings.css", "web/theme.css"])
+        self.assertEqual([x["ref"] for x in k["refs"]], ["github:o/r#7"])
+        self.assertIn(c, k["unblocks"])
+        self.assertEqual(self.c.execute("SELECT item_id FROM messages WHERE body='about b'").fetchone()[0], a)
+        self.assertEqual(self.c.execute("SELECT item_id FROM queue_entries WHERE agent='w2'").fetchone()[0], a)
+        self.assertEqual(core.duplicates(self.c), [])
+        with self.assertRaises(RiverError):  # closed
+            core.merge(self.c, a, b, "again", "mark")
+
+    def test_merge_refusals(self):
+        a = self.add("Approve the logo", doer="human")
+        b = self.add("Draw the logo", actor="w2")
+        c = self.add("Draw the logo mark", actor="w3", new="x")
+        with self.assertRaises(RiverError) as e:
+            core.merge(self.c, a, b, "same", "mark")
+        self.assertIn("a person's item merges only with a person's item", str(e.exception))
+        core.claim(self.c, c, "w3")
+        with self.assertRaises(RiverError) as e:
+            core.merge(self.c, b, c, "same", "mark")
+        self.assertIn("held by w3", str(e.exception))
+        with self.assertRaises(RiverError):
+            core.merge(self.c, b, b, "same", "mark")
+        # The holder may merge its own item into another one.
+        core.merge(self.c, b, c, "same", "w3")
+        self.assertEqual(core.item_show(self.c, c)["status"], "dropped")
