@@ -349,7 +349,8 @@ CREATE TABLE IF NOT EXISTS hook_runs (
   exit_code   INTEGER,
   timed_out   INTEGER NOT NULL DEFAULT 0,
   seconds     REAL,
-  output      TEXT                       -- the last lines
+  output      TEXT,                      -- the last lines
+  result      TEXT                       -- the result as JSON (run_hooks): a command whose hook maxpm serve ran reads it
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -842,6 +843,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _migrate(conn):
+    if "result" not in {r["name"] for r in conn.execute("PRAGMA table_info(hook_runs)")}:
+        conn.execute("ALTER TABLE hook_runs ADD COLUMN result TEXT")
     if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN parent_id INTEGER REFERENCES goals(id)")
     if "no_goal_context" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
@@ -2191,10 +2194,21 @@ def target_hooks(conn, name):
     return out
 
 
+def may_set_hook(conn, actor):
+    """Who may set, change, or remove a hook: a person or a manager session, because maxpm serve runs a hook
+    outside every sandbox (#1826). None (no name: a person at the terminal, or the page) may. Returns why not."""
+    r = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+    if r is None or r["kind"] == "human" or r["role"] == "manager":
+        return None
+    return (f"{actor} is an agent; only a person or the manager sets, changes, or removes a hook, because maxpm "
+            f"serve runs it outside the sandbox. Ask the manager: maxpm --as {actor} ask manager \"<the hook and why>\"")
+
+
 def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
     """maxpm target hook: set, remove, or list the hooks of a target. A hook is a shell command that MaximizePM
     runs when an event of the target occurs (HOOK_EVENTS), one for each event: a script can call more. The
-    command that causes the event runs it (run_hooks). A hook never undoes and never refuses its event."""
+    command that causes the event runs it (run_hooks), or maxpm serve when that command is in a sandbox. A hook
+    never undoes and never refuses its event. Only a person or the manager changes a hook (may_set_hook)."""
     changed = None
     with tx(conn):
         t = _target(conn, name)
@@ -2204,6 +2218,10 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
                 raise RiverError(f"name the event: maxpm target hook {name} <{'|'.join(HOOK_EVENTS)}> \"<command>\"")
         else:
             _hook_event(event)
+            if clear or command is not None:
+                why = may_set_hook(conn, actor)
+                if why:
+                    raise RiverError(why)
             has = conn.execute("SELECT command FROM hooks WHERE target_id=? AND event=?", (t["id"], event)).fetchone()
             if clear:
                 if command is not None:
@@ -2270,6 +2288,53 @@ def _review_deploy(conn, review_id):
     r = conn.execute("SELECT i.id FROM deps d JOIN items i ON i.id=d.item_id WHERE d.blocked_by=? AND i.kind='deploy' "
                      "ORDER BY i.id LIMIT 1", (review_id,)).fetchone()
     return r["id"] if r else None
+
+
+def hooks_waiting(conn, token=None):
+    """Whether hooks that the events of this command (or of token) queued wait to run."""
+    return conn.execute("SELECT 1 FROM hook_runs WHERE started_at IS NULL AND queued_by=? LIMIT 1",
+                        (token or hook_token(),)).fetchone() is not None
+
+
+HOOK_POLL = 0.5  # seconds between two looks at the hook runs that maxpm serve runs for a command (hook_results)
+HOOK_TAKE_AFTER = 15  # seconds after which a command runs a hook itself that maxpm serve did not start
+
+
+def hook_results(conn, token, cwd=None):
+    """maxpm serve runs the hooks of the events of a command in a sandbox (#1826): wait until each run of token
+    ends and return its result, as run_hooks does. A run that serve did not start within HOOK_TAKE_AFTER (it
+    started again meanwhile) runs here, in the sandbox. A run that is not done after its hook_timeout and a
+    minute more: its result says that it still runs, and the history of the deploy item gets it later."""
+    import time
+    q = "SELECT * FROM hook_runs WHERE queued_by=? ORDER BY id"
+    rows = conn.execute(q, (token,)).fetchall()
+    limit = sum(parse_duration(setting(conn, "hook_timeout", item_id=r["deploy_id"])).total_seconds() for r in rows)
+    t0 = time.monotonic()
+    out = []
+    while True:
+        rows = conn.execute(q, (token,)).fetchall()
+        if all(r["ended_at"] for r in rows):
+            break
+        waited = time.monotonic() - t0
+        if waited > HOOK_TAKE_AFTER and any(r["started_at"] is None for r in rows):
+            out += run_hooks(conn, cwd, token, sandbox=True)
+            continue
+        if waited > limit + 60:
+            break
+        time.sleep(HOOK_POLL)
+    done = {h["id"] for h in out}
+    for r in rows:
+        if r["id"] in done:
+            continue
+        if r["result"]:
+            out.append(json.loads(r["result"]))
+        else:
+            out.append({"id": r["id"], "target": r["target"], "event": r["event"], "command": r["command"],
+                        "item": r["item_id"], "deploy": r["deploy_id"], "rev": r["rev"], "folder": None,
+                        "exit_code": None, "timed_out": False, "seconds": None, "ok": None,
+                        "result": f"still runs in maxpm serve; its result goes to the history of #{r['deploy_id']}",
+                        "output": "", "alerted": None, "sandbox": False})
+    return sorted(out, key=lambda h: h["id"])
 
 
 def run_hooks(conn, cwd=None, token=None, orphans=False, sandbox=False):
@@ -2355,6 +2420,7 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
                       f"command, run it by hand" + (f" in {where}" if where else "") + "."
                       + (f" {HOOK_SANDBOX}." if sandbox else ""), to=to, item_id=run["deploy_id"])
                 out["alerted"] = to
+        conn.execute("UPDATE hook_runs SET result=? WHERE id=?", (json.dumps(out), run["id"]))
     return out
 
 

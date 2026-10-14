@@ -847,11 +847,12 @@ def end_tmux_orphans():
 HOOKS = {"running": 0}  # the hooks that a thread of maxpm serve runs now; the loop does not start again meanwhile
 
 
-def hooks_soon(conn, token=None):
+def hooks_soon(conn, token=None, cwd=None):
     """Run the hooks that wait (core.run_hooks) in a thread of their own, and return whether one started. With a
     token: those of the events that an action of the page caused, so the page gets its answer at once. With
-    none (one pass of the loop of maxpm serve): those whose command ended before it ran them. Each result goes to
-    the history of its deploy item, and a failure alerts the target owner."""
+    none (one pass of the loop of maxpm serve): those whose command ended before it ran them. A command in the
+    sandbox of an agent session asks for its own token (the op run_hooks, #1826) and reads the results from the
+    queue. Each result goes to the history of its deploy item, and a failure alerts the target owner."""
     q = "SELECT 1 FROM hook_runs WHERE started_at IS NULL AND " + ("queued_by=?" if token else "queued_at<?")
     old = core.iso(core.now() - core.timedelta(seconds=core.HOOK_ORPHAN_AFTER))
     if conn.execute(q, (token or old,)).fetchone() is None:
@@ -862,7 +863,7 @@ def hooks_soon(conn, token=None):
         try:
             c = core.connect()
             try:
-                for h in core.run_hooks(c, token=token, orphans=token is None):
+                for h in core.run_hooks(c, cwd, token=token, orphans=token is None):
                     print(f"hook {h['event']} of target {h['target']}: {h['result']}: {h['command']}", flush=True)
             finally:
                 c.close()
@@ -1901,6 +1902,7 @@ OPS = {
     "target_cadence": lambda c, a, who: core.target_cadence(c, a["target"], a.get("cadence") or "off", who),
     "release_now": lambda c, a, who: core.release_now(c, a["target"], a.get("reason"), who),
     "target_cut": lambda c, a, who: core.target_cut(c, a["target"], a.get("rev"), who),
+    "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
     "target_hook": lambda c, a, who: core.target_hook(c, a["target"], a.get("event"), a.get("command"),
                                                      bool(a.get("clear")), who),
     "open_monitors": lambda c, a, who: open_monitors(c, db=a.get("db")),

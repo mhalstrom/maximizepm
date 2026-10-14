@@ -5228,15 +5228,89 @@ class Hooks(Base):
         core.target_cut(self.c, "web", None, "mark")
         self.assertEqual(core.run_hooks(self.c)[0]["alerted"], "boss")
 
-    def test_a_failure_in_the_sandbox_of_an_agent_session_says_so(self):
+    def sandboxed(self, argv, serve=None):
+        """cli.run as an agent's command in its sandbox (SANDBOX_RUNTIME). serve: what cli.ask_server does
+        (None: no maxpm serve answers). Returns the output."""
         from river import cli
+
+        def ask(conn, op, args, actor=None, timeout=5, retries=3):
+            if serve is None:
+                raise RiverError("no maxpm serve answers on port 8765 (URLError): start it with `maxpm serve`")
+            self.assertEqual(op, "run_hooks")
+            return serve(conn, args, actor)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(cli, "ask_server", ask), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1", "SANDBOX_RUNTIME": "1"}):
+            cli.run(argv)
+        return out.getvalue()
+
+    def test_a_command_in_a_sandbox_has_maxpm_serve_run_its_hook(self):
+        """#1826: maxpm serve runs outside every sandbox; the command waits for the result and prints it."""
+        from river import server
+        bad = self.script("bad.py", "import sys\nprint('no build folder')\nsys.exit(3)\n")
+        core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
+        core.target_hook(self.c, "web", "review-passed", bad, actor="mark")
+        asked = []
+
+        def serve(conn, args, actor):  # the op of the page, as maxpm serve runs it: a thread of its own
+            asked.append((args["token"] == core.hook_token(), actor))
+            with contextlib.redirect_stdout(io.StringIO()):
+                return server.OPS["run_hooks"](conn, args, actor)
+        out = self.sandboxed(["--as", "rev", "claim", str(self.review)], serve)
+        self.assertEqual(asked, [(True, "rev")])
+        self.assertIn("hook release-cut of target web: exit 0, ", out)
+        self.assertIn("recorded release-cut", out)
+        self.assertIn("maxpm serve ran it, outside the sandbox of this session", out)
+        self.assertEqual([(x["event"], x["agent"]) for x in self.runs()], [("release-cut", "rev")])
+        out = self.sandboxed(["--as", "rev", "review", "pass", str(self.review), "--output", "ok"], serve)
+        self.assertIn("hook review-passed of target web: exit 3, ", out)
+        self.assertIn("no build folder", out)
+        self.assertIn("the hook failed; the event stands", out)
+        self.assertNotIn("ran in the sandbox", out)  # it did not: serve ran it
+        alert = [m for m in core.inbox(self.c, "ops") if "hook review-passed" in m["body"]][0]
+        self.assertNotIn("sandbox", alert["body"])
+        self.assertEqual(self.sandboxed(["--as", "rev", "who"], serve).count("hook "), 0)  # no event: no question
+        self.assertEqual(len(asked), 2)
+
+    def test_a_run_that_serve_does_not_start_runs_in_the_command(self):
+        old = core.HOOK_TAKE_AFTER
+        core.HOOK_TAKE_AFTER = 0.2
+        self.addCleanup(setattr, core, "HOOK_TAKE_AFTER", old)
+        core.target_hook(self.c, "web", "release-cut", self.recorder(), actor="mark")
+        out = self.sandboxed(["--as", "rev", "claim", str(self.review)], lambda conn, args, actor: {"started": False})
+        self.assertIn("hook release-cut of target web: exit 0, ", out)
+        self.assertNotIn("maxpm serve ran it", out)
+        self.assertEqual(len(self.runs()), 1)
+
+    def test_only_a_person_or_the_manager_changes_a_hook(self):
+        """#1829 C: maxpm serve runs a hook outside the sandbox, so a worker does not set one."""
+        with self.assertRaisesRegex(RiverError, "dev is an agent; only a person or the manager sets"):
+            core.target_hook(self.c, "web", "deployed", "scripts/x.sh", actor="dev")
+        core.target_hook(self.c, "web", "deployed", "scripts/x.sh", actor="mark")
+        for kw in ({"command": "scripts/y.sh"}, {"clear": True}):
+            with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+                core.target_hook(self.c, "web", "deployed", actor="ops", **kw)  # the target owner too
+        self.assertEqual([h["command"] for h in core.target_hook(self.c, "web", actor="dev")["hooks"]],
+                         ["scripts/x.sh"])  # a look is for everyone
+        self.assertEqual(core.target_hook(self.c, "web", "deployed", actor="dev")["changed"], None)
+        core.manage(self.c, self.dir.name, "boss")
+        self.assertEqual(core.target_hook(self.c, "web", "deployed", "scripts/y.sh", actor="boss")["changed"], "changed")
+        self.assertEqual(core.target_hook(self.c, "web", "deployed", clear=True)["changed"], "removed")  # no name: a person
+        from river import cli
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "CLAUDECODE": "1"}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            os.environ.pop("MAXPM_AGENT", None)
+            with self.assertRaisesRegex(RiverError, "name yourself"):  # with no name in an agent session
+                cli.dispatch(self.c, cli.build_parser().parse_args(["target", "hook", "web", "deployed", "x"]), None)
+
+    def test_a_failure_in_the_sandbox_of_an_agent_session_says_so(self):
         bad = self.script("bad.py", "import sys\nprint('Operation not permitted')\nsys.exit(1)\n")
         core.target_hook(self.c, "web", "release-cut", bad, actor="mark")
         core.target_hook(self.c, "web", "deployed", self.recorder(), actor="mark")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
-                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1", "SANDBOX_RUNTIME": "1"}):
-            cli.run(["--as", "rev", "claim", str(self.review)])  # an agent's command in its sandbox cuts the release
+        out = io.StringIO(self.sandboxed(["--as", "rev", "claim", str(self.review)]))  # no maxpm serve answers
+        self.assertIn("it ran in the sandbox of this session: maxpm serve did not run it (no maxpm serve answers",
+                      out.getvalue())
         self.assertIn("hook release-cut of target web: exit 1, ", out.getvalue())
         self.assertIn("ran in the sandbox of an agent session", out.getvalue())
         alert = [m for m in core.inbox(self.c, "ops") if "hook release-cut" in m["body"]][0]
@@ -5345,7 +5419,8 @@ class Hooks(Base):
 
         def run(*words):
             out = io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, env):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, env), \
+                    mock.patch.object(cli, "in_sandbox", lambda: False):  # also when an agent runs the tests in one
                 cli.run(list(words))
             return out.getvalue()
         bad = self.script("bad.py", "import sys\nprint('no build folder')\nsys.exit(3)\n")

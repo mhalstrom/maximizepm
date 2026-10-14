@@ -102,8 +102,10 @@ Stop when the user tells you to, and tell the user what you did.
 - **A hook runs a project's command on a release event**:
   `maxpm target hook <target> <event> "<command>"` (events: release-cut,
   review-passed, review-failed, deployed; `--clear` removes one; no event lists
-  them). The maxpm command that causes the event runs the hook before it
-  returns, in the folder of the target's project, with MAXPM_EVENT,
+  them; only a person or you set, change, or remove a hook). The maxpm command
+  that causes the event runs the hook before it returns (when that command is
+  in the sandbox of an agent session, maxpm serve runs it, outside the
+  sandbox, and the command prints the result), in the folder of the target's project, with MAXPM_EVENT,
   MAXPM_TARGET, MAXPM_REV (the commit of `maxpm target cut --rev`), MAXPM_ITEM,
   and MAXPM_AGENT set. So a step such as "prepare the build folder at the cut,
   clean it after the deploy" is a hook, not a line in a runbook that you run

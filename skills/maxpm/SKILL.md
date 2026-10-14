@@ -100,8 +100,10 @@ your type from your CLI's environment.
    A target can have hooks (`maxpm target hook <target>` lists them): commands
    that MaximizePM runs by itself when a release is cut, when its review passes
    or fails, and when its deploy item is done. The reply of your command shows
-   the result of the hook. Do not run those commands by hand; a hook that
-   fails does not undo your command, and the target owner gets an alert.
+   the result of the hook (in a sandbox, `maxpm serve` runs it outside the
+   sandbox). Do not run those commands by hand; a hook that fails does not
+   undo your command, and the target owner gets an alert. Only a person or
+   the manager sets or changes a hook: ask the manager when one is needed.
    With the setting `review` on, the deploy item first waits on one review
    of the whole release. `maxpm go` gives a ready review before new work
    (role REVIEWER; `--role reviewer` takes any), but never to an agent that

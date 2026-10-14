@@ -285,7 +285,11 @@ def _hook_result_lines(hooks):
         out.append(f"hook {h['event']} of target {h['target']}: {h['result']}: {h['command']}"
                    + (f"   (in {h['folder']})" if h["folder"] else ""))
         out += ["    " + line for line in (h["output"] or "").splitlines()]
-        if not h["ok"]:
+        if h.get("served"):
+            out.append("    maxpm serve ran it, outside the sandbox of this session")
+        elif h.get("serve_error"):
+            out.append(f"    it ran in the sandbox of this session: maxpm serve did not run it ({h['serve_error']})")
+        if h["ok"] is False:
             out.append(f"    the hook failed; the event stands (a hook never undoes it)"
                        + (f", and {h['alerted']} got an alert" if h["alerted"] else "")
                        + f". History: maxpm show {h['deploy']}")
@@ -652,9 +656,11 @@ def build_parser():
                    "and the notes of the deploy item")
     x = tgs.add_parser("hook", help="a shell command that MaximizePM runs when an event of the target occurs: "
                        + ", ".join(core.HOOK_EVENTS) + ". The maxpm command that causes the event runs it before it "
-                       "returns, in the folder of the target's project, with MAXPM_EVENT, MAXPM_TARGET, MAXPM_REV, "
-                       "MAXPM_ITEM, and MAXPM_AGENT in its environment, for at most hook_timeout. A hook never "
-                       "undoes and never refuses its event; a failure alerts the target owner")
+                       "returns (maxpm serve runs it when that command is in the sandbox of an agent session), in "
+                       "the folder of the target's project, with MAXPM_EVENT, MAXPM_TARGET, MAXPM_REV, MAXPM_ITEM, "
+                       "and MAXPM_AGENT in its environment, for at most hook_timeout. A hook never undoes and never "
+                       "refuses its event; a failure alerts the target owner. Only a person or the manager sets, "
+                       "changes, or removes a hook")
     x.add_argument("name")
     x.add_argument("event", nargs="?", help="one of " + ", ".join(core.HOOK_EVENTS) + "; none lists the hooks")
     x.add_argument("command", nargs="?", help="the command; none shows the hook")
@@ -1283,11 +1289,11 @@ def _run(args, conn):
         res = dispatch(conn, args, actor)
     except RiverError:
         # An event that occurred before the refusal still runs its hook.
-        for line in _hook_result_lines(core.run_hooks(conn, os.getcwd(), sandbox=in_sandbox())):
+        for line in _hook_result_lines(run_hooks(conn, actor)):
             print(line, file=sys.stderr)
         raise
     # The events of this command (a release cut, a review, a deploy): their hooks run now.
-    hooks = core.run_hooks(conn, os.getcwd(), sandbox=in_sandbox())
+    hooks = run_hooks(conn, actor)
     if hooks and isinstance(res, dict):
         res["hooks_run"] = hooks
     monitors = None
@@ -1347,6 +1353,26 @@ def ask_server_for_monitors(conn, timeout=5):
         return ask_server(conn, "open_monitors", {}, timeout=timeout)
     except RiverError as e:
         return {"error": str(e), "pending": core.pending_monitors(conn)}
+
+
+def run_hooks(conn, actor=None):
+    """The hooks of the events of this command run now (core.run_hooks). In the sandbox of an agent session the
+    hook would have the limits of that sandbox, so maxpm serve runs it, outside every sandbox, and this command
+    waits for the results and prints them (#1826). With no serve that answers, it runs here and says so."""
+    if not in_sandbox() or not core.hooks_waiting(conn):
+        return core.run_hooks(conn, os.getcwd())
+    token = core.hook_token()
+    try:
+        ask_server(conn, "run_hooks", {"token": token, "cwd": os.getcwd()}, actor=actor, retries=1)
+    except RiverError as e:
+        out = core.run_hooks(conn, os.getcwd(), sandbox=True)
+        for h in out:
+            h["serve_error"] = str(e)
+        return out
+    out = core.hook_results(conn, token, os.getcwd())
+    for h in out:
+        h["served"] = not h.get("sandbox")
+    return out
 
 
 def in_sandbox():
@@ -1762,6 +1788,9 @@ def dispatch(conn, a, actor):
         if a.tcmd == "cadence":
             return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor)
         if a.tcmd == "hook":
+            if not actor and (a.command is not None or a.clear) and core.agent_type_from_env(os.environ):
+                raise RiverError("name yourself: maxpm --as <name> target hook ... (only a person or the manager "
+                                 "sets, changes, or removes a hook)")
             return core.target_hook(conn, a.name, a.event, a.command, a.clear, actor)
         if a.tcmd == "release-now":
             return core.release_now(conn, a.name, a.reason, actor)
