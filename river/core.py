@@ -5720,7 +5720,10 @@ def sync_needs_you(conn):
         _open_event(conn, "item", f"#{iid} {a['title']} ({a['project']}) is ready for a person", item_id=iid)
     for mid in sorted(set(want_msgs) - have_msgs):
         m = want_msgs[mid]
-        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {m['body'][:120]}",
+        # A prompt alert names the window, the question, and the keys (server.watch_prompts): all of it, or the
+        # person still cannot act on it from the notification (#2713).
+        cut = 600 if m["body"].startswith(PROMPT_NOTE) else 120
+        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {m['body'][:cut]}",
                     item_id=m["item_id"], message_id=mid, human=m["to_agent"])
 
 
@@ -8143,6 +8146,87 @@ def tmux_path():
     (the desktop app starts maxpm serve from the Dock, with a short PATH)."""
     return shutil.which("tmux") or next((p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux",
                                                      "/opt/local/bin/tmux") if os.access(p, os.X_OK)), None)
+
+
+# Claude Code asks once for each folder whether it may work there, and a session that river starts in a folder it
+# does not trust yet waits on that question with nobody to answer it: on 2026-10-17 one waited 24 minutes, and its
+# alert said only "Enter to confirm · Esc to cancel" (#2713). River reads the answer from the Claude Code settings
+# and starts no session until a person gave it. It never writes the answer itself: a person chooses which folders
+# an agent may work in.
+TRUST_TITLE = "Trust the folder {path} for Claude Code"
+
+
+def claude_config_file():
+    """The file where Claude Code keeps its settings per folder: $CLAUDE_CONFIG_DIR/.claude.json, else ~/.claude.json."""
+    d = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(d).expanduser() / ".claude.json" if d else Path.home() / ".claude.json"
+
+
+def folder_trusted(path, config):
+    """True when Claude Code trusts the folder: it, or a folder above it, has hasTrustDialogAccepted in the
+    projects of the settings file config; False when none has; None when river cannot read the file (it cannot
+    tell, so it stops no start)."""
+    try:
+        projects = json.loads(Path(config).read_text(encoding="utf-8")).get("projects")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(projects, dict):
+        return None
+    path = os.path.expanduser(str(path))
+    for d in {os.path.abspath(path), os.path.realpath(path)}:  # Claude Code records the folder it runs in
+        while True:
+            for key in {d, d.replace("\\", "/")}:  # Windows: the settings name a folder with forward slashes
+                p = projects.get(key)
+                if isinstance(p, dict) and p.get("hasTrustDialogAccepted") is True:
+                    return True
+            if os.path.dirname(d) == d:
+                break
+            d = os.path.dirname(d)
+    return False
+
+
+def claude_trusted(path):
+    """folder_trusted with the Claude Code settings of this user. The tests replace it (tests/__init__.py)."""
+    return folder_trusted(path, claude_config_file())
+
+
+def trust_needed(conn, project, path, item_id=None, actor="maxpm"):
+    """Before river starts Claude Code in a folder: None when Claude Code trusts it (or river cannot tell). Else
+    the id of the person's item that asks for the trust: the open one for that folder, else a new one in the
+    project. The work item that the start was for (item_id) waits on it, so no start tries again until the
+    person answered; maxpm serve closes the person's item when the folder is trusted (trust_answered)."""
+    if claude_trusted(path) is not False:
+        return None
+    title = TRUST_TITLE.format(path=path)
+    r = conn.execute("SELECT id FROM items WHERE title=? AND status IN ('open','in_progress','held') ORDER BY id",
+                     (title,)).fetchone()
+    tid = r["id"] if r else item_add(
+        conn, project, title, priority=1, doer="human", actor=actor,
+        context=f"Claude Code asks once, for each folder, whether it may work there. A session that MaximizePM starts "
+                f"in {path} waits on that question with nobody to answer it, so MaximizePM starts none there until you "
+                f"answer. In a terminal: cd {_shell_quote(path)} && claude, choose 'Yes, I trust this folder' "
+                f"(Down, then Enter), then type /exit. MaximizePM closes this item by itself within a minute, and the "
+                f"work that waits on it starts. MaximizePM never trusts a folder for you.")["id"]
+    if item_id is not None and item_id != tid and not _link(conn, item_id, tid):
+        it = _item(conn, item_id)
+        if it["kind"] == "work" and it["status"] in OPEN_STATES:
+            with tx(conn):
+                _dep_add(conn, item_id, tid, actor)
+    return tid
+
+
+def trust_answered(conn):
+    """One pass of the loop of maxpm serve: close each open person's item that asks for the trust of a folder
+    (trust_needed) when Claude Code trusts the folder now. Returns the ids it closed."""
+    out = []
+    head, _, tail = TRUST_TITLE.partition("{path}")
+    for r in conn.execute("SELECT id, title FROM items WHERE status='open' AND doer='human' AND title LIKE ? ORDER BY id",
+                          (head + "%" + tail,)).fetchall():
+        path = r["title"][len(head):len(r["title"]) - len(tail)]
+        if claude_trusted(path) is True:
+            done(conn, r["id"], output="Claude Code trusts the folder now", actor="maxpm")
+            out.append(r["id"])
+    return out
 
 
 def _shell_quote(s):

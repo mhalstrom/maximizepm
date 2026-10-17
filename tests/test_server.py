@@ -261,6 +261,62 @@ class LaunchAgent(unittest.TestCase):
         self.c.execute("UPDATE goal_bases SET used_at=?", (core.iso(core.now() - core.timedelta(hours=1)),))
         self.assertIsNone(server.dispatch_item(self.c, b, runner=sent.append)["fork_of"])
 
+    def test_no_claude_code_session_starts_in_a_folder_it_does_not_trust(self):
+        import threading
+        from river import notify
+        cfg = os.path.join(self.dir.name, ".claude.json")
+        root = os.path.realpath(self.dir.name)  # Claude Code and project path both name the real folder
+        folder = os.path.join(root, "work", "shop")
+        os.makedirs(folder)
+        write = lambda projects: Path(cfg).write_text(json.dumps({"projects": projects}))
+        self.addCleanup(setattr, core, "claude_trusted", core.claude_trusted)
+        core.claude_trusted = lambda path: core.folder_trusted(path, cfg)
+        # Claude Code's settings: the folder, or a folder above it, with hasTrustDialogAccepted.
+        self.assertIsNone(core.folder_trusted(folder, os.path.join(self.dir.name, "none.json")))  # cannot tell
+        write({folder: {"hasTrustDialogAccepted": False}, root + "/other": {"hasTrustDialogAccepted": True}})
+        self.assertFalse(core.folder_trusted(folder, cfg))
+        write({os.path.join(root, "work"): {"hasTrustDialogAccepted": True}})
+        self.assertTrue(core.folder_trusted(folder, cfg))
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.dir.name}):
+            self.assertEqual(core.claude_config_file(), Path(cfg))
+        # Not trusted: no Terminal opens, no session is named; one person's item asks for the trust, and the item
+        # waits on it. MaximizePM never writes the trust itself.
+        write({})
+        core.project_add(self.c, "shop", path=folder)
+        x = core.item_add(self.c, "shop", "first")["id"]
+        sent = []
+        with self.assertRaisesRegex(RiverError, r"does not trust the folder .*: #(\d+) asks a person to trust it"):
+            server.dispatch_item(self.c, x, runner=sent.append)
+        (tid,) = [r[0] for r in self.c.execute("SELECT blocked_by FROM deps WHERE item_id=?", (x,))]
+        trust = core.item_show(self.c, tid)
+        self.assertEqual((trust["title"], trust["doer"], sent), (f"Trust the folder {folder} for Claude Code", "human", []))
+        self.assertIn(f"cd {folder} && claude, choose 'Yes, I trust this folder'", trust["context"])
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM agents WHERE kind='ai'").fetchone()[0], 0)
+        self.assertEqual(json.loads(Path(cfg).read_text()), {"projects": {}})
+        # Every other start in that folder is refused too, and they share the one person's item.
+        with self.assertRaisesRegex(RiverError, f"#{tid} asks a person"):
+            server.start_manager(self.c, runner=sent.append)
+        with self.assertRaisesRegex(RiverError, f"#{tid} asks a person"):
+            server.open_needs_you(self.c, runner=sent.append)
+        # Another agent CLI has its own trust: river checks only Claude Code.
+        core.config_set(self.c, "launch_agents", "Codex=@codex")
+        y = core.item_add(self.c, "shop", "second")["id"]
+        self.assertIn("codex", server.dispatch_item(self.c, y, runner=sent.append)["command"])
+        core.config_unset(self.c, "launch_agents")
+        # The person trusts the folder: maxpm serve closes their item, and the work is ready again.
+        self.assertEqual(core.trust_answered(self.c), [])
+        write({folder: {"hasTrustDialogAccepted": True}})
+        self.assertEqual(core.trust_answered(self.c), [tid])
+        self.assertTrue(core.annotate(self.c)[x]["ready"])
+        server.dispatch_item(self.c, x, runner=sent.append)
+        self.assertIn(f"MAXPM_FOCUS=item:{x} claude", sent[-1])
+        # The loop of maxpm serve looks on every pass.
+        stop, looks = threading.Event(), []
+        with mock.patch.object(core, "trust_answered", lambda c: (looks.append(1), stop.set())), \
+                mock.patch.object(server, "watch_prompts", lambda c: None):
+            notify.loop(stop, interval_s=1)
+        self.assertEqual(looks, [1])
+
     def test_dispatch_starts_a_named_session_for_one_item(self):
         core.project_add(self.c, "shop", path=self.dir.name)
         top = core.item_add(self.c, "shop", "first", priority=0)["id"]
@@ -1165,7 +1221,7 @@ class FakeTmux:
         elif cmd == "show-options":
             return "C-b"
         elif cmd == "display-message":  # terminal_screen: the pane's size and cursor; else the text as it is
-            return f"120|40|3|7|{pane['running']}|{pane['name']}" if pane else a[-1]
+            return f"120|40|3|7|{pane['running']}|maxpm:{pane['window'][1:]}.0|{pane['name']}" if pane else a[-1]
         elif cmd == "capture-pane":  # what the pane shows: with -e the colours too
             if not pane:
                 return None
@@ -1651,7 +1707,10 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(watch(), {"waiting": {name: "Do you want to proceed?"}, "told": [], "closed": []})
         self.assertEqual(watch(5)["told"], [])
         self.assertEqual(watch()["told"], [name])
-        self.assertEqual(events(), [(f"alert from {name}: waits on a prompt in its terminal: Do you want to proceed?", name)])
+        # The alert names the agent, its tmux window, the question, and the keys of each option (#2713).
+        self.assertEqual(events(), [(f"alert from {name}: waits on a prompt in its terminal: {name} in tmux maxpm:0.0. "
+                                     f"Question: Do you want to proceed? Keys: Enter = 1. Yes (selected now); "
+                                     f"Down, then Enter = 2. No", name)])
         self.assertEqual(watch()["told"], [])  # once for a prompt
         # The notification opens the agent's Terminal on the page; its web session when it has one (a phone).
         (row,) = core.outbox(self.c)
@@ -1691,6 +1750,51 @@ class LaunchInTmux(unittest.TestCase):
         with mock.patch.object(server, "watch_prompts", lambda c: (looks.append(1), stop.set())):
             notify.loop(stop, interval_s=1)
         self.assertEqual(looks, [1])
+
+    def test_a_prompt_alert_says_what_to_answer_and_who_reads_lines_with_no_question(self):
+        from unittest import mock
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mark", human=True)
+        core.item_add(self.c, "shop", "work")
+        name = server.launch_agent(self.c)["session_name"]
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.PROMPTS.clear)
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+
+        def watch():
+            clock[0] += core.timedelta(seconds=30)
+            return server.watch_prompts(self.c)
+        bodies = lambda who: [r[0] for r in self.c.execute(
+            "SELECT body FROM messages WHERE to_agent=? AND read_at IS NULL AND body LIKE ? ORDER BY id",
+            (who, core.PROMPT_NOTE + "%"))]
+        # Claude Code's trust question (2026-10-17): its options have no numbers, and "No, exit" is selected.
+        pane["screen"] = ("────────\n Accessing workspace:\n /x/shop\n Quick safety check: Is this a project you created "
+                          "or one you trust? (Like your own code). If not, take a moment to review what's in this\n "
+                          "folder first.\n Security guide\n ❯ No, exit\n   Yes, I trust this folder\n "
+                          "Enter to confirm · Esc to cancel")
+        self.assertEqual((watch()["told"], watch()["told"]), ([], [name]))
+        self.assertEqual(bodies("mark"), [
+            f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0. Question: Quick safety check: Is this a project "
+            f"you created or one you trust? Keys: Enter = No, exit (selected now); Down, then Enter = Yes, I trust this "
+            f"folder; Esc = cancel"])
+        # The page and the notification show it all, not the first 120 characters.
+        self.assertIn("Yes, I trust this folder; Esc = cancel", core.needs_you(self.c, "mark")[0]["summary"])
+        # Only the key hint on the screen: no question for a person to answer. The active manager looks at it.
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+        pane["screen"] = "⏺ Thinking\n\n Enter to confirm · Esc to cancel"
+        self.assertEqual((watch()["told"], watch()["told"]), ([], [name]))
+        self.assertEqual(bodies("mark"), [])
+        self.assertEqual(bodies("boss"), [f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0, with no question "
+                                          f"river can read. Its last lines: ⏺ Thinking | Enter to confirm · Esc to cancel"])
+        # An agent with a stop request gets no alert: an answer would only let it read the stop and end (alert #7392).
+        # Its alert closes, and maxpm view --tidy closes its pane, prompt and all.
+        core.stop_agent(self.c, name, reason="enough", actor="mark")
+        self.assertEqual((len(watch()["closed"]), bodies("boss"), watch()["waiting"]), (1, [], {}))
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name=?", (core.iso(clock[0] - core.timedelta(hours=2)), name))
+        self.assertIn(pane["id"], server._done_panes(self.c, [p for p in server._tmux_panes() if p["name"]]))
 
     def test_tmux_is_the_default_when_tmux_is_installed(self):
         from unittest import mock
