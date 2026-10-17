@@ -121,6 +121,12 @@ Stop when the user tells you to, and tell the user what you did.
   person does that), stop it, and launch again. MaximizePM
   takes its push back after `connect_within`. A stop ends every reservation
   of the agent at once, and MaximizePM does the same for an agent that is gone.
+- **A prompt alert to you** ("waits on a prompt in its terminal: <agent> in
+  tmux <window>, with no question river can read"): a person gets each prompt
+  alert that names a question and its keys; one without a question comes to
+  you. Read the screen (`maxpm view`, or the Terminal button). Send the person
+  an alert with the question and the keys when only a person can answer it;
+  else stop the agent and launch again.
 - **SERVE LOOP LATE**: `maxpm serve` made no complete pass of its loop for
   5 minutes or more, so it closes no finished session, sends no notification,
   starts no fresh session, and does not reload. Run `maxpm serve --restart`.

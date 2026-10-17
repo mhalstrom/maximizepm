@@ -102,6 +102,9 @@ const projTables = new Map();
 // People always show, and so does any agent that still holds an item, owns a goal or target, or has a push waiting.
 function agentShown(a) {
   if (a.kind === "human" || a.state === "active" || a.holds.length || (a.owns || []).length) return true;
+  // Its tmux pane is open (S.terminals): a session that never ran a maxpm command may wait there on a prompt,
+  // and its Terminal button is the only way to answer it (#2713).
+  if ((S.terminals || {})[a.name]) return true;
   if ((S.goals || []).some(g => g.owner === a.name && g.status === "open")) return true;
   return S.items.some(i => i.status === "open" && i.reserved_until && i.reserved_for === a.name);
 }

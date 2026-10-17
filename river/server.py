@@ -580,8 +580,9 @@ def _done_panes(conn, panes, terminals=None):
     after one), or it is gone, and it holds and owns nothing.
     A registered agent whose process runs in the pane decides in place of the named one (a session that began
     again under another name). A pane that shows a prompt (prompt_pattern) is never done by the queue's word:
-    a person may want to answer it. A pane with no agent name (a session for a person's item) is done only
-    by its shell. terminals: agent_terminals(conn), when the caller has it."""
+    a person may want to answer it; but the pane of an agent with a stop request is done with its prompt too,
+    since an answer would only let it read the stop and end. A pane with no agent name (a session for a person's
+    item) is done only by its shell. terminals: agent_terminals(conn), when the caller has it."""
     import re
     done = {p["pane"]: "its agent ended" for p in panes if p["ended"]}
     if conn is None:
@@ -589,7 +590,7 @@ def _done_panes(conn, panes, terminals=None):
     here = {}
     for agent, pane in (agent_terminals(conn) if terminals is None else terminals).items():
         here.setdefault(pane, []).append(agent)
-    maybe = {}
+    maybe, stopped = {}, set()
     registered = {r["name"] for r in conn.execute("SELECT name FROM agents")}
     for p in panes:
         # The named agent is registered and its process runs in another terminal: nothing here says it is done.
@@ -607,13 +608,15 @@ def _done_panes(conn, panes, terminals=None):
                 break
             why = (f"{name} is gone" if a["state"] == "gone" else f"{name} stopped" if a["role"] == "stopped"
                    else f"{name} was asked to stop and is idle")
+            if a.get("stop_at"):
+                stopped.add(p["pane"])
         else:
             maybe[p["pane"]] = why
     pattern = core.setting(conn, "prompt_pattern").strip()
-    texts = _pane_texts(sorted(maybe)) if pattern else dict.fromkeys(maybe, "")
+    texts = _pane_texts(sorted(set(maybe) - stopped)) if pattern else dict.fromkeys(maybe, "")
     rx = re.compile(pattern) if pattern else None
     for pane, why in maybe.items():
-        if pane in texts and not (rx and any(rx.search(x) for x in _prompt_tail(texts[pane]))):
+        if pane in stopped or (pane in texts and not (rx and any(rx.search(x) for x in _prompt_tail(texts[pane])))):
             done[pane] = why
     return done
 
@@ -949,14 +952,15 @@ def terminal_screen(conn, agent):
 
 def _pane_screen(agent, pane):
     out = _tmux("display-message", "-p", "-t", pane,
-                "#{pane_width}|#{pane_height}|#{cursor_x}|#{cursor_y}|#{pane_current_command}|#{@maxpm_name}",
+                "#{pane_width}|#{pane_height}|#{cursor_x}|#{cursor_y}|#{pane_current_command}|"
+                "#{session_name}:#{window_index}.#{pane_index}|#{@maxpm_name}",
                 ";", "capture-pane", "-p", "-e", "-t", pane)
     head, _, text = out.partition("\n")
-    f = head.split("|", 5)
-    if len(f) != 6:
+    f = head.split("|", 6)
+    if len(f) != 7:
         raise RiverError(f"tmux gave no answer for pane {pane}")
     return {"agent": agent, "pane": pane, "width": int(f[0]), "height": int(f[1]), "cursor": [int(f[2]), int(f[3])],
-            "ended": f[4].lstrip("-") in TMUX_SHELLS, "name": f[5], "text": text}
+            "ended": f[4].lstrip("-") in TMUX_SHELLS, "target": f[5], "name": f[6], "text": text}
 
 
 # An agent that waits on a prompt in its terminal (a permission prompt, a trust question) stops, and nobody
@@ -975,19 +979,99 @@ def _plain(text):
     return _ESCAPES.sub("", text)
 
 
+_BOX = "│┃╭╮╰╯┌┐└┘"  # the frame some CLIs draw around a prompt
+_HINT = None
+
+
+def _prompt_parts(tail):
+    """What a person needs to answer a prompt, read from a pane's last lines (_prompt_tail): {"question": the
+    sentence that asks (up to its question mark), or None; "options": [(text, selected)]: a menu, with the line
+    the marker (❯ or ›) is on selected; "hint": the line that names keys (Enter to confirm · Esc to cancel)}.
+    A menu is the marked line and the lines next to it whose text starts in the same column (numbered or not:
+    Claude Code's trust question lists "No, exit" and "Yes, I trust this folder" with no numbers)."""
+    import re
+    global _HINT
+    _HINT = _HINT or re.compile(r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]", re.I)
+    lines = [re.sub(f"^\\s*[{_BOX}]", "", x).rstrip(f" {_BOX}") for x in tail]
+    hint = next((m.group(0) for m in map(_HINT.search, lines) if m), None)
+    mark = re.compile(r"^(\s*)([❯›])\s*(\S.*)$")
+    at = next((n for n, x in enumerate(lines) if mark.match(x)), None)
+    options, top = [], len(lines)
+    if at is not None:
+        m = mark.match(lines[at])
+        col = len(lines[at]) - len(m.group(3))
+
+        def option(x):
+            return len(x) - len(x.lstrip()) == col and not _HINT.search(x)
+        top = at
+        while top > 0 and option(lines[top - 1]):
+            top -= 1
+        end = at + 1
+        while end < len(lines) and option(lines[end]):
+            end += 1
+        options = [(m.group(3).strip() if n == at else lines[n].strip(), n == at) for n in range(top, end)]
+    question = None
+    for x in reversed(lines[:top]):
+        if "?" in x:
+            question = x[:x.rindex("?") + 1].strip()
+            break
+    return {"question": question, "options": options, "hint": hint}
+
+
+def _keys_for(n, at):
+    """The keys that choose option n of a menu when option at is selected."""
+    d = n - at
+    if not d:
+        return "Enter"
+    key = "Down" if d > 0 else "Up"
+    return f"{key}, then Enter" if abs(d) == 1 else f"{key} {abs(d)} times, then Enter"
+
+
+PROMPT_ANSWER = "Answer it with View Terminal in MaximizePM"
+
+
+def prompt_alert(agent, target, tail):
+    """The alert text for an agent that waits on a prompt: core.PROMPT_NOTE, the agent and its tmux window, the
+    question, the options with the selected one, the keys that choose each, and where to answer (#2713). Before,
+    the alert gave only the first line that matched prompt_pattern ("Enter to confirm · Esc to cancel"), and a
+    person could do nothing with it. Returns (text, question): question is None when the lines hold no question."""
+    parts = _prompt_parts(tail)
+    q = parts["question"]
+    where = f"{core.PROMPT_NOTE}: {agent} in tmux {target}"
+    if q is None:
+        last = " | ".join(x.strip() for x in tail[-3:])
+        return f"{where}, with no question river can read. Its last lines: {last[:300]}", None
+    text = f"{where}. Question: {q[:240]}"
+    opts = parts["options"]
+    if opts:  # each option with the keys that choose it, from the selected one
+        at = next(n for n, (_, sel) in enumerate(opts) if sel)
+        text += " Keys: " + "; ".join(f"{_keys_for(n, at)} = {o}{' (selected now)' if sel else ''}"
+                                      for n, (o, sel) in enumerate(opts))
+        if parts["hint"] and "esc" in parts["hint"].lower():
+            text += "; Esc = cancel"
+    elif parts["hint"]:
+        text += f" Keys: {parts['hint']}"
+    return f"{text}. {PROMPT_ANSWER}.", q
+
+
 def watch_prompts(conn):
     """One look at every agent's tmux pane (the notify loop of maxpm serve, every notify_interval): when one of
     the last lines matches the setting prompt_pattern and those lines stay the same for prompt_wait, each
-    person gets an alert from that agent (core.PROMPT_NOTE and the line), which opens a needs-you event; the
-    page shows the agent's Terminal for it. When the prompt is gone (answered, or the agent ended), river marks
-    the alert read, which closes the event. A prompt that stays on the screen alerts once. Returns
-    {"waiting": {agent: line}, "told": [agents], "closed": [message ids]}."""
+    person gets an alert from that agent (prompt_alert: its window, the question, the options and their keys),
+    which opens a needs-you event; the page shows the agent's Terminal for it. Lines with no question that river
+    can read go to the active manager instead, which looks at the screen (the person, when no manager is active).
+    An agent with a stop request gets no alert: nobody needs its answer. When the prompt is gone (answered, or
+    the agent ended), river marks the alert read, which closes the event. A prompt that stays on the screen
+    alerts once. Returns {"waiting": {agent: question}, "told": [agents], "closed": [message ids]}."""
     import re
     pattern = core.setting(conn, "prompt_pattern").strip()
     waiting = {}
     if pattern:
         rx = re.compile(pattern)
+        stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
         for agent, pane in sorted(agent_terminals(conn).items()):
+            if agent in stopped:
+                continue  # a stop request: an answer would only let it read the stop and end (#2713, alert #7392)
             try:
                 screen = _pane_screen(agent, pane)
             except RiverError:
@@ -995,9 +1079,9 @@ def watch_prompts(conn):
             if screen["ended"]:
                 continue  # a shell: what the agent printed stays, and nobody waits there
             tail = _prompt_tail(_plain(screen["text"]))
-            line = next((x.strip() for x in tail if rx.search(x)), None)
-            if line:
-                waiting[agent] = (f"{core.PROMPT_NOTE}: {line[:200]}", "\n".join(tail))
+            if any(rx.search(x) for x in tail):
+                body, q = prompt_alert(agent, screen["target"], tail)
+                waiting[agent] = (body, "\n".join(tail), q)
     t, wait = core.now(), core.parse_duration(core.setting(conn, "prompt_wait"))
     for agent in [a for a in PROMPTS if a not in waiting]:
         del PROMPTS[agent]
@@ -1011,7 +1095,8 @@ def watch_prompts(conn):
     with core.tx(conn):
         core._mark_read(conn, closed)
         people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
-        for agent, (body, sig) in waiting.items():
+        manager = core.active_manager(conn)
+        for agent, (body, sig, q) in waiting.items():
             st = PROMPTS.get(agent)
             if not st or st["sig"] != sig:
                 st = PROMPTS[agent] = {"sig": sig, "since": t, "told": st["told"] if st else None}
@@ -1021,14 +1106,15 @@ def watch_prompts(conn):
                 continue
             held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
                                 (agent,)).fetchone()
-            for person in people:
+            to = [manager] if q is None and manager and manager != agent else people
+            for person in to:
                 core._send(conn, "alert", agent, body, to=person, item_id=held and held["id"])
-            if people:  # with no person in the queue yet, the first one who registers gets it
+            if to:  # with no person in the queue yet, the first one who registers gets it
                 st["told"] = body
                 told.append(agent)
         if told or closed:
             core.sync_needs_you(conn)
-    return {"waiting": {a: b[len(core.PROMPT_NOTE) + 2:] for a, (b, _) in waiting.items()}, "told": told, "closed": closed}
+    return {"waiting": {a: q or b for a, (b, _, q) in waiting.items()}, "told": told, "closed": closed}
 
 
 # An agent idle at its prompt runs no river command, and river never types into its pane: a stale session would

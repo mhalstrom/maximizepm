@@ -5720,7 +5720,10 @@ def sync_needs_you(conn):
         _open_event(conn, "item", f"#{iid} {a['title']} ({a['project']}) is ready for a person", item_id=iid)
     for mid in sorted(set(want_msgs) - have_msgs):
         m = want_msgs[mid]
-        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {m['body'][:120]}",
+        # A prompt alert names the window, the question, and the keys (server.watch_prompts): all of it, or the
+        # person still cannot act on it from the notification (#2713).
+        cut = 600 if m["body"].startswith(PROMPT_NOTE) else 120
+        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {m['body'][:cut]}",
                     item_id=m["item_id"], message_id=mid, human=m["to_agent"])
 
 

@@ -1165,7 +1165,7 @@ class FakeTmux:
         elif cmd == "show-options":
             return "C-b"
         elif cmd == "display-message":  # terminal_screen: the pane's size and cursor; else the text as it is
-            return f"120|40|3|7|{pane['running']}|{pane['name']}" if pane else a[-1]
+            return f"120|40|3|7|{pane['running']}|maxpm:{pane['window'][1:]}.0|{pane['name']}" if pane else a[-1]
         elif cmd == "capture-pane":  # what the pane shows: with -e the colours too
             if not pane:
                 return None
@@ -1651,7 +1651,10 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(watch(), {"waiting": {name: "Do you want to proceed?"}, "told": [], "closed": []})
         self.assertEqual(watch(5)["told"], [])
         self.assertEqual(watch()["told"], [name])
-        self.assertEqual(events(), [(f"alert from {name}: waits on a prompt in its terminal: Do you want to proceed?", name)])
+        # The alert names the agent, its tmux window, the question, the keys of each option, and where to answer (#2713).
+        self.assertEqual(events(), [(f"alert from {name}: waits on a prompt in its terminal: {name} in tmux maxpm:0.0. "
+                                     f"Question: Do you want to proceed? Keys: Enter = 1. Yes (selected now); "
+                                     f"Down, then Enter = 2. No. Answer it with View Terminal in MaximizePM.", name)])
         self.assertEqual(watch()["told"], [])  # once for a prompt
         # The notification opens the agent's Terminal on the page; its web session when it has one (a phone).
         (row,) = core.outbox(self.c)
@@ -1691,6 +1694,51 @@ class LaunchInTmux(unittest.TestCase):
         with mock.patch.object(server, "watch_prompts", lambda c: (looks.append(1), stop.set())):
             notify.loop(stop, interval_s=1)
         self.assertEqual(looks, [1])
+
+    def test_a_prompt_alert_says_what_to_answer_and_who_reads_lines_with_no_question(self):
+        from unittest import mock
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mark", human=True)
+        core.item_add(self.c, "shop", "work")
+        name = server.launch_agent(self.c)["session_name"]
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.PROMPTS.clear)
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+
+        def watch():
+            clock[0] += core.timedelta(seconds=30)
+            return server.watch_prompts(self.c)
+        bodies = lambda who: [r[0] for r in self.c.execute(
+            "SELECT body FROM messages WHERE to_agent=? AND read_at IS NULL AND body LIKE ? ORDER BY id",
+            (who, core.PROMPT_NOTE + "%"))]
+        # Claude Code's trust question (2026-10-17): its options have no numbers, and "No, exit" is selected.
+        pane["screen"] = ("────────\n Accessing workspace:\n /x/shop\n Quick safety check: Is this a project you created "
+                          "or one you trust? (Like your own code). If not, take a moment to review what's in this\n "
+                          "folder first.\n Security guide\n ❯ No, exit\n   Yes, I trust this folder\n "
+                          "Enter to confirm · Esc to cancel")
+        self.assertEqual((watch()["told"], watch()["told"]), ([], [name]))
+        self.assertEqual(bodies("mark"), [
+            f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0. Question: Quick safety check: Is this a project "
+            f"you created or one you trust? Keys: Enter = No, exit (selected now); Down, then Enter = Yes, I trust this "
+            f"folder; Esc = cancel. Answer it with View Terminal in MaximizePM."])
+        # The page and the notification show it all, not the first 120 characters.
+        self.assertIn("Esc = cancel. Answer it with View Terminal", core.needs_you(self.c, "mark")[0]["summary"])
+        # Only the key hint on the screen: no question for a person to answer. The active manager looks at it.
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+        pane["screen"] = "⏺ Thinking\n\n Enter to confirm · Esc to cancel"
+        self.assertEqual((watch()["told"], watch()["told"]), ([], [name]))
+        self.assertEqual(bodies("mark"), [])
+        self.assertEqual(bodies("boss"), [f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0, with no question "
+                                          f"river can read. Its last lines: ⏺ Thinking | Enter to confirm · Esc to cancel"])
+        # An agent with a stop request gets no alert: an answer would only let it read the stop and end (alert #7392).
+        # Its alert closes, and maxpm view --tidy closes its pane, prompt and all.
+        core.stop_agent(self.c, name, reason="enough", actor="mark")
+        self.assertEqual((len(watch()["closed"]), bodies("boss"), watch()["waiting"]), (1, [], {}))
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name=?", (core.iso(clock[0] - core.timedelta(hours=2)), name))
+        self.assertIn(pane["id"], server._done_panes(self.c, [p for p in server._tmux_panes() if p["name"]]))
 
     def test_tmux_is_the_default_when_tmux_is_installed(self):
         from unittest import mock
