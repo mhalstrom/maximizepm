@@ -122,6 +122,38 @@ class PageMessages(unittest.TestCase):
             server.open_agent_on(self.c, x)
         self.assertTrue(self.op("activate", "mark", id=x)["ready"])
 
+    def test_search_route_finds_open_done_and_dropped_items(self):
+        # The search field of the page header (#2968): core.search with the filters of maxpm search.
+        core.project_add(self.c, "b")
+        done = core.item_add(self.c, "a", "fix the login page", actor="ag")["id"]
+        core.claim(self.c, done, "bo")
+        core.done(self.c, done, output="abc123: login works", actor="bo")
+        gone = core.item_add(self.c, "a", "login page redesign", actor="ag")["id"]
+        core.drop(self.c, gone, actor="mark")
+        other = core.item_add(self.c, "b", "login page tests", actor="ag")["id"]
+        code, body = self.get("/api/search?q=login+page")
+        self.assertEqual((code, [m["id"] for m in body["items"]]), (200, [other, gone, done]))  # newest first
+        self.assertEqual({m["id"]: m["status"] for m in body["items"]}, {other: "open", gone: "dropped", done: "done"})
+        self.assertEqual(next(m for m in body["items"] if m["id"] == done)["output"], "abc123: login works")
+        self.assertEqual([m["id"] for m in self.get("/api/search?q=login&status=done")[1]["items"]], [done])
+        self.assertEqual([m["id"] for m in self.get("/api/search?q=login&status=closed&project=a")[1]["items"]],
+                         [gone, done])
+        self.assertEqual([m["id"] for m in self.get("/api/search?q=login&project=b&since=7d")[1]["items"]], [other])
+        code, body = self.get("/api/search?q=login&n=1")
+        self.assertEqual((body["total"], len(body["items"])), (3, 1))
+        code, body = self.get("/api/search?q=login+redesign+checkout")  # no item holds every word: the closest
+        self.assertEqual((code, body["items"]), (200, []))
+        self.assertIn(gone, [m["id"] for m in body["closest"]])
+        self.assertEqual(self.get("/api/search?q=")[0], 400)
+        self.assertEqual(self.get("/api/search?q=login&status=nope")[0], 400)
+        self.assertEqual(self.get("/api/search?q=login&n=x")[0], 400)
+
+    def test_page_has_the_search_field(self):
+        html = (Path(server.__file__).parent / "static" / "index.html").read_text()
+        for el in ('id="search"', 'id="searchDlg"', 'id="searchText"', 'id="searchStatus"', 'id="searchProject"'):
+            self.assertIn(el, html)
+        self.assertIn('fetch("api/search?"', (Path(server.__file__).parent / "static" / "app.js").read_text())
+
 
 class PageGoals(unittest.TestCase):
     """Goals on the page: the state carries goals with progress; the goal ops and item tags work."""

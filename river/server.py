@@ -2086,6 +2086,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": str(e)})
             finally:
                 conn.close()
+        if path == "/api/search":
+            # The search field of the page header: core.search, the one behind maxpm search (#2968).
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+            conn = core.connect()
+            try:
+                return self._send(200, core.search(conn, q.get("q", ""), project=q.get("project") or None,
+                                                   status=q.get("status") or None, since=q.get("since") or None,
+                                                   limit=max(1, min(int(q.get("n") or 50), 500)),
+                                                   kinds=bool(q.get("kinds"))))
+            except (RiverError, ValueError) as e:
+                return self._send(400, {"error": str(e)})
+            finally:
+                conn.close()
         if path == "/api/needs-you":
             from urllib.parse import parse_qs, urlsplit
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}

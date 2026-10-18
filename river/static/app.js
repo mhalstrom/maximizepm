@@ -1002,6 +1002,64 @@ $("#readyDlg").addEventListener("click", async (e) => {
   } catch (err) { b.disabled = false; /* toast shown */ }
 });
 
+// Search: the header field opens a dialog that lists the items, open, done, and dropped, that hold every
+// word (core.search, as maxpm search), newest first; a click opens the item in the drawer (#2968).
+const searchDialog = makeDialog($("#searchDlg"));
+let searchSeq = 0, searchTimer = null;
+function openSearch(text) {
+  if (S) fillSelect("#searchProject", S.projects.map(p => p.name), true);
+  if (text != null) $("#searchText").value = text;
+  searchDialog.open();
+  const el = $("#searchText"); el.focus(); el.setSelectionRange(el.value.length, el.value.length);
+  runSearch();
+}
+function runSearch(delay = 0) {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(doSearch, delay);
+}
+function searchRow(m) {
+  const st = m.status === "open" || m.status === "backlog" ? chip("c-p", m.status) : chip("c-" + m.status, m.status.replace("_", " "));
+  const when = m.closed_at ? `${m.status === "dropped" ? "dropped" : "done"} ${ago(m.closed_at)}` : `added ${ago(m.created_at)}`;
+  return `<div class="srow" data-open="${m.id}"><div class="t"><span class="link">#${m.id} ${esc(m.title)}</span></div>
+    <div class="sub">${projectChip(m.project)}${st}${m.doer === "human" ? personChip("human") : ""}
+      ${m.assignee && !m.closed_at ? `<span>${esc(m.assignee)}</span>` : ""}<span>${when}</span></div>
+    ${m.output ? `<div class="out">${esc(clip(m.output, 220))}</div>` : ""}</div>`;
+}
+async function doSearch() {
+  const text = $("#searchText").value.trim(), seq = ++searchSeq;
+  if (!text) { $("#searchInfo").textContent = "Items that hold every word, newest first."; $("#searchList").innerHTML = ""; return; }
+  const q = new URLSearchParams({ q: text, status: $("#searchStatus").value, n: 100 });
+  if ($("#searchProject").value) q.set("project", $("#searchProject").value);
+  if ($("#searchSince").value) q.set("since", $("#searchSince").value);
+  const r = await fetch("api/search?" + q).catch(() => null);
+  if (seq !== searchSeq || !r) return;
+  const res = await r.json();
+  if (!r.ok) { $("#searchInfo").textContent = res.error; $("#searchList").innerHTML = ""; return; }
+  if (res.items.length) {
+    $("#searchInfo").textContent = res.total > res.items.length ? `${res.total} items; the newest ${res.items.length} shown.`
+      : `${res.total} item${res.total === 1 ? "" : "s"}, newest first.`;
+    $("#searchList").innerHTML = res.items.map(searchRow).join("");
+  } else {
+    $("#searchInfo").textContent = res.closest.length ? "No item holds every word. The closest:" : "No item holds every word.";
+    $("#searchList").innerHTML = res.closest.map(searchRow).join("");
+  }
+}
+$("#search").addEventListener("input", () => { const v = $("#search").value; $("#search").value = ""; openSearch(v); });
+$("#search").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); openSearch(); } });
+$("#searchText").addEventListener("input", () => runSearch(200));
+for (const id of ["#searchStatus", "#searchProject", "#searchSince"]) $(id).addEventListener("change", () => runSearch());
+$("#searchClose").onclick = () => searchDialog.close();
+$("#searchDlg").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) return searchDialog.close();
+  if (e.target.closest("[data-open]")) return searchDialog.close();  // the item opens in the drawer
+});
+// "/" anywhere outside a field opens the search, as on many sites.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey || searchDialog.isOpen()) return;
+  const t = e.target; if (t.closest && t.closest("input, textarea, select, [contenteditable]")) return;
+  e.preventDefault(); openSearch();
+});
+
 $("#projFolderForm").innerHTML = folderForm();
 wireFolderForms(() => { if (setupDialog.isOpen()) openSetup(); });
 async function openSetup() {

@@ -22,6 +22,7 @@
     <button data-tab="settings">Settings</button>
   </nav>
   <span class="spacer"></span>
+  <input type="search" id="search" placeholder="Search items" title="Find items by their words: open, done, and dropped (Enter or /)" autocomplete="off">
   <select id="theme" title="Theme: System follows your computer's light or dark setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
   <button class="btn hidden" id="relayBtn">Connect relay</button>
   <button class="btn primary hidden" id="loopLate"></button>
@@ -219,6 +220,21 @@
   </div>
   <div class="muted" style="font-size:13px;margin:4px 0 8px">Most important first. Dispatch gives the item to a session that waits for work in its project; else it starts a new agent in the project folder, and that agent's first <code>maxpm go</code> takes this item.</div>
   <div id="readyList"></div>
+</div></div>
+
+<div id="searchDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="searchTitle"><div class="box">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+    <h2 id="searchTitle" style="margin:0">Search items</h2>
+    <button class="iconbtn" id="searchClose" title="Close">✕</button>
+  </div>
+  <div class="form searchbar">
+    <input type="search" id="searchText" placeholder="Words in the title, context, notes, or output" autocomplete="off">
+    <select id="searchStatus" title="Status"><option value="all">Any status</option><option value="open">Open</option><option value="in_progress">In progress</option><option value="held">Held</option><option value="backlog">Backlog</option><option value="done">Done</option><option value="dropped">Dropped</option><option value="closed">Done or dropped</option></select>
+    <select id="searchProject" title="Project"><option value="">All projects</option></select>
+    <select id="searchSince" title="Added or closed in"><option value="">Any time</option><option value="1d">last day</option><option value="7d">last 7 days</option><option value="30d">last 30 days</option></select>
+  </div>
+  <div class="muted" id="searchInfo" style="font-size:13px;margin:6px 0">Items that hold every word, newest first.</div>
+  <div id="searchList"></div>
 </div></div>
 
 <!-- An old maxpm serve with a new page cannot serve app.js: say so instead of showing a dead page. -->
