@@ -4216,15 +4216,16 @@ _QUOTE_RE = re.compile(r"(?<!\w)['\"‘“]([^'\"‘’“”\n]{3,80}?)['\"’�
 IDENT_COMMON = 4
 IDENT_BONUS = 0.2   # what a shared identifier adds to the score of two person items, and to a close check
 CLOSE_NEAR = 0.4    # the score from which a close lists an open item as maybe unnecessary (CLOSE_GOAL in its goal)
-CLOSE_GOAL = 0.3
+CLOSE_GOAL = 0.35
 CLOSE_LIMIT = 6     # at most this many near items in one close check (linked items always)
 
 
 def _idents(text):
     """The identifiers in a text, in one form each: lower case, a hex id cut to 7 characters (a uuid prefix and
-    the whole uuid match), a quoted name of two words or more in quotes ('before you connect google')."""
+    the whole uuid match; a whole uuid also adds uuid:<id>, which a commit id never has), a quoted name of two
+    words or more in quotes ('before you connect google')."""
     text = text or ""
-    out = {f"{m[:7]}" for m in _UUID_RE.findall(text)}
+    out = {m[:7] for m in _UUID_RE.findall(text)} | {f"uuid:{m[:7]}" for m in _UUID_RE.findall(text)}
     out |= {m.rstrip(".,;:").lower() for m in _URL_RE.findall(text)}
     out |= {m.rstrip(".").lower() for m in _MAIL_RE.findall(text)}
     rest = _MAIL_RE.sub(" ", _URL_RE.sub(" ", _UUID_RE.sub(" ", text)))
@@ -6365,9 +6366,11 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
     - done although it waited on open items (--force): those items;
     - a revert (its title or output says revert and names #N): the person's items found during #N.
     Then open items of the same folder whose score against it reaches CLOSE_NEAR (CLOSE_GOAL in the same goal),
-    with IDENT_BONUS for an identifier that its title, output, or note names and half of that for one in its
-    context (not an item number there: two items that wait on the same release name it); at most CLOSE_LIMIT,
-    person items first. What waits on a done item, and what was found during it,
+    with IDENT_BONUS for a place (_places: a URL, path, or quoted name) that its title, output, or note names, and
+    half of that for another identifier there (an item number, a commit id, a mail address: a look at the result
+    names the commit, follow-ups of one item name it) or one in its context; a uuid or its prefix is a place; at most CLOSE_LIMIT, person items
+    first. The series that one author added with the item (SIMILAR_BATCH) is left out of the score: on the live
+    queue a planner's series of tests in one goal scored 0.5 to 0.8 against each other. What waits on a done item, and what was found during it,
     are its next steps: they are not listed. before: leave out items made after that time (a check of a past
     close)."""
     cid = it["id"]
@@ -6407,22 +6410,31 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
                                              "WHERE found_during=?", (cid, cid))} if not gone else set()
     goal = {r[0] for r in conn.execute("SELECT b.item_id FROM item_goals a JOIN item_goals b ON b.goal_id=a.goal_id "
                                        "WHERE a.item_id=?", (cid,))}
+    added = {r["item_id"]: (r["actor"], parse_iso(r["at"])) for r in conn.execute(
+        "SELECT item_id, actor, at FROM events WHERE change LIKE 'added to %' AND (item_id IN "
+        f"(SELECT id FROM items WHERE {open_} AND project_id=?) OR item_id=?)", (*at, it["project_id"], cid))}
+    mine = added.get(cid)
+    series = {i for i, (who, when) in added.items() if mine and who and who == mine[0]
+              and abs(when - mine[1]) < SIMILAR_BATCH}
     common = _ident_counts(rows)
-    strong = _idents(said) - {f"#{cid}"}
-    weak = {x for x in _idents(it["context"]) - strong if not x.startswith("#")}  # "after the release of #12"
+    says = _idents(said) - {f"#{cid}"}
+    hexes = {x for x in says if _HEX_RE.fullmatch(x)}
+    strong = _places(says) - hexes
+    weak = (says - strong) | {x for x in _idents(it["context"]) if not x.startswith("#")}  # "after #12 ships"
     idf = _idf(conn)
     t = _words(it["title"])
     q = _vector(t + t + sorted(set(_words(it["context"]) + _words(output) + _words(note))), idf)
     near = []
     for d in rows:
-        if d["id"] in found or d["id"] in next_steps or d["id"] == merged_into:
+        if d["id"] in found or d["id"] in next_steps or d["id"] == merged_into or d["id"] in series:
             continue
         s = _cosine(q, _vector(d["key"], idf))
-        named = sorted(x for x in d["idents"] & strong if common[x] <= IDENT_COMMON)
-        hint = sorted(x for x in d["idents"] & weak if common[x] <= IDENT_COMMON)
+        uuids = {x for x in d["idents"] & hexes if f"uuid:{x}" in d["idents"] | says}  # not a commit
+        named = sorted(x for x in d["idents"] & strong | uuids if common[x] <= IDENT_COMMON)
+        hint = sorted(x for x in d["idents"] & weak - strong if common[x] <= IDENT_COMMON)
         score = s + (IDENT_BONUS if named else IDENT_BONUS / 2 if hint else 0)
         if score >= (CLOSE_GOAL if d["id"] in goal else CLOSE_NEAR):
-            why = (f"names {named[0]}, as #{cid} does" if named else f"names {hint[0]}, as the context of #{cid} does"
+            why = (f"names {named[0]}, as #{cid} does" if named else f"names {hint[0]}, as #{cid} does"
                    if hint else f"like #{cid}") + (", same goal" if d["id"] in goal else "") + f" (score {min(score, 1):.2f})"
             near.append((d["doer"] != "human", -score, d["id"], why))
     for _, _, i, why in sorted(near)[:CLOSE_LIMIT]:

@@ -5855,12 +5855,12 @@ class CloseCheck(TextQueue):
         self.assertNotIn("1234567", core._idents("order 1234567"))  # digits only: a number, not an id
 
     def test_a_reset_lists_the_person_items_it_made_unnecessary_and_the_closer_decides(self):
-        resume = self.add("Resume the sample automation in the demo workspace", doer="human",
+        resume = self.add("Resume the sample automation in the demo workspace", doer="human", actor="w2",
                           context="Open https://app.example.com/automations/4f2a91c3-1d2e-4b5a-9c8d-0e1f2a3b4c5d "
                                   "and press Resume in the header.")
-        again = self.add("Reconnect the test mail account in the demo workspace", doer="human",
+        again = self.add("Reconnect the test mail account in the demo workspace", doer="human", actor="w2",
                          context="Connections > Add connection, account 7be0d4e1, share it with everyone.")
-        other = self.add("Look at the new pricing table", doer="human")
+        other = self.add("Look at the new pricing table", doer="human", actor="w2")
         reset = self.add("Reset the demo workspace for a new recording")
         self.at(-3 * 3600)
         res = self.finish(reset, "Reset done: automation 4f2a91c3 archived, mail account 7be0d4e1 disconnected")
@@ -5890,7 +5890,8 @@ class CloseCheck(TextQueue):
         self.assertEqual(core.manager_findings(self.c)["unneeded"], [])
 
     def test_the_reply_of_done_names_the_commands(self):
-        look = self.add("Look at the export dialog 'Save as spreadsheet' after the next release", doer="human")
+        look = self.add("Look at the export dialog 'Save as spreadsheet' after the next release", doer="human",
+                        actor="w2")
         x = self.add("Remove the export dialog 'Save as spreadsheet'")
         self.at(-3 * 3600)
         core.claim(self.c, x, "w1")
@@ -5953,7 +5954,7 @@ class CloseCheck(TextQueue):
         self.assertNotIn(a, self.listed(res))
 
     def test_a_reopen_checks_again_at_the_next_close(self):
-        look = self.add("Look at the 'Weekly totals' card after the next release", doer="human")
+        look = self.add("Look at the 'Weekly totals' card after the next release", doer="human", actor="w2")
         x = self.add("Drop the 'Weekly totals' card")
         self.at(-3 * 3600)
         self.finish(x, "dropped the 'Weekly totals' card")
@@ -5963,7 +5964,7 @@ class CloseCheck(TextQueue):
         self.assertIn(look, self.listed(self.finish(x, "dropped the 'Weekly totals' card again")))
 
     def test_cleanup_checks_past_closes_without_items_made_later(self):
-        look = self.add("Look at the 'Team costs' sheet after the next release", doer="human")
+        look = self.add("Look at the 'Team costs' sheet after the next release", doer="human", actor="w2")
         x = self.add("Fill the 'Team costs' sheet")
         self.at(-3 * 3600)
         self.finish(x, "filled the 'Team costs' sheet")
