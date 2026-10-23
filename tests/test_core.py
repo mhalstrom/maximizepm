@@ -5993,3 +5993,44 @@ class CloseCheck(TextQueue):
         # Agent items get no bonus: the words alone decide.
         self.assertEqual(core.similar_items(self.c, "web", "Check the wording of 'Before you connect Mail' after "
                                             "the release", actor="w3"), [])
+
+    def test_a_keep_covers_every_close_and_later_word_matches(self):
+        """#3291: a keep holds for every close that lists the item now, and for later closes that match by
+        words only; an identifier brings it back."""
+        look = self.add("Look at the report export page", doer="human", actor="w2")
+        a = self.add("Report export page changes")
+        b = self.add("Report export page fixes", actor="w3")
+        self.at(-3 * 3600)
+        self.assertIn(look, self.listed(self.finish(a, "report export page")))
+        self.assertIn(look, self.listed(self.finish(b, "report export page", actor="w3")))
+        core.close_keep(self.c, a, look, "the look is still to do", "w1")
+        self.assertEqual(core.close_open(self.c), [])  # the keep covers the close of b too
+        c = self.add("Report export page texts", actor="w3")
+        self.at(-3 * 3600)
+        res = self.finish(c, "report export page", actor="w3")
+        self.assertNotIn(look, self.listed(res))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM close_checks WHERE closed_id=?", (c,)).fetchone()[0], 0)
+        self.c.execute("UPDATE items SET context=? WHERE id=?", ("The button 'Export report now' at the top.", look))
+        e = self.add("Move the 'Export report now' button of the report export page", actor="w3")
+        self.at(-3 * 3600)
+        self.assertIn(look, self.listed(self.finish(e, "moved 'Export report now' to the right", actor="w3")))
+
+    def test_words_alone_must_reach_similar_min(self):
+        near = self.add("Look at the invoice list filters", doer="human", actor="w2")
+        far = self.add("Look at the invoice totals line after the release", doer="human", actor="w2")
+        x = self.add("Invoice list filters")
+        self.at(-3 * 3600)
+        got = self.listed(self.finish(x, "invoice list filters added"))
+        self.assertIn(near, got)
+        self.assertNotIn(far, got)
+        self.assertGreaterEqual(float(got[near].split("score ")[1].rstrip(")")), 0.55)
+
+    def test_a_title_series_is_no_match(self):
+        self.assertTrue(core._title_series("Onboarding test: Notion (A1)", "Onboarding test: Box (A7)"))
+        self.assertFalse(core._title_series("Onboarding test: Notion", "Onboarding test: Notion"))
+        self.assertFalse(core._title_series("Onboarding test: Notion", "Connector walk: Notion"))
+        self.assertFalse(core._title_series("Onboarding test of Notion", "Onboarding test of Box"))
+        other = self.add("Onboarding test: Box connector walk on production", actor="w2")
+        x = self.add("Onboarding test: Notion connector walk on production")
+        self.at(-3 * 3600)
+        self.assertNotIn(other, self.listed(self.finish(x, "Notion connector walk passed on production")))

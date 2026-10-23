@@ -4215,8 +4215,7 @@ _REF_RE = re.compile(r"(?<![\w&])#(\d+)\b")
 _QUOTE_RE = re.compile(r"(?<!\w)['\"‘“]([^'\"‘’“”\n]{3,80}?)['\"’”](?!\w)")
 IDENT_COMMON = 4
 IDENT_BONUS = 0.2   # what a shared identifier adds to the score of two person items, and to a close check
-CLOSE_NEAR = 0.4    # the score from which a close lists an open item as maybe unnecessary (CLOSE_GOAL in its goal)
-CLOSE_GOAL = 0.35
+CLOSE_NEAR = 0.4    # the score from which a close lists an open item that names one of its identifiers
 CLOSE_LIMIT = 6     # at most this many near items in one close check (linked items always)
 
 
@@ -6365,14 +6364,16 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
       found during it;
     - done although it waited on open items (--force): those items;
     - a revert (its title or output says revert and names #N): the person's items found during #N.
-    Then open items of the same folder whose score against it reaches CLOSE_NEAR (CLOSE_GOAL in the same goal),
-    with IDENT_BONUS for a place (_places: a URL, path, or quoted name) that its title, output, or note names, and
-    half of that for another identifier there (an item number, a commit id, a mail address: a look at the result
-    names the commit, follow-ups of one item name it) or one in its context; a uuid or its prefix is a place; at most CLOSE_LIMIT, person items
-    first. The series that one author added with the item (SIMILAR_BATCH) is left out of the score: on the live
-    queue a planner's series of tests in one goal scored 0.5 to 0.8 against each other. What waits on a done item, and what was found during it,
-    are its next steps: they are not listed. before: leave out items made after that time (a check of a past
-    close)."""
+    Then open items of the same folder that name one of its identifiers, when the score with IDENT_BONUS reaches
+    CLOSE_NEAR: IDENT_BONUS for a place (_places: a URL, path, quoted name, or uuid) that its title, output, or
+    note names, half of that for another identifier there (an item number, a commit id, a mail address: a look
+    at the result names the commit, follow-ups of one item name it) or one in its context. Without an
+    identifier, the words alone must reach similar_min (#3291: on the live queue every word-only match below
+    about 0.5 was noise, and the same goal told nothing). At most CLOSE_LIMIT, person items first.
+    Left out of the score: a series (one author added it with the item within SIMILAR_BATCH, or its title has
+    the same words before the colon: 'Onboarding test: <app>'), and an item kept after an earlier close, unless
+    it names an identifier. What waits on a done item, and what was found during it, are its next steps: they
+    are not listed. before: leave out items made after that time (a check of a past close)."""
     cid = it["id"]
     output = output if output is not None else it["output"]
     said = " ".join(x or "" for x in (it["title"], output, note))
@@ -6408,8 +6409,8 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
                                 " AND i.created_at<=?" if before else ""), (cid, it["project_id"], path, *at))
     next_steps = {r[0] for r in conn.execute("SELECT item_id FROM deps WHERE blocked_by=? UNION SELECT id FROM items "
                                              "WHERE found_during=?", (cid, cid))} if not gone else set()
-    goal = {r[0] for r in conn.execute("SELECT b.item_id FROM item_goals a JOIN item_goals b ON b.goal_id=a.goal_id "
-                                       "WHERE a.item_id=?", (cid,))}
+    words_min = setting(conn, "similar_min", project_id=it["project_id"])
+    kept = {r[0] for r in conn.execute("SELECT DISTINCT item_id FROM events WHERE change LIKE 'kept after the close of #%'")}
     added = {r["item_id"]: (r["actor"], parse_iso(r["at"])) for r in conn.execute(
         "SELECT item_id, actor, at FROM events WHERE change LIKE 'added to %' AND (item_id IN "
         f"(SELECT id FROM items WHERE {open_} AND project_id=?) OR item_id=?)", (*at, it["project_id"], cid))}
@@ -6426,16 +6427,21 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
     q = _vector(t + t + sorted(set(_words(it["context"]) + _words(output) + _words(note))), idf)
     near = []
     for d in rows:
-        if d["id"] in found or d["id"] in next_steps or d["id"] == merged_into or d["id"] in series:
+        if d["id"] in found or d["id"] in next_steps or d["id"] == merged_into or d["id"] in series \
+                or _title_series(it["title"], d["title"]):
             continue
         s = _cosine(q, _vector(d["key"], idf))
         uuids = {x for x in d["idents"] & hexes if f"uuid:{x}" in d["idents"] | says}  # not a commit
         named = sorted(x for x in d["idents"] & strong | uuids if common[x] <= IDENT_COMMON)
         hint = sorted(x for x in d["idents"] & weak - strong if common[x] <= IDENT_COMMON)
         score = s + (IDENT_BONUS if named else IDENT_BONUS / 2 if hint else 0)
-        if score >= (CLOSE_GOAL if d["id"] in goal else CLOSE_NEAR):
+        if named or hint:
+            hit = score >= CLOSE_NEAR
+        else:
+            hit = d["id"] not in kept and words_min != "off" and s >= float(words_min)
+        if hit:
             why = (f"names {named[0]}, as #{cid} does" if named else f"names {hint[0]}, as #{cid} does"
-                   if hint else f"like #{cid}") + (", same goal" if d["id"] in goal else "") + f" (score {min(score, 1):.2f})"
+                   if hint else f"like #{cid}") + f" (score {min(score, 1):.2f})"
             near.append((d["doer"] != "human", -score, d["id"], why))
     for _, _, i, why in sorted(near)[:CLOSE_LIMIT]:
         add(i, why)
@@ -6444,6 +6450,14 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
         conn.execute("INSERT OR IGNORE INTO close_checks(closed_id, item_id, why, found_at) VALUES (?,?,?,?)",
                      (cid, i, why, t_))
     return _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL", (cid,))
+
+
+def _title_series(a, b):
+    """Two titles of one series: the same words before the colon, another subject after it (#3291)."""
+    if ":" not in a or ":" not in b:
+        return False
+    (x, rx), (y, ry) = (t.split(":", 1) for t in (a, b))
+    return _words(x) == _words(y) and bool(_words(x)) and _words(rx) != _words(ry)
 
 
 def _close_rows(conn, where, params=()):
@@ -6456,8 +6470,9 @@ def _close_rows(conn, where, params=()):
 
 
 def close_keep(conn, closed_id, item_id=None, note=None, actor=None):
-    """Keep an item that a close check listed: it is still needed after the close of closed_id, and the check
-    does not list it again for that close. Without item_id, every item the check still lists for that close."""
+    """Keep an item that a close check listed: it is still needed after the close of closed_id. The keep covers
+    every close check that lists the item now, and a later close lists it again only for a link or an
+    identifier (#3291). Without item_id, every item the check of closed_id still lists."""
     with tx(conn):
         _item(conn, closed_id)
         rows = _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL" + (" AND c.item_id=?" if item_id else ""),
@@ -6468,8 +6483,8 @@ def close_keep(conn, closed_id, item_id=None, note=None, actor=None):
                              + "; what it lists: maxpm cleanup")
         why = (note or "").strip()
         for r in rows:
-            conn.execute("UPDATE close_checks SET decided_by=?, decided_at=?, note=? WHERE closed_id=? AND item_id=?",
-                         (actor, iso(now()), why or None, int(closed_id), r["id"]))
+            conn.execute("UPDATE close_checks SET decided_by=?, decided_at=?, note=? WHERE item_id=? "
+                         "AND decided_at IS NULL", (actor, iso(now()), why or None, r["id"]))
             _event(conn, r["id"], actor, f"kept after the close of #{closed_id}" + (f": {why}" if why else ""))
     return {"closed": int(closed_id), "kept": [{"id": r["id"], "title": r["title"]} for r in rows]}
 
