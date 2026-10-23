@@ -6034,3 +6034,18 @@ class CloseCheck(TextQueue):
         x = self.add("Onboarding test: Notion connector walk on production")
         self.at(-3 * 3600)
         self.assertNotIn(other, self.listed(self.finish(x, "Notion connector walk passed on production")))
+
+    def test_a_drop_says_which_items_it_makes_ready(self):
+        """#3292: an item that waited on a dropped item is ready at once, although its real precondition may
+        still be false: the reply says so and gives the commands."""
+        step = self.add("Connect the test accounts", doer="human", actor="w2")
+        walk = self.add("Walk the shared accounts in the browser", actor="w2", after=[step])
+        other = self.add("Write the walk notes", actor="w2", after=[step, walk])
+        core.register(self.c, "w9")
+        out = self.cli("--as", "w9", "drop", str(step), "--note", "the accounts are connected a new way")
+        self.assertIn(f"#{walk} Walk the shared accounts", out)
+        self.assertIn("[NOW READY]", out)
+        self.assertIn(f"dep <id> --on <what it waits on>", out)
+        rows = {r["id"]: r for r in core.close_open(self.c)}
+        self.assertIn("the close makes it ready", rows[walk]["closes"][0]["why"])
+        self.assertNotIn("makes it ready", rows[other]["closes"][0]["why"])  # it still waits on the walk

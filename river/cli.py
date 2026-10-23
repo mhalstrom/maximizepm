@@ -435,9 +435,13 @@ def _close_check_lines(rows, closed, r="maxpm"):
     for x in rows:
         out.append(f"    #{x['id']} {_cut(x['title'], 70)}" + ("  [a person's item]" if x["doer"] == "human" else "")
                    + (f"  [held by {x['assignee']}]" if x["assignee"] and x["status"] != "open" else "")
-                   + f"  ({x['why']})")
+                   + ("  [NOW READY]" if x.get("ready") else "") + f"  ({x['why']})")
     out.append(f"  Not needed: {r} done <id> --note \"<why>\"  |  {r} drop <id> --note \"<why>\"  |  "
                f"the same work: {r} merge <keep> <id> --note \"<why>\"")
+    if any(x.get("ready") for x in rows):
+        out.append(f"  NOW READY only because of this close; its real precondition may still be false. Make it "
+                   f"wait again: {r} dep <id> --on <what it waits on>; or it is ready: {r} keep <id> --close "
+                   f"{closed} --note \"ready: <why>\"")
     out.append(f"  Still needed: {r} keep <id> --close {closed} --note \"<why>\"   (all of them: {r} keep --close {closed})")
     return out
 

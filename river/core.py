@@ -598,6 +598,7 @@ CREATE TABLE IF NOT EXISTS close_checks (
   decided_by  TEXT,
   decided_at  TEXT,
   note        TEXT,
+  ready       INTEGER NOT NULL DEFAULT 0,  -- the close made it ready (#3292): relink it, or confirm it
   PRIMARY KEY (closed_id, item_id)
 );
 
@@ -887,6 +888,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _migrate(conn):
+    if "ready" not in {r["name"] for r in conn.execute("PRAGMA table_info(close_checks)")}:
+        conn.execute("ALTER TABLE close_checks ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
     if "result" not in {r["name"] for r in conn.execute("PRAGMA table_info(hook_runs)")}:
         conn.execute("ALTER TABLE hook_runs ADD COLUMN result TEXT")
     if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -6329,6 +6332,13 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
             resumed = _resume_holds(conn, it["id"])
             ann = annotate(conn)
             newly = [d for d in ann[it["id"]]["unblocks"] if ann[d]["ready"]]
+            # An item that waited on an item nobody needs now is ready only because of the close: its real
+            # precondition may still be false (#3292). The close check says so, and the closer relinks it.
+            if unneeded:
+                for d in newly:
+                    conn.execute("UPDATE close_checks SET why=why || ?, ready=1 WHERE closed_id=? AND item_id=? "
+                                 "AND ready=0", ("; the close makes it ready", it["id"], d))
+                unneeded = _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL", (it["id"],))
             # A person answered: an agent item that waited on this person's item starts in a fresh session.
             if it["doer"] == "human":
                 for d in newly:
@@ -6463,7 +6473,7 @@ def _title_series(a, b):
 def _close_rows(conn, where, params=()):
     """Rows of close_checks whose item is still open, with the item and the closed item."""
     return [dict(r) for r in conn.execute(
-        "SELECT c.item_id id, i.title, i.doer, i.status, i.assignee, p.name project, c.why, c.closed_id, "
+        "SELECT c.item_id id, i.title, i.doer, i.status, i.assignee, p.name project, c.why, c.ready, c.closed_id, "
         "x.title closed_title, x.status closed_status, c.found_at FROM close_checks c JOIN items i ON i.id=c.item_id "
         "JOIN projects p ON p.id=i.project_id JOIN items x ON x.id=c.closed_id "
         f"WHERE i.status IN {OPEN_STATES} AND " + where + " ORDER BY (i.doer<>'human'), c.found_at, c.rowid", params)]
