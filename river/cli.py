@@ -423,8 +423,23 @@ def _print_show(a):
         print("  now ready:", ", ".join(f"#{i}" for i in a["now_ready"]))
     if a.get("resumed"):
         print("  back in progress for its holder:", ", ".join(f"#{i}" for i in a["resumed"]))
+    if a.get("close_check"):
+        print("\n".join(_close_check_lines(a["close_check"], a["id"] if "merged" not in a else a["merged"]["id"])))
     for e in a.get("events", [])[:8]:
         print(f"  {e['at']} {e['actor']}: {e['change']}")
+
+
+def _close_check_lines(rows, closed, r="maxpm"):
+    """The close check in the reply of done, drop, and merge (#3286): decide each item now."""
+    out = [f"  MAY BE UNNECESSARY NOW (the close of #{closed}; decide each one now):"]
+    for x in rows:
+        out.append(f"    #{x['id']} {_cut(x['title'], 70)}" + ("  [a person's item]" if x["doer"] == "human" else "")
+                   + (f"  [held by {x['assignee']}]" if x["assignee"] and x["status"] != "open" else "")
+                   + f"  ({x['why']})")
+    out.append(f"  Not needed: {r} done <id> --note \"<why>\"  |  {r} drop <id> --note \"<why>\"  |  "
+               f"the same work: {r} merge <keep> <id> --note \"<why>\"")
+    out.append(f"  Still needed: {r} keep <id> --close {closed} --note \"<why>\"   (all of them: {r} keep --close {closed})")
+    return out
 
 
 def _print_brief(a, n=240):
@@ -939,6 +954,8 @@ def build_parser():
     x.add_argument("--step", help="return after this long (default: the wait_step setting)")
     x = sub.add_parser("cleanup", help="open items that may be done or stale: expired leases, commits that name them, ...")
     x.add_argument("--project"); x.add_argument("--no-git", action="store_true", help="skip the git log checks")
+    x.add_argument("--closes", metavar="SINCE", help="first run the close check on the closes of this time (7d) that "
+                   "it has not checked, such as closes before the check existed")
     x = sub.add_parser("check", help="record what a check of a suspect item found: done, partial, or open")
     x.add_argument("id", type=int); x.add_argument("result", choices=core.CHECK_RESULTS)
     x.add_argument("--note", help="where the work is (done), what is left (partial), or what you looked at (open)")
@@ -1030,7 +1047,11 @@ def build_parser():
     x.add_argument("id", type=int); x.add_argument("--to", required=True)
     x = sub.add_parser("split", help="add smaller prerequisites anyone can take; your item waits for them, still yours")
     x.add_argument("id", type=int); x.add_argument("titles", nargs="+"); x.add_argument("--doer", default="any", choices=core.DOERS)
-    x = sub.add_parser("keep", help="hold an item again while you do its open prerequisites"); x.add_argument("id", type=int)
+    x = sub.add_parser("keep", help="hold an item again while you do its open prerequisites; with --close, keep an "
+                       "item that the close check of an item listed (it is still needed)")
+    x.add_argument("id", type=int, nargs="?", help="the item (with --close and no id: every item that check lists)")
+    x.add_argument("--close", type=int, metavar="CLOSED_ID", help="the closed item whose close check listed it")
+    x.add_argument("--note", help="with --close: why it is still needed")
     x = sub.add_parser("undep", help="remove waits or conflict links"); x.add_argument("id", type=int); x.add_argument("--on", type=int, nargs="+", required=True)
     x = sub.add_parser("blocked", help="record a blocker outside the queue, optionally until a time")
     x.add_argument("id", type=int); x.add_argument("--reason")
@@ -2008,7 +2029,7 @@ def dispatch(conn, a, actor):
     if c == "synced":
         return core.synced(conn, a.id, a.ref, actor)
     if c == "cleanup":
-        return core.cleanup(conn, a.project, not a.no_git)
+        return core.cleanup(conn, a.project, not a.no_git, a.closes, actor)
     if c == "wait":
         return core.wait(conn, os.getcwd(), actor, a.project, a.step, focus=os.environ.get("MAXPM_FOCUS"))
     if c == "check":
@@ -2056,6 +2077,11 @@ def dispatch(conn, a, actor):
     if c == "dep":
         return core.dep_add(conn, a.id, a.on, actor, a.kind, a.mode)
     if c == "keep":
+        if a.close is not None:
+            return core.close_keep(conn, a.close, a.id, a.note, actor)
+        if a.id is None or a.note:
+            raise RiverError("name the item: maxpm keep <id>; or keep what a close check listed: "
+                             "maxpm keep <id> --close <closed id> --note \"<why it is still needed>\"")
         return core.keep(conn, a.id, actor)
     if c == "push":
         if a.cancel:
@@ -2293,6 +2319,13 @@ def _findings_lines(f, r):
         out.append(f"  TARGET {x['target']}: owner {x['owner']} is {x['state']}.  {r} target give {x['target']} --to <agent>")
     for x in f["questions"]:
         out.append(f"  QUESTION #{x['id']} from {x['from_agent']} to {x['to_agent']}: {_cut(x['body'], 70)}")
+    for x in f.get("unneeded", []):
+        c = x["closes"][0]
+        out.append(f"  MAY BE UNNECESSARY #{x['id']} [{x['project']}] {_cut(x['title'], 50)}"
+                   + (" (a person's item)" if x["doer"] == "human" else "") + f": {c['why']}"
+                   + (f" (and {len(x['closes']) - 1} more)" if len(x["closes"]) > 1 else "")
+                   + f".  Close it ({r} done|drop {x['id']} --note \"<why>\"), merge it, or {r} keep {x['id']} "
+                   f"--close {c['id']} --note \"<why>\"")
     if f["human_ready"]:
         out.append("  WAITS ON THE USER: " + ", ".join(f"#{x['id']} {_cut(x['title'], 40)}" for x in f["human_ready"][:6]))
     return out or ["  nothing needs you now"]
@@ -2424,7 +2457,8 @@ def render_plan(b):
             f"({'OVERDUE' if x['due_state'] == 'overdue' else 'due soon' if x['due_state'] == 'soon' else 'due'} "
             f"{x['due_text']}; {x['open_before']} open before it)")
     section("May be done or stale (check each, then maxpm check <id> done|partial|open)", q.get("suspect", []),
-            lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  ({', '.join(x['reasons'])})")
+            lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  ({', '.join(x['reasons'])})"
+            + (f"; still needed: maxpm keep {x['id']} --close {x['closes'][0]}" if x.get("closes") else ""))
     section("Waiting on a human", q["human_waiting"], lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'])}")
     section("Wait on a backlog item: they cannot be ready (maxpm activate <backlog id>, or maxpm undep <id> --on <backlog id>)",
             q.get("waits_on_backlog", []), lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  "
@@ -2897,6 +2931,9 @@ def render_cleanup(rows, r="maxpm"):
               + f"  ({', '.join(s['reasons'])})")
         for e in s["evidence"][:4]:
             print(f"       {e}")
+    if any(core.UNNEEDED in s["reasons"] for s in rows):
+        print(f"A close may have made it unnecessary: {r} done <id> --note \"<why>\"  |  {r} drop <id> --note \"<why>\"  |  "
+              f"{r} merge <keep> <id> --note \"<why>\"  |  still needed: {r} keep <id> --close <closed id> --note \"<why>\"")
     print(f"Record it: {r} check <id> done --note \"<commits or files>\"   |   partial --note \"<what is left>\"   |   open")
 
 
@@ -2933,6 +2970,9 @@ def render(a, res):
         if lines:
             print()
             print("\n".join(lines))
+        return
+    if c == "keep" and isinstance(res, dict) and "kept" in res:
+        print(f"kept after the close of #{res['closed']}: " + ", ".join(f"#{k['id']} {_cut(k['title'], 50)}" for k in res["kept"]))
         return
     if c == "release" and isinstance(res, dict) and res.get("hint"):
         _print_show(res)

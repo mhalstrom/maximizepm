@@ -5626,8 +5626,8 @@ class Backlog(Base):
         self.assertTrue({"backlog_at", "backlog_note"} <= cols)
 
 
-class SimilarWork(Base):
-    """Find related items before work repeats (#2257): search, the check of add, related, duplicates, merge."""
+class TextQueue(Base):
+    """A queue with filler work and one person, for the tests of the score (#2257, #3286)."""
 
     def setUp(self):
         super().setUp()
@@ -5661,6 +5661,10 @@ class SimilarWork(Base):
 
     def add(self, title, actor="w1", **kw):
         return core.item_add(self.c, kw.pop("project", "web"), title, actor=actor, **kw)["id"]
+
+
+class SimilarWork(TextQueue):
+    """Find related items before work repeats (#2257): search, the check of add, related, duplicates, merge."""
 
     def test_search_finds_every_word_in_any_state_newest_first(self):
         a = self.add("Worktree script fails during a release", context="the hook refuses HEAD")
@@ -5823,3 +5827,168 @@ class SimilarWork(Base):
         # The holder may merge its own item into another one.
         core.merge(self.c, b, c, "same", "w3")
         self.assertEqual(core.item_show(self.c, c)["status"], "dropped")
+
+
+class CloseCheck(TextQueue):
+    """A close lists the open items it may have made unnecessary (#3286): linked, near, or naming the same thing."""
+
+    def finish(self, item_id, output=None, actor="w1", **kw):
+        core.claim(self.c, item_id, actor)
+        return core.done(self.c, item_id, output, actor, **kw)
+
+    def listed(self, res):
+        return {x["id"]: x["why"] for x in res["close_check"]}
+
+    def test_identifiers(self):
+        ids = core._idents("Open https://app.example.com/flows/4f2a91c3-1d2e-4b5a-9c8d-0e1f2a3b4c5d, then "
+                           "automation 4f2a91c3 and commit 9f304ff; see docs/guide/setup.md and the step "
+                           "'Before you connect Mail' for the person's 'look' (#41), and/or ask ops@example.com.")
+        self.assertIn("4f2a91c", ids)  # the uuid and its prefix are one id
+        self.assertIn("9f304ff", ids)
+        self.assertIn("docs/guide/setup.md", ids)
+        self.assertIn("'before you connect mail'", ids)
+        self.assertIn("#41", ids)
+        self.assertIn("ops@example.com", ids)
+        self.assertIn("https://app.example.com/flows/4f2a91c3-1d2e-4b5a-9c8d-0e1f2a3b4c5d", ids)
+        self.assertNotIn("and/or", ids)
+        self.assertNotIn("'look'", ids)  # one word: too common to name one thing
+        self.assertNotIn("1234567", core._idents("order 1234567"))  # digits only: a number, not an id
+
+    def test_a_reset_lists_the_person_items_it_made_unnecessary_and_the_closer_decides(self):
+        resume = self.add("Resume the sample automation in the demo workspace", doer="human",
+                          context="Open https://app.example.com/automations/4f2a91c3-1d2e-4b5a-9c8d-0e1f2a3b4c5d "
+                                  "and press Resume in the header.")
+        again = self.add("Reconnect the test mail account in the demo workspace", doer="human",
+                         context="Connections > Add connection, account 7be0d4e1, share it with everyone.")
+        other = self.add("Look at the new pricing table", doer="human")
+        reset = self.add("Reset the demo workspace for a new recording")
+        self.at(-3 * 3600)
+        res = self.finish(reset, "Reset done: automation 4f2a91c3 archived, mail account 7be0d4e1 disconnected")
+        got = self.listed(res)
+        self.assertEqual(set(got), {resume, again})
+        self.assertIn("names 4f2a91c", got[resume])
+        self.assertNotIn(other, got)
+        out = self.cli("--as", "w1", "show", str(reset))
+        self.assertNotIn("MAY BE UNNECESSARY", out)  # show prints only the item; the reply of done lists them
+        # The closer keeps one with the reason; the check does not list it again for this close.
+        out = self.cli("--as", "w1", "keep", str(again), "--close", str(reset), "--note", "the video needs it")
+        self.assertIn(f"kept after the close of #{reset}: #{again}", out)
+        self.assertIn("kept after the close", core.item_show(self.c, again)["events"][0]["change"])
+        self.assertIn("lists", self.cli("--as", "w1", "keep", str(again), "--close", str(reset)))
+        # The other one waits in cleanup and in the manager's findings until someone decides.
+        rows = core.cleanup(self.c, git=False)
+        self.assertEqual(rows[0]["id"], resume)
+        self.assertIn(core.UNNEEDED, rows[0]["reasons"])
+        self.assertEqual([x["id"] for x in core.manager_findings(self.c)["unneeded"]], [resume])
+        self.assertIn(f"unneeded:{resume}", core._finding_keys(core.manager_findings(self.c)))
+        self.assertIn("still needed", self.cli("cleanup", "--no-git"))
+        # An agent closes the person's item with a reason: the person gets one notice and can undo it.
+        core.done(self.c, resume, None, "w1", note=f"#{reset} archived the automation")
+        notice = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' AND item_id=?", (resume,)).fetchone()
+        self.assertIn("undo-takeover", notice["body"])
+        self.assertEqual(core.close_open(self.c), [])
+        self.assertEqual(core.manager_findings(self.c)["unneeded"], [])
+
+    def test_the_reply_of_done_names_the_commands(self):
+        look = self.add("Look at the export dialog 'Save as spreadsheet' after the next release", doer="human")
+        x = self.add("Remove the export dialog 'Save as spreadsheet'")
+        self.at(-3 * 3600)
+        core.claim(self.c, x, "w1")
+        out = self.cli("--as", "w1", "done", str(x), "--output", "removed the dialog 'Save as spreadsheet'")
+        self.assertIn(f"MAY BE UNNECESSARY NOW (the close of #{x}", out)
+        self.assertIn(f"#{look} Look at the export dialog", out)
+        self.assertIn("[a person's item]", out)
+        self.assertIn(f"keep <id> --close {x}", out)
+        self.assertIn("merge <keep> <id>", out)
+        out = self.cli("--as", "w1", "keep", "--close", str(x))  # all of them at once
+        self.assertIn(f"#{look}", out)
+        self.assertEqual(core.close_open(self.c), [])
+
+    def test_a_drop_lists_what_waits_on_it_and_what_was_found_during_it_first(self):
+        x = self.add("Build the weekly digest mail")
+        after = self.add("Translate the weekly digest", after=[x])
+        found = self.add("Look at the digest mail in a phone mail app", doer="human", found_during=x)
+        res = core.drop(self.c, x, "w1", note="the digest is no longer wanted")
+        got = res["close_check"]
+        self.assertEqual({g["id"] for g in got}, {after, found})
+        self.assertEqual(got[0]["id"], found)  # person items first
+        self.assertIn(f"waits on #{x}, which is dropped", self.listed(res)[after])
+        self.assertIn("found during", self.listed(res)[found])
+        # A done item's next steps are not listed: they are why it was done.
+        y = self.add("Build the monthly digest mail")
+        nxt = self.add("Translate the monthly digest", after=[y])
+        look = self.add("Look at the monthly digest mail", doer="human", found_during=y)
+        self.assertEqual(self.listed(self.finish(y, "built")), {})
+        # Done with a note that says it is no longer needed: like a drop.
+        z = self.add("Build the yearly digest mail")
+        nz = self.add("Translate the yearly digest", after=[z])
+        res = self.finish(z, "not needed: the monthly digest covers it")
+        self.assertIn("no longer needed", self.listed(res)[nz])
+        self.assertNotIn(nxt, self.listed(res))
+
+    def test_a_forced_done_lists_what_it_still_waited_on(self):
+        pre = self.add("Write the migration for the archive table")
+        x = self.add("Archive old reports", after=[pre])
+        res = core.done(self.c, x, "archived by hand", "w1", force="done by hand")
+        self.assertIn("although it waited on this", self.listed(res)[pre])
+
+    def test_a_revert_lists_the_persons_look_at_the_reverted_work(self):
+        x = self.add("Show the trust prompt in a new folder")
+        look = self.add("Look at the trust prompt in a new folder", doer="human", found_during=x)
+        self.finish(x, "shown")
+        self.c.execute("DELETE FROM close_checks")  # what the close of x listed does not count here
+        self.c.commit()
+        r = self.add("Undo the trust prompt change")
+        res = self.finish(r, f"Revert 1a2b3c4 (#{x}): the prompt is gone again")
+        self.assertIn(f"which #{r} reverts", self.listed(res)[look])
+
+    def test_a_merge_lists_a_third_copy(self):
+        a = self.add("Send the three test mails of the video to the test inbox", doer="human")
+        self.at(-3 * 3600)
+        b = self.add("Send the three test mails to the test inbox again", doer="human", actor="w2")
+        self.at(-3 * 3600)
+        c = self.add("Send three test mails to the test inbox before the recording", doer="human", actor="w3")
+        res = core.merge(self.c, a, b, "the same mails", "w1")
+        self.assertIn(c, self.listed(res))
+        self.assertNotIn(a, self.listed(res))
+
+    def test_a_reopen_checks_again_at_the_next_close(self):
+        look = self.add("Look at the 'Weekly totals' card after the next release", doer="human")
+        x = self.add("Drop the 'Weekly totals' card")
+        self.at(-3 * 3600)
+        self.finish(x, "dropped the 'Weekly totals' card")
+        core.close_keep(self.c, x, look, "the card stays on the old page", "w1")
+        core.reopen(self.c, x, "w1")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM close_checks WHERE closed_id=?", (x,)).fetchone()[0], 0)
+        self.assertIn(look, self.listed(self.finish(x, "dropped the 'Weekly totals' card again")))
+
+    def test_cleanup_checks_past_closes_without_items_made_later(self):
+        look = self.add("Look at the 'Team costs' sheet after the next release", doer="human")
+        x = self.add("Fill the 'Team costs' sheet")
+        self.at(-3 * 3600)
+        self.finish(x, "filled the 'Team costs' sheet")
+        later = self.add("Check the 'Team costs' sheet totals", doer="human", actor="w2")
+        self.c.execute("UPDATE items SET created_at=? WHERE id=?", (core.iso(core.now() + timedelta(minutes=5)), later))
+        self.c.execute("DELETE FROM close_checks")  # a close before the check existed
+        self.c.commit()
+        self.assertEqual(core.close_open(self.c), [])
+        out = self.cli("cleanup", "--no-git", "--closes", "7d")
+        self.assertIn(f"#{look}", out)
+        self.assertNotIn(f"#{later} ", out)
+
+    def test_reworded_person_asks_for_the_same_step_are_duplicates(self):
+        a = self.add("Look at the step 'Before you connect Mail' after the next release; reply ok", doer="human",
+                     context="Connections > Add connection > Mail. Its new last section 'The rules we follow.'")
+        self.at(-3 * 3600)
+        b = self.add("Read the 'Before you connect Mail' step and section 4 of the policy after the release",
+                     doer="human", actor="w2", context="The policy page section 4 is new.")
+        pair = [g["items"] for g in core.duplicates(self.c)]
+        self.assertEqual([[m["id"] for m in g] for g in pair], [[a, b]])
+        # The add check sees it too, for a person's item.
+        self.at(-3 * 3600)
+        with self.assertRaises(core.SimilarWork):
+            self.add("Check the wording of 'Before you connect Mail' after the release", doer="human", actor="w3",
+                     check_similar=True)
+        # Agent items get no bonus: the words alone decide.
+        self.assertEqual(core.similar_items(self.c, "web", "Check the wording of 'Before you connect Mail' after "
+                                            "the release", actor="w3"), [])

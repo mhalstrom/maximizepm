@@ -52,8 +52,9 @@ BLOCKED_SIGNS = ("sender", "waits", "item")
 # the send (#1597: one of the two signs showed 39 of the 50 messages whose item stood still).
 BLOCKED_WINDOW = timedelta(minutes=3)
 # New findings of these kinds wait manage_wait_low: an agent that waits ends by itself after wait_max, and a
-# person gets a notification for an item that is ready for them.
-LOW_FINDINGS = ("waiting", "human")
+# person gets a notification for an item that is ready for them, and the closer decides the items its close
+# check listed (unneeded, #3286).
+LOW_FINDINGS = ("waiting", "human", "unneeded")
 
 DEFAULT_SETTINGS = {
     "lease_ttl": "30m",
@@ -585,6 +586,19 @@ CREATE TABLE IF NOT EXISTS needs_you (
   opened_at     TEXT NOT NULL,
   closed_at     TEXT,
   close_reason  TEXT
+);
+
+-- The close check (#3286): an open item that the close of closed_id may have made unnecessary, and why.
+-- decided_at is set when the closer (or a manager) keeps it; closing the item itself decides it too.
+CREATE TABLE IF NOT EXISTS close_checks (
+  closed_id   INTEGER NOT NULL REFERENCES items(id),
+  item_id     INTEGER NOT NULL REFERENCES items(id),
+  why         TEXT NOT NULL,
+  found_at    TEXT NOT NULL,
+  decided_by  TEXT,
+  decided_at  TEXT,
+  note        TEXT,
+  PRIMARY KEY (closed_id, item_id)
 );
 
 -- One row per (event, channel): each event notifies once per channel; a failed send retries.
@@ -3075,7 +3089,7 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     if new is not None and not new.strip():
         raise RiverError("say how this item differs from the matches: --new \"<how it differs>\"")
     like = similar_items(conn, project, title, context, touches, [blocks, found_during, *after, *(feeds or ())],
-                         actor) if check_similar or new else []
+                         actor, doer=doer) if check_similar or new else []
     if like and check_similar and new is None:
         raise SimilarWork(like)
     with tx(conn):
@@ -4186,6 +4200,66 @@ def _cosine(a, b):
     return dot / (math.sqrt(sum(x * x for x in a.values())) * math.sqrt(sum(x * x for x in b.values())))
 
 
+# Identifiers (#3286): the names of one thing, which two texts share even when their words differ. An item
+# number, a URL, a mail address, a path, a hex id (a uuid or its prefix, a commit), or a quoted name ('Save').
+# Measured on a live queue (2026-10-23, 128 open items in one folder): two person items that ask for a look at
+# the same step scored 0.50, and share its quoted name; a reset item and the person's item it made unnecessary
+# scored 0.32, and share a path. An identifier that more than IDENT_COMMON open items name is a common place
+# (a file every item touches, the release they all wait on): it tells nothing.
+_UUID_RE = re.compile(r"(?<![0-9a-zA-Z])([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-zA-Z])")
+_URL_RE = re.compile(r"https?://[^\s'\"<>()\[\]]+")
+_MAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_PATH_RE = re.compile(r"(?<![\w/~.-])(?:~/|/)?[\w.-]+(?:/[\w.-]+)+")
+_HEX_RE = re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{7,}(?![0-9a-zA-Z])")
+_REF_RE = re.compile(r"(?<![\w&])#(\d+)\b")
+_QUOTE_RE = re.compile(r"(?<!\w)['\"‘“]([^'\"‘’“”\n]{3,80}?)['\"’”](?!\w)")
+IDENT_COMMON = 4
+IDENT_BONUS = 0.2   # what a shared identifier adds to the score of two person items, and to a close check
+CLOSE_NEAR = 0.4    # the score from which a close lists an open item as maybe unnecessary (CLOSE_GOAL in its goal)
+CLOSE_GOAL = 0.3
+CLOSE_LIMIT = 6     # at most this many near items in one close check (linked items always)
+
+
+def _idents(text):
+    """The identifiers in a text, in one form each: lower case, a hex id cut to 7 characters (a uuid prefix and
+    the whole uuid match), a quoted name of two words or more in quotes ('before you connect google')."""
+    text = text or ""
+    out = {f"{m[:7]}" for m in _UUID_RE.findall(text)}
+    out |= {m.rstrip(".,;:").lower() for m in _URL_RE.findall(text)}
+    out |= {m.rstrip(".").lower() for m in _MAIL_RE.findall(text)}
+    rest = _MAIL_RE.sub(" ", _URL_RE.sub(" ", _UUID_RE.sub(" ", text)))
+    for m in _PATH_RE.findall(rest):
+        m = m.rstrip(".")
+        if len(m) >= 6 and ("." in m.rsplit("/", 1)[-1] or m[0] in "/~"):
+            out.add(m.lower())
+    out |= {m[:7] for m in _HEX_RE.findall(rest) if re.search(r"\d", m) and re.search(r"[a-f]", m)}
+    out |= {"#" + m for m in _REF_RE.findall(text)}
+    for m in _QUOTE_RE.findall(text):
+        q = " ".join(m.split()).strip(" .,;:").lower()
+        if len(q) >= 8 and " " in q:
+            out.add(f"'{q}'")
+    return out
+
+
+def _item_idents(d):
+    return _idents(" ".join(x or "" for x in (d["title"], d["context"], d["notes"])))
+
+
+def _ident_counts(rows):
+    """How many of the rows (open items) name each identifier."""
+    n = {}
+    for d in rows:
+        for x in d.setdefault("idents", _item_idents(d)):
+            n[x] = n.get(x, 0) + 1
+    return n
+
+
+def _places(idents):
+    """The identifiers that name a place or a thing, not an item or a person: what two person asks share when
+    they ask for the same step (#id and mail addresses tie unrelated asks together)."""
+    return {x for x in idents if not x.startswith("#") and "@" not in x}
+
+
 def _state(d):
     return "backlog" if d["backlog_at"] and d["status"] == "open" else d["status"]
 
@@ -4255,11 +4329,14 @@ def _recent_batch(conn, actor):
         (actor, iso(now() - SIMILAR_BATCH)))}
 
 
-def similar_items(conn, project, title, context="", touches=None, linked=(), actor=None, limit=5):
+def similar_items(conn, project, title, context="", touches=None, linked=(), actor=None, limit=5, doer=None):
     """What maxpm add checks before it adds: open items of the project, and items done in the last similar_days,
     whose score against the new title and context reaches similar_min. An open item whose touches overlap the new
-    ones scores 0.15 more. Items the new one names (--blocks, --after, --feeds, --found-during) and the series that
-    the same author added in the last two hours are left out: the author knows them."""
+    ones scores 0.15 more; for a person's item, a person's item that names the same place (a quoted name, URL,
+    path, or id; _places) scores IDENT_BONUS more. Items the new one names (--blocks, --after, --feeds,
+    --found-during) and the series that the same author added in the last two hours are left out: the author
+    knows them. The series stays out for person items too: on the live queue a planner's series of person asks
+    (one per vendor or per person) scored 0.55 to 0.87 against each other, with no repeat among them."""
     p = _project(conn, project)
     floor = setting(conn, "similar_min", project_id=p["id"])
     if floor == "off":
@@ -4273,6 +4350,8 @@ def similar_items(conn, project, title, context="", touches=None, linked=(), act
     t = _words(title)
     q = _vector(t + t + sorted(set(_words(context))), idf)
     mine = _touch_keys(_touches(touches) or "", p["id"], p["path"])
+    places = _places(_idents(f"{title} {context}")) if doer == "human" else set()
+    common = _ident_counts([d for d in rows if d["status"] in OPEN_STATES]) if places else {}
     out = []
     for d in rows:
         if d["id"] in skip:
@@ -4281,6 +4360,9 @@ def similar_items(conn, project, title, context="", touches=None, linked=(), act
         if mine and d["status"] in OPEN_STATES and d["touches"] and any(
                 _keys_overlap(x, y) for x in mine for y in _touch_keys(d["touches"], d["project_id"], d["path"])):
             s += 0.15
+        if places and d["doer"] == "human" and any(
+                common.get(x, 0) < IDENT_COMMON for x in places & _item_idents(d)):
+            s += IDENT_BONUS
         if s >= floor:
             out.append(_match(d, min(s, 1.0)))
     out.sort(key=lambda m: -m["score"])
@@ -4310,7 +4392,8 @@ def related(conn, item_id, n=3):
 def duplicates(conn, project=None):
     """Groups of open items that match each other with the score of the add check (similar_min of the project),
     for the manager and the planner to merge (maxpm merge). Items linked to each other, and a series that one
-    author added within two hours, are not duplicates."""
+    author added within two hours, are not duplicates. Two person items that name the same place score
+    IDENT_BONUS more: a reworded ask for the same step (similar_items)."""
     names = _names(conn, project) if project else None
     rows = [d for d in _text_rows(conn, f"i.kind='work' AND i.status IN {OPEN_STATES}")
             if (names is None or d["project"] in names)]
@@ -4325,6 +4408,9 @@ def duplicates(conn, project=None):
     added = {r["item_id"]: (r["actor"], parse_iso(r["at"])) for r in conn.execute(
         f"SELECT item_id, actor, at FROM events WHERE change LIKE 'added to %' "
         f"AND item_id IN ({','.join('?' * len(ids))})", ids)}
+    common = _ident_counts(rows)
+    places = {d["id"]: {x for x in _places(d["idents"]) if common[x] <= IDENT_COMMON}
+              for d in rows if d["doer"] == "human"}
     floors = {}
     parent = {i: i for i in ids}
     root = lambda i: i if parent[i] == i else root(parent[i])
@@ -4340,6 +4426,8 @@ def duplicates(conn, project=None):
             if x and y and x[0] and x[0] == y[0] and abs(x[1] - y[1]) < SIMILAR_BATCH:
                 continue
             s = _cosine(vec[a["id"]], vec[b["id"]])
+            if a["id"] in places and b["id"] in places and places[a["id"]] & places[b["id"]]:
+                s = min(s + IDENT_BONUS, 1.0)
             if s >= float(f):
                 pairs.append((a["id"], b["id"], round(s, 2)))
                 parent[root(b["id"])] = root(a["id"])
@@ -4442,11 +4530,13 @@ def merge(conn, keep, other, note, actor=None):
                      (iso(now()), f"duplicate of #{k['id']}: {why}", o["id"]))
         _sync_conflicts(conn, o["id"], actor)
         _event(conn, o["id"], actor, f"merged into #{k['id']} (a duplicate): {why}")
+        _close_check(conn, _item(conn, o["id"]), "dropped", note=why, merged_into=k["id"])
         _event(conn, k["id"], actor, f"#{o['id']} {o['title']} merged into this item: {why}"
                + (f"; moved {', '.join(moved)}" if moved else ""))
         _goal_notice(conn, k["id"], actor, f"merged #{o['id']} into", why)
     res = item_show(conn, k["id"])
     res["merged"] = {"id": o["id"], "title": o["title"], "moved": moved, "skipped": skipped}
+    res["close_check"] = _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL", (o["id"],))
     return res
 
 
@@ -6227,7 +6317,8 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
         conn.execute("UPDATE items SET status=?, closed_at=?, lease_expires_at=NULL, hold_expires_at=NULL, "
                      "reserved_for=NULL, needs_check=0, backlog_at=NULL, backlog_note=NULL, output=COALESCE(?, output) "
                      "WHERE id=?", (status, iso(now()), output, it["id"]))
-        _event(conn, it["id"], actor, status + (f": {output}" if output else ""))
+        _event(conn, it["id"], actor, status + (f": {output}" if output else f": {note}" if note else ""))
+        unneeded = _close_check(conn, it, status, output, note) if it["kind"] == "work" else []
         if status == "done" and it["kind"] == "deploy":
             _hook(conn, "deployed", it["target"], it["id"], actor)
         elif status == "done" and it["kind"] == "review":
@@ -6257,7 +6348,152 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
     res = item_show(conn, item_id)
     res["now_ready"] = newly
     res["resumed"] = resumed
+    res["close_check"] = unneeded
     return res
+
+
+_NOT_NEEDED_RE = re.compile(r"\b(no longer (needed|necessary|wanted|relevant)|not needed|unnecessary|obsolete|"
+                            r"superseded|moot)\b", re.I)
+_REVERT_RE = re.compile(r"\brevert", re.I)
+
+
+def _close_check(conn, it, status, output=None, note=None, merged_into=None, before=None):
+    """Inside a tx, after the close of a work item: the open items that the close may have made unnecessary
+    (#3286), recorded in close_checks for the closer, maxpm cleanup, and the manager. First the linked ones:
+    - the item is not needed (dropped, merged, or done with a note that says so): what waits on it, and what was
+      found during it;
+    - done although it waited on open items (--force): those items;
+    - a revert (its title or output says revert and names #N): the person's items found during #N.
+    Then open items of the same folder whose score against it reaches CLOSE_NEAR (CLOSE_GOAL in the same goal),
+    with IDENT_BONUS for an identifier that its title, output, or note names and half of that for one in its
+    context (not an item number there: two items that wait on the same release name it); at most CLOSE_LIMIT,
+    person items first. What waits on a done item, and what was found during it,
+    are its next steps: they are not listed. before: leave out items made after that time (a check of a past
+    close)."""
+    cid = it["id"]
+    output = output if output is not None else it["output"]
+    said = " ".join(x or "" for x in (it["title"], output, note))
+    gone = status == "dropped" or merged_into is not None or bool(_NOT_NEEDED_RE.search(f"{output or ''} {note or ''}"))
+    what = (f"merged into #{merged_into}" if merged_into else "dropped" if status == "dropped" else
+            "no longer needed" if gone else "done")
+    open_ = f"status IN {OPEN_STATES} AND kind='work'" + (" AND created_at<=?" if before else "")
+    at = (before,) if before else ()
+    found = {}
+
+    def add(row_id, why):
+        if row_id not in (cid, merged_into) and row_id not in found:
+            found[row_id] = why
+
+    if gone:
+        for r in conn.execute(f"SELECT id FROM items WHERE id IN (SELECT item_id FROM deps WHERE blocked_by=?) "
+                              f"AND {open_} ORDER BY id", (cid, *at)):
+            add(r["id"], f"waits on #{cid}, which is {what}")
+        for r in conn.execute(f"SELECT id FROM items WHERE found_during=? AND {open_} ORDER BY id", (cid, *at)):
+            add(r["id"], f"found during #{cid}, which is {what}")
+    elif status == "done":
+        for r in conn.execute(f"SELECT id FROM items WHERE id IN (SELECT blocked_by FROM deps WHERE item_id=?) "
+                              f"AND {open_} ORDER BY id", (cid, *at)):
+            add(r["id"], f"#{cid} is done although it waited on this")
+    if _REVERT_RE.search(f"{it['title']} {output or ''}"):
+        for n in sorted({int(x) for x in _REF_RE.findall(f"{it['title']} {output or ''}")} - {cid}):
+            for r in conn.execute(f"SELECT id FROM items WHERE found_during=? AND doer='human' AND {open_} "
+                                  f"ORDER BY id", (n, *at)):
+                add(r["id"], f"a person's item of #{n}, which #{cid} reverts")
+    path = conn.execute("SELECT path FROM projects WHERE id=?", (it["project_id"],)).fetchone()["path"]
+    rows = _text_rows(conn, f"i.kind='work' AND i.status IN {OPEN_STATES} AND i.backlog_at IS NULL AND i.id<>? "
+                            "AND (i.project_id=? OR (p.path IS NOT NULL AND p.path=?))" + (
+                                " AND i.created_at<=?" if before else ""), (cid, it["project_id"], path, *at))
+    next_steps = {r[0] for r in conn.execute("SELECT item_id FROM deps WHERE blocked_by=? UNION SELECT id FROM items "
+                                             "WHERE found_during=?", (cid, cid))} if not gone else set()
+    goal = {r[0] for r in conn.execute("SELECT b.item_id FROM item_goals a JOIN item_goals b ON b.goal_id=a.goal_id "
+                                       "WHERE a.item_id=?", (cid,))}
+    common = _ident_counts(rows)
+    strong = _idents(said) - {f"#{cid}"}
+    weak = {x for x in _idents(it["context"]) - strong if not x.startswith("#")}  # "after the release of #12"
+    idf = _idf(conn)
+    t = _words(it["title"])
+    q = _vector(t + t + sorted(set(_words(it["context"]) + _words(output) + _words(note))), idf)
+    near = []
+    for d in rows:
+        if d["id"] in found or d["id"] in next_steps or d["id"] == merged_into:
+            continue
+        s = _cosine(q, _vector(d["key"], idf))
+        named = sorted(x for x in d["idents"] & strong if common[x] <= IDENT_COMMON)
+        hint = sorted(x for x in d["idents"] & weak if common[x] <= IDENT_COMMON)
+        score = s + (IDENT_BONUS if named else IDENT_BONUS / 2 if hint else 0)
+        if score >= (CLOSE_GOAL if d["id"] in goal else CLOSE_NEAR):
+            why = (f"names {named[0]}, as #{cid} does" if named else f"names {hint[0]}, as the context of #{cid} does"
+                   if hint else f"like #{cid}") + (", same goal" if d["id"] in goal else "") + f" (score {min(score, 1):.2f})"
+            near.append((d["doer"] != "human", -score, d["id"], why))
+    for _, _, i, why in sorted(near)[:CLOSE_LIMIT]:
+        add(i, why)
+    t_ = iso(now())
+    for i, why in found.items():
+        conn.execute("INSERT OR IGNORE INTO close_checks(closed_id, item_id, why, found_at) VALUES (?,?,?,?)",
+                     (cid, i, why, t_))
+    return _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL", (cid,))
+
+
+def _close_rows(conn, where, params=()):
+    """Rows of close_checks whose item is still open, with the item and the closed item."""
+    return [dict(r) for r in conn.execute(
+        "SELECT c.item_id id, i.title, i.doer, i.status, i.assignee, p.name project, c.why, c.closed_id, "
+        "x.title closed_title, x.status closed_status, c.found_at FROM close_checks c JOIN items i ON i.id=c.item_id "
+        "JOIN projects p ON p.id=i.project_id JOIN items x ON x.id=c.closed_id "
+        f"WHERE i.status IN {OPEN_STATES} AND " + where + " ORDER BY (i.doer<>'human'), c.found_at, c.rowid", params)]
+
+
+def close_keep(conn, closed_id, item_id=None, note=None, actor=None):
+    """Keep an item that a close check listed: it is still needed after the close of closed_id, and the check
+    does not list it again for that close. Without item_id, every item the check still lists for that close."""
+    with tx(conn):
+        _item(conn, closed_id)
+        rows = _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL" + (" AND c.item_id=?" if item_id else ""),
+                           (int(closed_id), int(item_id)) if item_id else (int(closed_id),))
+        if not rows:
+            raise RiverError(f"the close check of #{closed_id} lists " + (f"#{item_id} not (or it was decided)"
+                             if item_id else "nothing that is open and undecided")
+                             + "; what it lists: maxpm cleanup")
+        why = (note or "").strip()
+        for r in rows:
+            conn.execute("UPDATE close_checks SET decided_by=?, decided_at=?, note=? WHERE closed_id=? AND item_id=?",
+                         (actor, iso(now()), why or None, int(closed_id), r["id"]))
+            _event(conn, r["id"], actor, f"kept after the close of #{closed_id}" + (f": {why}" if why else ""))
+    return {"closed": int(closed_id), "kept": [{"id": r["id"], "title": r["title"]} for r in rows]}
+
+
+def close_open(conn, project=None):
+    """The items that a close may have made unnecessary and nobody decided (kept, closed, or merged), person
+    items first: for maxpm cleanup and the manager."""
+    names = _names(conn, project) if project else None
+    out = {}
+    for r in _close_rows(conn, "c.decided_at IS NULL AND i.backlog_at IS NULL"):
+        if names is not None and r["project"] not in names:
+            continue
+        e = out.setdefault(r["id"], {k: r[k] for k in ("id", "title", "doer", "status", "assignee", "project")}
+                           | {"closes": []})
+        e["closes"].append({"id": r["closed_id"], "title": r["closed_title"], "status": r["closed_status"],
+                            "why": r["why"]})
+    return sorted(out.values(), key=lambda e: (e["doer"] != "human", e["closes"][0]["id"], e["id"]))
+
+
+def close_scan(conn, since, project=None, actor=None):
+    """Run the close check on the work items closed since that time that it has not checked (closes before
+    #3286, or after a reopen). Each check leaves out the items made after its close."""
+    names = _names(conn, project) if project else None
+    t = _since(conn, since)
+    n = 0
+    for r in conn.execute(f"SELECT i.id, p.name FROM items i JOIN projects p ON p.id=i.project_id WHERE i.kind='work' "
+                          f"AND i.status IN {CLOSED_STATES} AND i.closed_at>=? AND NOT EXISTS (SELECT 1 FROM "
+                          f"close_checks c WHERE c.closed_id=i.id) ORDER BY i.closed_at", (t,)).fetchall():
+        if names is not None and r["name"] not in names:
+            continue
+        with tx(conn):
+            it = _item(conn, r["id"])
+            m = re.match(r"duplicate of #(\d+)", it["output"] or "")
+            _close_check(conn, it, it["status"], merged_into=int(m.group(1)) if m else None, before=it["closed_at"])
+        n += 1
+    return n
 
 
 def synced(conn, item_id, ref=None, actor=None):
@@ -6772,13 +7008,20 @@ def _git_log(path, *args):
     return [tuple(line.split("\t", 2)) for line in r.stdout.splitlines() if line.count("\t") >= 2]
 
 
-def cleanup(conn, project=None, git=True):
+UNNEEDED = "a close may have made it unnecessary"  # the cleanup reason of the close check (#3286)
+
+
+def cleanup(conn, project=None, git=True, closes=None, actor=None):
     """Open items that may be done or stale although the queue says otherwise, with the evidence.
 
     Suspect: a lease ran out without done; a commit in the project folder names the item (#id);
     a person's item whose touched files changed after it was made; ready and never claimed for
     stale_after; a needs-you notice whose title is out of date. A check (maxpm check) after the
-    evidence clears the item."""
+    evidence clears the item. First, person items first: the items that a close may have made unnecessary
+    and nobody decided (close_open); closes (a time back, 7d) first runs the close check on the closes of that
+    time that it has not checked."""
+    if closes:
+        close_scan(conn, closes, project, actor)
     ann = annotate(conn)
     t = now()
     project = _project(conn, project)["name"] if project is not None else None
@@ -6834,7 +7077,13 @@ def cleanup(conn, project=None, git=True):
                     changed = _git_log(path, f"--since={since}", "-n", "3", "--", *a["touches"])
                     for c in changed:
                         flag(a, "files changed", f"commit {c[0]} {c[1][:10]} changed its files: {c[2][:80]}")
-    return sorted(out.values(), key=lambda e: ann[e["id"]]["sort_key"])
+    first = close_open(conn, project)
+    for e in first:
+        for c in e["closes"]:
+            flag(ann[e["id"]], UNNEEDED, f"#{c['id']} {c['title'][:60]} ({c['status']}): {c['why']}")
+        out[e["id"]]["closes"] = [c["id"] for c in e["closes"]]
+    order = {e["id"]: n for n, e in enumerate(first)}
+    return sorted(out.values(), key=lambda e: (order.get(e["id"], len(order)), ann[e["id"]]["sort_key"]))
 
 
 def drop(conn, item_id, actor=None, note=None):
@@ -6980,6 +7229,7 @@ def reopen(conn, item_id, actor=None):
         if it["status"] not in CLOSED_STATES:
             raise RiverError(f"item {item_id} is {it['status']}, not closed")
         conn.execute("UPDATE items SET status='open', closed_at=NULL, assignee=NULL WHERE id=?", (it["id"],))
+        conn.execute("DELETE FROM close_checks WHERE closed_id=?", (it["id"],))  # the next close checks again
         _event(conn, it["id"], actor, "reopened")
     return item_show(conn, item_id)
 
@@ -9739,7 +9989,11 @@ def manager_findings(conn):
         f"SELECT id, from_agent, to_agent, body, item_id FROM messages WHERE kind='question' AND state='open' "
         f"AND to_agent IN ({','.join('?' * len(humans))}) ORDER BY id", humans)] if humans else []
     loop = serve_loop(conn)
+    unneeded = [{"id": e["id"], "title": e["title"], "doer": e["doer"], "project": e["project"],
+                 "closes": [{"id": c["id"], "why": c["why"]} for c in e["closes"]]}
+                for e in close_open(conn) if not ann[e["id"]]["project_archived"]]
     return {"stuck": stuck, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
+            "unneeded": unneeded,
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "targets": targets, "questions": questions,
             "human_ready": [{"id": x["id"], "title": x["title"]} for x in sorted(
@@ -9753,6 +10007,7 @@ def _finding_keys(f):
                   | {f"unconnected:{x['agent']}" for x in f.get("not_connected", [])} | {f"uncovered:{x['project']}" + (f":{x['agent_type']}" if x.get("agent_type") else "") for x in f["uncovered"]}
                   | {f"target:{x['target']}" for x in f["targets"]} | {f"question:{x['id']}" for x in f["questions"]}
                   | {"serve_loop" for x in f.get("serve_loop", [])}
+                  | {f"unneeded:{x['id']}" for x in f.get("unneeded", [])}
                   | {f"human:{x['id']}" for x in f["human_ready"]})
 
 

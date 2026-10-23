@@ -74,7 +74,9 @@ your type from your CLI's environment.
    also when a message comes for you, and you read the message when the
    harness wakes you. A loop that only renews the lease is not work.
 4. Finish: `maxpm done <id> --output "<one line: what changed, commit id>"`.
-   The reply lists items that became ready.
+   The reply lists items that became ready, and MAY BE UNNECESSARY NOW: open items the close may have
+   made unnecessary. Decide each one at once: close it (`done|drop <id> --note "<why>"`, a person's item
+   too), merge it, or `maxpm keep <id> --close <your-id> --note "<why it is still needed>"`.
    Cannot finish: `maxpm release <id> --note "<why>"`.
    Done is refused while an item it waits on is open (`maxpm blockers <id>`); close it
    anyway only with a reason, `maxpm done <id> --force "<why>"` (never a deploy item).

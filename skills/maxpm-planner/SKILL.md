@@ -110,7 +110,8 @@ helps. Agents read `maxpm project list` to pick an area.
 `maxpm plan` lists items that may be done or stale (from `maxpm cleanup`).
 Check each one, or ask the user about a person's item, and record the result
 with `maxpm check <id> done|partial|open --note "..."`. `stale_after` (14d)
-sets when an untaken ready item counts as stale.
+sets when an untaken ready item counts as stale. An item that a close may have made
+unnecessary: close it with `--note`, merge it, or `maxpm keep <id> --close <closed-id>`.
 
 ### Outside trackers
 

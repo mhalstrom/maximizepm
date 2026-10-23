@@ -198,6 +198,9 @@ Stop when the user tells you to, and tell the user what you did.
   item that stays: `maxpm merge <keep-id> <other-id> --note "<why the same>"` (the other is dropped as a
   duplicate; its notes, links, tags, messages, and queue places move). A person's item merges only with a
   person's item, and only with the person's yes. Not the same work: link them, or leave them.
+- MAY BE UNNECESSARY (also in `maxpm cleanup`): a close may have made the item unnecessary, and its closer
+  did not decide. Close it with `--note` (a person gets one notice and can undo it), or keep it:
+  `maxpm keep <id> --close <closed-id> --note "<why>"`.
 - Planning: everything in `maxpm guide planner` (add, dep, prio, edit).
 
 ## Rules
