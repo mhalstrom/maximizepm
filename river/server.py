@@ -567,8 +567,12 @@ def _pane_texts(panes):
 
 
 def _prompt_tail(text):
-    """The last lines of a pane's text (no blank ones): where a prompt shows."""
-    return [x.rstrip() for x in text.splitlines() if x.strip()][-PROMPT_LINES:]
+    """The last lines of a pane's text (no blank ones): where a prompt shows. Claude Code blinks the dot (⏺)
+    of the tool call that waits on a permission prompt, so it is a space on every other look. A space in its
+    place gives the same lines on each look, and a prompt that stays on the screen stays the same (#4280)."""
+    import re
+    lines = [x.rstrip() for x in text.splitlines() if x.strip()]
+    return [re.sub(r"^(\s*)⏺", r"\1 ", x) for x in lines[-PROMPT_LINES:]]
 
 
 def _done_panes(conn, panes, terminals=None):
@@ -995,7 +999,9 @@ def _prompt_parts(tail):
     lines = [re.sub(f"^\\s*[{_BOX}]", "", x).rstrip(f" {_BOX}") for x in tail]
     hint = next((m.group(0) for m in map(_HINT.search, lines) if m), None)
     mark = re.compile(r"^(\s*)([❯›])\s*(\S.*)$")
-    at = next((n for n, x in enumerate(lines) if mark.match(x)), None)
+    # The last marked line: the lines above a prompt can show what the person typed before ("❯ run the tests"),
+    # and with the first one river found no question in a real Claude Code prompt (#4280).
+    at = next((n for n in range(len(lines) - 1, -1, -1) if mark.match(lines[n])), None)
     options, top = [], len(lines)
     if at is not None:
         m = mark.match(lines[at])
@@ -1010,12 +1016,40 @@ def _prompt_parts(tail):
         while end < len(lines) and option(lines[end]):
             end += 1
         options = [(m.group(3).strip() if n == at else lines[n].strip(), n == at) for n in range(top, end)]
-    question = None
-    for x in reversed(lines[:top]):
-        if "?" in x:
-            question = x[:x.rindex("?") + 1].strip()
+    question, qat = None, None
+    for n in range(top - 1, -1, -1):
+        if "?" in lines[n]:
+            question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
             break
-    return {"question": question, "options": options, "hint": hint}
+    return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
+            **_prompt_command(lines[:qat] if qat is not None else [])}
+
+
+_RULE = None
+
+
+def _prompt_command(lines):
+    """What a permission prompt asks to run, from the lines above its question: {"tool": the header ("Bash
+    command (unsandboxed)"), "command": the command's first line, "why": a line that says why it asks (auto
+    mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
+    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it."""
+    import re
+    global _RULE
+    _RULE = _RULE or re.compile(r"^\s*[─━╌╍┄┅═-]{8,}\s*$")
+    why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
+    head = next((n for n in range(len(lines) - 1, -1, -1)
+                 if re.match(r"^\s*(\w+ )?(command|file|edit|fetch|tool)\b", lines[n].strip(), re.I)
+                 and len(lines[n].strip()) < 60), None)
+    if head is None:
+        return {"tool": None, "command": None, "why": why}
+    below = lines[head + 1:]
+    rules = [n for n, x in enumerate(below) if _RULE.match(x)]
+    body = below[rules[0] + 1:rules[1]] if len(rules) >= 2 else [x for x in below if not _RULE.match(x)]
+    body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")]
+    cmd = body[0] if body else None
+    if cmd and len(body) > 1 and len(rules) >= 2:
+        cmd += " …"  # a command of more lines: the first one names it
+    return {"tool": lines[head].strip(), "command": cmd and cmd[:200], "why": why}
 
 
 def _keys_for(n, at):
@@ -1030,18 +1064,28 @@ def _keys_for(n, at):
 PROMPT_ANSWER = "Answer it with View Terminal in MaximizePM"
 
 
-def prompt_alert(agent, target, tail):
-    """The alert text for an agent that waits on a prompt: core.PROMPT_NOTE, the agent and its tmux window, the
-    question, the options with the selected one, the keys that choose each, and where to answer (#2713). Before,
-    the alert gave only the first line that matched prompt_pattern ("Enter to confirm · Esc to cancel"), and a
-    person could do nothing with it. Returns (text, question): question is None when the lines hold no question."""
+def prompt_alert(agent, target, tail, pane=None, item=None):
+    """The alert text for an agent that waits on a prompt: core.PROMPT_NOTE, the agent, its tmux window and pane,
+    the item it holds, the command the prompt asks to run and why auto mode asks, the question, the options with
+    the selected one, the keys that choose each, and where to answer (#2713, #4280). Before, the alert gave only
+    the first line that matched prompt_pattern ("Enter to confirm · Esc to cancel"), and a person could do
+    nothing with it. item: {"id", "title"} or None. Returns (text, question, sig): question is None when the
+    lines hold no question; sig is the prompt's own lines, which stay the same while it waits (the lines above
+    it can change: a spinner, a timer, the dot that blinks)."""
     parts = _prompt_parts(tail)
     q = parts["question"]
-    where = f"{core.PROMPT_NOTE}: {agent} in tmux {target}"
+    where = f"{core.PROMPT_NOTE}: {agent} in tmux {target}" + (f" (pane {pane})" if pane else "")
+    if item:
+        where += f", on #{item['id']} {item['title'][:80]}"
     if q is None:
         last = " | ".join(x.strip() for x in tail[-3:])
-        return f"{where}, with no question river can read. Its last lines: {last[:300]}", None
-    text = f"{where}. Question: {q[:240]}"
+        return f"{where}, with no question river can read. Its last lines: {last[:300]}", None, "\n".join(tail[-3:])
+    text = where
+    if parts["command"]:
+        text += f". It asks to run ({parts['tool']}): {parts['command']}"
+    if parts["why"]:
+        text += f". {parts['why'][:160].rstrip('.')}"
+    text += f". Question: {q[:240]}"
     opts = parts["options"]
     if opts:  # each option with the keys that choose it, from the selected one
         at = next(n for n, (_, sel) in enumerate(opts) if sel)
@@ -1051,7 +1095,20 @@ def prompt_alert(agent, target, tail):
             text += "; Esc = cancel"
     elif parts["hint"]:
         text += f" Keys: {parts['hint']}"
-    return f"{text}. {PROMPT_ANSWER}.", q
+    return f"{text}. {PROMPT_ANSWER}.", q, "\n".join(tail[max(0, parts["start"] - 8):])
+
+
+def _pane_session_url(pane):
+    """The Remote Control link that Claude Code printed in a pane ("Continue here, on your phone, or at
+    https://claude.ai/code/session_..."), or None: the link of a session that ran no river command yet, or
+    one whose commands do not see CLAUDE_CODE_BRIDGE_SESSION_ID. The last one on the screen and its history."""
+    import re
+    try:
+        text = _tmux("capture-pane", "-p", "-J", "-S", "-5000", "-t", pane, check=False) or ""
+    except RiverError:
+        return None
+    found = re.findall(r"https://claude\.ai/code/session_[A-Za-z0-9]+", _plain(text))
+    return found[-1] if found else None
 
 
 def watch_prompts(conn):
@@ -1080,8 +1137,10 @@ def watch_prompts(conn):
                 continue  # a shell: what the agent printed stays, and nobody waits there
             tail = _prompt_tail(_plain(screen["text"]))
             if any(rx.search(x) for x in tail):
-                body, q = prompt_alert(agent, screen["target"], tail)
-                waiting[agent] = (body, "\n".join(tail), q)
+                held = conn.execute("SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                                    "ORDER BY id", (agent,)).fetchone()
+                body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held))
+                waiting[agent] = (body, sig, q, held and held["id"], pane)
     t, wait = core.now(), core.parse_duration(core.setting(conn, "prompt_wait"))
     for agent in [a for a in PROMPTS if a not in waiting]:
         del PROMPTS[agent]
@@ -1096,7 +1155,7 @@ def watch_prompts(conn):
         core._mark_read(conn, closed)
         people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
         manager = core.active_manager(conn)
-        for agent, (body, sig, q) in waiting.items():
+        for agent, (body, sig, q, held, pane) in waiting.items():
             st = PROMPTS.get(agent)
             if not st or st["sig"] != sig:
                 st = PROMPTS[agent] = {"sig": sig, "since": t, "told": st["told"] if st else None}
@@ -1104,17 +1163,21 @@ def watch_prompts(conn):
                 st["told"] = body  # also after maxpm serve started again: the alert is there
             if st["told"] == body or t - st["since"] < wait:
                 continue
-            held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
-                                (agent,)).fetchone()
+            # The notice opens the agent's web session (notify.compose: its session_url). A session that ran no
+            # river command with Remote Control on has none yet: the link it printed in its pane (#4280).
+            if not conn.execute("SELECT session_url FROM agents WHERE name=?", (agent,)).fetchone()["session_url"]:
+                link = _pane_session_url(pane)
+                if link:
+                    conn.execute("UPDATE agents SET session_url=? WHERE name=?", (link, agent))
             to = [manager] if q is None and manager and manager != agent else people
             for person in to:
-                core._send(conn, "alert", agent, body, to=person, item_id=held and held["id"])
+                core._send(conn, "alert", agent, body, to=person, item_id=held)
             if to:  # with no person in the queue yet, the first one who registers gets it
                 st["told"] = body
                 told.append(agent)
         if told or closed:
             core.sync_needs_you(conn)
-    return {"waiting": {a: q or b for a, (b, _, q) in waiting.items()}, "told": told, "closed": closed}
+    return {"waiting": {a: w[2] or w[0] for a, w in waiting.items()}, "told": told, "closed": closed}
 
 
 # An agent idle at its prompt runs no river command, and river never types into its pane: a stale session would

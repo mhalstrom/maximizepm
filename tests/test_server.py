@@ -1201,7 +1201,8 @@ class FakeTmux:
         elif cmd == "capture-pane":  # what the pane shows: with -e the colours too
             if not pane:
                 return None
-            return pane.get("screen", "") if "-e" in a else re.sub(r"\x1b\[[0-9;]*m", "", pane.get("screen", ""))
+            text = pane.get("history", "") + pane.get("screen", "") if "-S" in a else pane.get("screen", "")  # -S: and its history
+            return text if "-e" in a else re.sub(r"\x1b\[[0-9;]*m", "", text)
         return ""
 
 
@@ -1684,7 +1685,8 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(watch(5)["told"], [])
         self.assertEqual(watch()["told"], [name])
         # The alert names the agent, its tmux window, the question, the keys of each option, and where to answer (#2713).
-        self.assertEqual(events(), [(f"alert from {name}: waits on a prompt in its terminal: {name} in tmux maxpm:0.0. "
+        self.assertEqual(events(), [(f"alert from {name}: waits on a prompt in its terminal: {name} in tmux maxpm:0.0 "
+                                     f"(pane %0). It asks to run (Bash command): rm -rf build. "
                                      f"Question: Do you want to proceed? Keys: Enter = 1. Yes (selected now); "
                                      f"Down, then Enter = 2. No. Answer it with View Terminal in MaximizePM.", name)])
         self.assertEqual(watch()["told"], [])  # once for a prompt
@@ -1752,7 +1754,7 @@ class LaunchInTmux(unittest.TestCase):
                           "Enter to confirm · Esc to cancel")
         self.assertEqual((watch()["told"], watch()["told"]), ([], [name]))
         self.assertEqual(bodies("mark"), [
-            f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0. Question: Quick safety check: Is this a project "
+            f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0 (pane %0). Question: Quick safety check: Is this a project "
             f"you created or one you trust? Keys: Enter = No, exit (selected now); Down, then Enter = Yes, I trust this "
             f"folder; Esc = cancel. Answer it with View Terminal in MaximizePM."])
         # The page and the notification show it all, not the first 120 characters.
@@ -1763,14 +1765,56 @@ class LaunchInTmux(unittest.TestCase):
         pane["screen"] = "⏺ Thinking\n\n Enter to confirm · Esc to cancel"
         self.assertEqual((watch()["told"], watch()["told"]), ([], [name]))
         self.assertEqual(bodies("mark"), [])
-        self.assertEqual(bodies("boss"), [f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0, with no question "
-                                          f"river can read. Its last lines: ⏺ Thinking | Enter to confirm · Esc to cancel"])
+        self.assertEqual(bodies("boss"), [f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0 (pane %0), with no question "
+                                          f"river can read. Its last lines: Thinking | Enter to confirm · Esc to cancel"])
         # An agent with a stop request gets no alert: an answer would only let it read the stop and end (alert #7392).
         # Its alert closes, and maxpm view --tidy closes its pane, prompt and all.
         core.stop_agent(self.c, name, reason="enough", actor="mark")
         self.assertEqual((len(watch()["closed"]), bodies("boss"), watch()["waiting"]), (1, [], {}))
         self.c.execute("UPDATE agents SET last_seen=? WHERE name=?", (core.iso(clock[0] - core.timedelta(hours=2)), name))
         self.assertIn(pane["id"], server._done_panes(self.c, [p for p in server._tmux_panes() if p["name"]]))
+
+    def test_a_real_claude_code_prompt_alerts_with_its_command_item_and_session(self):
+        from unittest import mock
+        from river import notify
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "notify_channels", "log")
+        core.item_add(self.c, "shop", "Fix the build")
+        name = server.launch_agent(self.c)["session_name"]
+        core.claim(self.c, 1, name)
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.PROMPTS.clear)
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+
+        def watch():
+            clock[0] += core.timedelta(seconds=30)
+            return server.watch_prompts(self.c)
+        # The screen of Claude Code 2.1.318 at a permission prompt (2026-11-04), with auto mode's classifier line. The
+        # line the person typed before starts with the marker too, and the dot of the tool call blinks: river found
+        # no question in it, and the lines changed on every other look, so the prompt_wait clock began again (#4280).
+        rule = "╌" * 60
+        screen = (f"❯ Run the release review gate\n{{dot}} Running the review gate\n  ⎿  $ git push origin main\n"
+                  f"{'─' * 60}\n Bash command (unsandboxed)\n Push the release branch\n"
+                  f" Auto mode held this command for the server-side classifier to review\n{rule}\n"
+                  f" git push origin main\n{rule}\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel · Tab to amend")
+        pane["history"] = (" /remote-control is active · Continue here, on your phone, or at "
+                           "https://claude.ai/code/session_01AbC\n")
+        pane["screen"] = screen.format(dot="⏺")
+        self.assertEqual(watch()["told"], [])
+        pane["screen"] = screen.format(dot=" ")
+        self.assertEqual(watch()["told"], [name])
+        (e,) = core.needs_you(self.c, "mark")
+        self.assertEqual(e["summary"], (
+            f"alert from {name}: waits on a prompt in its terminal: {name} in tmux maxpm:0.0 (pane %0), on #1 Fix the "
+            f"build. It asks to run (Bash command (unsandboxed)): git push origin main. Auto mode held this command for "
+            f"the server-side classifier to review. Question: Do you want to proceed? Keys: Enter = 1. Yes (selected "
+            f"now); Down, then Enter = 2. No; Esc = cancel. Answer it with View Terminal in MaximizePM."))
+        # The agent ran no river command in its session: the notice opens the link Claude Code printed in its pane.
+        (row,) = core.outbox(self.c)
+        self.assertEqual(notify.compose(self.c, [row])[2], "https://claude.ai/code/session_01AbC")
 
     def test_tmux_is_the_default_when_tmux_is_installed(self):
         from unittest import mock
