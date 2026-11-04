@@ -304,6 +304,7 @@ def loop(stop, interval_s=None):
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
             from . import server
             server.watch_prompts(conn)  # an agent that waits on a prompt in its tmux pane: tell the person
+            core.activity_watch(conn)  # an agent whose hooks reported nothing for activity_silence: tell the manager
             server.watch_busy(conn)  # an agent that is busy with no river command keeps its leases
             core.tell_watch_late(conn)  # a manager that runs no watch while a message is due: tell the person
             server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session

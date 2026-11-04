@@ -127,6 +127,13 @@ Stop when the user tells you to, and tell the user what you did.
   you. Read the screen (`maxpm view`, or the Terminal button). Send the person
   an alert with the question and the keys when only a person can answer it;
   else stop the agent and launch again.
+- **An activity alert to you** ("<agent> stands still: ..."): the Claude Code
+  hooks of a session that MaximizePM started say that it holds an item and
+  waits on a permission prompt, ended its turn at its prompt, or reported
+  nothing for `activity_silence` (10m). The alert names the item and the
+  command it waits on. Look at its terminal or session. Send a prompt that
+  only a person can answer to the person; else stop the agent and launch
+  again. Agents reach you with `maxpm alert manager "..."` (also ask, note).
 - **SERVE LOOP LATE**: `maxpm serve` made no complete pass of its loop for
   5 minutes or more, so it closes no finished session, sends no notification,
   starts no fresh session, and does not reload. Run `maxpm serve --restart`.

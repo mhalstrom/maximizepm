@@ -165,6 +165,12 @@ DEFAULT_SETTINGS = {
     # Claude Code and Codex; add the words of another CLI or a new version with | (maxpm config set).
     "prompt_pattern": r"Do you (want to|trust)|Would you like to|[Ee]nter to confirm|[❯›]\s*\d+\.\s",
     "prompt_wait": "20s",
+    # A Claude Code session that river starts gets hooks (the launch option claude_activity_hooks) that report
+    # each tool call, prompt, permission prompt and turn end to river (maxpm activity, #4288). A session that holds
+    # an item and reported nothing for activity_silence, and does not wait in maxpm wait, on a person's answer,
+    # or on a background command, alerts the active manager; a permission prompt or a turn end with an item in
+    # hand alerts it at once. 0s: no silence alert.
+    "activity_silence": "10m",
     # An agent that ended its turn at its CLI's prompt runs no river command. maxpm serve never types into its
     # pane (a stale session continues a large context); it starts fresh sessions instead. An agent is idle at its
     # prompt when its tmux pane shows the agent CLI with the same screen and no prompt (prompt_pattern) for
@@ -292,6 +298,10 @@ LAUNCH_PLATFORMS = {
                                  "args names, if any): each session reads it from the prompt cache, and does not "
                                  "load it again"},
         "prompt": {"kind": "text", "default": "go", "text": "the first prompt"},
+        "activity_hooks": {"kind": "toggle", "default": "on",
+                           "text": "hooks that report the session's tool calls, permission prompts and turn ends to "
+                                   "MaximizePM (--settings with the hook file; maxpm activity), so the manager hears of a "
+                                   "session that stands still"},
     }},
     "codex": {"label": "Codex", "exe": "codex", "family": "openai", "prefix": "codex_", "options": {
         "sandbox": {"kind": "choice", "default": "", "choices": ["read-only", "workspace-write", "danger-full-access"],
@@ -535,6 +545,10 @@ CREATE TABLE IF NOT EXISTS agents (
   manage_seen    TEXT,                       -- the manager's findings it has seen (maxpm manage --watch)
   watch_seen     TEXT,                       -- the last poll or return of the manager's watch (maxpm manage --watch)
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
+  activity_at     TEXT,                      -- the last event its Claude Code hooks reported (maxpm activity)
+  activity_event  TEXT,                      -- that event (PostToolUse, Stop, Notification:permission_prompt, ...)
+  activity_prompt TEXT,                      -- the tool call that waits on a permission prompt now (JSON), if any
+  activity_told   TEXT,                      -- the activity_at of the last alert to the manager about it
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
   host           TEXT,
   pid_cmd        TEXT,
@@ -924,6 +938,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_in TEXT")
     if "watch_seen" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN watch_seen TEXT")
+    for col in ("activity_at", "activity_event", "activity_prompt", "activity_told"):
+        if col not in acols:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "session_url" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN session_url TEXT")
     if "via" not in acols:
@@ -7289,6 +7306,163 @@ def claude_session_from_env(env=None):
     return sid if _SESSION_ID_RE.match(sid) else None
 
 
+# ---------------------------------------------------------------- activity hooks
+
+# Claude Code runs these hooks of a session that river started (launch option claude_activity_hooks): each one
+# runs `maxpm activity`, which reads the hook's JSON on stdin and records the event (#4288). A tool call or a prompt
+# says the session works; PermissionRequest names the tool call that waits on a permission prompt, and the
+# Notification permission_prompt says that the prompt shows; Stop says the turn ended.
+ACTIVITY_EVENTS = ("PostToolUse", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop")
+ACTIVITY_HOOK_FILE = "claude-hooks.json"
+ACTIVITY_NOTE = "stands still"  # the alerts of the hooks to the manager start with "<agent> stands still"
+
+
+def activity_hook_settings():
+    """The Claude Code settings (claude --settings) with river's hooks: each event runs maxpm activity. The command
+    is the maxpm on PATH when there is one, so the hook finds the same queue as the session's own commands."""
+    import shutil
+    exe = shutil.which("maxpm") or "maxpm"
+    run = [{"type": "command", "command": f"{_shell_quote(exe)} activity", "timeout": 10}]
+    return {"hooks": {ev: [{"matcher": "", "hooks": run}] if ev in ("PostToolUse", "PermissionRequest")
+                      else [{"hooks": run}] for ev in ACTIVITY_EVENTS}}
+
+
+def activity_hook_file():
+    """The file beside the queue that claude --settings reads: written when its text changes."""
+    f = Path(river_dir()) / ACTIVITY_HOOK_FILE
+    text = json.dumps(activity_hook_settings(), indent=2) + "\n"
+    try:
+        if not f.exists() or f.read_text() != text:
+            f.write_text(text)
+    except OSError as e:
+        raise RiverError(f"cannot write the activity hook file {f}: {e}; turn the hooks off: maxpm config set claude_activity_hooks off")
+    return str(f)
+
+
+def activity_agent(conn, sid=None, env=None):
+    """The agent of a hook: the one that ran a maxpm command in Claude Code session sid (agent_sessions, the
+    newest), else MAXPM_AGENT of the hook's environment when that agent is registered; else None."""
+    env = env if env is not None else os.environ
+    if sid:
+        r = conn.execute("SELECT s.agent FROM agent_sessions s JOIN agents a ON a.name=s.agent AND a.kind='ai' "
+                         "WHERE s.session_id=? ORDER BY s.first_seen DESC LIMIT 1", (sid,)).fetchone()
+        if r:
+            return r["agent"]
+    name = (env.get("MAXPM_AGENT") or "").strip()
+    if name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone():
+        return name
+    return None
+
+
+def _activity_call(prompt):
+    """The tool call of a PermissionRequest, in a few words: 'Bash: git push origin main'."""
+    try:
+        p = json.loads(prompt or "")
+    except ValueError:
+        return None
+    if not isinstance(p, dict) or not p.get("tool"):
+        return None
+    inp = p.get("input") or {}
+    what = next((inp[k] for k in ("command", "file_path", "url", "path", "pattern") if isinstance(inp.get(k), str)), "")
+    what = " ".join(what.split())
+    return f"{p['tool']}: {what[:200]}" if what else p["tool"]
+
+
+def _activity_alert(conn, agent, item, text):
+    """Alert the active manager about an agent that stands still, inside a tx; blocked, so its watch wakes at
+    once. Nothing when no manager is active, when the agent is that manager, or when the same alert is unread."""
+    manager = active_manager(conn)
+    if not manager or manager == agent:
+        return None
+    body = f"{agent} {ACTIVITY_NOTE}: {text}"
+    if conn.execute("SELECT 1 FROM messages WHERE kind='alert' AND from_agent=? AND to_agent=? AND body=? "
+                    "AND read_at IS NULL", (agent, manager, body)).fetchone():
+        return None
+    return _send(conn, "alert", agent, body, to=manager, item_id=item, blocked="waits")
+
+
+def _activity_item(conn, agent):
+    return conn.execute("SELECT id, title FROM items WHERE assignee=? AND status='in_progress' ORDER BY id",
+                        (agent,)).fetchone()
+
+
+def activity_event(conn, payload, env=None):
+    """Record one hook event of a Claude Code session (maxpm activity): the agent's activity_at and activity_event, and
+    for a PermissionRequest the tool call that waits (activity_prompt; a tool call or a prompt clears it). A
+    permission prompt that shows, or a turn that ends, while the agent holds an item alerts the active manager
+    at once (_activity_alert): not a turn end while the agent waits on a person's answer (maxpm ask), has a stop
+    request, or runs a background command. Returns {"agent", "event", "alert": message id or None}."""
+    env = env if env is not None else os.environ
+    ev = str(payload.get("hook_event_name") or "")
+    agent = activity_agent(conn, payload.get("session_id"), env)
+    if not agent or ev not in ACTIVITY_EVENTS:
+        return {"agent": agent, "event": ev, "alert": None}
+    record_session_url(conn, agent, session_url_from_env(env))
+    ntype = str(payload.get("notification_type") or "")
+    t, alert = iso(now()), None
+    with tx(conn):
+        a = conn.execute("SELECT activity_prompt, stop_at FROM agents WHERE name=?", (agent,)).fetchone()
+        prompt = a["activity_prompt"]
+        if ev == "PermissionRequest":
+            inp = payload.get("tool_input")
+            inp = {k: v for k, v in inp.items() if isinstance(v, str)} if isinstance(inp, dict) else {}
+            prompt = json.dumps({"tool": str(payload.get("tool_name") or ""), "input": {k: v[:400] for k, v in inp.items()}})
+        elif ev in ("PostToolUse", "UserPromptSubmit"):
+            prompt = None
+        conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=? WHERE name=?",
+                     (t, ev + (f":{ntype}" if ntype else ""), prompt, agent))
+        held = _activity_item(conn, agent)
+        if held and ev == "Notification" and ntype == "permission_prompt":
+            call = _activity_call(prompt)
+            alert = _activity_alert(conn, agent, held["id"],
+                                f"it waits on a permission prompt in its terminal on #{held['id']} {held['title'][:80]}"
+                                + (f"; it asks to run {call}" if call else "")
+                                + f" ({str(payload.get('message') or '')[:160]}). Answer it in its terminal or "
+                                  f"its session, or tell the person.")
+        elif (held and ev == "Stop" and not a["stop_at"] and agent not in waits_on_person(conn, [agent])
+              and agent not in busy_now(conn, [agent])):
+            alert = _activity_alert(conn, agent, held["id"],
+                                f"it ended its turn while it holds #{held['id']} {held['title'][:80]}: it sits at its "
+                                f"prompt and runs no maxpm wait. Look at its terminal or session.")
+        if alert:
+            conn.execute("UPDATE agents SET activity_told=? WHERE name=?", (t, agent))
+    return {"agent": agent, "event": ev, "alert": alert}
+
+
+def activity_watch(conn):
+    """One look of maxpm serve (each pass): an agent with hooks that holds an item and reported no hook event
+    and ran no maxpm command for activity_silence alerts the active manager, once for each silence. Not an agent
+    in maxpm wait, one that waits on a person's answer, one with a stop request, or one that runs a background
+    command. Returns the agents it alerted about."""
+    limit = parse_duration(setting(conn, "activity_silence"))
+    if not limit:
+        return []
+    t, told = now(), []
+    rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, last_seen FROM agents "
+                                    "WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
+                                    "AND waiting_since IS NULL").fetchall()
+            if r["activity_told"] != r["activity_at"]
+            and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit]
+    if not rows:
+        return []
+    waiting = waits_on_person(conn, [r["name"] for r in rows])
+    busy = busy_now(conn, [r["name"] for r in rows])
+    with tx(conn):
+        for r in rows:
+            held = _activity_item(conn, r["name"])
+            if not held or r["name"] in waiting or r["name"] in busy:
+                continue
+            quiet = _short(t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])))
+            call = _activity_call(r["activity_prompt"])
+            last = (f"it waits on a permission prompt for {call}" if call
+                    else f"its last event: {r['activity_event']} at {show_time(r['activity_at'])}")
+            if _activity_alert(conn, r["name"], held["id"], f"nothing for {quiet} while it holds #{held['id']} "
+                           f"{held['title'][:80]} ({last}). Look at its terminal or session."):
+                told.append(r["name"])
+            conn.execute("UPDATE agents SET activity_told=activity_at WHERE name=?", (r["name"],))
+    return told
+
+
 def record_claude_session(conn, name, sid):
     """Remember that agent `name` ran a command in Claude Code session `sid` (once per pair)."""
     if not (name and sid) or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? AND session_id=?",
@@ -7891,6 +8065,11 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                 to = it["assignee"]
         if to is None and item is None:
             raise RiverError("say who gets it: --to <agent>, --item <id> (its holder), or --reply <message-id>")
+        if to == "manager" and not conn.execute("SELECT 1 FROM agents WHERE name='manager'").fetchone():
+            to = active_manager(conn)  # the word manager: the manager session that is active now (#4288)
+            if to is None:
+                raise RiverError("no manager session is active now (maxpm who); a session becomes the manager with "
+                                 "maxpm manage, or send it to a person")
         if to is not None:
             _agent(conn, to)
         manager = _is_manager(conn, to)
@@ -9045,6 +9224,8 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
             built = {**opts, "args": skill_prompt_args(opts.get("args", ""))}
         if fork_of and prof[0] == "claude-code":  # fork_base: start from a goal's warm base
             built = {**built, "args": f"--resume {_shell_quote(fork_of)} --fork-session " + built.get("args", "")}
+        if prof[0] == "claude-code" and opts.get("activity_hooks") == "on" and "--settings" not in built.get("args", ""):
+            built = {**built, "args": f"--settings {_shell_quote(activity_hook_file())} " + built.get("args", "")}
         if autocompact and prof[0] == "claude-code" and "--autocompact" not in built.get("args", ""):
             built = {**built, "args": f"--autocompact {autocompact} " + built.get("args", "")}
         else:

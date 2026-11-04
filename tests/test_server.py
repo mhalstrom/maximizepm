@@ -224,6 +224,7 @@ class LaunchAgent(unittest.TestCase):
         os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
         self.c = core.connect()
         core.config_set(self.c, "claude_skill_prompt", "off")  # exact commands; LaunchProfiles tests the skill file
+        core.config_set(self.c, "claude_activity_hooks", "off")  # exact commands; test_a_started_claude_code_session_reports_its_activity
 
     def tearDown(self):
         core.PLATFORM = self.platform
@@ -1042,7 +1043,8 @@ class LaunchAgent(unittest.TestCase):
         self.assertTrue(opts["Codex"]["takes_model"] and opts["Codex"]["takes_effort"])
         self.assertTrue(all(m["note"] for o in ("Claude Code", "Codex") for m in opts[o]["models"]))
         self.assertEqual((opts["Mine"]["family"], len(opts["Mine"]["models"]), opts["Mine"]["takes_model"]), (None, 8, False))
-        self.assertEqual([o["name"] for o in opts["Claude Code"]["options"]], ["remote_control", "permission_mode", "skill_prompt"])
+        self.assertEqual([o["name"] for o in opts["Claude Code"]["options"]], ["remote_control", "permission_mode", "skill_prompt",
+                                                                              "activity_hooks"])
         self.assertEqual([o["name"] for o in opts["Codex"]["options"]], ["sandbox", "approval"])
         self.assertEqual(opts["Mine"]["options"], [])
         c = core.fill_launch_command('codex -m {model} -c model_reasoning_effort={effort} "go"', "sol", "xhigh")
@@ -2523,6 +2525,7 @@ class LaunchProfiles(unittest.TestCase):
         core.PLATFORM = "darwin"
         core.project_add(self.c, "shop", path=self.dir.name)
         core.config_set(self.c, "claude_skill_prompt", "off")  # exact commands; test_the_skill_goes_in_the_system_prompt
+        core.config_set(self.c, "claude_activity_hooks", "off")  # exact commands; test_a_started_claude_code_session_reports_its_activity
 
     def tearDown(self):
         core.PLATFORM = self.platform
@@ -2597,7 +2600,20 @@ class LaunchProfiles(unittest.TestCase):
         (prof,) = server.setup_status(self.c)["launch_profiles"]
         self.assertEqual([o["setting"] for o in prof["options"]],
                          ["claude_remote_control", "claude_permission_mode", "claude_model_ids", "claude_args",
-                          "claude_skill_prompt", "claude_prompt"])
+                          "claude_skill_prompt", "claude_prompt", "claude_activity_hooks"])
+
+    def test_a_started_claude_code_session_reports_its_activity(self):
+        pid = core._project(self.c, "shop")["id"]
+        core.config_unset(self.c, "claude_activity_hooks")  # the default: on
+        cmd = core._launch_agent_cmd(self.c, pid, None)["command"]
+        m = re.search(r"^claude --settings (\S+) go --remote-control$", cmd)
+        self.assertIsNotNone(m, cmd)
+        f = Path(m.group(1).strip("'"))
+        self.assertEqual(f, Path(core.river_dir()) / core.ACTIVITY_HOOK_FILE)
+        self.assertEqual(json.loads(f.read_text()), core.activity_hook_settings())
+        # A person's own --settings in claude_args wins: river adds no second one.
+        core.config_set(self.c, "claude_args", "--settings /x/mine.json")
+        self.assertEqual(core._launch_agent_cmd(self.c, pid, None)["command"].count("--settings"), 1)
 
     def test_the_skill_goes_in_the_system_prompt(self):
         pid = core._project(self.c, "shop")["id"]

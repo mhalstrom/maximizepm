@@ -1126,6 +1126,8 @@ def build_parser():
     x.add_argument("--dir", default="~/.claude/skills", help="skills folder (default ~/.claude/skills)")
     x.add_argument("--copy", action="store_true", help="copy the files instead of linking them")
     x.add_argument("--force", action="store_true", help="replace a folder that is not a link (your edits there are lost)")
+    sub.add_parser("activity", help="for Claude Code hooks: record the session event on stdin (sessions that "
+                                    "maxpm starts run it)")
     db = sub.add_parser("db", help="where the queue database is")
     dbs = db.add_subparsers(dest="dcmd", required=True)
     dbs.add_parser("path", help="print the database file MaximizePM uses")
@@ -1306,7 +1308,23 @@ def install_skills(dest, copy=False, force=False):
     return out
 
 
+def activity_command(stdin=None):
+    """maxpm activity: a Claude Code hook (core.activity_hook_settings) passes its event as JSON on stdin. It prints nothing,
+    waits at most two seconds for the queue, and always exits 0: a failed record never stops the session (#4288)."""
+    import json
+    try:
+        payload = json.loads((stdin or sys.stdin).read() or "{}")
+        conn = core.connect()
+        conn.execute("PRAGMA busy_timeout=2000")
+        core.activity_event(conn, payload if isinstance(payload, dict) else {})
+    except Exception:  # noqa: BLE001 - a hook must never fail the session
+        pass
+    return 0
+
+
 def run(argv=None):
+    if (sys.argv[1:] if argv is None else list(argv))[:1] == ["activity"]:
+        return activity_command()  # first: a hook runs on every tool call, so it skips the parser and the briefing
     args = build_parser().parse_args(argv)
     if args.cmd is None:
         print(QUICKSTART)

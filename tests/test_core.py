@@ -6049,3 +6049,110 @@ class CloseCheck(TextQueue):
         rows = {r["id"]: r for r in core.close_open(self.c)}
         self.assertIn("the close makes it ready", rows[walk]["closes"][0]["why"])
         self.assertNotIn("makes it ready", rows[other]["closes"][0]["why"])  # it still waits on the walk
+
+
+class Activity(Base):
+    """The Claude Code hooks of a session that river starts report its activity (maxpm activity, #4288)."""
+    SID = "0b5a3c1e-1111-4222-8333-944455556666"
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        core.project_add(self.c, "shop")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+        core.register(self.c, "w")
+        self.item = self.add("shop", "Fix the build")
+        core.claim(self.c, self.item, "w")
+        core.record_claude_session(self.c, "w", self.SID)
+        self.clock = [core.now()]
+        fake_now = mock.patch.object(core, "now", lambda: self.clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+
+    def event(self, name, **more):
+        return core.activity_event(self.c, {"hook_event_name": name, "session_id": self.SID, **more}, env={})
+
+    def alerts(self):
+        return [r["body"] for r in self.c.execute(
+            "SELECT body FROM messages WHERE to_agent='boss' AND kind='alert' AND read_at IS NULL ORDER BY id")]
+
+    def test_a_permission_prompt_or_a_turn_end_with_an_item_alerts_the_manager_at_once(self):
+        self.assertEqual(self.event("PostToolUse", tool_name="Read")["alert"], None)
+        a = core.agent_status(self.c, "w")
+        row = self.c.execute("SELECT activity_at, activity_event FROM agents WHERE name='w'").fetchone()
+        self.assertEqual((row["activity_event"], a["name"]), ("PostToolUse", "w"))
+        # The permission request names the call; the notice that the prompt shows alerts the manager, blocked.
+        self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "git push  origin main", "timeout": 5})
+        mid = self.event("Notification", notification_type="permission_prompt",
+                         message="Claude needs your permission to use Bash")["alert"]
+        self.assertEqual(self.alerts(), [
+            f"w stands still: it waits on a permission prompt in its terminal on #{self.item} Fix the build; it asks "
+            f"to run Bash: git push origin main (Claude needs your permission to use Bash). Answer it in its terminal "
+            f"or its session, or tell the person."])
+        m = core.message_show(self.c, mid)
+        self.assertEqual((m["from_agent"], m["item_id"], bool(m["blocked"])), ("w", self.item, True))
+        self.assertIsNone(self.event("Notification", notification_type="permission_prompt",
+                                     message="Claude needs your permission to use Bash")["alert"])  # once while unread
+        # Another notice (idle) alerts nothing; a tool call clears the prompt.
+        self.assertIsNone(self.event("Notification", notification_type="idle_prompt", message="waiting")["alert"])
+        self.event("PostToolUse", tool_name="Bash")
+        self.assertIsNone(self.c.execute("SELECT activity_prompt FROM agents WHERE name='w'").fetchone()[0])
+        # The turn ends while it holds the item: it sits at its prompt.
+        self.assertIsNotNone(self.event("Stop")["alert"])
+        self.assertIn("it ended its turn while it holds", self.alerts()[-1])
+        # Not while it waits on a person's answer (maxpm ask), and not with nothing in hand.
+        core.message(self.c, "question", "Push to production?", to="mark", item=self.item, actor="w")
+        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        self.assertIsNone(self.event("Stop")["alert"])
+        core.release(self.c, self.item, "w")
+        self.assertIsNone(self.event("Notification", notification_type="permission_prompt", message="x")["alert"])
+        # A session river does not know: nothing recorded.
+        self.assertIsNone(core.activity_event(self.c, {"hook_event_name": "Stop", "session_id": "other"}, env={})["agent"])
+        self.assertEqual(core.activity_event(self.c, {"hook_event_name": "Stop"}, env={"MAXPM_AGENT": "w"})["agent"], "w")
+
+    def test_silence_with_an_item_in_hand_alerts_the_manager_once(self):
+        self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "make deploy"})
+        self.assertEqual(core.activity_watch(self.c), [])
+        self.clock[0] += core.timedelta(minutes=11)
+        self.assertEqual(core.activity_watch(self.c), ["w"])
+        self.assertIn("nothing for 11m while it holds", self.alerts()[0])
+        self.assertIn("it waits on a permission prompt for Bash: make deploy", self.alerts()[0])
+        self.clock[0] += core.timedelta(minutes=11)
+        self.assertEqual(core.activity_watch(self.c), [])  # once for one silence
+        # A new event, then silence again: a new alert. Not while it waits in maxpm wait.
+        self.event("PostToolUse", tool_name="Bash")
+        self.clock[0] += core.timedelta(minutes=11)
+        self.c.execute("UPDATE agents SET waiting_since=? WHERE name='w'", (core.iso(core.now()),))
+        self.assertEqual(core.activity_watch(self.c), [])
+        self.c.execute("UPDATE agents SET waiting_since=NULL WHERE name='w'")
+        self.assertEqual(core.activity_watch(self.c), ["w"])
+        core.config_set(self.c, "activity_silence", "0s")
+        self.assertEqual(core.activity_watch(self.c), [])
+
+    def test_the_word_manager_reaches_the_active_manager(self):
+        (m,) = core.message(self.c, "alert", "the gate is red", to="manager", actor="w")
+        self.assertEqual(core.message_show(self.c, m["id"])["to_agent"], "boss")
+        core.unregister(self.c, "boss")
+        with self.assertRaisesRegex(RiverError, "no manager session is active now"):
+            core.message(self.c, "note", "hello", to="manager", actor="w")
+
+    def test_the_hook_file_and_the_command(self):
+        import contextlib
+        import io
+        import json as _json
+        from unittest import mock
+        from river import cli
+        settings = core.activity_hook_settings()
+        self.assertEqual(sorted(settings["hooks"]), sorted(core.ACTIVITY_EVENTS))
+        self.assertTrue(all(h["hooks"][0]["command"].endswith(" activity") for hs in settings["hooks"].values() for h in hs))
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}):
+            f = core.activity_hook_file()
+            self.assertEqual(_json.loads(open(f).read()), settings)
+            out = io.StringIO()
+            for text in ('{"hook_event_name": "Stop", "session_id": "%s"}' % self.SID, "not json", ""):
+                with mock.patch.object(sys, "stdin", io.StringIO(text)), contextlib.redirect_stdout(out):
+                    self.assertEqual(cli.run(["activity"]), 0)  # never fails the session, prints nothing
+            self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w'").fetchone()[0], "Stop")
