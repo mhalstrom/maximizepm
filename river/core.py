@@ -39,12 +39,14 @@ SEND_KINDS = ("alert", "question", "note")
 MESSAGE_STATES = ("open", "accepted", "declined", "answered", "read")
 # The level of a message says how soon it wakes the manager's watch (maxpm manage --watch, #1583, #1608): high
 # after manage_wait_high, low after manage_wait_low. A message is high unless the sender says low (--level) or
-# MaximizePM writes a low one (the ship request notice). A blocked message wakes the watch at once: the sender
+# MaximizePM writes a low one (a ship request notice to an owner that is not the manager); MaximizePM's notice of
+# level now (WAKE_LEVEL: a ship request, a review passed, a deploy done) wakes it at once. A blocked message wakes the watch at once: the sender
 # says so (--blocked: its item cannot move until the answer), or MaximizePM sees it (BLOCKED_SIGNS). A person's
 # message always wakes it at once. On 2026-10-06 to 08, the sender went on with its item after 78 of 128 alerts
 # and questions to the manager (current_project/research/worker-stops.md, #1597).
 MESSAGE_LEVELS = ("high", "low")
 DEFAULT_LEVEL = "high"
+WAKE_LEVEL = "now"  # river's own notice that wakes the manager's watch at once (_wake_manager); no sender picks it
 # What messages.blocked holds: who said that the message's item stands still. sender: the flag --blocked. waits:
 # the sender then ran maxpm inbox --wait. item: the sender released or blocked the item near the send.
 BLOCKED_SIGNS = ("sender", "waits", "item")
@@ -212,7 +214,7 @@ DEFAULT_SETTINGS = {
     "manage_settle": "2m",
     # How long a message to the manager of the level high or low waits before it wakes maxpm manage --watch
     # (#1583, #1608). A message is high (also an alert and a question) unless the sender gives --level low; a
-    # ship request notice is low. A blocked message (--blocked, or MaximizePM sees that its item stands still)
+    # ship request, a review passed and a deploy done wake it at once (#4289). A blocked message (--blocked, or MaximizePM sees that its item stands still)
     # and a person's message wake the watch at once. The new findings "an agent waits" and "an item is ready
     # for a person" wait manage_wait_low; another finding waits manage_settle. A wake brings every message that
     # waits. On 2026-10-08, 141 of 181 wakes of the manager were for events that could wait. 0s: at once.
@@ -6615,7 +6617,23 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synce
     if ship_it:
         shipped = ship(conn, item_id, actor)
         res["shipped_in"], res["ship_release"] = shipped["id"], shipped["release"]
+    if res["kind"] in ("review", "deploy"):
+        what = (f"review #{res['id']} of {res.get('target') or 'a release'} passed: its deploy can start"
+                if res["kind"] == "review" else f"deploy #{res['id']} to {res.get('target') or 'its target'} is done")
+        with tx(conn):
+            _wake_manager(conn, actor, f"{what} ({(res.get('output') or '')[:160]})", res["id"])
     return res
+
+
+def _wake_manager(conn, actor, text, item_id=None):
+    """Inside a tx: a notice to the active manager that wakes its watch at once (level now, which only river
+    sends): a ship request, a review that passed, a deploy that is done (#4289). Before, the manager heard of
+    them at its next wake, and a release waited on it (#4278 passed at 22:16Z, the manager saw it at 22:37Z).
+    Nothing when no manager is active or when the manager itself did it."""
+    manager = active_manager(conn)
+    if not manager or manager == actor:
+        return None
+    return _send(conn, "notice", actor or "maxpm", text, to=manager, item_id=item_id, level=WAKE_LEVEL)
 
 
 def ship(conn, item_id, actor=None):
@@ -6675,8 +6693,13 @@ def ship(conn, item_id, actor=None):
             _event(conn, it["id"], actor, f"ship requested in #{dep['id']} ({tg['name']})")
             if tg["owner"] and tg["owner"] != actor:
                 # low: the owner acts on it only when the release starts (the cadence), not at each request
+                # A target owner that is the manager gets it at once (#4289), as every manager does below.
                 _send(conn, "notice", actor or "maxpm", f"ship request: #{it['id']} {it['title']} joins deploy "
-                      f"#{dep['id']} for {tg['name']}", to=tg["owner"], item_id=dep["id"], level="low")
+                      f"#{dep['id']} for {tg['name']}", to=tg["owner"], item_id=dep["id"],
+                      level=WAKE_LEVEL if tg["owner"] == active_manager(conn) else "low")
+            if not tg["owner"] or tg["owner"] != active_manager(conn):
+                _wake_manager(conn, actor, f"ship request: #{it['id']} {it['title']} joins deploy #{dep['id']} for "
+                              f"{tg['name']}", dep["id"])
         _cadence_sync(conn)  # a new release waits (a cut release, the cadence) from its first ship request
     # release: when this release can start, for the worker that asked; in_cut: the item joined a cut release.
     return dict(item_show(conn, dep["id"]), release=dict(release_plan(conn, tg["name"]), in_cut=bool(dep["cut_at"])))
@@ -10369,7 +10392,7 @@ def _watch_mail(conn, actor, native, waits):
         f"LEFT JOIN agents a ON a.name=m.from_agent WHERE {_TO_ME} "
         f"AND m.from_agent<>? AND m.read_at IS NULL", (actor, actor, actor)).fetchall()
         if not (native and (m["native_status"] is None or m["native_status"] == "sent"))]
-    return waiting, [m for m in waiting if m["blocked"] or m["sender"] == "human"
+    return waiting, [m for m in waiting if m["blocked"] or m["sender"] == "human" or m["level"] == WAKE_LEVEL
                      or parse_iso(m["created_at"]) + waits[m["level"] or DEFAULT_LEVEL] <= now()]
 
 

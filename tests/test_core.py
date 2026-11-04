@@ -4618,10 +4618,17 @@ class Manager(Base):
         x = self.add("a", "page")
         core.ship(self.c, x, "w1")
         got = [m for m in core.inbox(self.c, "boss", mark_read=False) if "ship request" in m["body"]]
-        self.assertEqual([(m["kind"], m["level"]) for m in got], [("notice", "low")])
+        # The owner is the manager: a ship request wakes it at once (#4289, mark 2026-11-04), one notice.
+        self.assertEqual([(m["kind"], m["level"]) for m in got], [("notice", "now")])
         core.manage(self.c, self.dir.name, "boss")  # the briefing shows the findings of now; the watch starts after it
         w, minutes = self.watch_minutes(step="2h")
-        self.assertEqual((w["result"], minutes), ("messages", 30))
+        self.assertEqual((w["result"], minutes), ("messages", 0))
+        # Another owner: it gets the low notice, and the manager gets one that wakes it at once.
+        core.target_give(self.c, "web", "w2", "mark")
+        core.ship(self.c, self.add("a", "footer"), "w1")
+        self.assertEqual(sorted((m["to_agent"], m["level"]) for m in self.c.execute(
+            "SELECT to_agent, level FROM messages WHERE body LIKE 'ship request%footer%'")), [("boss", "now"), ("w2", "low")])
+        core.inbox(self.c, "boss")
 
         def run(*words):
             out = io.StringIO()
@@ -6156,3 +6163,42 @@ class Activity(Base):
                     self.assertEqual(cli.run(["activity"]), 0)  # never fails the session, prints nothing
             self.assertEqual(out.getvalue(), "")
         self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w'").fetchone()[0], "Stop")
+
+
+class ManagerWake(Base):
+    """A ship request, a review that passed and a deploy that is done wake the manager's watch at once (#4289)."""
+
+    def test_the_release_steps_wake_the_manager(self):
+        core.project_add(self.c, "a")
+        core.target_add(self.c, "web", "push")
+        core.project_target(self.c, "a", "web")
+        core.config_set(self.c, "review", "on")
+        core.register(self.c, "mark", human=True)
+        for name in ("boss", "w1", "w2", "w3"):
+            core.register(self.c, name)
+        core._set_role_note(self.c, "boss", "manager", None)
+        core.target_give(self.c, "web", "w3", "mark")
+        x = self.add("a", "page")
+        core.claim(self.c, x, "w1")
+        dep = core.done(self.c, x, "abc123", "w1", ship_it=True)["shipped_in"]
+        rv = self.c.execute("SELECT blocked_by FROM deps d JOIN items i ON i.id=d.blocked_by "
+                            "WHERE d.item_id=? AND i.kind='review'", (dep,)).fetchone()[0]
+        core.claim(self.c, rv, "w2")
+        core.review_pass(self.c, rv, "checked the page", "w2", confirm="all")
+        core.claim(self.c, dep, "w3")
+        core.done(self.c, dep, "release-1", "w3")
+        got = [(m["level"], m["body"]) for m in self.c.execute(
+            "SELECT level, body FROM messages WHERE to_agent='boss' ORDER BY id")]
+        self.assertEqual(got, [
+            ("now", f"ship request: #{x} page joins deploy #{dep} for web"),
+            ("now", f"review #{rv} of web passed: its deploy can start (checked the page)"),
+            ("now", f"deploy #{dep} to web is done (release-1)")])
+        # The watch returns for them at once.
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: None)
+        self.assertEqual(w["result"], "messages")
+        # The manager's own steps wake nothing.
+        y = self.add("a", "footer")
+        core.claim(self.c, y, "w1")
+        core.done(self.c, y, "def456", "w1")
+        core.ship(self.c, y, "boss")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='boss' AND read_at IS NULL").fetchone()[0], 0)
