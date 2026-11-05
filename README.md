@@ -69,12 +69,14 @@ projects at the same time.
   near one it just did, or the items that unblock it) and claims the next
   ready item there. Claims are leases that expire, so a stopped agent never
   blocks the queue for long. A lease does not run out while its agent is
-  busy: a command runs in its session (a long test run), its tmux pane
-  changes, or it waits on a prompt (`busy_max`, 4h after its last command;
-  the tmux and prompt signs need `maxpm serve` running).
+  busy: a command runs in its session (a long test run), a background
+  command or a subagent runs for it, its tmux pane changes, or it waits on a
+  prompt (`busy_max`, 4h after its last command; the tmux and prompt signs
+  need `maxpm serve` running).
   And no second agent takes an item while the first one still works on it.
 - A local web page shows the board, the graph, who is doing what, and how many
-  more agent sessions the ready work could use right now.
+  more agent sessions the ready work could use right now. The search field in
+  its header (or `/`) finds items, open, done, and dropped.
 
 One SQLite file, one command (`maxpm`), one page. Python 3.10 or later, standard
 library only. The page ships one vendored JavaScript library,
@@ -176,6 +178,8 @@ maxpm target rename prod-web prod                # its projects and deploy items
 maxpm project show shop                          # its description, who works on it, its ready items
 maxpm go                                         # in ~/code/shop: name, role, item, briefing
 maxpm add shop "Build the checkout page" -p 0 --doer ai --after 3 4
+maxpm search checkout payment                    # items in any state with every word, newest first: look before you add
+maxpm merge 12 15 --note "the same checkout fix" # 15 is dropped as a duplicate; its notes, links, and messages move to 12
 maxpm next                                       # most important ready item overall
 maxpm next --project shop --claim                # take one from a project
 maxpm next --near 12 --claim                     # take one linked to item 12
@@ -186,6 +190,7 @@ maxpm release 12 --note "what is done, what is left"   # give it back
 maxpm blocked 12 --reason "waits on the vendor" --until 2h   # a blocker outside the queue; unblock 12 clears it
 maxpm dep 12 --on 9                              # 12 waits on 9 (--kind conflicts: never in progress together); undep removes it
 maxpm prio 12 0                                  # also: drop, reopen, move
+maxpm backlog 12 --note "after the launch"       # kept with its links, but nobody is offered it; activate 12 takes it up again
 maxpm goal add shop checkout --outcome "customers can pay" --done-when "a test order succeeds"
 maxpm add "Payment form" --goal checkout         # tag an item with a goal (repeatable)
 maxpm goal own checkout                          # own it: its agent items are reserved for you (goal_lease 4h)
@@ -308,6 +313,7 @@ differ (`maxpm config set claude_remote_control off --project shop`):
 | `claude_remote_control` | `--remote-control` | on |
 | `claude_permission_mode` | `--permission-mode` | Claude Code's own |
 | `claude_skill_prompt` | `--append-system-prompt-file` with the maxpm skill (after the file `claude_args` names, if any), so each session reads it from the prompt cache | on |
+| `claude_activity_hooks` | `--settings` with a hooks file: the session reports each tool call, permission prompt, and turn end to MaximizePM (`maxpm activity`) | on |
 | `claude_args`, `codex_args` | more arguments before the prompt | none |
 | `claude_prompt`, `codex_prompt` | the first prompt | `go`; `run maxpm go in this folder and follow the briefing` |
 | `codex_sandbox` | `--sandbox` | Codex's own |
@@ -397,6 +403,21 @@ An agent that waits on a person's item (`maxpm add "..." --doer human --blocks
 project). Then MaximizePM releases the item, which still waits on the person,
 tells the agent to take other work, and reminds the person.
 
+When a person should look at a finished result (a page, a text, a design),
+the project's setting `result_look` decides the order. `ask_first`: the
+worker shows the result, asks in the queue, and waits for the person's yes
+before the push. `push_first`: the worker pushes, closes the item, and adds
+an item for the person's look. No project gets its value in silence: the
+agent that sets a project up recommends a value from one fact (does
+something stand between a push and the users?), and the person confirms it.
+A deploy target with a review or a release step: `push_first`. No target, or
+a push to main that is live at once (a site, a public repository):
+`ask_first`. Store the answer with `maxpm project add <name> --result-look
+ask_first|push_first` or `maxpm config set result_look <value> --project
+<name>`; a project where nobody chose has `ask_first`. Under both values the
+worker asks first for public text, a release to production, a step that
+deletes data or costs money, and an item that says so.
+
 ## How agents learn it
 
 The command teaches itself: `maxpm` with no arguments prints a quick start,
@@ -449,8 +470,7 @@ no folder and gets its own agent name. Like the rest of `maxpm serve`, it has
 no sign-in yet, so it answers only requests made on this computer straight to
 maxpm serve: a request from another address, a request with
 a proxy or tunnel header (`X-Forwarded-For`, `CF-Connecting-IP`, ...), another
-`Host`, or a foreign `Origin` gets 403. Sign-in and a tunnel for claude.ai and
-the phone apps come later.
+`Host`, or a foreign `Origin` gets 403.
 
 ### ChatGPT desktop app
 
@@ -549,6 +569,19 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   agent that needs a person files a person's item and releases its item;
   when the person answers, a fresh session takes the item
   (`fresh_sessions`, `idle_after`, `idle_end`).
+- Agents that stand still: `maxpm serve` reads the tmux pane of each agent.
+  When a prompt (a permission prompt, a folder trust question;
+  `prompt_pattern`) stays on the screen for `prompt_wait` (20s), each person
+  gets an alert with the question, each option and the keys that choose it,
+  the item the agent holds, and a link to the session. Answer it with the
+  Terminal button on the page. A Claude Code session that MaximizePM starts
+  also reports each tool call, permission prompt, and turn end through hooks
+  (`claude_activity_hooks`). When the agent holds an item, a permission
+  prompt alerts the manager at once, and so does a turn end, but not while
+  the agent waits on a person's answer, a background command, a subagent, or
+  a wakeup.
+  An agent that holds an item and reports nothing for `activity_silence`
+  (10m) alerts the manager once.
 - `maxpm serve` runs new code by itself: after a commit or a pull that
   changes the code, it starts again within a minute or two, on the same port.
   It waits while git shows a change in the code that is not committed, and it
@@ -593,12 +626,21 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   longer than `wait_too_long` (20m), projects with ready work and no agent,
   targets whose owner is away, and what waits on the user. `maxpm manage
   --watch`, a background command, exits when a new finding appears (one it
-  reported before does not count), when a message or question comes to the
-  manager (it prints it and marks it read), or after `manage_every` (30m) with
-  one line. So the manager runs this one watcher. A session that MaximizePM
-  reaches through `native_message` gets its messages in the session, and they
-  do not wake the watch. Its actions show in the history as "(by manager <name>)". Rules:
-  `maxpm guide manager` (skills/maxpm-manager).
+  reported before does not count), when a message to the manager is due (it
+  prints each one that waits and marks it read), or after `manage_every`
+  (30m) with one line. So the manager runs this one watcher. A message waits
+  `manage_wait_high` (10m) before it wakes the watch, or `manage_wait_low`
+  (30m) when the sender gives `--level low`, because each wake makes the
+  manager read its whole context again. A message with `--blocked` (the
+  sender's item cannot move until the answer), a person's message, a ship
+  request, a review that passed, and a deploy that is done wake it at once.
+  When no watch runs, each command of the manager says so, and after 5
+  minutes with a message due, each person gets one alert. A Claude Code
+  manager compacts its context at `manager_autocompact` (250k tokens). A
+  session that MaximizePM reaches through `native_message` gets its messages
+  in the session, and they do not wake the watch. Its actions show in the
+  history as "(by manager <name>)". Rules: `maxpm guide manager`
+  (skills/maxpm-manager).
 - Emergency kill: `maxpm go`, `register`, and `heartbeat` record the agent
   CLI's process (the first ancestor of the MaximizePM command that is not a shell)
   and the host; `maxpm who` shows them, and a session whose process on this
@@ -686,6 +728,27 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   review), or with `maxpm target cut <target> --rev <commit>` from the target
   owner, the manager, or a person, for example when they pin the commit that
   the release builds from.
+- Hooks: a hook is a shell command of your project that MaximizePM runs when
+  a release event of a deploy target occurs, so nobody runs it by hand from a
+  runbook. The events: `release-cut` (the release is cut), `review-passed`,
+  `review-failed`, and `deployed` (the deploy item is done). Set one with
+  `maxpm target hook <target> <event> "<command>"`, for example
+  `maxpm target hook prod deployed "scripts/after-release.sh"`; `--clear`
+  removes it, and `maxpm target hook <target>` lists the hooks with their
+  last result. One command for each event of a target; a script can call
+  more. Only a person or the manager sets, changes, or removes a hook. The
+  maxpm command that causes the event runs the hook before it returns (when
+  that command runs in the sandbox of an agent session, `maxpm serve` runs
+  the hook outside the sandbox), in the folder of the target's project, with `MAXPM_EVENT`,
+  `MAXPM_TARGET`, `MAXPM_REV` (the commit of `maxpm target cut --rev`),
+  `MAXPM_ITEM` (the deploy or the review item), and `MAXPM_AGENT` in its
+  environment. A hook never undoes and never refuses its event: the command
+  prints the last lines of the hook's output and its exit code, and the
+  history of the deploy item gets one line. When a hook fails or runs longer
+  than `hook_timeout` (10m; MaximizePM then stops it with every process it
+  started), the target owner gets an alert. The Targets tab of the page shows
+  each hook with the result of its last run, and changes, removes, or adds
+  hooks.
 - Overviews: `maxpm status`, and `maxpm log` with a Done tab on the page.
 - Token usage: when an item is done, MaximizePM reads the Claude Code
   transcripts of the sessions that held it and records the tokens they spent
@@ -695,6 +758,43 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   lease ran out without done, a commit names the item, a person's files
   changed, nobody took it for `stale_after`, an old notice);
   `maxpm check <id> done|partial|open` records what a check found.
+- Backlog: an item that nobody plans to take now stays in the queue with its
+  notes, links, priority, and goal tags, but `go`, `next`, `launch`, the
+  capacity, the manager, and the notifications never offer it. Move one with
+  `maxpm backlog <id> --note "<why not now>"`, add one with
+  `maxpm add "<title>" --backlog "<why not now>"`, list them by project and
+  priority with `maxpm backlog`, and take one up again with
+  `maxpm activate <id>`. The counts show the backlog apart ("2 in backlog"),
+  and the Projects tab of the page has a "show backlog" box and an Activate
+  button. An item that waits on a backlog item is never ready, so
+  `maxpm backlog` names such items and asks for `--force`, and `maxpm
+  blockers` says "a backlog item". An agent's item must be released first,
+  and a person's item goes to the backlog only with the person's yes.
+- Repeated work: `maxpm search <words>` lists the items, open, done, and
+  dropped, that hold every word in their title, context, notes, or output,
+  newest first (`--project`, `--status`, `--since 30d`). `maxpm add` looks
+  first: when an open item of the project, or one done in the last
+  `similar_days` (14 days), scores `similar_min` (0.55) or more against the
+  new title and context, it adds nothing and shows those items with their
+  state and output. The agent then adds what it found to the match, or adds
+  again with `--new "<how it differs>"`, which the history keeps. The score
+  weighs each word by how rare it is in the queue; items that the new one
+  names (`--blocks`, `--found-during`) and a series that one author adds
+  within two hours do not count. `maxpm show` and the go briefing list up to
+  three related items, `maxpm duplicates` groups open items that look like
+  the same work (the plan briefing names the groups), and
+  `maxpm merge <keep> <other> --note "<why>"` drops the other item as a
+  duplicate and moves its notes, links, goal tags, messages, and queue
+  places to the kept one. Set `similar_min off` to turn the check off.
+- Work that a close makes unnecessary: after `done`, `drop`, or `merge`, the
+  reply lists the open items that the close may have made unnecessary (MAY
+  BE UNNECESSARY NOW): what waited on a dropped item, what was found during
+  it, and open items of the same folder that look like the same work or name
+  the same item, commit, path, or URL. An item that the close makes ready is
+  marked NOW READY. The agent decides each one at once: `done` or `drop` with
+  a note, `merge`, or `maxpm keep <id> --close <closed-id> --note "<why it is
+  still needed>"`. `maxpm cleanup` and the plan briefing list the undecided
+  ones first (`--closes 7d` checks older closes).
 - Tests run on GitHub Actions on Linux (Python 3.10 to 3.13), macOS, and
   Windows.
 
