@@ -5615,8 +5615,10 @@ def busy_now(conn, names=None, skip=()):
     """The agents (among names; else every AI agent) in whose session a command runs now: the agent CLI process
     runs on this computer, and a process below it started after the agent's last river command (a test run, a
     build, a merge). The servers the CLI started with are older, and so is a maxpm wait, which renews last_seen
-    itself. Only within busy_max of the last river command. The processes in skip (the hook that asks, #4293) and
-    the ones below them do not count. One ps call; an empty set with no ps (Windows, a sandbox that blocks it)."""
+    itself. On macOS Claude Code also runs `caffeinate -i -t 300` below it while a turn runs (it restarts it every
+    4 minutes and ends it 30 seconds after the turn): that counts too, and rightly, since the session works; at
+    its prompt it has none (#4294). Only within busy_max of the last river command. The processes in skip (the
+    hook that asks, #4293) and the ones below them do not count. One ps call; an empty set with no ps (Windows, a sandbox that blocks it)."""
     limit = parse_duration(setting(conn, "busy_max"))
     t, host = now(), this_host()
     rows = [r for r in conn.execute("SELECT name, pid, last_seen FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
