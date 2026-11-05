@@ -6159,10 +6159,79 @@ class Activity(Base):
             self.assertEqual(_json.loads(open(f).read()), settings)
             out = io.StringIO()
             for text in ('{"hook_event_name": "Stop", "session_id": "%s"}' % self.SID, "not json", ""):
-                with mock.patch.object(sys, "stdin", io.StringIO(text)), contextlib.redirect_stdout(out):
+                with mock.patch.object(sys, "stdin", io.StringIO(text)), contextlib.redirect_stdout(out), \
+                        mock.patch.object(core, "agent_process", lambda: (None, None)):
                     self.assertEqual(cli.run(["activity"]), 0)  # never fails the session, prints nothing
             self.assertEqual(out.getvalue(), "")
         self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w'").fetchone()[0], "Stop")
+
+    def test_a_turn_end_that_waits_on_its_own_background_work_alerts_nobody(self):
+        """#4293: build-loop-513a ended its turn to wait on its background gate run, and the manager heard that it
+        stands still. The Stop hook's input lists the background work that will wake the session."""
+        gate = [{"id": "b1", "type": "local_bash", "status": "running", "description": "gate",
+                 "command": "make  check-all-once"}]
+        self.assertIsNone(self.event("Stop", background_tasks=gate, session_crons=[])["alert"])
+        waits = lambda: self.c.execute("SELECT activity_waits FROM agents WHERE name='w'").fetchone()[0]  # noqa: E731
+        self.assertEqual(json.loads(waits()), ["local_bash: make check-all-once"])
+        self.event("Notification", notification_type="idle_prompt", message="waiting")  # keeps what it waits on
+        self.assertIsNotNone(waits())
+        # The silence watch waits too, for at most busy_max.
+        self.clock[0] += core.timedelta(minutes=30)
+        self.assertEqual(core.activity_watch(self.c), [])
+        self.clock[0] += core.timedelta(hours=4)
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name='boss'", (core.iso(core.now()),))  # still active
+        self.assertEqual(core.activity_watch(self.c), ["w"])
+        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        # The command ends and wakes the session: it works, then ends its turn with nothing in flight.
+        self.event("UserPromptSubmit")
+        self.assertIsNone(waits())
+        done = [{**gate[0], "status": "completed"}]
+        self.assertIsNotNone(self.event("Stop", background_tasks=done, session_crons=[])["alert"])
+        self.assertIn("it ended its turn while it holds", self.alerts()[-1])
+        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        # A background subagent and a wakeup count too.
+        sub = [{"id": "a1", "type": "local_agent", "status": "running", "agent_type": "Explore", "description": "x"}]
+        self.assertIsNone(self.event("Stop", background_tasks=sub)["alert"])
+        self.assertIsNone(self.event("Stop", background_tasks=[], session_crons=[
+            {"id": "c1", "schedule": "*/5 * * * *", "recurring": True, "prompt": "go"}])["alert"])
+        self.assertEqual(json.loads(waits()), ["wakeup */5 * * * *"])
+
+    def test_an_older_claude_code_looks_at_the_processes_without_the_hook_itself(self):
+        """Without background_tasks in the Stop input: a process below the session that started after its last
+        maxpm command, but not the hook that asks (busy_now skip)."""
+        self.c.execute("UPDATE agents SET pid=100, host=? WHERE name='w'", (core.this_host(),))
+        procs = ["100 1 10:00", f"{os.getppid()} 100 0:00", f"{os.getpid()} {os.getppid()} 0:00"]
+        old = core.PROC_RUNNER
+        self.addCleanup(setattr, core, "PROC_RUNNER", old)
+        core.PROC_RUNNER = lambda: "\n".join(procs) + "\n"
+        self.clock[0] += core.timedelta(seconds=30)
+        self.assertIsNotNone(self.event("Stop")["alert"])  # only the hook runs below it
+        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        procs.append("555 100 0:05")  # a command it started in the background
+        self.assertIsNone(self.event("Stop")["alert"])
+        self.assertEqual(json.loads(self.c.execute("SELECT activity_waits FROM agents WHERE name='w'").fetchone()[0]),
+                         ["a process"])
+
+    def test_the_hook_records_the_session_process_that_a_sandbox_hides(self):
+        """A sandbox blocks ps for the agent's own commands, so agents.pid stays empty; the hook runs outside it."""
+        import contextlib
+        import io
+        from unittest import mock
+        from river import cli
+        calls = []
+
+        def found():
+            calls.append(1)
+            return 4242, "claude --name w"
+        stop = '{"hook_event_name": "Stop", "session_id": "%s"}' % self.SID
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), mock.patch.object(core, "agent_process", found), \
+                mock.patch.object(core, "pid_alive", lambda pid: pid == 4242), contextlib.redirect_stdout(io.StringIO()):
+            for text in ('{"hook_event_name": "PostToolUse", "session_id": "%s"}' % self.SID, stop, stop):
+                with mock.patch.object(sys, "stdin", io.StringIO(text)):
+                    cli.run(["activity"])
+        row = self.c.execute("SELECT pid, pid_cmd, host FROM agents WHERE name='w'").fetchone()
+        self.assertEqual((row["pid"], row["pid_cmd"], row["host"]), (4242, "claude --name w", core.this_host()))
+        self.assertEqual(len(calls), 1)  # not on a tool call, and not again while that process runs
 
 
 class ManagerWake(Base):

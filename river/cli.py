@@ -1316,10 +1316,25 @@ def activity_command(stdin=None):
         payload = json.loads((stdin or sys.stdin).read() or "{}")
         conn = core.connect()
         conn.execute("PRAGMA busy_timeout=2000")
-        core.activity_event(conn, payload if isinstance(payload, dict) else {})
+        res = core.activity_event(conn, payload if isinstance(payload, dict) else {})
+        if res["event"] in ("UserPromptSubmit", "Stop"):
+            _record_hook_process(conn, res["agent"])
     except Exception:  # noqa: BLE001 - a hook must never fail the session
         pass
     return 0
+
+
+def _record_hook_process(conn, name):
+    """A hook runs outside the agent's sandbox, where ps works: record the agent CLI process when the agent's own
+    commands could not (a sandbox blocks ps, so agents.pid stays empty, #4293). maxpm serve then sees the commands
+    that run below the session (busy_now) and keeps its leases. Only at a prompt or a turn end, and only when no
+    live process of this host is recorded: the tool calls stay fast."""
+    r = name and conn.execute("SELECT pid, host FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone()
+    if not r or (r["pid"] and r["host"] == core.this_host() and core.pid_alive(r["pid"])):
+        return
+    pid, cmd = core.agent_process()
+    if pid:
+        core.set_process(conn, name, pid, cmd)
 
 
 def run(argv=None):

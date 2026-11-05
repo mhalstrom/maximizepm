@@ -131,7 +131,9 @@ Stop when the user tells you to, and tell the user what you did.
 - **An activity alert to you** ("<agent> stands still: ..."): the Claude Code
   hooks of a session that MaximizePM started say that it holds an item and
   waits on a permission prompt, ended its turn at its prompt, or reported
-  nothing for `activity_silence` (10m). The alert names the item and the
+  nothing for `activity_silence` (10m). A turn end while its own background
+  command, background subagent, or wakeup runs is no alert: that work wakes
+  it, and its next turn end counts. The alert names the item and the
   command it waits on. Look at its terminal or session. Send a prompt that
   only a person can answer to the person; else stop the agent and launch
   again. Agents reach you with `maxpm alert manager "..."` (also ask, note).

@@ -551,6 +551,7 @@ CREATE TABLE IF NOT EXISTS agents (
   activity_event  TEXT,                      -- that event (PostToolUse, Stop, Notification:permission_prompt, ...)
   activity_prompt TEXT,                      -- the tool call that waits on a permission prompt now (JSON), if any
   activity_told   TEXT,                      -- the activity_at of the last alert to the manager about it
+  activity_waits  TEXT,                      -- at its last turn end: the background work that will wake it (JSON), if any
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
   host           TEXT,
   pid_cmd        TEXT,
@@ -940,7 +941,7 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_in TEXT")
     if "watch_seen" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN watch_seen TEXT")
-    for col in ("activity_at", "activity_event", "activity_prompt", "activity_told"):
+    for col in ("activity_at", "activity_event", "activity_prompt", "activity_told", "activity_waits"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "session_url" not in acols:
@@ -5610,12 +5611,12 @@ def _process_list():
         return None
 
 
-def busy_now(conn, names=None):
+def busy_now(conn, names=None, skip=()):
     """The agents (among names; else every AI agent) in whose session a command runs now: the agent CLI process
     runs on this computer, and a process below it started after the agent's last river command (a test run, a
     build, a merge). The servers the CLI started with are older, and so is a maxpm wait, which renews last_seen
-    itself. Only within busy_max of the last river command. One ps call; an empty set with no ps (Windows, a
-    sandbox that blocks it)."""
+    itself. Only within busy_max of the last river command. The processes in skip (the hook that asks, #4293) and
+    the ones below them do not count. One ps call; an empty set with no ps (Windows, a sandbox that blocks it)."""
     limit = parse_duration(setting(conn, "busy_max"))
     t, host = now(), this_host()
     rows = [r for r in conn.execute("SELECT name, pid, last_seen FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
@@ -5645,7 +5646,7 @@ def busy_now(conn, names=None):
         todo, seen = list(below.get(r["pid"], ())), set()
         while todo:
             pid = todo.pop()
-            if pid in seen:
+            if pid in seen or pid in skip:
                 continue
             seen.add(pid)
             if started[pid] > after:
@@ -7404,6 +7405,30 @@ def _activity_alert(conn, agent, item, text):
     return _send(conn, "alert", agent, body, to=manager, item_id=item, blocked="waits")
 
 
+_TASK_ENDED = {"completed", "failed", "killed", "stopped", "cancelled", "canceled", "done", "error"}
+
+
+def _activity_waits(payload):
+    """The background work that will wake a session whose turn ended, from the Stop hook's input (Claude Code
+    2.1 and later): background_tasks (a Bash command with run_in_background, a background subagent, a monitor
+    or workflow) that has not ended, and session_crons (ScheduleWakeup, CronCreate, /loop). A list of short
+    texts ('local_bash: make check'), empty when nothing will wake it; None when the input has neither field
+    (an older Claude Code), so the caller looks at the processes instead (#4293)."""
+    tasks, crons = payload.get("background_tasks"), payload.get("session_crons")
+    if not isinstance(tasks, list) and not isinstance(crons, list):
+        return None
+    out = []
+    for t in tasks if isinstance(tasks, list) else ():
+        if not isinstance(t, dict) or str(t.get("status") or "").lower() in _TASK_ENDED:
+            continue
+        what = next((str(t[k]) for k in ("command", "agent_type", "name", "tool", "description") if t.get(k)), "")
+        out.append(f"{t.get('type') or 'task'}: {' '.join(what.split())[:120]}" if what else str(t.get("type") or "task"))
+    for c in crons if isinstance(crons, list) else ():
+        if isinstance(c, dict):
+            out.append(f"wakeup {c.get('schedule') or ''}".strip())
+    return out
+
+
 def _activity_item(conn, agent):
     return conn.execute("SELECT id, title FROM items WHERE assignee=? AND status='in_progress' ORDER BY id",
                         (agent,)).fetchone()
@@ -7414,7 +7439,9 @@ def activity_event(conn, payload, env=None):
     for a PermissionRequest the tool call that waits (activity_prompt; a tool call or a prompt clears it). A
     permission prompt that shows, or a turn that ends, while the agent holds an item alerts the active manager
     at once (_activity_alert): not a turn end while the agent waits on a person's answer (maxpm ask), has a stop
-    request, or runs a background command. Returns {"agent", "event", "alert": message id or None}."""
+    request, or waits on its own background work (_activity_waits: a background command or subagent, a wakeup;
+    recorded in activity_waits until its next tool call or prompt, #4293). That work wakes the session, and its
+    next turn end is judged again. Returns {"agent", "event", "alert": message id or None}."""
     env = env if env is not None else os.environ
     ev = str(payload.get("hook_event_name") or "")
     agent = activity_agent(conn, payload.get("session_id"), env)
@@ -7424,16 +7451,21 @@ def activity_event(conn, payload, env=None):
     ntype = str(payload.get("notification_type") or "")
     t, alert = iso(now()), None
     with tx(conn):
-        a = conn.execute("SELECT activity_prompt, stop_at FROM agents WHERE name=?", (agent,)).fetchone()
-        prompt = a["activity_prompt"]
+        a = conn.execute("SELECT activity_prompt, activity_waits, stop_at FROM agents WHERE name=?", (agent,)).fetchone()
+        prompt, waits = a["activity_prompt"], a["activity_waits"]
         if ev == "PermissionRequest":
             inp = payload.get("tool_input")
             inp = {k: v for k, v in inp.items() if isinstance(v, str)} if isinstance(inp, dict) else {}
             prompt = json.dumps({"tool": str(payload.get("tool_name") or ""), "input": {k: v[:400] for k, v in inp.items()}})
         elif ev in ("PostToolUse", "UserPromptSubmit"):
-            prompt = None
-        conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=? WHERE name=?",
-                     (t, ev + (f":{ntype}" if ntype else ""), prompt, agent))
+            prompt = waits = None
+        if ev == "Stop":
+            found = _activity_waits(payload)
+            if found is None:  # an older Claude Code: a process below the session, not this hook (busy_now)
+                found = ["a process"] if agent in busy_now(conn, [agent], skip={os.getpid(), os.getppid()}) else []
+            waits = json.dumps(found) if found else None
+        conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=?, activity_waits=? WHERE name=?",
+                     (t, ev + (f":{ntype}" if ntype else ""), prompt, waits, agent))
         held = _activity_item(conn, agent)
         if held and ev == "Notification" and ntype == "permission_prompt":
             call = _activity_call(prompt)
@@ -7442,8 +7474,7 @@ def activity_event(conn, payload, env=None):
                                 + (f"; it asks to run {call}" if call else "")
                                 + f" ({str(payload.get('message') or '')[:160]}). Answer it in its terminal or "
                                   f"its session, or tell the person.")
-        elif (held and ev == "Stop" and not a["stop_at"] and agent not in waits_on_person(conn, [agent])
-              and agent not in busy_now(conn, [agent])):
+        elif held and ev == "Stop" and not waits and not a["stop_at"] and agent not in waits_on_person(conn, [agent]):
             alert = _activity_alert(conn, agent, held["id"],
                                 f"it ended its turn while it holds #{held['id']} {held['title'][:80]}: it sits at its "
                                 f"prompt and runs no maxpm wait. Look at its terminal or session.")
@@ -7456,16 +7487,19 @@ def activity_watch(conn):
     """One look of maxpm serve (each pass): an agent with hooks that holds an item and reported no hook event
     and ran no maxpm command for activity_silence alerts the active manager, once for each silence. Not an agent
     in maxpm wait, one that waits on a person's answer, one with a stop request, or one that runs a background
-    command. Returns the agents it alerted about."""
+    command: one whose last turn ended while its own background work runs (activity_waits, for at most busy_max),
+    or one with a process below it (busy_now). Returns the agents it alerted about."""
     limit = parse_duration(setting(conn, "activity_silence"))
     if not limit:
         return []
     t, told = now(), []
-    rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, last_seen FROM agents "
-                                    "WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
+    bg = parse_duration(setting(conn, "busy_max"))
+    rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, activity_waits, "
+                                    "last_seen FROM agents WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
                                     "AND waiting_since IS NULL").fetchall()
             if r["activity_told"] != r["activity_at"]
-            and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit]
+            and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit
+            and not (r["activity_waits"] and t - parse_iso(r["activity_at"]) < bg)]
     if not rows:
         return []
     waiting = waits_on_person(conn, [r["name"] for r in rows])
