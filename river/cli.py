@@ -3350,6 +3350,8 @@ def render(a, res):
                 print(f"{ch['channel']}: {ch['pending']} pending, last sent {ch['last_sent'] or 'never'}"
                       + (f", last error: {ch['last_error']}" if ch["last_error"] else "")
                       + (f" ({'; '.join(notes)})" if notes else ""))
+            if res.get("hint"):
+                print(res["hint"])
         else:
             print(f"{res['channel']}: " + ("test sent" if res["ok"] else f"failed: {res['error']}"))
         return

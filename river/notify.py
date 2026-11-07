@@ -150,10 +150,36 @@ def _mac_channel(conn):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             raise OSError(f"{Path(cmd[0]).name} exited {r.returncode}: {r.stderr.strip()[:200]}")
+        hint = None if notifier else mac_hint()
+        if hint:
+            # stderr: maxpm notify test shows it, maxpm serve logs it, and --json output stays clean
+            try:
+                print(f"maxpm notify: {hint}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
     return send
 
 
 register_channel("mac", _mac_channel)
+
+MAC_HINT = "On macOS, brew install terminal-notifier makes a click on a notice open the page."
+
+
+def mac_hint():
+    """The terminal-notifier hint, one time per machine: only on macOS without terminal-notifier on PATH.
+    A marker file beside the queue database records that it was shown."""
+    import shutil
+    import sys
+    if sys.platform != "darwin" or shutil.which("terminal-notifier"):
+        return None
+    marker = Path(core.db_path()).with_name("mac-hint-shown")
+    if marker.exists():
+        return None
+    try:
+        marker.write_text(core.iso(core.now()) + "\n")
+    except OSError:
+        return None  # without a marker it would show on every notice; stay quiet instead
+    return MAC_HINT
 
 
 def setup_ntfy(conn, url=None, token=None, actor=None):
@@ -279,7 +305,8 @@ def status(conn):
             "last_error": err["last_error"] if err else None,
         })
     return {"channels": out, "interval": core.setting(conn, "notify_interval"),
-            "batch_window": core.setting(conn, "notify_batch_window")}
+            "batch_window": core.setting(conn, "notify_batch_window"),
+            "hint": mac_hint() if "mac" in configured else None}
 
 
 def _say(text):

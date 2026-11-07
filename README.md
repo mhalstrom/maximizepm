@@ -111,6 +111,10 @@ them instead). The queue database is one file per user, `~/.maximizepm/maxpm.db`
 `MAXPM_DB` to use another file. `maxpm db path` shows the file in use. If your
 agents run in a sandbox, allow them to write to `~/.maximizepm`.
 
+On macOS, `brew install terminal-notifier` (optional) makes a click on a Mac
+notice open the session's page. Without it MaximizePM uses osascript, and a
+click on the notice opens Script Editor; the link shows only as text.
+
 
 ## Desktop app
 
@@ -658,7 +662,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   every command.
 - Needs you (`maxpm needs-you`): one list of what waits on a person, most
   important first, with notifications by phone (ntfy), email (SMTP), macOS
-  banner, and browser. `maxpm notify setup ntfy` makes a secret topic and
+  banner (a click opens the page with terminal-notifier), and browser. `maxpm notify setup ntfy` makes a secret topic and
   prints the phone steps; `maxpm notify test <channel>` and `maxpm notify
   status` check a channel. The running `maxpm serve` sends them (or
   `maxpm notify run`). Phone notifications go out at ntfy priority `high`

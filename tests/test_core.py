@@ -2332,8 +2332,14 @@ class Email(Base):
 
 
 class Mac(Base):
-    def run_mac(self, notifier, returncode=0):
-        from unittest import mock
+    def setUp(self):
+        super().setUp()
+        # The hint marker sits beside the queue database: keep it in this test's folder.
+        p = mock.patch.dict(os.environ, {"MAXPM_DB": self.path})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def run_mac(self, notifier, returncode=0, err=None):
         from river import notify
         seen = []
 
@@ -2345,9 +2351,42 @@ class Mac(Base):
             return Done()
 
         with mock.patch("sys.platform", "darwin"), mock.patch("shutil.which", lambda name: notifier), \
-                mock.patch("subprocess.run", fake_run):
+                mock.patch("subprocess.run", fake_run), contextlib.redirect_stderr(err or io.StringIO()):
             notify.ADAPTERS["mac"](self.c)('Say "yes"', "#3 sign", "http://127.0.0.1:8765/#item-3")
         return seen[0]
+
+    def test_osascript_hint_shows_once(self):
+        from river import notify
+        first, second = io.StringIO(), io.StringIO()
+        self.run_mac(None, err=first)
+        self.run_mac(None, err=second)
+        self.assertIn(notify.MAC_HINT, first.getvalue())
+        self.assertEqual(second.getvalue(), "")
+        self.assertTrue(os.path.exists(os.path.join(self.dir.name, "mac-hint-shown")))
+        core.config_set(self.c, "notify_channels", "mac")
+        with mock.patch("sys.platform", "darwin"), mock.patch("shutil.which", lambda name: None):
+            self.assertIsNone(notify.status(self.c)["hint"])
+
+    def test_status_shows_the_hint_first(self):
+        from river import notify
+        core.config_set(self.c, "notify_channels", "mac")
+        with mock.patch("sys.platform", "darwin"), mock.patch("shutil.which", lambda name: None):
+            self.assertEqual(notify.status(self.c)["hint"], notify.MAC_HINT)
+            self.assertIsNone(notify.status(self.c)["hint"])
+        err = io.StringIO()
+        self.run_mac(None, err=err)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_terminal_notifier_never_hints(self):
+        from river import notify
+        err = io.StringIO()
+        self.run_mac("/opt/homebrew/bin/terminal-notifier", err=err)
+        self.assertEqual(err.getvalue(), "")
+        core.config_set(self.c, "notify_channels", "mac")
+        with mock.patch("sys.platform", "darwin"), \
+                mock.patch("shutil.which", lambda name: "/opt/homebrew/bin/terminal-notifier"):
+            self.assertIsNone(notify.status(self.c)["hint"])
+        self.assertFalse(os.path.exists(os.path.join(self.dir.name, "mac-hint-shown")))
 
     def test_osascript_passes_texts_as_arguments(self):
         cmd = self.run_mac(None)
