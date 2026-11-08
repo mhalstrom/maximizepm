@@ -17,7 +17,27 @@ env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
   CSC_IDENTITY_AUTO_DISCOVERY: "false"
 jobs:
+  # Before the release builds (#4636): the unit tests, and the wheel builds, installs and runs. The desktop smoke
+  # test (maxpm serve starts and stops) runs in the mac and windows jobs before their build step.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Tests (standard library only)
+        run: python -m unittest discover -s tests -t . -v
+      - name: Wheel builds and runs
+        run: |
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist .
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install --quiet dist/*.whl
+          MAXPM_DB=/tmp/q.db /tmp/v/bin/maxpm guide | head -1
+          MAXPM_DB=/tmp/q.db /tmp/v/bin/maxpm project add demo
   mac:
+    needs: checks
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -92,6 +112,7 @@ jobs:
               .catch((e) => { console.error(e.message); process.exit(1); });' "$app/Contents/Resources/river-app"
           hdiutil detach "$RUNNER_TEMP/app"
   windows:
+    needs: checks
     runs-on: windows-latest
     defaults:
       run:
