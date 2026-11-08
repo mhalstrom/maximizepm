@@ -9,6 +9,7 @@
 import { $, esc, ago, clip, store, toast, typeAction } from "../lib.js";
 import { chip } from "./chip.js";
 import { appendEntries, wireCopy } from "./chat.js";
+import { openTerminal } from "./terminalDialog.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p" };
 const PICKED = "river.session";  // the session the person chose last
@@ -18,9 +19,19 @@ function stateChip(s) {
     ? "A permission prompt waits in its terminal or session: answer it there" : null);
 }
 
-function openButton(s) {
-  if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code to type in it">Open</a>`;
-  return `<span class="muted sl-noopen" title="${s.agent_type === "codex" ? "Codex sessions have no web link: type in its terminal" : "This session has no Remote Control link: type in its terminal"}">no web link</span>`;
+// The header of the chosen session (#4608): Open session (its claude.ai/code page; else its tmux pane in the
+// terminal view; else off, with why), and the item it works on, which opens in the drawer.
+function headerOpen(s) {
+  if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code">Open session</a>`;
+  if (s.terminal) return `<button class="btn" type="button" data-term="${esc(s.name)}" title="Open its tmux pane in the terminal view">Open session</button>`;
+  const why = s.agent_type === "codex" ? "A Codex session has no web link, and this one runs in no tmux pane here" : "This session has no Remote Control link and runs in no tmux pane here";
+  return `<button class="btn" type="button" disabled title="${esc(why)}">Open session</button><span class="muted sess-noopen">${esc(why)}</span>`;
+}
+function headerItem(s) {
+  if (s.holds && s.holds.length) return s.holds.map(h => `<button class="btn sess-itembtn" type="button" data-open="${h.id}" title="Open #${h.id} in the drawer: its notes, what it waits on, and what it unblocks">`
+    + `#${h.id} ${esc(clip(h.title, 110))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}</button>`).join(" ");
+  if (s.owns && s.owns.length) return `<span class="muted">No item · owns target ${s.owns.map(esc).join(", ")}</span>`;
+  return `<span class="muted">No item</span>`;
 }
 
 function itemHtml(s, n) {
@@ -115,9 +126,9 @@ export function makeSessions({ isShown }) {
       const s = list.find(x => x.name === agent) || {};
       $("#sessState").innerHTML = stateChip(j);
       waitLine(j);
-      $("#sessItem").innerHTML = s.holds ? itemHtml(s, 120) : "";
+      $("#sessItem").innerHTML = s.name ? headerItem(s) : "";
       barFor(j.terminal, s);
-      $("#sessOpen").innerHTML = openButton({ ...s, session_url: j.session_url });
+      $("#sessOpen").innerHTML = headerOpen({ ...s, session_url: j.session_url, terminal: j.terminal });
       if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
     } catch (e) { /* the next poll tries again */ }
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
@@ -183,6 +194,9 @@ export function makeSessions({ isShown }) {
       }
     } catch (err) { toast(err.message, true); ok = !/tmux pane/.test(err.message); }
     finally { if (!input.disabled) { btn.disabled = false; input.focus(); } if (!ok) barFor(false); }
+  });
+  $("#sessOpen").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
   });
   side.addEventListener("click", (e) => {
     if (e.target.closest("[data-open], a")) return;  // an item link opens the drawer

@@ -318,7 +318,7 @@ def views(conn, terminals=None, root=None, croot=None):
             conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
         card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "name": a["name"], "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"),
-                "holds": [{"id": h["id"], "title": h["title"]} for h in a["holds"]],
+                "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,
                 "session_url": a.get("session_url"), "terminal": bool((terminals or {}).get(a["name"])),
                 "transcript": kind if path else None, "last": tail["entries"],
