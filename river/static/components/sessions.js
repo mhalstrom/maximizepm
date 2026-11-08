@@ -37,6 +37,11 @@ function headerItem(s) {
   return `<span class="muted">No item</span>`;
 }
 
+// The chat provider of a session (#4627): a small label from the server's provider table.
+function provTag(p) {
+  return p ? `<span class="prov prov-${esc(p.id)}" title="Runs in ${esc(p.label)}">${esc(p.label)}</span>` : "";
+}
+
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
 function waitBadge(s) {
   const n = (s.waiting || []).length;
@@ -54,7 +59,7 @@ export function sessionRow(s) {
     : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + s.owns.join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(s.owns.join(", ")) : "No item"}</span></div>`;
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
     <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
-      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}<b>${esc(s.name)}</b><span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
+      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}<b>${esc(s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
       <div class="sub">${esc(clip(lastText, 90))}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
     </div>
     ${item}
@@ -162,7 +167,7 @@ export function makeSessions({ isShown }) {
       agePending(col);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
-      $("#sessState").innerHTML = stateChip(j);
+      $("#sessState").innerHTML = provTag(j.provider) + stateChip(j);
       waitLine(j);
       $("#sessItem").innerHTML = s.name ? headerItem(s) : "";
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });

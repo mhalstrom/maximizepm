@@ -475,3 +475,8 @@ button.srow-it { cursor: pointer; }
 .art-btns .btn { font-size: 12px; }
 .art-btns a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; color: var(--ink); text-decoration: none; }
 @media (max-width: 700px) { .art-row { flex-direction: column; align-items: flex-start; } }
+/* The chat provider of a session (#4627). */
+.prov { flex: none; font-size: 10.5px; font-weight: 600; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted); white-space: nowrap; }
+.prov-codex { color: var(--ready); border-color: var(--ready); }
+.prov-claude-code { color: var(--prog); border-color: var(--prog); }
+#sessState .prov { margin-right: 6px; }

@@ -185,6 +185,9 @@ class Sessions(Base):
         self.assertEqual([(e["role"], e["text"]) for e in card["last"]],
                          [("user", "Fix the footer"), ("tool", "shell: git status"), ("assistant", "Fixed.")])
         self.assertEqual((card["state"], card["session_url"], card["transcript"]), ("idle", None, "codex"))
+        self.assertEqual(card["provider"], {"id": "codex", "label": "Codex"})  # #4627
+        self.assertEqual(sessions.provider(None, "claude"), {"id": "claude-code", "label": "Claude Code"})
+        self.assertIsNone(sessions.provider(None, None))
         if sessions._zstd():  # Codex compresses a log when the session ends
             log.unlink()
             Path(str(log) + ".zst").write_bytes(sessions._zstd().compress(text.encode()))

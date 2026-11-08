@@ -25,6 +25,17 @@ DETAIL_MAX = 4000         # a tool call's input, and its result, when the page o
 PREVIEW = 4               # the lines a card shows
 ADOPT_QUIET = 120         # tmux_adopt: a session moves into tmux after its turn ended and it wrote nothing this long
 PLATFORMS = {"claude": "claude-code", "codex": "codex"}
+# The chat providers the Sessions tab knows (#4627): the label each session shows. A new provider is one more row
+# here (#4625 adds its settings); the page draws what it gets.
+PROVIDERS = {"claude-code": {"label": "Claude Code"}, "codex": {"label": "Codex"}}
+
+
+def provider(agent_type, kind=None):
+    """{id, label} of a session's chat provider: its agent type, else the kind of its transcript."""
+    pid = agent_type or PLATFORMS.get(kind or "")
+    if not pid:
+        return None
+    return {"id": pid, "label": PROVIDERS.get(pid, {}).get("label") or pid}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
           "stopping": "asked to stop", "starting": "not connected yet: it ran no maxpm command",
           "ended": "ended before its first maxpm command"}
@@ -362,7 +373,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
             label = STATES[key]
         adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
             conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
-        card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]},
+        card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "provider": provider(a.get("agent_type"), kind),
                 "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"]))), "name": a["name"], "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"),
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
@@ -409,7 +420,8 @@ def view(conn, agent, cursor=None, root=None, croot=None):
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
     key, label = state(conn, a, turn)
-    return {"agent": agent, "transcript": kind, "entries": got["entries"], "cursor": got["cursor"],
+    return {"agent": agent, "transcript": kind, "provider": provider(a.get("agent_type"), kind),
+            "entries": got["entries"], "cursor": got["cursor"],
             "refs": item_refs(conn, got["entries"]),
             "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url")}
 
