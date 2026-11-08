@@ -310,32 +310,39 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup .mark.opt { color: var(--muted); }
 #setup details.more { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #setup details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
-/* Sessions tab (#4592): a grid of running sessions, and the large view of one. */
-.sgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 12px; }
-.scard { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--bg); cursor: pointer; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.scard:hover, .scard:focus { border-color: var(--accent); outline: none; }
-.scard-h { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.scard-h b { overflow-wrap: anywhere; }
-.scard-h .spacer { flex: 1; }
-.scard-item { font-size: 13px; overflow-wrap: anywhere; }
-.scard .sub { color: var(--muted); font-size: 12px; }
-.scard-lines { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 6px; font-size: 12px; }
-.sl { display: flex; gap: 8px; padding: 2px 0; min-width: 0; }
+/* Sessions tab (#4592, #4597): the running sessions in a left bar, the chosen one on the right. */
+.sess-layout { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 16px; min-height: 320px; }
+.sess-layout > .panel { margin-bottom: 0; min-height: 0; display: flex; flex-direction: column; }
+.sess-side .slist { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.sess-note { font-size: 12px; margin-top: 8px; }
+.srow { border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 8px; padding: 7px 9px; background: var(--bg); cursor: pointer; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.srow:hover, .srow:focus { border-color: var(--accent); outline: none; }
+.srow.on { border-color: var(--accent); background: var(--panel); box-shadow: inset 0 0 0 1px var(--accent); }
+.srow.needs { border-left-color: var(--warn); }
+.srow-h { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.srow-h b { overflow-wrap: anywhere; font-size: 13px; }
+.srow-h .spacer, .sess-head .spacer { flex: 1; }
+.srow-item { font-size: 12px; overflow-wrap: anywhere; }
+.srow .sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sess-head h2 { margin: 0; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.sess-item { font-size: 13px; margin: 4px 0 8px; overflow-wrap: anywhere; }
+.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; font-size: 13px; padding-right: 4px; border-top: 1px solid var(--line); }
+.sess-main .sbar { display: flex; gap: 8px; margin-top: 10px; }
+.sess-main .sbar.hidden, .sess-main.hidden { display: none; }
+.sess-main .sbar input { flex: 1; min-width: 0; }
+.sl { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); min-width: 0; }
 .sl-who { flex: 0 0 48px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; padding-top: 1px; }
 .sl-text { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.scard .sl-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sl-tool .sl-text { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
 .sl-user .sl-who { color: var(--human); }
 .sl-assistant .sl-who { color: var(--accent); }
 .sl-event .sl-text { color: var(--muted); font-style: italic; }
-.sl-noopen { font-size: 12px; }
-.scard a.btn, #sessDlg a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; color: var(--ink); text-decoration: none; display: inline-block; font-size: 13px; }
-#sessDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; justify-content: center; padding: 3vh 12px; }
-#sessDlg.hidden { display: none; }
-#sessDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(1000px, 100%); height: 100%; display: flex; flex-direction: column; padding: 14px 16px; }
-#sessDlg .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; font-size: 13px; padding-right: 4px; }
-#sessDlg .sl { padding: 4px 0; border-bottom: 1px solid var(--line); }
-#sessDlg .sbar { display: flex; gap: 8px; margin-top: 10px; }
-#sessDlg .sbar.hidden { display: none; }
-#sessDlg .sbar input { flex: 1; min-width: 0; }
 .sl-sent .sl-text { opacity: .7; }
+.sl-noopen { font-size: 12px; }
+.sess-head a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; color: var(--ink); text-decoration: none; display: inline-block; font-size: 13px; }
+@media (max-width: 759px) {
+  .sess-layout { grid-template-columns: minmax(0, 1fr); }
+  .sess-side .slist { flex: none; max-height: 40vh; }
+  .sess-main { height: 75vh; }
+}

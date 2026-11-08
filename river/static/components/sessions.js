@@ -1,16 +1,16 @@
-// The Sessions tab: one card per running agent session (Claude Code and Codex), with its agent, item, state and
-// its last lines, read again every few seconds while the tab shows. A click on a card opens the large view: the
-// session's transcript, with new lines added as the session writes them. A person types in the session through
-// Open (its claude.ai/code link), or, for a session in a tmux pane, the text bar below the large view (#4596): the
-// text goes to the pane, then Enter. MaximizePM types nothing by itself (#4592).
+// The Sessions tab: a list of the running agent sessions (Claude Code and Codex) in a left bar, one row each with
+// its agent, item and state, read again every few seconds while the tab shows; and the selected session on the
+// right: its transcript, with new lines added as the session writes them (#4597, in place of the cards of #4592).
+// A person types in the session through Open (its claude.ai/code link), or, for a session in a tmux pane, the
+// text bar below the view (#4596): the text goes to the pane, then Enter. MaximizePM types nothing by itself.
 // Server: GET /api/sessions, GET /api/session?agent=<name>&cursor=<byte>, and the op session_send (with the
 // page's token: typeAction).
-import { $, esc, ago, clip, toast, typeAction } from "../lib.js";
+import { $, esc, ago, clip, store, toast, typeAction } from "../lib.js";
 import { chip } from "./chip.js";
-import { makeDialog } from "./dialog.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p" };
 const ROLE_LABEL = { user: "person", assistant: "agent", tool: "tool", event: "event" };
+const PICKED = "river.session";  // the session the person chose last
 
 function stateChip(s) {
   return chip(STATE_CHIP[s.state] || "c-p", esc(s.state_label), s.state === "prompt"
@@ -28,47 +28,58 @@ function openButton(s) {
   return `<span class="muted sl-noopen" title="${s.agent_type === "codex" ? "Codex sessions have no web link: type in its terminal" : "This session has no Remote Control link: type in its terminal"}">no web link</span>`;
 }
 
-export function sessionCard(s) {
-  const item = s.holds.length ? s.holds.map(h => `<span class="link" data-open="${h.id}">#${h.id} ${esc(clip(h.title, 90))}</span>`).join(" ")
+function itemHtml(s, n) {
+  return s.holds.length ? s.holds.map(h => `<span class="link" data-open="${h.id}">#${h.id} ${esc(clip(h.title, n))}</span>`).join(" ")
     : s.owns.length ? `owns target ${s.owns.map(esc).join(", ")}` : `<span class="muted">${esc(s.role || "no item")}</span>`;
-  const meta = [s.agent_type, s.model, s.also.length ? "also: " + s.also.join(", ") : ""].filter(Boolean).map(esc).join(" · ");
-  const lines = s.last.length ? s.last.map(e => lineHtml(e, false)).join("")
-    : `<div class="muted sl-none">${s.transcript ? "No lines yet." : "No transcript of this session on this computer."}</div>`;
-  return `<div class="scard" data-session="${esc(s.name)}" tabindex="0" title="Click to see the whole session">
-    <div class="scard-h"><b>${esc(s.name)}</b>${stateChip(s)}<span class="spacer"></span>${openButton(s)}</div>
-    <div class="scard-item">${item}</div>
-    <div class="sub">${meta}${s.at ? ` · last line <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
-    <div class="scard-lines">${lines}</div>
+}
+
+// One row of the left bar. A session that waits at a prompt or for an answer stands out (class "needs").
+export function sessionRow(s) {
+  const last = s.last.length ? s.last[s.last.length - 1] : null;
+  return `<div class="srow${["prompt", "answer"].includes(s.state) ? " needs" : ""}" data-session="${esc(s.name)}" tabindex="0" role="button" title="Show this session">
+    <div class="srow-h"><b>${esc(s.name)}</b><span class="spacer"></span>${stateChip(s)}</div>
+    <div class="srow-item">${itemHtml(s, 70)}</div>
+    <div class="sub">${last ? esc(clip(last.text.split("\n")[0], 80)) : ""}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
   </div>`;
 }
 
-// Replace only the cards whose data changed, so a card keeps its hover, focus and selected text between reads.
-function renderGrid(grid, list) {
-  const cards = [...grid.querySelectorAll("[data-session]")];
+// Replace only the rows whose data changed, so a row keeps its hover and focus between reads.
+function renderList(el, list, picked) {
+  const rows = [...el.querySelectorAll("[data-session]")];
   if (!list.length) {
-    grid.innerHTML = `<div class="muted">No agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`;
+    el.innerHTML = `<div class="muted">No agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`;
     return;
   }
   const sigs = list.map(s => JSON.stringify(s));
-  if (cards.length !== list.length || cards.some((c, i) => c.dataset.session !== list[i].name)) {
-    grid.innerHTML = list.map(sessionCard).join("");
-    [...grid.children].forEach((c, i) => { c.dataset.sig = sigs[i]; });
-    return;
+  if (rows.length !== list.length || rows.some((r, i) => r.dataset.session !== list[i].name)) {
+    el.innerHTML = list.map(sessionRow).join("");
+    [...el.children].forEach((r, i) => { r.dataset.sig = sigs[i]; });
+  } else {
+    rows.forEach((r, i) => {
+      if (r.dataset.sig === sigs[i]) return;
+      const t = document.createElement("template");
+      t.innerHTML = sessionRow(list[i]).trim();
+      t.content.firstChild.dataset.sig = sigs[i];
+      r.replaceWith(t.content.firstChild);
+    });
   }
-  cards.forEach((c, i) => {
-    if (c.dataset.sig === sigs[i]) return;
-    const t = document.createElement("template");
-    t.innerHTML = sessionCard(list[i]).trim();
-    t.content.firstChild.dataset.sig = sigs[i];
-    c.replaceWith(t.content.firstChild);
-  });
-  grid.querySelectorAll(".sago").forEach(x => { x.textContent = ago(x.dataset.at); });
+  el.querySelectorAll(".sago").forEach(x => { x.textContent = ago(x.dataset.at); });
+  el.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === picked));
 }
 
 export function makeSessions({ isShown }) {
   let list = [], busy = false;
-  const grid = $("#sessions");
-  const render = () => renderGrid(grid, list);
+  let agent = null, cursor = null, timer = null, gen = 0;
+  const side = $("#sessions"), body = $("#sessBody"), main = $("#sessMain");
+
+  // The tab fills the window below the header; the view scrolls inside it, so the text bar stays in sight.
+  function fit() {
+    const lay = $("#sessLayout");
+    if (!isShown() || window.innerWidth < 760) return lay.style.removeProperty("height");
+    lay.style.height = Math.max(320, window.innerHeight - lay.getBoundingClientRect().top - 16) + "px";
+  }
+  window.addEventListener("resize", fit);
+
   async function refresh() {
     if (busy || document.hidden || !isShown()) return;
     busy = true;
@@ -77,48 +88,57 @@ export function makeSessions({ isShown }) {
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "failed");
       list = j.sessions;
-      render();
+      // At load: the session chosen last, else the first. A session that ended gives way to the first.
+      if (!list.some(s => s.name === agent)) {
+        const want = store(PICKED);
+        pick((list.find(s => s.name === want) || list[0] || {}).name || null, false);
+      }
+      renderList(side, list, agent);
+      fit();
     } catch (e) {
-      grid.innerHTML = `<div class="muted">Could not read the sessions: ${esc(e.message)}</div>`;
+      side.innerHTML = `<div class="muted">Could not read the sessions: ${esc(e.message)}</div>`;
     } finally { busy = false; }
   }
 
-  // The large view of one session.
-  const dlg = makeDialog($("#sessDlg"), { onClose: () => { agent = null; clearTimeout(timer); } });
-  const body = $("#sessBody");
-  let agent = null, cursor = null, timer = null, gen = 0;
   async function poll() {
     const mine = gen;
     clearTimeout(timer);
     if (!agent) return;
+    if (document.hidden || !isShown()) { timer = setTimeout(poll, 3000); return; }
     try {
       const r = await fetch(`api/session?agent=${encodeURIComponent(agent)}${cursor != null ? "&cursor=" + cursor : ""}`);
       const j = await r.json();
       if (mine !== gen) return;
-      if (!r.ok) { body.innerHTML = `<div class="muted">${esc(j.error || "failed")}</div>`; return; }
+      if (!r.ok) { body.innerHTML = `<div class="muted">${esc(j.error || "failed")}</div>`; timer = setTimeout(poll, 10000); return; }
       const first = cursor == null, atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
       if (first) body.innerHTML = j.entries.length ? "" : `<div class="muted sl-none">${esc(j.note || "No lines yet.")}</div>`;
       else if (j.entries.length) body.querySelector(".sl-none")?.remove();
       body.insertAdjacentHTML("beforeend", j.entries.map(e => lineHtml(e, true)).join(""));
       cursor = j.cursor;
+      const s = list.find(x => x.name === agent) || {};
       $("#sessState").innerHTML = stateChip(j);
+      $("#sessItem").innerHTML = s.holds ? itemHtml(s, 120) : "";
       $("#sessBar").classList.toggle("hidden", !j.terminal);
-      $("#sessOpen").innerHTML = openButton({ ...(list.find(s => s.name === agent) || {}), session_url: j.session_url });
+      $("#sessOpen").innerHTML = openButton({ ...s, session_url: j.session_url });
       if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
     } catch (e) { /* the next poll tries again */ }
-    if (mine === gen && agent && !document.hidden) timer = setTimeout(poll, 2000);
-    else if (mine === gen && agent) timer = setTimeout(poll, 10000);
+    if (mine === gen && agent) timer = setTimeout(poll, 2000);
   }
-  function open(name) {
+
+  function pick(name, remember = true) {
+    if (remember && name) store(PICKED, name);
+    if (name === agent) return;
     agent = name; cursor = null; gen++;
-    $("#sessTitle").textContent = name;
-    $("#sessState").innerHTML = ""; $("#sessOpen").innerHTML = ""; $("#sessText").value = "";
+    main.classList.toggle("hidden", !name);
+    $("#sessTitle").textContent = name || "";
+    $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
+    $("#sessText").value = "";
     $("#sessBar").classList.add("hidden");
     body.innerHTML = `<div class="muted sl-none">Reading the transcript…</div>`;
-    dlg.open(); $("#sessClose").focus();
+    side.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
-  $("#sessClose").onclick = () => dlg.close();
+
   // The text bar: the person's text goes to the session's tmux pane. It shows at once as the person's turn; the
   // transcript has it too when the session reads it as a prompt.
   $("#sessBar").addEventListener("submit", async (e) => {
@@ -137,17 +157,14 @@ export function makeSessions({ isShown }) {
     } catch (err) { toast(err.message, true); }
     finally { btn.disabled = false; input.focus(); }
   });
-  $("#sessDlg").addEventListener("click", (e) => {
-    if (e.target === e.currentTarget) return dlg.close();
-    if (e.target.closest("[data-open]")) dlg.close();  // the item opens in the drawer
+  side.addEventListener("click", (e) => {
+    if (e.target.closest("[data-open], a")) return;  // an item link opens the drawer
+    const r = e.target.closest("[data-session]"); if (r) pick(r.dataset.session);
   });
-  grid.addEventListener("click", (e) => {
-    if (e.target.closest("[data-open], a")) return;
-    const c = e.target.closest("[data-session]"); if (c) open(c.dataset.session);
-  });
-  grid.addEventListener("keydown", (e) => {
-    const c = e.key === "Enter" && e.target.closest("[data-session]"); if (c) open(c.dataset.session);
+  side.addEventListener("keydown", (e) => {
+    const r = (e.key === "Enter" || e.key === " ") && e.target.closest("[data-session]");
+    if (r) { e.preventDefault(); pick(r.dataset.session); }
   });
   setInterval(refresh, 3000);
-  return { refresh, open };
+  return { refresh: () => { refresh(); fit(); }, pick };
 }

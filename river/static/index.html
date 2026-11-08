@@ -139,9 +139,24 @@
   </section>
 
   <section id="tab-sessions" class="hidden">
-    <div class="panel"><h2>Running sessions</h2>
-      <div class="muted" style="font-size:12px;margin-bottom:8px">Each agent session that runs now, with its last lines, read from its transcript on this computer. Click a card to follow the whole session. To type in a session, use Open (its claude.ai/code page), or the text bar of a session that runs in a tmux pane.</div>
-      <div id="sessions" class="sgrid"></div>
+    <div class="sess-layout" id="sessLayout">
+      <aside class="panel sess-side" aria-label="Running sessions">
+        <h2>Running sessions</h2>
+        <div id="sessions" class="slist"></div>
+        <div class="muted sess-note">Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the text bar of a session that runs in a tmux pane.</div>
+      </aside>
+      <div class="panel sess-main hidden" id="sessMain">
+        <div class="sess-head">
+          <h2 id="sessTitle"></h2><span id="sessState"></span>
+          <span class="spacer"></span><span id="sessOpen"></span>
+        </div>
+        <div id="sessItem" class="sess-item"></div>
+        <div id="sessBody" class="sbody"></div>
+        <form id="sessBar" class="sbar hidden" autocomplete="off">
+          <input id="sessText" placeholder="Type to this session's terminal: an answer, a prompt, or 1 for a permission prompt" aria-label="Text for the session's terminal">
+          <button class="btn primary" type="submit" title="Type the text into the session's tmux pane, then Enter (empty: Enter alone)">Send</button>
+        </form>
+      </div>
     </div>
   </section>
 
@@ -228,20 +243,6 @@
   </div>
   <div class="muted" style="font-size:13px;margin:4px 0 8px">Most important first. Dispatch gives the item to a session that waits for work in its project; else it starts a new agent in the project folder, and that agent's first <code>maxpm go</code> takes this item.</div>
   <div id="readyList"></div>
-</div></div>
-
-<div id="sessDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="sessTitle"><div class="box">
-  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-    <h2 id="sessTitle" style="margin:0"></h2><span id="sessState"></span>
-    <span class="spacer" style="flex:1"></span><span id="sessOpen"></span>
-    <button class="iconbtn" id="sessClose" title="Close">✕</button>
-  </div>
-  <div class="muted" style="font-size:12px;margin:4px 0 8px">New lines show as the session writes them.</div>
-  <div id="sessBody" class="sbody"></div>
-  <form id="sessBar" class="sbar hidden" autocomplete="off">
-    <input id="sessText" placeholder="Type to this session's terminal: an answer, a prompt, or 1 for a permission prompt" aria-label="Text for the session's terminal">
-    <button class="btn primary" type="submit" title="Type the text into the session's tmux pane, then Enter (empty: Enter alone)">Send</button>
-  </form>
 </div></div>
 
 <div id="searchDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="searchTitle"><div class="box">
