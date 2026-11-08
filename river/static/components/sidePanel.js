@@ -51,7 +51,7 @@ function save() {
 function renderTabs() {
   $("#spTabs").innerHTML = tabs.map(t => { const k = kindOf(t.target);
     return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(t.target)}">`
-    + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-tab="${t.id}"><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
+    + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}"><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
     + `<button type="button" class="sp-x" data-close="${t.id}" title="Close this tab" aria-label="Close ${esc(t.title || label(t.target))}">✕</button></span>`; }).join("");
   save();
 }
@@ -199,7 +199,8 @@ export function wirePanel() {
   if (w >= 280) document.documentElement.style.setProperty("--sp-w", w + "px");
   $("#spTabs").addEventListener("click", (e) => {
     const x = e.target.closest("[data-close]"); if (x) return close(+x.dataset.close);
-    const t = e.target.closest("[data-tab]"); if (t) show(tabs.find(z => z.id === +t.dataset.tab));
+    // data-sp-tab, not data-tab: the page's own click handler reads data-tab as a tab of the page (#4652).
+    const t = e.target.closest("[data-sp-tab]"); if (t) show(tabs.find(z => z.id === +t.dataset.spTab));
   });
   $("#spForm").addEventListener("submit", (e) => { e.preventDefault(); openInPanel($("#spAddr").value); });
   $("#spReload").onclick = () => { const t = tabs.find(z => z.id === on); if (t) show(t); else if (listed) showList(); };

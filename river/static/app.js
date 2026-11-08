@@ -827,7 +827,7 @@ document.addEventListener("click", async (e) => {
   if (t.dataset.unset) { const sc = t.dataset.scope, [kind, name] = sc.includes(":") ? [sc.split(":")[0], sc.slice(sc.indexOf(":") + 1)] : ["global", null];
     const args = { key: t.dataset.unset }; if (kind !== "global") args[kind] = kind === "item" ? +name : name;
     return act("config_unset", args).catch(() => {}); }
-  if (t.dataset.tab) return setTab(t.dataset.tab);
+  if (t.dataset.tab && TABS.includes(t.dataset.tab)) return setTab(t.dataset.tab);  // only a tab of the page (#4652)
   if (t.dataset.fold) { const c = projClosed(), n = t.dataset.fold; store("river.projClosed", JSON.stringify(c.includes(n) ? c.filter(x => x !== n) : c.concat(n))); return renderProjects(); }
 });
 

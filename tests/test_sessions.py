@@ -670,6 +670,93 @@ try {
         self.assertEqual([c[0] for c in self.tmux.calls].count("paste-buffer"), 1)
 
 
+class SidePanelTabs(TmuxBase):
+    """#4652: a click on a tab of the side panel shows that tab, in the real page (app.js and its own click
+    handler, which reads data-tab as a tab of the page), beside the chat of the running session ag."""
+
+    def test_a_click_on_each_tab_shows_it(self):
+        import subprocess
+        import threading
+        from tests.test_server import _chrome
+        if not _chrome():
+            self.skipTest("no Chrome on this computer")
+        driver = r'''
+const q = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const until = async (f, what) => { for (let i = 0; i < 150; i++) { if (f()) return; await sleep(100); } throw new Error(what); };
+const check = (v, what) => { if (!v) throw new Error(what); };
+const post = o => navigator.sendBeacon("/__result", JSON.stringify(o));
+try {
+  await until(() => window.__appReady, "app.js loaded");
+  q('nav button[data-tab="sessions"]').click();
+  await until(() => !q("#tab-sessions").classList.contains("hidden") && q("#sessTitle").textContent === "ag", "session ag shown");
+  const { openTool } = await import("/components/sidePanel.js");
+  for (const k of ["one", "two", "three"]) openTool("t-" + k, "Tool " + k, box => { box.textContent = "body of " + k; });
+  const shown = [];
+  for (const k of ["one", "two", "three", "one"]) {
+    const find = () => [...document.querySelectorAll("#spTabs .sp-tab-l")].find(x => x.textContent.includes("Tool " + k));
+    find().click();
+    await sleep(50);
+    const b = find();  // the tabs are drawn again after a click
+    check(b, "the tab " + k + " is still there");
+    check(!q("#tab-sessions").classList.contains("hidden"), "the Sessions tab stays after a click on " + k);
+    check(q('nav button[data-tab="sessions"]').classList.contains("on"), "the page tab stays Sessions");
+    check(b.getAttribute("aria-selected") === "true" && b.closest(".sp-tab").classList.contains("on"), k + " is the active tab");
+    check(document.querySelectorAll("#spTabs .sp-tab.on").length === 1, "one active tab");
+    shown.push(q("#spBody").textContent);
+  }
+  post({ shown });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        page = (server.STATIC / "index.html").read_bytes().replace(
+            b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>',
+            b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>'
+            b'<script type="module">import "/app.js"; window.__appReady = true;</script>'
+            b'<script type="module" src="/__drive.js"></script>')
+        self.assertIn(b"__drive.js", page)
+        got, result = threading.Event(), {}
+        from unittest.mock import patch
+        patched = patch.object(core, "transcripts_root", lambda: self.root)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+        class H(server.Handler):
+            def do_GET(self):
+                if self.path == "/":
+                    return self._send(200, page, "text/html; charset=utf-8")
+                if self.path == "/__drive.js":
+                    return self._send(200, driver.encode(), "text/javascript; charset=utf-8")
+                return super().do_GET()
+
+            def do_POST(self):
+                if self.path == "/__result":
+                    result.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                    got.set()
+                    return self._send(204, b"")
+                return super().do_POST()
+
+        try:
+            httpd = server._Server(("127.0.0.1", 0), H)
+        except PermissionError:
+            self.skipTest("no local port here")
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        chrome = subprocess.Popen([
+            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
+            f"http://127.0.0.1:{httpd.server_address[1]}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            ran = got.wait(30)
+        finally:
+            chrome.kill()
+            chrome.wait()
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertTrue(ran, "browser test did not report")
+        self.assertNotIn("error", result, result.get("error"))
+        self.assertEqual(result["shown"], ["body of one", "body of two", "body of three", "body of one"])
+
+
 class SideFiles(Base):
     """#4619: the side panel shows local files read only, with the page's token, only from the project folders,
     their worktrees and uploads, each in a sandbox of its own."""
