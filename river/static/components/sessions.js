@@ -13,7 +13,7 @@ import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
 import { openSettings } from "./settingsDialog.js";
 import { showRows, wireRows } from "./artifacts.js";
-import { openInPanel, wirePanel } from "./sidePanel.js";
+import { openInPanel, wirePanel, panelFor } from "./sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked" };
@@ -187,6 +187,7 @@ export function makeSessions({ isShown }) {
     if (remember && name) store(PICKED, name);
     if (name === agent) return;
     agent = name; cursor = null; gen++; pinned = remember;
+    panelFor(name);  // its own side panel tabs (#4632)
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";

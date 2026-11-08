@@ -496,3 +496,7 @@ button.srow-it { cursor: pointer; }
 .set-sub { grid-column: 2 / 4; font-size: 12px; }
 .set-foot { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
 @media (max-width: 560px) { .set-row { grid-template-columns: 1fr; } .set-sub { grid-column: 1; } }
+/* Side panel tabs (#4632): the kind of each, and a button to reach it from the keyboard. */
+.sp-tab .sp-tab-l { background: none; border: 0; color: inherit; font: inherit; padding: 0; cursor: pointer; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-k { opacity: .75; font-size: 11px; }
+.sp-k-image { color: var(--ready); } .sp-k-page { color: var(--prog); } .sp-k-tool { color: var(--accent); }
