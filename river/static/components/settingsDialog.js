@@ -7,6 +7,7 @@
 // Server: GET /api/session-settings, the ops session_setting and session_restart (with the page token).
 import { $, esc, toast, typeAction } from "../lib.js";
 import { makeDialog } from "./dialog.js";
+import { viewOf, setView } from "./viewSettings.js";
 
 const dlg = makeDialog($("#setDlg"));
 let cur = null, onDone = null;
@@ -21,6 +22,16 @@ function field(s, i) {
     : `<span class="muted" title="Its chat provider changes this only when the session starts">restart</span>`;
   return `<div class="set-row"><label>${esc(s.label)}</label>${input}${how}
     <div class="set-sub muted">${val ? esc(SRC[s.source] || s.source || "") : "MaximizePM cannot tell"}${s.reported && s.reported !== val ? ` (it reports ${esc(s.reported)})` : ""}${s.default_key ? ` · default ${esc(s.default_key)} = ${esc(s.default_value || "(the CLI's own)")}` : ""}${s.note ? ` · ${esc(s.note)}` : ""}</div></div>`;
+}
+
+// The page's view of this session (#4635): changes at once, in this browser only; no restart.
+function pageSection(agent) {
+  const v = viewOf(agent);
+  return `<div class="muted set-head">This page</div>
+    <div class="set-row"><label for="setTools">Show tool calls</label>
+      <select id="setTools" data-view="showTools" data-agent="${esc(agent)}"><option value="on"${v.showTools ? " selected" : ""}>on</option><option value="off"${v.showTools ? "" : " selected"}>off: a marker such as "12 tool calls" opens them</option></select>
+      <span class="muted">now</span>
+      <div class="set-sub muted">The tool call lines (Bash, Write, ...) between the messages of its chat; kept for this session in this browser</div></div>`;
 }
 
 function changes() {
@@ -49,14 +60,18 @@ export async function openSettings(agent, { done } = {}) {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || "failed");
     cur = j;
-    $("#setList").innerHTML = `<div class="muted set-head">${esc(j.provider.label)}${j.transcript ? "" : " · no transcript here: the values come from its command line"}</div>`
+    $("#setList").innerHTML = pageSection(agent) + `<div class="muted set-head">${esc(j.provider.label)}${j.transcript ? "" : " · no transcript here: the values come from its command line"}</div>`
       + j.settings.map(field).join("");
     sync();
-  } catch (e) { $("#setList").innerHTML = `<div class="muted">${esc(e.message)}</div>`; cur = null; }
+  } catch (e) { $("#setList").innerHTML = pageSection(agent) + `<div class="muted">${esc(e.message)}</div>`; cur = null; }
 }
 
 $("#setList").addEventListener("input", sync);
-$("#setList").addEventListener("change", sync);
+$("#setList").addEventListener("change", (e) => {
+  const v = e.target.closest("[data-view]");
+  if (v) return setView(v.dataset.agent, v.dataset.view, v.value === "on");
+  sync();
+});
 $("#setList").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-live]"); if (!b || !cur) return;
   const s = cur.settings[+b.dataset.live], v = document.querySelector(`#setList [data-i="${b.dataset.live}"]`).value;

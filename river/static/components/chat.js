@@ -193,8 +193,29 @@ export function appendEntries(col, entries, refs) {
     const node = entryNode(e);
     linkRefs(node, refs);
     linkPaths(node);
-    col.append(node);
+    if (e.role === "tool" || e.role === "event") toolGroup(col).append(node), countGroup(col.lastElementChild);
+    else col.append(node);
   }
+}
+
+// Each run of tool calls (and "a background task ended" lines) sits in one group (#4635). With the chat's tool
+// calls hidden (class hide-tools), the group shows only its marker ("12 tool calls"), which opens it.
+function toolGroup(col) {
+  const last = col.lastElementChild;
+  if (last && last.classList.contains("tool-group")) return last;
+  const g = el("div", "tool-group");
+  const b = el("button", "tg-sum");
+  b.type = "button";
+  b.setAttribute("aria-expanded", "false");
+  b.onclick = () => { const o = g.classList.toggle("open"); b.setAttribute("aria-expanded", String(o)); countGroup(g); };
+  g.append(b);
+  col.append(g);
+  return g;
+}
+function countGroup(g) {
+  const n = g.querySelectorAll(":scope > details.tool").length, ev = g.querySelectorAll(":scope > .msg-event").length;
+  const parts = [n ? `${n} tool call${n > 1 ? "s" : ""}` : "", ev ? `${ev} background task${ev > 1 ? "s" : ""} ended` : ""].filter(Boolean);
+  g.querySelector(".tg-sum").textContent = `${g.classList.contains("open") ? "▾" : "▸"} ${parts.join(", ")}`;
 }
 
 export function wireCopy(col) {

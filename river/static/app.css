@@ -509,3 +509,8 @@ button.srow-it { cursor: pointer; }
 @keyframes micpulse { 50% { opacity: .65; } }
 @media (prefers-reduced-motion: reduce) { .composer .mic.on { animation: none; } }
 .sess-dictate { font-size: 12px; color: var(--muted); padding: 2px 4px; }
+/* Tool calls in a group, hidden behind a marker when the view says so (#4635). */
+.tg-sum { display: none; background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 2px 0; cursor: pointer; }
+.tg-sum:hover { color: var(--ink); }
+.chat-col.hide-tools .tg-sum { display: inline-block; }
+.chat-col.hide-tools .tool-group:not(.open) > :not(.tg-sum) { display: none; }

@@ -14,6 +14,7 @@ import { openWaiting } from "./waitDialog.js";
 import { openSettings } from "./settingsDialog.js";
 import { showRows, wireRows } from "./artifacts.js";
 import { makeDictation } from "./dictate.js";
+import { viewOf } from "./viewSettings.js";
 import { openInPanel, wirePanel, panelFor } from "./sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
@@ -189,6 +190,7 @@ export function makeSessions({ isShown }) {
     if (remember && name) store(PICKED, name);
     if (name === agent) return;
     if (name !== agent) dict.stop();
+    col.classList.toggle("hide-tools", !viewOf(name).showTools);  // #4635
     agent = name; cursor = null; gen++; pinned = remember;
     panelFor(name);  // its own side panel tabs (#4632)
     main.classList.toggle("hidden", !name);
@@ -239,6 +241,7 @@ export function makeSessions({ isShown }) {
   }
   document.querySelector(".sess-views").addEventListener("click", (e) => { const b = e.target.closest("[data-sview]"); if (b) setView(b.dataset.sview); });
   setInterval(() => { if (!document.hidden && isShown()) { loadItems(); loadArts(); } }, 10000);
+  document.addEventListener("maxpm-view", (e) => { if (e.detail.agent === agent) col.classList.toggle("hide-tools", !viewOf(agent).showTools); });
 
   // A session that waits on the person says so above the composer.
   function waitLine(j) {
