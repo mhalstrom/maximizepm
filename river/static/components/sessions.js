@@ -1,26 +1,21 @@
 // The Sessions tab: a list of the running agent sessions (Claude Code and Codex) in a left bar, one row each with
 // its agent, item and state, read again every few seconds while the tab shows; and the selected session on the
 // right: its transcript, with new lines added as the session writes them (#4597, in place of the cards of #4592).
-// A person types in the session through Open (its claude.ai/code link), or, for a session in a tmux pane, the
-// text bar below the view (#4596): the text goes to the pane, then Enter. MaximizePM types nothing by itself.
+// The view shows the session as a chat (components/chat.js, #4604). A person types in the session through Open
+// (its claude.ai/code link), or, for a session in a tmux pane, the composer below the chat (#4596): the text goes
+// to the pane, then Enter. MaximizePM types nothing by itself.
 // Server: GET /api/sessions, GET /api/session?agent=<name>&cursor=<byte>, and the op session_send (with the
 // page's token: typeAction).
 import { $, esc, ago, clip, store, toast, typeAction } from "../lib.js";
 import { chip } from "./chip.js";
+import { appendEntries, wireCopy } from "./chat.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p" };
-const ROLE_LABEL = { user: "person", assistant: "agent", tool: "tool", event: "event" };
 const PICKED = "river.session";  // the session the person chose last
 
 function stateChip(s) {
   return chip(STATE_CHIP[s.state] || "c-p", esc(s.state_label), s.state === "prompt"
     ? "A permission prompt waits in its terminal or session: answer it there" : null);
-}
-
-function lineHtml(e, full) {
-  const text = full ? e.text : clip(e.text.split("\n")[0], 220);
-  return `<div class="sl sl-${e.role}${e.sent ? " sl-sent" : ""}"><span class="sl-who">${e.sent ? "sent" : ROLE_LABEL[e.role] || esc(e.role)}</span>`
-    + `<span class="sl-text">${esc(text)}</span></div>`;
 }
 
 function openButton(s) {
@@ -70,13 +65,15 @@ function renderList(el, list, picked) {
 export function makeSessions({ isShown }) {
   let list = [], busy = false;
   let agent = null, cursor = null, timer = null, gen = 0;
-  const side = $("#sessions"), body = $("#sessBody"), main = $("#sessMain");
+  const side = $("#sessions"), body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
+  wireCopy(col);
+  const note = (text) => { col.replaceChildren(); const n = document.createElement("div"); n.className = "muted sl-none"; n.textContent = text; col.append(n); };
 
   // The tab fills the window below the header; the view scrolls inside it, so the text bar stays in sight.
   function fit() {
     const lay = $("#sessLayout");
     if (!isShown() || window.innerWidth < 760) return lay.style.removeProperty("height");
-    lay.style.height = Math.max(320, window.innerHeight - lay.getBoundingClientRect().top - 16) + "px";
+    lay.style.height = Math.max(320, window.innerHeight - lay.getBoundingClientRect().top) + "px";
   }
   window.addEventListener("resize", fit);
 
@@ -109,14 +106,15 @@ export function makeSessions({ isShown }) {
       const r = await fetch(`api/session?agent=${encodeURIComponent(agent)}${cursor != null ? "&cursor=" + cursor : ""}`);
       const j = await r.json();
       if (mine !== gen) return;
-      if (!r.ok) { body.innerHTML = `<div class="muted">${esc(j.error || "failed")}</div>`; timer = setTimeout(poll, 10000); return; }
-      const first = cursor == null, atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-      if (first) body.innerHTML = j.entries.length ? "" : `<div class="muted sl-none">${esc(j.note || "No lines yet.")}</div>`;
-      else if (j.entries.length) body.querySelector(".sl-none")?.remove();
-      body.insertAdjacentHTML("beforeend", j.entries.map(e => lineHtml(e, true)).join(""));
+      if (!r.ok) { note(j.error || "failed"); timer = setTimeout(poll, 10000); return; }
+      const first = cursor == null, atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+      if (first) { if (j.entries.length) col.replaceChildren(); else note(j.note || "No lines yet."); }
+      else if (j.entries.length) col.querySelector(".sl-none")?.remove();
+      appendEntries(col, j.entries);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
       $("#sessState").innerHTML = stateChip(j);
+      waitLine(j);
       $("#sessItem").innerHTML = s.holds ? itemHtml(s, 120) : "";
       barFor(j.terminal, s);
       $("#sessOpen").innerHTML = openButton({ ...s, session_url: j.session_url });
@@ -134,11 +132,26 @@ export function makeSessions({ isShown }) {
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
     $("#sessText").value = "";
     barFor(null);
-    body.innerHTML = `<div class="muted sl-none">Reading the transcript…</div>`;
+    note("Reading the transcript…");
+    waitLine({});
     side.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
 
+  // A session that waits on the person says so above the composer.
+  function waitLine(j) {
+    const w = $("#sessWait");
+    w.textContent = j.state === "prompt" ? "It waits at a permission prompt in its terminal: type the answer below (for example 1), then Send."
+      : j.state === "answer" ? "It waits for your answer to its question: type it below, then Send." : "";
+    w.classList.toggle("hidden", !w.textContent);
+  }
+  // The composer grows with the text; Enter sends, Shift+Enter starts a new line.
+  const text = $("#sessText");
+  const grow = () => { text.style.height = "auto"; text.style.height = Math.min(text.scrollHeight, window.innerHeight / 3) + "px"; };
+  text.addEventListener("input", grow);
+  text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#sessBar").requestSubmit(); }
+  });
   // The text bar is always there. With no tmux pane of the session on this computer it is off, and says why.
   function barFor(pane, s = {}) {
     const input = $("#sessText"), btn = $("#sessBar button"), why = $("#sessBarWhy");
@@ -162,10 +175,11 @@ export function makeSessions({ isShown }) {
     try {
       const r = await typeAction("session_send", { agent: to, text: input.value });
       if (to === agent) {
-        body.querySelector(".sl-none")?.remove();
-        body.insertAdjacentHTML("beforeend", lineHtml({ role: "user", sent: true, text: r.text || "(Enter)" }, true));
+        col.querySelector(".sl-none")?.remove();
+        appendEntries(col, [{ role: "user", sent: true, text: r.text || "(Enter)" }]);
         body.scrollTop = body.scrollHeight;
         input.value = "";
+        grow();
       }
     } catch (err) { toast(err.message, true); ok = !/tmux pane/.test(err.message); }
     finally { if (!input.disabled) { btn.disabled = false; input.focus(); } if (!ok) barFor(false); }

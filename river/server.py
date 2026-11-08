@@ -1640,12 +1640,7 @@ def terminal_keys(conn, agent, keys, who=None):
     """Type into an agent's tmux pane from the page: keys is a list of {"text": "..."} (typed as it is) and
     {"key": "Enter"} (a key in TERMINAL_KEYS). Only a person does this: an agent does not answer another
     agent's prompts through river."""
-    row = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
-    if row and row["kind"] != "human":
-        raise RiverError("only a person types into an agent's terminal")
-    pane = agent_terminals(conn).get(agent)
-    if not pane:
-        raise RiverError(f"{agent} does not run in a tmux pane on this computer")
+    pane = _typing_pane(conn, agent, who)
     if not isinstance(keys, list) or len(keys) > 200:
         raise RiverError("keys is a list of at most 200 entries")
     for k in keys:
@@ -1662,15 +1657,34 @@ def terminal_keys(conn, agent, keys, who=None):
     return {"agent": agent, "pane": pane, "sent": len(keys)}
 
 
+def _typing_pane(conn, agent, who):
+    """The tmux pane a person may type into for this agent; RiverError for an agent, or with no pane."""
+    row = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
+    if row and row["kind"] != "human":
+        raise RiverError("only a person types into an agent's terminal")
+    pane = agent_terminals(conn).get(agent)
+    if not pane:
+        raise RiverError(f"{agent} does not run in a tmux pane on this computer")
+    return pane
+
+
 def session_send(conn, agent, text, who=None):
-    """The text bar of the Sessions tab (#4596): a person's text, typed into the agent's tmux pane as one line,
-    then Enter. Empty text sends Enter alone (a prompt that waits for it). The text comes from the person: river
-    types nothing by itself."""
+    """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
+    Enter; text of several lines goes as one bracketed paste. Empty text sends Enter alone (a prompt that waits
+    for it). The text comes from the person: river types nothing by itself."""
     if not isinstance(text, str) or len(text) > 4000:
         raise RiverError("text is at most 4000 characters")
-    line = " ".join(text.split("\n")).strip()  # a new line would end the prompt early
-    keys = ([{"text": line}] if line else []) + [{"key": "Enter"}]
-    return dict(terminal_keys(conn, agent, keys, who), text=line)
+    text = text.replace("\r\n", "\n").strip()
+    if "\n" not in text:
+        keys = ([{"text": text}] if text else []) + [{"key": "Enter"}]
+        return dict(terminal_keys(conn, agent, keys, who), text=text)
+    # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
+    # prompt early), then Enter.
+    pane = _typing_pane(conn, agent, who)
+    _tmux("set-buffer", "-b", "maxpm-send", "--", text)
+    _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
+    _tmux("send-keys", "-t", pane, "Enter")
+    return {"agent": agent, "pane": pane, "sent": 2, "text": text}
 
 
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,

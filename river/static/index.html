@@ -143,7 +143,7 @@
       <aside class="panel sess-side" aria-label="Running sessions">
         <h2>Running sessions</h2>
         <div id="sessions" class="slist"></div>
-        <div class="muted sess-note">Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the text bar of a session that runs in a tmux pane.</div>
+        <div class="muted sess-note">Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the message box of a session that runs in a tmux pane.</div>
       </aside>
       <div class="panel sess-main hidden" id="sessMain">
         <div class="sess-head">
@@ -151,12 +151,15 @@
           <span class="spacer"></span><span id="sessOpen"></span>
         </div>
         <div id="sessItem" class="sess-item"></div>
-        <div id="sessBody" class="sbody"></div>
-        <div id="sessBarWhy" class="muted sess-why hidden"></div>
-        <form id="sessBar" class="sbar" autocomplete="off">
-          <input id="sessText" placeholder="Type to this session's terminal: an answer, a prompt, or 1 for a permission prompt" aria-label="Text for the session's terminal">
-          <button class="btn primary" type="submit" title="Type the text into the session's tmux pane, then Enter (empty: Enter alone)">Send</button>
-        </form>
+        <div id="sessBody" class="sbody"><div id="sessCol" class="chat-col"></div></div>
+        <div class="chat-col chat-foot">
+          <div id="sessWait" class="sess-wait hidden"></div>
+          <div id="sessBarWhy" class="muted sess-why hidden"></div>
+          <form id="sessBar" class="sbar composer" autocomplete="off">
+            <textarea id="sessText" rows="1" placeholder="Message this session: an answer, a prompt, or 1 for a permission prompt" aria-label="Message for the session's terminal"></textarea>
+            <button class="btn primary" type="submit" title="Type the text into the session's tmux pane, then Enter (empty: Enter alone). Shift+Enter starts a new line.">Send</button>
+          </form>
+        </div>
       </div>
     </div>
   </section>

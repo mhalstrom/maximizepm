@@ -7,6 +7,7 @@
   --done: #6e7781; --done-bg: #f0f1f3;
   --warn: #b42318; --warn-bg: #fde7e6;
   --human: #8250df; --human-bg: #efe6fd;
+  --bubble: #eef1f5;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.04);
 }
 @media (prefers-color-scheme: dark) {
@@ -19,6 +20,7 @@
     --done: #7d8590; --done-bg: #1c2128;
     --warn: #ff7b72; --warn-bg: #3d1614;
     --human: #b38cff; --human-bg: #2a1f45;
+    --bubble: #252b33;
     --shadow: none;
   }
 }
@@ -32,6 +34,7 @@
   --done: #7d8590; --done-bg: #1c2128;
   --warn: #ff7b72; --warn-bg: #3d1614;
   --human: #b38cff; --human-bg: #2a1f45;
+  --bubble: #252b33;
   --shadow: none;
 }
 :root { color-scheme: light dark; }
@@ -311,8 +314,12 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup details.more { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #setup details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 /* Sessions tab (#4592, #4597): the running sessions in a left bar, the chosen one on the right. */
-.sess-layout { display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap: 16px; min-height: 320px; }
-.sess-layout > .panel { margin-bottom: 0; min-height: 0; display: flex; flex-direction: column; }
+/* The tab fills the window under the header, edge to edge, as the side bar of a chat app (#4604). */
+main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
+.sess-layout { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 0; min-height: 320px; }
+.sess-layout > .panel { margin-bottom: 0; min-height: 0; display: flex; flex-direction: column; border-radius: 0; box-shadow: none; border-width: 0; }
+.sess-layout > .sess-side { border-right-width: 1px; padding: 12px; }
+.sess-layout > .sess-main { padding: 12px 20px 14px; }
 .sess-side .slist { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
 .sess-note { font-size: 12px; margin-top: 8px; }
 .srow { border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 8px; padding: 7px 9px; background: var(--bg); cursor: pointer; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -327,24 +334,58 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .sess-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sess-head h2 { margin: 0; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--ink); }
 .sess-item { font-size: 13px; margin: 4px 0 8px; overflow-wrap: anywhere; }
-.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; font-size: 13px; padding-right: 4px; border-top: 1px solid var(--line); }
-.sess-main .sbar { display: flex; gap: 8px; margin-top: 10px; }
+.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: 1px solid var(--line); padding: 12px 4px 4px; }
+.sess-main .sbar { display: flex; gap: 8px; margin-top: 8px; align-items: flex-end; }
 .sess-main .sbar.hidden, .sess-main.hidden { display: none; }
-.sess-main .sbar input { flex: 1; min-width: 0; }
-.sl { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); min-width: 0; }
-.sl-who { flex: 0 0 48px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; padding-top: 1px; }
-.sl-text { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-.sl-tool .sl-text { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
-.sl-user .sl-who { color: var(--human); }
-.sl-assistant .sl-who { color: var(--accent); }
-.sl-event .sl-text { color: var(--muted); font-style: italic; }
-.sl-sent .sl-text { opacity: .7; }
+.sess-main .sbar textarea { flex: 1; min-width: 0; resize: none; line-height: 1.45; padding: 8px 12px; border-radius: 12px; max-height: 33vh; overflow-y: auto; font: inherit; }
 .sl-noopen { font-size: 12px; }
 .sess-why { font-size: 12px; margin-top: 8px; }
 .sess-why.hidden { display: none; }
 .sess-head a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; color: var(--ink); text-decoration: none; display: inline-block; font-size: 13px; }
 @media (max-width: 759px) {
   .sess-layout { grid-template-columns: minmax(0, 1fr); }
+  .sess-layout > .sess-side { border-right-width: 0; border-bottom-width: 1px; }
   .sess-side .slist { flex: none; max-height: 40vh; }
   .sess-main { height: 75vh; }
 }
+/* The chat view of a session (#4604): a middle column of readable width. */
+.chat-col { max-width: 48rem; margin: 0 auto; width: 100%; box-sizing: border-box; }
+.chat-foot { flex: none; }
+.sl-none { padding: 8px 0; }
+.msg { margin: 0 0 14px; line-height: 1.6; font-size: 14.5px; }
+.msg-user { display: flex; flex-direction: column; align-items: flex-end; }
+.msg-user .bubble { background: var(--bubble); border-radius: 18px; padding: 8px 14px; max-width: 80%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-user.sent .bubble { opacity: .8; }
+.msg-note { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.msg-agent { overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md blockquote, .md table, .md pre { margin: 0 0 10px; }
+.md ul, .md ol { padding-left: 1.4em; }
+.md h1, .md h2, .md h3, .md h4 { margin: 16px 0 8px; line-height: 1.3; color: var(--ink); text-transform: none; letter-spacing: 0; display: block; }
+.md h1 { font-size: 1.3em; } .md h2 { font-size: 1.15em; } .md h3, .md h4 { font-size: 1em; }
+.md a { color: var(--accent); }
+.md code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; background: var(--bubble); border-radius: 4px; padding: 1px 4px; }
+.md pre { position: relative; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.5; }
+.md pre .copy { position: absolute; top: 6px; right: 6px; font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; opacity: 0; }
+.md pre:hover .copy, .md pre .copy:focus { opacity: 1; }
+.md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.tool { margin: 0 0 2px; font-size: 12.5px; line-height: 1.5; }
+.msg + .tool, .msg-event + .tool { margin-top: -4px; }
+.tool + .msg { margin-top: 10px; }
+.tool summary { cursor: pointer; color: var(--muted); list-style: none; display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.tool summary::-webkit-details-marker { display: none; }
+.tool summary::before { content: "▸"; flex: none; font-size: 10px; }
+.tool[open] summary::before { content: "▾"; }
+.tool .tname { flex: none; font-weight: 600; }
+.tool .twhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.tool.err .tname { color: var(--warn); }
+.tool-body pre { margin: 6px 0 8px 16px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.tool-out { color: var(--muted); }
+.msg-event { text-align: center; font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+.sess-wait { font-size: 13px; margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); }
+.sess-wait.hidden { display: none; }

@@ -1631,8 +1631,15 @@ class LaunchInTmux(unittest.TestCase):
             server.terminal_keys(self.c, name, [{"key": "Enter"}], "other-agent")
         self.assertEqual(pane["keys"], ["1", "Enter", "-l; rm"])
         # The text bar of the Sessions tab (#4596): the person's text as one line, then Enter; empty text is Enter.
-        r = server.OPS["session_send"](self.c, {"agent": name, "text": "yes,\nplease go on "}, "mark")
+        r = server.OPS["session_send"](self.c, {"agent": name, "text": "yes, please go on "}, "mark")
         self.assertEqual((r["text"], pane["keys"][3:]), ("yes, please go on", ["yes, please go on", "Enter"]))
+        # Several lines go as one bracketed paste (#4604): a typed new line would end the prompt early.
+        r = server.OPS["session_send"](self.c, {"agent": name, "text": "first\r\nsecond\n"}, "mark")
+        self.assertEqual(r["text"], "first\nsecond")
+        self.assertEqual(self.tmux.calls[-3:], [["set-buffer", "-b", "maxpm-send", "--", "first\nsecond"],
+                                                ["paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", "%0"],
+                                                ["send-keys", "-t", "%0", "Enter"]])
+        del pane["keys"][5:]
         self.assertEqual(server.OPS["session_send"](self.c, {"agent": name}, "mark")["text"], "")
         self.assertEqual(pane["keys"][5:], ["Enter"])
         with self.assertRaisesRegex(RiverError, "only a person types"):

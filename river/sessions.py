@@ -21,6 +21,7 @@ CARD_BYTES = 256 * 1024      # the read of a card: its last few lines
 LIMIT = 300               # at most this many lines in one answer
 TEXT_MAX = 4000           # a longer text is cut
 TOOL_MAX = 160            # the one line of a tool call
+DETAIL_MAX = 4000         # a tool call's input, and its result, when the page opens it
 PREVIEW = 4               # the lines a card shows
 ADOPT_QUIET = 120         # tmux_adopt: a session moves into tmux after its turn ended and it wrote nothing this long
 PLATFORMS = {"claude": "claude-code", "codex": "codex"}
@@ -107,6 +108,30 @@ def _tool_line(name, inp):
     return f"{name}: {_clip(' '.join(str(what).split()), TOOL_MAX)}" if what else str(name)
 
 
+def _detail(inp):
+    """A tool call's input as the page shows it opened: the command itself, else the input as JSON."""
+    if isinstance(inp, str):
+        try:
+            inp = json.loads(inp)
+        except ValueError:
+            return _clip(inp, DETAIL_MAX)
+    if isinstance(inp, dict) and isinstance(inp.get("command"), (str, list)):
+        c = inp["command"]
+        return _clip(" ".join(map(str, c)) if isinstance(c, list) else c, DETAIL_MAX)
+    return _clip(json.dumps(inp, indent=2, ensure_ascii=False), DETAIL_MAX)
+
+
+def _result_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") in
+                         ("text", "input_text", "output_text"))
+    if isinstance(content, dict):
+        return str(content.get("output") or content.get("content") or "")
+    return ""
+
+
 def _parts_text(content, kinds):
     if isinstance(content, str):
         return content
@@ -126,9 +151,14 @@ def _claude(d):
             if x.get("type") == "text" and x.get("text", "").strip():
                 out.append({"at": at, "role": "assistant", "text": _clip(x["text"], TEXT_MAX)})
             elif x.get("type") == "tool_use":
-                out.append({"at": at, "role": "tool", "text": _tool_line(x.get("name"), x.get("input"))})
+                out.append({"at": at, "role": "tool", "text": _tool_line(x.get("name"), x.get("input")),
+                            "id": x.get("id"), "detail": _detail(x.get("input"))})
         stop = m.get("stop_reason")
         return out, ("idle" if stop in ("end_turn", "stop_sequence") else "working" if stop else None)
+    for x in content if isinstance(content, list) else []:
+        if isinstance(x, dict) and x.get("type") == "tool_result" and x.get("tool_use_id"):
+            out.append({"at": at, "role": "result", "for": x["tool_use_id"], "error": bool(x.get("is_error")),
+                        "text": _clip(_result_text(x.get("content")), DETAIL_MAX)})
     text = _parts_text(content, ("text",)).strip()
     if text.startswith("<task-notification>"):
         out.append({"at": at, "role": "event", "text": "a background task ended"})
@@ -155,7 +185,11 @@ def _codex(d):
         return [{"at": at, "role": p["role"], "text": _clip(text, TEXT_MAX)}], None
     if t in ("function_call", "custom_tool_call", "local_shell_call"):
         inp = p.get("arguments") if t == "function_call" else p.get("input") if t == "custom_tool_call" else p.get("action")
-        return [{"at": at, "role": "tool", "text": _tool_line(p.get("name") or "shell", inp)}], None
+        return [{"at": at, "role": "tool", "text": _tool_line(p.get("name") or "shell", inp), "id": p.get("call_id"),
+                 "detail": _detail(inp)}], None
+    if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output") and p.get("call_id"):
+        return [{"at": at, "role": "result", "for": p["call_id"],
+                 "text": _clip(_result_text(p.get("output")), DETAIL_MAX)}], None
     return [], None
 
 
@@ -275,7 +309,8 @@ def views(conn, terminals=None, root=None, croot=None):
         tail = {"entries": [], "turn": None}
         if path:
             try:
-                tail = entries(kind, path, None, PREVIEW, CARD_BYTES)
+                tail = entries(kind, path, None, LIMIT, CARD_BYTES)
+                tail = dict(tail, entries=[e for e in tail["entries"] if e["role"] != "result"][-PREVIEW:])
             except (OSError, ValueError, EOFError):
                 path = None
         key, label = state(conn, a, tail["turn"], waiting)

@@ -79,6 +79,21 @@ class Sessions(Base):
         self.assertEqual((card["state"], card["state_label"]), ("idle", "idle: at its prompt"))
         self.assertEqual(card["last"][-1]["text"], "Done.")
 
+    def test_a_tool_call_carries_its_input_and_its_result_for_the_chat(self):
+        # #4604: the chat folds each tool call to one line; opened, it shows the command and what came back.
+        self.write(claude_line("assistant", [{"type": "tool_use", "id": "tu1", "name": "Bash",
+                                              "input": {"command": "git status", "description": "Show the status",
+                                                        "timeout": 60, "run_in_background": False}}], "tool_use")
+                   + claude_line("user", [{"type": "tool_result", "tool_use_id": "tu1", "is_error": True,
+                                           "content": [{"type": "text", "text": "fatal: not a repo"}]}]))
+        got = sessions.view(self.c, "ag", None, self.root, self.croot)["entries"]
+        tool, res = got[-2], got[-1]
+        self.assertEqual((tool["role"], tool["text"], tool["id"], tool["detail"]),
+                         ("tool", "Bash: Show the status", "tu1", "git status"))
+        self.assertEqual((res["role"], res["for"], res["error"], res["text"]), ("result", "tu1", True, "fatal: not a repo"))
+        (card,) = self.cards()
+        self.assertNotIn("result", [e["role"] for e in card["last"]])  # a card's last lines leave results out
+
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET activity_prompt='{}' WHERE name='ag'")
