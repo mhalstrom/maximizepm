@@ -15,6 +15,7 @@
   <nav>
     <button data-tab="board" class="on">Board</button>
     <button data-tab="sessions" title="Every running agent session: its item, its state, and what it writes now">Sessions</button>
+    <button data-tab="artifacts" title="The pages, files and artifact links the sessions made or named">Artifacts</button>
     <button data-tab="projects">Projects</button>
     <button data-tab="targets">Targets</button>
     <button data-tab="capacity">Capacity</button>
@@ -170,10 +171,21 @@
           <input id="spAddr" placeholder="A web address or a full file path" aria-label="Address">
           <button class="btn" type="button" id="spReload" title="Load it again">Reload</button>
           <button class="btn" type="button" id="spNew" title="Open it in a new browser tab">Open in a new tab</button>
+          <button class="btn" type="button" id="spFull" title="Show it alone in a browser tab of its own, with a link to keep">Open full screen</button>
           <button class="iconbtn" type="button" id="spClose" title="Close the side panel">✕</button>
         </form>
         <div class="sp-body" id="spBody"></div>
       </aside>
+    </div>
+  </section>
+
+  <section id="tab-artifacts" class="hidden">
+    <div class="panel"><h2>Artifacts <span class="spacer"></span>
+        <select id="artSession" title="Session"><option value="">All sessions</option></select>
+        <input id="artItem" type="search" placeholder="Item #" title="Only the artifacts of this item" style="width:90px">
+      </h2>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">What the sessions made or named, newest first: files they wrote or named that the side panel can show, local pages, and claude.ai artifact links. Open shows it beside its session's chat; Open full screen gives it a browser tab of its own.</div>
+      <div id="artList"></div>
     </div>
   </section>
 

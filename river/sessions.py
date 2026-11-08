@@ -407,3 +407,102 @@ def view(conn, agent, cursor=None, root=None, croot=None):
     return {"agent": agent, "transcript": kind, "entries": got["entries"], "cursor": got["cursor"],
             "refs": item_refs(conn, got["entries"]),
             "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url")}
+
+
+# The Artifacts tab (#4620): what the sessions made or named that the side panel can show. Files a session wrote
+# (Write, Edit), full file paths, local pages (localhost, 127.0.0.1) and claude.ai artifact links in its own text,
+# the person's turns, and its tool calls (a screenshot's file name). Results of tools are left out: a listing of
+# files names many that nobody made.
+ARTIFACT_BYTES = 4 * 1024 * 1024
+ARTIFACT_DAYS = 1  # agents seen this recently, besides the running ones
+_ART_CACHE = {}  # path -> (size, mtime, hits)
+_FILE_RX = None
+_URL_RX = None
+
+
+def _hits_in(text, at, how):
+    import re
+    global _FILE_RX, _URL_RX
+    _FILE_RX = _FILE_RX or re.compile(r"(?<![\w.:/-])((?:~|/)(?:[\w.@~+-]+/)*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md))\b")
+    _URL_RX = _URL_RX or re.compile(r"https?://(?:(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:/[^\s)\]>'\"`\\]*)?"
+                                    r"|claude\.ai/(?:code/)?artifact/[\w-]+)")
+    out = [{"target": m, "kind": "file", "how": how, "at": at} for m in _FILE_RX.findall(text or "")]
+    for u in _URL_RX.findall(text or ""):
+        u = u.rstrip(".,;:")
+        out.append({"target": u, "kind": "artifact" if "claude.ai/" in u else "page", "how": how, "at": at})
+    return out
+
+
+def _artifact_hits(path):
+    """The hits of one transcript's last ARTIFACT_BYTES, read again only when the file changed."""
+    st = Path(path).stat()
+    got = _ART_CACHE.get(str(path))
+    if got and got[:2] == (st.st_size, st.st_mtime_ns):
+        return got[2]
+    text, _s, _e = _read(path, None, ARTIFACT_BYTES)
+    hits = []
+    for line in text.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        at = d.get("timestamp")
+        m = d.get("message") if isinstance(d.get("message"), dict) else None
+        p = d.get("payload") if isinstance(d.get("payload"), dict) else None
+        if m and d.get("type") in ("user", "assistant") and not d.get("isSidechain"):
+            content = m.get("content")
+            if isinstance(content, str):
+                hits += _hits_in(content, at, "named")
+            for x in content if isinstance(content, list) else []:
+                if not isinstance(x, dict):
+                    continue
+                if x.get("type") == "text":
+                    hits += _hits_in(x.get("text", ""), at, "named")
+                elif x.get("type") == "tool_use":
+                    inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+                    if x.get("name") in ("Write", "Edit", "MultiEdit", "NotebookEdit") and inp.get("file_path"):
+                        hits += [dict(h, how="wrote") for h in _hits_in(" " + str(inp["file_path"]), at, "wrote")]
+                    else:
+                        hits += _hits_in(json.dumps(inp, ensure_ascii=False), at, "named")
+        elif p and d.get("type") == "response_item":
+            if p.get("type") == "message":
+                hits += _hits_in(_parts_text(p.get("content"), ("input_text", "output_text", "text")), at, "named")
+            elif p.get("type") in ("function_call", "custom_tool_call"):
+                hits += _hits_in(str(p.get("arguments") or p.get("input") or ""), at, "named")
+    _ART_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, hits)
+    return hits
+
+
+def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=300):
+    """[{target, kind (file, page, artifact), how (wrote, named), session, item, at}], newest first, one per target:
+    from the running sessions and the agents seen in the last ARTIFACT_DAYS. allowed(path): whether the side panel
+    may show that file (server.local_file); a file it may not show is left out."""
+    names = {a["name"] for a in running(conn, terminals)}
+    since = core.iso(core.now() - core.timedelta(days=ARTIFACT_DAYS))
+    names |= {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND last_seen>=?", (since,))}
+    best = {}
+    for name in sorted(names):
+        kind, path = transcript(conn, name, root, croot)
+        if not path:
+            continue
+        try:
+            hits = _artifact_hits(path)
+        except (OSError, ValueError, EOFError):
+            continue
+        for h in hits:
+            old = best.get(h["target"])
+            if old is None or (h["at"] or "") > (old["at"] or "") or (h["how"] == "wrote" and old["how"] != "wrote"):
+                best[h["target"]] = dict(h, session=name)
+    out = []
+    for h in sorted(best.values(), key=lambda h: h["at"] or "", reverse=True):
+        if h["kind"] == "file" and allowed is not None and not allowed(h["target"]):
+            continue
+        r = conn.execute("SELECT item_id FROM holds WHERE agent=? AND started_at<=? AND (ended_at IS NULL OR ended_at>=?) "
+                         "ORDER BY started_at DESC LIMIT 1", (h["session"], (h["at"] or "")[:19] + "Z", (h["at"] or "")[:19] + "Z")
+                         ).fetchone()
+        out.append(dict(h, item=r["item_id"] if r else None))
+        if len(out) >= limit:
+            break
+    return out

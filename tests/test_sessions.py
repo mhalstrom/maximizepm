@@ -449,6 +449,44 @@ class SideFiles(Base):
             self.assertEqual(out["code"], 404, bad)
             self.assertIn(why, out["body"]["error"], bad)
 
+    def test_full_screen_opens_one_file_by_a_signed_key(self):
+        # #4620: a tab of its own cannot send the token; its address carries a key for that one file.
+        from urllib.parse import parse_qs, urlsplit, quote
+        shot = str(self.proj / "scratch" / "shot.png")
+        out = self.get(f"/api/view-key?target={quote(shot)}&session=ag&item={self.it}&token={server.PAGE_TOKEN}")
+        url = out["body"]["url"]
+        q = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+        page = self.get(url)
+        self.assertEqual((page["code"], page["ctype"]), (200, "text/html; charset=utf-8"))
+        self.assertIn(b"shot.png", page["body"])
+        self.assertIn(f"#{self.it}".encode(), page["body"])
+        got = self.get(f"/api/file?path={quote(shot)}&e={q['e']}&k={q['k']}")
+        self.assertEqual((got["code"], got["ctype"]), (200, "image/png"))
+        # The key opens nothing else, and not after its end.
+        other = quote(str(self.proj / "page.html"))
+        self.assertEqual(self.get(f"/api/file?path={other}&e={q['e']}&k={q['k']}")["code"], 403)
+        self.assertEqual(self.get(url.replace(q["k"], "0" * 40))["code"], 403)
+        old_end = str(int(time.time()) - 5)
+        self.assertEqual(self.get(f"/api/file?path={quote(shot)}&e={old_end}&k={server.view_key(self.c, shot, old_end)}")["code"], 403)
+        self.assertEqual(self.get("/api/view-key?target=javascript:x&token=" + server.PAGE_TOKEN)["code"], 409)
+        self.assertEqual(self.get(f"/api/view-key?target={quote(shot)}")["code"], 403)  # no token
+
+    def test_the_artifacts_of_a_session(self):
+        shot = str(self.proj / "scratch" / "shot.png")
+        self.write(claude_line("assistant", [{"type": "tool_use", "id": "w1", "name": "Write",
+                                              "input": {"file_path": str(self.proj / "page.html"), "content": "<p>"}}], "tool_use",
+                               at="2026-11-08T10:01:00Z")
+                   + claude_line("assistant", [{"type": "text", "text": f"Saved {shot}; see http://localhost:5173/app "
+                                                "and https://claude.ai/artifact/ab12-cd and /etc/hosts.md"}], "end_turn",
+                                 at="2026-11-08T10:02:00Z"))
+        allowed = lambda f: self.get(f"/api/file?path={f}&token={server.PAGE_TOKEN}")["code"] == 200
+        got = {a["target"]: a for a in sessions.artifacts(self.c, {}, allowed, self.root, self.croot)}
+        self.assertEqual(got[str(self.proj / "page.html")]["how"], "wrote")
+        self.assertEqual((got[shot]["kind"], got[shot]["session"]), ("file", "ag"))
+        self.assertEqual(got["http://localhost:5173/app"]["kind"], "page")
+        self.assertEqual(got["https://claude.ai/artifact/ab12-cd"]["kind"], "artifact")
+        self.assertNotIn("/etc/hosts.md", got)  # outside the project folders
+
     def test_the_frame_check_needs_a_web_address(self):
         self.assertEqual(server.frame_check("javascript:alert(1)")["frame"], False)
         self.assertEqual(self.get("/api/frame-check?url=x")["code"], 403)

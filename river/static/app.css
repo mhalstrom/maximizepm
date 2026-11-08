@@ -464,3 +464,14 @@ button.srow-it { cursor: pointer; }
   .sess-panel { height: 70vh; }
   .sp-grip { display: none; }
 }
+/* The Artifacts tab (#4620). */
+.art-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); padding: 8px 2px; }
+.art-row:first-child { border-top: 0; }
+.art-main { min-width: 0; }
+.art-main b { overflow-wrap: anywhere; }
+.art-main .sub { color: var(--muted); font-size: 12px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.art-path { overflow-wrap: anywhere; }
+.art-btns { display: flex; gap: 6px; flex: none; }
+.art-btns .btn { font-size: 12px; }
+.art-btns a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; color: var(--ink); text-decoration: none; }
+@media (max-width: 700px) { .art-row { flex-direction: column; align-items: flex-start; } }

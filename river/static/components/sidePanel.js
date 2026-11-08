@@ -66,6 +66,19 @@ async function show(t) {
     <a class="btn primary" href="${esc(t.target)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></div>`);
 }
 
+// Full screen (#4620): the target alone in a browser tab of its own, at an address with a key that maxpm serve
+// signs for it. The tab opens at once (a later window.open is blocked), then goes to that address.
+export async function openFullScreen(target, session = "", item = "") {
+  const w = window.open("", "_blank");
+  try {
+    const q = new URLSearchParams({ target, session, item: item || "", token: await pageToken() });
+    const r = await fetch("api/view-key?" + q);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "failed");
+    if (w) { w.opener = null; w.location = j.url; } else window.open(j.url, "_blank", "noopener");
+  } catch (e) { if (w) w.close(); toast(e.message, true); }
+}
+
 export function openInPanel(target) {
   target = String(target || "").trim();
   if (!target) return;
@@ -97,6 +110,7 @@ export function wirePanel() {
     window.open(isFile(t.target) ? await fileUrl(t.target) : t.target, "_blank", "noopener");
   };
   $("#spClose").onclick = () => { tabs = []; close(-1); };
+  $("#spFull").onclick = () => { const t = tabs.find(z => z.id === on); if (t) openFullScreen(t.target); };
   // Drag the left edge to resize; the width stays for the next visit.
   const grip = $("#spGrip");
   grip.addEventListener("pointerdown", (e) => {

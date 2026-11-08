@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -1869,7 +1870,7 @@ def file_roots(conn):
     return _ROOTS["roots"]
 
 
-def local_file(conn, path):
+def local_file(conn, path, read=True):
     """(bytes, type) of a local file for the side panel; RiverError when the path is outside file_roots, hidden,
     not a file, of a type it does not show, or too large."""
     if not path or "\0" in path:
@@ -1889,7 +1890,104 @@ def local_file(conn, path):
         raise RiverError("no such file")
     if f.stat().st_size > FILE_MAX:
         raise RiverError("the file is too large for the side panel")
-    return f.read_bytes(), kind
+    return (f.read_bytes() if read else b""), kind
+
+
+# Full screen (#4620): each thing the side panel shows also has an address of its own, /view, for a browser tab of
+# its own. A new tab cannot send the page's token, so the address carries a key: an HMAC of the target and an end
+# time, made with a secret kept in the queue (it outlives a restart of maxpm serve). The key opens that one target
+# until it ends, nothing else.
+VIEW_HOURS = 8
+
+
+def _view_secret(conn):
+    import secrets
+    r = conn.execute("SELECT value FROM meta WHERE key='view_secret'").fetchone()
+    if r:
+        return r["value"]
+    with core.tx(conn):
+        conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('view_secret', ?)", (secrets.token_hex(32),))
+    return conn.execute("SELECT value FROM meta WHERE key='view_secret'").fetchone()["value"]
+
+
+def view_key(conn, target, end):
+    import hashlib
+    return hmac.new(_view_secret(conn).encode(), f"{target}\x1f{int(end)}".encode(), hashlib.sha256).hexdigest()[:40]
+
+
+def view_ok(conn, target, end, key):
+    try:
+        end = int(end)
+    except (TypeError, ValueError):
+        return False
+    return end > time.time() and hmac.compare_digest(str(key or ""), view_key(conn, target, end))
+
+
+def view_url(conn, target, session="", item=""):
+    """The full-screen address of a target (a full file path or a web address), valid for VIEW_HOURS."""
+    from urllib.parse import urlencode
+    if not (str(target).startswith(("/", "~/")) or re.match(r"^https?://", str(target))):
+        raise RiverError("full screen shows a web address or a full file path")
+    end = int(time.time() + VIEW_HOURS * 3600)
+    q = {"t": target, "e": end, "k": view_key(conn, target, end)}
+    if session:
+        q["s"] = session
+    if item:
+        q["i"] = str(item)
+    return "/view?" + urlencode(q)
+
+
+def view_page(conn, q):
+    """The HTML of /view: the target alone in the tab, under a thin bar with its name, the session and item it came
+    from, Reload and Copy link."""
+    import html
+    from urllib.parse import quote
+    t, end, key = q.get("t", ""), q.get("e", ""), q.get("k", "")
+    e = html.escape
+    if not view_ok(conn, t, end, key):
+        return 403, ("<!doctype html><meta charset=utf-8><title>MaximizePM</title><body style='font:15px system-ui;padding:24px'>"
+                     "This full-screen link has ended or is not valid. Open it again from the MaximizePM page.</body>")
+    is_file = t.startswith(("/", "~/"))
+    name = t.rstrip("/").split("/")[-1] if is_file else re.sub(r"^https?://", "", t)[:80]
+    src = f"/api/file?path={quote(t)}&e={int(end)}&k={quote(key)}" if is_file else t
+    if is_file and re.search(r"\.(png|jpe?g|gif|webp|svg)$", t, re.I):
+        body = f"<div class=fit><img src='{e(src)}' alt='{e(name)}'></div>"
+    elif is_file and re.search(r"\.(md|txt)$", t, re.I):
+        body = f"<div id=md class=md data-src='{e(src)}' data-md='{1 if t.lower().endswith('.md') else 0}'></div>"
+    elif is_file or re.match(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(/|$)", t, re.I) or frame_check(t)["frame"]:
+        body = f"<iframe src='{e(src)}' sandbox='allow-scripts allow-forms allow-popups allow-same-origin'></iframe>"
+    else:
+        body = (f"<div class=card><b>{e(name)}</b><p>This site does not let another page show it in a frame.</p>"
+                f"<a class=btn href='{e(t)}' rel='noopener noreferrer'>Open it here</a></div>")
+    came = " · ".join(x for x in (q.get("s") and "from " + e(q["s"]), q.get("i", "").isdigit() and f"#{q['i']}") if x)
+    return 200, f"""<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+<title>{e(name)} · MaximizePM</title><style>
+:root{{--bg:#f6f7f9;--panel:#fff;--ink:#1b1f24;--muted:#5f6b7a;--line:#dde2e8;--accent:#1f6feb}}
+@media (prefers-color-scheme: dark){{:root{{--bg:#0f1216;--panel:#171b21;--ink:#e6e9ee;--muted:#9aa5b1;--line:#2a3139;--accent:#4c8dff}}}}
+html,body{{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+body{{display:flex;flex-direction:column}}
+.bar{{display:flex;gap:10px;align-items:center;padding:6px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex:none}}
+.bar b{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}} .bar .m{{color:var(--muted);font-size:12px}} .bar .s{{flex:1}}
+button,.btn{{font:inherit;font-size:13px;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer;text-decoration:none}}
+iframe{{flex:1;border:0;width:100%;background:#fff}} .fit{{flex:1;overflow:auto;display:flex;align-items:flex-start;justify-content:center}} .fit img{{max-width:100%}}
+.md{{flex:1;overflow:auto;padding:24px;max-width:56rem;margin:0 auto;width:100%;box-sizing:border-box}} .md pre{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto}}
+.card{{margin:40px auto;max-width:32rem;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}}
+</style></head><body>
+<div class=bar><b title="{e(t)}">{e(name)}</b><span class=m>{came}</span><span class=s></span>
+<button onclick="location.reload()">Reload</button><button id=copy>Copy link</button></div>
+{body}
+<script type=module>
+document.getElementById("copy").onclick = async (ev) => {{ try {{ await navigator.clipboard.writeText(location.href); ev.target.textContent = "Copied"; }} catch (e) {{ prompt("Copy this link", location.href); }} }};
+const md = document.getElementById("md");
+if (md) {{
+  const r = await fetch(md.dataset.src); const text = r.ok ? await r.text() : "MaximizePM cannot show this file.";
+  if (md.dataset.md === "1" && r.ok) {{
+    const {{ marked }} = await import("/vendor/marked/marked.esm.js");
+    const DOMPurify = (await import("/vendor/dompurify/purify.es.mjs")).default;
+    md.innerHTML = DOMPurify.sanitize(marked.parse(text), {{ FORBID_TAGS: ["style", "form", "input", "iframe", "script"] }});
+  }} else {{ const p = document.createElement("pre"); p.textContent = text; md.append(p); }}
+}}
+</script></body></html>"""
 
 
 def frame_check(url):
@@ -2490,18 +2588,48 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/api/file", "/api/frame-check"):  # the side panel of the Sessions tab (#4619)
             from urllib.parse import parse_qs, urlsplit
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
-            if not hmac.compare_digest(q.get("token", ""), PAGE_TOKEN):
-                return self._send(403, {"error": "this needs the page's token: reload the page"})
-            if path == "/api/frame-check":
-                return self._send(200, frame_check(q.get("url", "")))
             conn = core.connect()
             try:
+                # The page's token, or a full-screen key for this very file (#4620).
+                if not (hmac.compare_digest(q.get("token", ""), PAGE_TOKEN)
+                        or (path == "/api/file" and view_ok(conn, q.get("path", ""), q.get("e"), q.get("k")))):
+                    return self._send(403, {"error": "this needs the page's token: reload the page"})
+                if path == "/api/frame-check":
+                    return self._send(200, frame_check(q.get("url", "")))
                 got = local_file(conn, q.get("path", ""))
             except RiverError as e:
                 return self._send(404, {"error": str(e)})
             finally:
                 conn.close()
             return self._send(200, got[0], got[1], {"Content-Security-Policy": FILE_CSP, "X-Content-Type-Options": "nosniff"})
+        if path == "/api/artifacts":  # the Artifacts tab (#4620)
+            from . import sessions
+            conn = core.connect()
+            try:
+                def allowed(f):
+                    try:
+                        local_file(conn, f, read=False)
+                        return True
+                    except RiverError:
+                        return False
+                return self._send(200, {"artifacts": sessions.artifacts(conn, agent_terminals(conn), allowed)})
+            finally:
+                conn.close()
+        if path in ("/view", "/api/view-key"):  # full screen in a tab of its own (#4620)
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+            conn = core.connect()
+            try:
+                if path == "/view":
+                    code, page = view_page(conn, q)
+                    return self._send(code, page.encode(), "text/html; charset=utf-8")
+                if not hmac.compare_digest(q.get("token", ""), PAGE_TOKEN):
+                    return self._send(403, {"error": "this needs the page's token: reload the page"})
+                return self._send(200, {"url": view_url(conn, q.get("target", ""), q.get("session", ""), q.get("item", ""))})
+            except RiverError as e:
+                return self._send(409, {"error": str(e)})
+            finally:
+                conn.close()
         if path == "/api/token":
             return self._send(200, {"token": PAGE_TOKEN})
         if path in ("/api/sessions", "/api/session"):  # the Sessions tab: running sessions, read only (#4592)

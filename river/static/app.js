@@ -15,6 +15,8 @@ import { graphItems, graphText, GRAPH_LIMITS, GRAPH_MAX } from "./components/gra
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { hooksHtml } from "./components/targetHooks.js";
 import { makeSessions } from "./components/sessions.js";
+import { makeArtifacts } from "./components/artifacts.js";
+import { openInPanel } from "./components/sidePanel.js";
 hooks.refresh = refresh;
 let S = null, openItem = null, tab = "board", graphSig = "";
 const drawer = makeDrawer($("#drawer"));
@@ -955,7 +957,7 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["board", "sessions", "projects", "targets", "capacity", "graph", "done", "settings"];
+const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings"];
 // The page's URL: #as-<person>, #tab-<name> (the Board has none), and #item-<id> while an item's drawer
 // is open, so a tab or an open item can be linked, reloaded, and reached with Back.
 function pageHash(tabName = tab, item = drawer.isOpen() ? openItem : null) {
@@ -971,9 +973,13 @@ function setTab(name, push = true) {
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   renderLog(true);
   if (tab === "sessions") sessionsTab.refresh();
+  if (tab === "artifacts") artifactsTab.refresh();
   return renderGraph(true);
 }
 const sessionsTab = makeSessions({ isShown: () => tab === "sessions" });
+// Open in the Artifacts tab: the thing in the side panel, beside the chat of the session that made it.
+const artifactsTab = makeArtifacts({ isShown: () => tab === "artifacts",
+  openBeside: async (session, target) => { await setTab("sessions"); if (session) sessionsTab.pick(session); openInPanel(target); } });
 // Links into the page: #item-4, #tab-graph, #as-alex, or several joined with & (#as-alex&item-4);
 // #terminal-<agent> (a notification for an agent that waits on a prompt) opens that agent's Terminal.
 // Setup guide: an overlay that shows until the user dismisses it for good (setting setup_done).
