@@ -5,15 +5,18 @@
 // several, an address bar, Reload, Open in a new tab, Close, and a handle to resize it (the width stays).
 // Each session has its own tabs (#4632), kept in this browser across reloads; each tab shows what it holds (file,
 // image, page, site, tool). A tool (#4631) opens as a tab too: openTool(key, title, render).
+// The X of the last tab keeps the panel open, with the list of the session's artifacts to open (#4646); the panel's
+// own X closes it.
 import { $, esc, store, toast, pageToken } from "../lib.js";
 import { markdown } from "./chat.js";
+import { showRows, wireRows } from "./artifacts.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
 const IMAGE = /\.(png|jpe?g|gif|webp|svg)$/i, MD = /\.(md|txt)$/i;
 
-let tabs = [], on = null, n = 0, session = "";
-const bySession = {};  // name -> {tabs, on}
+let tabs = [], on = null, n = 0, session = "", listed = false;
+const bySession = {};  // name -> {tabs, on, listed}
 const tools = {};      // key -> render(box): the tool tabs of #4631
 const panel = () => $("#sessPanel");
 
@@ -36,7 +39,7 @@ const KIND_MARK = { image: "▣", file: "▤", page: "◧", site: "◎", tool: "
 // The tabs of each session stay in this browser (targets only; a tool tab comes back when its tool opens again).
 function save() {
   if (!session) return;
-  bySession[session] = { tabs, on };
+  bySession[session] = { tabs, on, listed };
   let all = {};
   try { all = JSON.parse(store(TABS) || "{}") || {}; } catch (e) { all = {}; }
   const keep = tabs.filter(t => kindOf(t.target) !== "tool");
@@ -54,7 +57,7 @@ function renderTabs() {
 }
 
 async function show(t) {
-  on = t.id;
+  on = t.id; listed = false;
   renderTabs();
   $("#spAddr").value = t.target;
   const box = $("#spBody");
@@ -109,6 +112,26 @@ export async function openFullScreen(target, session = "", item = "") {
   } catch (e) { if (w) w.close(); toast(e.message, true); }
 }
 
+// No tab open (#4646): the artifacts of this session (GET /api/artifacts?agent=), as in its Artifacts view (#4630).
+// Open gives one a tab; Open full screen a browser tab of its own.
+async function showList() {
+  on = null; listed = true;
+  renderTabs();
+  $("#spAddr").value = "";
+  const box = $("#spBody"), name = session;
+  box.innerHTML = `<div class="sp-note sp-list"><b>Artifacts of ${esc(name || "this session")}</b>
+    <div class="muted">Open one in a tab, or type an address above.</div><div class="sp-arts"><div class="muted sl-none">Reading the transcript…</div></div></div>`;
+  const list = box.querySelector(".sp-arts");
+  wireRows(list, (_s, target) => openInPanel(target));
+  let rows = [];
+  try {
+    const r = await fetch("api/artifacts" + (name ? "?agent=" + encodeURIComponent(name) : ""));
+    rows = r.ok ? ((await r.json()).artifacts || []) : [];
+  } catch (e) { /* an empty list says so */ }
+  if (!listed || name !== session || !box.contains(list)) return;  // a tab or another session came first
+  showRows(list, rows, "This session wrote or named nothing the side panel can show.");
+}
+
 function reveal(yes) {
   panel().classList.toggle("hidden", !yes);
   $("#sessLayout").classList.toggle("with-panel", yes);
@@ -148,16 +171,27 @@ export function panelFor(name) {
     const list = (s.targets || []).filter(x => typeof x === "string").map(target => ({ id: ++n, target, title: "" }));
     mine = { tabs: list, on: (list.find(t => t.target === s.on) || list[list.length - 1] || {}).id ?? null };
   }
-  tabs = mine.tabs; on = mine.on;
-  if (!tabs.length) { $("#spTabs").innerHTML = ""; return reveal(false); }
+  tabs = mine.tabs; on = mine.on; listed = !!mine.listed;
+  if (!tabs.length) {
+    if (listed) { reveal(true); return showList(); }
+    $("#spTabs").innerHTML = ""; return reveal(false);
+  }
   reveal(true);
   show(tabs.find(t => t.id === on) || tabs[tabs.length - 1]);
 }
 
+// The X of a tab. After the last one the panel stays, with the session's artifacts (#4646).
 function close(id) {
   tabs = tabs.filter(t => t.id !== id);
-  if (!tabs.length) { on = null; renderTabs(); return reveal(false); }
+  if (!tabs.length) return showList();
   if (on === id) show(tabs[tabs.length - 1]); else renderTabs();
+}
+
+// The panel's own X: no tabs, and no panel.
+function closePanel() {
+  tabs = []; on = null; listed = false;
+  renderTabs();
+  reveal(false);
 }
 
 export function wirePanel() {
@@ -168,15 +202,15 @@ export function wirePanel() {
     const t = e.target.closest("[data-tab]"); if (t) show(tabs.find(z => z.id === +t.dataset.tab));
   });
   $("#spForm").addEventListener("submit", (e) => { e.preventDefault(); openInPanel($("#spAddr").value); });
-  $("#spReload").onclick = () => { const t = tabs.find(z => z.id === on); if (t) show(t); };
+  $("#spReload").onclick = () => { const t = tabs.find(z => z.id === on); if (t) show(t); else if (listed) showList(); };
   $("#spNew").onclick = async () => {
-    const t = tabs.find(z => z.id === on); if (!t) return;
+    const t = tabs.find(z => z.id === on); if (!t) return toast("Open an artifact in a tab first", true);
     window.open(isFile(t.target) ? await fileUrl(t.target) : t.target, "_blank", "noopener");
   };
-  $("#spClose").onclick = () => { tabs = []; close(-1); };
+  $("#spClose").onclick = closePanel;
   $("#spFull").onclick = () => { const t = tabs.find(z => z.id === on);
     if (t && kindOf(t.target) === "tool") return toast("A tool shows in the side panel only", true);
-    if (t) openFullScreen(t.target, session); };
+    if (t) openFullScreen(t.target, session); else toast("Open an artifact in a tab first", true); };
   // Drag the left edge to resize; the width stays for the next visit.
   const grip = $("#spGrip");
   grip.addEventListener("pointerdown", (e) => {
