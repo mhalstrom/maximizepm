@@ -228,9 +228,12 @@ export function makeSessions({ isShown }) {
   // The composer grows with the text; Enter sends, Shift+Enter starts a new line.
   const text = $("#sessText");
   const grow = () => { text.style.height = "auto"; text.style.height = Math.min(text.scrollHeight, window.innerHeight / 3) + "px"; };
-  text.addEventListener("input", grow);
+  // An empty message box (no text, no image) sends nothing (#4617): Send is off, and Enter does nothing.
+  const empty = () => !text.value.trim() && !imgs.length;
+  const sendState = () => { $("#sessBar button").disabled = text.disabled || empty(); };
+  text.addEventListener("input", () => { grow(); sendState(); });
   text.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#sessBar").requestSubmit(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!empty()) $("#sessBar").requestSubmit(); }
   });
   // Images pasted or dropped into the message box go with the next message (#4610): a thumbnail with Remove each.
   const IMG_MAX = 10 * 1024 * 1024, IMG_COUNT = 5;
@@ -245,6 +248,7 @@ export function makeSessions({ isShown }) {
       d.append(img, x); return d;
     }));
     box.classList.toggle("hidden", !imgs.length);
+    sendState();
   }
   function clearImgs(revoke = true) {
     if (revoke) imgs.forEach(im => URL.revokeObjectURL(im.url));
@@ -285,9 +289,10 @@ export function makeSessions({ isShown }) {
   }
   // The text bar is always there. With no tmux pane of the session on this computer it is off, and says why.
   function barFor(pane, s = {}) {
-    const input = $("#sessText"), btn = $("#sessBar button"), why = $("#sessBarWhy");
+    const input = $("#sessText"), why = $("#sessBarWhy");
     const off = !pane;
-    input.disabled = btn.disabled = off;
+    input.disabled = off;
+    sendState();
     why.classList.toggle("hidden", !off || pane === null);
     const elsewhere = /^https:\/\//.test(s.session_url || "") ? "type in it with Open, or in its terminal" : "type in its terminal";
     const ad = s.adopt || { when: "never", why: "" };
@@ -300,7 +305,7 @@ export function makeSessions({ isShown }) {
   $("#sessBar").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = $("#sessText"), btn = $("#sessBar button"), to = agent;
-    if (!to || btn.disabled) return;
+    if (!to || btn.disabled || empty()) return;
     btn.disabled = true;
     let ok = true;
     try {
@@ -317,7 +322,7 @@ export function makeSessions({ isShown }) {
         grow();
       }
     } catch (err) { toast(err.message, true); ok = !/tmux pane/.test(err.message); }
-    finally { if (!input.disabled) { btn.disabled = false; input.focus(); } if (!ok) barFor(false); }
+    finally { if (!input.disabled) { sendState(); input.focus(); } if (!ok) barFor(false); }
   });
   $("#sessOpen").addEventListener("click", (e) => {
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);

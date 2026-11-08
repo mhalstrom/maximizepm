@@ -1743,8 +1743,8 @@ def tidy_uploads(days=UPLOAD_DAYS):
 
 def session_send(conn, agent, text, who=None, images=None):
     """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
-    Enter; text of several lines goes as one bracketed paste. Empty text sends Enter alone (a prompt that waits
-    for it). The text comes from the person: river types nothing by itself."""
+    Enter; text of several lines goes as one bracketed paste. An empty message sends nothing (#4617): the ! dialog
+    answers a prompt. The text comes from the person: river types nothing by itself."""
     if not isinstance(text, str) or len(text) > 4000:
         raise RiverError("text is at most 4000 characters")
     text = text.replace("\r\n", "\n").strip()
@@ -1762,8 +1762,10 @@ def session_send(conn, agent, text, who=None, images=None):
             time.sleep(PROMPT_PAUSE)
         _tmux("send-keys", "-t", pane, "Enter")
         return {"agent": agent, "pane": pane, "sent": 2, "text": text, "images": paths}
+    if not text:
+        raise RiverError("the message is empty: type a message first (the ! dialog answers a prompt)")
     if "\n" not in text:
-        keys = ([{"text": text}] if text else []) + [{"key": "Enter"}]
+        keys = [{"text": text}, {"key": "Enter"}]
         return dict(terminal_keys(conn, agent, keys, who), text=text)
     # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
     # prompt early), then Enter.

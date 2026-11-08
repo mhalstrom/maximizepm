@@ -1640,8 +1640,9 @@ class LaunchInTmux(unittest.TestCase):
                                                 ["paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", "%0"],
                                                 ["send-keys", "-t", "%0", "Enter"]])
         del pane["keys"][5:]
-        self.assertEqual(server.OPS["session_send"](self.c, {"agent": name}, "mark")["text"], "")
-        self.assertEqual(pane["keys"][5:], ["Enter"])
+        with self.assertRaisesRegex(RiverError, "the message is empty"):  # an empty message sends nothing (#4617)
+            server.OPS["session_send"](self.c, {"agent": name, "text": " \n "}, "mark")
+        self.assertEqual(pane["keys"][5:], [])
         with self.assertRaisesRegex(RiverError, "only a person types"):
             server.session_send(self.c, name, "rm -rf /", "other-agent")
         with self.assertRaisesRegex(RiverError, "at most 4000"):
