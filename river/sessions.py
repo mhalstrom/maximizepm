@@ -526,21 +526,56 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
 
 
 def item_session(conn, item_id, root=None, croot=None):
-    """The pop-up of an item anywhere on the page (#4622): its title and state, and its session: the agent that
-    holds it, else the last one that held it (holds), with whether that session runs (active or away) and whether
-    its transcript is on this computer (an ended session opens read only)."""
+    """The pop-up of an item anywhere on the page (#4622, #4628): its title and state, and the session to open, with
+    why: (1) the one that holds it; (2) the owner of its sub-goal, then of the parent goal; (3) for a goal with no
+    owner (shared), a running session that holds another item of that sub-goal or goal, newest first; (4) the last
+    one that held it. With none, "goal" names its goal. Each session says whether it runs (active or away) and
+    whether its transcript is on this computer (an ended session opens read only)."""
     it = conn.execute("SELECT id, title, status, assignee FROM items WHERE id=?", (item_id,)).fetchone()
     if it is None:
         raise core.RiverError(f"no item #{item_id}")
     holder = it["assignee"] if it["status"] in ("in_progress", "held") else None
-    name = holder
-    if not name:
-        r = conn.execute("SELECT agent FROM holds WHERE item_id=? ORDER BY started_at DESC, id DESC LIMIT 1", (item_id,)).fetchone()
-        name = r["agent"] if r else None
-    out = {"id": it["id"], "title": it["title"], "status": it["status"], "holder": holder, "session": None}
-    if name:
+    goals = [dict(r) for r in conn.execute(
+        "SELECT g.id, g.name, g.owner, g.parent_id FROM goals g JOIN item_goals ig ON ig.goal_id=g.id "
+        "WHERE ig.item_id=? ORDER BY g.parent_id IS NULL, g.id", (item_id,))]
+    chain = []  # each tagged goal (sub-goals first), then its parent
+    for g in goals:
+        chain.append(g)
+        if g["parent_id"] and not any(x["id"] == g["parent_id"] for x in chain + goals):
+            p = conn.execute("SELECT id, name, owner, parent_id FROM goals WHERE id=?", (g["parent_id"],)).fetchone()
+            if p:
+                chain.append(dict(p))
+
+    def state(name):
         a = conn.execute("SELECT * FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone()
-        state = core._agent_state(conn, a) if a else "gone"
-        out["session"] = {"name": name, "running": state in ("active", "away"), "state": state,
-                          "viewable": bool(a) and transcript(conn, name, root, croot)[1] is not None}
+        return (core._agent_state(conn, a) if a else "gone"), a
+
+    pick, why = None, None
+    if holder:
+        pick, why = holder, "holds it"
+    if not pick:
+        for g in chain:
+            if g["owner"]:
+                pick, why = g["owner"], f"owns goal {g['name']}"
+                break
+    if not pick:
+        for g in chain:
+            for r in conn.execute("SELECT i.assignee FROM items i JOIN item_goals ig ON ig.item_id=i.id WHERE ig.goal_id=? "
+                                  "AND i.id<>? AND i.status IN ('in_progress','held') AND i.assignee IS NOT NULL "
+                                  "ORDER BY i.claimed_at DESC", (g["id"], item_id)):
+                if state(r["assignee"])[0] in ("active", "away"):
+                    pick, why = r["assignee"], f"works on goal {g['name']}"
+                    break
+            if pick:
+                break
+    if not pick:
+        r = conn.execute("SELECT agent FROM holds WHERE item_id=? ORDER BY started_at DESC, id DESC LIMIT 1", (item_id,)).fetchone()
+        if r:
+            pick, why = r["agent"], "finished it" if it["status"] == "done" else "held it last"
+    out = {"id": it["id"], "title": it["title"], "status": it["status"], "holder": holder, "session": None,
+           "goal": chain[0]["name"] if chain else None}
+    if pick:
+        st, a = state(pick)
+        out["session"] = {"name": pick, "why": why, "running": st in ("active", "away"), "state": st,
+                          "viewable": bool(a) and transcript(conn, pick, root, croot)[1] is not None}
     return out

@@ -28,11 +28,12 @@ function itemOf(el) {
 
 function render(d) {
   const s = d.session;
-  const go = !s ? `<span class="muted">No session worked on it</span>`
+  const go = !s ? `<span class="muted">No session${d.goal ? ` · goal ${esc(d.goal)}` : " worked on it"}</span>`
     : s.running ? `<button class="btn" type="button" data-session-go="${esc(s.name)}" title="Open the session of ${esc(s.name)} in the Sessions tab">Open session</button>`
     : s.viewable ? `<button class="btn" type="button" data-session-go="${esc(s.name)}" title="The session of ${esc(s.name)} has ended: its chat shows read only">Open session (ended)</button>`
     : `<span class="muted">${esc(s.name)} has ended; its transcript is not on this computer</span>`;
-  const who = d.holder ? `held by ${esc(d.holder)}` : s ? `last held by ${esc(s.name)}${s.running ? "" : " (ended)"}` : "";
+  // Why this session (#4628): it holds the item, owns its goal, works on its goal, or finished it.
+  const who = s ? `${esc(s.name)} ${esc(s.why || "")}${s.running ? "" : " (ended)"}` : "";
   pop.innerHTML = `<div class="refpop-t"><b>#${d.id}</b> ${esc(d.title)}</div>
     <div class="refpop-s">${chip("c-" + esc(d.status), esc(d.status.replace("_", " ")))} <span class="muted">${who}</span></div>
     <div class="refpop-b"><button class="btn" type="button" data-open="${d.id}">Open item</button>${go}</div>`;

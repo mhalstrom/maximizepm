@@ -110,10 +110,28 @@ class Sessions(Base):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET pid=999999 WHERE name='ag'")  # its process ended
         got = sessions.item_session(self.c, self.it, self.root, self.croot)
-        self.assertEqual((got["status"], got["holder"], got["session"]["name"], got["session"]["running"]),
-                         ("done", None, "ag", False))
+        self.assertEqual((got["status"], got["holder"], got["session"]["name"], got["session"]["running"], got["session"]["why"]),
+                         ("done", None, "ag", False, "finished it"))
         other = core.item_add(self.c, "site", "nobody took it")["id"]
         self.assertIsNone(sessions.item_session(self.c, other)["session"])
+        # #4628: no holder: the goal's owner, then a running session on another item of the goal, then the history.
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO goals (project_id, name, outcome, done_when, rank, status, owner, shared, created_at) "
+                           "SELECT project_id, 'ship', '', '', 1, 'open', NULL, 1, ? FROM items WHERE id=?", (core.iso(core.now()), other))
+            g = self.c.execute("SELECT id FROM goals WHERE name='ship'").fetchone()[0]
+            self.c.execute("INSERT INTO item_goals VALUES (?, ?)", (other, g))
+        got = sessions.item_session(self.c, other)
+        self.assertEqual((got["session"], got["goal"]), (None, "ship"))
+        core.register(self.c, "w2")
+        busy = core.item_add(self.c, "site", "next part")["id"]
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO item_goals VALUES (?, ?)", (busy, g))
+        core.claim(self.c, busy, "w2")
+        self.assertEqual((sessions.item_session(self.c, other)["session"]["name"],
+                          sessions.item_session(self.c, other)["session"]["why"]), ("w2", "works on goal ship"))
+        with core.tx(self.c):
+            self.c.execute("UPDATE goals SET owner='lead', shared=0 WHERE id=?", (g,))
+        self.assertEqual(sessions.item_session(self.c, other)["session"]["why"], "owns goal ship")
         with self.assertRaises(core.RiverError):
             sessions.item_session(self.c, 999999)
 
