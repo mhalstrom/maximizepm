@@ -2138,6 +2138,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": str(e)})
             finally:
                 conn.close()
+        if path in ("/api/sessions", "/api/session"):  # the Sessions tab: running sessions, read only (#4592)
+            from urllib.parse import parse_qs, urlsplit
+            from . import sessions
+            q = parse_qs(urlsplit(self.path).query)
+            conn = core.connect()
+            try:
+                if path == "/api/sessions":
+                    return self._send(200, {"sessions": sessions.views(conn, agent_terminals(conn))})
+                cursor = q.get("cursor", [""])[0]
+                return self._send(200, sessions.view(conn, q.get("agent", [""])[0],
+                                                     int(cursor) if cursor.isdigit() else None))
+            except RiverError as e:
+                return self._send(409, {"error": str(e)})
+            finally:
+                conn.close()
         if path == "/api/log":
             from urllib.parse import parse_qs, urlsplit
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}

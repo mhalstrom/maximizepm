@@ -310,3 +310,28 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup .mark.opt { color: var(--muted); }
 #setup details.more { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #setup details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+/* Sessions tab (#4592): a grid of running sessions, and the large view of one. */
+.sgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 12px; }
+.scard { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--bg); cursor: pointer; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.scard:hover, .scard:focus { border-color: var(--accent); outline: none; }
+.scard-h { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.scard-h b { overflow-wrap: anywhere; }
+.scard-h .spacer { flex: 1; }
+.scard-item { font-size: 13px; overflow-wrap: anywhere; }
+.scard .sub { color: var(--muted); font-size: 12px; }
+.scard-lines { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 6px; font-size: 12px; }
+.sl { display: flex; gap: 8px; padding: 2px 0; min-width: 0; }
+.sl-who { flex: 0 0 48px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; padding-top: 1px; }
+.sl-text { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.scard .sl-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-tool .sl-text { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+.sl-user .sl-who { color: var(--human); }
+.sl-assistant .sl-who { color: var(--accent); }
+.sl-event .sl-text { color: var(--muted); font-style: italic; }
+.sl-noopen { font-size: 12px; }
+.scard a.btn, #sessDlg a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; color: var(--ink); text-decoration: none; display: inline-block; font-size: 13px; }
+#sessDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; justify-content: center; padding: 3vh 12px; }
+#sessDlg.hidden { display: none; }
+#sessDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(1000px, 100%); height: 100%; display: flex; flex-direction: column; padding: 14px 16px; }
+#sessDlg .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; font-size: 13px; padding-right: 4px; }
+#sessDlg .sl { padding: 4px 0; border-bottom: 1px solid var(--line); }

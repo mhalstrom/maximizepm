@@ -14,6 +14,7 @@
   <h1>MaximizePM</h1>
   <nav>
     <button data-tab="board" class="on">Board</button>
+    <button data-tab="sessions" title="Every running agent session: its item, its state, and what it writes now">Sessions</button>
     <button data-tab="projects">Projects</button>
     <button data-tab="targets">Targets</button>
     <button data-tab="capacity">Capacity</button>
@@ -137,6 +138,13 @@
     </div>
   </section>
 
+  <section id="tab-sessions" class="hidden">
+    <div class="panel"><h2>Running sessions</h2>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">Each agent session that runs now, with its last lines, read from its transcript on this computer. Click a card to follow the whole session. Read only: to type in a session, use Open (its claude.ai/code page) or its terminal.</div>
+      <div id="sessions" class="sgrid"></div>
+    </div>
+  </section>
+
   <section id="tab-targets" class="hidden">
     <div class="panel" id="targetsPanel"><h2>Deploy targets</h2><div id="targets"></div></div>
   </section>
@@ -220,6 +228,16 @@
   </div>
   <div class="muted" style="font-size:13px;margin:4px 0 8px">Most important first. Dispatch gives the item to a session that waits for work in its project; else it starts a new agent in the project folder, and that agent's first <code>maxpm go</code> takes this item.</div>
   <div id="readyList"></div>
+</div></div>
+
+<div id="sessDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="sessTitle"><div class="box">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <h2 id="sessTitle" style="margin:0"></h2><span id="sessState"></span>
+    <span class="spacer" style="flex:1"></span><span id="sessOpen"></span>
+    <button class="iconbtn" id="sessClose" title="Close">✕</button>
+  </div>
+  <div class="muted" style="font-size:12px;margin:4px 0 8px">Read only. New lines show as the session writes them.</div>
+  <div id="sessBody" class="sbody"></div>
 </div></div>
 
 <div id="searchDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="searchTitle"><div class="box">

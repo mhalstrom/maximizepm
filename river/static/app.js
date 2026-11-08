@@ -14,6 +14,7 @@ import { makePanZoom } from "./components/panZoom.js";
 import { graphItems, graphText, GRAPH_LIMITS, GRAPH_MAX } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { hooksHtml } from "./components/targetHooks.js";
+import { makeSessions } from "./components/sessions.js";
 hooks.refresh = refresh;
 let S = null, openItem = null, tab = "board", graphSig = "";
 const drawer = makeDrawer($("#drawer"));
@@ -951,7 +952,7 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["board", "projects", "targets", "capacity", "graph", "done", "settings"];
+const TABS = ["board", "sessions", "projects", "targets", "capacity", "graph", "done", "settings"];
 // The page's URL: #as-<person>, #tab-<name> (the Board has none), and #item-<id> while an item's drawer
 // is open, so a tab or an open item can be linked, reloaded, and reached with Back.
 function pageHash(tabName = tab, item = drawer.isOpen() ? openItem : null) {
@@ -966,8 +967,10 @@ function setTab(name, push = true) {
   tab = name; document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   renderLog(true);
+  if (tab === "sessions") sessionsTab.refresh();
   return renderGraph(true);
 }
+const sessionsTab = makeSessions({ isShown: () => tab === "sessions" });
 // Links into the page: #item-4, #tab-graph, #as-alex, or several joined with & (#as-alex&item-4);
 // #terminal-<agent> (a notification for an agent that waits on a prompt) opens that agent's Terminal.
 // Setup guide: an overlay that shows until the user dismisses it for good (setting setup_done).
