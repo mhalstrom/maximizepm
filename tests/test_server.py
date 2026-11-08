@@ -543,6 +543,33 @@ class LaunchAgent(unittest.TestCase):
         b = core.go(self.c, self.dir.name, name, focus="deploy:web")
         self.assertEqual((b["role"], b["item"]["id"]), ("deployer", dep2))
 
+    def test_a_deployer_session_does_not_own_again_a_target_it_released(self):
+        # #4473: after wait said END, a deployer session ran maxpm target release, and its next go (MAXPM_FOCUS
+        # deploy:<target>) owned the target again for owner_ttl.
+        rv, dep = self._release()
+        nap = dict(sleep=lambda s: None, step="1s")
+        core.target_release(self.c, "web", "ops")
+        self.assertEqual(core.go(self.c, self.dir.name, "ops", focus="deploy:web")["role"], "idle")
+        self.assertIsNone(core.target_show(self.c, "web")["owner"])
+        core.register(self.c, "rev")
+        core.claim(self.c, rv, "rev")
+        core.review_pass(self.c, rv, "ok", "rev")
+        core.inbox(self.c, "ops")
+        self.assertEqual(core.wait(self.c, self.dir.name, "ops", focus="deploy:web", **nap)["result"], "again")
+        self.assertEqual(core.go(self.c, self.dir.name, "ops", focus="deploy:web")["role"], "idle")
+        self.assertIsNone(core.target_show(self.c, "web")["owner"])
+        # Another session takes the free target as before.
+        core.register(self.c, "ops2")
+        b = core.go(self.c, self.dir.name, "ops2", focus="deploy:web")
+        self.assertEqual((b["role"], b["item"]["id"]), ("deployer", dep))
+        core.release(self.c, dep, "later", "ops2")
+        core.target_release(self.c, "web", "ops2")
+        # After another owner released it, the first session may take it again; --role deployer always may.
+        self.assertEqual(core.go(self.c, self.dir.name, "ops", focus="deploy:web")["item"]["id"], dep)
+        core.release(self.c, dep, "later", "ops")
+        core.target_release(self.c, "web", "ops")
+        self.assertEqual(core.go(self.c, self.dir.name, "ops", role="deployer")["item"]["id"], dep)
+
     def test_a_deployer_session_waits_only_for_what_go_gives_a_deployer(self):
         # #1012: a deployer (MAXPM_FOCUS=deploy:<target>) waited while its deploy waited on the review; maxpm wait
         # said WORK for a console item, maxpm go said IDLE (the focus makes every go a deployer's), and so on.

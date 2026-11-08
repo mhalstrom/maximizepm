@@ -9664,7 +9664,8 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
     kind, _, fid = (focus or "").partition(":")
     fid, _, person = fid.partition("@")
     # Deploy now on the Targets tab: the session deploys (owning the free target) or reviews the release.
-    if role is None and kind in ("deploy", "review"):
+    focus_role_only = role is None and kind in ("deploy", "review")
+    if focus_role_only:
         role = "deployer" if kind == "deploy" else "reviewer"
     if role in (None, "context") and kind == "context" and fid:
         brief.update(role="context", item=None, context=context_brief(conn, fid),
@@ -9732,7 +9733,8 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             _set_role_note(conn, actor, r, item["id"])
             return brief
     if role in (None, "deployer"):
-        got = _deploy_claim(conn, actor, names, take_free=(role == "deployer"), brief=brief)
+        got = _deploy_claim(conn, actor, names, take_free=(role == "deployer"), brief=brief,
+                            skip_released=focus_role_only)
         if got:
             brief.update(_deploy_brief(conn, got))
             brief.update(role="deployer", item=got,
@@ -9870,12 +9872,30 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
     return brief
 
 
-def _deploy_claim(conn, actor, names, take_free=False, brief=None):
-    """Claim a ready deploy item on a target the actor owns; with take_free, first own a free target of these projects."""
+def released_by(conn, target, actor):
+    """True when the last change of the target's owner is this agent's own `maxpm target release`. A deployer
+    session's go and wait (MAXPM_FOCUS deploy:) then leave the target free: the agent let it go, and only
+    `maxpm target own` or `maxpm go --role deployer` takes it again (#4473: after wait said END, the agent
+    released the target, and its next go owned it again for owner_ttl)."""
+    head = f"target {target} "
+    owner_changes = ("released", "owned by ", "given to ", "taken over ", "ownership expired")
+    for r in conn.execute("SELECT actor, change FROM events WHERE item_id IS NULL AND substr(change, 1, ?)=? "
+                          "ORDER BY id DESC", (len(head), head)):
+        rest = r["change"][len(head):]
+        if rest.startswith(owner_changes):
+            return r["actor"] == actor and rest == "released"
+    return False
+
+
+def _deploy_claim(conn, actor, names, take_free=False, brief=None, skip_released=False):
+    """Claim a ready deploy item on a target the actor owns; with take_free, first own a free target of these
+    projects. skip_released (the role comes from MAXPM_FOCUS, not from --role): skip a target the actor released."""
     if take_free:
         targets = [r["target"] for r in conn.execute(
             f"SELECT DISTINCT target FROM projects WHERE target IS NOT NULL AND name IN ({','.join('?' * len(names))})",
             names)] if names else []
+        if skip_released:
+            targets = [t for t in targets if not released_by(conn, t, actor)]
         for t in targets:
             try:
                 target_own(conn, t, actor)
@@ -9938,7 +9958,7 @@ def _work_for(conn, actor, names, role=None):
             targets = {r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=?", (actor,))} | {
                 r["name"] for r in conn.execute(
                     f"SELECT t.name FROM targets t JOIN projects p ON p.target=t.name WHERE t.owner IS NULL "
-                    f"AND p.name IN ({','.join('?' * len(names))})", names)}
+                    f"AND p.name IN ({','.join('?' * len(names))})", names) if not released_by(conn, r["name"], actor)}
             got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"])
                         if a["kind"] == "deploy" and a["target"] in targets and a["ready"]), None)
         else:
