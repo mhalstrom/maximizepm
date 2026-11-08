@@ -99,7 +99,7 @@ class Sessions(Base):
         self.write(claude_line("assistant", [{"type": "text", "text": f"Done with #{self.it}; see #99999 and a&#38;"}],
                                "end_turn"))
         refs = sessions.view(self.c, "ag", None, self.root, self.croot)["refs"]
-        self.assertEqual(refs, {str(self.it): "header"})
+        self.assertEqual(refs, {str(self.it): {"title": "header", "status": "in_progress", "assignee": "ag"}})
 
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
         with core.tx(self.c):

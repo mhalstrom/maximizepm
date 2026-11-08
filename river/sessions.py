@@ -375,7 +375,8 @@ _REF = None
 
 
 def item_refs(conn, entries):
-    """{id: title} of the queue items that the lines name as #<number> (#4609): the page links only these."""
+    """{id: {title, status, assignee}} of the queue items that the lines name as #<number> (#4609): the page links
+    only these, and its pop-up shows each one's state and the session that holds it (#4611)."""
     import re
     global _REF
     _REF = _REF or re.compile(r"(?<![\w&])#(\d{1,7})\b")
@@ -383,8 +384,9 @@ def item_refs(conn, entries):
     out = {}
     for n in range(0, len(ids), 500):
         part = ids[n:n + 500]
-        out.update({str(r["id"]): r["title"] for r in conn.execute(
-            f"SELECT id, title FROM items WHERE id IN ({','.join('?' * len(part))})", part)})
+        out.update({str(r["id"]): {"title": r["title"], "status": r["status"], "assignee": r["assignee"]}
+                    for r in conn.execute(f"SELECT id, title, status, assignee FROM items "
+                                          f"WHERE id IN ({','.join('?' * len(part))})", part)})
     return out
 
 

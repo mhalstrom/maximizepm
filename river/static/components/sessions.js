@@ -131,6 +131,7 @@ export function makeSessions({ isShown }) {
       const first = cursor == null, atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
       if (first) { if (j.entries.length) col.replaceChildren(); else note(j.note || "No lines yet."); }
       else if (j.entries.length) col.querySelector(".sl-none")?.remove();
+      Object.assign(refs, j.refs || {});
       appendEntries(col, j.entries, j.refs);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
@@ -147,7 +148,7 @@ export function makeSessions({ isShown }) {
   function pick(name, remember = true) {
     if (remember && name) store(PICKED, name);
     if (name === agent) return;
-    agent = name; cursor = null; gen++;
+    agent = name; cursor = null; gen++; refs = {}; hidePop(true);
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
@@ -159,6 +160,62 @@ export function makeSessions({ isShown }) {
     side.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
+
+  // The pop-up of an item reference in the chat (#4611): on hover or focus, the item's title and state, Open item
+  // (the drawer), and Open session for the session that holds it. A click on the reference opens the item.
+  let refs = {}, popFor = null, popTimer = null;
+  const pop = document.createElement("div");
+  pop.className = "refpop hidden"; pop.setAttribute("role", "tooltip"); pop.id = "refPop";
+  document.body.append(pop);
+  function showPop(a) {
+    const id = a.dataset.ref, r = refs[id];
+    if (!r) return;
+    clearTimeout(popTimer);
+    popFor = a;
+    const held = ["in_progress", "held"].includes(r.status) ? r.assignee : null;  // a closed item keeps its last assignee
+    const holder = held && list.find(x => x.name === held || (x.also || []).includes(held));
+    pop.innerHTML = `<div class="refpop-t"><b>#${esc(id)}</b> ${esc(r.title)}</div>
+      <div class="refpop-s">${chip("c-" + esc(r.status), esc(r.status.replace("_", " ")))}${held ? ` <span class="muted">held by ${esc(held)}</span>` : ""}</div>
+      <div class="refpop-b"><button class="btn" type="button" data-open="${esc(id)}">Open item</button>
+      ${holder ? `<button class="btn" type="button" data-go="${esc(holder.name)}">Open session</button>`
+        : `<span class="muted">${held ? `${esc(held)} runs no session here` : "No session holds it"}</span>`}</div>`;
+    pop.classList.remove("hidden");
+    place();
+  }
+  // Beside its reference; hidden when the reference leaves the chat's view (the chat scrolls with new lines).
+  function place() {
+    if (!popFor) return;
+    const b = popFor.getBoundingClientRect(), v = body.getBoundingClientRect();
+    if (!popFor.isConnected || b.bottom < v.top || b.top > v.bottom) return hidePop(true);
+    const w = pop.offsetWidth, h = pop.offsetHeight;
+    pop.style.left = Math.max(8, Math.min(b.left, window.innerWidth - w - 8)) + "px";
+    pop.style.top = (b.bottom + h + 8 > window.innerHeight ? b.top - h - 6 : b.bottom + 6) + "px";
+  }
+  function hidePop(now) {
+    clearTimeout(popTimer);
+    const go = () => { pop.classList.add("hidden"); popFor = null; };
+    if (now) go(); else popTimer = setTimeout(go, 250);
+  }
+  col.addEventListener("mouseover", (e) => {
+    const a = e.target.closest("[data-ref]"); if (!a || a === popFor) return;
+    clearTimeout(popTimer); popTimer = setTimeout(() => showPop(a), 250);
+  });
+  col.addEventListener("mouseout", (e) => { if (e.target.closest("[data-ref]") && !pop.contains(e.relatedTarget)) hidePop(); });
+  col.addEventListener("focusin", (e) => { const a = e.target.closest("[data-ref]"); if (a) showPop(a); });
+  col.addEventListener("focusout", (e) => { if (e.target.closest("[data-ref]") && !pop.contains(e.relatedTarget)) hidePop(); });
+  col.addEventListener("keydown", (e) => {
+    const a = e.key === "Enter" && e.target.closest("[data-ref]"); if (a) { e.preventDefault(); a.click(); }
+  });
+  body.addEventListener("scroll", place);
+  pop.addEventListener("mouseover", () => clearTimeout(popTimer));
+  pop.addEventListener("mouseout", (e) => { if (!pop.contains(e.relatedTarget) && e.relatedTarget !== popFor) hidePop(); });
+  pop.addEventListener("focusout", (e) => { if (!pop.contains(e.relatedTarget) && e.relatedTarget !== popFor) hidePop(); });
+  pop.addEventListener("click", (e) => {
+    const go = e.target.closest("[data-go]");
+    if (go) { hidePop(true); pick(go.dataset.go); return; }
+    if (e.target.closest("[data-open]")) hidePop(true);  // the page's own handler opens the drawer
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && popFor) hidePop(true); });
 
   // A session that waits on the person says so above the composer.
   function waitLine(j) {

@@ -424,3 +424,10 @@ button.srow-it { cursor: pointer; }
 .chat-foot.drop .composer textarea { outline: 2px dashed var(--accent); }
 .msg-imgs { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 4px; max-width: 80%; }
 .msg-imgs img { max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--line); object-fit: cover; }
+/* The pop-up of an item reference in the chat (#4611). */
+.refpop { position: fixed; z-index: 20; max-width: 340px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.25); padding: 10px 12px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
+.refpop.hidden { display: none; }
+.refpop-t { overflow-wrap: anywhere; }
+.refpop-b { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.refpop-b .btn { font-size: 12px; }
+.link.ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }

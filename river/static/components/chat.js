@@ -25,8 +25,9 @@ export function plainText(text) {
   return d.textContent.replace(/\s+/g, " ").trim();
 }
 
-// Each #<number> that names a queue item (refs: {id: title}, from GET /api/session) becomes a link that opens the
-// item in the drawer (#4609). Text in code, a link or a button stays as it is.
+// Each #<number> that names a queue item (refs: {id: {title, status, assignee}}, from GET /api/session) becomes a
+// link that opens the item in the drawer (#4609), with a pop-up on hover and focus (refPopup, #4611). Text in code,
+// a link or a button stays as it is.
 const REF = /(^|[^\w&])#(\d{1,7})\b/g, HAS_REF = /(^|[^\w&])#\d{1,7}\b/;
 export function linkRefs(root, refs) {
   if (!refs || !Object.keys(refs).length) return;
@@ -42,7 +43,8 @@ export function linkRefs(root, refs) {
       if (!(id in refs)) return m;
       frag.append(n.data.slice(at, off + pre.length));
       const a = el("span", "link ref", "#" + id);
-      a.dataset.open = id; a.title = `Open #${id} ${refs[id]}`;
+      a.dataset.open = id; a.dataset.ref = id; a.tabIndex = 0;
+      a.setAttribute("aria-label", `#${id} ${refs[id].title}`);
       frag.append(a);
       at = off + m.length;
       return m;
