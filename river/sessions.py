@@ -351,6 +351,23 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None):
     return sorted(cards, key=lambda c: (order.get(c["state"], 5), c["name"]))
 
 
+_REF = None
+
+
+def item_refs(conn, entries):
+    """{id: title} of the queue items that the lines name as #<number> (#4609): the page links only these."""
+    import re
+    global _REF
+    _REF = _REF or re.compile(r"(?<![\w&])#(\d{1,7})\b")
+    ids = sorted({int(m) for e in entries for m in _REF.findall(e.get("text", "") + " " + e.get("detail", ""))})
+    out = {}
+    for n in range(0, len(ids), 500):
+        part = ids[n:n + 500]
+        out.update({str(r["id"]): r["title"] for r in conn.execute(
+            f"SELECT id, title FROM items WHERE id IN ({','.join('?' * len(part))})", part)})
+    return out
+
+
 def view(conn, agent, cursor=None, root=None, croot=None):
     """The large view of one session: its lines after cursor (None: the last LIMIT of them), the next cursor, and
     its state; with a note and no lines for an agent that has no transcript on this computer."""
@@ -366,4 +383,5 @@ def view(conn, agent, cursor=None, root=None, croot=None):
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
     key, label = state(conn, a, turn)
     return {"agent": agent, "transcript": kind, "entries": got["entries"], "cursor": got["cursor"],
+            "refs": item_refs(conn, got["entries"]),
             "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url")}

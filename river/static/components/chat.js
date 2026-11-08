@@ -1,8 +1,8 @@
-// A session as a chat (#4604): the person's turns on the right in a bubble, the agent's replies as markdown, each
+// A session as a chat (#4604): the person's turns on the right in a bubble, both sides' text as markdown, each
 // tool call folded to one line that opens on a click (its input, and its result when it comes), and small lines
 // for events. The transcript lines come from GET /api/session (river/sessions.py).
-// Markdown: marked, then DOMPurify, because an agent's text can hold any HTML. The person's text and every tool
-// text go in as text, never as HTML.
+// Markdown: marked, then DOMPurify, because a turn's text can hold any HTML. Every tool text goes in as text, never
+// as HTML. A #<number> that names a queue item links to its drawer (linkRefs, #4609).
 import { marked } from "../vendor/marked/marked.esm.js";
 import DOMPurify from "../vendor/dompurify/purify.es.mjs";
 import { copyText, toast } from "../lib.js";
@@ -16,6 +16,41 @@ DOMPurify.addHook("afterSanitizeAttributes", (n) => {
 
 export function markdown(text) {
   return DOMPurify.sanitize(marked.parse(String(text || "")), PURIFY);
+}
+
+// Markdown as plain text: the left bar's last line shows no markdown marks.
+export function plainText(text) {
+  const d = document.createElement("div");
+  d.innerHTML = markdown(text);  // sanitized by DOMPurify; only its text is used
+  return d.textContent.replace(/\s+/g, " ").trim();
+}
+
+// Each #<number> that names a queue item (refs: {id: title}, from GET /api/session) becomes a link that opens the
+// item in the drawer (#4609). Text in code, a link or a button stays as it is.
+const REF = /(^|[^\w&])#(\d{1,7})\b/g, HAS_REF = /(^|[^\w&])#\d{1,7}\b/;
+export function linkRefs(root, refs) {
+  if (!refs || !Object.keys(refs).length) return;
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => n.parentElement.closest("code, pre, a, button, .link") ? NodeFilter.FILTER_REJECT
+      : HAS_REF.test(n.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+  const nodes = [];
+  for (let n; (n = walk.nextNode());) nodes.push(n);
+  for (const n of nodes) {
+    const frag = document.createDocumentFragment();
+    let at = 0;
+    n.data.replace(REF, (m, pre, id, off) => {
+      if (!(id in refs)) return m;
+      frag.append(n.data.slice(at, off + pre.length));
+      const a = el("span", "link ref", "#" + id);
+      a.dataset.open = id; a.title = `Open #${id} ${refs[id]}`;
+      frag.append(a);
+      at = off + m.length;
+      return m;
+    });
+    if (!at) continue;
+    frag.append(n.data.slice(at));
+    n.replaceWith(frag);
+  }
 }
 
 function el(tag, cls, text) {
@@ -37,7 +72,10 @@ function addCopy(root) {
 function entryNode(e) {
   if (e.role === "user") {
     const m = el("div", "msg msg-user" + (e.sent ? " sent" : ""));
-    m.append(el("div", "bubble", e.text));
+    const b = el("div", "bubble md");
+    b.innerHTML = markdown(e.text);  // sanitized by DOMPurify
+    addCopy(b);
+    m.append(b);
     if (e.sent) m.append(el("div", "msg-note", "sent to its terminal"));
     return m;
   }
@@ -68,7 +106,7 @@ function entryNode(e) {
 
 // Add transcript lines to the chat column. A tool result fills the tool call it belongs to (when that call is
 // shown); it never shows as a line of its own.
-export function appendEntries(col, entries) {
+export function appendEntries(col, entries, refs) {
   for (const e of entries) {
     if (e.role === "result") {
       const d = e.for && col.querySelector(`details.tool[data-tool="${CSS.escape(e.for)}"]`);
@@ -79,7 +117,9 @@ export function appendEntries(col, entries) {
       d.classList.toggle("err", !!e.error);
       continue;
     }
-    col.append(entryNode(e));
+    const node = entryNode(e);
+    linkRefs(node, refs);
+    col.append(node);
   }
 }
 

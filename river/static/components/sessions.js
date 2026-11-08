@@ -8,7 +8,7 @@
 // page's token: typeAction).
 import { $, esc, ago, clip, store, toast, typeAction } from "../lib.js";
 import { chip } from "./chip.js";
-import { appendEntries, wireCopy } from "./chat.js";
+import { appendEntries, wireCopy, plainText } from "./chat.js";
 import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
 
@@ -35,24 +35,27 @@ function headerItem(s) {
   return `<span class="muted">No item</span>`;
 }
 
-function itemHtml(s, n) {
-  return s.holds.length ? s.holds.map(h => `<span class="link" data-open="${h.id}">#${h.id} ${esc(clip(h.title, n))}</span>`).join(" ")
-    : s.owns.length ? `owns target ${s.owns.map(esc).join(", ")}` : `<span class="muted">${esc(s.role || "no item")}</span>`;
-}
-
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
 function waitBadge(s) {
   const n = (s.waiting || []).length;
   return n ? `<span class="wbadge" title="${n} thing(s) wait for you here: click to answer">! ${n}</span>` : "";
 }
 
-// One row of the left bar. A session that waits at a prompt or for an answer stands out (class "needs").
+// One row of the left bar, in two parts (#4609): the left two thirds (name, state, ! badge, last line) opens the
+// session on the right; the right third shows the item it works on and opens that item in the drawer. A session
+// that waits at a prompt or for an answer stands out (class "needs").
 export function sessionRow(s) {
   const last = s.last.length ? s.last[s.last.length - 1] : null;
-  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}" tabindex="0" role="button" title="Show this session">
-    <div class="srow-h"><b>${esc(s.name)}</b><span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
-    <div class="srow-item">${itemHtml(s, 70)}</div>
-    <div class="sub">${last ? esc(clip(last.text.split("\n")[0], 80)) : ""}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
+  const lastText = last ? (last.role === "tool" ? last.text : plainText(last.text)) : "";
+  const h = s.holds && s.holds[0];
+  const item = h ? `<button class="srow-it" type="button" data-open="${h.id}" title="${esc(`Open item #${h.id} ${h.title}`)}"><b>#${h.id}</b><span>${esc(clip(h.title, 48))}</span></button>`
+    : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + s.owns.join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(s.owns.join(", ")) : "No item"}</span></div>`;
+  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
+    <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
+      <div class="srow-h"><b>${esc(s.name)}</b><span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
+      <div class="sub">${esc(clip(lastText, 90))}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
+    </div>
+    ${item}
   </div>`;
 }
 
@@ -128,7 +131,7 @@ export function makeSessions({ isShown }) {
       const first = cursor == null, atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
       if (first) { if (j.entries.length) col.replaceChildren(); else note(j.note || "No lines yet."); }
       else if (j.entries.length) col.querySelector(".sl-none")?.remove();
-      appendEntries(col, j.entries);
+      appendEntries(col, j.entries, j.refs);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
       $("#sessState").innerHTML = stateChip(j);
@@ -207,13 +210,13 @@ export function makeSessions({ isShown }) {
   });
   side.addEventListener("click", (e) => {
     if (e.target.closest("[data-open], a")) return;  // an item link opens the drawer
-    const r = e.target.closest("[data-session]"); if (!r) return;
+    const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
     pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
     if (s && (s.waiting || []).length) openWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   side.addEventListener("keydown", (e) => {
-    const r = (e.key === "Enter" || e.key === " ") && e.target.closest("[data-session]");
+    const r = (e.key === "Enter" || e.key === " ") && e.target.closest(".srow-main") && e.target.closest("[data-session]");
     if (!r) return;
     e.preventDefault(); pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
