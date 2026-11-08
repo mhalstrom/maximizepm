@@ -15,12 +15,12 @@ const SRC = { session: "from the session", "command line": "from its command lin
 function field(s, i) {
   const val = s.value == null ? "" : s.value;
   const input = s.kind === "choice"
-    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${s.choices.map(c => `<option${c === val ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>`
+    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${s.choices.map(c => `<option value="${esc(c)}"${c === val ? " selected" : ""}${s.notes && s.notes[c] ? ` title="${esc(s.notes[c])}"` : ""}>${esc(c)}${s.notes && s.notes[c] && s.notes[c].split(" · ")[0] !== c ? ` (${esc(s.notes[c].split(" · ")[0])})` : ""}</option>`).join("")}</select>`
     : `<input data-i="${i}" value="${esc(val)}" aria-label="${esc(s.label)}" spellcheck="false">`;
   const how = s.live ? `<button class="btn" type="button" data-live="${i}" title="Type the change into its terminal now">Change now</button>`
     : `<span class="muted" title="Its chat provider changes this only when the session starts">restart</span>`;
   return `<div class="set-row"><label>${esc(s.label)}</label>${input}${how}
-    <div class="set-sub muted">${val ? esc(SRC[s.source] || s.source || "") : "MaximizePM cannot tell"}${s.default_key ? ` · default ${esc(s.default_key)} = ${esc(s.default_value || "(the CLI's own)")}` : ""}${s.note ? ` · ${esc(s.note)}` : ""}</div></div>`;
+    <div class="set-sub muted">${val ? esc(SRC[s.source] || s.source || "") : "MaximizePM cannot tell"}${s.reported && s.reported !== val ? ` (it reports ${esc(s.reported)})` : ""}${s.default_key ? ` · default ${esc(s.default_key)} = ${esc(s.default_value || "(the CLI's own)")}` : ""}${s.note ? ` · ${esc(s.note)}` : ""}</div></div>`;
 }
 
 function changes() {

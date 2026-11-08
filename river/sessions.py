@@ -34,7 +34,7 @@ _CC = core.LAUNCH_PLATFORMS["claude-code"]["options"]
 _CX = core.LAUNCH_PLATFORMS["codex"]["options"]
 PROVIDERS = {
     "claude-code": {"label": "Claude Code", "settings": [
-        {"key": "model", "label": "Model", "kind": "text", "live": "/model {value}", "restart": "model",
+        {"key": "model", "label": "Model", "kind": "model", "live": "/model {value}", "restart": "model",
          "cmd": r"--model (\S+)"},
         {"key": "effort", "label": "Effort", "kind": "choice", "choices": ["low", "medium", "high", "xhigh", "max"],
          "live": "/effort {value}", "restart": "effort", "cmd": r"--effort (\S+)"},
@@ -45,7 +45,7 @@ PROVIDERS = {
          "restart": "opt", "default": "claude_remote_control", "flag": "--remote-control"},
     ]},
     "codex": {"label": "Codex", "settings": [
-        {"key": "model", "label": "Model", "kind": "text", "restart": "model", "cmd": r"(?:^|\s)-m (\S+)"},
+        {"key": "model", "label": "Model", "kind": "model", "restart": "model", "cmd": r"(?:^|\s)-m (\S+)"},
         {"key": "effort", "label": "Reasoning effort", "kind": "choice", "choices": core.PLATFORM_EFFORTS["openai"],
          "restart": "effort", "cmd": r"model_reasoning_effort=(\S+)"},
         {"key": "approval", "label": "Approval", "kind": "choice", "choices": _CX["approval"]["choices"] + ["untrusted"],
@@ -692,6 +692,7 @@ def session_settings(conn, agent, root=None, croot=None):
         except (OSError, ValueError, EOFError):
             seen = {}
     cmd = a.get("pid_cmd") or ""
+    models = core.platform_models(conn, prov["id"]) if prov["id"] in core.LAUNCH_PLATFORMS else []
     out = []
     for spec in PROVIDERS[prov["id"]]["settings"]:
         value, source = seen.get(spec["key"]), "session"
@@ -702,7 +703,15 @@ def session_settings(conn, agent, root=None, croot=None):
             value, source = ("on" if spec["flag"] in cmd.split() else "off"), "command line"
         if value is None and spec.get("default"):
             value, source = core.setting(conn, spec["default"], agent=agent) or None, "default"
+        row = {}
+        if spec["kind"] == "model":
+            # The models of the session's own provider (#4633), as the launch dialog lists them; the one it runs is
+            # chosen, by its ladder name, else as it reports it.
+            row = {"kind": "choice", "choices": [m["name"] for m in models], "reported": value,
+                   "notes": {m["name"]: f"{m['id']}{' · ' + m['note'] if m['note'] else ''}" for m in models}}
+            value = core.model_name_of(models, value) or value
         out.append({"key": spec["key"], "label": spec["label"], "kind": spec["kind"], "choices": spec.get("choices"),
+                    **row,
                     "value": value, "source": source, "live": bool(spec.get("live")), "note": spec.get("note"),
                     "default_key": spec.get("default"),
                     "default_value": core.setting(conn, spec["default"]) if spec.get("default") else None})
@@ -716,9 +725,14 @@ def setting_spec(provider_id, key):
     return spec
 
 
-def check_value(spec, value):
+def check_value(spec, value, conn=None, provider_id=None):
     import re as _re
     value = str(value or "").strip()
+    if spec["kind"] == "model":
+        names = [m["name"] for m in core.platform_models(conn, provider_id)] if conn is not None and provider_id else []
+        if names and value not in names:
+            raise core.RiverError(f"{spec['label']} is one of {', '.join(names)}, not {value or 'empty'}")
+        spec = dict(spec, kind="text")
     if spec["kind"] == "choice" and value not in spec["choices"]:
         raise core.RiverError(f"{spec['label']} is one of {', '.join(spec['choices'])}, not {value or 'empty'}")
     if spec["kind"] == "text" and not _re.match(r"^[\w.:@/-]{1,80}$", value):

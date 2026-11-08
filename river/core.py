@@ -8663,6 +8663,25 @@ def model_id(conn, platform, model, project_id=None, inline=None):
     return parse_model_ids(ids, platform).get(model.lower(), model)
 
 
+def platform_models(conn, platform, project_id=None, inline=None):
+    """The models a platform's sessions run, for the launch dialog and a session's Settings dialog (#4633), one
+    source for both: the model_ladder names of its family, each with its note and the id its CLI gets."""
+    fam = LAUNCH_PLATFORMS.get(platform, {}).get("family")
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    return [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam, "id": model_id(conn, platform, m, project_id, inline)}
+            for m in ladder.get(fam, [])]
+
+
+def model_name_of(models, value):
+    """The ladder name of a model a session reports (an id such as gpt-6.1-sol or claude-opus-5-5, or a name), or
+    None: its id, else its name, else the name as a word of the id."""
+    v = str(value or "").lower()
+    for m in models:
+        if v in (m["name"], str(m["id"]).lower()):
+            return m["name"]
+    return next((m["name"] for m in models if re.search(r"(?:^|[-_.])" + re.escape(m["name"]) + r"(?:$|[-_.])", v)), None)
+
+
 def codex_models():
     """{id: [effort levels]} from the Codex model cache (~/.codex/models_cache.json), or None without one."""
     import json
@@ -9449,8 +9468,9 @@ def launch_options(conn):
         fam = fam if fam in ladder else None
         out.append({"label": label, "family": fam, "platform": prof[0] if prof else None,
                     "agent_type": prof[0] if prof else _exe_platform(cmd),
-                    "models": [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
-                               for f, ms in ladder.items() if fam in (None, f) for m in ms],
+                    "models": (platform_models(conn, prof[0], inline=prof[1]) if prof else
+                               [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
+                                for f, ms in ladder.items() if fam in (None, f) for m in ms]),
                     "efforts": PLATFORM_EFFORTS.get(fam, levels),
                     "takes_model": bool(prof) or "{model}" in cmd, "takes_effort": bool(prof) or "{effort}" in cmd,
                     # The options the dialog can change for one launch, preset from the entry and the settings.

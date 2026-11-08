@@ -143,7 +143,18 @@ class Sessions(Base):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET pid_cmd='claude --name ag --remote-control --model opus' WHERE name='ag'")
         got = {x["key"]: x for x in sessions.session_settings(self.c, "ag", self.root, self.croot)["settings"]}
-        self.assertEqual((got["model"]["value"], got["model"]["source"], got["model"]["live"]), ("claude-opus-5-5", "session", True))
+        self.assertEqual((got["model"]["value"], got["model"]["source"], got["model"]["live"]), ("opus", "session", True))
+        # #4633: the models of its own provider, the launch dialog's list; the id it reports stays shown.
+        self.assertEqual((got["model"]["kind"], got["model"]["choices"], got["model"]["reported"]),
+                         ("choice", ["haiku", "sonnet", "opus", "fable"], "claude-opus-5-5"))
+        launch = next(o for o in core.launch_options(self.c) if o["platform"] == "claude-code")
+        self.assertEqual([m["name"] for m in launch["models"]], got["model"]["choices"])
+        cx = core.platform_models(self.c, "codex")
+        self.assertEqual([m["name"] for m in cx], ["luna", "terra", "sol", "astra"])
+        self.assertEqual(core.model_name_of(cx, cx[2]["id"]), "sol")
+        self.assertIsNone(core.model_name_of(cx, "gpt-9"))
+        with self.assertRaises(core.RiverError):
+            sessions.check_value(sessions.setting_spec("codex", "model"), "opus", self.c, "codex")
         self.assertEqual((got["effort"]["value"], got["permission_mode"]["value"]), ("xhigh", "auto"))
         self.assertEqual((got["remote_control"]["value"], got["remote_control"]["source"]), ("on", "command line"))
         self.assertFalse(got["permission_mode"]["live"])

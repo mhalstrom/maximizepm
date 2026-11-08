@@ -1006,10 +1006,11 @@ def session_setting_live(conn, agent, key, value, who=None):
     it (Claude Code /model, /effort): the command goes into its tmux pane while the session is quiet."""
     from . import sessions
     a, kind, path, _tail = _quiet_session(conn, agent, who)
-    spec = sessions.setting_spec(sessions.provider(a.get("agent_type"), kind)["id"], key)
+    prov = sessions.provider(a.get("agent_type"), kind)["id"]
+    spec = sessions.setting_spec(prov, key)
     if not spec.get("live"):
         raise RiverError(f"{spec['label']} changes only with a restart: use Restart with these settings")
-    value = sessions.check_value(spec, value)
+    value = sessions.check_value(spec, value, conn, prov)
     if pane_prompts(conn, {agent: _typing_pane(conn, agent, who)}).get(agent):
         raise RiverError(f"a prompt waits in the terminal of {agent}: answer it first")
     terminal_keys(conn, agent, [{"text": spec["live"].format(value=value)}, {"key": "Enter"}], who)
@@ -1034,7 +1035,7 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
     ov, done, defaults = {"opts": {}, "flags": [], "noflags": []}, [], []
     for key, value in changes.items():
         spec = sessions.setting_spec(prov, key)
-        value = sessions.check_value(spec, value)
+        value = sessions.check_value(spec, value, conn, prov)
         if spec["restart"] in ("model", "effort"):
             ov[spec["restart"]] = value
         elif spec["restart"] == "opt":
