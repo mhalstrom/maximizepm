@@ -66,12 +66,25 @@ function modelInput(it, f, id, hint) {
 }
 
 // The drawer for one item (it from /api/item/<id>). S: the page state; me: who acts.
+// An agent whose session still runs (active or away): its name opens that session in the Sessions tab (#4615).
+function running(S, name) {
+  const a = (S.agents || []).find(x => x.name === name);
+  return !!a && a.kind === "ai" && ["active", "away"].includes(a.state);
+}
+function sessionName(S, name) {
+  return running(S, name) ? `<span class="link" data-session-go="${esc(name)}" title="Open the session of ${esc(name)} in the Sessions tab">${esc(name)}</span>` : esc(name);
+}
+
 export function itemDrawerHtml(it, { S, me }) {
   const closed = ["done", "dropped"].includes(it.status);
+  const holder = ["in_progress", "held"].includes(it.status) && it.assignee;
   return `
     <div style="display:flex;align-items:center;gap:8px"><span class="muted">#${it.id} · ${esc(it.project)}</span><span class="spacer" style="flex:1"></span><button class="btn" id="dClose">Close</button></div>
     <h3>${esc(it.title)}</h3>
     <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${modelChip(it)}${statusChip(it)}</div>
+    ${holder ? `<div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Held by</span> <b>${esc(holder)}</b>
+      ${running(S, holder) ? `<button class="btn" data-session-go="${esc(holder)}" title="Open the session of ${esc(holder)} in the Sessions tab">Open session</button>`
+        : `<span class="muted" style="font-size:12px">its session does not run now</span>`}</div>` : ""}
     <div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Goals:</span>
       ${(it.goals || []).map(g => chip("c-goal", `${esc(g)} <span class="link" data-untag="${esc(g)}" title="remove this goal tag">×</span>`)).join("") || '<span class="muted" style="font-size:12px">none</span>'}
       ${(S.goals || []).some(g => g.status === "open" && !(it.goals || []).includes(g.name)) ? `<select id="dGoal">${(S.goals || []).filter(g => g.status === "open" && !(it.goals || []).includes(g.name)).sort((a, b) => (b.project === it.project) - (a.project === it.project)).map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.project !== it.project ? " (" + esc(g.project) + ")" : ""}</option>`).join("")}</select><button class="btn" data-do="tag">Add goal</button>` : ""}</div>
@@ -129,5 +142,5 @@ export function itemDrawerHtml(it, { S, me }) {
       ${it.blocked_reason ? `<div>${esc(it.blocked_text)} <span class="link" data-do="unblock">clear</span></div>${it.blocked_at ? `<div class="muted" style="font-size:12px">since ${ago(it.blocked_at)}${it.blocked_until ? ", ready by itself in " + left(it.blocked_until) : ""}</div>` : ""}`
         : `<div class="actions"><input id="dBlock" placeholder="waiting on …" style="flex:1"><input id="dUntil" placeholder="until (optional): 2h, mon 07:00" style="width:170px"><button class="btn" data-do="block">Set</button></div>`}
     </div>
-    <div class="sec"><h4>History</h4>${it.events.map(e => `<div class="ev">${ago(e.at)} · <b>${esc(e.actor)}</b> ${esc(e.change)}</div>`).join("")}</div>`;
+    <div class="sec"><h4>History</h4>${it.events.map(e => `<div class="ev">${ago(e.at)} · <b>${/^(claimed|done)\b/.test(e.change) ? sessionName(S, e.actor) : esc(e.actor)}</b> ${esc(e.change)}</div>`).join("")}</div>`;
 }

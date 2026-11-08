@@ -753,6 +753,9 @@ document.addEventListener("click", async (e) => {
   if (t.dataset.goalAct) return goalAction(t.dataset.goalAct, t.dataset.g);
   if (t.dataset.untag) { await act("item_edit", { id: openItem, untag: [t.dataset.untag] }).catch(() => {}); return openDrawer(openItem, true); }
   const card = t.closest("[data-goal]"); if (card) { const g = card.dataset.goal; setGoal(goalSel() === g ? "" : g); return; }
+  // A session link (the drawer's Open session, a name in its history): the Sessions tab on that session (#4615).
+  const sgo = t.closest("[data-session-go]");
+  if (sgo) { closeDrawer(); await setTab("sessions"); sessionsTab.pick(sgo.dataset.sessionGo); return; }
   const open = t.closest("[data-open]"); if (open) return openDrawer(+open.dataset.open);
   const row = t.closest(".row"); if (row) return openDrawer(+row.dataset.id);
   if (t.id === "dClose") return closeDrawer();
