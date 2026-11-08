@@ -67,12 +67,20 @@ def page_html(path):
             return None
         depth = len(parts) - 1
     base = "../" * depth or "./"
-    return (STATIC / "index.html").read_bytes().replace(b"<head>", f'<head>\n<base href="{base}">'.encode(), 1)
+    page = (STATIC / "index.html").read_bytes().replace(b"<head>", f'<head>\n<base href="{base}">'.encode(), 1)
+    # Each tab's HTML is a file of its own (#4656): static/views/<view>.html, at its <!-- view: <view> --> mark.
+    return re.sub(rb"<!-- view: (\w+) -->", lambda m: (STATIC / "views" / (m.group(1).decode() + ".html")).read_bytes(), page)
+
+
+def _code_files():
+    """The server's Python code: river/*.py and the routes of each view (river/routes/*.py, #4656)."""
+    return sorted(PKG.glob("*.py")) + sorted(PKG.glob("routes/*.py"))
 
 
 def _watched():
-    """The server's code and every page file, in subfolders too (components/); vendor/ never changes by hand."""
-    return sorted(PKG.glob("*.py")) + sorted(
+    """The server's code and every page file, in subfolders too (components/, views/); vendor/ never changes by
+    hand."""
+    return _code_files() + sorted(
         f for f in STATIC.rglob("*") if f.is_file() and "vendor" not in f.relative_to(STATIC).parts[:1]
         and not any(part.startswith(".") for part in f.relative_to(STATIC).parts))
 
@@ -85,7 +93,7 @@ def _build_id():
 def _code_id():
     """Changes when the server's Python code changes (git pull, a commit, an edit). The page files are
     read from disk on every request, but the code runs as it was when the server started."""
-    return str(max((f.stat().st_mtime_ns for f in PKG.glob("*.py")), default=0))
+    return str(max((f.stat().st_mtime_ns for f in _code_files()), default=0))
 
 
 BOOT_CODE = _code_id()
@@ -2549,42 +2557,17 @@ OPS = {
     # The page's Connect button for the relay: the device flow, finished in the background by maxpm serve.
     "relay_connect": lambda conn, a, who: relay.connect_from_page(bool(a.get("replace"))),
     "relay_disconnect": lambda conn, a, who: relay.disconnect(),
-    "project_add": lambda c, a, who: core.project_add(c, a["name"], a.get("rank"), a.get("notes", ""), who),
-    "project_rank": lambda c, a, who: core.project_rank(c, a["name"], a["rank"], who),
-    "project_describe": lambda c, a, who: core.project_describe(c, a["name"], a["text"], who),
-    "item_add": lambda c, a, who: core.item_add(c, a["project"], a["title"], int(a.get("priority", 2)),
-                                                a.get("notes", ""), a.get("doer", "any"),
-                                                [int(x) for x in a.get("after", [])], who,
-                                                a.get("context", ""), a.get("touches"), a.get("check", ""),
-                                                a.get("blocks"), a.get("mode"), a.get("found_during"),
-                                                [int(x) for x in a.get("feeds", [])], a.get("due"),
-                                                goals=a.get("goals"), models=a.get("models")),
     "item_edit": lambda c, a, who: core.item_edit(c, a["id"], a.get("title"), a.get("notes"), a.get("doer"),
                                                   a.get("project"), who, a.get("context"), a.get("touches"),
                                                   a.get("check"), a.get("due"), goals=a.get("goals"),
                                                   untag=a.get("untag"), models=a.get("models")),
-    "goal_add": lambda c, a, who: core.goal_add(c, a["project"], a["name"], a.get("outcome", ""), a.get("done_when", ""),
-                                                who, shared=bool(a.get("shared"))),
-    "goal_edit": lambda c, a, who: core.goal_edit(c, a["name"], a.get("outcome"), a.get("done_when"), a.get("new_name"), who,
-                                                  a.get("shared")),
-    "goal_rank": lambda c, a, who: core.goal_rank(c, a["name"], a["rank"], who),
-    "goal_own": lambda c, a, who: core.goal_own(c, a["name"], who),
-    "goal_release": lambda c, a, who: core.goal_release(c, a["name"], who, a.get("no_handoff")),
-    "goal_done": lambda c, a, who: core.goal_done(c, a["name"], a.get("result", ""), who, bool(a.get("drop_open"))),
-    "goal_reopen": lambda c, a, who: core.goal_reopen(c, a["name"], who),
     "prio": lambda c, a, who: core.item_prio(c, a["id"], a["priority"], who),
     "move": lambda c, a, who: core.item_move(c, a["id"], a.get("before"), a.get("after"), who),
     "dep_add": lambda c, a, who: core.dep_add(c, a["id"], [int(x) for x in a["on"]], who, a.get("kind", "blocks")),
     "dep_remove": lambda c, a, who: core.dep_remove(c, a["id"], [int(x) for x in a["on"]], who),
     "claim": lambda c, a, who: core.claim(c, a["id"], who),
-    "push": lambda c, a, who: core.push(c, a["id"], a["to"], a.get("note"), who),
-    "push_cancel": lambda c, a, who: core.cancel_push(c, a["id"], who),
-    "undo_takeover": lambda c, a, who: core.undo_takeover(c, a["id"], who),
-    "takeover_seen": lambda c, a, who: core.takeover_seen(c, a["id"], who),
     "accept": lambda c, a, who: core.accept(c, a["id"], who),
     "decline": lambda c, a, who: core.decline(c, a["id"], a.get("note"), who),
-    "next_claim": lambda c, a, who: core.next_item(c, a.get("project"), a.get("unblocks"), True, who, 1, a.get("near"),
-                                                   bool(a.get("mine"))),
     "done": lambda c, a, who: core.done(c, a["id"], a.get("output"), who),
     "release": lambda c, a, who: core.release(c, a["id"], a.get("note"), who),
     "drop": lambda c, a, who: core.drop(c, a["id"], who),
@@ -2594,17 +2577,7 @@ OPS = {
     "block": lambda c, a, who: core.block(c, a["id"], a.get("reason"), who, a.get("until")),
     "unblock": lambda c, a, who: core.unblock(c, a["id"], who),
     "replanned": lambda c, a, who: core.replanned(c, a["id"], a.get("note"), who),
-    "register": lambda c, a, who: core.register(c, a["name"], bool(a.get("human")), a.get("note", "")),
-    "config_set": lambda c, a, who: core.config_set(c, a["key"], str(a["value"]), a.get("project"), a.get("item"),
-                                                    a.get("agent"), who),
-    "config_unset": lambda c, a, who: core.config_unset(c, a["key"], a.get("project"), a.get("item"), a.get("agent"), who),
-    "answer": lambda c, a, who: core.answer(c, int(a["msg"]), a["body"], who),
-    "message_read": lambda c, a, who: _message_read(c, int(a["msg"])),
-    "send": lambda c, a, who: core.send(c, a["kind"], a["body"], a.get("to"), a.get("item"), a.get("reply"), who,
-                                        a.get("level"), bool(a.get("blocked"))),
     "offer": lambda c, a, who: core.offer(c, a["body"], int(a["item"]), a.get("to"), who),
-    "give": lambda c, a, who: core.give(c, int(a["id"]), a["to"], who),
-    "split": lambda c, a, who: core.split(c, int(a["id"]), [t for t in a["titles"] if t.strip()], who),
     "setup_block": lambda c, a, who: setup_block(c, a["path"], a.get("move")),
     "setup_maxpm_cmd": lambda c, a, who: install_command(),
     "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who),
@@ -2619,17 +2592,8 @@ OPS = {
     "open_agent_on": lambda c, a, who: open_agent_on(c, int(a["id"]), agent=a.get("agent"), person=a.get("person"), actor=who,
                                                      **_launch_args(a)),
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
-    "deploy_now": lambda c, a, who: deploy_now(c, a["target"], bool(a.get("review")), agent=a.get("agent"), actor=who,
-                                               **_launch_args(a)),
-    "target_cadence": lambda c, a, who: core.target_cadence(c, a["target"], a.get("cadence") or "off", who),
-    "release_now": lambda c, a, who: core.release_now(c, a["target"], a.get("reason"), who),
-    "target_cut": lambda c, a, who: core.target_cut(c, a["target"], a.get("rev"), who),
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
-    "target_hook": lambda c, a, who: core.target_hook(c, a["target"], a.get("event"), a.get("command"),
-                                                     bool(a.get("clear")), who),
     "open_monitors": lambda c, a, who: open_monitors(c, db=a.get("db")),
-    "queue_add": lambda c, a, who: core.queue_add(c, a["agent"], a.get("id"), a.get("message"), bool(a.get("first")),
-                                                  a.get("before"), who),
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops from the page without a reason; the agent then reads who stopped it.
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
@@ -2637,17 +2601,22 @@ OPS = {
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "open_chat": lambda c, a, who: open_chat(c, a["agent"]),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
-    "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who, a.get("images"), a.get("files")),
-    "session_setting": lambda c, a, who: session_setting_live(c, a["agent"], a["key"], a.get("value"), who),
-    "session_restart": lambda c, a, who: session_restart(c, a["agent"], a.get("changes"), bool(a.get("make_default")), who),
-    "prompt_answer": lambda c, a, who: prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"), a.get("other"), who),
-    "tmux_tidy": lambda c, a, who: tmux_tidy(c),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
-    "decline_message": lambda c, a, who: core.decline_message(c, int(a["msg"]), a.get("note"), who),
     "update": lambda c, a, who: _no_update_in_app() or update_apply(),
     "restart": lambda c, a, who: _no_update_in_app() or (_restart_soon(), {"restarting": True})[1],
 }
+
+
+def _view_routes():
+    """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
+    from .routes import artifacts, board, done, projects, sessions, settings, targets
+    views = (board, projects, sessions, artifacts, targets, done, settings)
+    for v in views:
+        for key in v.OPS:
+            assert key not in OPS, key
+        OPS.update(v.OPS)
+    return [r for v in views for r in v.GET]
 
 
 def _message_read(conn, msg_id):
@@ -2693,6 +2662,9 @@ class Handler(BaseHTTPRequestHandler):
         page = page_html(path)
         if page is not None:
             return self._send(200, page, "text/html; charset=utf-8")
+        for route in VIEW_GET:  # each view's own routes (river/routes/<view>.py, #4656)
+            if route[0](path):
+                return route[1](self, path)
         if path == "/api/state":
             conn = core.connect()
             try:
@@ -2718,31 +2690,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": str(e)})
             finally:
                 conn.close()
-        if path.startswith("/api/upload/"):  # a file sent to a session
-            got = upload_file(path[len("/api/upload/"):])
-            if not got:
-                return self._send(404, {"error": "not found"})
-            headers = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": FILE_CSP}
-            if got[1] == "application/octet-stream":
-                headers["Content-Disposition"] = "attachment"
-            return self._send(200, got[0], got[1], headers)
-        if path in ("/api/file", "/api/frame-check"):  # the side panel of the Sessions tab (#4619)
-            from urllib.parse import parse_qs, urlsplit
-            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
-            conn = core.connect()
-            try:
-                # The page's token, or a full-screen key for this very file (#4620).
-                if not (hmac.compare_digest(q.get("token", ""), PAGE_TOKEN)
-                        or (path == "/api/file" and view_ok(conn, q.get("path", ""), q.get("e"), q.get("k")))):
-                    return self._send(403, {"error": "this needs the page's token: reload the page"})
-                if path == "/api/frame-check":
-                    return self._send(200, frame_check(q.get("url", "")))
-                got = local_file(conn, q.get("path", ""))
-            except RiverError as e:
-                return self._send(404, {"error": str(e)})
-            finally:
-                conn.close()
-            return self._send(200, got[0], got[1], {"Content-Security-Policy": FILE_CSP, "X-Content-Type-Options": "nosniff"})
         if path.startswith("/api/item-pop/") and path.rsplit("/", 1)[-1].isdigit():  # the item pop-up (#4622)
             from . import sessions
             conn = core.connect()
@@ -2752,90 +2699,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": str(e)})
             finally:
                 conn.close()
-        if path == "/api/session-settings":  # the Settings dialog of a session (#4625)
-            from urllib.parse import parse_qs, urlsplit
-            from . import sessions
-            conn = core.connect()
-            try:
-                return self._send(200, sessions.session_settings(conn, parse_qs(urlsplit(self.path).query).get("agent", [""])[0]))
-            except RiverError as e:
-                return self._send(409, {"error": str(e)})
-            finally:
-                conn.close()
-        if path == "/api/session-items":  # the Items view of a session (#4623)
-            from urllib.parse import parse_qs, urlsplit
-            from . import sessions
-            conn = core.connect()
-            try:
-                agent = parse_qs(urlsplit(self.path).query).get("agent", [""])[0]
-                return self._send(200, {"agent": agent, "items": sessions.session_items(conn, agent)})
-            finally:
-                conn.close()
-        if path == "/api/artifacts":  # the Artifacts tab (#4620)
-            from . import sessions
-            conn = core.connect()
-            try:
-                def allowed(f):
-                    try:
-                        local_file(conn, f, read=False)
-                        return True
-                    except RiverError:
-                        return False
-                from urllib.parse import parse_qs, urlsplit
-                one = parse_qs(urlsplit(self.path).query).get("agent", [""])[0] or None
-                return self._send(200, {"artifacts": sessions.artifacts(conn, None if one else agent_terminals(conn),
-                                                                        allowed, agent=one)})
-            finally:
-                conn.close()
-        if path in ("/view", "/api/view-key"):  # full screen in a tab of its own (#4620)
-            from urllib.parse import parse_qs, urlsplit
-            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
-            conn = core.connect()
-            try:
-                if path == "/view":
-                    code, page = view_page(conn, q)
-                    return self._send(code, page.encode(), "text/html; charset=utf-8")
-                if not hmac.compare_digest(q.get("token", ""), PAGE_TOKEN):
-                    return self._send(403, {"error": "this needs the page's token: reload the page"})
-                return self._send(200, {"url": view_url(conn, q.get("target", ""), q.get("session", ""), q.get("item", ""))})
-            except RiverError as e:
-                return self._send(409, {"error": str(e)})
-            finally:
-                conn.close()
         if path == "/api/token":
             return self._send(200, {"token": PAGE_TOKEN})
-        if path in ("/api/sessions", "/api/session"):  # the Sessions tab: running sessions, read only (#4592)
-            from urllib.parse import parse_qs, urlsplit
-            from . import sessions
-            q = parse_qs(urlsplit(self.path).query)
-            conn = core.connect()
-            try:
-                terminals = agent_terminals(conn)
-                if path == "/api/sessions":
-                    try:
-                        ended = {p["pane"] for p in _tmux_panes(everywhere=True) if p["ended"]} if terminals else set()
-                    except RiverError:
-                        ended = set()
-                    return self._send(200, {"sessions": sessions.views(conn, terminals, prompts=pane_prompts(conn, terminals),
-                                                                       ended_panes=ended)})
-                cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
-                return self._send(200, dict(sessions.view(conn, agent, int(cursor) if cursor.isdigit() else None),
-                                            terminal=bool(terminals.get(agent))))
-            except RiverError as e:
-                return self._send(409, {"error": str(e)})
-            finally:
-                conn.close()
-        if path == "/api/log":
-            from urllib.parse import parse_qs, urlsplit
-            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
-            conn = core.connect()
-            try:
-                since = q.get("since", "7d")
-                return self._send(200, core.completed(conn, q.get("project") or None, None if since == "all" else since))
-            except RiverError as e:
-                return self._send(400, {"error": str(e)})
-            finally:
-                conn.close()
         if path == "/api/search":
             # The search field of the page header: core.search, the one behind maxpm search (#2968).
             from urllib.parse import parse_qs, urlsplit
@@ -2847,37 +2712,6 @@ class Handler(BaseHTTPRequestHandler):
                                                    limit=max(1, min(int(q.get("n") or 50), 500)),
                                                    kinds=bool(q.get("kinds"))))
             except (RiverError, ValueError) as e:
-                return self._send(400, {"error": str(e)})
-            finally:
-                conn.close()
-        if path == "/api/needs-you":
-            from urllib.parse import parse_qs, urlsplit
-            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
-            conn = core.connect()
-            try:
-                return self._send(200, {"events": needs_you_view(conn, q.get("human"))})
-            finally:
-                conn.close()
-        if path == "/api/prompt-all" or (path.startswith("/api/item/") and path.endswith("/prompt")):
-            from urllib.parse import parse_qs, urlsplit
-            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
-            conn = core.connect()
-            try:
-                if path == "/api/prompt-all":
-                    return self._send(200, {"prompt": core.prompt_for_all(conn, q.get("person") or None)})
-                return self._send(200, {"prompt": core.prompt_for(conn, int(path.split("/")[3]), q.get("person") or None)})
-            except (RiverError, ValueError) as e:
-                return self._send(404, {"error": str(e)})
-            finally:
-                conn.close()
-        if path == "/api/inbox":
-            from urllib.parse import parse_qs, urlsplit
-            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
-            conn = core.connect()
-            try:
-                # The page only looks: messages turn read when the person acts on them (Mark read, answer, reply).
-                return self._send(200, {"messages": core.inbox(conn, q.get("agent"), bool(q.get("all")), mark_read=False)})
-            except RiverError as e:
                 return self._send(400, {"error": str(e)})
             finally:
                 conn.close()
@@ -2893,14 +2727,6 @@ class Handler(BaseHTTPRequestHandler):
             conn = core.connect()
             try:
                 return self._send(200, setup_status(conn))
-            finally:
-                conn.close()
-        if path.startswith("/api/thread/"):
-            conn = core.connect()
-            try:
-                return self._send(200, core.thread(conn, int(path.rsplit("/", 1)[1])))
-            except (RiverError, ValueError) as e:
-                return self._send(404, {"error": str(e)})
             finally:
                 conn.close()
         if path.startswith("/api/item/"):
@@ -3017,10 +2843,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def _restart_on_change(httpd):
     """Dev mode: when a Python file changes, stop serving and start the process again."""
-    code = {f: f.stat().st_mtime_ns for f in PKG.glob("*.py")}
+    code = {f: f.stat().st_mtime_ns for f in _code_files()}
     while True:
         time.sleep(1)
-        now = {f: f.stat().st_mtime_ns for f in PKG.glob("*.py")}
+        now = {f: f.stat().st_mtime_ns for f in _code_files()}
         if now != code:
             print("code changed; restarting", flush=True)
             # Replace the process in place. Shutting down first would let the main thread exit before this
@@ -3089,3 +2915,6 @@ def serve(port: int, open_browser=False, dev=False):
         pass
     finally:
         stop.set()
+
+
+VIEW_GET = _view_routes()

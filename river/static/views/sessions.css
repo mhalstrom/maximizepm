@@ -1,0 +1,190 @@
+/* The Sessions tab: the list of sessions, the chat, the message box, the side panel, its dialogs. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
+/* Sessions tab (#4592, #4597): the running sessions in a left bar, the chosen one on the right. */
+/* The tab fills the window under the header, edge to edge, as the side bar of a chat app (#4604). */
+main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
+.sess-layout { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 0; min-height: 320px; }
+.sess-layout > .panel { margin-bottom: 0; min-height: 0; display: flex; flex-direction: column; border-radius: 0; box-shadow: none; border-width: 0; }
+.sess-layout > .sess-side { border-right-width: 1px; padding: 12px; }
+.sess-layout > .sess-main { padding: 12px 20px 14px; }
+.sess-side .slist { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.sess-note { font-size: 12px; margin-top: 8px; }
+.srow { border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 8px; background: var(--bg); display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); min-width: 0; overflow: hidden; }
+.srow-main { padding: 7px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.srow-it { border: 0; border-left: 1px solid var(--line); background: none; color: var(--ink); font: inherit; font-size: 12px; text-align: left; padding: 7px 8px; display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
+button.srow-it { cursor: pointer; }
+.srow-it b { color: var(--accent); font-size: 12px; }
+.srow-it span { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.srow-main:hover, button.srow-it:hover { background: var(--panel); }
+.srow-main:focus-visible, button.srow-it:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.srow.on { border-color: var(--accent); background: var(--panel); box-shadow: inset 0 0 0 1px var(--accent); }
+.srow.needs { border-left-color: var(--warn); }
+.srow-h { display: flex; align-items: center; gap: 4px 6px; min-width: 0; flex-wrap: wrap; }
+.srow-h b { overflow-wrap: break-word; font-size: 13px; min-width: 0; max-width: 100%; }
+.srow-h .chip { flex: none; }
+.srow-h .spacer, .sess-head .spacer { flex: 1; }
+.srow .sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sess-head h2 { margin: 0; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.sess-item { font-size: 13px; margin: 4px 0 8px; overflow-wrap: anywhere; }
+.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: 1px solid var(--line); padding: 12px 4px 4px; }
+.sess-main .sbar { display: flex; gap: 8px; margin-top: 8px; align-items: flex-end; }
+.sess-main .sbar.hidden, .sess-main.hidden { display: none; }
+.sess-main .sbar textarea { flex: 1; min-width: 0; resize: none; line-height: 1.45; padding: 8px 12px; border-radius: 12px; max-height: 33vh; overflow-y: auto; font: inherit; }
+.sess-why { font-size: 12px; margin-top: 8px; }
+.sess-why.hidden { display: none; }
+.sess-head a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; color: var(--ink); text-decoration: none; display: inline-block; font-size: 13px; }
+@media (max-width: 759px) {
+  .sess-layout { grid-template-columns: minmax(0, 1fr); }
+  .sess-layout > .sess-side { border-right-width: 0; border-bottom-width: 1px; }
+  .sess-side .slist { flex: none; max-height: 40vh; }
+  .sess-main { height: 75vh; }
+}
+/* The chat view of a session (#4604): a middle column of readable width. */
+.chat-col { max-width: 48rem; margin: 0 auto; width: 100%; box-sizing: border-box; }
+.chat-foot { flex: none; }
+.sl-none { padding: 8px 0; }
+.msg { margin: 0 0 14px; line-height: 1.6; font-size: 14.5px; }
+.msg-user { display: flex; flex-direction: column; align-items: flex-end; }
+.msg-user .bubble { background: var(--bubble); border-radius: 18px; padding: 8px 14px; max-width: 80%; overflow-wrap: anywhere; }
+.msg-user .bubble.md pre { background: var(--panel); }
+.msg-user.sent .bubble { opacity: .8; }
+.msg-note { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.msg-agent { overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md blockquote, .md table, .md pre { margin: 0 0 10px; }
+.md ul, .md ol { padding-left: 1.4em; }
+.md h1, .md h2, .md h3, .md h4 { margin: 16px 0 8px; line-height: 1.3; color: var(--ink); text-transform: none; letter-spacing: 0; display: block; }
+.md h1 { font-size: 1.3em; } .md h2 { font-size: 1.15em; } .md h3, .md h4 { font-size: 1em; }
+.md a { color: var(--accent); }
+.md code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; background: var(--bubble); border-radius: 4px; padding: 1px 4px; }
+.md pre { position: relative; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.5; }
+.md pre .copy { position: absolute; top: 6px; right: 6px; font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; opacity: 0; }
+.md pre:hover .copy, .md pre .copy:focus { opacity: 1; }
+.md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.tool { margin: 0 0 2px; font-size: 12.5px; line-height: 1.5; }
+.msg + .tool, .msg-event + .tool { margin-top: -4px; }
+.tool + .msg { margin-top: 10px; }
+.tool summary { cursor: pointer; color: var(--muted); list-style: none; display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.tool summary::-webkit-details-marker { display: none; }
+.tool summary::before { content: "▸"; flex: none; font-size: 10px; }
+.tool[open] summary::before { content: "▾"; }
+.tool .tname { flex: none; font-weight: 600; }
+.tool .twhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.tool.err .tname { color: var(--warn); }
+.tool-body pre { margin: 6px 0 8px 16px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.tool-out { color: var(--muted); }
+.msg-event { text-align: center; font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+.sess-wait { font-size: 13px; margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); }
+.sess-wait.hidden { display: none; }
+.sess-head .btn, .sess-item .btn { font-size: 13px; }
+.sess-itembtn { text-align: left; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.sess-itembtn .chip { margin-left: 4px; }
+.sess-noopen { font-size: 12px; margin-left: 6px; }
+/* What waits for the person in a session (#4607): a badge in the left bar, and the dialog that answers it. */
+.wbadge { flex: none; white-space: nowrap; display: inline-flex; align-items: center; gap: 2px; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--warn); color: var(--panel); }
+#waitDlg, #setDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
+#waitDlg.hidden, #setDlg.hidden { display: none; }
+#waitDlg .box, #setDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(640px, 100%); padding: 18px 20px; }
+.wblock { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 8px; }
+.wkind { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.wq { font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wcmd { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.wlines summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.wlines pre { font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
+.wopt { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; cursor: pointer; }
+.wopt input { margin-top: 3px; }
+.wblock textarea { width: 100%; box-sizing: border-box; min-height: 60px; resize: vertical; font: inherit; }
+.wblock .wgo { align-self: flex-end; }
+/* Images for a session (#4610): thumbnails in the message box, and in the person's turn. */
+.sess-files { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.sess-files.hidden { display: none; }
+.sess-file { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 240px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.sess-file img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; }
+.sess-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-file .iconbtn { flex-shrink: 0; }
+.chat-foot.drop { outline: 2px dashed var(--accent); outline-offset: -3px; }
+.msg-files { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 4px; max-width: 80%; overflow-wrap: anywhere; }
+.msg-files a { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.msg-imgs { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 4px; max-width: 80%; }
+.msg-imgs img { max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--line); object-fit: cover; }
+/* The manager's rows, first and apart (#4616). */
+.slist-mgr { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line); flex: none; }
+.mgr-tag { flex: none; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--human); background: var(--human-bg); border-radius: 4px; padding: 1px 6px; }
+.mgr-none .srow-main { cursor: default; }
+.mgr-none .srow-it { justify-content: center; align-items: center; }
+.mgr-none .srow-it .btn { font-size: 12px; }
+/* The side panel of the Sessions tab (#4619): left bar | chat | panel. */
+.sess-layout.with-panel { grid-template-columns: minmax(280px, 360px) minmax(0, 1fr) var(--sp-w, 480px); }
+.sess-panel { position: relative; border-left-width: 1px !important; padding: 10px 12px; gap: 8px; }
+.sess-panel.hidden { display: none; }
+.sp-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 2; }
+.sp-grip:hover { background: var(--accent); opacity: .3; }
+.sp-tabs { display: flex; gap: 4px; overflow-x: auto; flex: none; }
+.sp-tab { display: inline-flex; align-items: center; gap: 4px; max-width: 200px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px 2px 8px; font-size: 12px; cursor: pointer; background: var(--bg); }
+.sp-tab.on { border-color: var(--accent); background: var(--panel); }
+.sp-tab-l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; }
+.sp-bar { display: flex; gap: 6px; align-items: center; flex: none; }
+.sp-bar input { flex: 1; min-width: 0; font-size: 12.5px; }
+.sp-bar .btn { font-size: 12px; white-space: nowrap; }
+.sp-body { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; }
+.sp-frame { flex: 1; width: 100%; border: 0; background: #fff; min-height: 300px; }
+.sp-img { max-width: 100%; height: auto; display: block; margin: auto; }
+.sp-md { padding: 12px 16px; font-size: 14px; line-height: 1.6; }
+.sp-note { padding: 16px; font-size: 13px; }
+.sp-list { display: flex; flex-direction: column; gap: 6px; }
+.sp-list .art-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+.sp-card { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.sp-card a.btn { background: var(--accent); color: var(--accent-ink); border-radius: 6px; padding: 4px 12px; text-decoration: none; font-size: 13px; }
+.link.fpath { cursor: pointer; }
+@media (max-width: 759px) {
+  .sess-layout.with-panel { grid-template-columns: minmax(0, 1fr); }
+  .sess-panel { height: 70vh; }
+  .sp-grip { display: none; }
+}
+/* The chat provider of a session (#4627). */
+.prov { flex: none; font-size: 10.5px; font-weight: 600; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted); white-space: nowrap; }
+.prov-codex { color: var(--ready); border-color: var(--ready); }
+.prov-claude-code { color: var(--prog); border-color: var(--prog); }
+#sessState .prov { margin-right: 6px; }
+/* Chat | Items of a session (#4623). */
+.sess-views { display: flex; gap: 2px; margin: 0 0 6px; flex: none; }
+.sv { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font: inherit; font-size: 13px; padding: 4px 10px; cursor: pointer; }
+.sv.on { color: var(--ink); border-bottom-color: var(--accent); }
+.sess-main #sessItems.hidden, .sess-main #sessBody.hidden, .sess-main #sessArts.hidden { display: none; }
+.si-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.si-t { overflow-wrap: anywhere; }
+.si-m { grid-column: 2; font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+/* The Settings dialog of a session (#4625). */
+#setDlg .box { width: min(620px, calc(100vw - 32px)); }
+.set-head { margin: 8px 0; }
+.set-row { display: grid; grid-template-columns: 170px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.set-row select, .set-row input { font: inherit; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; min-width: 0; }
+.set-sub { grid-column: 2 / 4; font-size: 12px; }
+.set-foot { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+@media (max-width: 560px) { .set-row { grid-template-columns: 1fr; } .set-sub { grid-column: 1; } }
+/* Side panel tabs (#4632): the kind of each, and a button to reach it from the keyboard. */
+.sp-tab .sp-tab-l { background: none; border: 0; color: inherit; font: inherit; padding: 0; cursor: pointer; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-k { opacity: .75; font-size: 11px; }
+.sp-k-image { color: var(--ready); } .sp-k-page { color: var(--prog); } .sp-k-tool { color: var(--accent); }
+/* Dictation (#4626). */
+/* Attach (#4649): a small paperclip at the right end of the message box, left of Send. */
+.composer .attach { flex: none; align-self: flex-end; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; background: none; border: 0; border-radius: 8px; color: var(--muted); cursor: pointer; }
+.composer .attach:hover:not(:disabled) { color: var(--ink); background: var(--panel2, rgba(127,127,127,.12)); }
+.composer .attach:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.composer .attach:disabled { opacity: .45; cursor: default; }
+.composer .mic { flex: none; padding: 4px 9px; }
+.composer .mic.on { background: var(--p0, #c0392b); border-color: transparent; color: #fff; animation: micpulse 1.2s ease-in-out infinite; }
+@keyframes micpulse { 50% { opacity: .65; } }
+@media (prefers-reduced-motion: reduce) { .composer .mic.on { animation: none; } }
+.sess-dictate { font-size: 12px; color: var(--muted); padding: 2px 4px; }
+/* Tool calls in a group, hidden behind a marker when the view says so (#4635). */
+.tg-sum { display: none; background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 2px 0; cursor: pointer; }
+.tg-sum:hover { color: var(--ink); }
+.chat-col.hide-tools .tg-sum { display: inline-block; }
+.chat-col.hide-tools .tool-group:not(.open) > :not(.tg-sum) { display: none; }

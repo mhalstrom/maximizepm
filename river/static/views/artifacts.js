@@ -2,8 +2,8 @@
 // named that the side panel can show, local pages, and claude.ai artifact links. A filter by session and by item.
 // Open shows it in the side panel beside its session's chat; Open full screen gives it a browser tab of its own.
 import { $, esc, ago, clip } from "../lib.js";
-import { chip } from "./chip.js";
-import { openFullScreen } from "./sidePanel.js";
+import { chip } from "../components/chip.js";
+import { openFullScreen } from "../components/sidePanel.js";
 
 const KIND = { file: "file", page: "local page", artifact: "claude.ai artifact" };
 let list = [];

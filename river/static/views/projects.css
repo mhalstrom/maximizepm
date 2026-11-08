@@ -1,0 +1,18 @@
+/* The Projects tab: a card for each project. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
+/* Projects tab: one card per project, so where one project ends and the next begins is plain. */
+.proj { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; background: var(--bg); }
+.proj-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.proj-h b { font-size: 17px; overflow-wrap: anywhere; }
+.proj-h .rk { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; border-radius: 6px; background: var(--wait-bg); color: var(--muted); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.proj-h .fold { background: none; border: 0; cursor: pointer; color: var(--muted); font-size: 13px; padding: 0 2px; width: 18px; }
+.proj-h .spacer { flex: 1; }
+.pmeta { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+.pmeta code { font-size: 12px; overflow-wrap: anywhere; }
+.pdesc { font-size: 13px; color: var(--ink); margin: 8px 0 0; line-height: 1.45; }
+.pcounts { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; }
+.pcounts .chip b { font-variant-numeric: tabular-nums; margin-right: 3px; }
+.pwho { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+.pwho b { color: var(--ink); font-weight: 600; }
+.psec { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 14px 0 6px; }
+.proj .goals { margin: 0 0 4px; }
+.proj.closed .pbody { display: none; }

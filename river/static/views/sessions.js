@@ -7,15 +7,15 @@
 // Server: GET /api/sessions, GET /api/session?agent=<name>&cursor=<byte>, and the op session_send (with the
 // page's token: typeAction).
 import { $, esc, ago, clip, store, toast, typeAction } from "../lib.js";
-import { chip } from "./chip.js";
-import { appendEntries, agePending, wireCopy, plainText } from "./chat.js";
-import { openTerminal } from "./terminalDialog.js";
-import { openWaiting } from "./waitDialog.js";
-import { openSettings } from "./settingsDialog.js";
+import { chip } from "../components/chip.js";
+import { appendEntries, agePending, wireCopy, plainText } from "../components/chat.js";
+import { openTerminal } from "../components/terminalDialog.js";
+import { openWaiting } from "../components/waitDialog.js";
+import { openSettings } from "../components/settingsDialog.js";
 import { showRows, wireRows } from "./artifacts.js";
-import { makeDictation } from "./dictate.js";
-import { viewOf } from "./viewSettings.js";
-import { openInPanel, wirePanel, panelFor } from "./sidePanel.js";
+import { makeDictation } from "../components/dictate.js";
+import { viewOf } from "../components/viewSettings.js";
+import { openInPanel, wirePanel, panelFor } from "../components/sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked" };

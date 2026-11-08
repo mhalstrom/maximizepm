@@ -6,6 +6,16 @@
 <title>MaximizePM</title>
 <link rel="stylesheet" href="vendor/tabulator/tabulator.min.css">
 <link rel="stylesheet" href="app.css">
+<!-- Each view's own styles (#4656), after the shared ones of app.css. -->
+<link rel="stylesheet" href="views/board.css">
+<link rel="stylesheet" href="views/projects.css">
+<link rel="stylesheet" href="views/sessions.css">
+<link rel="stylesheet" href="views/artifacts.css">
+<link rel="stylesheet" href="views/targets.css">
+<link rel="stylesheet" href="views/capacity.css">
+<link rel="stylesheet" href="views/graph.css">
+<link rel="stylesheet" href="views/done.css">
+<link rel="stylesheet" href="views/settings.css">
 <!-- The saved theme (header switch) before the page draws, so it does not flash the other theme. -->
 <script>try { var t = localStorage.getItem("river.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
 </head>
@@ -36,228 +46,23 @@
 </header>
 
 <main>
-  <section id="tab-board">
-    <div class="strip" id="strip"></div>
-    <div class="dash">
-      <div class="col" id="colNeeds">
-    <div class="panel hidden" id="takeoverPanel">
-      <div id="takeovers"></div>
-    </div>
-    <div class="panel hidden" id="needsYouPanel">
-      <h2>Needs you <span class="spacer"></span><button class="btn" id="copyAll" title="Copy one prompt for an agent that walks you through all of these">Copy prompt</button><span id="agentAllSlot"></span><button class="btn hidden" id="notifyOn" title="Turn on browser notifications">Notify me</button></h2>
-      <div id="needsYou"></div>
-    </div>
-        <div class="panel muted hidden" id="nothingForYou" style="font-size:13px">Nothing waits on you now.</div>
-    <div class="panel hidden" id="inboxPanel">
-      <h2><span id="inboxTitle">Inbox</span> <span class="spacer"></span><label class="sub"><input type="checkbox" id="inboxAll"> show read</label></h2>
-      <div id="inbox"></div>
-      <div class="actions" style="margin-top:8px">
-        <select id="sendKind"><option value="note">note</option><option value="question">question</option><option value="alert">alert</option></select>
-        <select id="sendTo"></select>
-        <input id="sendItem" placeholder="or item #" style="width:80px">
-        <input id="sendBody" placeholder="message" style="flex:1;min-width:160px">
-        <button class="btn" id="sendGo">Send</button>
-      </div>
-    </div>
-      </div>
-      <div class="col" id="colWork">
-        <div class="panel">
-          <h2>Next up
-            <span class="spacer"></span>
-            <select id="area"><option value="">All projects</option><option value="__mine">Near my earlier work</option></select>
-            <button class="btn primary" id="claimNext">Claim next</button>
-            <label class="muted" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:normal;display:flex;align-items:center;gap:4px" title="After you claim, open an agent in the item's project folder that helps you do it"><input type="checkbox" id="claimAgent" checked>with an agent</label>
-          </h2>
-          <div id="next"></div>
-        </div>
-        <div class="panel">
-          <h2>Work <span class="spacer"></span><span class="link" data-tab="projects" style="text-transform:none;letter-spacing:0">all items</span></h2>
-          <div id="work"></div>
-        </div>
-      </div>
-      <div class="col" id="colAgents">
-        <div class="panel" id="managerPanel"><h2>Manager</h2><div id="manager"></div></div>
-        <div class="panel"><h2>Agents <span class="spacer"></span><button class="btn hidden" id="tidyPanes" style="text-transform:none;letter-spacing:0"></button><label class="sub hidden" id="showIdleWrap"><input type="checkbox" id="showIdle"> <span id="showIdleText"></span></label></h2><div id="agents"></div>
-          <details style="margin-top:8px"><summary>Register an agent or person</summary>
-            <div class="form" style="margin-top:8px">
-              <div class="two"><input id="regName" placeholder="name"><label style="flex-direction:row;display:flex;align-items:center;gap:6px"><input type="checkbox" id="regHuman"> human</label></div>
-              <input id="regNote" placeholder="note (optional)">
-              <button class="btn" id="regGo">Register</button>
-            </div>
-          </details>
-        </div>
-        <div class="panel"><h2>Recent</h2><div id="events"></div></div>
-      </div>
-    </div>
-  </section>
+  <!-- view: board -->
 
-  <section id="tab-projects" class="hidden">
-    <div class="grid">
-      <div>
-        <div class="panel">
-          <h2>Projects <span class="spacer"></span><select id="goalFilter" title="Show only the items of one goal"><option value="">All goals</option><option value="__none">No goal</option></select><label class="sub"><input type="checkbox" id="showDone"> show done</label><label class="sub" title="Items that nobody plans to take now: kept, but never offered"><input type="checkbox" id="showBacklog"> show backlog</label></h2>
-          <div id="projects"></div>
-        </div>
-      </div>
-      <div>
-    <div class="panel hidden" id="blockedPanel">
-      <h2>Blocked outside the queue</h2>
-      <div id="blockedList"></div>
-    </div>
-        <div class="panel"><h2>Add item</h2>
-          <div class="form">
-            <input id="addTitle" placeholder="Title">
-            <div class="two">
-              <label>Project<select id="addProject"></select></label>
-              <label>Priority<select id="addPrio"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
-            </div>
-            <div class="two">
-              <label>Who can do it<select id="addDoer"><option value="any">anyone</option><option value="ai">agent</option><option value="human">human</option></select></label>
-              <label>Waits on (ids)<input id="addAfter" placeholder="e.g. 3, 7"></label>
-            </div>
-            <label>Reads the output of (ids; it also waits on them)<input id="addFeeds" placeholder="e.g. 4"></label>
-            <label>Goal (optional)<select id="addGoal"><option value="">no goal</option></select></label>
-            <textarea id="addNotes" rows="2" placeholder="Notes"></textarea>
-            <button class="btn primary" id="addGo">Add</button>
-          </div>
-          <details style="margin-top:8px"><summary>Add a goal</summary>
-            <div class="form" style="margin-top:8px">
-              <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="lower-case, e.g. launch-legal"></label></div>
-              <label>Outcome<textarea id="goalOutcome" rows="2" placeholder="What is true when this goal is reached"></textarea></label>
-              <label>Done when<input id="goalDoneWhen" placeholder="The test the owner checks before declaring it done"></label>
-              <button class="btn" id="goalGo">Add goal</button>
-            </div>
-          </details>
-          <details style="margin-top:8px"><summary>Add a project</summary>
-            <div class="sub" style="margin-top:8px">A project is usually a folder you work in: MaximizePM links it, and agents started there use the queue.</div>
-            <div id="projFolderForm"></div>
-            <div class="sub" style="margin-top:8px">A project without a folder (for example tasks for people):</div>
-            <div class="form" style="margin-top:4px"><input id="projName" placeholder="name (lower-case)"><button class="btn" id="projGo">Add project</button></div>
-          </details>
-        </div>
-      </div>
-    </div>
-  </section>
+  <!-- view: projects -->
 
-  <section id="tab-sessions" class="hidden">
-    <div class="sess-layout" id="sessLayout">
-      <aside class="panel sess-side" aria-label="Running sessions">
-        <h2>Running sessions</h2>
-        <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
-        <div id="sessions" class="slist"></div>
-        <div class="muted sess-note">Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the message box of a session that runs in a tmux pane.</div>
-      </aside>
-      <div class="panel sess-main hidden" id="sessMain">
-        <div class="sess-head">
-          <h2 id="sessTitle"></h2><span id="sessState"></span>
-          <span class="spacer"></span><span id="sessOpen"></span>
-        </div>
-        <div id="sessItem" class="sess-item"></div>
-        <div class="sess-views" role="tablist" aria-label="Session view">
-          <button class="sv on" type="button" role="tab" data-sview="chat" aria-selected="true">Chat</button>
-          <button class="sv" type="button" role="tab" data-sview="items" aria-selected="false" title="The items this session claimed, finished, released or gave away">Items</button>
-          <button class="sv" type="button" role="tab" data-sview="artifacts" aria-selected="false" title="The files, local pages and claude.ai artifact links this session wrote or named">Artifacts</button>
-        </div>
-        <div id="sessBody" class="sbody"><div id="sessCol" class="chat-col"></div></div>
-        <div id="sessItems" class="sbody hidden"><div class="chat-col" id="sessItemList"></div></div>
-        <div id="sessArts" class="sbody hidden"><div class="chat-col" id="sessArtList"></div></div>
-        <div class="chat-col chat-foot">
-          <div id="sessWait" class="sess-wait hidden"></div>
-          <div id="sessBarWhy" class="muted sess-why hidden"></div>
-          <div id="sessFiles" class="sess-files hidden" aria-label="Files that go with the message"></div>
-          <div id="sessDictate" class="sess-dictate hidden" aria-live="polite"></div>
-          <form id="sessBar" class="sbar composer" autocomplete="off">
-            <input id="sessPickFiles" type="file" multiple hidden>
-            <textarea id="sessText" rows="1" placeholder="Message this session. Enter sends; paste, drop or attach files." aria-label="Message for the session's terminal"></textarea>
-            <button id="sessAttach" class="attach" type="button" title="Attach files (up to 5, 10 MB each)" aria-label="Attach files"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
-            <button class="btn mic hidden" type="button" id="sessMic" aria-pressed="false" aria-label="Dictate">🎤</button>
-            <button id="sessSend" class="btn primary" type="submit" title="Send the message and files to the session. Shift+Enter starts a new line.">Send</button>
-          </form>
-        </div>
-      </div>
-      <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
-        <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
-        <div class="sp-tabs" id="spTabs"></div>
-        <form class="sp-bar" id="spForm" autocomplete="off">
-          <input id="spAddr" placeholder="A web address or a full file path" aria-label="Address">
-          <button class="btn" type="button" id="spReload" title="Load it again">Reload</button>
-          <button class="btn" type="button" id="spNew" title="Open it in a new browser tab">Open in a new tab</button>
-          <button class="btn" type="button" id="spFull" title="Show it alone in a browser tab of its own, with a link to keep">Open full screen</button>
-          <button class="iconbtn" type="button" id="spClose" title="Close the side panel">✕</button>
-        </form>
-        <div class="sp-body" id="spBody"></div>
-      </aside>
-    </div>
-  </section>
+  <!-- view: sessions -->
 
-  <section id="tab-artifacts" class="hidden">
-    <div class="panel"><h2>Artifacts <span class="spacer"></span>
-        <select id="artSession" title="Session"><option value="">All sessions</option></select>
-        <input id="artItem" type="search" placeholder="Item #" title="Only the artifacts of this item" style="width:90px">
-      </h2>
-      <div class="muted" style="font-size:12px;margin-bottom:8px">What the sessions made or named, newest first: files they wrote or named that the side panel can show, local pages, and claude.ai artifact links. Open shows it beside its session's chat; Open full screen gives it a browser tab of its own.</div>
-      <div id="artList"></div>
-    </div>
-  </section>
+  <!-- view: artifacts -->
 
-  <section id="tab-targets" class="hidden">
-    <div class="panel" id="targetsPanel"><h2>Deploy targets</h2><div id="targets"></div></div>
-  </section>
+  <!-- view: targets -->
 
-  <section id="tab-capacity" class="hidden">
-    <div class="panel" id="capacity"></div>
-  </section>
+  <!-- view: capacity -->
 
-  <section id="tab-graph" class="hidden">
-    <div class="graph-layout">
-    <aside class="panel graph-side" id="graphSide" aria-label="Choose a project"></aside>
-    <div class="panel">
-      <h2><span id="graphTitle">Dependency graph</span> <span class="spacer"></span>
-        <label class="sub"><input type="checkbox" id="graphDone"> include done</label>
-      </h2>
-      <div class="muted" style="font-size:12px;margin-bottom:8px">Arrows point from a prerequisite to the item that waits on it. Green: ready. Yellow: in progress. Purple border: a human does it. Click a box to open it. Scroll or drag to move; pinch, the wheel, or + and − to zoom; Fit shows it all.</div>
-      <div class="muted hidden" id="graphNote" style="font-size:12px;margin-bottom:8px"></div>
-      <div id="graph"></div>
-    </div>
-    </div>
-  </section>
+  <!-- view: graph -->
 
-  <section id="tab-done" class="hidden">
-    <div class="grid">
-      <div class="panel">
-        <h2>Completed work <span class="spacer"></span>
-          <select id="logProject"><option value="">All projects</option></select>
-          <select id="logSince"><option value="1d">last day</option><option value="7d" selected>last 7 days</option><option value="30d">last 30 days</option><option value="all">all time</option></select>
-        </h2>
-        <div id="log"></div>
-      </div>
-      <div class="panel"><h2>Progress per project</h2><div id="progress"></div></div>
-    </div>
-  </section>
+  <!-- view: done -->
 
-  <section id="tab-settings" class="hidden">
-    <div class="panel">
-      <h2>Settings</h2>
-      <div class="muted" style="font-size:12px;margin-bottom:8px">The most specific value wins: item, then agent, then project, then global, then the built-in default.<br>
-        <b>launch_agents</b> lists the agents the Start button offers, as <code>Label=command</code> entries separated by <code>;</code>. The first is the default.
-        <code>@claude-code</code> and <code>@codex</code> are launch profiles: MaximizePM builds the command from their options, the <b>claude_*</b> and <b>codex_*</b> settings (Remote Control, permission or sandbox mode, more arguments, the first prompt; the setup guide has toggles for them). <code>@codex sandbox=read-only</code> sets an option for that entry alone. For example:
-        <code>Claude Code=@claude-code; Plan first=@claude-code permission_mode=plan; Codex=@codex; Grok=grok "run maxpm go in this folder and follow the briefing"</code>.
-        Any other command is custom: <code>{model}</code> and <code>{effort}</code> take the launch dialog's choice, and with no choice the flag before them drops out.</div>
-      <div style="margin-bottom:8px"><button class="btn" id="openSetup">Open setup guide</button></div>
-      <div id="settingsTable"></div>
-      <div class="form" style="margin-top:12px;max-width:640px">
-        <div class="two">
-          <label>Key<select id="setKey"></select></label>
-          <label>Value<input id="setValue" placeholder="e.g. 45m, 7d, 2"></label>
-        </div>
-        <div class="two">
-          <label>Scope<select id="setScope"><option value="global">global</option><option value="project">project</option><option value="agent">agent</option><option value="item">item</option></select></label>
-          <label>Scope name or id<input id="setScopeName" placeholder="website / alex / 42"></label>
-        </div>
-        <button class="btn primary" id="setGo">Save setting</button>
-      </div>
-    </div>
-  </section>
+  <!-- view: settings -->
 </main>
 
 <aside id="drawer"></aside>

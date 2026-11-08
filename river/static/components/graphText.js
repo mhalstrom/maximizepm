@@ -1,5 +1,5 @@
 // The text of the dependency graph for Mermaid, and which items a large queue draws.
-// No DOM here, so a test can run it (tests/test_server.py gives it a queue of 700 items).
+// No DOM here, so a test can run it (tests/test_view_graph.py gives it a queue of 700 items).
 
 // The limits the page gives Mermaid. Mermaid's own are 50,000 characters and 500 edges: a queue of
 // about 350 items passes the first, and Mermaid then draws "Maximum text size in diagram exceeded".

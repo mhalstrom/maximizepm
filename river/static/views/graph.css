@@ -1,0 +1,26 @@
+/* The Graph tab: the pan and zoom box of the graph, the project cards beside it. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
+/* The graph box (components/panZoom.js): a fixed box; the drawing inside zooms and moves. */
+#graph.pz { position: relative; overflow: hidden; height: calc(100vh - 210px); min-height: 320px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); cursor: grab; touch-action: none; outline: none; user-select: none; -webkit-user-select: none; }
+#graph.pz:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+#graph.pz.dragging { cursor: grabbing; }
+.pz-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.pz-tools { position: absolute; right: 8px; top: 8px; display: flex; gap: 4px; }
+.pz-tools .btn { min-width: 32px; padding: 4px 8px; background: var(--panel); }
+/* Graph tab: projects on the left, each card with a small preview of its graph; the chosen graph on the right. */
+.graph-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start; }
+.graph-side { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; padding: 10px; }
+.graph-side h2 { margin: 2px 4px 8px; }
+.gcard { display: block; width: 100%; text-align: left; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; }
+.gcard:hover { border-color: var(--muted); }
+.gcard.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.gcard.empty { opacity: .6; }
+.gcard b { font-size: 13px; overflow-wrap: anywhere; }
+.gcard .gc-n { display: block; font-size: 11px; color: var(--muted); margin-top: 1px; font-variant-numeric: tabular-nums; }
+.gcard svg { display: block; width: 100%; height: 56px; margin-top: 6px; border-radius: 5px; background: var(--panel); }
+.gcard .gc-none { display: block; font-size: 11px; color: var(--muted); margin-top: 6px; }
+@media (max-width: 800px) {
+  .graph-layout { grid-template-columns: minmax(0, 1fr); }
+  .graph-side { position: static; max-height: none; display: flex; gap: 8px; overflow-x: auto; }
+  .graph-side h2 { display: none; }
+  .gcard { flex: 0 0 180px; margin-bottom: 0; }
+}

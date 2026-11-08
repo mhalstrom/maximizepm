@@ -9,7 +9,7 @@
 // own X closes it.
 import { $, esc, store, toast, pageToken } from "../lib.js";
 import { markdown } from "./chat.js";
-import { showRows, wireRows } from "./artifacts.js";
+import { showRows, wireRows } from "../views/artifacts.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;

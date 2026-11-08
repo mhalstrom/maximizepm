@@ -1,0 +1,55 @@
+<!-- The board tab of the page (#4656). maxpm serve puts it into index.html, at view: board. -->
+<section id="tab-board">
+  <div class="strip" id="strip"></div>
+  <div class="dash">
+    <div class="col" id="colNeeds">
+  <div class="panel hidden" id="takeoverPanel">
+    <div id="takeovers"></div>
+  </div>
+  <div class="panel hidden" id="needsYouPanel">
+    <h2>Needs you <span class="spacer"></span><button class="btn" id="copyAll" title="Copy one prompt for an agent that walks you through all of these">Copy prompt</button><span id="agentAllSlot"></span><button class="btn hidden" id="notifyOn" title="Turn on browser notifications">Notify me</button></h2>
+    <div id="needsYou"></div>
+  </div>
+      <div class="panel muted hidden" id="nothingForYou" style="font-size:13px">Nothing waits on you now.</div>
+  <div class="panel hidden" id="inboxPanel">
+    <h2><span id="inboxTitle">Inbox</span> <span class="spacer"></span><label class="sub"><input type="checkbox" id="inboxAll"> show read</label></h2>
+    <div id="inbox"></div>
+    <div class="actions" style="margin-top:8px">
+      <select id="sendKind"><option value="note">note</option><option value="question">question</option><option value="alert">alert</option></select>
+      <select id="sendTo"></select>
+      <input id="sendItem" placeholder="or item #" style="width:80px">
+      <input id="sendBody" placeholder="message" style="flex:1;min-width:160px">
+      <button class="btn" id="sendGo">Send</button>
+    </div>
+  </div>
+    </div>
+    <div class="col" id="colWork">
+      <div class="panel">
+        <h2>Next up
+          <span class="spacer"></span>
+          <select id="area"><option value="">All projects</option><option value="__mine">Near my earlier work</option></select>
+          <button class="btn primary" id="claimNext">Claim next</button>
+          <label class="muted" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:normal;display:flex;align-items:center;gap:4px" title="After you claim, open an agent in the item's project folder that helps you do it"><input type="checkbox" id="claimAgent" checked>with an agent</label>
+        </h2>
+        <div id="next"></div>
+      </div>
+      <div class="panel">
+        <h2>Work <span class="spacer"></span><span class="link" data-tab="projects" style="text-transform:none;letter-spacing:0">all items</span></h2>
+        <div id="work"></div>
+      </div>
+    </div>
+    <div class="col" id="colAgents">
+      <div class="panel" id="managerPanel"><h2>Manager</h2><div id="manager"></div></div>
+      <div class="panel"><h2>Agents <span class="spacer"></span><button class="btn hidden" id="tidyPanes" style="text-transform:none;letter-spacing:0"></button><label class="sub hidden" id="showIdleWrap"><input type="checkbox" id="showIdle"> <span id="showIdleText"></span></label></h2><div id="agents"></div>
+        <details style="margin-top:8px"><summary>Register an agent or person</summary>
+          <div class="form" style="margin-top:8px">
+            <div class="two"><input id="regName" placeholder="name"><label style="flex-direction:row;display:flex;align-items:center;gap:6px"><input type="checkbox" id="regHuman"> human</label></div>
+            <input id="regNote" placeholder="note (optional)">
+            <button class="btn" id="regGo">Register</button>
+          </div>
+        </details>
+      </div>
+      <div class="panel"><h2>Recent</h2><div id="events"></div></div>
+    </div>
+  </div>
+</section>
