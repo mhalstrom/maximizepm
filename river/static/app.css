@@ -340,6 +340,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .sl-event .sl-text { color: var(--muted); font-style: italic; }
 .sl-sent .sl-text { opacity: .7; }
 .sl-noopen { font-size: 12px; }
+.sess-why { font-size: 12px; margin-top: 8px; }
+.sess-why.hidden { display: none; }
 .sess-head a.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; color: var(--ink); text-decoration: none; display: inline-block; font-size: 13px; }
 @media (max-width: 759px) {
   .sess-layout { grid-template-columns: minmax(0, 1fr); }

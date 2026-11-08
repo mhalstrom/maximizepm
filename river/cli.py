@@ -2394,6 +2394,7 @@ def render_manage(b):
     out = [f"You are the MaximizePM MANAGER {me}" + (f" (you took over from {b['took_over']})" if b.get("took_over") else "") + "."]
     if b["new_name"]:
         out.append(f"Pass --as {me} on every maxpm command.")
+    out += _tmux_line()
     st = b["status"]
     out += ["", "Projects: " + ", ".join(f"{p['project']} {p['ready']} ready/{p['open']} open"
                                           + (f" ({p['backlog']} in backlog)" if p.get("backlog") else "")
@@ -2573,6 +2574,15 @@ def _look_rule(b, it, r, short=False):
             f"costs money, or when the item says so."]
 
 
+def _tmux_line():
+    """One briefing line for a session outside tmux: the Sessions page of maxpm serve can type only into a tmux pane."""
+    if not core.outside_tmux(os.environ):
+        return []
+    return ["This session runs outside tmux, so the Sessions page of maxpm serve cannot type into it (Open on "
+            "claude.ai/code still works). Next time, start sessions from the page (launch_in tmux), or start the agent "
+            "inside tmux: tmux new -A -s maxpm"]
+
+
 def render_go(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
@@ -2586,6 +2596,7 @@ def render_go(b):
                    f"and this briefing is yours.")
     if b["new_name"]:
         out.append(f"Your shell may not keep environment variables, so pass --as {me} on every maxpm command.")
+    out += _tmux_line()
     # Only Claude Code has session names and ListAgents; it sets CLAUDECODE in the commands it runs.
     if not b.get("session") and os.environ.get("CLAUDECODE"):
         out.append(f"Record your Claude Code session name once, so others can message this session "

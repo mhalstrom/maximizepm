@@ -173,5 +173,29 @@ class Sessions(unittest.TestCase):
         self.assertEqual(get("/api/session?agent=ghost")[0], 409)
 
 
+class OutsideTmux(unittest.TestCase):
+    """#4599: go and manage say when a session runs outside tmux, where the Sessions page cannot type into it."""
+
+    def test_tmux_is_known_by_term_program_too(self):
+        cc = {"CLAUDECODE": "1"}
+        self.assertFalse(core.outside_tmux({**cc, "TMUX": "/tmp/tmux-501/default,1,2", "TERM_PROGRAM": "tmux"}))
+        self.assertFalse(core.outside_tmux({**cc, "TMUX": "/tmp/tmux-501/default,1,2"}))  # an old tmux sets no TERM_PROGRAM
+        # A Terminal app started from a tmux pane passes TMUX to its tabs: such a tab is outside tmux.
+        self.assertTrue(core.outside_tmux({**cc, "TMUX": "/tmp/tmux-501/default,1,2", "TERM_PROGRAM": "Apple_Terminal"}))
+        self.assertTrue(core.outside_tmux({**cc, "TERM_PROGRAM": "iTerm.app"}))
+        self.assertTrue(core.outside_tmux({"CODEX_THREAD_ID": TID}))
+        self.assertFalse(core.outside_tmux({"TERM_PROGRAM": "Apple_Terminal"}))  # a person's shell, not an agent CLI
+        self.assertFalse(core.outside_tmux({**cc, "MAXPM_CHAT": "1"}))  # a chat app has no terminal
+
+    def test_the_go_briefing_says_so(self):
+        from unittest import mock
+        from river import cli
+        line = "This session runs outside tmux"
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "TERM_PROGRAM": "Apple_Terminal"}):
+            self.assertIn(line, cli._tmux_line()[0])
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1", "TERM_PROGRAM": "tmux", "TMUX": "x,1,2"}):
+            self.assertEqual(cli._tmux_line(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

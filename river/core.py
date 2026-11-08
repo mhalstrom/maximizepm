@@ -1517,6 +1517,15 @@ def agent_type_from_env(env):
     return None
 
 
+def outside_tmux(env):
+    """True when a command runs in an agent CLI (agent_type_from_env) that is not inside a tmux pane. TMUX alone does
+    not say it: a Terminal app started from a tmux pane passes TMUX to every tab it opens. tmux sets TERM_PROGRAM
+    to tmux in its panes, so another TERM_PROGRAM there (Apple_Terminal, iTerm.app, vscode) means outside (#4599)."""
+    if os.name == "nt" or not agent_type_from_env(env) or env.get("MAXPM_CHAT"):
+        return False
+    return not env.get("TMUX") or env.get("TERM_PROGRAM", "tmux") != "tmux"
+
+
 def set_agent_type(conn, name, agent_type):
     with tx(conn):
         if agent_type and conn.execute("UPDATE agents SET agent_type=? WHERE name=? AND agent_type IS NOT ?",

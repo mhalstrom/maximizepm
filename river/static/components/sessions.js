@@ -118,7 +118,7 @@ export function makeSessions({ isShown }) {
       const s = list.find(x => x.name === agent) || {};
       $("#sessState").innerHTML = stateChip(j);
       $("#sessItem").innerHTML = s.holds ? itemHtml(s, 120) : "";
-      $("#sessBar").classList.toggle("hidden", !j.terminal);
+      barFor(j.terminal, s);
       $("#sessOpen").innerHTML = openButton({ ...s, session_url: j.session_url });
       if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
     } catch (e) { /* the next poll tries again */ }
@@ -133,12 +133,21 @@ export function makeSessions({ isShown }) {
     $("#sessTitle").textContent = name || "";
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
     $("#sessText").value = "";
-    $("#sessBar").classList.add("hidden");
+    barFor(null);
     body.innerHTML = `<div class="muted sl-none">Reading the transcript…</div>`;
     side.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
 
+  // The text bar is always there. With no tmux pane of the session on this computer it is off, and says why.
+  function barFor(pane, s = {}) {
+    const input = $("#sessText"), btn = $("#sessBar button"), why = $("#sessBarWhy");
+    const off = !pane;
+    input.disabled = btn.disabled = off;
+    why.classList.toggle("hidden", !off || pane === null);
+    why.textContent = off ? "This session runs outside tmux, so the page cannot type into it: "
+      + (/^https:\/\//.test(s.session_url || "") ? "type in it with Open, or in its terminal." : "type in its terminal.") : "";
+  }
   // The text bar: the person's text goes to the session's tmux pane. It shows at once as the person's turn; the
   // transcript has it too when the session reads it as a prompt.
   $("#sessBar").addEventListener("submit", async (e) => {
@@ -146,6 +155,7 @@ export function makeSessions({ isShown }) {
     const input = $("#sessText"), btn = $("#sessBar button"), to = agent;
     if (!to || btn.disabled) return;
     btn.disabled = true;
+    let ok = true;
     try {
       const r = await typeAction("session_send", { agent: to, text: input.value });
       if (to === agent) {
@@ -154,8 +164,8 @@ export function makeSessions({ isShown }) {
         body.scrollTop = body.scrollHeight;
         input.value = "";
       }
-    } catch (err) { toast(err.message, true); }
-    finally { btn.disabled = false; input.focus(); }
+    } catch (err) { toast(err.message, true); ok = !/tmux pane/.test(err.message); }
+    finally { if (!input.disabled) { btn.disabled = false; input.focus(); } if (!ok) barFor(false); }
   });
   side.addEventListener("click", (e) => {
     if (e.target.closest("[data-open], a")) return;  // an item link opens the drawer
