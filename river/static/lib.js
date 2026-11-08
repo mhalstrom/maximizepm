@@ -38,3 +38,19 @@ export function fillSelect(sel, values, keepFirst) {
   el.innerHTML = first + values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
   if ([...el.options].some(o => o.value === cur)) el.value = cur;
 }
+// An action that types into an agent's terminal (terminal_keys, session_send): it sends the page's token, which
+// maxpm serve makes at each start (GET api/token). After a restart of the server the old token is refused: read
+// the new one and send once more.
+let typingToken = null;
+export async function typeAction(op, args) {
+  for (let i = 0; i < 2; i++) {
+    if (!typingToken) typingToken = (await (await fetch("api/token")).json()).token;
+    const r = await fetch("api/action", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-Maxpm-Token": typingToken },
+      body: JSON.stringify({ op, args, actor: actor() }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 403 && i === 0 && /token/.test(j.error || "")) { typingToken = null; continue; }
+    if (!r.ok) throw new Error(j.error || "failed");
+    return j.result;
+  }
+}

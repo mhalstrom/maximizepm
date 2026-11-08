@@ -1,9 +1,11 @@
 // The Sessions tab: one card per running agent session (Claude Code and Codex), with its agent, item, state and
 // its last lines, read again every few seconds while the tab shows. A click on a card opens the large view: the
-// session's transcript, with new lines added as the session writes them. Read only: a person types in the session
-// itself, through Open (its claude.ai/code link) or its terminal. MaximizePM never types into a session (#4592).
-// Server: GET /api/sessions, and GET /api/session?agent=<name>&cursor=<byte> for the large view.
-import { $, esc, ago, clip } from "../lib.js";
+// session's transcript, with new lines added as the session writes them. A person types in the session through
+// Open (its claude.ai/code link), or, for a session in a tmux pane, the text bar below the large view (#4596): the
+// text goes to the pane, then Enter. MaximizePM types nothing by itself (#4592).
+// Server: GET /api/sessions, GET /api/session?agent=<name>&cursor=<byte>, and the op session_send (with the
+// page's token: typeAction).
+import { $, esc, ago, clip, toast, typeAction } from "../lib.js";
 import { chip } from "./chip.js";
 import { makeDialog } from "./dialog.js";
 
@@ -17,7 +19,7 @@ function stateChip(s) {
 
 function lineHtml(e, full) {
   const text = full ? e.text : clip(e.text.split("\n")[0], 220);
-  return `<div class="sl sl-${e.role}"><span class="sl-who">${ROLE_LABEL[e.role] || esc(e.role)}</span>`
+  return `<div class="sl sl-${e.role}${e.sent ? " sl-sent" : ""}"><span class="sl-who">${e.sent ? "sent" : ROLE_LABEL[e.role] || esc(e.role)}</span>`
     + `<span class="sl-text">${esc(text)}</span></div>`;
 }
 
@@ -95,11 +97,12 @@ export function makeSessions({ isShown }) {
       if (mine !== gen) return;
       if (!r.ok) { body.innerHTML = `<div class="muted">${esc(j.error || "failed")}</div>`; return; }
       const first = cursor == null, atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-      if (first) body.innerHTML = j.entries.length ? "" : `<div class="muted sl-none">No lines yet.</div>`;
+      if (first) body.innerHTML = j.entries.length ? "" : `<div class="muted sl-none">${esc(j.note || "No lines yet.")}</div>`;
       else if (j.entries.length) body.querySelector(".sl-none")?.remove();
       body.insertAdjacentHTML("beforeend", j.entries.map(e => lineHtml(e, true)).join(""));
       cursor = j.cursor;
       $("#sessState").innerHTML = stateChip(j);
+      $("#sessBar").classList.toggle("hidden", !j.terminal);
       $("#sessOpen").innerHTML = openButton({ ...(list.find(s => s.name === agent) || {}), session_url: j.session_url });
       if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
     } catch (e) { /* the next poll tries again */ }
@@ -109,12 +112,31 @@ export function makeSessions({ isShown }) {
   function open(name) {
     agent = name; cursor = null; gen++;
     $("#sessTitle").textContent = name;
-    $("#sessState").innerHTML = ""; $("#sessOpen").innerHTML = "";
+    $("#sessState").innerHTML = ""; $("#sessOpen").innerHTML = ""; $("#sessText").value = "";
+    $("#sessBar").classList.add("hidden");
     body.innerHTML = `<div class="muted sl-none">Reading the transcript…</div>`;
     dlg.open(); $("#sessClose").focus();
     poll();
   }
   $("#sessClose").onclick = () => dlg.close();
+  // The text bar: the person's text goes to the session's tmux pane. It shows at once as the person's turn; the
+  // transcript has it too when the session reads it as a prompt.
+  $("#sessBar").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = $("#sessText"), btn = $("#sessBar button"), to = agent;
+    if (!to || btn.disabled) return;
+    btn.disabled = true;
+    try {
+      const r = await typeAction("session_send", { agent: to, text: input.value });
+      if (to === agent) {
+        body.querySelector(".sl-none")?.remove();
+        body.insertAdjacentHTML("beforeend", lineHtml({ role: "user", sent: true, text: r.text || "(Enter)" }, true));
+        body.scrollTop = body.scrollHeight;
+        input.value = "";
+      }
+    } catch (err) { toast(err.message, true); }
+    finally { btn.disabled = false; input.focus(); }
+  });
   $("#sessDlg").addEventListener("click", (e) => {
     if (e.target === e.currentTarget) return dlg.close();
     if (e.target.closest("[data-open]")) dlg.close();  // the item opens in the drawer

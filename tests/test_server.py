@@ -1630,6 +1630,16 @@ class LaunchInTmux(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "only a person types into an agent's terminal"):
             server.terminal_keys(self.c, name, [{"key": "Enter"}], "other-agent")
         self.assertEqual(pane["keys"], ["1", "Enter", "-l; rm"])
+        # The text bar of the Sessions tab (#4596): the person's text as one line, then Enter; empty text is Enter.
+        r = server.OPS["session_send"](self.c, {"agent": name, "text": "yes,\nplease go on "}, "mark")
+        self.assertEqual((r["text"], pane["keys"][3:]), ("yes, please go on", ["yes, please go on", "Enter"]))
+        self.assertEqual(server.OPS["session_send"](self.c, {"agent": name}, "mark")["text"], "")
+        self.assertEqual(pane["keys"][5:], ["Enter"])
+        with self.assertRaisesRegex(RiverError, "only a person types"):
+            server.session_send(self.c, name, "rm -rf /", "other-agent")
+        with self.assertRaisesRegex(RiverError, "at most 4000"):
+            server.session_send(self.c, name, "x" * 4001, "mark")
+        del pane["keys"][3:]
         # An agent that runs in no pane, and a pane of no agent, have no terminal on the page.
         with self.assertRaisesRegex(RiverError, "other-agent does not run in a tmux pane"):
             server.terminal_screen(self.c, "other-agent")
@@ -1672,7 +1682,17 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(call("GET", f"/api/terminal?agent={name}", local)[0], 200)
         state = call("GET", "/api/state", local)[1]
         self.assertEqual((state["terminals"], state["tmux_done"]), ({name: "%0"}, []))  # the agent is in the queue: its pane stays
-        self.assertEqual(call("POST", "/api/action", {**local, "Origin": "http://127.0.0.1:8765"}, keys)[1]["result"]["sent"], 1)
+        page = {**local, "Origin": "http://127.0.0.1:8765"}
+        # Typing needs the page's token (GET /api/token), made at each start: not the Origin alone (#4596).
+        token = call("GET", "/api/token", local)[1]["token"]
+        for bad in ({}, {"X-Maxpm-Token": "old"}):
+            code, body = call("POST", "/api/action", {**page, **bad}, keys)
+            self.assertEqual((code, "reload the page" in body["error"]), (403, True))
+        self.assertEqual(call("POST", "/api/action", {**page, "X-Maxpm-Token": token}, keys)[1]["result"]["sent"], 1)
+        text = {"op": "session_send", "args": {"agent": name, "text": "1"}}
+        self.assertEqual(call("POST", "/api/action", page, text)[0], 403)
+        self.assertEqual(call("POST", "/api/action", {**page, "X-Maxpm-Token": token}, text)[1]["result"]["sent"], 2)
+        self.assertEqual(call("GET", "/api/token", {"Host": "evil.example:8765"})[0], 403)
         self.assertEqual(call("GET", "/api/terminal?agent=nobody", local)[0], 409)
         sent = len(self.tmux.panes[0]["keys"])
         # A page of another site whose name points at this computer (DNS rebinding), a tunnel or proxy, another computer.

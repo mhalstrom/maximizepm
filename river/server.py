@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -1577,6 +1579,23 @@ def terminal_keys(conn, agent, keys, who=None):
     return {"agent": agent, "pane": pane, "sent": len(keys)}
 
 
+def session_send(conn, agent, text, who=None):
+    """The text bar of the Sessions tab (#4596): a person's text, typed into the agent's tmux pane as one line,
+    then Enter. Empty text sends Enter alone (a prompt that waits for it). The text comes from the person: river
+    types nothing by itself."""
+    if not isinstance(text, str) or len(text) > 4000:
+        raise RiverError("text is at most 4000 characters")
+    line = " ".join(text.split("\n")).strip()  # a new line would end the prompt early
+    keys = ([{"text": line}] if line else []) + [{"key": "Enter"}]
+    return dict(terminal_keys(conn, agent, keys, who), text=line)
+
+
+# A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
+# for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
+PAGE_TOKEN = secrets.token_urlsafe(24)
+TYPING_OPS = ("terminal_keys", "session_send")
+
+
 REPO = PKG.parent
 
 
@@ -2064,6 +2083,7 @@ OPS = {
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "open_chat": lambda c, a, who: open_chat(c, a["agent"]),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
+    "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who),
     "tmux_tidy": lambda c, a, who: tmux_tidy(c),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
@@ -2138,17 +2158,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": str(e)})
             finally:
                 conn.close()
+        if path == "/api/token":
+            return self._send(200, {"token": PAGE_TOKEN})
         if path in ("/api/sessions", "/api/session"):  # the Sessions tab: running sessions, read only (#4592)
             from urllib.parse import parse_qs, urlsplit
             from . import sessions
             q = parse_qs(urlsplit(self.path).query)
             conn = core.connect()
             try:
+                terminals = agent_terminals(conn)
                 if path == "/api/sessions":
-                    return self._send(200, {"sessions": sessions.views(conn, agent_terminals(conn))})
-                cursor = q.get("cursor", [""])[0]
-                return self._send(200, sessions.view(conn, q.get("agent", [""])[0],
-                                                     int(cursor) if cursor.isdigit() else None))
+                    return self._send(200, {"sessions": sessions.views(conn, terminals)})
+                cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
+                return self._send(200, dict(sessions.view(conn, agent, int(cursor) if cursor.isdigit() else None),
+                                            terminal=bool(terminals.get(agent))))
             except RiverError as e:
                 return self._send(409, {"error": str(e)})
             finally:
@@ -2311,6 +2334,10 @@ class Handler(BaseHTTPRequestHandler):
             op = OPS.get(body.get("op"))
             if not op:
                 return self._send(400, {"error": f"unknown op {body.get('op')!r}"})
+            if body.get("op") in TYPING_OPS and not hmac.compare_digest(
+                    self.headers.get("X-Maxpm-Token") or "", PAGE_TOKEN):
+                return self._send(403, {"error": "typing into a terminal needs the page's token, and it is missing or "
+                                                 "old: reload the page"})
             actor = body.get("actor") or None
             _same_queue(body.get("args", {}).get("db"))  # only a river command sends it (cli.ask_server)
             conn = core.connect()

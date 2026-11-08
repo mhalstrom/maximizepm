@@ -4,7 +4,7 @@
 // The dialog has its own size (app.css): the pane's columns and rows never change it. A pane wider or taller
 // than the screen scrolls inside it, and the view stays at the end of the pane's text, where the prompt is.
 // Server: GET /api/terminal?agent=<name>, and the op terminal_keys; both answer this computer only.
-import { $, esc, actor, toast } from "../lib.js";
+import { $, esc, toast, typeAction } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 
 const FG = "#d4d4d4", BG = "#1e1e1e";
@@ -135,9 +135,8 @@ async function send(k) {
   try {
     while (pending.length && agent) {
       const keys = pending.splice(0, pending.length);
-      const r = await fetch("api/action", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ op: "terminal_keys", args: { agent, keys }, actor: actor() }) });
-      if (!r.ok) { pending = []; toast(((await r.json().catch(() => ({}))).error) || "the keys did not go", true); }
+      try { await typeAction("terminal_keys", { agent, keys }); }
+      catch (e) { pending = []; toast(e.message || "the keys did not go", true); }
     }
   } finally { sending = false; }
   clearTimeout(timer); tick();

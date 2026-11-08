@@ -99,8 +99,9 @@ class Sessions(unittest.TestCase):
         again = sessions.view(self.c, "ag", again["cursor"], self.root, self.croot)
         self.assertEqual(([e["text"] for e in again["entries"]], again["state"]), (["half a line"], "idle"))
         core.register(self.c, "nobody")
-        with self.assertRaises(core.RiverError):
-            sessions.view(self.c, "nobody", None, self.root, self.croot)
+        v = sessions.view(self.c, "nobody", None, self.root, self.croot)
+        self.assertEqual(v["entries"], [])
+        self.assertIn("No transcript of nobody", v["note"])
 
     def test_a_first_read_of_a_long_transcript_starts_at_a_whole_line(self):
         self.write(claude_line("assistant", [{"type": "text", "text": "x" * 5000}], "tool_use") * 3)
@@ -166,7 +167,7 @@ class Sessions(unittest.TestCase):
         code, body = get("/api/sessions")
         self.assertEqual((code, [c["name"] for c in body["sessions"]]), (200, ["ag"]))
         code, body = get("/api/session?agent=ag")
-        self.assertEqual((code, len(body["entries"])), (200, 3))
+        self.assertEqual((code, len(body["entries"]), body["terminal"]), (200, 3, False))
         code, body = get(f"/api/session?agent=ag&cursor={body['cursor']}")
         self.assertEqual((code, body["entries"]), (200, []))
         self.assertEqual(get("/api/session?agent=ghost")[0], 409)

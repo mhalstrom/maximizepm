@@ -5,7 +5,8 @@ each agent CLI writes on this computer and sends its lines to the page: the pers
 each tool call as one line. Claude Code writes <config dir>/projects/<folder>/<session id>.jsonl (the session id
 comes from agent_sessions); Codex writes ~/.codex/sessions/<y>/<m>/<d>/rollout-<time>-<thread id>.jsonl, which it
 compresses to .jsonl.zst (the thread id is the agent's native_address). Nothing here writes to a session: a
-person types in the session itself, through its Open link (session_url) or its terminal.
+person types through its Open link (session_url), its terminal, or the text bar of the large view
+(server.session_send, for a session in a tmux pane).
 """
 
 import json
@@ -261,12 +262,15 @@ def views(conn, terminals=None, root=None, croot=None):
 
 def view(conn, agent, cursor=None, root=None, croot=None):
     """The large view of one session: its lines after cursor (None: the last LIMIT of them), the next cursor, and
-    its state. Raises RiverError for an agent that has no transcript on this computer."""
+    its state; with a note and no lines for an agent that has no transcript on this computer."""
     a = core.agent_status(conn, agent)
     kind, path = transcript(conn, agent, root, croot)
-    if not path:
-        raise core.RiverError(f"no transcript of {agent} on this computer: MaximizePM reads Claude Code transcripts "
-                              f"and Codex session logs" + ("" if _zstd() else " (Codex logs need Python 3.14)"))
+    if not path:  # a session in a pane still gets the text bar
+        key, label = state(conn, a, None)
+        return {"agent": agent, "transcript": None, "entries": [], "cursor": None, "turn": None, "state": key,
+                "state_label": label, "session_url": a.get("session_url"),
+                "note": f"No transcript of {agent} on this computer: MaximizePM reads Claude Code transcripts and "
+                        f"Codex session logs" + ("." if _zstd() else " (Codex logs need Python 3.14).")}
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
     key, label = state(conn, a, turn)

@@ -140,7 +140,7 @@
 
   <section id="tab-sessions" class="hidden">
     <div class="panel"><h2>Running sessions</h2>
-      <div class="muted" style="font-size:12px;margin-bottom:8px">Each agent session that runs now, with its last lines, read from its transcript on this computer. Click a card to follow the whole session. Read only: to type in a session, use Open (its claude.ai/code page) or its terminal.</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">Each agent session that runs now, with its last lines, read from its transcript on this computer. Click a card to follow the whole session. To type in a session, use Open (its claude.ai/code page), or the text bar of a session that runs in a tmux pane.</div>
       <div id="sessions" class="sgrid"></div>
     </div>
   </section>
@@ -236,8 +236,12 @@
     <span class="spacer" style="flex:1"></span><span id="sessOpen"></span>
     <button class="iconbtn" id="sessClose" title="Close">✕</button>
   </div>
-  <div class="muted" style="font-size:12px;margin:4px 0 8px">Read only. New lines show as the session writes them.</div>
+  <div class="muted" style="font-size:12px;margin:4px 0 8px">New lines show as the session writes them.</div>
   <div id="sessBody" class="sbody"></div>
+  <form id="sessBar" class="sbar hidden" autocomplete="off">
+    <input id="sessText" placeholder="Type to this session's terminal: an answer, a prompt, or 1 for a permission prompt" aria-label="Text for the session's terminal">
+    <button class="btn primary" type="submit" title="Type the text into the session's tmux pane, then Enter (empty: Enter alone)">Send</button>
+  </form>
 </div></div>
 
 <div id="searchDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="searchTitle"><div class="box">
