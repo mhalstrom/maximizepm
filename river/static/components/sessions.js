@@ -145,8 +145,11 @@ export function makeSessions({ isShown }) {
     const off = !pane;
     input.disabled = btn.disabled = off;
     why.classList.toggle("hidden", !off || pane === null);
-    why.textContent = off ? "This session runs outside tmux, so the page cannot type into it: "
-      + (/^https:\/\//.test(s.session_url || "") ? "type in it with Open, or in its terminal." : "type in its terminal.") : "";
+    const elsewhere = /^https:\/\//.test(s.session_url || "") ? "type in it with Open, or in its terminal" : "type in its terminal";
+    const ad = s.adopt || { when: "never", why: "" };
+    why.textContent = !off ? "" : ad.when === "now" ? `This session runs outside tmux. MaximizePM moves it into a tmux pane now; until then, ${elsewhere}.`
+      : ad.when === "later" ? `This session runs outside tmux. ${ad.why} (tmux_adopt). Until then, ${elsewhere}.`
+      : `This session runs outside tmux, so the page cannot type into it${ad.why ? ` (${ad.why})` : ""}: ${elsewhere}.`;
   }
   // The text bar: the person's text goes to the session's tmux pane. It shows at once as the person's turn; the
   // transcript has it too when the session reads it as a prompt.

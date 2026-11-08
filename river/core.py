@@ -187,6 +187,11 @@ DEFAULT_SETTINGS = {
     # (river unregisters it and closes the tmux pane river started for it). 0s: never.
     "idle_after": "2m",
     "fresh_sessions": "on",
+    # tmux_adopt on: maxpm serve moves an agent session that runs outside tmux (a Terminal tab) into a tmux pane, so
+    # the Sessions page can type into it (#4598). It waits until the session's turn has ended and it has written
+    # nothing for ADOPT_QUIET, with no prompt, question or background work open; then it ends the old process and
+    # resumes the same chat in a pane (claude --resume, codex resume) with the same name, item and context.
+    "tmux_adopt": "on",
     "idle_end": "15m",
     # maxpm serve closes the tmux panes of sessions that are done every tidy_every, as maxpm view --tidy does; a pane
     # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. It also
@@ -1224,7 +1229,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is on or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_reload") and value not in ("on", "off"):
+    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
         autocompact_tokens(value)
@@ -9311,6 +9316,48 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
             "model": model, "model_id": mid, "effort": effort or None, "custom_prompt": prompt,
             "autocompact": autocompact,
             "env": {"MAXPM_MODEL": model} if model else {}}
+
+
+# The first prompt of a session that maxpm serve moved into a tmux pane (tmux_adopt): it resumes the same chat.
+ADOPT_PROMPT = ("MaximizePM moved this session into a tmux pane, so the Sessions page can type into it; your name, items "
+                "and context are the same. Start again any background command you had running (for example maxpm "
+                "manage --watch, or maxpm inbox --wait), then continue where you stopped: run maxpm --as {agent} go "
+                "if you are not sure.")
+
+
+def resume_command(conn, agent, platform, session_id, project_id=None):
+    """The command that resumes an agent's chat in a new process (tmux_adopt, #4598): the first launch_agents
+    profile of its platform, its model, `claude --resume <session id>` or `codex resume <thread id>`, and
+    ADOPT_PROMPT as its first prompt. {command, env}."""
+    a = _agent(conn, agent)
+    agents = parse_launch_agents(setting(conn, "launch_agents", project_id=project_id))
+    pick = next((x for x in agents if (parse_profile(x[1]) or (None,))[0] == platform), None)
+    if pick is None:
+        raise RiverError(f"no {platform} profile in launch_agents (@{platform}): MaximizePM cannot resume {agent}")
+    prof = parse_profile(pick[1])
+    try:
+        model = _check_model_name(a["model"]) if a["model"] else None
+    except RiverError:
+        model = None
+    mid = model_id(conn, platform, model, project_id, prof[1])
+    opts = {**profile_options(conn, prof[0], prof[1], project_id, None),
+            "prompt": ADOPT_PROMPT.format(agent=agent)}
+    # The effort it ran at: from its recorded command line (the agents table keeps no effort).
+    m = re.search(r"(?:--effort |model_reasoning_effort=)([a-z][a-z0-9_-]{0,31})\b", a["pid_cmd"] or "")
+    effort = m.group(1) if m else None
+    q = _shell_quote
+    if platform == "claude-code":
+        args = f"--resume {q(session_id)} " + opts.get("args", "")
+        if opts.get("activity_hooks") == "on" and "--settings" not in args:
+            args = f"--settings {q(activity_hook_file())} " + args
+        tokens = autocompact_tokens(setting(conn, "manager_autocompact")) if a["role"] == "manager" else None
+        if tokens and "--autocompact" not in args:
+            args = f"--autocompact {tokens} " + args
+        cmd = build_command(platform, {**opts, "args": args}, mid, effort, a["session"] or agent)
+    else:
+        cmd = build_command(platform, opts, mid, effort)
+        cmd = f"codex resume {q(session_id)}" + cmd[len("codex"):]
+    return {"command": cmd, "agent": pick[0], "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
 
 
 def _check_codex_effort(mid, effort):

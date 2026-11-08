@@ -11,6 +11,7 @@ person types through its Open link (session_url), its terminal, or the text bar 
 
 import json
 import os
+import time
 from pathlib import Path
 
 from . import core
@@ -21,6 +22,8 @@ LIMIT = 300               # at most this many lines in one answer
 TEXT_MAX = 4000           # a longer text is cut
 TOOL_MAX = 160            # the one line of a tool call
 PREVIEW = 4               # the lines a card shows
+ADOPT_QUIET = 120         # tmux_adopt: a session moves into tmux after its turn ended and it wrote nothing this long
+PLATFORMS = {"claude": "claude-code", "codex": "codex"}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
           "stopping": "asked to stop"}
 
@@ -174,7 +177,7 @@ def entries(kind, path, cursor=None, limit=LIMIT, tail=TAIL_BYTES):
 def _entries(kind, path, cursor, limit=LIMIT, tail=TAIL_BYTES):
     text, _start, end = _read(path, cursor, tail)
     parse = _claude if kind == "claude" else _codex
-    out, turn = [], None
+    out, turn, cwd = [], None, None
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -187,7 +190,9 @@ def _entries(kind, path, cursor, limit=LIMIT, tail=TAIL_BYTES):
         got, st = parse(d)
         out += got
         turn = st or turn
-    return {"entries": out[-limit:], "cursor": end, "turn": turn}
+        p = d.get("payload") if isinstance(d.get("payload"), dict) else d  # the folder the session runs in
+        cwd = p.get("cwd") if isinstance(p.get("cwd"), str) else cwd
+    return {"entries": out[-limit:], "cursor": end, "turn": turn, "cwd": cwd}
 
 
 def state(conn, a, turn, waiting=None):
@@ -205,6 +210,33 @@ def state(conn, a, turn, waiting=None):
         bg = core.background_work(conn, a["name"])  # its harness wakes it when this ends
         return "idle", f"idle: waits on {bg[0]['what'] or 'its background work'}" if bg else "idle: at its prompt"
     return "working", STATES["working"]
+
+
+def adopt_check(conn, a, kind, path, turn, cwd, waiting=None):
+    """tmux_adopt (#4598) for a session outside tmux: ("now", why) when maxpm serve moves it into a tmux pane now,
+    ("later", why) when it moves after its turn, or ("never", why)."""
+    if core.setting(conn, "tmux_adopt", agent=a["name"]) != "on":
+        return "never", "tmux_adopt is off"
+    if os.name == "nt" or not core.tmux_path():
+        return "never", "tmux is not installed"
+    if not path or kind not in PLATFORMS:
+        return "never", "MaximizePM has no transcript of it, so it does not know which chat to resume"
+    if not (a.get("pid") and a.get("host") == core.this_host() and a.get("pid_cmd")):
+        return "never", "its process on this computer is not known"
+    if not cwd:
+        return "never", "its transcript does not name its folder"
+    if a.get("stop_at"):
+        return "never", "it is asked to stop"
+    try:
+        quiet = time.time() - Path(path).stat().st_mtime
+    except OSError:
+        return "never", "its transcript is gone"
+    if (a.get("activity_prompt") or turn != "idle" or quiet < ADOPT_QUIET
+            or a["name"] in (waiting if waiting is not None else core.waits_on_person(conn, [a["name"]]))
+            or core.background_work(conn, a["name"])):
+        return "later", (f"MaximizePM moves it into tmux when its turn has ended and it has been quiet for "
+                         f"{ADOPT_QUIET // 60} minutes, with no prompt, question or background work open")
+    return "now", "it is quiet at its prompt"
 
 
 def running(conn, terminals=None):
@@ -247,7 +279,9 @@ def views(conn, terminals=None, root=None, croot=None):
             except (OSError, ValueError, EOFError):
                 path = None
         key, label = state(conn, a, tail["turn"], waiting)
-        card = {"name": a["name"], "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
+        adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
+            conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
+        card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "name": a["name"], "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"),
                 "holds": [{"id": h["id"], "title": h["title"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,

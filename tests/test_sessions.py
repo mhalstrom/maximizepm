@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -23,7 +24,7 @@ def codex_line(kind, payload, at="2026-11-08T10:00:00Z"):
     return json.dumps({"timestamp": at, "type": kind, "payload": payload}) + "\n"
 
 
-class Sessions(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.root = Path(self.dir.name) / "claude"
@@ -63,6 +64,8 @@ class Sessions(unittest.TestCase):
     def cards(self):
         return sessions.views(self.c, {}, self.root, self.croot)
 
+
+class Sessions(Base):
     def test_a_card_shows_the_agent_its_item_state_open_link_and_last_lines(self):
         (card,) = self.cards()
         self.assertEqual((card["name"], card["holds"][0]["id"], card["session_url"], card["transcript"]),
@@ -171,6 +174,92 @@ class Sessions(unittest.TestCase):
         code, body = get(f"/api/session?agent=ag&cursor={body['cursor']}")
         self.assertEqual((code, body["entries"]), (200, []))
         self.assertEqual(get("/api/session?agent=ghost")[0], 409)
+
+
+class Adopt(Base):
+    """tmux_adopt (#4598): a session outside tmux moves into a tmux pane when it is quiet at its prompt."""
+
+    def setUp(self):
+        import subprocess
+        from tests.test_server import FakeTmux
+        super().setUp()
+        self.platform, core.PLATFORM = core.PLATFORM, "linux"
+        self.tmux = server.TMUX_RUNNER = FakeTmux()
+        self.tmux_path, core.tmux_path = core.tmux_path, lambda: "/usr/bin/tmux"
+        roots, core.transcripts_root = core.transcripts_root, lambda: self.root
+        self.addCleanup(setattr, core, "transcripts_root", roots)
+        self.proc = subprocess.Popen(["sleep", "60"])  # the agent CLI in its Terminal tab
+        self.addCleanup(self.proc.wait)
+        self.addCleanup(self.proc.kill)
+        info = core.proc_info(self.proc.pid)
+        if info is None:
+            self.skipTest("no ps here (an agent sandbox)")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, pid_cmd=?, model='opus' WHERE name='ag'", (self.proc.pid, info[2]))
+        self.write(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn", cwd=self.dir.name))
+
+    def tearDown(self):
+        core.PLATFORM, server.TMUX_RUNNER, core.tmux_path = self.platform, None, self.tmux_path
+        server.ADOPT["failed"].clear()
+        super().tearDown()
+
+    def quiet(self, seconds=600):
+        t = time.time() - seconds
+        os.utime(self.path, (t, t))
+
+    def check(self):
+        (card,) = sessions.views(self.c, {}, self.root, self.croot)
+        return card["adopt"]["when"]
+
+    def test_it_waits_for_a_quiet_prompt_and_tmux_adopt(self):
+        self.assertEqual(self.check(), "later")  # it wrote just now
+        self.quiet()
+        self.assertEqual(self.check(), "now")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET activity_prompt='{}' WHERE name='ag'")
+        self.assertEqual(self.check(), "later")  # a permission prompt waits
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET activity_prompt=NULL WHERE name='ag'")
+        core.config_set(self.c, "tmux_adopt", "off")
+        self.assertEqual(self.check(), "never")
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "tmux_adopt", "maybe")
+
+    def test_the_resume_commands(self):
+        cmd = core.resume_command(self.c, "ag", "claude-code", SID)["command"]
+        self.assertTrue(cmd.startswith("claude --name ag --model "), cmd)
+        self.assertIn(f"--resume {SID} ", cmd)
+        self.assertIn("MaximizePM moved this session into a tmux pane", cmd)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid_cmd='codex -m x -c model_reasoning_effort=low' WHERE name='ag'")
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Codex=@codex")
+        cmd = core.resume_command(self.c, "ag", "codex", TID)["command"]
+        self.assertTrue(cmd.startswith(f"codex resume {TID} -m "), cmd)
+        self.assertIn("model_reasoning_effort=low", cmd)
+
+    def test_serve_moves_a_quiet_session_and_it_keeps_its_work(self):
+        self.quiet()
+        moved = server.adopt_sessions(self.c)
+        self.assertEqual(list(moved), ["ag"])
+        self.proc.wait(5)  # its old process ended
+        pane = self.tmux.panes[0]
+        self.assertEqual(pane["agent"], "ag")
+        line = pane["keys"][0]
+        self.assertIn(f"cd {self.dir.name} && ", line)
+        self.assertIn("MAXPM_AGENT=ag ", line)
+        self.assertIn(f"--resume {SID} ", line)
+        a = core.agent_status(self.c, "ag")
+        self.assertEqual((a["pid"], a["state"], [h["id"] for h in a["holds"]]), (None, "active", [self.it]))
+        self.assertIn("moves into a tmux pane", self.c.execute("SELECT change FROM events ORDER BY id DESC").fetchone()[0])
+        self.assertEqual(server.adopt_sessions(self.c), {})  # no process now: nothing more to move
+
+    def test_a_reused_pid_is_not_ended(self):
+        self.quiet()
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid_cmd='claude --other' WHERE name='ag'")
+        self.assertEqual(server.adopt_sessions(self.c), {})
+        self.assertIsNone(self.proc.poll())  # still runs
+        self.assertIn("ag", server.ADOPT["failed"])
 
 
 class OutsideTmux(unittest.TestCase):

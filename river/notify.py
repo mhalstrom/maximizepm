@@ -334,6 +334,7 @@ def loop(stop, interval_s=None):
             core.activity_watch(conn)  # an agent whose hooks reported nothing for activity_silence: tell the manager
             server.watch_busy(conn)  # an agent that is busy with no river command keeps its leases
             core.tell_watch_late(conn)  # a manager that runs no watch while a message is due: tell the person
+            server.adopt_sessions(conn)  # tmux_adopt: a session outside tmux, quiet at its prompt, moves into a pane
             server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session
             server.auto_release(conn)  # a ready review gets a reviewer, a ready deploy its deployer
             server.auto_context(conn)  # goal_context on: a goal with ready work gets a context session (a base)

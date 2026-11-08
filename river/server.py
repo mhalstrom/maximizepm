@@ -898,6 +898,89 @@ def auto_end_orphans(conn):
         return []
 
 
+ADOPT = {"failed": {}}  # agent -> when its last move into tmux failed: the next try waits ADOPT_RETRY
+ADOPT_RETRY = 600
+
+
+def adopt_sessions(conn, runner=None, end=None):
+    """One pass of the loop of maxpm serve (tmux_adopt, #4598): each agent session that runs outside tmux on this
+    computer and is quiet at its prompt (sessions.adopt_check) moves into a tmux pane. Returns {agent: pane}."""
+    from . import sessions
+    if TMUX_RUNNER is None and not _tmux_cmd():
+        return {}
+    terminals = agent_terminals(conn)
+    agents = [a for a in sessions.running(conn, terminals) if not terminals.get(a["name"])]
+    waiting = core.waits_on_person(conn, [a["name"] for a in agents]) if agents else {}
+    moved, t = {}, time.time()
+    for a in agents:
+        if t - ADOPT["failed"].get(a["name"], 0) < ADOPT_RETRY:
+            continue
+        kind, path = sessions.transcript(conn, a["name"])
+        if not path:
+            continue
+        try:
+            tail = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)
+        except (OSError, ValueError, EOFError):
+            continue
+        if sessions.adopt_check(conn, a, kind, path, tail["turn"], tail["cwd"], waiting)[0] != "now":
+            continue
+        try:
+            moved[a["name"]] = move_into_tmux(conn, a, kind, path, tail["cwd"], runner, end)
+        except RiverError as e:
+            ADOPT["failed"][a["name"]] = t
+            print(f"tmux_adopt: {a['name']}: {e}", flush=True)
+    return moved
+
+
+def _end_process(pid, grace=5.0):
+    """End a process: SIGTERM, then SIGKILL after grace seconds. True when it has ended."""
+    import signal
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    for _ in range(int(grace / 0.2)):
+        time.sleep(0.2)
+        try:
+            os.waitpid(pid, os.WNOHANG)  # a child of this process (tests): reap it
+        except (ChildProcessError, OSError):
+            pass
+        if not core.pid_alive(pid):
+            return True
+    os.kill(pid, signal.SIGKILL)
+    time.sleep(0.2)
+    return not core.pid_alive(pid)
+
+
+def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None):
+    """Move one agent session into a tmux pane (tmux_adopt): end its process (only one process may write a chat),
+    then resume the same chat in a new pane of the maxpm tmux session, in its folder, with the same MAXPM_AGENT.
+    The agent keeps its items, goals and targets: its leases run from now, and its old process id is cleared, so
+    the queue does not count it as gone before the new process runs a river command. Returns the pane."""
+    from . import sessions
+    name, pid = a["name"], a["pid"]
+    sid = a.get("native_address") if kind == "codex" else Path(path).name.split(".")[0]
+    held = conn.execute("SELECT project_id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                        "ORDER BY id LIMIT 1", (name,)).fetchone()
+    names = core.projects_for_dir(conn, cwd)
+    project_id = held["project_id"] if held else core._project(conn, names[0])["id"] if names else None
+    t = core.resume_command(conn, name, sessions.PLATFORMS[kind], sid, project_id)
+    info = core.proc_info(pid)
+    if info is not None and info[2] != a["pid_cmd"]:
+        raise RiverError(f"PID {pid} now runs another command ({info[2][:80]}); nothing moved")
+    if not (end or _end_process)(pid):
+        raise RiverError(f"its process {pid} did not end; nothing moved")
+    with core.tx(conn):
+        conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL, busy_at=NULL WHERE name=?", (name,))
+        core._touch_agent(conn, name)
+        core._event(conn, None, "maxpm", f"{name} moves into a tmux pane (tmux_adopt): its process {pid} ended, "
+                                         f"and the same chat resumes ({t['agent']})")
+    spec = {"command": t["command"], "path": cwd, "launch_in": "tmux", "project": name,
+            "session_title": a.get("session") or name}
+    _open_terminal(spec, t["env"], runner)
+    return spec.get("tmux_pane")
+
+
 def tmux_orphans_view(end=False):
     """maxpm view --orphans: the servers tmux_orphans finds; with end (--tidy), it ends them first."""
     return {"orphans": end_tmux_orphans() if end else tmux_orphans(), "ended": end}
