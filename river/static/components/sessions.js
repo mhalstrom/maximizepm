@@ -12,6 +12,7 @@ import { appendEntries, agePending, wireCopy, plainText } from "./chat.js";
 import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
 import { openSettings } from "./settingsDialog.js";
+import { showRows, wireRows } from "./artifacts.js";
 import { openInPanel, wirePanel } from "./sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
@@ -193,7 +194,7 @@ export function makeSessions({ isShown }) {
     clearImgs();
     barFor(null);
     note("Reading the transcript…");
-    if (sview === "items") setView("items");
+    if (sview !== "chat") setView(sview);
     waitLine({});
     bar.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
@@ -213,15 +214,27 @@ export function makeSessions({ isShown }) {
         <span class="si-m">${chip("c-" + esc(x.status), esc(x.status.replace("_", " ")))} <span class="muted">${esc(x.did.join(", "))} · ${ago(x.at)}</span></span>
       </div>`).join("") || `<div class="muted sl-none">This session took no item yet.</div>`;
   }
+  // Artifacts (#4630): what this session wrote or named, with the rows of the Artifacts tab; also when it ended.
+  async function loadArts() {
+    if (sview !== "artifacts" || !agent) return;
+    const name = agent;
+    const r = await fetch("api/artifacts?agent=" + encodeURIComponent(name));
+    const j = r.ok ? await r.json() : { artifacts: [] };
+    if (name !== agent || sview !== "artifacts") return;
+    showRows($("#sessArtList"), j.artifacts || [], "This session wrote or named nothing the side panel can show.");
+  }
+  wireRows($("#sessArtList"), (_session, target) => openInPanel(target));
   function setView(v) {
     sview = v;
+    $("#sessArts").classList.toggle("hidden", v !== "artifacts");
+    if (v === "artifacts") { $("#sessArtList").innerHTML = `<div class="muted sl-none">Reading the transcript…</div>`; loadArts(); }
     document.querySelectorAll("[data-sview]").forEach(b => { b.classList.toggle("on", b.dataset.sview === v); b.setAttribute("aria-selected", String(b.dataset.sview === v)); });
     $("#sessBody").classList.toggle("hidden", v !== "chat");
     $("#sessItems").classList.toggle("hidden", v !== "items");
     if (v === "items") { $("#sessItemList").innerHTML = `<div class="muted sl-none">Reading the history…</div>`; loadItems(); }
   }
   document.querySelector(".sess-views").addEventListener("click", (e) => { const b = e.target.closest("[data-sview]"); if (b) setView(b.dataset.sview); });
-  setInterval(() => { if (!document.hidden && isShown()) loadItems(); }, 10000);
+  setInterval(() => { if (!document.hidden && isShown()) { loadItems(); loadArts(); } }, 10000);
 
   // A session that waits on the person says so above the composer.
   function waitLine(j) {

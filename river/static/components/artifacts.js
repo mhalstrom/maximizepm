@@ -13,10 +13,11 @@ function name(a) {
   return a.target.replace(/^https?:\/\//, "");
 }
 
-function render() {
-  const s = $("#artSession").value, item = $("#artItem").value.replace(/\D/g, "");
-  const rows = list.filter(a => (!s || a.session === s) && (!item || String(a.item) === item));
-  $("#artList").innerHTML = rows.map((a, i) => `<div class="art-row">
+// The rows of a list of artifacts, in the Artifacts tab and in a session's view (#4630): one copy of the row code.
+// The list keeps its rows (el._rows) for wireRows.
+export function showRows(el, rows, empty) {
+  el._rows = rows;
+  el.innerHTML = rows.map((a, i) => `<div class="art-row">
       <div class="art-main"><b title="${esc(a.target)}">${esc(clip(name(a), 80))}</b>
         <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} ${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}
           ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}
@@ -25,8 +26,22 @@ function render() {
         ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="claude.ai does not let another page show it in a frame">Open on claude.ai</a>`
         : `<button class="btn" type="button" data-art-open="${i}">Open</button>`}
         <button class="btn" type="button" data-art-full="${i}">Open full screen</button></div>
-    </div>`).join("") || `<div class="muted">${list.length ? "Nothing matches the filter." : "The sessions made or named nothing the side panel can show yet."}</div>`;
-  $("#artList").dataset.rows = JSON.stringify(rows.map(a => [a.target, a.session, a.item]));
+    </div>`).join("") || `<div class="muted">${esc(empty)}</div>`;
+}
+
+// Open: openBeside(session, target); Open full screen: a browser tab of its own.
+export function wireRows(el, openBeside) {
+  el.addEventListener("click", (e) => {
+    const o = e.target.closest("[data-art-open]"), f = e.target.closest("[data-art-full]");
+    if (o && (el._rows || [])[+o.dataset.artOpen]) { const r = el._rows[+o.dataset.artOpen]; openBeside(r.session, r.target); }
+    if (f && (el._rows || [])[+f.dataset.artFull]) { const r = el._rows[+f.dataset.artFull]; openFullScreen(r.target, r.session, r.item || ""); }
+  });
+}
+
+function render() {
+  const s = $("#artSession").value, item = $("#artItem").value.replace(/\D/g, "");
+  showRows($("#artList"), list.filter(a => (!s || a.session === s) && (!item || String(a.item) === item)),
+           list.length ? "Nothing matches the filter." : "The sessions made or named nothing the side panel can show yet.");
 }
 
 export function makeArtifacts({ isShown, openBeside }) {
@@ -49,12 +64,7 @@ export function makeArtifacts({ isShown, openBeside }) {
   }
   $("#artSession").addEventListener("change", render);
   $("#artItem").addEventListener("input", render);
-  $("#artList").addEventListener("click", (e) => {
-    const rows = JSON.parse($("#artList").dataset.rows || "[]");
-    const o = e.target.closest("[data-art-open]"), f = e.target.closest("[data-art-full]");
-    if (o) { const [target, session] = rows[+o.dataset.artOpen]; openBeside(session, target); }
-    if (f) { const [target, session, item] = rows[+f.dataset.artFull]; openFullScreen(target, session, item || ""); }
-  });
+  wireRows($("#artList"), openBeside);
   setInterval(refresh, 10000);
   return { refresh };
 }

@@ -2712,7 +2712,10 @@ class Handler(BaseHTTPRequestHandler):
                         return True
                     except RiverError:
                         return False
-                return self._send(200, {"artifacts": sessions.artifacts(conn, agent_terminals(conn), allowed)})
+                from urllib.parse import parse_qs, urlsplit
+                one = parse_qs(urlsplit(self.path).query).get("agent", [""])[0] or None
+                return self._send(200, {"artifacts": sessions.artifacts(conn, None if one else agent_terminals(conn),
+                                                                        allowed, agent=one)})
             finally:
                 conn.close()
         if path in ("/view", "/api/view-key"):  # full screen in a tab of its own (#4620)

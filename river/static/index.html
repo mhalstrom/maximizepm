@@ -156,9 +156,11 @@
         <div class="sess-views" role="tablist" aria-label="Session view">
           <button class="sv on" type="button" role="tab" data-sview="chat" aria-selected="true">Chat</button>
           <button class="sv" type="button" role="tab" data-sview="items" aria-selected="false" title="The items this session claimed, finished, released or gave away">Items</button>
+          <button class="sv" type="button" role="tab" data-sview="artifacts" aria-selected="false" title="The files, local pages and claude.ai artifact links this session wrote or named">Artifacts</button>
         </div>
         <div id="sessBody" class="sbody"><div id="sessCol" class="chat-col"></div></div>
         <div id="sessItems" class="sbody hidden"><div class="chat-col" id="sessItemList"></div></div>
+        <div id="sessArts" class="sbody hidden"><div class="chat-col" id="sessArtList"></div></div>
         <div class="chat-col chat-foot">
           <div id="sessWait" class="sess-wait hidden"></div>
           <div id="sessBarWhy" class="muted sess-why hidden"></div>

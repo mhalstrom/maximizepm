@@ -566,6 +566,13 @@ class SideFiles(Base):
         self.assertEqual(got["http://localhost:5173/app"]["kind"], "page")
         self.assertEqual(got["https://claude.ai/artifact/ab12-cd"]["kind"], "artifact")
         self.assertNotIn("/etc/hosts.md", got)  # outside the project folders
+        # #4630: one session only, also when it is not running and was not seen for days.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET last_seen='2026-01-01T00:00:00Z', pid=NULL WHERE name='ag'")
+        self.assertEqual(sessions.artifacts(self.c, {}, allowed, self.root, self.croot), [])
+        one = sessions.artifacts(self.c, {}, allowed, self.root, self.croot, agent="ag")
+        self.assertIn(shot, [a["target"] for a in one])
+        self.assertEqual(sessions.artifacts(self.c, {}, allowed, self.root, self.croot, agent="nobody"), [])
 
     def test_the_frame_check_needs_a_web_address(self):
         self.assertEqual(server.frame_check("javascript:alert(1)")["frame"], False)

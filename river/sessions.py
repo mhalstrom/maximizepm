@@ -522,13 +522,17 @@ def _artifact_hits(path):
     return hits
 
 
-def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=300):
+def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=300, agent=None):
     """[{target, kind (file, page, artifact), how (wrote, named), session, item, at}], newest first, one per target:
     from the running sessions and the agents seen in the last ARTIFACT_DAYS. allowed(path): whether the side panel
-    may show that file (server.local_file); a file it may not show is left out."""
-    names = {a["name"] for a in running(conn, terminals)}
-    since = core.iso(core.now() - core.timedelta(days=ARTIFACT_DAYS))
-    names |= {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND last_seen>=?", (since,))}
+    may show that file (server.local_file); a file it may not show is left out. agent: that one session only, also
+    when it ended long ago (its session view, #4630)."""
+    if agent:
+        names = {agent}
+    else:
+        names = {a["name"] for a in running(conn, terminals)}
+        since = core.iso(core.now() - core.timedelta(days=ARTIFACT_DAYS))
+        names |= {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND last_seen>=?", (since,))}
     best = {}
     for name in sorted(names):
         kind, path = transcript(conn, name, root, croot)
