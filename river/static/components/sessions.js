@@ -11,6 +11,7 @@ import { chip } from "./chip.js";
 import { appendEntries, agePending, wireCopy, plainText } from "./chat.js";
 import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
+import { openSettings } from "./settingsDialog.js";
 import { openInPanel, wirePanel } from "./sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
@@ -25,6 +26,10 @@ function stateChip(s) {
 // The header of the chosen session (#4608): Open session (its claude.ai/code page; else its tmux pane in the
 // terminal view; else off, with why), and the item it works on, which opens in the drawer.
 function headerOpen(s) {
+  const set = s.provider ? `<button class="btn" type="button" data-settings="${esc(s.name)}" title="The settings this session runs with, and what you can change">Settings</button> ` : "";
+  return set + headerOpenBtn(s);
+}
+function headerOpenBtn(s) {
   if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code">Open session</a>`;
   if (s.terminal) return `<button class="btn" type="button" data-term="${esc(s.name)}" title="Open its tmux pane in the terminal view">Open session</button>`;
   const why = s.agent_type === "codex" ? "A Codex session has no web link, and this one runs in no tmux pane here" : "This session has no Remote Control link and runs in no tmux pane here";
@@ -327,6 +332,7 @@ export function makeSessions({ isShown }) {
   });
   $("#sessOpen").addEventListener("click", (e) => {
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
+    const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
   bar.addEventListener("click", (e) => {
     if (e.target.closest("[data-open], a")) return;  // an item link opens the drawer

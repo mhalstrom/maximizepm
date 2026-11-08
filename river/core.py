@@ -9345,10 +9345,13 @@ ADOPT_PROMPT = ("MaximizePM moved this session into a tmux pane, so the Sessions
                 "if you are not sure.")
 
 
-def resume_command(conn, agent, platform, session_id, project_id=None):
+def resume_command(conn, agent, platform, session_id, project_id=None, overrides=None):
     """The command that resumes an agent's chat in a new process (tmux_adopt, #4598): the first launch_agents
     profile of its platform, its model, `claude --resume <session id>` or `codex resume <thread id>`, and
-    ADOPT_PROMPT as its first prompt. {command, env}."""
+    ADOPT_PROMPT as its first prompt. {command, env}. overrides (the Settings dialog, #4625): model (a model_ladder
+    name or the CLI's own id), effort, opts (profile options such as permission_mode or sandbox), flags (added),
+    noflags (taken out of the profile's args), prompt."""
+    ov = overrides or {}
     a = _agent(conn, agent)
     agents = parse_launch_agents(setting(conn, "launch_agents", project_id=project_id))
     pick = next((x for x in agents if (parse_profile(x[1]) or (None,))[0] == platform), None)
@@ -9359,12 +9362,21 @@ def resume_command(conn, agent, platform, session_id, project_id=None):
         model = _check_model_name(a["model"]) if a["model"] else None
     except RiverError:
         model = None
+    if ov.get("model"):
+        try:
+            model = _check_model_name(ov["model"])
+        except RiverError:
+            model = None
     mid = model_id(conn, platform, model, project_id, prof[1])
+    if ov.get("model") and not model:
+        mid = ov["model"]  # the CLI's own id
     opts = {**profile_options(conn, prof[0], prof[1], project_id, None),
-            "prompt": ADOPT_PROMPT.format(agent=agent)}
+            "prompt": ov.get("prompt") or ADOPT_PROMPT.format(agent=agent), **(ov.get("opts") or {})}
+    args = " ".join(x for x in opts.get("args", "").split() if x not in (ov.get("noflags") or ()))
+    opts["args"] = " ".join([args] + [f for f in (ov.get("flags") or ()) if f not in args.split()]).strip()
     # The effort it ran at: from its recorded command line (the agents table keeps no effort).
     m = re.search(r"(?:--effort |model_reasoning_effort=)([a-z][a-z0-9_-]{0,31})\b", a["pid_cmd"] or "")
-    effort = m.group(1) if m else None
+    effort = ov.get("effort") or (m.group(1) if m else None)
     q = _shell_quote
     if platform == "claude-code":
         args = f"--resume {q(session_id)} " + opts.get("args", "")
@@ -9377,6 +9389,8 @@ def resume_command(conn, agent, platform, session_id, project_id=None):
     else:
         cmd = build_command(platform, opts, mid, effort)
         cmd = f"codex resume {q(session_id)}" + cmd[len("codex"):]
+    if platform == "codex" and "--no-daemon" in (ov.get("noflags") or ()):
+        cmd = cmd.replace(" --no-daemon", "")
     return {"command": cmd, "agent": pick[0], "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
 
 

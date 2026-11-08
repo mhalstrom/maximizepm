@@ -954,7 +954,8 @@ def _end_process(pid, grace=5.0):
     return not core.pid_alive(pid)
 
 
-def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None):
+def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=None,
+                   why="moves into a tmux pane (tmux_adopt)"):
     """Move one agent session into a tmux pane (tmux_adopt): end its process (only one process may write a chat),
     then resume the same chat in a new pane of the maxpm tmux session, in its folder, with the same MAXPM_AGENT.
     The agent keeps its items, goals and targets: its leases run from now, and its old process id is cleared, so
@@ -966,7 +967,7 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None):
                         "ORDER BY id LIMIT 1", (name,)).fetchone()
     names = core.projects_for_dir(conn, cwd)
     project_id = held["project_id"] if held else core._project(conn, names[0])["id"] if names else None
-    t = core.resume_command(conn, name, sessions.PLATFORMS[kind], sid, project_id)
+    t = core.resume_command(conn, name, sessions.PLATFORMS[kind], sid, project_id, overrides)
     info = core.proc_info(pid)
     if info is not None and info[2] != a["pid_cmd"]:
         raise RiverError(f"PID {pid} now runs another command ({info[2][:80]}); nothing moved")
@@ -975,12 +976,81 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None):
     with core.tx(conn):
         conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL, busy_at=NULL WHERE name=?", (name,))
         core._touch_agent(conn, name)
-        core._event(conn, None, "maxpm", f"{name} moves into a tmux pane (tmux_adopt): its process {pid} ended, "
-                                         f"and the same chat resumes ({t['agent']})")
+        core._event(conn, None, "maxpm", f"{name} {why}: its process {pid} ended, and the same chat resumes "
+                                         f"({t['agent']})")
     spec = {"command": t["command"], "path": cwd, "launch_in": "tmux", "project": name,
             "session_title": a.get("session") or name}
     _open_terminal(spec, t["env"], runner)
     return spec.get("tmux_pane")
+
+
+def _quiet_session(conn, agent, who):
+    """(agent_status, kind, path, tail) of a session a person may change now: a person asks, its transcript is here,
+    and its turn has ended with no prompt open. RiverError says what stands in the way."""
+    from . import sessions
+    row = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
+    if row and row["kind"] != "human":
+        raise RiverError("only a person changes a session's settings")
+    a = core.agent_status(conn, agent)
+    kind, path = sessions.transcript(conn, agent)
+    if not path:
+        raise RiverError(f"no transcript of {agent} on this computer, so MaximizePM cannot tell when it is quiet")
+    tail = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)
+    if tail["turn"] != "idle" or a.get("activity_prompt") or core.waits_on_person(conn, [agent]):
+        raise RiverError(f"{agent} works now or waits on a prompt or an answer; change its settings when its turn has ended")
+    return a, kind, path, tail
+
+
+def session_setting_live(conn, agent, key, value, who=None):
+    """The Settings dialog (#4625): change one setting of a running session in place, where its provider allows
+    it (Claude Code /model, /effort): the command goes into its tmux pane while the session is quiet."""
+    from . import sessions
+    a, kind, path, _tail = _quiet_session(conn, agent, who)
+    spec = sessions.setting_spec(sessions.provider(a.get("agent_type"), kind)["id"], key)
+    if not spec.get("live"):
+        raise RiverError(f"{spec['label']} changes only with a restart: use Restart with these settings")
+    value = sessions.check_value(spec, value)
+    if pane_prompts(conn, {agent: _typing_pane(conn, agent, who)}).get(agent):
+        raise RiverError(f"a prompt waits in the terminal of {agent}: answer it first")
+    terminal_keys(conn, agent, [{"text": spec["live"].format(value=value)}, {"key": "Enter"}], who)
+    with core.tx(conn):
+        core._event(conn, None, who or "maxpm", f"{agent}: {spec['label']} set to {value} in place")
+    return {"agent": agent, "key": key, "value": value}
+
+
+def session_restart(conn, agent, changes, make_default=False, who=None, runner=None, end=None):
+    """The Settings dialog (#4625): end a quiet session and resume the same chat with new settings (the way
+    tmux_adopt moves a session), so it keeps its name, items and context. make_default: also make each changed
+    provider option the default (maxpm config claude_* or codex_*)."""
+    from . import sessions
+    if not isinstance(changes, dict) or not changes:
+        raise RiverError("no setting changed")
+    a, kind, path, tail = _quiet_session(conn, agent, who)
+    if not (a.get("pid") and a.get("host") == core.this_host() and a.get("pid_cmd") and core.pid_alive(a["pid"])):
+        raise RiverError(f"the process of {agent} on this computer is not known; restart it by hand")
+    if not tail.get("cwd"):
+        raise RiverError(f"the transcript of {agent} does not name its folder")
+    prov = sessions.provider(a.get("agent_type"), kind)["id"]
+    ov, done, defaults = {"opts": {}, "flags": [], "noflags": []}, [], []
+    for key, value in changes.items():
+        spec = sessions.setting_spec(prov, key)
+        value = sessions.check_value(spec, value)
+        if spec["restart"] in ("model", "effort"):
+            ov[spec["restart"]] = value
+        elif spec["restart"] == "opt":
+            ov["opts"][key] = value
+        else:
+            (ov["flags"] if value == "on" else ov["noflags"]).append(spec["flag"])
+        done.append(f"{spec['label']} {value}")
+        if make_default and spec.get("default"):
+            defaults.append((spec["default"], value))
+    ov["prompt"] = (f"MaximizePM restarted this session with new settings ({'; '.join(done)}); your name, items and "
+                    f"context are the same. Start again any background command you had running, then continue where "
+                    f"you stopped: run maxpm --as {agent} go if you are not sure.")
+    pane = move_into_tmux(conn, a, kind, path, tail["cwd"], runner, end, ov, f"restarted with new settings ({'; '.join(done)})")
+    for k, v in defaults:
+        core.config_set(conn, k, v)
+    return {"agent": agent, "pane": pane, "changed": done, "defaults": [k for k, _ in defaults]}
 
 
 def tmux_orphans_view(end=False):
@@ -2014,7 +2084,7 @@ def frame_check(url):
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
-TYPING_OPS = ("terminal_keys", "session_send", "prompt_answer")
+TYPING_OPS = ("terminal_keys", "session_send", "prompt_answer", "session_setting", "session_restart")
 
 
 REPO = PKG.parent
@@ -2505,6 +2575,8 @@ OPS = {
     "open_chat": lambda c, a, who: open_chat(c, a["agent"]),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who, a.get("images")),
+    "session_setting": lambda c, a, who: session_setting_live(c, a["agent"], a["key"], a.get("value"), who),
+    "session_restart": lambda c, a, who: session_restart(c, a["agent"], a.get("changes"), bool(a.get("make_default")), who),
     "prompt_answer": lambda c, a, who: prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"), a.get("other"), who),
     "tmux_tidy": lambda c, a, who: tmux_tidy(c),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
@@ -2609,6 +2681,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, sessions.item_session(conn, int(path.rsplit("/", 1)[-1])))
             except RiverError as e:
                 return self._send(404, {"error": str(e)})
+            finally:
+                conn.close()
+        if path == "/api/session-settings":  # the Settings dialog of a session (#4625)
+            from urllib.parse import parse_qs, urlsplit
+            from . import sessions
+            conn = core.connect()
+            try:
+                return self._send(200, sessions.session_settings(conn, parse_qs(urlsplit(self.path).query).get("agent", [""])[0]))
+            except RiverError as e:
+                return self._send(409, {"error": str(e)})
             finally:
                 conn.close()
         if path == "/api/session-items":  # the Items view of a session (#4623)

@@ -27,7 +27,37 @@ ADOPT_QUIET = 120         # tmux_adopt: a session moves into tmux after its turn
 PLATFORMS = {"claude": "claude-code", "codex": "codex"}
 # The chat providers the Sessions tab knows (#4627): the label each session shows. A new provider is one more row
 # here (#4625 adds its settings); the page draws what it gets.
-PROVIDERS = {"claude-code": {"label": "Claude Code"}, "codex": {"label": "Codex"}}
+# Each provider's settings (#4625): how the Settings dialog reads each one (from the session's transcript, else
+# its command line), whether it changes in place (a command typed into its pane while it is idle), and how a
+# restart applies it (model, effort, a profile option, or a flag). A new provider is one more table here.
+_CC = core.LAUNCH_PLATFORMS["claude-code"]["options"]
+_CX = core.LAUNCH_PLATFORMS["codex"]["options"]
+PROVIDERS = {
+    "claude-code": {"label": "Claude Code", "settings": [
+        {"key": "model", "label": "Model", "kind": "text", "live": "/model {value}", "restart": "model",
+         "cmd": r"--model (\S+)"},
+        {"key": "effort", "label": "Effort", "kind": "choice", "choices": ["low", "medium", "high", "xhigh", "max"],
+         "live": "/effort {value}", "restart": "effort", "cmd": r"--effort (\S+)"},
+        {"key": "permission_mode", "label": "Permission mode", "kind": "choice", "choices": _CC["permission_mode"]["choices"],
+         "restart": "opt", "default": "claude_permission_mode", "cmd": r"--permission-mode (\S+)",
+         "note": "Shift+Tab in its terminal also cycles it"},
+        {"key": "remote_control", "label": "Remote Control", "kind": "choice", "choices": ["on", "off"],
+         "restart": "opt", "default": "claude_remote_control", "flag": "--remote-control"},
+    ]},
+    "codex": {"label": "Codex", "settings": [
+        {"key": "model", "label": "Model", "kind": "text", "restart": "model", "cmd": r"(?:^|\s)-m (\S+)"},
+        {"key": "effort", "label": "Reasoning effort", "kind": "choice", "choices": core.PLATFORM_EFFORTS["openai"],
+         "restart": "effort", "cmd": r"model_reasoning_effort=(\S+)"},
+        {"key": "approval", "label": "Approval", "kind": "choice", "choices": _CX["approval"]["choices"] + ["untrusted"],
+         "restart": "opt", "default": "codex_approval", "cmd": r"--ask-for-approval (\S+)"},
+        {"key": "sandbox", "label": "Sandbox", "kind": "choice", "choices": _CX["sandbox"]["choices"],
+         "restart": "opt", "default": "codex_sandbox", "cmd": r"--sandbox (\S+)"},
+        {"key": "approve_for_me", "label": "Approve for me (auto)", "kind": "choice", "choices": ["on", "off"],
+         "restart": "flag", "flag": "--approve-for-me"},
+        {"key": "no_daemon", "label": "No shared background server", "kind": "choice", "choices": ["on", "off"],
+         "restart": "flag", "flag": "--no-daemon"},
+    ]},
+}
 
 
 def provider(agent_type, kind=None):
@@ -603,3 +633,90 @@ def session_items(conn, agent, limit=200):
     for x in out:
         del x["_n"]
     return out
+
+
+def _transcript_settings(kind, path):
+    """The settings a session's transcript shows last: Claude Code puts the model and effort on each reply and a
+    line for each permission mode; Codex a turn_context at each turn."""
+    import re as _re
+    text, _s, _e = _read(path, None, CARD_BYTES * 4)
+    got = {}
+    for line in text.splitlines():
+        if kind == "claude":
+            if '"permission-mode"' in line:
+                m = _re.search(r'"permissionMode":\s*"([^"]+)"', line)
+                if m:
+                    got["permission_mode"] = m.group(1)
+            elif line.startswith('{"') and '"assistant"' in line:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("type") != "assistant":
+                    continue
+                msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+                if msg.get("model"):
+                    got["model"] = msg["model"]
+                if isinstance(d.get("effort"), str):
+                    got["effort"] = d["effort"]
+        elif '"turn_context"' in line:
+            try:
+                p = json.loads(line).get("payload") or {}
+            except ValueError:
+                continue
+            for k, v in (("model", p.get("model")), ("effort", p.get("effort")), ("approval", p.get("approval_policy")),
+                         ("sandbox", (p.get("sandbox_policy") or {}).get("type") if isinstance(p.get("sandbox_policy"), dict) else None)):
+                if v:
+                    got[k] = v
+    return got
+
+
+def session_settings(conn, agent, root=None, croot=None):
+    """The Settings dialog of a session (#4625): its provider's settings with the value it runs with now (from its
+    transcript, else its command line), where each comes from, whether it changes in place or needs a restart,
+    and the default setting (maxpm config) a restart can also change."""
+    import re as _re
+    a = core.agent_status(conn, agent)
+    kind, path = transcript(conn, agent, root, croot)
+    prov = provider(a.get("agent_type"), kind)
+    if not prov or prov["id"] not in PROVIDERS or not PROVIDERS[prov["id"]].get("settings"):
+        raise core.RiverError(f"MaximizePM knows no settings of {agent}'s chat provider")
+    seen = {}
+    if path:
+        try:
+            seen = _transcript_settings(kind, path)
+        except (OSError, ValueError, EOFError):
+            seen = {}
+    cmd = a.get("pid_cmd") or ""
+    out = []
+    for spec in PROVIDERS[prov["id"]]["settings"]:
+        value, source = seen.get(spec["key"]), "session"
+        if value is None and spec.get("cmd"):
+            m = _re.search(spec["cmd"], cmd)
+            value, source = (m.group(1), "command line") if m else (None, None)
+        if value is None and spec.get("flag") and cmd:
+            value, source = ("on" if spec["flag"] in cmd.split() else "off"), "command line"
+        if value is None and spec.get("default"):
+            value, source = core.setting(conn, spec["default"], agent=agent) or None, "default"
+        out.append({"key": spec["key"], "label": spec["label"], "kind": spec["kind"], "choices": spec.get("choices"),
+                    "value": value, "source": source, "live": bool(spec.get("live")), "note": spec.get("note"),
+                    "default_key": spec.get("default"),
+                    "default_value": core.setting(conn, spec["default"]) if spec.get("default") else None})
+    return {"agent": agent, "provider": prov, "settings": out, "transcript": kind if path else None}
+
+
+def setting_spec(provider_id, key):
+    spec = next((x for x in PROVIDERS.get(provider_id, {}).get("settings", []) if x["key"] == key), None)
+    if spec is None:
+        raise core.RiverError(f"{PROVIDERS.get(provider_id, {}).get('label', provider_id)} has no setting {key}")
+    return spec
+
+
+def check_value(spec, value):
+    import re as _re
+    value = str(value or "").strip()
+    if spec["kind"] == "choice" and value not in spec["choices"]:
+        raise core.RiverError(f"{spec['label']} is one of {', '.join(spec['choices'])}, not {value or 'empty'}")
+    if spec["kind"] == "text" and not _re.match(r"^[\w.:@/-]{1,80}$", value):
+        raise core.RiverError(f"{spec['label']}: a name such as opus or gpt-6.1-sol")
+    return value

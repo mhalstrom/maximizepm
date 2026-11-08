@@ -135,6 +135,20 @@ class Sessions(Base):
         with self.assertRaises(core.RiverError):
             sessions.item_session(self.c, 999999)
 
+    def test_the_settings_a_session_runs_with(self):
+        # #4625: the values come from the session's transcript first, then its command line, then the default.
+        self.write(json.dumps({"type": "permission-mode", "permissionMode": "auto"}) + "\n"
+                   + json.dumps({"type": "assistant", "timestamp": "2026-11-08T10:03:00Z", "effort": "xhigh",
+                                 "message": {"role": "assistant", "model": "claude-opus-5-5", "content": []}}) + "\n")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid_cmd='claude --name ag --remote-control --model opus' WHERE name='ag'")
+        got = {x["key"]: x for x in sessions.session_settings(self.c, "ag", self.root, self.croot)["settings"]}
+        self.assertEqual((got["model"]["value"], got["model"]["source"], got["model"]["live"]), ("claude-opus-5-5", "session", True))
+        self.assertEqual((got["effort"]["value"], got["permission_mode"]["value"]), ("xhigh", "auto"))
+        self.assertEqual((got["remote_control"]["value"], got["remote_control"]["source"]), ("on", "command line"))
+        self.assertFalse(got["permission_mode"]["live"])
+        self.assertEqual(got["permission_mode"]["default_key"], "claude_permission_mode")
+
     def test_the_items_a_session_took(self):
         # #4623: from the history by the agent's name, newest first, with what it did.
         other = core.item_add(self.c, "site", "footer")["id"]
@@ -322,6 +336,24 @@ class Adopt(Base):
         self.assertEqual((a["pid"], a["state"], [h["id"] for h in a["holds"]]), (None, "active", [self.it]))
         self.assertIn("moves into a tmux pane", self.c.execute("SELECT change FROM events ORDER BY id DESC").fetchone()[0])
         self.assertEqual(server.adopt_sessions(self.c), {})  # no process now: nothing more to move
+
+    def test_restart_with_new_settings(self):
+        # #4625: the same chat resumes with the changed settings; a live change goes into its pane as a command.
+        with self.assertRaises(core.RiverError):
+            server.session_restart(self.c, "ag", {"permission_mode": "sometimes"})
+        got = server.session_restart(self.c, "ag", {"permission_mode": "plan", "effort": "low"}, make_default=True)
+        self.assertEqual(got["defaults"], ["claude_permission_mode"])
+        self.proc.wait(5)
+        line = self.tmux.panes[0]["keys"][0]
+        self.assertIn(f"--resume {SID} ", line)
+        self.assertIn("--permission-mode plan", line)
+        self.assertIn("--effort low", line)
+        self.assertIn("restarted this session with new settings", line)
+        self.assertEqual(core.setting(self.c, "claude_permission_mode"), "plan")
+        with self.assertRaises(core.RiverError):  # its provider changes this only at a start
+            server.session_setting_live(self.c, "ag", "permission_mode", "auto")
+        server.session_setting_live(self.c, "ag", "model", "sonnet")
+        self.assertIn("/model sonnet", " ".join(str(k) for k in self.tmux.panes[0]["keys"]))
 
     def test_a_reused_pid_is_not_ended(self):
         self.quiet()

@@ -401,9 +401,9 @@ button.srow-it { cursor: pointer; }
 .sess-noopen { font-size: 12px; margin-left: 6px; }
 /* What waits for the person in a session (#4607): a badge in the left bar, and the dialog that answers it. */
 .wbadge { flex: none; white-space: nowrap; display: inline-flex; align-items: center; gap: 2px; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--warn); color: var(--panel); }
-#waitDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
-#waitDlg.hidden { display: none; }
-#waitDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(640px, 100%); padding: 18px 20px; }
+#waitDlg, #setDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
+#waitDlg.hidden, #setDlg.hidden { display: none; }
+#waitDlg .box, #setDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(640px, 100%); padding: 18px 20px; }
 .wblock { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 8px; }
 .wkind { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
 .wq { font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -488,3 +488,11 @@ button.srow-it { cursor: pointer; }
 .si-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .si-t { overflow-wrap: anywhere; }
 .si-m { grid-column: 2; font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+/* The Settings dialog of a session (#4625). */
+#setDlg .box { width: min(620px, calc(100vw - 32px)); }
+.set-head { margin: 8px 0; }
+.set-row { display: grid; grid-template-columns: 170px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.set-row select, .set-row input { font: inherit; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; min-width: 0; }
+.set-sub { grid-column: 2 / 4; font-size: 12px; }
+.set-foot { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+@media (max-width: 560px) { .set-row { grid-template-columns: 1fr; } .set-sub { grid-column: 1; } }
