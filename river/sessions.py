@@ -579,3 +579,27 @@ def item_session(conn, item_id, root=None, croot=None):
         out["session"] = {"name": pick, "why": why, "running": st in ("active", "away"), "state": st,
                           "viewable": bool(a) and transcript(conn, pick, root, croot)[1] is not None}
     return out
+
+
+# The Items view of a session (#4623): what it did with items, from the history by its name; also for an ended one.
+ITEM_ACTIONS = (("claimed", "claimed"), ("done", "finished"), ("released", "released"), ("given to", "gave"),
+                ("pushed to", "pushed"), ("dropped", "dropped"), ("taken over", "took over"), ("reopened", "reopened"))
+
+
+def session_items(conn, agent, limit=200):
+    """[{id, title, status, did (its actions, oldest first), at (the last one)}], the newest first: each item the
+    agent claimed, finished, released, gave, pushed, dropped, took over or reopened."""
+    rows = {}
+    for r in conn.execute("SELECT e.id AS eid, e.item_id, e.at, e.change, i.title, i.status FROM events e JOIN items i ON i.id=e.item_id "
+                          "WHERE e.actor=? ORDER BY e.id", (agent,)):
+        did = next((label for word, label in ITEM_ACTIONS if r["change"].startswith(word)), None)
+        if not did:
+            continue
+        x = rows.setdefault(r["item_id"], {"id": r["item_id"], "title": r["title"], "status": r["status"], "did": [], "at": r["at"]})
+        if not x["did"] or x["did"][-1] != did:
+            x["did"].append(did)
+        x["at"], x["_n"] = r["at"], r["eid"]
+    out = sorted(rows.values(), key=lambda x: x["_n"], reverse=True)[:limit]
+    for x in out:
+        del x["_n"]
+    return out

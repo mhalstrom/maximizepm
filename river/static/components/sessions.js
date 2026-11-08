@@ -188,10 +188,35 @@ export function makeSessions({ isShown }) {
     clearImgs();
     barFor(null);
     note("Reading the transcript…");
+    if (sview === "items") setView("items");
     waitLine({});
     bar.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
+
+  // Chat | Items (#4623): the items this session claimed, finished, released or gave away, newest first.
+  let sview = "chat";
+  async function loadItems() {
+    if (sview !== "items" || !agent) return;
+    const name = agent;
+    const r = await fetch("api/session-items?agent=" + encodeURIComponent(name));
+    const j = r.ok ? await r.json() : { items: [] };
+    if (name !== agent || sview !== "items") return;
+    $("#sessItemList").innerHTML = j.items.map(x => `<div class="si-row">
+        <span class="link" data-open="${x.id}">#${x.id}</span>
+        <span class="si-t">${esc(x.title)}</span>
+        <span class="si-m">${chip("c-" + esc(x.status), esc(x.status.replace("_", " ")))} <span class="muted">${esc(x.did.join(", "))} · ${ago(x.at)}</span></span>
+      </div>`).join("") || `<div class="muted sl-none">This session took no item yet.</div>`;
+  }
+  function setView(v) {
+    sview = v;
+    document.querySelectorAll("[data-sview]").forEach(b => { b.classList.toggle("on", b.dataset.sview === v); b.setAttribute("aria-selected", String(b.dataset.sview === v)); });
+    $("#sessBody").classList.toggle("hidden", v !== "chat");
+    $("#sessItems").classList.toggle("hidden", v !== "items");
+    if (v === "items") { $("#sessItemList").innerHTML = `<div class="muted sl-none">Reading the history…</div>`; loadItems(); }
+  }
+  document.querySelector(".sess-views").addEventListener("click", (e) => { const b = e.target.closest("[data-sview]"); if (b) setView(b.dataset.sview); });
+  setInterval(() => { if (!document.hidden && isShown()) loadItems(); }, 10000);
 
   // A session that waits on the person says so above the composer.
   function waitLine(j) {

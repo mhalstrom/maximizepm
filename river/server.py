@@ -2611,6 +2611,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": str(e)})
             finally:
                 conn.close()
+        if path == "/api/session-items":  # the Items view of a session (#4623)
+            from urllib.parse import parse_qs, urlsplit
+            from . import sessions
+            conn = core.connect()
+            try:
+                agent = parse_qs(urlsplit(self.path).query).get("agent", [""])[0]
+                return self._send(200, {"agent": agent, "items": sessions.session_items(conn, agent)})
+            finally:
+                conn.close()
         if path == "/api/artifacts":  # the Artifacts tab (#4620)
             from . import sessions
             conn = core.connect()

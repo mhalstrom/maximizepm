@@ -135,6 +135,17 @@ class Sessions(Base):
         with self.assertRaises(core.RiverError):
             sessions.item_session(self.c, 999999)
 
+    def test_the_items_a_session_took(self):
+        # #4623: from the history by the agent's name, newest first, with what it did.
+        other = core.item_add(self.c, "site", "footer")["id"]
+        core.done(self.c, self.it, "c1", "ag")
+        core.claim(self.c, other, "ag")
+        core.release(self.c, other, "later", "ag")
+        got = sessions.session_items(self.c, "ag")
+        self.assertEqual([(x["id"], x["did"], x["status"]) for x in got],
+                         [(other, ["claimed", "released"], "open"), (self.it, ["claimed", "finished"], "done")])
+        self.assertEqual(sessions.session_items(self.c, "nobody"), [])
+
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET activity_prompt='{}' WHERE name='ag'")
