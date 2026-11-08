@@ -431,3 +431,9 @@ button.srow-it { cursor: pointer; }
 .refpop-b { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .refpop-b .btn { font-size: 12px; }
 .link.ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+/* The manager's rows, first and apart (#4616). */
+.slist-mgr { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line); flex: none; }
+.mgr-tag { flex: none; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--human); background: var(--human-bg); border-radius: 4px; padding: 1px 6px; }
+.mgr-none .srow-main { cursor: default; }
+.mgr-none .srow-it { justify-content: center; align-items: center; }
+.mgr-none .srow-it .btn { font-size: 12px; }

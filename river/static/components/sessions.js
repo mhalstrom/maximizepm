@@ -52,20 +52,27 @@ export function sessionRow(s) {
     : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + s.owns.join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(s.owns.join(", ")) : "No item"}</span></div>`;
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
     <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
-      <div class="srow-h"><b>${esc(s.name)}</b><span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
+      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}<b>${esc(s.name)}</b><span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
       <div class="sub">${esc(clip(lastText, 90))}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
     </div>
     ${item}
   </div>`;
 }
 
+// The manager's rows come first, apart from the other sessions (#4616); with no manager running, a row that starts
+// one (the page's Start manager: the launch dialog, then the op start_manager).
+const NO_MANAGER = `<div class="srow mgr-none"><div class="srow-main"><div class="srow-h"><span class="mgr-tag">Manager</span>
+  <span class="muted">No manager running</span></div></div>
+  <div class="srow-it"><button class="btn primary" type="button" data-start-manager="1" title="Opens the launch dialog; the agent starts with maxpm manage">Start manager</button></div></div>`;
+
 // Replace only the rows whose data changed, so a row keeps its hover and focus between reads.
-function renderList(el, list, picked) {
+function renderList(el, list, picked, empty) {
   const rows = [...el.querySelectorAll("[data-session]")];
   if (!list.length) {
-    el.innerHTML = `<div class="muted">No agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`;
+    if (el.dataset.empty !== "1") { el.innerHTML = empty; el.dataset.empty = "1"; }
     return;
   }
+  delete el.dataset.empty;
   const sigs = list.map(s => JSON.stringify(s));
   if (rows.length !== list.length || rows.some((r, i) => r.dataset.session !== list[i].name)) {
     el.innerHTML = list.map(sessionRow).join("");
@@ -86,7 +93,8 @@ function renderList(el, list, picked) {
 export function makeSessions({ isShown }) {
   let list = [], busy = false;
   let agent = null, cursor = null, timer = null, gen = 0;
-  const side = $("#sessions"), body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
+  const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
+  const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
   const note = (text) => { col.replaceChildren(); const n = document.createElement("div"); n.className = "muted sl-none"; n.textContent = text; col.append(n); };
 
@@ -109,12 +117,15 @@ export function makeSessions({ isShown }) {
       // At load: the session chosen last, else the first. A session that ended gives way to the first.
       if (!list.some(s => s.name === agent)) {
         const want = store(PICKED);
-        pick((list.find(s => s.name === want) || list[0] || {}).name || null, false);
+        pick((list.find(s => s.name === want) || list.find(s => s.role === "manager") || list[0] || {}).name || null, false);
       }
-      renderList(side, list, agent);
+      renderList(mgr, list.filter(x => x.role === "manager"), agent, NO_MANAGER);
+      renderList(side, list.filter(x => x.role !== "manager"), agent,
+        `<div class="muted">No other agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
       fit();
     } catch (e) {
       side.innerHTML = `<div class="muted">Could not read the sessions: ${esc(e.message)}</div>`;
+      delete side.dataset.empty;
     } finally { busy = false; }
   }
 
@@ -158,7 +169,7 @@ export function makeSessions({ isShown }) {
     barFor(null);
     note("Reading the transcript…");
     waitLine({});
-    side.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
+    bar.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
 
@@ -327,14 +338,14 @@ export function makeSessions({ isShown }) {
   $("#sessOpen").addEventListener("click", (e) => {
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
   });
-  side.addEventListener("click", (e) => {
+  bar.addEventListener("click", (e) => {
     if (e.target.closest("[data-open], a")) return;  // an item link opens the drawer
     const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
     pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
     if (s && (s.waiting || []).length) openWaiting(s, { onSent: sentTurn });  // what waits for the person comes first; Dismiss shows the chat
   });
-  side.addEventListener("keydown", (e) => {
+  bar.addEventListener("keydown", (e) => {
     const r = (e.key === "Enter" || e.key === " ") && e.target.closest(".srow-main") && e.target.closest("[data-session]");
     if (!r) return;
     e.preventDefault(); pick(r.dataset.session);
