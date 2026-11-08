@@ -163,6 +163,17 @@
           </form>
         </div>
       </div>
+      <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
+        <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
+        <div class="sp-tabs" id="spTabs"></div>
+        <form class="sp-bar" id="spForm" autocomplete="off">
+          <input id="spAddr" placeholder="A web address or a full file path" aria-label="Address">
+          <button class="btn" type="button" id="spReload" title="Load it again">Reload</button>
+          <button class="btn" type="button" id="spNew" title="Open it in a new browser tab">Open in a new tab</button>
+          <button class="iconbtn" type="button" id="spClose" title="Close the side panel">✕</button>
+        </form>
+        <div class="sp-body" id="spBody"></div>
+      </aside>
     </div>
   </section>
 

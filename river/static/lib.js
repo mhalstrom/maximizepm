@@ -42,6 +42,11 @@ export function fillSelect(sel, values, keepFirst) {
 // maxpm serve makes at each start (GET api/token). After a restart of the server the old token is refused: read
 // the new one and send once more.
 let typingToken = null;
+// The page's token, read once (and again after a restart of the server: fresh = true).
+export async function pageToken(fresh = false) {
+  if (!typingToken || fresh) typingToken = (await (await fetch("api/token")).json()).token;
+  return typingToken;
+}
 export async function typeAction(op, args) {
   for (let i = 0; i < 2; i++) {
     if (!typingToken) typingToken = (await (await fetch("api/token")).json()).token;

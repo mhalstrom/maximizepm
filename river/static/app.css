@@ -437,3 +437,30 @@ button.srow-it { cursor: pointer; }
 .mgr-none .srow-main { cursor: default; }
 .mgr-none .srow-it { justify-content: center; align-items: center; }
 .mgr-none .srow-it .btn { font-size: 12px; }
+/* The side panel of the Sessions tab (#4619): left bar | chat | panel. */
+.sess-layout.with-panel { grid-template-columns: minmax(280px, 360px) minmax(0, 1fr) var(--sp-w, 480px); }
+.sess-panel { position: relative; border-left-width: 1px !important; padding: 10px 12px; gap: 8px; }
+.sess-panel.hidden { display: none; }
+.sp-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 2; }
+.sp-grip:hover { background: var(--accent); opacity: .3; }
+.sp-tabs { display: flex; gap: 4px; overflow-x: auto; flex: none; }
+.sp-tab { display: inline-flex; align-items: center; gap: 4px; max-width: 200px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px 2px 8px; font-size: 12px; cursor: pointer; background: var(--bg); }
+.sp-tab.on { border-color: var(--accent); background: var(--panel); }
+.sp-tab-l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; }
+.sp-bar { display: flex; gap: 6px; align-items: center; flex: none; }
+.sp-bar input { flex: 1; min-width: 0; font-size: 12.5px; }
+.sp-bar .btn { font-size: 12px; white-space: nowrap; }
+.sp-body { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; }
+.sp-frame { flex: 1; width: 100%; border: 0; background: #fff; min-height: 300px; }
+.sp-img { max-width: 100%; height: auto; display: block; margin: auto; }
+.sp-md { padding: 12px 16px; font-size: 14px; line-height: 1.6; }
+.sp-note { padding: 16px; font-size: 13px; }
+.sp-card { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.sp-card a.btn { background: var(--accent); color: var(--accent-ink); border-radius: 6px; padding: 4px 12px; text-decoration: none; font-size: 13px; }
+.link.fpath { cursor: pointer; }
+@media (max-width: 759px) {
+  .sess-layout.with-panel { grid-template-columns: minmax(0, 1fr); }
+  .sess-panel { height: 70vh; }
+  .sp-grip { display: none; }
+}

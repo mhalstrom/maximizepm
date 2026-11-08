@@ -1835,6 +1835,84 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
     return {"agent": agent, "pane": pane, "picked": opts[pick], "text": ""}
 
 
+# The side panel of the Sessions tab (#4619) shows local files: read only, with the page's token, and only under
+# the project folders, their git worktrees, and the uploads of sessions. Each file comes with a sandbox policy, so an
+# HTML file runs in an origin of its own and can never act as the page (its POST has Origin null: refused).
+FILE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+              ".webp": "image/webp", ".svg": "image/svg+xml", ".pdf": "application/pdf",
+              ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
+              ".md": "text/plain; charset=utf-8", ".txt": "text/plain; charset=utf-8"}
+FILE_MAX = 50 * 1024 * 1024
+FILE_CSP = "sandbox allow-scripts allow-popups allow-forms"
+_ROOTS = {"at": 0.0, "roots": []}
+
+
+def file_roots(conn):
+    """The folders the side panel may show files from: every project folder, each git worktree of it, and the
+    uploads folder. Read again after a minute (worktrees come and go)."""
+    import subprocess
+    if time.time() - _ROOTS["at"] < 60:
+        return _ROOTS["roots"]
+    roots = {uploads_dir().resolve()}
+    for r in conn.execute("SELECT path FROM projects WHERE path IS NOT NULL AND path<>''"):
+        p = Path(r["path"]).expanduser()
+        if not p.is_dir():
+            continue
+        roots.add(p.resolve())
+        try:
+            out = subprocess.run(["git", "-C", str(p), "worktree", "list", "--porcelain"], capture_output=True,
+                                 text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        roots.update(Path(x[9:]).resolve() for x in out.splitlines() if x.startswith("worktree "))
+    _ROOTS.update(at=time.time(), roots=sorted(roots))
+    return _ROOTS["roots"]
+
+
+def local_file(conn, path):
+    """(bytes, type) of a local file for the side panel; RiverError when the path is outside file_roots, hidden,
+    not a file, of a type it does not show, or too large."""
+    if not path or "\0" in path:
+        raise RiverError("no file named")
+    f = Path(path).expanduser()
+    if not f.is_absolute():
+        raise RiverError("the side panel shows a file by its full path")
+    f = f.resolve()
+    if any(part.startswith(".") for part in f.parts[1:]) and uploads_dir().resolve() not in f.parents:
+        raise RiverError("the side panel shows no hidden files")
+    if not any(root == f or root in f.parents for root in file_roots(conn)):
+        raise RiverError("the side panel shows files only from the project folders, their worktrees, and uploads")
+    kind = FILE_TYPES.get(f.suffix.lower())
+    if kind is None:
+        raise RiverError(f"the side panel does not show {f.suffix or 'this kind of'} files")
+    if not f.is_file():
+        raise RiverError("no such file")
+    if f.stat().st_size > FILE_MAX:
+        raise RiverError("the file is too large for the side panel")
+    return f.read_bytes(), kind
+
+
+def frame_check(url):
+    """{"frame": whether the site lets another page show it in a frame, "title"} for an outside http(s) page, read
+    from its headers (X-Frame-Options, CSP frame-ancestors). A page that cannot be read: frame False."""
+    import re
+    import urllib.request
+    if not re.match(r"^https?://", url or ""):
+        return {"frame": False, "title": "", "error": "not a web address"}
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "MaximizePM side panel"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            xfo = (r.headers.get("X-Frame-Options") or "").lower()
+            csp = (r.headers.get("Content-Security-Policy") or "").lower()
+            head = r.read(65536).decode("utf-8", "replace")
+    except Exception as e:  # any failure: the panel offers a new tab
+        return {"frame": False, "title": "", "error": str(e)[:200]}
+    fa = re.search(r"frame-ancestors([^;]*)", csp)
+    frame = not xfo and not (fa and "*" not in fa.group(1).split())
+    m = re.search(r"<title[^>]*>(.*?)</title>", head, re.I | re.S)
+    return {"frame": frame, "title": " ".join(m.group(1).split())[:200] if m else ""}
+
+
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
@@ -2362,12 +2440,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet
         pass
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", headers=None):
         data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
@@ -2407,6 +2487,21 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/upload/"):  # an image sent to a session (#4610)
             got = upload_file(path[len("/api/upload/"):])
             return self._send(200, got[0], got[1]) if got else self._send(404, {"error": "not found"})
+        if path in ("/api/file", "/api/frame-check"):  # the side panel of the Sessions tab (#4619)
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+            if not hmac.compare_digest(q.get("token", ""), PAGE_TOKEN):
+                return self._send(403, {"error": "this needs the page's token: reload the page"})
+            if path == "/api/frame-check":
+                return self._send(200, frame_check(q.get("url", "")))
+            conn = core.connect()
+            try:
+                got = local_file(conn, q.get("path", ""))
+            except RiverError as e:
+                return self._send(404, {"error": str(e)})
+            finally:
+                conn.close()
+            return self._send(200, got[0], got[1], {"Content-Security-Policy": FILE_CSP, "X-Content-Type-Options": "nosniff"})
         if path == "/api/token":
             return self._send(200, {"token": PAGE_TOKEN})
         if path in ("/api/sessions", "/api/session"):  # the Sessions tab: running sessions, read only (#4592)

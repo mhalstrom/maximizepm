@@ -57,6 +57,32 @@ export function linkRefs(root, refs) {
   }
 }
 
+// A full path to a file the side panel can show becomes a link that opens it there (#4619). Text in a link, a
+// button or a code block stays as it is; a path in inline code does link.
+const FPATH = /(^|[\s(`'"=])((?:~|\/)(?:[\w.@~+-]+\/)*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md|txt))(?=$|[\s)`'",:;!?]|\.(?:\s|$))/g;
+export function linkPaths(root) {
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => n.parentElement.closest("pre, a, button, .link") ? NodeFilter.FILTER_REJECT
+      : /[~/][^\s]*\.\w{2,4}/.test(n.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+  const nodes = [];
+  for (let n; (n = walk.nextNode());) nodes.push(n);
+  for (const n of nodes) {
+    const frag = document.createDocumentFragment();
+    let at = 0;
+    n.data.replace(FPATH, (m, pre, path, off) => {
+      frag.append(n.data.slice(at, off + pre.length));
+      const a = el("span", "link fpath", path);
+      a.dataset.file = path; a.title = "Open in the side panel"; a.tabIndex = 0;
+      frag.append(a);
+      at = off + m.length;
+      return m;
+    });
+    if (!at) continue;
+    frag.append(n.data.slice(at));
+    n.replaceWith(frag);
+  }
+}
+
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -156,6 +182,7 @@ export function appendEntries(col, entries, refs) {
     }
     const node = entryNode(e);
     linkRefs(node, refs);
+    linkPaths(node);
     col.append(node);
   }
 }

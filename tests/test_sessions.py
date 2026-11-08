@@ -409,6 +409,51 @@ class Images(TmuxBase):
             server.session_send(self.c, "ag", "x", "bot", [{"data": "AAAA"}])
 
 
+class SideFiles(Base):
+    """#4619: the side panel shows local files read only, with the page's token, only from the project folders,
+    their worktrees and uploads, each in a sandbox of its own."""
+
+    def setUp(self):
+        super().setUp()
+        self.proj = Path(self.dir.name) / "proj"
+        (self.proj / "scratch").mkdir(parents=True)
+        (self.proj / "scratch" / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (self.proj / "page.html").write_text("<script>fetch('/api/action')</script>")
+        (self.proj / "notes.py").write_text("x = 1")
+        (self.proj / ".env").mkdir()
+        (self.proj / ".env" / "key.txt").write_text("secret")
+        core.project_add(self.c, "web", path=str(self.proj))
+        server._ROOTS["at"] = 0
+        self.addCleanup(server._ROOTS.update, at=0)
+
+    def get(self, path):
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.headers, out = path, ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}, {}
+        h._send = lambda code, body, ctype=None, headers=None: out.update(code=code, body=body, ctype=ctype, headers=headers)
+        h.do_GET()
+        return out
+
+    def test_a_file_under_a_project_comes_with_the_token_in_a_sandbox(self):
+        from urllib.parse import quote
+        shot = quote(str(self.proj / "scratch" / "shot.png"))
+        self.assertEqual(self.get(f"/api/file?path={shot}")["code"], 403)  # no token
+        out = self.get(f"/api/file?path={shot}&token={server.PAGE_TOKEN}")
+        self.assertEqual((out["code"], out["ctype"]), (200, "image/png"))
+        self.assertIn("sandbox", out["headers"]["Content-Security-Policy"])
+        out = self.get(f"/api/file?path={quote(str(self.proj / 'page.html'))}&token={server.PAGE_TOKEN}")
+        self.assertEqual((out["code"], out["headers"]["Content-Security-Policy"]), (200, server.FILE_CSP))
+        for bad, why in ((self.proj / "notes.py", "does not show .py"), (self.proj / ".env" / "key.txt", "hidden"),
+                         (Path(self.dir.name) / "t.db", "only from the project folders"), (Path("/etc/hosts"), "only from"),
+                         (self.proj / "scratch" / ".." / ".." / "t.db", "only from")):
+            out = self.get(f"/api/file?path={quote(str(bad))}&token={server.PAGE_TOKEN}")
+            self.assertEqual(out["code"], 404, bad)
+            self.assertIn(why, out["body"]["error"], bad)
+
+    def test_the_frame_check_needs_a_web_address(self):
+        self.assertEqual(server.frame_check("javascript:alert(1)")["frame"], False)
+        self.assertEqual(self.get("/api/frame-check?url=x")["code"], 403)
+
+
 class OutsideTmux(unittest.TestCase):
     """#4599: go and manage say when a session runs outside tmux, where the Sessions page cannot type into it."""
 

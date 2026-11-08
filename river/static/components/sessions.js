@@ -11,6 +11,7 @@ import { chip } from "./chip.js";
 import { appendEntries, agePending, wireCopy, plainText } from "./chat.js";
 import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
+import { openInPanel, wirePanel } from "./sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p" };
 const PICKED = "river.session";  // the session the person chose last
@@ -96,6 +97,18 @@ export function makeSessions({ isShown }) {
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
   const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
+  wirePanel();
+  // A link or a file path in the chat opens in the side panel; Cmd or Ctrl+click keeps a new browser tab (#4619).
+  col.addEventListener("click", (e) => {
+    const f = e.target.closest("[data-file]");
+    if (f) { e.preventDefault(); openInPanel(f.dataset.file); return; }
+    const a = e.target.closest("a[href]");
+    if (!a || e.metaKey || e.ctrlKey || e.shiftKey || !/^https?:\/\//i.test(a.getAttribute("href"))) return;
+    e.preventDefault(); openInPanel(a.href);
+  });
+  col.addEventListener("keydown", (e) => {
+    const f = e.key === "Enter" && e.target.closest("[data-file]"); if (f) { e.preventDefault(); openInPanel(f.dataset.file); }
+  });
   const note = (text) => { col.replaceChildren(); const n = document.createElement("div"); n.className = "muted sl-none"; n.textContent = text; col.append(n); };
 
   // The tab fills the window below the header; the view scrolls inside it, so the text bar stays in sight.
