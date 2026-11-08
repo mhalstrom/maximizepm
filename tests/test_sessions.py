@@ -239,8 +239,13 @@ class Sessions(Base):
         self.assertEqual([(e["role"], e["text"]) for e in card["last"]],
                          [("user", "Fix the footer"), ("tool", "shell: git status"), ("assistant", "Fixed.")])
         self.assertEqual((card["state"], card["session_url"], card["transcript"]), ("idle", None, "codex"))
-        self.assertEqual(card["provider"], {"id": "codex", "label": "Codex"})  # #4627
-        self.assertEqual(sessions.provider(None, "claude"), {"id": "claude-code", "label": "Claude Code"})
+        self.assertEqual((card["provider"]["id"], card["provider"]["label"]), ("codex", "Codex"))  # #4627
+        cc = sessions.provider(None, "claude")
+        self.assertEqual((cc["id"], cc["label"]), ("claude-code", "Claude Code"))
+        # #4626: both CLIs record their own computer's microphone, so the page dictates text for each.
+        self.assertEqual((cc["voice"], card["provider"]["voice"]), ("dictate", "dictate"))
+        self.assertIn("/voice", cc["voice_cli"])
+        self.assertIsNone(sessions.provider("other-cli")["voice"])
         self.assertIsNone(sessions.provider(None, None))
         if sessions._zstd():  # Codex compresses a log when the session ends
             log.unlink()

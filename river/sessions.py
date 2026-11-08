@@ -32,8 +32,14 @@ PLATFORMS = {"claude": "claude-code", "codex": "codex"}
 # restart applies it (model, effort, a profile option, or a flag). A new provider is one more table here.
 _CC = core.LAUNCH_PLATFORMS["claude-code"]["options"]
 _CX = core.LAUNCH_PLATFORMS["codex"]["options"]
+# Voice (#4626): what each CLI's own voice mode does, and the way the page takes speech for its sessions. Both
+# CLIs record the microphone of the computer they run on and take no audio from outside (checked in Claude Code
+# 2.1.319 and Codex 0.159.1), so the page dictates: the browser turns speech into text in the message box, and the
+# person sends it as a typed message.
 PROVIDERS = {
-    "claude-code": {"label": "Claude Code", "settings": [
+    "claude-code": {"label": "Claude Code", "voice": {"page": "dictate", "cli": (
+        "/voice [hold|tap|off] in its terminal: hold-to-talk dictation into its prompt; it records the microphone of "
+        "the computer it runs on (SoX) and needs a claude.ai login; it takes no audio from outside")}, "settings": [
         {"key": "model", "label": "Model", "kind": "model", "live": "/model {value}", "restart": "model",
          "cmd": r"--model (\S+)"},
         {"key": "effort", "label": "Effort", "kind": "choice", "choices": ["low", "medium", "high", "xhigh", "max"],
@@ -44,7 +50,9 @@ PROVIDERS = {
         {"key": "remote_control", "label": "Remote Control", "kind": "choice", "choices": ["on", "off"],
          "restart": "opt", "default": "claude_remote_control", "flag": "--remote-control"},
     ]},
-    "codex": {"label": "Codex", "settings": [
+    "codex": {"label": "Codex", "voice": {"page": "dictate", "cli": (
+        "/voice in its terminal: a spoken conversation (OpenAI realtime, the feature realtime_conversation) with the "
+        "microphone and speakers of the computer it runs on; it takes no audio from outside")}, "settings": [
         {"key": "model", "label": "Model", "kind": "model", "restart": "model", "cmd": r"(?:^|\s)-m (\S+)"},
         {"key": "effort", "label": "Reasoning effort", "kind": "choice", "choices": core.PLATFORM_EFFORTS["openai"],
          "restart": "effort", "cmd": r"model_reasoning_effort=(\S+)"},
@@ -65,7 +73,9 @@ def provider(agent_type, kind=None):
     pid = agent_type or PLATFORMS.get(kind or "")
     if not pid:
         return None
-    return {"id": pid, "label": PROVIDERS.get(pid, {}).get("label") or pid}
+    voice = PROVIDERS.get(pid, {}).get("voice") or {}
+    return {"id": pid, "label": PROVIDERS.get(pid, {}).get("label") or pid, "voice": voice.get("page"),
+            "voice_cli": voice.get("cli")}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
           "stopping": "asked to stop", "starting": "not connected yet: it ran no maxpm command",
           "ended": "ended before its first maxpm command"}

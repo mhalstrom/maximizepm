@@ -13,6 +13,7 @@ import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
 import { openSettings } from "./settingsDialog.js";
 import { showRows, wireRows } from "./artifacts.js";
+import { makeDictation } from "./dictate.js";
 import { openInPanel, wirePanel, panelFor } from "./sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
@@ -177,6 +178,7 @@ export function makeSessions({ isShown }) {
       waitLine(j);
       $("#sessItem").innerHTML = s.name ? headerItem(s) : "";
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });
+      dict.showFor(list.some(x => x.name === agent) ? (s || {}).provider || j.provider : null, !!j.terminal);
       $("#sessOpen").innerHTML = headerOpen({ ...s, session_url: j.session_url, terminal: j.terminal });
       if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
     } catch (e) { /* the next poll tries again */ }
@@ -186,6 +188,7 @@ export function makeSessions({ isShown }) {
   function pick(name, remember = true) {
     if (remember && name) store(PICKED, name);
     if (name === agent) return;
+    if (name !== agent) dict.stop();
     agent = name; cursor = null; gen++; pinned = remember;
     panelFor(name);  // its own side panel tabs (#4632)
     main.classList.toggle("hidden", !name);
@@ -255,6 +258,8 @@ export function makeSessions({ isShown }) {
     $("#sessSend").disabled = text.disabled || sending || empty() || files.some(f => f.reading);
     $("#sessAttach").disabled = $("#sessPickFiles").disabled = text.disabled || sending;
   };
+  // Dictation (#4626): the microphone puts speech into the box as text.
+  const dict = makeDictation({ button: $("#sessMic"), input: text, status: $("#sessDictate"), changed: () => { grow(); sendState(); } });
   text.addEventListener("input", () => { grow(); sendState(); });
   text.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!empty()) $("#sessBar").requestSubmit(); }
