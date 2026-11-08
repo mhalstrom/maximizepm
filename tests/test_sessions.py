@@ -301,8 +301,8 @@ PERMISSION = """⏺ Bash(git push)
 """
 
 
-class Waiting(Base):
-    """#4607: what waits for the person in a session, and the dialog's answers to a prompt in its pane."""
+class TmuxBase(Base):
+    """An agent in a fake tmux pane that shows a permission prompt."""
 
     def setUp(self):
         from tests.test_server import FakeTmux
@@ -324,6 +324,10 @@ class Waiting(Base):
     def cards(self):
         t = server.agent_terminals(self.c)
         return sessions.views(self.c, t, self.root, self.croot, prompts=server.pane_prompts(self.c, t))
+
+
+class Waiting(TmuxBase):
+    """#4607: what waits for the person in a session, and the dialog's answers to a prompt in its pane."""
 
     def test_a_prompt_in_the_pane_and_an_open_question_wait_for_the_person(self):
         core.send(self.c, "question", "Push the header?", to="mark", item=self.it, actor="ag")
@@ -357,6 +361,50 @@ class Waiting(Base):
             server.prompt_answer(self.c, "ag", sig, 0, None, "other")
         self.assertEqual(self.pane["keys"], [])
         self.assertIn("prompt_answer", server.TYPING_OPS)  # it needs the page's token
+
+
+class Images(TmuxBase):
+    """#4610: an image pasted into the message box goes to the session as a saved file, its path pasted."""
+
+    def setUp(self):
+        super().setUp()
+        self.pane["screen"] = "❯ \n"
+
+    def test_an_image_is_saved_and_its_path_pasted_with_the_text(self):
+        import base64
+        png = b"\x89PNG\r\n\x1a\n" + b"\0" * 20
+        r = server.OPS["session_send"](self.c, {"agent": "ag", "text": "what is wrong here?",
+                                                "images": [{"type": "image/png", "data": base64.b64encode(png).decode()}]}, "mark")
+        (path,) = r["images"]
+        self.assertTrue(path.startswith(str(server.uploads_dir() / "ag")) and path.endswith(".png"), path)
+        self.assertEqual(Path(path).read_bytes(), png)
+        self.assertEqual(self.tmux.calls[-3:], [["set-buffer", "-b", "maxpm-send", "--", f"{path} what is wrong here?"],
+                                                ["paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", self.pane["id"]],
+                                                ["send-keys", "-t", self.pane["id"], "Enter"]])
+        got = server.upload_file("ag/" + Path(path).name)
+        self.assertEqual(got, (png, "image/png"))
+        for bad in ("../t.db", "ag/../../t.db", "ag/.x.png", "ag"):
+            self.assertIsNone(server.upload_file(bad), bad)
+        # The person's turn in the transcript names the image: the chat shows its thumbnail.
+        self.write(claude_line("user", f"{path} what is wrong here?"))
+        last = sessions.view(self.c, "ag", None, self.root, self.croot)["entries"][-1]
+        self.assertEqual(last["images"], ["ag/" + Path(path).name])
+        # Old uploads go.
+        old = time.time() - 8 * 86400
+        os.utime(path, (old, old))
+        self.assertEqual(server.tidy_uploads(), 1)
+        self.assertFalse(Path(path).exists())
+
+    def test_only_images_and_not_too_many(self):
+        import base64
+        for images, why in (([{"data": base64.b64encode(b"#!/bin/sh").decode()}], "only PNG"),
+                            ([{"data": "not base64!"}], "base64"),
+                            ([{"data": "AAAA"}] * 6, "at most 5")):
+            with self.assertRaisesRegex(core.RiverError, why):
+                server.session_send(self.c, "ag", "x", "mark", images)
+        with self.assertRaisesRegex(core.RiverError, "only a person"):
+            core.register(self.c, "bot")
+            server.session_send(self.c, "ag", "x", "bot", [{"data": "AAAA"}])
 
 
 class OutsideTmux(unittest.TestCase):

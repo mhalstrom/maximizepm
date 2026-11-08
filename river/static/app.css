@@ -415,3 +415,12 @@ button.srow-it { cursor: pointer; }
 .wblock textarea { width: 100%; box-sizing: border-box; min-height: 60px; resize: vertical; font: inherit; }
 .wblock .wgo { align-self: flex-end; }
 .link.ref { cursor: pointer; }
+/* Images for a session (#4610): thumbnails in the message box, and in the person's turn. */
+.sess-imgs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.sess-imgs.hidden { display: none; }
+.sess-img { position: relative; width: 72px; height: 72px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.sess-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sess-img .iconbtn { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; line-height: 18px; padding: 0; font-size: 11px; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; border: 0; cursor: pointer; }
+.chat-foot.drop .composer textarea { outline: 2px dashed var(--accent); }
+.msg-imgs { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 4px; max-width: 80%; }
+.msg-imgs img { max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--line); object-fit: cover; }

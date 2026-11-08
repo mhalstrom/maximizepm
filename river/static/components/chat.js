@@ -72,10 +72,23 @@ function addCopy(root) {
 function entryNode(e) {
   if (e.role === "user") {
     const m = el("div", "msg msg-user" + (e.sent ? " sent" : ""));
-    const b = el("div", "bubble md");
-    b.innerHTML = markdown(e.text);  // sanitized by DOMPurify
-    addCopy(b);
-    m.append(b);
+    const srcs = [...(e.localImages || []), ...(e.images || []).map(p => "api/upload/" + p.split("/").map(encodeURIComponent).join("/"))];
+    if (srcs.length) {
+      const g = el("div", "msg-imgs");
+      for (const src of srcs) {
+        const img = el("img"); img.src = src; img.alt = "Image sent to the session"; img.loading = "lazy";
+        g.append(img);
+      }
+      m.append(g);
+    } else if (e.image_count) {
+      m.append(el("div", "msg-note", `${e.image_count} image${e.image_count > 1 ? "s" : ""} attached`));
+    }
+    if (e.text) {
+      const b = el("div", "bubble md");
+      b.innerHTML = markdown(e.text);  // sanitized by DOMPurify
+      addCopy(b);
+      m.append(b);
+    }
     if (e.sent) m.append(el("div", "msg-note", "sent to its terminal"));
     return m;
   }

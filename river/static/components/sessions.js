@@ -152,6 +152,7 @@ export function makeSessions({ isShown }) {
     $("#sessTitle").textContent = name || "";
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
     $("#sessText").value = "";
+    clearImgs();
     barFor(null);
     note("Reading the transcript…");
     waitLine({});
@@ -172,6 +173,51 @@ export function makeSessions({ isShown }) {
   text.addEventListener("input", grow);
   text.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#sessBar").requestSubmit(); }
+  });
+  // Images pasted or dropped into the message box go with the next message (#4610): a thumbnail with Remove each.
+  const IMG_MAX = 10 * 1024 * 1024, IMG_COUNT = 5;
+  let imgs = [];
+  function renderImgs() {
+    const box = $("#sessImgs");
+    box.replaceChildren(...imgs.map((im, i) => {
+      const d = document.createElement("div"); d.className = "sess-img";
+      const img = document.createElement("img"); img.src = im.url; img.alt = "Image to send";
+      const x = document.createElement("button"); x.type = "button"; x.className = "iconbtn"; x.textContent = "✕";
+      x.title = "Remove this image"; x.setAttribute("aria-label", "Remove this image"); x.dataset.rm = i;
+      d.append(img, x); return d;
+    }));
+    box.classList.toggle("hidden", !imgs.length);
+  }
+  function clearImgs(revoke = true) {
+    if (revoke) imgs.forEach(im => URL.revokeObjectURL(im.url));
+    imgs = []; renderImgs();
+  }
+  function addImage(file) {
+    if (!file || !/^image\/(png|jpeg|gif|webp)$/.test(file.type)) return toast("Only PNG, JPEG, GIF and WebP images go to a session", true);
+    if (file.size > IMG_MAX) return toast("An image is at most 10 MB", true);
+    if (imgs.length >= IMG_COUNT) return toast(`At most ${IMG_COUNT} images go with one message`, true);
+    if (text.disabled) return toast("This session runs outside tmux, so the page cannot send it an image", true);
+    const r = new FileReader();
+    r.onload = () => { imgs.push({ type: file.type, data: String(r.result).split(",")[1], url: URL.createObjectURL(file) }); renderImgs(); };
+    r.readAsDataURL(file);
+  }
+  $("#sessImgs").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-rm]"); if (!b) return;
+    const [im] = imgs.splice(+b.dataset.rm, 1); URL.revokeObjectURL(im.url); renderImgs(); text.focus();
+  });
+  text.addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.items || [])].filter(i => i.kind === "file" && i.type.startsWith("image/")).map(i => i.getAsFile());
+    if (!files.length) return;
+    e.preventDefault();
+    files.forEach(addImage);
+  });
+  const foot = $("#sessBar").closest(".chat-foot");
+  foot.addEventListener("dragover", (e) => { if (e.dataTransfer?.types.includes("Files")) { e.preventDefault(); foot.classList.add("drop"); } });
+  foot.addEventListener("dragleave", () => foot.classList.remove("drop"));
+  foot.addEventListener("drop", (e) => {
+    if (!e.dataTransfer?.files.length) return;
+    e.preventDefault(); foot.classList.remove("drop");
+    [...e.dataTransfer.files].forEach(addImage);
   });
   // The text bar is always there. With no tmux pane of the session on this computer it is off, and says why.
   function barFor(pane, s = {}) {
@@ -194,10 +240,14 @@ export function makeSessions({ isShown }) {
     btn.disabled = true;
     let ok = true;
     try {
-      const r = await typeAction("session_send", { agent: to, text: input.value });
+      const sent = imgs;
+      const r = await typeAction("session_send", { agent: to, text: input.value,
+        ...(sent.length ? { images: sent.map(im => ({ type: im.type, data: im.data })) } : {}) });
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
-        appendEntries(col, [{ role: "user", sent: true, text: r.text || "(Enter)" }]);
+        appendEntries(col, [{ role: "user", sent: true, text: r.text || (sent.length ? "" : "(Enter)"),
+                              localImages: sent.map(im => im.url) }]);
+        clearImgs(false);  // the chat shows them now
         body.scrollTop = body.scrollHeight;
         input.value = "";
         grow();

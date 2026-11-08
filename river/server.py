@@ -723,6 +723,7 @@ def auto_tidy(conn):
     t = core.now()
     if not every.total_seconds() or (TIDY["at"] and t - TIDY["at"] < every):
         return []
+    tidy_uploads()  # images sent to sessions, after UPLOAD_DAYS
     if TMUX_RUNNER is None and not _tmux_cmd():
         return []
     try:
@@ -1668,13 +1669,97 @@ def _typing_pane(conn, agent, who):
     return pane
 
 
-def session_send(conn, agent, text, who=None):
+# Images for a session (#4610): the page uploads a pasted or dropped image with the message, and river saves it
+# here and pastes its path into the pane, as a file dropped on the terminal: Claude Code and Codex attach it.
+UPLOAD_MAX = 10 * 1024 * 1024
+UPLOADS_PER_SEND = 5
+UPLOAD_DAYS = 7  # auto_tidy removes older uploads
+UPLOAD_KINDS = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF87a", ".gif"), (b"GIF89a", ".gif"))
+UPLOAD_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def uploads_dir():
+    return Path(core.river_dir()) / "uploads"
+
+
+def save_upload(agent, data):
+    """Save one image (base64) for an agent's session; return its path. PNG, JPEG, GIF or WebP, at most UPLOAD_MAX."""
+    import base64
+    import binascii
+    import secrets
+    try:
+        raw = base64.b64decode(data or "", validate=True)
+    except (binascii.Error, ValueError, TypeError):
+        raise RiverError("an image comes as base64")
+    if not raw or len(raw) > UPLOAD_MAX:
+        raise RiverError(f"an image is at most {UPLOAD_MAX // (1024 * 1024)} MB")
+    ext = next((e for magic, e in UPLOAD_KINDS if raw.startswith(magic)), None)
+    if ext is None and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        ext = ".webp"
+    if ext is None:
+        raise RiverError("only PNG, JPEG, GIF and WebP images go to a session")
+    folder = uploads_dir() / agent
+    folder.mkdir(parents=True, exist_ok=True)
+    f = folder / f"{core.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}{ext}"
+    f.write_bytes(raw)
+    return str(f)
+
+
+def upload_file(path):
+    """GET /api/upload/<agent>/<file>: (bytes, type) of a saved image, or None. Nothing outside uploads_dir."""
+    from urllib.parse import unquote
+    parts = unquote(path).split("/")
+    if len(parts) != 2 or any(not p or p.startswith(".") or "\\" in p for p in parts):
+        return None
+    root = uploads_dir().resolve()
+    f = (root / parts[0] / parts[1]).resolve()
+    if root not in f.parents or not f.is_file() or f.suffix.lower() not in UPLOAD_TYPES:
+        return None
+    return f.read_bytes(), UPLOAD_TYPES[f.suffix.lower()]
+
+
+def tidy_uploads(days=UPLOAD_DAYS):
+    """Remove uploads older than days, and empty agent folders. Returns how many files went."""
+    root, gone = uploads_dir(), 0
+    if not root.is_dir():
+        return 0
+    cut = time.time() - days * 86400
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            try:
+                if f.is_file() and f.stat().st_mtime < cut:
+                    f.unlink()
+                    gone += 1
+            except OSError:
+                pass
+        try:
+            d.rmdir()  # only when empty
+        except OSError:
+            pass
+    return gone
+
+
+def session_send(conn, agent, text, who=None, images=None):
     """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
     Enter; text of several lines goes as one bracketed paste. Empty text sends Enter alone (a prompt that waits
     for it). The text comes from the person: river types nothing by itself."""
     if not isinstance(text, str) or len(text) > 4000:
         raise RiverError("text is at most 4000 characters")
     text = text.replace("\r\n", "\n").strip()
+    if images:
+        if not isinstance(images, list) or len(images) > UPLOADS_PER_SEND:
+            raise RiverError(f"at most {UPLOADS_PER_SEND} images go with one message")
+        pane = _typing_pane(conn, agent, who)
+        paths = [save_upload(agent, (im or {}).get("data") if isinstance(im, dict) else None) for im in images]
+        # The paths and the text as one paste, as files dropped on the terminal; the CLI attaches each image.
+        msg = " ".join(paths) + (" " + text if text else "")
+        _tmux("set-buffer", "-b", "maxpm-send", "--", msg)
+        _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
+        time.sleep(PROMPT_PAUSE)
+        _tmux("send-keys", "-t", pane, "Enter")
+        return {"agent": agent, "pane": pane, "sent": 2, "text": text, "images": paths}
     if "\n" not in text:
         keys = ([{"text": text}] if text else []) + [{"key": "Enter"}]
         return dict(terminal_keys(conn, agent, keys, who), text=text)
@@ -2239,7 +2324,7 @@ OPS = {
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "open_chat": lambda c, a, who: open_chat(c, a["agent"]),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
-    "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who),
+    "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who, a.get("images")),
     "prompt_answer": lambda c, a, who: prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"), a.get("other"), who),
     "tmux_tidy": lambda c, a, who: tmux_tidy(c),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
@@ -2315,6 +2400,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": str(e)})
             finally:
                 conn.close()
+        if path.startswith("/api/upload/"):  # an image sent to a session (#4610)
+            got = upload_file(path[len("/api/upload/"):])
+            return self._send(200, got[0], got[1]) if got else self._send(404, {"error": "not found"})
         if path == "/api/token":
             return self._send(200, {"token": PAGE_TOKEN})
         if path in ("/api/sessions", "/api/session"):  # the Sessions tab: running sessions, read only (#4592)

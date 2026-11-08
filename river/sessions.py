@@ -162,9 +162,26 @@ def _claude(d):
     text = _parts_text(content, ("text",)).strip()
     if text.startswith("<task-notification>"):
         out.append({"at": at, "role": "event", "text": "a background task ended"})
-    elif text and not text.startswith("<"):  # tags the CLI adds: a command's name and output, reminders
-        out.append({"at": at, "role": "user", "text": _clip(text, TEXT_MAX)})
+    elif (text and not text.startswith("<")) or any(isinstance(x, dict) and x.get("type") == "image"
+                                                   for x in content if isinstance(content, list)):
+        # tags the CLI adds (a command's name and output, reminders) are no turn of the person
+        out.append(_user_turn(at, text, sum(1 for x in content if isinstance(x, dict) and x.get("type") == "image")
+                              if isinstance(content, list) else 0))
     return out, "working"
+
+
+def _user_turn(at, text, images=0):
+    """A person's turn: its text, the images it names that river saved for a session (server.save_upload, #4610) as
+    <agent>/<file> for GET /api/upload/, and how many image blocks the CLI put in it."""
+    import re
+    root = re.escape(str(Path(core.river_dir()) / "uploads"))
+    found = re.findall(root + r"/([^/\s]+)/([^/\s]+\.(?:png|jpg|gif|webp))", text)
+    e = {"at": at, "role": "user", "text": _clip(text, TEXT_MAX)}
+    if found:
+        e["images"] = [f"{a}/{f}" for a, f in found]
+    if images:
+        e["image_count"] = images
+    return e
 
 
 _CODEX_SKIP = ("# AGENTS.md", "<environment_context>", "<user_instructions>", "<")
@@ -182,6 +199,9 @@ def _codex(d):
         text = _parts_text(p.get("content"), ("input_text", "output_text", "text")).strip()
         if not text or (p["role"] == "user" and text.startswith(_CODEX_SKIP)):
             return [], None
+        if p["role"] == "user":
+            return [_user_turn(at, text, sum(1 for x in p.get("content") or [] if isinstance(x, dict)
+                                             and x.get("type") in ("input_image", "image")))], None
         return [{"at": at, "role": p["role"], "text": _clip(text, TEXT_MAX)}], None
     if t in ("function_call", "custom_tool_call", "local_shell_call"):
         inp = p.get("arguments") if t == "function_call" else p.get("input") if t == "custom_tool_call" else p.get("action")
