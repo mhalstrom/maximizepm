@@ -454,8 +454,8 @@ class Waiting(TmuxBase):
         self.assertIn("prompt_answer", server.TYPING_OPS)  # it needs the page's token
 
 
-class Images(TmuxBase):
-    """#4610: an image pasted into the message box goes to the session as a saved file, its path pasted."""
+class Uploads(TmuxBase):
+    """#4610, #4629: images attach; arbitrary files go to the session as readable paths."""
 
     def setUp(self):
         super().setUp()
@@ -488,16 +488,180 @@ class Images(TmuxBase):
         self.assertEqual(server.tidy_uploads(), 1)
         self.assertFalse(Path(path).exists())
 
-    def test_only_images_and_not_too_many(self):
+    def test_files_keep_their_type_and_bytes_and_have_separate_paths(self):
         import base64
-        for images, why in (([{"data": base64.b64encode(b"#!/bin/sh").decode()}], "only PNG"),
-                            ([{"data": "not base64!"}], "base64"),
-                            ([{"data": "AAAA"}] * 6, "at most 5")):
+        for provider in ("claude-code", "codex"):
+            with core.tx(self.c):
+                self.c.execute("UPDATE agents SET agent_type=? WHERE name='ag'", (provider,))
+            payloads = [("report.pdf", b"%PDF-1.4\n"), ("data.csv", b"a,b\n1,2"),
+                        ("archive.zip", b"PK\x03\x04\x00\xff"), ("LICENSE", b""), ("shot.png", b"not an image")]
+            r = server.OPS["session_send"](self.c, {"agent": "ag", "files": [
+                {"name": name, "data": base64.b64encode(raw).decode()} for name, raw in payloads]}, "mark")
+            self.assertEqual(r["images"], [])
+            self.assertEqual(len(r["files"]), 5)
+            self.assertEqual(r["text"], "Attached files:\n" + "\n".join(r["files"]))
+            for path, (name, raw) in zip(r["files"], payloads):
+                self.assertEqual(Path(path).read_bytes(), raw)
+                self.assertTrue(path.endswith(name + (".bin" if name == "shot.png" else "")))
+                self.assertEqual(server.upload_file("ag/" + Path(path).name), (raw, "application/octet-stream"))
+            pastes = [c[-1] for c in self.tmux.calls if c[0] == "set-buffer"]
+            self.assertEqual(pastes[-1], " " + r["text"])
+            self.write(claude_line("user", r["text"]))
+            last = sessions.view(self.c, "ag", None, self.root, self.croot)["entries"][-1]
+            self.assertEqual([f["name"] for f in last["files"]], [n + (".bin" if n == "shot.png" else "") for n, _ in payloads])
+            self.assertNotIn("images", last)
+
+    def test_mixed_files_and_images_and_safe_names(self):
+        import base64
+        png = b"\x89PNG\r\n\x1a\n" + b"\0" * 20
+        r = server.session_send(self.c, "ag", "compare", "mark", files=[
+            {"name": "../unsafe/notes $(whoami)\n.txt", "data": base64.b64encode(b"notes").decode()},
+            {"name": "screenshot.jpeg", "data": base64.b64encode(png).decode()}])
+        self.assertTrue(Path(r["files"][0]).name.endswith("notes___whoami__.txt"))
+        self.assertTrue(r["images"][0].endswith("screenshot.png"))
+        self.assertEqual([c[-1] for c in self.tmux.calls if c[0] == "set-buffer"],
+                         [r["images"][0], " " + r["text"]])
+        self.assertIn(r["files"][0] + "\n\ncompare", r["text"])
+
+    def test_bad_files_size_count_and_authorization(self):
+        for files, why in (([{"data": "not base64!"}], "base64"),
+                           ([{"data": None}], "base64"), ([None], "file needs"),
+                           ([{"data": "", "name": 1}], "name must be text"),
+                           ([{"data": "AAAA"}] * 6, "at most 5"), ({"data": "AAAA"}, "at most 5")):
             with self.assertRaisesRegex(core.RiverError, why):
-                server.session_send(self.c, "ag", "x", "mark", images)
+                server.session_send(self.c, "ag", "x", "mark", files=files)
+        from unittest.mock import patch
+        with patch.object(server, "UPLOAD_MAX", 2):
+            with self.assertRaisesRegex(core.RiverError, "at most"):
+                server.session_send(self.c, "ag", "x", "mark", files=[{"data": "AAAA"}])
         with self.assertRaisesRegex(core.RiverError, "only a person"):
             core.register(self.c, "bot")
-            server.session_send(self.c, "ag", "x", "bot", [{"data": "AAAA"}])
+            server.session_send(self.c, "ag", "x", "bot", files=[{"data": "AAAA"}])
+        # A bad second file leaves no orphan from the first and types nothing into the terminal.
+        before = list(server.uploads_dir().glob("ag/*"))
+        with self.assertRaisesRegex(core.RiverError, "base64"):
+            server.session_send(self.c, "ag", "x", "mark", files=[{"data": "AAAA"}, {"data": "!"}])
+        self.assertEqual(list(server.uploads_dir().glob("ag/*")), before)
+        self.assertFalse(any(c[0] == "paste-buffer" for c in self.tmux.calls))
+
+    def test_active_content_downloads_and_symlinks_are_refused(self):
+        import base64
+        raw = b"<script>alert(1)</script>"
+        path = Path(server.save_upload("ag", base64.b64encode(raw).decode(), "page.html"))
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.headers, out = "/api/upload/ag/" + path.name, ("127.0.0.1", 5555), {"Host": "localhost:8765"}, {}
+        h._send = lambda code, body, ctype=None, headers=None: out.update(code=code, body=body, ctype=ctype, headers=headers)
+        h.do_GET()
+        self.assertEqual((out["code"], out["ctype"], out["body"]), (200, "application/octet-stream", raw))
+        self.assertEqual(out["headers"]["Content-Disposition"], "attachment")
+        self.assertEqual(out["headers"]["X-Content-Type-Options"], "nosniff")
+        self.assertIn("sandbox", out["headers"]["Content-Security-Policy"])
+        link = path.with_name("link.txt")
+        link.symlink_to(Path(self.dir.name) / "t.db")
+        self.assertIsNone(server.upload_file("ag/link.txt"))
+        (server.uploads_dir() / "alias").symlink_to(path.parent, target_is_directory=True)
+        self.assertIsNone(server.upload_file("alias/" + path.name))
+
+
+class UploadComposer(TmuxBase):
+    """Exercise paste, drop, the picker, limits, and the file-only Send in a real browser."""
+
+    def test_generic_files_in_the_composer(self):
+        import subprocess
+        import threading
+        from unittest.mock import patch
+        from tests.test_server import _chrome
+        if not _chrome():
+            self.skipTest("no Chrome on this computer")
+        driver = r'''
+import { makeSessions } from "/components/sessions.js";
+const q = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const until = async (f, what) => { for (let i = 0; i < 150; i++) { if (f()) return; await sleep(100); } throw new Error(what); };
+const check = (v, what) => { if (!v) throw new Error(what); };
+const post = o => navigator.sendBeacon("/__result", JSON.stringify(o));
+try {
+  q("#actor").innerHTML = '<option value="mark">mark</option>';
+  const ui = makeSessions({ isShown: () => true });
+  ui.refresh();
+  await until(() => q("#sessText").disabled === false && q("#sessTitle").textContent === "ag", "composer ready");
+  check(q("#sessSend").disabled && !q("#sessAttach").disabled, "empty Send off, Attach available");
+  const dt = new DataTransfer(); dt.items.add(new File(["a,b\n1,2"], "table.csv", { type: "text/csv" }));
+  q("#sessText").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  const drop = new DataTransfer(); drop.items.add(new File(["PK"], "archive.zip", { type: "application/zip" }));
+  q("#sessBar").closest(".chat-foot").dispatchEvent(new DragEvent("drop", { dataTransfer: drop, bubbles: true, cancelable: true }));
+  const pick = new DataTransfer(); pick.items.add(new File(["%PDF-1.4"], "report.pdf", { type: "application/pdf" }));
+  q("#sessPickFiles").files = pick.files;
+  q("#sessPickFiles").dispatchEvent(new Event("change", { bubbles: true }));
+  await until(() => !q("#sessSend").disabled, "files read");
+  check(q("#sessFiles").children.length === 3, "paste, drop, picker all accept files");
+  check(!q("#sessPickFiles").hasAttribute("accept"), "picker accepts every type");
+  q('#sessFiles [data-rm="1"]').click();
+  check(q("#sessFiles").children.length === 2 && !q("#sessFiles").textContent.includes("archive.zip"), "remove file");
+  const many = new DataTransfer();
+  for (let i = 0; i < 6; i++) many.items.add(new File(["text"], "file" + i));
+  q("#sessPickFiles").files = many.files; q("#sessPickFiles").dispatchEvent(new Event("change"));
+  await until(() => !q("#sessSend").disabled, "many files read");
+  check(q("#sessFiles").children.length === 5, "five-file limit includes reads in progress");
+  while (q("#sessFiles").children.length > 2) q('#sessFiles [data-rm="2"]').click();
+  const big = new DataTransfer(); big.items.add(new File([new Uint8Array(10 * 1024 * 1024 + 1)], "large.bin"));
+  q("#sessPickFiles").files = big.files; q("#sessPickFiles").dispatchEvent(new Event("change"));
+  check(q("#sessFiles").children.length === 2, "size limit");
+  q("#sessBar").requestSubmit();
+  await until(() => q(".msg-files a") && q("#sessFiles").children.length === 0, "files sent and chat links shown");
+  const links = [...document.querySelectorAll(".msg-files a")];
+  check(links.length === 2 && links[0].download === "table.csv" && links[1].download === "report.pdf", "sent filename links");
+  const download = await fetch(links[0].href);
+  check(await download.text() === "a,b\n1,2", "download keeps exact bytes");
+  check(download.headers.get("Content-Disposition") === "attachment", "download response");
+  check(q("#sessSend").disabled, "Send off after sending");
+  post({ files: links.map(a => a.download) });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        page = (server.STATIC / "index.html").read_bytes().replace(
+            b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>',
+            b'<script type="module" src="/__drive.js"></script>')
+        got, result = threading.Event(), {}
+
+        class H(server.Handler):
+            def do_GET(self):
+                if self.path == "/":
+                    return self._send(200, page, "text/html; charset=utf-8")
+                if self.path == "/__drive.js":
+                    return self._send(200, driver.encode(), "text/javascript; charset=utf-8")
+                return super().do_GET()
+
+            def do_POST(self):
+                if self.path == "/__result":
+                    result.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                    got.set()
+                    return self._send(204, b"")
+                return super().do_POST()
+
+        with patch.object(core, "transcripts_root", lambda: self.root):
+            try:
+                httpd = server._Server(("127.0.0.1", 0), H)
+            except PermissionError:
+                self.skipTest("no local port here")
+            httpd.daemon_threads = True
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            chrome = subprocess.Popen([
+                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
+                f"http://127.0.0.1:{httpd.server_address[1]}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                ran = got.wait(30)
+            finally:
+                chrome.kill()
+                chrome.wait()
+                httpd.shutdown()
+                httpd.server_close()
+        self.assertTrue(ran, "browser test did not report")
+        self.assertNotIn("error", result, result.get("error"))
+        self.assertEqual(result["files"], ["table.csv", "report.pdf"])
+        paths = list(server.uploads_dir().glob("ag/*"))
+        self.assertEqual(len(paths), 2)
+        self.assertEqual([c[0] for c in self.tmux.calls].count("paste-buffer"), 1)
 
 
 class SideFiles(Base):

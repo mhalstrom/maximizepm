@@ -213,14 +213,17 @@ def _claude(d):
 
 
 def _user_turn(at, text, images=0):
-    """A person's turn: its text, the images it names that river saved for a session (server.save_upload, #4610) as
-    <agent>/<file> for GET /api/upload/, and how many image blocks the CLI put in it."""
+    """A person's turn, including saved uploads and how many image blocks the CLI put in it."""
     import re
     root = re.escape(str(Path(core.river_dir()) / "uploads"))
-    found = re.findall(root + r"/([^/\s]+)/([^/\s]+\.(?:png|jpg|gif|webp))", text)
+    found = re.findall(root + r"/([^/\s]+)/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}(?:-[a-zA-Z0-9_.-]+|\.(?:png|jpg|gif|webp)))", text)
     e = {"at": at, "role": "user", "text": _clip(text, TEXT_MAX)}
-    if found:
-        e["images"] = [f"{a}/{f}" for a, f in found]
+    for a, f in dict.fromkeys(found):
+        path = f"{a}/{f}"
+        if Path(f).suffix.lower() in {".png", ".jpg", ".gif", ".webp"}:
+            e.setdefault("images", []).append(path)
+        else:
+            e.setdefault("files", []).append({"path": path, "name": re.sub(r"^\d{8}-\d{6}-[a-f0-9]{8}-", "", f)})
     if images:
         e["image_count"] = images
     return e

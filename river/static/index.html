@@ -164,10 +164,12 @@
         <div class="chat-col chat-foot">
           <div id="sessWait" class="sess-wait hidden"></div>
           <div id="sessBarWhy" class="muted sess-why hidden"></div>
-          <div id="sessImgs" class="sess-imgs hidden" aria-label="Images that go with the message"></div>
+          <div id="sessFiles" class="sess-files hidden" aria-label="Files that go with the message"></div>
           <form id="sessBar" class="sbar composer" autocomplete="off">
-            <textarea id="sessText" rows="1" placeholder="Message this session. Enter sends; paste or drop an image to add it." aria-label="Message for the session's terminal"></textarea>
-            <button class="btn primary" type="submit" title="Type the text into the session's tmux pane, then Enter (empty: Enter alone). Shift+Enter starts a new line.">Send</button>
+            <input id="sessPickFiles" type="file" multiple hidden>
+            <button id="sessAttach" class="btn" type="button" title="Attach files (up to 5, 10 MB each)" aria-label="Attach files">Attach</button>
+            <textarea id="sessText" rows="1" placeholder="Message this session. Enter sends; paste, drop or attach files." aria-label="Message for the session's terminal"></textarea>
+            <button id="sessSend" class="btn primary" type="submit" title="Send the message and files to the session. Shift+Enter starts a new line.">Send</button>
           </form>
         </div>
       </div>

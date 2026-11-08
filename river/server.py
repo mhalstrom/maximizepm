@@ -724,7 +724,7 @@ def auto_tidy(conn):
     t = core.now()
     if not every.total_seconds() or (TIDY["at"] and t - TIDY["at"] < every):
         return []
-    tidy_uploads()  # images sent to sessions, after UPLOAD_DAYS
+    tidy_uploads()  # files sent to sessions, after UPLOAD_DAYS
     if TMUX_RUNNER is None and not _tmux_cmd():
         return []
     try:
@@ -1741,8 +1741,8 @@ def _typing_pane(conn, agent, who):
     return pane
 
 
-# Images for a session (#4610): the page uploads a pasted or dropped image with the message, and river saves it
-# here and pastes its path into the pane, as a file dropped on the terminal: Claude Code and Codex attach it.
+# Files for a session (#4629): images keep their own paste (the CLIs attach them); other files go as readable
+# paths in the prompt. Keep a safe version of the filename so the agent can identify the file and its format.
 UPLOAD_MAX = 10 * 1024 * 1024
 UPLOADS_PER_SEND = 5
 UPLOAD_DAYS = 7  # auto_tidy removes older uploads
@@ -1754,40 +1754,59 @@ def uploads_dir():
     return Path(core.river_dir()) / "uploads"
 
 
-def save_upload(agent, data):
-    """Save one image (base64) for an agent's session; return its path. PNG, JPEG, GIF or WebP, at most UPLOAD_MAX."""
+def upload_image_ext(raw):
+    ext = next((e for magic, e in UPLOAD_KINDS if raw.startswith(magic)), None)
+    return ext or (".webp" if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" else None)
+
+
+def save_upload(agent, data, name=None):
+    """Save any file (base64), at most UPLOAD_MAX. Old image clients may omit the name."""
     import base64
     import binascii
     import secrets
+    if not isinstance(data, str):
+        raise RiverError("a file comes as base64")
+    if len(data) > ((UPLOAD_MAX + 2) // 3) * 4:
+        raise RiverError(f"a file is at most {UPLOAD_MAX // (1024 * 1024)} MB")
     try:
-        raw = base64.b64decode(data or "", validate=True)
+        raw = base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError, TypeError):
-        raise RiverError("an image comes as base64")
-    if not raw or len(raw) > UPLOAD_MAX:
-        raise RiverError(f"an image is at most {UPLOAD_MAX // (1024 * 1024)} MB")
-    ext = next((e for magic, e in UPLOAD_KINDS if raw.startswith(magic)), None)
-    if ext is None and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-        ext = ".webp"
-    if ext is None:
-        raise RiverError("only PNG, JPEG, GIF and WebP images go to a session")
+        raise RiverError("a file comes as base64")
+    if len(raw) > UPLOAD_MAX:
+        raise RiverError(f"a file is at most {UPLOAD_MAX // (1024 * 1024)} MB")
+    ext = upload_image_ext(raw)
+    if name is not None and not isinstance(name, str):
+        raise RiverError("a file name must be text")
+    # No directory components, whitespace, terminal controls or shell syntax in a pasted path.
+    name = re.sub(r"[^a-zA-Z0-9_.-]", "_", (name or "").replace("\\", "/").rsplit("/", 1)[-1])[:120].strip(".-")
+    if not name:
+        name = "image" + ext if ext else "file"
+    if ext and Path(name).suffix.lower() not in {*UPLOAD_TYPES, ".jpeg"}:
+        name += ext
+    elif ext:
+        name = str(Path(name).with_suffix(ext))
+    elif Path(name).suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        name += ".bin"  # a file merely named .png must not trigger a CLI's image attachment handling
     folder = uploads_dir() / agent
     folder.mkdir(parents=True, exist_ok=True)
-    f = folder / f"{core.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}{ext}"
+    f = folder / f"{core.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}-{name}"
     f.write_bytes(raw)
     return str(f)
 
 
 def upload_file(path):
-    """GET /api/upload/<agent>/<file>: (bytes, type) of a saved image, or None. Nothing outside uploads_dir."""
+    """GET /api/upload/<agent>/<file>: saved bytes, safe type. Nothing outside that agent's upload folder."""
     from urllib.parse import unquote
     parts = unquote(path).split("/")
     if len(parts) != 2 or any(not p or p.startswith(".") or "\\" in p for p in parts):
         return None
     root = uploads_dir().resolve()
-    f = (root / parts[0] / parts[1]).resolve()
-    if root not in f.parents or not f.is_file() or f.suffix.lower() not in UPLOAD_TYPES:
+    folder = root / parts[0]
+    f = folder / parts[1]
+    if folder.is_symlink() or f.is_symlink() or f.resolve().parent != folder or not f.is_file():
         return None
-    return f.read_bytes(), UPLOAD_TYPES[f.suffix.lower()]
+    raw = f.read_bytes()
+    return raw, UPLOAD_TYPES.get(upload_image_ext(raw), "application/octet-stream")
 
 
 def tidy_uploads(days=UPLOAD_DAYS):
@@ -1813,27 +1832,41 @@ def tidy_uploads(days=UPLOAD_DAYS):
     return gone
 
 
-def session_send(conn, agent, text, who=None, images=None):
+def session_send(conn, agent, text, who=None, images=None, files=None):
     """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
     Enter; text of several lines goes as one bracketed paste. An empty message sends nothing (#4617): the ! dialog
     answers a prompt. The text comes from the person: river types nothing by itself."""
     if not isinstance(text, str) or len(text) > 4000:
         raise RiverError("text is at most 4000 characters")
     text = text.replace("\r\n", "\n").strip()
-    if images:
-        if not isinstance(images, list) or len(images) > UPLOADS_PER_SEND:
-            raise RiverError(f"at most {UPLOADS_PER_SEND} images go with one message")
+    attachments = files if files is not None else images  # accept the previous image-only page too
+    if attachments is not None and (not isinstance(attachments, list) or len(attachments) > UPLOADS_PER_SEND):
+        raise RiverError(f"at most {UPLOADS_PER_SEND} files go with one message")
+    if attachments:
         pane = _typing_pane(conn, agent, who)
-        paths = [save_upload(agent, (im or {}).get("data") if isinstance(im, dict) else None) for im in images]
-        # Each path as a paste of its own, as a file dropped on the terminal: Claude Code attaches a pasted path
-        # only when the paste holds the path alone (it turns into [Image #1]); a path with text stays text (#4618).
-        # Then the text as one more paste, and Enter.
-        for part in paths + ([" " + text] if text else []):
+        paths = []
+        try:
+            for f in attachments:
+                if not isinstance(f, dict):
+                    raise RiverError("a file needs its name and base64 data")
+                paths.append(save_upload(agent, f.get("data"), f.get("name")))
+        except (RiverError, OSError):
+            for path in paths:
+                Path(path).unlink(missing_ok=True)
+            raise
+        image_paths = [p for p in paths if Path(p).suffix.lower() in UPLOAD_TYPES]
+        other_paths = [p for p in paths if p not in image_paths]
+        # Images must be pasted alone to become [Image #1] (#4618). Non-images are paths the agent reads with
+        # its file tools (both Claude Code and Codex); explicit newlines keep several paths from joining.
+        prompt = ("Attached files:\n" + "\n".join(other_paths)) if other_paths else ""
+        if text:
+            prompt += ("\n\n" if prompt else "") + text
+        for part in image_paths + ([" " + prompt] if prompt else []):
             _tmux("set-buffer", "-b", "maxpm-send", "--", part)
             _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
             time.sleep(PROMPT_PAUSE)
         _tmux("send-keys", "-t", pane, "Enter")
-        return {"agent": agent, "pane": pane, "sent": 2, "text": text, "images": paths}
+        return {"agent": agent, "pane": pane, "sent": 2, "text": prompt, "images": image_paths, "files": paths}
     if not text:
         raise RiverError("the message is empty: type a message first (the ! dialog answers a prompt)")
     if "\n" not in text:
@@ -2575,7 +2608,7 @@ OPS = {
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "open_chat": lambda c, a, who: open_chat(c, a["agent"]),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
-    "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who, a.get("images")),
+    "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who, a.get("images"), a.get("files")),
     "session_setting": lambda c, a, who: session_setting_live(c, a["agent"], a["key"], a.get("value"), who),
     "session_restart": lambda c, a, who: session_restart(c, a["agent"], a.get("changes"), bool(a.get("make_default")), who),
     "prompt_answer": lambda c, a, who: prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"), a.get("other"), who),
@@ -2655,9 +2688,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(409, {"error": str(e)})
             finally:
                 conn.close()
-        if path.startswith("/api/upload/"):  # an image sent to a session (#4610)
+        if path.startswith("/api/upload/"):  # a file sent to a session
             got = upload_file(path[len("/api/upload/"):])
-            return self._send(200, got[0], got[1]) if got else self._send(404, {"error": "not found"})
+            if not got:
+                return self._send(404, {"error": "not found"})
+            headers = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": FILE_CSP}
+            if got[1] == "application/octet-stream":
+                headers["Content-Disposition"] = "attachment"
+            return self._send(200, got[0], got[1], headers)
         if path in ("/api/file", "/api/frame-check"):  # the side panel of the Sessions tab (#4619)
             from urllib.parse import parse_qs, urlsplit
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}

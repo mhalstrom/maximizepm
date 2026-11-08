@@ -116,7 +116,7 @@ export function makeSessions({ isShown }) {
     const f = e.target.closest("[data-file]");
     if (f) { e.preventDefault(); openInPanel(f.dataset.file); return; }
     const a = e.target.closest("a[href]");
-    if (!a || e.metaKey || e.ctrlKey || e.shiftKey || !/^https?:\/\//i.test(a.getAttribute("href"))) return;
+    if (!a || a.hasAttribute("download") || e.metaKey || e.ctrlKey || e.shiftKey || !/^https?:\/\//i.test(a.getAttribute("href"))) return;
     e.preventDefault(); openInPanel(a.href);
   });
   col.addEventListener("keydown", (e) => {
@@ -192,7 +192,7 @@ export function makeSessions({ isShown }) {
     $("#sessTitle").textContent = name || "";
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
     $("#sessText").value = "";
-    clearImgs();
+    clearFiles();
     barFor(null);
     note("Reading the transcript…");
     if (sview !== "chat") setView(sview);
@@ -247,50 +247,65 @@ export function makeSessions({ isShown }) {
   // The composer grows with the text; Enter sends, Shift+Enter starts a new line.
   const text = $("#sessText");
   const grow = () => { text.style.height = "auto"; text.style.height = Math.min(text.scrollHeight, window.innerHeight / 3) + "px"; };
-  // An empty message box (no text, no image) sends nothing (#4617): Send is off, and Enter does nothing.
-  const empty = () => !text.value.trim() && !imgs.length;
-  const sendState = () => { $("#sessBar button").disabled = text.disabled || empty(); };
+  // Empty messages send nothing. Files being read reserve a slot, and Send waits until they are ready.
+  const FILE_MAX = 10 * 1024 * 1024, FILE_COUNT = 5;
+  let files = [], sending = false;
+  const empty = () => !text.value.trim() && !files.length;
+  const sendState = () => {
+    $("#sessSend").disabled = text.disabled || sending || empty() || files.some(f => f.reading);
+    $("#sessAttach").disabled = $("#sessPickFiles").disabled = text.disabled || sending;
+  };
   text.addEventListener("input", () => { grow(); sendState(); });
   text.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!empty()) $("#sessBar").requestSubmit(); }
   });
-  // Images pasted or dropped into the message box go with the next message (#4610): a thumbnail with Remove each.
-  const IMG_MAX = 10 * 1024 * 1024, IMG_COUNT = 5;
-  let imgs = [];
-  function renderImgs() {
-    const box = $("#sessImgs");
-    box.replaceChildren(...imgs.map((im, i) => {
-      const d = document.createElement("div"); d.className = "sess-img";
-      const img = document.createElement("img"); img.src = im.url; img.alt = "Image to send";
+  function renderFiles() {
+    const box = $("#sessFiles");
+    box.replaceChildren(...files.map((f, i) => {
+      const d = document.createElement("div"); d.className = "sess-file";
+      if (f.url) {
+        const img = document.createElement("img"); img.src = f.url; img.alt = f.name;
+        d.append(img);
+      }
+      const label = document.createElement("span"); label.textContent = f.name; label.title = f.name;
       const x = document.createElement("button"); x.type = "button"; x.className = "iconbtn"; x.textContent = "✕";
-      x.title = "Remove this image"; x.setAttribute("aria-label", "Remove this image"); x.dataset.rm = i;
-      d.append(img, x); return d;
+      x.title = `Remove ${f.name}`; x.setAttribute("aria-label", x.title); x.dataset.rm = i; x.disabled = sending;
+      d.append(label, x); return d;
     }));
-    box.classList.toggle("hidden", !imgs.length);
+    box.classList.toggle("hidden", !files.length);
     sendState();
   }
-  function clearImgs(revoke = true) {
-    if (revoke) imgs.forEach(im => URL.revokeObjectURL(im.url));
-    imgs = []; renderImgs();
+  function clearFiles() {
+    files.forEach(f => { if (f.url) URL.revokeObjectURL(f.url); });
+    files = []; renderFiles();
   }
-  function addImage(file) {
-    if (!file || !/^image\/(png|jpeg|gif|webp)$/.test(file.type)) return toast("Only PNG, JPEG, GIF and WebP images go to a session", true);
-    if (file.size > IMG_MAX) return toast("An image is at most 10 MB", true);
-    if (imgs.length >= IMG_COUNT) return toast(`At most ${IMG_COUNT} images go with one message`, true);
-    if (text.disabled) return toast("This session runs outside tmux, so the page cannot send it an image", true);
+  function addFile(file) {
+    if (!file || sending) return;
+    if (text.disabled) return toast("This session runs outside tmux, so the page cannot send it a file", true);
+    if (file.size > FILE_MAX) return toast("A file is at most 10 MB", true);
+    if (files.length >= FILE_COUNT) return toast(`At most ${FILE_COUNT} files go with one message`, true);
+    const f = { name: file.name || "file", type: file.type, reading: true,
+      url: /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? URL.createObjectURL(file) : null };
+    files.push(f); renderFiles();
     const r = new FileReader();
-    r.onload = () => { imgs.push({ type: file.type, data: String(r.result).split(",")[1], url: URL.createObjectURL(file) }); renderImgs(); };
+    r.onload = () => { if (!files.includes(f)) return; f.data = String(r.result).split(",")[1]; f.reading = false; renderFiles(); };
+    r.onerror = () => {
+      if (!files.includes(f)) return;
+      files.splice(files.indexOf(f), 1); if (f.url) URL.revokeObjectURL(f.url);
+      renderFiles(); toast(`Could not read ${f.name}`, true);
+    };
     r.readAsDataURL(file);
   }
-  $("#sessImgs").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-rm]"); if (!b) return;
-    const [im] = imgs.splice(+b.dataset.rm, 1); URL.revokeObjectURL(im.url); renderImgs(); text.focus();
+  $("#sessFiles").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-rm]"); if (!b || sending) return;
+    const [f] = files.splice(+b.dataset.rm, 1); if (f.url) URL.revokeObjectURL(f.url); renderFiles(); text.focus();
   });
+  $("#sessAttach").addEventListener("click", () => $("#sessPickFiles").click());
+  $("#sessPickFiles").addEventListener("change", (e) => { [...e.target.files].forEach(addFile); e.target.value = ""; });
   text.addEventListener("paste", (e) => {
-    const files = [...(e.clipboardData?.items || [])].filter(i => i.kind === "file" && i.type.startsWith("image/")).map(i => i.getAsFile());
-    if (!files.length) return;
-    e.preventDefault();
-    files.forEach(addImage);
+    const incoming = [...(e.clipboardData?.files || [])];
+    if (!incoming.length) return;
+    e.preventDefault(); incoming.forEach(addFile);
   });
   const foot = $("#sessBar").closest(".chat-foot");
   foot.addEventListener("dragover", (e) => { if (e.dataTransfer?.types.includes("Files")) { e.preventDefault(); foot.classList.add("drop"); } });
@@ -298,7 +313,7 @@ export function makeSessions({ isShown }) {
   foot.addEventListener("drop", (e) => {
     if (!e.dataTransfer?.files.length) return;
     e.preventDefault(); foot.classList.remove("drop");
-    [...e.dataTransfer.files].forEach(addImage);
+    [...e.dataTransfer.files].forEach(addFile);
   });
   // A turn the person sent from the ! dialog shows in the chat at once.
   function sentTurn(text, track = false) {  // track: a message the transcript shows later (not a key such as a pick)
@@ -324,25 +339,27 @@ export function makeSessions({ isShown }) {
   // transcript has it too when the session reads it as a prompt.
   $("#sessBar").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const input = $("#sessText"), btn = $("#sessBar button"), to = agent;
+    const input = $("#sessText"), btn = $("#sessSend"), to = agent;
     if (!to || btn.disabled || empty()) return;
-    btn.disabled = true;
+    sending = true; renderFiles();
     let ok = true;
     try {
-      const sent = imgs;
+      const sent = files;
       const r = await typeAction("session_send", { agent: to, text: input.value,
-        ...(sent.length ? { images: sent.map(im => ({ type: im.type, data: im.data })) } : {}) });
+        ...(sent.length ? { files: sent.map(f => ({ name: f.name, data: f.data })) } : {}) });
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
         appendEntries(col, [{ role: "user", sent: true, track: !!r.text, text: r.text || (sent.length ? "" : "(Enter)"),
-                              localImages: sent.map(im => im.url) }]);
-        clearImgs(false);  // the chat shows them now
+                              images: (r.images || []).map(p => p.split("/").slice(-2).join("/")),
+                              files: (r.files || []).filter(p => !(r.images || []).includes(p)).map(p => ({
+                                path: p.split("/").slice(-2).join("/"), name: p.split("/").pop().replace(/^\d{8}-\d{6}-[a-f0-9]{8}-/, "") })) }]);
+        clearFiles();
         body.scrollTop = body.scrollHeight;
         input.value = "";
         grow();
       }
     } catch (err) { toast(err.message, true); ok = !/tmux pane/.test(err.message); }
-    finally { if (!input.disabled) { sendState(); input.focus(); } if (!ok) barFor(false); }
+    finally { sending = false; renderFiles(); if (!input.disabled) { sendState(); input.focus(); } if (!ok) barFor(false); }
   });
   $("#sessOpen").addEventListener("click", (e) => {
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);

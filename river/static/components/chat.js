@@ -113,6 +113,16 @@ function entryNode(e) {
     } else if (e.image_count) {
       m.append(el("div", "msg-note", `${e.image_count} image${e.image_count > 1 ? "s" : ""} attached`));
     }
+    if (e.files?.length) {
+      const g = el("div", "msg-files");
+      for (const f of e.files) {
+        const a = el("a", "", f.name);
+        a.href = "api/upload/" + f.path.split("/").map(encodeURIComponent).join("/");
+        a.download = f.name;
+        g.append(a);
+      }
+      m.append(g);
+    }
     if (e.text) {
       const b = el("div", "bubble md");
       b.innerHTML = markdown(e.text);  // sanitized by DOMPurify

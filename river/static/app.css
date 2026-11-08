@@ -416,12 +416,15 @@ button.srow-it { cursor: pointer; }
 .wblock .wgo { align-self: flex-end; }
 .link.ref { cursor: pointer; }
 /* Images for a session (#4610): thumbnails in the message box, and in the person's turn. */
-.sess-imgs { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.sess-imgs.hidden { display: none; }
-.sess-img { position: relative; width: 72px; height: 72px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
-.sess-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.sess-img .iconbtn { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; line-height: 18px; padding: 0; font-size: 11px; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; border: 0; cursor: pointer; }
-.chat-foot.drop .composer textarea { outline: 2px dashed var(--accent); }
+.sess-files { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.sess-files.hidden { display: none; }
+.sess-file { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 240px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.sess-file img { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; }
+.sess-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-file .iconbtn { flex-shrink: 0; }
+.chat-foot.drop { outline: 2px dashed var(--accent); outline-offset: -3px; }
+.msg-files { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 4px; max-width: 80%; overflow-wrap: anywhere; }
+.msg-files a { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
 .msg-imgs { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-bottom: 4px; max-width: 80%; }
 .msg-imgs img { max-width: 220px; max-height: 160px; border-radius: 10px; border: 1px solid var(--line); object-fit: cover; }
 /* The pop-up of an item reference in the chat (#4611). */
