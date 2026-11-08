@@ -16,3 +16,4 @@ for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", 
     os.environ.pop(_name, None)
 
 core.tmux_path = lambda: None
+core.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them

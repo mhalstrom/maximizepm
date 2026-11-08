@@ -492,6 +492,29 @@ class SideFiles(Base):
         self.assertEqual(self.get("/api/frame-check?url=x")["code"], 403)
 
 
+class NotConnected(TmuxBase):
+    """#4621: a session that ran no maxpm command and wrote no transcript is not working."""
+
+    def test_a_session_that_never_connected_is_starting_or_ended(self):
+        core.register(self.c, "cx")
+        self.tmux._pane(name="cx")
+        p = self.tmux.panes[-1]
+        p.update(agent="cx", screen="")
+        t = server.agent_terminals(self.c)
+        card = next(c for c in sessions.views(self.c, t, self.root, self.croot) if c["name"] == "cx")
+        self.assertEqual(card["state"], "starting")
+        card = next(c for c in sessions.views(self.c, t, self.root, self.croot, ended_panes={p["id"]}) if c["name"] == "cx")
+        self.assertEqual((card["state"], card["state_label"]), ("ended", "ended before its first maxpm command"))
+
+    def test_codex_gets_no_daemon_when_it_knows_the_flag(self):
+        self.addCleanup(setattr, core, "CODEX_FLAGS", set())
+        core.CODEX_FLAGS = {"--no-daemon", "--sandbox"}
+        self.assertIn(" --no-daemon ", core.build_command("codex", {"prompt": "go"}) + " ")
+        self.assertEqual(core.build_command("codex", {"prompt": "go", "args": "--no-daemon"}).count("--no-daemon"), 1)
+        core.CODEX_FLAGS = set()
+        self.assertNotIn("--no-daemon", core.build_command("codex", {"prompt": "go"}))
+
+
 class OutsideTmux(unittest.TestCase):
     """#4599: go and manage say when a session runs outside tmux, where the Sessions page cannot type into it."""
 

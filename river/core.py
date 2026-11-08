@@ -8806,6 +8806,22 @@ def autocompact_tokens(value):
     return n
 
 
+CODEX_FLAGS = None  # the flags `codex --help` lists, read once (tests set it)
+
+
+def codex_flags():
+    """The long flags of the installed Codex CLI (an empty set when it does not run)."""
+    global CODEX_FLAGS
+    if CODEX_FLAGS is None:
+        import subprocess
+        try:
+            out = subprocess.run(["codex", "--help"], capture_output=True, text=True, timeout=15).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        CODEX_FLAGS = set(re.findall(r"(?<![\w-])(--[a-z][\w-]*)", out))
+    return CODEX_FLAGS
+
+
 def build_command(platform, opts, model=None, effort=None, name=None):
     """The command line that starts a platform's CLI with these options. name: the session's name, for a
     CLI that takes one (claude --name, and the Remote Control session name); Codex has no flag for it."""
@@ -8823,6 +8839,10 @@ def build_command(platform, opts, model=None, effort=None, name=None):
         parts += ["--sandbox", opts["sandbox"]] if opts.get("sandbox") else []
         parts += ["--ask-for-approval", opts["approval"]] if opts.get("approval") else []
         parts += ["--add-dir", q(river_dir())]
+        # Codex 0.159 ends at start, in a session with an API key, when it may use its shared background server
+        # ("requires api_key_model_discovery to be disabled"); --no-daemon runs it alone (#4621).
+        if "--no-daemon" in codex_flags() and "--no-daemon" not in opts.get("args", ""):
+            parts.append("--no-daemon")
         parts += [opts["args"].strip()] if opts.get("args", "").strip() else []
         parts.append(q(opts["prompt"]))
     else:

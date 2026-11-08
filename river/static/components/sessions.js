@@ -13,7 +13,8 @@ import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
 import { openInPanel, wirePanel } from "./sidePanel.js";
 
-const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p" };
+const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
+                     starting: "c-waiting", ended: "c-blocked" };
 const PICKED = "river.session";  // the session the person chose last
 
 function stateChip(s) {

@@ -26,7 +26,8 @@ PREVIEW = 4               # the lines a card shows
 ADOPT_QUIET = 120         # tmux_adopt: a session moves into tmux after its turn ended and it wrote nothing this long
 PLATFORMS = {"claude": "claude-code", "codex": "codex"}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
-          "stopping": "asked to stop"}
+          "stopping": "asked to stop", "starting": "not connected yet: it ran no maxpm command",
+          "ended": "ended before its first maxpm command"}
 
 
 def codex_root():
@@ -328,7 +329,7 @@ def waiting_for(conn, a, prompt=None, pane=False):
     return out
 
 
-def views(conn, terminals=None, root=None, croot=None, prompts=None):
+def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes=None):
     """The cards of the Sessions tab: one per running agent session, with its item, state, Open link, its last
     lines, and what waits for a person in it (prompts: server.pane_prompts)."""
     agents = running(conn, terminals)
@@ -355,6 +356,10 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None):
         prompt = (prompts or {}).get(a["name"])
         if prompt and key != "stopping":
             key, label = "prompt", STATES["prompt"]
+        elif not path and not a.get("pid") and key not in ("stopping", "answer"):
+            # It ran no maxpm command and wrote no transcript: not working (#4621). Its pane shows a shell: it ended.
+            key = "ended" if (terminals or {}).get(a["name"]) in (ended_panes or ()) else "starting"
+            label = STATES[key]
         adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
             conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
         card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]},
@@ -367,7 +372,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None):
                 "at": tail["entries"][-1]["at"] if tail["entries"] else a.get("last_seen")}
         cards.append(card)
         seen.update((k, card) for k in keys)
-    order = {"prompt": 0, "answer": 1, "working": 2, "stopping": 3, "idle": 4}
+    order = {"prompt": 0, "answer": 1, "working": 2, "starting": 3, "stopping": 4, "idle": 5, "ended": 6}
     return sorted(cards, key=lambda c: (order.get(c["state"], 5), c["name"]))
 
 

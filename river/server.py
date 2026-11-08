@@ -2640,8 +2640,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 terminals = agent_terminals(conn)
                 if path == "/api/sessions":
-                    return self._send(200, {"sessions": sessions.views(conn, terminals,
-                                                                       prompts=pane_prompts(conn, terminals))})
+                    try:
+                        ended = {p["pane"] for p in _tmux_panes(everywhere=True) if p["ended"]} if terminals else set()
+                    except RiverError:
+                        ended = set()
+                    return self._send(200, {"sessions": sessions.views(conn, terminals, prompts=pane_prompts(conn, terminals),
+                                                                       ended_panes=ended)})
                 cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
                 return self._send(200, dict(sessions.view(conn, agent, int(cursor) if cursor.isdigit() else None),
                                             terminal=bool(terminals.get(agent))))
