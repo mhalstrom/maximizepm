@@ -1750,7 +1750,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(watch()["told"], [])  # once for a prompt
         # The notification opens the agent's Terminal on the page; its web session when it has one (a phone).
         (row,) = core.outbox(self.c)
-        self.assertEqual(notify.compose(self.c, [row])[2], f"http://127.0.0.1:8765/#terminal-{name}")
+        self.assertEqual(notify.compose(self.c, [row])[2], f"http://127.0.0.1:8765/sessions/{name}")
         self.c.execute("UPDATE agents SET session_url='https://claude.ai/code/session_1' WHERE name=?", (name,))
         self.assertEqual(notify.compose(self.c, [row])[2], "https://claude.ai/code/session_1")
         # maxpm serve starts again while the prompt waits: no second alert.

@@ -51,6 +51,25 @@ def static_file(path, root=None):
     return f.read_bytes(), ctype
 
 
+# The page's addresses (#4653): a path for each view, for example /sessions/<session>/artifacts/<artifact id>,
+# with ?as=<person> and ?item=<id>. Each one gets the page, with a <base> that points back to the page's root, so
+# its relative addresses (app.js, api/state) work at any depth, here and under the relay's /app/ prefix.
+PAGE_VIEWS = ("board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings")
+
+
+def page_html(path):
+    """The page (bytes) for a path of a view, with its <base>; None for any other path."""
+    if path in ("/", "/index.html"):
+        depth = 0
+    else:
+        parts = path.split("/")[1:]
+        if parts[0] not in PAGE_VIEWS or "" in parts[:-1] or any(x in (".", "..") for x in parts):
+            return None
+        depth = len(parts) - 1
+    base = "../" * depth or "./"
+    return (STATIC / "index.html").read_bytes().replace(b"<head>", f'<head>\n<base href="{base}">'.encode(), 1)
+
+
 def _watched():
     """The server's code and every page file, in subfolders too (components/); vendor/ never changes by hand."""
     return sorted(PKG.glob("*.py")) + sorted(
@@ -2671,8 +2690,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._mcp("GET")
         if self._refuse():
             return
-        if path in ("/", "/index.html"):
-            return self._send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
+        page = page_html(path)
+        if page is not None:
+            return self._send(200, page, "text/html; charset=utf-8")
         if path == "/api/state":
             conn = core.connect()
             try:

@@ -76,12 +76,11 @@ async function main() {
   const ready = async () => { for (let i = 0; i < 50; i++) { try { await win.loadURL(url); return; } catch (e) { await sleep(200); } } };
   const until = async (code, tries = 50) => { for (let i = 0; i < tries; i++) { if (await js(code)) return true; await sleep(200); } return false; };
 
-  // Open the page on a link (#tab-graph&as-alex) in a theme, wait until it has drawn, run a step, take a picture.
-  async function open(hash, theme = "light") {
+  // Open the page on a link (graph?as=alex) in a theme, wait until it has drawn, run a step, take a picture.
+  async function open(path, theme = "light") {
     await js(`localStorage.setItem("river.theme", ${JSON.stringify(theme)})`);
-    // A new hash alone does not load the page again: go through a blank page.
     await win.loadURL("about:blank");
-    await win.loadURL(url + (hash ? "#" + hash : ""));
+    await win.loadURL(new URL(path || "", url).href);
     await until(`!!document.querySelector("#work .row, #work .card, #work > *")`);
     await sleep(1200);
     // Paths: the throwaway HOME reads as ~, like on a person's own computer.
@@ -116,7 +115,7 @@ async function main() {
   const first = { ...base, MAXPM_DB: path.join(tmp, "first.db") };
   riverIn(first)("register", "alex", "--human");
   let s1 = await serve(first); url = s1.url; await ready();
-  await open("as-alex");
+  await open("?as=alex");
   await shot("setup-guide.png", "#setup .box", 0);
   s1.stop();
 
@@ -186,21 +185,21 @@ while True:
   river("config", "set", "prompt_wait", "1s");
   river("config", "set", "notify_interval", "2s");
   const s2 = await serve(env); url = s2.url; await ready();
-  await open("as-alex");
+  await open("?as=alex");
   if (!await until(`/waits on a prompt/.test((document.querySelector("#needsYou") || {}).textContent || "")`, 150)) throw new Error("no prompt alert on the page");
 
   for (const theme of ["light", "dark"]) {
-    await open("as-alex", theme);
+    await open("?as=alex", theme);
     await shot(`board-${theme}.png`);
     // The alert's row open: its Terminal button shows.
     await js(`[...document.querySelectorAll("#needsYou .nyl")].find(e => /waits on a prompt/.test(e.textContent)).click()`);
     await sleep(300);
     await shot(`needs-you-${theme}.png`, "#needsYouPanel", 8);
   }
-  await open("tab-capacity&as-alex"); await shot("parallel-work.png", "#tab-capacity", 8);
-  await open("tab-graph&as-alex"); await sleep(1500); await shot("graph.png", "#tab-graph", 8);
-  await open("tab-targets&as-alex"); await shot("release.png", "#tab-targets", 8);
-  await open("tab-projects&as-alex");
+  await open("capacity?as=alex"); await shot("parallel-work.png", "#tab-capacity", 8);
+  await open("graph?as=alex"); await sleep(1500); await shot("graph.png", "#tab-graph", 8);
+  await open("targets?as=alex"); await shot("release.png", "#tab-targets", 8);
+  await open("projects?as=alex");
   await js(`(() => { const s = document.querySelector("#goalFilter"); s.value = "checkout-launch"; s.dispatchEvent(new Event("change")); })()`);
   await sleep(600); await shot("goals.png", "#tab-projects", 8);
   await js(`localStorage.removeItem("river.goal")`);  // the page remembers the goal: the pictures after this one show all work
@@ -208,14 +207,14 @@ while True:
   // The Terminal of an agent on the page: its pane, with the prompt that waits there.
   const termOpen = () => until(`(document.querySelector("#termScreen") || {}).textContent > ""`);
   for (const theme of ["light", "dark"]) {
-    await open("as-alex&terminal-web-agent", theme);
+    await open("?as=alex&terminal=web-agent", theme);
     if (!await termOpen()) throw new Error("the Terminal dialog shows nothing");
     await sleep(400);
     await shot(`terminal-${theme}.png`, "#termDlg .box", 16);
   }
 
   // The tour: Board, an agent's Terminal, an item, Projects, Graph, Targets, Done; two frames each.
-  for (const h of ["as-alex", "as-alex&terminal-web-agent", "as-alex&item-4", "tab-projects&as-alex", "tab-graph&as-alex", "tab-targets&as-alex", "tab-done&as-alex"]) {
+  for (const h of ["?as=alex", "?as=alex&terminal=web-agent", "?as=alex&item=4", "projects?as=alex", "graph?as=alex", "targets?as=alex", "done?as=alex"]) {
     await open(h); if (h.includes("graph")) await sleep(1500);
     if (h.includes("terminal")) { await termOpen(); await sleep(400); }
     await frame(); await frame();
@@ -233,7 +232,7 @@ while True:
     `env -u TMUX -u TMUX_PANE python3 ${path.join(repo, "bin", "maxpm")} view`, ";", "set-option", "-g", "status", "off");
   await sleep(2500);
   const view = outer("capture-pane", "-p", "-e", "-t", "outer");
-  await open("as-alex");
+  await open("?as=alex");
   const viewHtml = await js(`import("/components/terminalDialog.js").then(m => m.ansiToHtml(${JSON.stringify(view)}))`);
   await win.loadURL(termPage(viewHtml, "12px/1.2"));
   await sleep(500); await shot("maxpm-view.png", "#t", 0);

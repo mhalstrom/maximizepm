@@ -2187,7 +2187,7 @@ class Dispatch(Base):
         self.assertIn("network down", st["last_error"])
         self.fail.clear()
         self.notify.run(self.c, now_=True)
-        self.assertEqual(self.sent[0][2], f"http://127.0.0.1:8765/#item-{i}")
+        self.assertEqual(self.sent[0][2], f"http://127.0.0.1:8765/?item={i}")
         self.assertEqual(self.notify.status(self.c)["channels"][0]["pending"], 0)
 
     def test_test_and_unknown_channel(self):
@@ -2757,7 +2757,7 @@ class SessionLinks(Base):
         self.assertEqual(core.origin_session_url(self.c, other, q["id"]), "https://claude.ai/code/session_01Abc")
         row = lambda i, m=None: {"summary": "s", "item_id": i, "message_id": m}
         self.assertEqual(notify.compose(self.c, [row(step)])[2], "https://claude.ai/code/session_01Abc")
-        self.assertTrue(notify.compose(self.c, [row(other)])[2].endswith(f"#item-{other}"))  # falls back to the page
+        self.assertTrue(notify.compose(self.c, [row(other)])[2].endswith(f"/?item={other}"))  # falls back to the page
         self.assertTrue(notify.compose(self.c, [row(step), row(other)])[2].startswith("http://127.0.0.1:"))
         # A batch from one session opens that session.
         self.assertEqual(notify.compose(self.c, [row(step), row(other, q["id"])])[2], "https://claude.ai/code/session_01Abc")

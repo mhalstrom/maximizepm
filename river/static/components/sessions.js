@@ -105,7 +105,7 @@ function renderList(el, list, picked, empty) {
   el.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === picked));
 }
 
-export function makeSessions({ isShown }) {
+export function makeSessions({ isShown, onPick = () => {} }) {
   let list = [], busy = false;
   let agent = null, cursor = null, timer = null, gen = 0;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
@@ -192,6 +192,7 @@ export function makeSessions({ isShown }) {
     if (name !== agent) dict.stop();
     col.classList.toggle("hide-tools", !viewOf(name).showTools);  // #4635
     agent = name; cursor = null; gen++; pinned = remember;
+    onPick(name, remember);  // the page's address (#4653); the panel then names its tab
     panelFor(name);  // its own side panel tabs (#4632)
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";

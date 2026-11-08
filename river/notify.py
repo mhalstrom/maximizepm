@@ -215,10 +215,11 @@ def _is_local(url):
 
 
 def page_url(conn, item_id=None, terminal=None):
-    """The river page: on an item, or on the Terminal of an agent (the agent's name)."""
+    """The MaximizePM page: on an item (/?item=<id>), or on the session of an agent that waits on a prompt
+    (/sessions/<name>, where the person answers it, #4653)."""
     import urllib.parse
     base = f"http://127.0.0.1:{SERVE_PORT['port'] or core.setting(conn, 'serve_port')}/"
-    return base + (f"#terminal-{urllib.parse.quote(terminal, safe='')}" if terminal else f"#item-{item_id}" if item_id else "")
+    return base + (f"sessions/{urllib.parse.quote(terminal, safe='')}" if terminal else f"?item={item_id}" if item_id else "")
 
 
 def compose(conn, rows):

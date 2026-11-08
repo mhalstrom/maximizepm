@@ -59,3 +59,16 @@ export async function typeAction(op, args) {
     return j.result;
   }
 }
+
+// The id of an artifact in the page's address (#4653): a short hash of its target (a file path or a web address),
+// the same in every browser, so /sessions/<session>/artifacts/<id> names one thing. 53 bits (cyrb53), in base 36.
+export function artId(target) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (const ch of String(target)) {
+    const c = ch.codePointAt(0);
+    h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}

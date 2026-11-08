@@ -19,6 +19,12 @@ let tabs = [], on = null, n = 0, session = "", listed = false;
 const bySession = {};  // name -> {tabs, on, listed}
 const tools = {};      // key -> render(box): the tool tabs of #4631
 const panel = () => $("#sessPanel");
+// What the panel shows changed (#4653): fn(session, target or null). The page puts it in its address.
+let told = () => {};
+export function onPanel(fn) { told = fn; }
+const tell = () => told(session, (tabs.find(t => t.id === on) || {}).target || null);
+// The targets of this session's tabs, to find an artifact by its id.
+export function panelTargets() { return tabs.map(t => t.target); }
 
 function isFile(target) { return /^(?:\/|~[/\\]|[a-z]:[/\\]|\\\\)/i.test(target); }
 function label(target) {
@@ -59,6 +65,7 @@ function renderTabs() {
 async function show(t) {
   on = t.id; listed = false;
   renderTabs();
+  tell();
   $("#spAddr").value = t.target;
   const box = $("#spBody");
   box.replaceChildren();
@@ -117,6 +124,7 @@ export async function openFullScreen(target, session = "", item = "") {
 async function showList() {
   on = null; listed = true;
   renderTabs();
+  tell();
   $("#spAddr").value = "";
   const box = $("#spBody"), name = session;
   box.innerHTML = `<div class="sp-note sp-list"><b>Artifacts of ${esc(name || "this session")}</b>
@@ -174,7 +182,7 @@ export function panelFor(name) {
   tabs = mine.tabs; on = mine.on; listed = !!mine.listed;
   if (!tabs.length) {
     if (listed) { reveal(true); return showList(); }
-    $("#spTabs").innerHTML = ""; return reveal(false);
+    $("#spTabs").innerHTML = ""; reveal(false); return tell();
   }
   reveal(true);
   show(tabs.find(t => t.id === on) || tabs[tabs.length - 1]);
@@ -192,6 +200,7 @@ function closePanel() {
   tabs = []; on = null; listed = false;
   renderTabs();
   reveal(false);
+  tell();
 }
 
 export function wirePanel() {

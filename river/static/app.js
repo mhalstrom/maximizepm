@@ -1,4 +1,4 @@
-import { $, esc, store, actor, toast, act, ago, left, clip, copyText, fillSelect, hooks } from "./lib.js";
+import { $, esc, store, actor, toast, act, ago, left, clip, copyText, fillSelect, hooks, artId } from "./lib.js";
 import { chip, prioNumChip, doerChip, personChip, projectChip, ownerChip, countChip } from "./components/chip.js";
 import { bar, pct, capacityBars } from "./components/bar.js";
 import { nyCard, goalCard, projCard } from "./components/card.js";
@@ -16,7 +16,7 @@ import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { hooksHtml } from "./components/targetHooks.js";
 import { makeSessions } from "./components/sessions.js";
 import { makeArtifacts } from "./components/artifacts.js";
-import { openInPanel } from "./components/sidePanel.js";
+import { openInPanel, onPanel, panelTargets } from "./components/sidePanel.js";
 import { wireItemPop } from "./components/itemPop.js";
 hooks.refresh = refresh;
 let S = null, openItem = null, tab = "board", graphSig = "";
@@ -449,17 +449,17 @@ window.riverOpen = (id) => openDrawer(id);
 function closeDrawer() {
   const id = openItem;
   drawer.close(); openItem = null;
-  if (hashItem() !== id) return;
+  if (urlItem() !== id) return;
   if (history.state && history.state.item === id) history.back();
-  else history.replaceState(null, "", pageHash(tab, null));
+  else history.replaceState(null, "", pageUrl(null));
 }
 
 
 async function openDrawer(id, fresh = false) {
   openItem = id;
   // A new entry when no item was open (Back closes it); another item replaces the open one.
-  if (hashItem() == null) history.pushState({ item: id }, "", pageHash(tab, id));
-  else if (hashItem() !== id) history.replaceState(history.state && history.state.item != null ? { item: id } : null, "", pageHash(tab, id));
+  if (urlItem() == null) history.pushState({ item: id }, "", pageUrl(id));
+  else if (urlItem() !== id) history.replaceState(history.state && history.state.item != null ? { item: id } : null, "", pageUrl(id));
   const r = await fetch(`api/item/${id}`); if (!r.ok) return;
   drawer.show(id, itemDrawerHtml(await r.json(), { S, me: actor() }), fresh);
 }
@@ -959,17 +959,49 @@ document.addEventListener("drop", async (e) => {
 });
 
 const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings"];
-// The page's URL: #as-<person>, #tab-<name> (the Board has none), and #item-<id> while an item's drawer
-// is open, so a tab or an open item can be linked, reloaded, and reached with Back.
-function pageHash(tabName = tab, item = drawer.isOpen() ? openItem : null) {
-  const keep = location.hash.slice(1).split("&").filter(x => /^as-/.test(x));
-  if (tabName !== "board") keep.push("tab-" + tabName);
-  if (item != null) keep.push("item-" + item);
-  return keep.length ? "#" + keep.join("&") : location.pathname + location.search;
+// The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
+//   /  (the Board)   /sessions   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
+//   /artifacts   /artifacts/<artifact id> (opens it beside its session)   /projects   /targets   /capacity
+//   /graph   /done   /settings
+// plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
+// Terminal, then leaves the address). The artifact id is artId(target). The paths
+// are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here, /app/ through the relay.
+const ROOT = new URL("./", document.baseURI).pathname;
+const view = { session: null, art: null };  // the session the Sessions tab shows, and the tab of its side panel
+let asParam = new URLSearchParams(location.search).get("as");
+let quiet = 0;  // while the page follows an address, its own changes do not write one
+function readUrl() {
+  const rel = location.pathname.startsWith(ROOT) ? location.pathname.slice(ROOT.length) : "";
+  const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
+  const q = new URLSearchParams(location.search), it = q.get("item");
+  const r = { tab: TABS.includes(parts[0]) ? parts[0] : "board", session: null, art: null, as: q.get("as"), terminal: q.get("terminal"),
+              item: /^\d+$/.test(it || "") ? +it : null };
+  if (r.tab === "sessions") { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null; }
+  if (r.tab === "artifacts") r.art = parts[1] || null;
+  return r;
 }
-function hashItem() { const m = location.hash.match(/(?:^#|&)item-(\d+)/); return m ? +m[1] : null; }
+function urlItem() { return readUrl().item; }
+function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
+  let p = tabName === "board" ? "" : tabName;
+  if (tabName === "sessions" && view.session) {
+    p += "/" + encodeURIComponent(view.session);
+    if (view.art) p += "/artifacts/" + view.art;
+  }
+  const q = new URLSearchParams();
+  if (asParam) q.set("as", asParam);
+  if (item != null) q.set("item", item);
+  return ROOT + p + (q.toString() ? "?" + q : "");
+}
+// Write the address of what the page shows: a new history entry (Back returns) or in place of the current one.
+function syncUrl(push) {
+  if (quiet) return;
+  const url = pageUrl();
+  if (url === location.pathname + location.search) return;
+  if (push) history.pushState(null, "", url);
+  else history.replaceState(history.state, "", url);
+}
 function setTab(name, push = true) {
-  if (push && name !== tab) history.pushState(null, "", pageHash(name));
+  if (push && name !== tab) history.pushState(null, "", pageUrl(drawer.isOpen() ? openItem : null, name));
   tab = name; document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   renderLog(true);
@@ -977,13 +1009,23 @@ function setTab(name, push = true) {
   if (tab === "artifacts") artifactsTab.refresh();
   return renderGraph(true);
 }
-const sessionsTab = makeSessions({ isShown: () => tab === "sessions" });
+// A session the person picks is a new entry; one the tab picks by itself replaces the address.
+const sessionsTab = makeSessions({ isShown: () => tab === "sessions",
+  onPick: (name, byPerson) => { view.session = name; view.art = null; if (tab === "sessions") syncUrl(byPerson); } });
+// Another tab of the side panel, or none: the same entry, with the artifact's id.
+onPanel((session, target) => {
+  if (session !== view.session) return;
+  view.art = target ? artId(target) : null;
+  if (tab === "sessions") syncUrl(false);
+});
 wireItemPop();  // the pop-up of every item on the page (#4622)
 // Open in the Artifacts tab: the thing in the side panel, beside the chat of the session that made it.
 const artifactsTab = makeArtifacts({ isShown: () => tab === "artifacts",
-  openBeside: async (session, target) => { await setTab("sessions"); if (session) sessionsTab.pick(session); openInPanel(target); } });
-// Links into the page: #item-4, #tab-graph, #as-alex, or several joined with & (#as-alex&item-4);
-// #terminal-<agent> (a notification for an agent that waits on a prompt) opens that agent's Terminal.
+  openBeside: async (session, target) => {
+    quiet++;
+    try { await setTab("sessions", false); if (session) sessionsTab.pick(session); openInPanel(target); } finally { quiet--; }
+    syncUrl(true);
+  } });
 // Setup guide: an overlay that shows until the user dismisses it for good (setting setup_done).
 let setupSeen = false;
 // Ready for agents: every ready agent item, most important first, each with Dispatch (one session for one item).
@@ -1242,23 +1284,44 @@ function maybeSetup() {
   if (!done) openSetup();
 }
 
-async function openFromHash() {
-  let tabIn = null, itemIn = false;
-  for (const part of location.hash.slice(1).split("&")) {
-    const m = part.match(/^(item|tab|as|terminal)-(.+)$/); if (!m) continue;
-    const v = decodeURIComponent(m[2]);
-    if (m[1] === "terminal") openTerminal(v);
-    if (m[1] === "as" && [...$("#actor").options].some(o => o.value === v)) { $("#actor").value = v; store("river.actor", v); inboxGen++; await pollInbox().catch(() => {}); }
-    if (m[1] === "tab" && TABS.includes(v)) tabIn = v;
-    if (m[1] === "item") { itemIn = true; await openDrawer(+v); }
+// Show what the address names: at load, and after Back or Forward.
+async function openFromUrl() {
+  const r = readUrl();
+  quiet++;
+  try {
+    asParam = r.as;
+    if (r.as && r.as !== $("#actor").value && [...$("#actor").options].some(o => o.value === r.as)) {
+      $("#actor").value = r.as; store("river.actor", r.as); inboxGen++; await pollInbox().catch(() => {});
+    }
+    if (r.terminal) openTerminal(r.terminal);
+    if (r.tab === "artifacts" && r.art) return await openArtifact(null, r.art);
+    if (r.tab !== tab) await setTab(r.tab, false);
+    if (r.tab === "sessions" && r.session) {
+      sessionsTab.pick(r.session);
+      if (r.art && r.art !== view.art) await openArtifact(r.session, r.art);
+    }
+    // No item in the address (Back after opening one): the drawer closes.
+    if (r.item != null) { if (r.item !== openItem || !drawer.isOpen()) await openDrawer(r.item); }
+    else if (drawer.isOpen()) { drawer.close(); openItem = null; }
+  } finally {
+    quiet--;
+    syncUrl(false);  // the address of what shows now: a gone artifact or an unknown path is written plainly
   }
-  // No item in the URL (Back after opening one): the drawer closes.
-  if (!itemIn && drawer.isOpen()) { drawer.close(); openItem = null; }
-  // An item link alone keeps the tab; a link with no tab and no item is the Board.
-  if (!tabIn && !itemIn) tabIn = "board";
-  if (tabIn && tabIn !== tab) await setTab(tabIn, false);
 }
-window.addEventListener("hashchange", openFromHash);
+// An artifact by its id: from the session's panel tabs, else from what the session (or any session) made.
+async function openArtifact(session, id) {
+  let target = session ? panelTargets().find(t => artId(t) === id) : null;
+  if (!target) {
+    const r = await fetch("api/artifacts" + (session ? "?agent=" + encodeURIComponent(session) : "")).catch(() => null);
+    const hit = ((r && r.ok ? await r.json() : {}).artifacts || []).find(a => artId(a.target) === id);
+    if (hit) { target = hit.target; session = session || hit.session; }
+  }
+  if (!target) { if (tab !== "sessions" && !session) await setTab("artifacts", false); return toast("That artifact is not in the list any more", true); }
+  if (tab !== "sessions") await setTab("sessions", false);
+  if (session) sessionsTab.pick(session);
+  openInPanel(target);
+}
+window.addEventListener("popstate", openFromUrl);
 // Relay button: connects this MaximizePM to the relay (maxpm connect), so its page opens from any browser.
 // A click starts the sign-in: the relay page opens with a code to approve, and maxpm serve finishes it.
 let relayArmed = 0;  // a click on a connected relay asks again before it disconnects
@@ -1364,7 +1427,7 @@ setInterval(() => {
   if (document.hidden || updateMode !== "update") return;  // hidden, or already asking for a restart
   fetch("api/update?fetch=0").then(r => r.ok ? r.json() : null).then(u => { if (u && u.stale) checkUpdate(); }).catch(() => {});
 }, 60 * 1000);
-refresh().then(openFromHash).then(maybeSetup); setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
+refresh().then(openFromUrl).then(maybeSetup); setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
 // A hidden tab stops the full refresh but keeps asking what needs a person, so notifications still arrive.
 setInterval(() => { if (document.hidden) pollNeedsYou().catch(() => {}); }, 15000);
 
