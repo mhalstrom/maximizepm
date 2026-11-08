@@ -276,6 +276,12 @@ export function makeSessions({ isShown }) {
     e.preventDefault(); foot.classList.remove("drop");
     [...e.dataTransfer.files].forEach(addImage);
   });
+  // A turn the person sent from the ! dialog shows in the chat at once.
+  function sentTurn(text) {
+    col.querySelector(".sl-none")?.remove();
+    appendEntries(col, [{ role: "user", sent: true, text: text || "(Enter)" }]);
+    body.scrollTop = body.scrollHeight;
+  }
   // The text bar is always there. With no tmux pane of the session on this computer it is off, and says why.
   function barFor(pane, s = {}) {
     const input = $("#sessText"), btn = $("#sessBar button"), why = $("#sessBarWhy");
@@ -320,14 +326,14 @@ export function makeSessions({ isShown }) {
     const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
     pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
-    if (s && (s.waiting || []).length) openWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
+    if (s && (s.waiting || []).length) openWaiting(s, { onSent: sentTurn });  // what waits for the person comes first; Dismiss shows the chat
   });
   side.addEventListener("keydown", (e) => {
     const r = (e.key === "Enter" || e.key === " ") && e.target.closest(".srow-main") && e.target.closest("[data-session]");
     if (!r) return;
     e.preventDefault(); pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
-    if (s && (s.waiting || []).length) openWaiting(s);
+    if (s && (s.waiting || []).length) openWaiting(s, { onSent: sentTurn });
   });
   setInterval(refresh, 3000);
   return { refresh: () => { refresh(); fit(); }, pick };
