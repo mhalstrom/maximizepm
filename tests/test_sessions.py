@@ -101,6 +101,22 @@ class Sessions(Base):
         refs = sessions.view(self.c, "ag", None, self.root, self.croot)["refs"]
         self.assertEqual(refs, {str(self.it): {"title": "header", "status": "in_progress", "assignee": "ag"}})
 
+    def test_the_item_pop_up_names_its_session_also_when_nobody_holds_it(self):
+        # #4622: the holder; after it is done, the last agent that held it, ended or running.
+        got = sessions.item_session(self.c, self.it, self.root, self.croot)
+        self.assertEqual((got["holder"], got["session"]["name"], got["session"]["running"], got["session"]["viewable"]),
+                         ("ag", "ag", True, True))
+        core.done(self.c, self.it, "c1", "ag")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=999999 WHERE name='ag'")  # its process ended
+        got = sessions.item_session(self.c, self.it, self.root, self.croot)
+        self.assertEqual((got["status"], got["holder"], got["session"]["name"], got["session"]["running"]),
+                         ("done", None, "ag", False))
+        other = core.item_add(self.c, "site", "nobody took it")["id"]
+        self.assertIsNone(sessions.item_session(self.c, other)["session"])
+        with self.assertRaises(core.RiverError):
+            sessions.item_session(self.c, 999999)
+
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET activity_prompt='{}' WHERE name='ag'")

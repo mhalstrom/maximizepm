@@ -17,6 +17,7 @@ import { hooksHtml } from "./components/targetHooks.js";
 import { makeSessions } from "./components/sessions.js";
 import { makeArtifacts } from "./components/artifacts.js";
 import { openInPanel } from "./components/sidePanel.js";
+import { wireItemPop } from "./components/itemPop.js";
 hooks.refresh = refresh;
 let S = null, openItem = null, tab = "board", graphSig = "";
 const drawer = makeDrawer($("#drawer"));
@@ -977,6 +978,7 @@ function setTab(name, push = true) {
   return renderGraph(true);
 }
 const sessionsTab = makeSessions({ isShown: () => tab === "sessions" });
+wireItemPop();  // the pop-up of every item on the page (#4622)
 // Open in the Artifacts tab: the thing in the side panel, beside the chat of the session that made it.
 const artifactsTab = makeArtifacts({ isShown: () => tab === "artifacts",
   openBeside: async (session, target) => { await setTab("sessions"); if (session) sessionsTab.pick(session); openInPanel(target); } });

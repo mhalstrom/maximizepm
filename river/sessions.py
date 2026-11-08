@@ -511,3 +511,24 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
         if len(out) >= limit:
             break
     return out
+
+
+def item_session(conn, item_id, root=None, croot=None):
+    """The pop-up of an item anywhere on the page (#4622): its title and state, and its session: the agent that
+    holds it, else the last one that held it (holds), with whether that session runs (active or away) and whether
+    its transcript is on this computer (an ended session opens read only)."""
+    it = conn.execute("SELECT id, title, status, assignee FROM items WHERE id=?", (item_id,)).fetchone()
+    if it is None:
+        raise core.RiverError(f"no item #{item_id}")
+    holder = it["assignee"] if it["status"] in ("in_progress", "held") else None
+    name = holder
+    if not name:
+        r = conn.execute("SELECT agent FROM holds WHERE item_id=? ORDER BY started_at DESC, id DESC LIMIT 1", (item_id,)).fetchone()
+        name = r["agent"] if r else None
+    out = {"id": it["id"], "title": it["title"], "status": it["status"], "holder": holder, "session": None}
+    if name:
+        a = conn.execute("SELECT * FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone()
+        state = core._agent_state(conn, a) if a else "gone"
+        out["session"] = {"name": name, "running": state in ("active", "away"), "state": state,
+                          "viewable": bool(a) and transcript(conn, name, root, croot)[1] is not None}
+    return out

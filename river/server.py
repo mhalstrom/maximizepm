@@ -2602,6 +2602,15 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
             return self._send(200, got[0], got[1], {"Content-Security-Policy": FILE_CSP, "X-Content-Type-Options": "nosniff"})
+        if path.startswith("/api/item-pop/") and path.rsplit("/", 1)[-1].isdigit():  # the item pop-up (#4622)
+            from . import sessions
+            conn = core.connect()
+            try:
+                return self._send(200, sessions.item_session(conn, int(path.rsplit("/", 1)[-1])))
+            except RiverError as e:
+                return self._send(404, {"error": str(e)})
+            finally:
+                conn.close()
         if path == "/api/artifacts":  # the Artifacts tab (#4620)
             from . import sessions
             conn = core.connect()
