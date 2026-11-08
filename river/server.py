@@ -1687,10 +1687,69 @@ def session_send(conn, agent, text, who=None):
     return {"agent": agent, "pane": pane, "sent": 2, "text": text}
 
 
+PROMPT_PAUSE = 0.4  # after a pick that leaves a prompt, before the text: the CLI draws its input box again (tests: 0)
+
+
+def pane_prompts(conn, terminals):
+    """{agent: prompt} for the agents whose tmux pane shows a prompt now (prompt_pattern), with one tmux command
+    for every pane (#4607). A prompt: {question, options (their text, as the CLI lists them), selected (the option
+    the marker is on), tool, command, why, lines (the prompt's lines as the pane shows them), sig (what the page
+    sends back with an answer, so a prompt that changed gets no keys)}."""
+    import re
+    pattern = core.setting(conn, "prompt_pattern").strip()
+    if not pattern or not terminals:
+        return {}
+    rx, out = re.compile(pattern), {}
+    texts = _pane_texts(sorted(set(terminals.values())))
+    for agent, pane in terminals.items():
+        tail = _prompt_tail(_plain(texts.get(pane) or ""))
+        if not any(rx.search(x) for x in tail):
+            continue
+        parts = _prompt_parts(tail)
+        options = [o[0] for o in parts["options"]]
+        sig = "\x1f".join([parts["question"] or "", parts["command"] or "", *options])
+        out[agent] = {"question": parts["question"], "options": options,
+                      "selected": next((n for n, o in enumerate(parts["options"]) if o[1]), 0),
+                      "tool": parts["tool"], "command": parts["command"], "why": parts["why"],
+                      "lines": tail[parts["start"]:], "sig": sig}
+    return out
+
+
+def _menu_keys(at, n):
+    """The keys that choose option n of a menu when option at is selected."""
+    return [{"key": "Down" if n > at else "Up"}] * abs(n - at) + [{"key": "Enter"}]
+
+
+def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
+    """The prompt dialog of the Sessions tab (#4607): a person's answer to the prompt that the agent's tmux pane
+    shows. pick: the number of an option (0 is the first); other: the person's text, sent by the CLI's own way to
+    tell the agent what to do instead (the option "No, and tell ... what to do", else Escape), then Enter. Refused
+    when the pane shows another prompt than the one the person read (sig)."""
+    import re
+    pane = _typing_pane(conn, agent, who)
+    p = pane_prompts(conn, {agent: pane}).get(agent)
+    if not p or p["sig"] != sig:
+        raise RiverError(f"the prompt in the terminal of {agent} changed or is gone; look at it again")
+    opts, at = p["options"], p["selected"]
+    text = " ".join(str(other or "").split())
+    if text:
+        if len(text) > 4000:
+            raise RiverError("text is at most 4000 characters")
+        n = next((i for i, o in enumerate(opts) if re.search(r"\bno\b.*\btell\b", o, re.I)), None)
+        terminal_keys(conn, agent, _menu_keys(at, n) if n is not None else [{"key": "Escape"}], who)
+        time.sleep(PROMPT_PAUSE)
+        terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
+        return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
+    if not isinstance(pick, int) or not 0 <= pick < len(opts):
+        raise RiverError("pick one of the prompt's options, or write what to do instead")
+    terminal_keys(conn, agent, _menu_keys(at, pick), who)
+    return {"agent": agent, "pane": pane, "picked": opts[pick], "text": ""}
+
+
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
-TYPING_OPS = ("terminal_keys", "session_send")
+TYPING_OPS = ("terminal_keys", "session_send", "prompt_answer")
 
 
 REPO = PKG.parent
@@ -2181,6 +2240,7 @@ OPS = {
     "open_chat": lambda c, a, who: open_chat(c, a["agent"]),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "session_send": lambda c, a, who: session_send(c, a["agent"], a.get("text", ""), who),
+    "prompt_answer": lambda c, a, who: prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"), a.get("other"), who),
     "tmux_tidy": lambda c, a, who: tmux_tidy(c),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
@@ -2265,7 +2325,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 terminals = agent_terminals(conn)
                 if path == "/api/sessions":
-                    return self._send(200, {"sessions": sessions.views(conn, terminals)})
+                    return self._send(200, {"sessions": sessions.views(conn, terminals,
+                                                                       prompts=pane_prompts(conn, terminals))})
                 cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
                 return self._send(200, dict(sessions.view(conn, agent, int(cursor) if cursor.isdigit() else None),
                                             terminal=bool(terminals.get(agent))))

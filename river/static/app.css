@@ -327,7 +327,8 @@ main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
 .srow.on { border-color: var(--accent); background: var(--panel); box-shadow: inset 0 0 0 1px var(--accent); }
 .srow.needs { border-left-color: var(--warn); }
 .srow-h { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.srow-h b { overflow-wrap: anywhere; font-size: 13px; }
+.srow-h b { overflow-wrap: anywhere; font-size: 13px; min-width: 0; }
+.srow-h .chip { flex: none; }
 .srow-h .spacer, .sess-head .spacer { flex: 1; }
 .srow-item { font-size: 12px; overflow-wrap: anywhere; }
 .srow .sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -392,3 +393,18 @@ main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
 .sess-itembtn { text-align: left; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .sess-itembtn .chip { margin-left: 4px; }
 .sess-noopen { font-size: 12px; margin-left: 6px; }
+/* What waits for the person in a session (#4607): a badge in the left bar, and the dialog that answers it. */
+.wbadge { flex: none; white-space: nowrap; display: inline-flex; align-items: center; gap: 2px; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--warn); color: var(--panel); }
+#waitDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
+#waitDlg.hidden { display: none; }
+#waitDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(640px, 100%); padding: 18px 20px; }
+.wblock { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 8px; }
+.wkind { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.wq { font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wcmd { font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.wlines summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.wlines pre { font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; }
+.wopt { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; cursor: pointer; }
+.wopt input { margin-top: 3px; }
+.wblock textarea { width: 100%; box-sizing: border-box; min-height: 60px; resize: vertical; font: inherit; }
+.wblock .wgo { align-self: flex-end; }

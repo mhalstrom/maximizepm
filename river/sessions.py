@@ -290,9 +290,27 @@ def running(conn, terminals=None):
     return out
 
 
-def views(conn, terminals=None, root=None, croot=None):
-    """The cards of the Sessions tab: one per running agent session, with its item, state, Open link, and its last
-    lines."""
+def waiting_for(conn, a, prompt=None, pane=False):
+    """What waits for a person in one session (#4607): the prompt its tmux pane shows (server.pane_prompts); with no
+    pane, the permission prompt its hooks reported, which a person answers in the session itself; and each open
+    maxpm question from it to a person."""
+    out = []
+    if prompt:
+        out.append({"kind": "prompt", **prompt})
+    elif not pane and a.get("activity_prompt"):
+        call = core._activity_call(a["activity_prompt"])
+        out.append({"kind": "prompt", "elsewhere": True, "question": f"A permission prompt for {call}" if call
+                    else "A permission prompt", "options": []})
+    for r in conn.execute("SELECT m.id, m.body, m.item_id, m.to_agent FROM messages m JOIN agents p ON p.name=m.to_agent "
+                          "AND p.kind='human' WHERE m.kind='question' AND m.state='open' AND m.from_agent=? ORDER BY m.id",
+                          (a["name"],)):
+        out.append({"kind": "question", "id": r["id"], "body": r["body"], "item_id": r["item_id"], "to": r["to_agent"]})
+    return out
+
+
+def views(conn, terminals=None, root=None, croot=None, prompts=None):
+    """The cards of the Sessions tab: one per running agent session, with its item, state, Open link, its last
+    lines, and what waits for a person in it (prompts: server.pane_prompts)."""
     agents = running(conn, terminals)
     waiting = core.waits_on_person(conn, [a["name"] for a in agents])
     # One session can run commands under several names (a manager that acted --as a worker): one card for it, in
@@ -314,9 +332,13 @@ def views(conn, terminals=None, root=None, croot=None):
             except (OSError, ValueError, EOFError):
                 path = None
         key, label = state(conn, a, tail["turn"], waiting)
+        prompt = (prompts or {}).get(a["name"])
+        if prompt and key != "stopping":
+            key, label = "prompt", STATES["prompt"]
         adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
             conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
-        card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "name": a["name"], "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
+        card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]},
+                "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"]))), "name": a["name"], "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"),
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,

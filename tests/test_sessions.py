@@ -277,6 +277,81 @@ class Adopt(Base):
         self.assertIn("ag", server.ADOPT["failed"])
 
 
+PERMISSION = """⏺ Bash(git push)
+  ⎿  Running…
+
+ Bash command
+
+   git push origin main
+   Push the branch
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for git push commands in /work
+   3. No, and tell Claude what to do differently (esc)
+
+ Esc to cancel · Tab to amend
+"""
+
+
+class Waiting(Base):
+    """#4607: what waits for the person in a session, and the dialog's answers to a prompt in its pane."""
+
+    def setUp(self):
+        from tests.test_server import FakeTmux
+        super().setUp()
+        self.platform, core.PLATFORM = core.PLATFORM, "linux"
+        self.tmux = server.TMUX_RUNNER = FakeTmux()
+        self.tmux.session = True
+        self.tmux._pane(name="ag")
+        self.pane = self.tmux.panes[0]
+        self.pane.update(agent="ag", screen=PERMISSION)
+        self.pause, server.PROMPT_PAUSE = server.PROMPT_PAUSE, 0
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=NULL WHERE name='ag'")
+
+    def tearDown(self):
+        core.PLATFORM, server.TMUX_RUNNER, server.PROMPT_PAUSE = self.platform, None, self.pause
+        super().tearDown()
+
+    def cards(self):
+        t = server.agent_terminals(self.c)
+        return sessions.views(self.c, t, self.root, self.croot, prompts=server.pane_prompts(self.c, t))
+
+    def test_a_prompt_in_the_pane_and_an_open_question_wait_for_the_person(self):
+        core.send(self.c, "question", "Push the header?", to="mark", item=self.it, actor="ag")
+        (card,) = self.cards()
+        prompt, question = card["waiting"]
+        self.assertEqual((prompt["kind"], prompt["question"], prompt["selected"], prompt["command"]),
+                         ("prompt", "Do you want to proceed?", 0, "git push origin main"))
+        self.assertEqual(prompt["options"][2], "3. No, and tell Claude what to do differently (esc)")
+        self.assertEqual((question["kind"], question["body"], question["to"]), ("question", "Push the header?", "mark"))
+        self.assertEqual(card["state"], "prompt")
+        self.pane["screen"] = "❯ \n"  # answered: the prompt is gone
+        self.assertEqual([w["kind"] for w in self.cards()[0]["waiting"]], ["question"])
+
+    def test_the_dialog_picks_an_option_or_tells_the_agent_what_to_do(self):
+        sig = self.cards()[0]["waiting"][0]["sig"]
+        r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "pick": 1}, "mark")
+        self.assertEqual((r["picked"][:6], self.pane["keys"]), ("2. Yes", ["Down", "Enter"]))
+        self.pane["keys"].clear()
+        r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": sig, "other": "push to\na branch first"}, "mark")
+        self.assertEqual(self.pane["keys"], ["Down", "Down", "Enter", "push to a branch first", "Enter"])
+        # A prompt that changed since the person read it gets no keys.
+        self.pane["keys"].clear()
+        self.pane["screen"] = PERMISSION.replace("git push origin main", "rm -rf build")
+        with self.assertRaisesRegex(core.RiverError, "changed or is gone"):
+            server.prompt_answer(self.c, "ag", sig, 0, None, "mark")  # same options, another command
+        sig = self.cards()[0]["waiting"][0]["sig"]
+        with self.assertRaisesRegex(core.RiverError, "pick one of the prompt's options"):
+            server.prompt_answer(self.c, "ag", sig, 7, None, "mark")
+        core.register(self.c, "other")
+        with self.assertRaisesRegex(core.RiverError, "only a person"):
+            server.prompt_answer(self.c, "ag", sig, 0, None, "other")
+        self.assertEqual(self.pane["keys"], [])
+        self.assertIn("prompt_answer", server.TYPING_OPS)  # it needs the page's token
+
+
 class OutsideTmux(unittest.TestCase):
     """#4599: go and manage say when a session runs outside tmux, where the Sessions page cannot type into it."""
 
