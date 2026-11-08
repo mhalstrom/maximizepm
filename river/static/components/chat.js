@@ -59,11 +59,11 @@ export function linkRefs(root, refs) {
 
 // A full path to a file the side panel can show becomes a link that opens it there (#4619). Text in a link, a
 // button or a code block stays as it is; a path in inline code does link.
-const FPATH = /(^|[\s(`'"=])((?:~|\/)(?:[\w.@~+-]+\/)*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md|txt))(?=$|[\s)`'",:;!?]|\.(?:\s|$))/g;
+const FPATH = /(^|[\s(`'"=])((?:[a-zA-Z]:[/\\]|\\\\|~[/\\]|\/)(?:[\w.@~+-]+[/\\])*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md|txt))(?=$|[\s)`'",:;!?]|\.(?:\s|$))/g;
 export function linkPaths(root) {
   const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) => n.parentElement.closest("pre, a, button, .link") ? NodeFilter.FILTER_REJECT
-      : /[~/][^\s]*\.\w{2,4}/.test(n.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+      : /[~\/\\][^\s]*\.\w{2,4}/.test(n.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
   const nodes = [];
   for (let n; (n = walk.nextNode());) nodes.push(n);
   for (const n of nodes) {

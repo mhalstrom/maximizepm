@@ -471,10 +471,11 @@ class LaunchAgent(unittest.TestCase):
                            "SELECT project_id,'Deploy web',rank+1,'deploy','web','done',?,created_at,? FROM items "
                            "WHERE id=?",
                            (f"Release 3 live: abc1234 (ships #{old})", core.iso(core.now()), dep))
-        core.config_set(self.c, "release_commits", 'printf "%s %s" "$MAXPM_LAST_RELEASE" "$MAXPM_TARGET"')
+        core.config_set(self.c, "release_commits", f'"{sys.executable}" -c "import os; '
+                        "print(os.environ['MAXPM_LAST_RELEASE'], os.environ['MAXPM_TARGET'])" + '"')
         self.assertEqual(core.release_commit_items(self.c, core._item(self.c, rv)), {old})
         core._RELEASE_COMMITS.clear()
-        core.config_set(self.c, "release_commits", f"echo '#{old}'; exit 3")
+        core.config_set(self.c, "release_commits", f'''"{sys.executable}" -c "import sys; print('#{old}'); sys.exit(3)"''')
         self.assertEqual(core.release_commit_items(self.c, core._item(self.c, rv)), set(), "a failed command names nothing")
         core.config_set(self.c, "release_commits", "")
         self.assertEqual(core.release_authors(self.c, rv), {"dev"})
@@ -3799,7 +3800,7 @@ class PageHooks(unittest.TestCase):
             self.assertIn(f'data-hook="{event}" data-target="web" title="MaximizePM runs the command when ', h)
         self.assertNotIn("data-clear", h)
         # A hook that failed and one that never ran; the other two events are free.
-        bad = f'"{sys.executable}" -c "import sys; sys.exit(3)" # <b>'
+        bad = f'"{sys.executable}" -c "import sys; sys.exit(3) # <b>"'
         core.target_hook(self.c, "web", "release-cut", bad, actor="mark")
         core.target_hook(self.c, "web", "deployed", self.cmd, actor="mark")
         core.target_cut(self.c, "web", "abc1234", "mark")
@@ -3807,7 +3808,7 @@ class PageHooks(unittest.TestCase):
         h = html()
         cut, deployed, free = h.split('<div class="st" style="margin-top:4px">')[1:3] + [h.split("add a hook for: ")[1]]
         self.assertIn("<b>release-cut</b>", cut)
-        self.assertIn("# &lt;b&gt;</code>", cut)  # the command is text, never markup
+        self.assertIn("# &lt;b&gt;&quot;</code>", cut)  # the command is text, never markup
         self.assertRegex(cut, rf'color:var\(--warn\)">\(last run for <span class="link" data-open="{self.deploy}">'
                               rf'#{self.deploy}</span>: exit 3, \d+s ago\)')
         self.assertIn('data-hook="release-cut" data-target="web" data-clear="1"', cut)

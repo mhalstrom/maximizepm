@@ -17,9 +17,9 @@ const bySession = {};  // name -> {tabs, on}
 const tools = {};      // key -> render(box): the tool tabs of #4631
 const panel = () => $("#sessPanel");
 
-function isFile(target) { return target.startsWith("/") || target.startsWith("~/"); }
+function isFile(target) { return /^(?:\/|~[/\\]|[a-z]:[/\\]|\\\\)/i.test(target); }
 function label(target) {
-  if (isFile(target)) return target.split("/").pop();
+  if (isFile(target)) return target.split(/[\\/]/).pop();
   try { const u = new URL(target); return u.host + (u.pathname.length > 1 ? u.pathname : ""); } catch (e) { return target; }
 }
 async function fileUrl(path) {

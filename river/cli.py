@@ -1312,6 +1312,7 @@ def activity_command(stdin=None):
     """maxpm activity: a Claude Code hook (core.activity_hook_settings) passes its event as JSON on stdin. It prints nothing,
     waits at most two seconds for the queue, and always exits 0: a failed record never stops the session (#4288)."""
     import json
+    conn = None
     try:
         payload = json.loads((stdin or sys.stdin).read() or "{}")
         conn = core.connect()
@@ -1321,6 +1322,9 @@ def activity_command(stdin=None):
             _record_hook_process(conn, res["agent"])
     except Exception:  # noqa: BLE001 - a hook must never fail the session
         pass
+    finally:
+        if conn is not None:
+            conn.close()
     return 0
 
 

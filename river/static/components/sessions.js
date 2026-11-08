@@ -355,9 +355,9 @@ export function makeSessions({ isShown }) {
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
         appendEntries(col, [{ role: "user", sent: true, track: !!r.text, text: r.text || (sent.length ? "" : "(Enter)"),
-                              images: (r.images || []).map(p => p.split("/").slice(-2).join("/")),
+                              images: (r.images || []).map(p => p.split(/[\\/]/).slice(-2).join("/")),
                               files: (r.files || []).filter(p => !(r.images || []).includes(p)).map(p => ({
-                                path: p.split("/").slice(-2).join("/"), name: p.split("/").pop().replace(/^\d{8}-\d{6}-[a-f0-9]{8}-/, "") })) }]);
+                                path: p.split(/[\\/]/).slice(-2).join("/"), name: p.split(/[\\/]/).pop().replace(/^\d{8}-\d{6}-[a-f0-9]{8}-/, "") })) }]);
         clearFiles();
         body.scrollTop = body.scrollHeight;
         input.value = "";

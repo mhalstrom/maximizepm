@@ -935,7 +935,11 @@ def adopt_sessions(conn, runner=None, end=None):
 
 
 def _end_process(pid, grace=5.0):
-    """End a process: SIGTERM, then SIGKILL after grace seconds. True when it has ended."""
+    """End a process: taskkill on Windows; SIGTERM then SIGKILL on Unix. True when it has ended."""
+    if os.name == "nt":
+        import subprocess
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        return not core.pid_alive(pid)
     import signal
     try:
         os.kill(pid, signal.SIGTERM)
@@ -2027,10 +2031,16 @@ def view_ok(conn, target, end, key):
     return end > time.time() and hmac.compare_digest(str(key or ""), view_key(conn, target, end))
 
 
+def _file_target(target):
+    """A full Unix, Windows drive or UNC path, including a home-relative path."""
+    from pathlib import PureWindowsPath
+    return str(target).startswith(("/", "~/", "~\\")) or PureWindowsPath(str(target)).is_absolute()
+
+
 def view_url(conn, target, session="", item=""):
     """The full-screen address of a target (a full file path or a web address), valid for VIEW_HOURS."""
     from urllib.parse import urlencode
-    if not (str(target).startswith(("/", "~/")) or re.match(r"^https?://", str(target))):
+    if not (_file_target(target) or re.match(r"^https?://", str(target))):
         raise RiverError("full screen shows a web address or a full file path")
     end = int(time.time() + VIEW_HOURS * 3600)
     q = {"t": target, "e": end, "k": view_key(conn, target, end)}
@@ -2051,8 +2061,8 @@ def view_page(conn, q):
     if not view_ok(conn, t, end, key):
         return 403, ("<!doctype html><meta charset=utf-8><title>MaximizePM</title><body style='font:15px system-ui;padding:24px'>"
                      "This full-screen link has ended or is not valid. Open it again from the MaximizePM page.</body>")
-    is_file = t.startswith(("/", "~/"))
-    name = t.rstrip("/").split("/")[-1] if is_file else re.sub(r"^https?://", "", t)[:80]
+    is_file = _file_target(t)
+    name = re.split(r"[/\\]", t.rstrip("/\\"))[-1] if is_file else re.sub(r"^https?://", "", t)[:80]
     src = f"/api/file?path={quote(t)}&e={int(end)}&k={quote(key)}" if is_file else t
     if is_file and re.search(r"\.(png|jpe?g|gif|webp|svg)$", t, re.I):
         body = f"<div class=fit><img src='{e(src)}' alt='{e(name)}'></div>"

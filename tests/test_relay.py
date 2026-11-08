@@ -179,7 +179,8 @@ class Connect(Base):
         self.assertEqual(cfg["token"], "secret-token")
         self.assertEqual(relay.load()["account"], "Alice")
         self.assertEqual(relay.config_path(), os.path.join(self.tmp.name, "relay.json"))
-        self.assertEqual(stat.S_IMODE(os.stat(relay.config_path()).st_mode), 0o600)
+        if os.name != "nt":  # Windows chmod has no Unix owner/group permission bits
+            self.assertEqual(stat.S_IMODE(os.stat(relay.config_path()).st_mode), 0o600)
         conn = core.connect()
         self.addCleanup(conn.close)
         self.assertNotIn("secret-token", json.dumps(core.config_list(conn)), "never in the settings")

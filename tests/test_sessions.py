@@ -276,6 +276,7 @@ class Sessions(Base):
         self.assertEqual(get("/api/session?agent=ghost")[0], 409)
 
 
+@unittest.skipIf(os.name == "nt", "tmux adoption uses Unix terminals and signals")
 class Adopt(Base):
     """tmux_adopt (#4598): a session outside tmux moves into a tmux pane when it is quiet at its prompt."""
 
@@ -703,7 +704,7 @@ class SideFiles(Base):
         out = self.get(f"/api/file?path={quote(str(self.proj / 'page.html'))}&token={server.PAGE_TOKEN}")
         self.assertEqual((out["code"], out["headers"]["Content-Security-Policy"]), (200, server.FILE_CSP))
         for bad, why in ((self.proj / "notes.py", "does not show .py"), (self.proj / ".env" / "key.txt", "hidden"),
-                         (Path(self.dir.name) / "t.db", "only from the project folders"), (Path("/etc/hosts"), "only from"),
+                         (Path(self.dir.name) / "t.db", "only from the project folders"), (Path(Path(self.dir.name).anchor) / "outside-maxpm-roots.txt", "only from"),
                          (self.proj / "scratch" / ".." / ".." / "t.db", "only from")):
             out = self.get(f"/api/file?path={quote(str(bad))}&token={server.PAGE_TOKEN}")
             self.assertEqual(out["code"], 404, bad)
@@ -782,6 +783,39 @@ class NotConnected(TmuxBase):
         self.assertNotIn("--no-daemon", core.build_command("codex", {"prompt": "go"}))
 
 
+class WindowsPaths(unittest.TestCase):
+    def test_windows_artifacts_and_full_screen_paths(self):
+        for path in (r"C:\Users\person\project\page.html", r"C:/Users/person/project/page.html",
+                     r"\\computer\share\page.html"):
+            with self.subTest(path=path):
+                self.assertEqual(sessions._hits_in("Saved " + path + ";", None, "named"),
+                                 [{"target": path, "kind": "file", "how": "named", "at": None}])
+                self.assertTrue(server._file_target(path))
+        self.assertFalse(server._file_target(r"C:relative.txt"))
+        self.assertFalse(server._file_target("https://example.com/file.txt"))
+
+    def test_uploads_in_backslash_paths_still_have_previews_and_downloads(self):
+        from unittest.mock import patch
+        with patch.object(core, "river_dir", lambda: "C:/Users/person/.maximizepm"):
+            turn = sessions._user_turn(None, r"C:\Users\person\.maximizepm\uploads\ag\20261108-120000-12345678-shot.png"
+                                       + "\n" + r"C:\Users\person\.maximizepm\uploads\ag\20261108-120000-12345678-report.pdf")
+        self.assertEqual(turn["images"], ["ag/20261108-120000-12345678-shot.png"])
+        self.assertEqual(turn["files"], [{"path": "ag/20261108-120000-12345678-report.pdf", "name": "report.pdf"}])
+
+
+class EndProcess(unittest.TestCase):
+    def test_windows_ends_the_process_tree_without_unix_signal_or_waitpid(self):
+        from unittest.mock import patch
+        with patch.object(os, "name", "nt"), patch("subprocess.run") as run, \
+                patch.object(core, "pid_alive", return_value=False), patch.object(os, "kill") as kill:
+            self.assertTrue(server._end_process(1234))
+            run.assert_called_once_with(["taskkill", "/PID", "1234", "/T", "/F"], capture_output=True)
+            kill.assert_not_called()
+        with patch.object(os, "name", "nt"), patch("subprocess.run"), patch.object(core, "pid_alive", return_value=True):
+            self.assertFalse(server._end_process(1234))
+
+
+@unittest.skipIf(os.name == "nt", "Windows does not use tmux; outside_tmux intentionally returns false")
 class OutsideTmux(unittest.TestCase):
     """#4599: go and manage say when a session runs outside tmux, where the Sessions page cannot type into it."""
 

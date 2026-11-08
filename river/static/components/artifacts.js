@@ -9,7 +9,7 @@ const KIND = { file: "file", page: "local page", artifact: "claude.ai artifact" 
 let list = [];
 
 function name(a) {
-  if (a.kind === "file") return a.target.split("/").pop();
+  if (a.kind === "file") return a.target.split(/[\\/]/).pop();
   return a.target.replace(/^https?:\/\//, "");
 }
 

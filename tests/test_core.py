@@ -6184,10 +6184,29 @@ class Activity(Base):
         with self.assertRaisesRegex(RiverError, "no manager session is active now"):
             core.message(self.c, "note", "hello", to="manager", actor="w")
 
+    def test_the_hook_closes_its_connection_even_when_recording_fails(self):
+        from river import cli
+        connect = core.connect
+        opened = []
+
+        def capture():
+            conn = connect(self.path)
+            opened.append(conn)
+            return conn
+        for fails in (False, True):
+            with mock.patch.object(core, "connect", capture), mock.patch.object(core, "activity_event") as event:
+                event.return_value = {"event": "PostToolUse", "agent": "w"}
+                if fails:
+                    event.side_effect = RuntimeError("failed hook")
+                self.assertEqual(cli.activity_command(io.StringIO("{}")), 0)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                opened[-1].execute("SELECT 1")
+
     def test_the_hook_file_and_the_command(self):
         import contextlib
         import io
         import json as _json
+        from pathlib import Path
         from unittest import mock
         from river import cli
         settings = core.activity_hook_settings()
@@ -6195,7 +6214,7 @@ class Activity(Base):
         self.assertTrue(all(h["hooks"][0]["command"].endswith(" activity") for hs in settings["hooks"].values() for h in hs))
         with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}):
             f = core.activity_hook_file()
-            self.assertEqual(_json.loads(open(f).read()), settings)
+            self.assertEqual(_json.loads(Path(f).read_text()), settings)
             out = io.StringIO()
             for text in ('{"hook_event_name": "Stop", "session_id": "%s"}' % self.SID, "not json", ""):
                 with mock.patch.object(sys, "stdin", io.StringIO(text)), contextlib.redirect_stdout(out), \
