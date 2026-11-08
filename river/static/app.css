@@ -506,6 +506,11 @@ button.srow-it { cursor: pointer; }
 .sp-k { opacity: .75; font-size: 11px; }
 .sp-k-image { color: var(--ready); } .sp-k-page { color: var(--prog); } .sp-k-tool { color: var(--accent); }
 /* Dictation (#4626). */
+/* Attach (#4649): a small paperclip at the right end of the message box, left of Send. */
+.composer .attach { flex: none; align-self: flex-end; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; background: none; border: 0; border-radius: 8px; color: var(--muted); cursor: pointer; }
+.composer .attach:hover:not(:disabled) { color: var(--ink); background: var(--panel2, rgba(127,127,127,.12)); }
+.composer .attach:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.composer .attach:disabled { opacity: .45; cursor: default; }
 .composer .mic { flex: none; padding: 4px 9px; }
 .composer .mic.on { background: var(--p0, #c0392b); border-color: transparent; color: #fff; animation: micpulse 1.2s ease-in-out infinite; }
 @keyframes micpulse { 50% { opacity: .65; } }
