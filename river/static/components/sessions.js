@@ -8,7 +8,7 @@
 // page's token: typeAction).
 import { $, esc, ago, clip, store, toast, typeAction } from "../lib.js";
 import { chip } from "./chip.js";
-import { appendEntries, wireCopy, plainText } from "./chat.js";
+import { appendEntries, agePending, wireCopy, plainText } from "./chat.js";
 import { openTerminal } from "./terminalDialog.js";
 import { openWaiting } from "./waitDialog.js";
 
@@ -133,6 +133,7 @@ export function makeSessions({ isShown }) {
       else if (j.entries.length) col.querySelector(".sl-none")?.remove();
       Object.assign(refs, j.refs || {});
       appendEntries(col, j.entries, j.refs);
+      agePending(col);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
       $("#sessState").innerHTML = stateChip(j);
@@ -277,9 +278,9 @@ export function makeSessions({ isShown }) {
     [...e.dataTransfer.files].forEach(addImage);
   });
   // A turn the person sent from the ! dialog shows in the chat at once.
-  function sentTurn(text) {
+  function sentTurn(text, track = false) {  // track: a message the transcript shows later (not a key such as a pick)
     col.querySelector(".sl-none")?.remove();
-    appendEntries(col, [{ role: "user", sent: true, text: text || "(Enter)" }]);
+    appendEntries(col, [{ role: "user", sent: true, track: track && !!text, text: text || "(Enter)" }]);
     body.scrollTop = body.scrollHeight;
   }
   // The text bar is always there. With no tmux pane of the session on this computer it is off, and says why.
@@ -308,7 +309,7 @@ export function makeSessions({ isShown }) {
         ...(sent.length ? { images: sent.map(im => ({ type: im.type, data: im.data })) } : {}) });
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
-        appendEntries(col, [{ role: "user", sent: true, text: r.text || (sent.length ? "" : "(Enter)"),
+        appendEntries(col, [{ role: "user", sent: true, track: !!r.text, text: r.text || (sent.length ? "" : "(Enter)"),
                               localImages: sent.map(im => im.url) }]);
         clearImgs(false);  // the chat shows them now
         body.scrollTop = body.scrollHeight;

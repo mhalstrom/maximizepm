@@ -1753,11 +1753,13 @@ def session_send(conn, agent, text, who=None, images=None):
             raise RiverError(f"at most {UPLOADS_PER_SEND} images go with one message")
         pane = _typing_pane(conn, agent, who)
         paths = [save_upload(agent, (im or {}).get("data") if isinstance(im, dict) else None) for im in images]
-        # The paths and the text as one paste, as files dropped on the terminal; the CLI attaches each image.
-        msg = " ".join(paths) + (" " + text if text else "")
-        _tmux("set-buffer", "-b", "maxpm-send", "--", msg)
-        _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
-        time.sleep(PROMPT_PAUSE)
+        # Each path as a paste of its own, as a file dropped on the terminal: Claude Code attaches a pasted path
+        # only when the paste holds the path alone (it turns into [Image #1]); a path with text stays text (#4618).
+        # Then the text as one more paste, and Enter.
+        for part in paths + ([" " + text] if text else []):
+            _tmux("set-buffer", "-b", "maxpm-send", "--", part)
+            _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
+            time.sleep(PROMPT_PAUSE)
         _tmux("send-keys", "-t", pane, "Enter")
         return {"agent": agent, "pane": pane, "sent": 2, "text": text, "images": paths}
     if "\n" not in text:

@@ -72,7 +72,7 @@ $("#waitList").addEventListener("submit", async (e) => {
       if (!body) { toast("Write the answer first", true); return; }
       let typed = false;
       if (pane) {
-        try { const r = await typeAction("session_send", { agent, text: body }); typed = true; if (onSent) onSent(r.text); }
+        try { const r = await typeAction("session_send", { agent, text: body }); typed = true; if (onSent) onSent(r.text, true); }
         catch (err) { toast(`Not typed into the session (${err.message}); the queue still gets the answer`, true); }
       }
       await act("answer", { msg: +form.dataset.id, body });

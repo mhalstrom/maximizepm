@@ -29,6 +29,8 @@ export function plainText(text) {
 // link that opens the item in the drawer (#4609), with a pop-up on hover and focus (refPopup, #4611). Text in code,
 // a link or a button stays as it is.
 const REF = /(^|[^\w&])#(\d{1,7})\b/g, HAS_REF = /(^|[^\w&])#\d{1,7}\b/;
+// A number after one of these words is no item (#4618): Claude Code's "[Image #1]", "step #2", "option #3".
+const NOT_ITEM = /\b(image|step|option|line|no\.?|number|round|attempt|part|phase|page|slide|pr|pull request|issue|comment|row|column|tab|panel|card)\s*\[?$/i;
 export function linkRefs(root, refs) {
   if (!refs || !Object.keys(refs).length) return;
   const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -40,7 +42,7 @@ export function linkRefs(root, refs) {
     const frag = document.createDocumentFragment();
     let at = 0;
     n.data.replace(REF, (m, pre, id, off) => {
-      if (!(id in refs)) return m;
+      if (!(id in refs) || NOT_ITEM.test(n.data.slice(Math.max(0, off - 24), off + pre.length))) return m;
       frag.append(n.data.slice(at, off + pre.length));
       const a = el("span", "link ref", "#" + id);
       a.dataset.open = id; a.dataset.ref = id; a.tabIndex = 0;
@@ -92,6 +94,7 @@ function entryNode(e) {
       m.append(b);
     }
     if (e.sent) m.append(el("div", "msg-note", "sent to its terminal"));
+    if (e.sent && e.track && norm(e.text)) { m.dataset.pending = norm(e.text); m.dataset.sentAt = Date.now(); }
     return m;
   }
   if (e.role === "assistant") {
@@ -121,8 +124,27 @@ function entryNode(e) {
 
 // Add transcript lines to the chat column. A tool result fills the tool call it belongs to (when that call is
 // shown); it never shows as a line of its own.
+// The page shows a message it sent at once (pending); when the transcript holds the same turn, that turn takes its
+// place, so the message shows once (#4618). Claude Code puts "[Image #1]" before the text of a turn with an image.
+const norm = (t) => String(t || "").replace(/\[Image #\d+\]/g, "").replace(/\s+/g, " ").trim();
+function takePending(col, e) {
+  if (e.role !== "user" || e.sent) return;
+  const got = norm(e.text);
+  const m = [...col.querySelectorAll(".msg-user[data-pending]")].find(x => x.dataset.pending === got);
+  if (m) m.remove();
+}
+// A sent message that the transcript has not shown after PENDING_MAX says so.
+const PENDING_MAX = 30000;
+export function agePending(col) {
+  for (const m of col.querySelectorAll(".msg-user[data-pending]")) {
+    const note = m.querySelector(".msg-note");
+    if (note && Date.now() - +m.dataset.sentAt > PENDING_MAX) note.textContent = "sent to its terminal; not taken yet";
+  }
+}
+
 export function appendEntries(col, entries, refs) {
   for (const e of entries) {
+    takePending(col, e);
     if (e.role === "result") {
       const d = e.for && col.querySelector(`details.tool[data-tool="${CSS.escape(e.for)}"]`);
       if (!d) continue;

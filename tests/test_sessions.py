@@ -378,8 +378,10 @@ class Images(TmuxBase):
         (path,) = r["images"]
         self.assertTrue(path.startswith(str(server.uploads_dir() / "ag")) and path.endswith(".png"), path)
         self.assertEqual(Path(path).read_bytes(), png)
-        self.assertEqual(self.tmux.calls[-3:], [["set-buffer", "-b", "maxpm-send", "--", f"{path} what is wrong here?"],
-                                                ["paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", self.pane["id"]],
+        # The path as a paste of its own (Claude Code attaches it as [Image #1]), then the text, then Enter (#4618).
+        paste = ["paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", self.pane["id"]]
+        self.assertEqual(self.tmux.calls[-5:], [["set-buffer", "-b", "maxpm-send", "--", path], paste,
+                                                ["set-buffer", "-b", "maxpm-send", "--", " what is wrong here?"], paste,
                                                 ["send-keys", "-t", self.pane["id"], "Enter"]])
         got = server.upload_file("ag/" + Path(path).name)
         self.assertEqual(got, (png, "image/png"))
