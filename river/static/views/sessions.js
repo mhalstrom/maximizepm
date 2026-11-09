@@ -146,15 +146,25 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   // (visualViewport) smaller than the window, the tab is fixed to that visible part: its top (iOS scrolls the page
   // under the keyboard: offsetTop) and its height, so the message box sits right above the keyboard. It follows each
   // resize and scroll of the visible part, and again after the keyboard's animation ends.
+  // The keyboard is open when the visible part is shorter than the whole page height (#4910): iOS Safari makes
+  // window.innerHeight smaller with the keyboard too, so a test against innerHeight said "no keyboard", the tab stayed
+  // in the page, and Safari scrolled its head and most of the chat above the screen. The whole height is the layout
+  // viewport (documentElement.clientHeight, which the keyboard does not change), or the tallest visible part seen
+  // while no field had the focus, at this width.
+  let full = { w: 0, h: 0 };
   function keyboardOpen(lay, vv) {
-    const a = document.activeElement;
-    return !!(vv && a && lay.contains(a) && /^(TEXTAREA|INPUT)$/.test(a.tagName) && vv.height < window.innerHeight - 80);
+    const a = document.activeElement, field = !!(a && lay.contains(a) && /^(TEXTAREA|INPUT)$/.test(a.tagName));
+    if (!vv) return false;
+    if (full.w !== window.innerWidth) full = { w: window.innerWidth, h: 0 };
+    if (!field) full.h = Math.max(full.h, vv.height);
+    return field && vv.height < Math.max(document.documentElement.clientHeight, full.h) - 80;
   }
   function fit() {
     const lay = $("#sessLayout"), phone = window.innerWidth < 760, vv = window.visualViewport;
     const chat = isShown() && phone && lay.classList.contains("phone-chat");
     const kb = chat && keyboardOpen(lay, vv);
     lay.classList.toggle("phone-kb", kb);
+    kbDebug(lay, vv, kb);
     if (kb) { lay.style.top = vv.offsetTop + "px"; lay.style.height = vv.height + "px"; return; }
     lay.style.removeProperty("top");
     if (!isShown() || (phone && !chat)) return lay.style.removeProperty("height");
@@ -163,8 +173,23 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   }
   let fitting = 0;
   const fitSoon = () => { cancelAnimationFrame(fitting); fitting = requestAnimationFrame(fit); };
-  const fitAfter = () => { fitSoon(); setTimeout(fit, 350); };  // the keyboard opens or closes in about 300 ms
+  // The keyboard opens or closes in about 300 ms, and its suggestion bar can come later: fit again until it settles.
+  const fitAfter = () => { fitSoon(); for (const ms of [100, 350, 700, 1200]) setTimeout(fit, ms); };
   window.addEventListener("resize", fitSoon);
+  window.addEventListener("scroll", () => { if ($("#sessLayout").classList.contains("phone-kb")) fitSoon(); }, { passive: true });
+  // ?kbdebug=1 (remembered; ?kbdebug=0 ends it) shows the numbers of the fit above the message box, so a screenshot
+  // from a phone says what the page measured (#4910).
+  const KBDEBUG = "river.kbdebug";
+  { const d = new URLSearchParams(location.search).get("kbdebug"); if (d != null) store(KBDEBUG, d === "1" ? "1" : ""); }
+  function kbDebug(lay, vv, kb) {
+    if (store(KBDEBUG) !== "1") return;
+    let el = $("#kbDebug");
+    if (!el) { el = document.createElement("div"); el.id = "kbDebug"; el.className = "muted"; el.style.cssText = "font: 11px ui-monospace, monospace; white-space: pre-wrap";
+      $("#sessMain .chat-foot").prepend(el); }
+    const r = lay.getBoundingClientRect(), a = document.activeElement;
+    el.textContent = `kb ${kb} focus ${a ? a.tagName + (a.id ? "#" + a.id : "") : "-"} inner ${innerWidth}x${innerHeight} client ${document.documentElement.clientHeight}`
+      + ` full ${full.h} vv ${vv ? Math.round(vv.height) + " @" + Math.round(vv.offsetTop) : "-"} scrollY ${Math.round(scrollY)} box ${Math.round(r.top)}+${Math.round(r.height)}`;
+  }
   if (window.visualViewport) { window.visualViewport.addEventListener("resize", fitSoon); window.visualViewport.addEventListener("scroll", fitSoon); }
   $("#sessLayout").addEventListener("focusin", fitAfter);
   $("#sessLayout").addEventListener("focusout", fitAfter);

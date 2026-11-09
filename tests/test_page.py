@@ -246,7 +246,9 @@ try {
     def test_the_message_box_stays_above_the_phone_keyboard(self):
         """#4902: on an iPhone the keyboard makes the visible part of the page (visualViewport) smaller and scrolls the
         page; the Sessions tab then covers that visible part, so the message box sits right above the keyboard. A
-        browser here has no keyboard: a stand-in visualViewport says what an iPhone's says."""
+        browser here has no keyboard: a stand-in visualViewport says what an iPhone's says. #4910: iOS Safari makes
+        window.innerHeight smaller with the keyboard too; the second run says so, and the tab still covers the visible
+        part."""
         driver = r'''try {
   await until(() => window.__appReady, "app.js loaded");
   q('nav button[data-tab="sessions"]').click();
@@ -256,8 +258,9 @@ try {
   // for this one, which takes the focus away).
   const sbar = q("#sessBar"); sbar.classList.remove("hidden"); sbar.classList.toggle = () => false; box.disabled = false;
   Object.defineProperty(box, "disabled", { get: () => false, set: () => {}, configurable: true });
-  const vv = Object.assign(new EventTarget(), { height: Math.round(innerHeight * 0.55), offsetTop: 230, width: innerWidth });
+  const FULL = innerHeight, vv = Object.assign(new EventTarget(), { height: Math.round(innerHeight * 0.55), offsetTop: 230, width: innerWidth });
   Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
+  if (IOS) Object.defineProperty(window, "innerHeight", { get: () => vv.height, configurable: true });
   // The session waits on the person: the page opens its dialog once by itself, which takes the focus. Close it first.
   await until(() => q("#waitDlg") && !q("#waitDlg").classList.contains("hidden"), "the wait dialog").catch(() => {});
   if (q("#waitDlg")) q("#waitDlg").classList.add("hidden");
@@ -272,19 +275,21 @@ try {
   vv.offsetTop = 260; dispatchEvent(new Event("resize"));
   await sleep(100);
   out.moved = Math.round(lay.getBoundingClientRect().top);
-  vv.height = innerHeight; vv.offsetTop = 0;  // the keyboard closes
+  vv.height = FULL; vv.offsetTop = 0;  // the keyboard closes
   box.blur();
   await sleep(450);
   out.after = { kb: lay.classList.contains("phone-kb"), top: lay.style.top, fixed: getComputedStyle(lay).position };
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
-        got = self.drive(driver, "/sessions/ag", size="390,844")
-        self.assertTrue(got["kb"], got)
-        self.assertEqual((got["fixed"], got["top"], got["height"]), ("fixed", *got["want"]))
-        self.assertGreaterEqual(got["barEnd"], 0, "the message box is inside the visible part")
-        self.assertLess(got["barEnd"], 40, "and right above the keyboard: no empty band under it")
-        self.assertEqual(got["moved"], 260)
-        self.assertEqual(got["after"], {"kb": False, "top": "", "fixed": "static"})
+        for ios in (False, True):
+            with self.subTest(ios=ios):
+                got = self.drive(f"const IOS = {'true' if ios else 'false'};\n" + driver, "/sessions/ag", size="390,844")
+                self.assertTrue(got["kb"], got)
+                self.assertEqual((got["fixed"], got["top"], got["height"]), ("fixed", *got["want"]))
+                self.assertGreaterEqual(got["barEnd"], 0, "the message box is inside the visible part")
+                self.assertLess(got["barEnd"], 40, "and right above the keyboard: no empty band under it")
+                self.assertEqual(got["moved"], 260)
+                self.assertEqual(got["after"], {"kb": False, "top": "", "fixed": "static"})
 
     def test_the_header_of_a_phone_is_one_bar(self):
         """#4903: at phone width the header is one bar of 48 px: the mark, the tab's name, which opens the sheet of all
