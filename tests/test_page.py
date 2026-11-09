@@ -20,8 +20,9 @@ const check = (v, what) => { if (!v) throw new Error(what); };
 const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON.stringify(o));
 '''
 
-    def drive(self, driver, path="/"):
-        """Run driver (a module) on every page the browser loads, from path; it posts its result to /__result."""
+    def drive(self, driver, path="/", steps=None):
+        """Run driver (a module) on every page the browser loads, from path; it posts its result to /__result.
+        steps: name -> function that the driver runs on the server side with fetch("/__step/<name>")."""
         import subprocess
         import threading
         from unittest.mock import patch
@@ -35,6 +36,9 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
 
         class H(server.Handler):
             def do_GET(self):
+                if self.path.startswith("/__step/"):
+                    (steps or {})[self.path[len("/__step/"):]]()
+                    return self._send(204, b"")
                 if self.path == "/__drive.js":
                     return self._send(200, (PageBrowser.HEAD + driver).encode(), "text/javascript; charset=utf-8")
                 page = server.page_html(self.path.split("?")[0])
@@ -130,6 +134,40 @@ try {
         got = self.drive(driver)
         self.assertEqual(got["errors"], [])
         self.assertTrue(all(got["seen"].values()), got["seen"])
+
+    def test_a_new_prompt_or_question_of_the_open_session_opens_the_dialog_once(self):
+        """#4663: the ! dialog opens by itself when the open session comes to a prompt or asks a question; Dismiss
+        keeps it closed until something new waits."""
+        core.config_set(self.c, "setup_done", "on")
+
+        def question():
+            c = core.connect()
+            try:
+                core.send(c, "question", "Push the header?", to="mark", item=self.it, actor="ag")
+            finally:
+                c.close()
+        driver = r'''
+const open = () => !q("#waitDlg").classList.contains("hidden");
+try {
+  await until(() => window.__appReady && open(), "the dialog opens by itself for the prompt");
+  check(q("#waitList").textContent.includes("Do you want to proceed?"), "it shows the prompt");
+  q("#waitDismiss").click();
+  await sleep(7000);  // two refreshes of the Sessions tab
+  check(!open(), "Dismiss keeps the same prompt closed");
+  check(q("#sessWait [data-wait-open]"), "the wait line links to the dialog");
+  check(!q("#sessWait").textContent.includes("type the answer below"), "no text about typing the answer below");
+  await fetch("/__step/question");
+  await until(open, "a new question opens it again");
+  check(q("#waitList").textContent.includes("Push the header?"), "it shows the question");
+  q("#waitDismiss").click();
+  await sleep(4000);
+  check(!open(), "and Dismiss keeps it closed");
+  q("#sessWait [data-wait-open]").click();
+  check(open(), "Answer it opens it");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        self.assertEqual(self.drive(driver, "/sessions/ag", {"question": question}), {"ok": True})
 
     def test_a_click_on_each_tab_of_the_side_panel_shows_it(self):
         """#4652: the panel's tabs once had data-tab, which the page's own click handler reads as a tab of the

@@ -152,6 +152,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       renderList(side, list.filter(x => x.role !== "manager"), agent,
         `<div class="muted">No other agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
       fit();
+      autoWait();
     } catch (e) {
       side.innerHTML = `<div class="muted">Could not read the sessions: ${esc(e.message)}</div>`;
       delete side.dataset.empty;
@@ -244,12 +245,32 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   setInterval(() => { if (!document.hidden && isShown()) { loadItems(); loadArts(); } }, 10000);
   document.addEventListener("maxpm-view", (e) => { if (e.detail.agent === agent) col.classList.toggle("hide-tools", !viewOf(agent).showTools); });
 
-  // A session that waits on the person says so above the composer.
+  // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it.
   function waitLine(j) {
-    const w = $("#sessWait");
-    w.textContent = j.state === "prompt" ? "It waits at a permission prompt in its terminal: type the answer below (for example 1), then Send."
-      : j.state === "answer" ? "It waits for your answer to its question: type it below, then Send." : "";
-    w.classList.toggle("hidden", !w.textContent);
+    const w = $("#sessWait"), waits = ((list.find(x => x.name === agent) || {}).waiting || []).map(x => x.kind);
+    const what = waits.includes("prompt") || j.state === "prompt" ? "It waits at a permission prompt in its terminal."
+      : waits.includes("question") || j.state === "answer" ? "It waits for your answer to its question." : "";
+    w.innerHTML = what ? `${esc(what)} <span class="link" data-wait-open="1" tabindex="0" role="button">Answer it</span>` : "";
+    w.classList.toggle("hidden", !what);
+  }
+  const showWaiting = (s) => { for (const w of s.waiting || []) seenWait.add(s.name + "\x1f" + waitKey(w)); openWaiting(s, { onSent: sentTurn }); };
+  $("#sessWait").addEventListener("click", (e) => {
+    if (!e.target.closest("[data-wait-open]")) return;
+    const s = list.find(x => x.name === agent);
+    if (s && (s.waiting || []).length) showWaiting(s);
+  });
+  $("#sessWait").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.closest("[data-wait-open]")) e.target.click(); });
+  // The open session comes to a prompt or asks a question: the ! dialog opens by itself (#4663), once for each
+  // prompt (its sig) and question (its id), so Dismiss does not bring the same one back; a new one opens it again.
+  // Not while the tab is hidden or another dialog is open: the next refresh after that opens it.
+  const seenWait = new Set();
+  function waitKey(w) { return w.kind === "question" ? "q" + w.id : "p" + (w.sig || w.question || ""); }
+  function autoWait() {
+    if (!agent || document.hidden || !isShown()) return;
+    const s = list.find(x => x.name === agent);
+    if (!s || !(s.waiting || []).some(w => !seenWait.has(s.name + "\x1f" + waitKey(w)))) return;
+    if (document.querySelector('#setup:not(.hidden), [id$="Dlg"]:not(.hidden)')) return;
+    showWaiting(s);
   }
   // The composer grows with the text; Enter sends, Shift+Enter starts a new line.
   const text = $("#sessText");
@@ -379,14 +400,14 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
     pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
-    if (s && (s.waiting || []).length) openWaiting(s, { onSent: sentTurn });  // what waits for the person comes first; Dismiss shows the chat
+    if (s && (s.waiting || []).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
     const r = (e.key === "Enter" || e.key === " ") && e.target.closest(".srow-main") && e.target.closest("[data-session]");
     if (!r) return;
     e.preventDefault(); pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
-    if (s && (s.waiting || []).length) openWaiting(s, { onSent: sentTurn });
+    if (s && (s.waiting || []).length) showWaiting(s);
   });
   setInterval(refresh, 3000);
   return { refresh: () => { refresh(); fit(); }, pick };
