@@ -20,7 +20,9 @@ button.srow-it { cursor: pointer; }
 .srow.needs { border-left-color: var(--warn); }
 .srow-h { display: flex; align-items: center; gap: 4px 6px; min-width: 0; flex-wrap: wrap; }
 .srow-h b { overflow-wrap: break-word; font-size: 13px; min-width: 0; max-width: 100%; }
-.srow-h .chip { flex: none; }
+/* A long state ('not connected yet: it ran no maxpm command') wraps inside the row's own column, never over the
+   item column on the right (#4675). */
+.srow-h .chip { flex: 0 1 auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; border-radius: 9px; }
 .srow-h .spacer, .sess-head .spacer { flex: 1; }
 .srow .sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sess-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

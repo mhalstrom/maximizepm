@@ -671,6 +671,41 @@ try {
         self.assertEqual([c[0] for c in self.tmux.calls].count("paste-buffer"), 1)
 
 
+class RowLayout(unittest.TestCase):
+    """#4675: a long state chip wraps inside the row's own column, never over the item column on the right."""
+
+    def test_a_long_state_chip_stays_in_its_column(self):
+        import subprocess
+        import tempfile
+        from tests.test_server import _chrome
+        if not _chrome():
+            self.skipTest("no Chrome on this computer")
+        static = Path(server.__file__).parent / "static"
+        page = f"""<!doctype html><meta charset="utf-8">
+<link rel="stylesheet" href="{(static / 'app.css').as_uri()}"><link rel="stylesheet" href="{(static / 'views/sessions.css').as_uri()}">
+<body style="width:300px;margin:8px"><div class="srow" id="row"><div class="srow-main"><div class="srow-h"><b>maximizepm-d450</b>
+<span class="spacer"></span><span class="chip c-waiting" id="chip">not connected yet: it ran no maxpm command</span></div>
+<div class="sub">last line</div></div><button class="srow-it" id="it"><b>#4675</b><span>A long item title</span></button></div>
+<pre id="out"></pre><script>
+const c = document.getElementById("chip").getBoundingClientRect(), i = document.getElementById("it").getBoundingClientRect();
+document.getElementById("out").textContent = "RESULT " + JSON.stringify({{chipRight: c.right, itemLeft: i.left}});
+</script>"""
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "row.html"
+            f.write_text(page)
+            try:
+                dom = subprocess.run([_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+                                      "--allow-file-access-from-files", f"--user-data-dir={d}/browser",
+                                      "--window-size=320,300", "--dump-dom", f.as_uri()],
+                                     capture_output=True, text=True, timeout=60).stdout
+            except (OSError, subprocess.TimeoutExpired) as e:
+                self.skipTest(f"Chrome did not run here: {e}")
+        if "RESULT " not in dom:
+            self.skipTest("Chrome gave no page here")
+        got = json.loads(dom.split("RESULT ", 1)[1].split("<", 1)[0].replace("&quot;", '"'))
+        self.assertLessEqual(got["chipRight"], got["itemLeft"], got)
+
+
 class SideFiles(Base):
     """#4619: the side panel shows local files read only, with the page's token, only from the project folders,
     their worktrees and uploads, each in a sandbox of its own."""
