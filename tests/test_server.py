@@ -1552,6 +1552,8 @@ class LaunchInTmux(unittest.TestCase):
         (row,) = core.outbox(self.c)
         self.assertEqual(notify.compose(self.c, [row])[2], f"http://127.0.0.1:8765/sessions/{name}?as={row['human']}")
         self.c.execute("UPDATE agents SET session_url='https://claude.ai/code/session_1' WHERE name=?", (name,))
+        self.assertTrue(notify.compose(self.c, [row])[2].startswith(f"http://127.0.0.1:8765/sessions/{name}"))
+        core.config_set(self.c, "notify_open", "agent")  # #4673: the agent's own app
         self.assertEqual(notify.compose(self.c, [row])[2], "https://claude.ai/code/session_1")
         # maxpm serve starts again while the prompt waits: no second alert.
         server.PROMPTS.clear()
@@ -1670,8 +1672,10 @@ class LaunchInTmux(unittest.TestCase):
             f"build. It asks to run (Bash command (unsandboxed)): git push origin main. Auto mode held this command for "
             f"the server-side classifier to review. Question: Do you want to proceed? Keys: Enter = 1. Yes (selected "
             f"now); Down, then Enter = 2. No; Esc = cancel. Answer it with View Terminal in MaximizePM."))
-        # The agent ran no river command in its session: the notice opens the link Claude Code printed in its pane.
+        # The agent ran no river command in its session: the notice opens the link Claude Code printed in its pane
+        # (notify_open agent; the page is the default, #4673).
         (row,) = core.outbox(self.c)
+        core.config_set(self.c, "notify_open", "agent")
         self.assertEqual(notify.compose(self.c, [row])[2], "https://claude.ai/code/session_01AbC")
 
     def test_tmux_is_the_default_when_tmux_is_installed(self):

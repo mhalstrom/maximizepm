@@ -95,7 +95,7 @@ DEFAULT_SETTINGS = {
     # Where a tap on a notification opens (#4673): maxpm (the MaximizePM page: the item's drawer, the session in
     # the Sessions tab for its question or prompt, the Board's Needs you for a batch) or agent (the agent's own app:
     # Claude Code's claude.ai/code session, Codex's chatgpt.com/codex; else the page). Per person: --agent <person>.
-    "notify_open": "agent",
+    "notify_open": "maxpm",
     # Where a phone notification opens when its link is the page on this computer and no relay (maxpm connect)
     # makes the page reachable from the phone.
     "ntfy_click": "https://claude.ai/code",

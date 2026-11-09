@@ -664,7 +664,9 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   important first, with notifications by phone (ntfy), email (SMTP), macOS
   banner (a click opens the page with terminal-notifier), and browser. `maxpm notify setup ntfy` makes a secret topic and
   prints the phone steps; `maxpm notify test <channel>` and `maxpm notify
-  status` check a channel. The running `maxpm serve` sends them (or
+  status` check a channel. A tap on a notification opens the MaximizePM page
+  at the item or session that needs you. Set `notify_open` to `agent` to open
+  the agent's own app (claude.ai/code or Codex) instead. The running `maxpm serve` sends them (or
   `maxpm notify run`). Phone notifications go out at ntfy priority `high`
   (`ntfy_priority`), so the phone shows a banner; the ntfy app also needs the
   phone's permission for banners and the lock screen.

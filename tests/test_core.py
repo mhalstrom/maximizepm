@@ -2765,6 +2765,7 @@ class SessionLinks(Base):
 
     def test_env_record_and_origin(self):
         from river import notify
+        core.config_set(self.c, "notify_open", "agent")  # #4673: the page is the default
         self.assertEqual(core.session_url_from_env({"CLAUDE_CODE_BRIDGE_SESSION_ID": "session_01Abc"}),
                          "https://claude.ai/code/session_01Abc")
         self.assertIsNone(core.session_url_from_env({"CLAUDE_CODE_BRIDGE_SESSION_ID": "x/../y"}))
@@ -2814,7 +2815,8 @@ class NotifyOpen(Base):
         return notify.compose(self.c, [{"summary": "s", "item_id": i, "message_id": m, "human": h} for i, m, h in rows])[2]
 
     def test_agent_opens_each_agent_type_else_the_page(self):
-        self.assertEqual(core.setting(self.c, "notify_open"), "agent")
+        self.assertEqual(core.setting(self.c, "notify_open"), "maxpm")
+        core.config_set(self.c, "notify_open", "agent")
         self.assertEqual(self.url((self.items["cc"], None, None)), "https://claude.ai/code/session_01Abc")
         self.assertEqual(self.url((self.items["cx"], None, None)), "https://chatgpt.com/codex")
         self.assertEqual(self.url((None, self.q, "mark")), "https://chatgpt.com/codex")
@@ -2825,6 +2827,7 @@ class NotifyOpen(Base):
         self.assertRegex(self.url((self.items["cc"], None, None), (self.items["cx"], None, None)), r"^http://127\.0\.0\.1:\d+/$")
 
     def test_maxpm_opens_the_page_at_the_thing_per_person(self):
+        core.config_set(self.c, "notify_open", "agent")
         core.config_set(self.c, "notify_open", "maxpm", agent="mark")
         cc = self.items["cc"]
         self.assertTrue(self.url((cc, None, "mark")).endswith(f"/?item={cc}&as=mark"))
@@ -2866,19 +2869,19 @@ class NotifyOpen(Base):
 
     def test_setup_asks_and_status_shows_it(self):
         from river import cli, notify
-        out = notify.setup_ntfy(self.c, actor="mark", open_="maxpm")
-        self.assertEqual(core.setting(self.c, "notify_open", agent="mark"), "maxpm")
-        self.assertEqual(core.setting(self.c, "notify_open"), "agent")
+        out = notify.setup_ntfy(self.c, actor="mark", open_="agent")
+        self.assertEqual(core.setting(self.c, "notify_open", agent="mark"), "agent")
+        self.assertEqual(core.setting(self.c, "notify_open"), "maxpm")
         text = "\n".join(out["subscribe"])
-        self.assertIn("opens the MaximizePM page (notify_open maxpm for mark)", text)
-        self.assertIn("maxpm config set notify_open agent --agent mark", text)
+        self.assertIn("opens the agent's own app (claude.ai/code, chatgpt.com/codex) (notify_open agent for mark)", text)
+        self.assertIn("maxpm config set notify_open maxpm --agent mark", text)
         st = notify.status(self.c)
-        self.assertEqual((st["open"], st["open_people"]), ("agent", {"mark": "maxpm"}))
+        self.assertEqual((st["open"], st["open_people"]), ("maxpm", {"mark": "agent"}))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli.render(cli.build_parser().parse_args(["notify", "status"]), st)
-        self.assertIn("a tap opens the agent's own app", buf.getvalue())
-        self.assertIn("mark: maxpm", buf.getvalue())
+        self.assertIn("a tap opens the MaximizePM page", buf.getvalue())
+        self.assertIn("mark: agent", buf.getvalue())
 
 
 if __name__ == "__main__":
