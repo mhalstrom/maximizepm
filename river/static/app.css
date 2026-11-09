@@ -160,6 +160,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .ny { padding: 8px 0; border-top: 1px solid var(--line); }
 .ny:first-child { border-top: none; }
 .ny-h { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+/* A title with a long identifier (a_run_refused_for_its_inputs_...) wraps inside its row, not past the window (#4719). */
+.ny-h > * { min-width: 0; overflow-wrap: break-word; }
 .ny-c { color: var(--muted); font-size: 12px; margin: 4px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .goals { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px 22px; }
 .goal { border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; cursor: pointer; width: 230px; font-size: 12px; background: var(--panel); }
