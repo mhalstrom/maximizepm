@@ -45,6 +45,14 @@ function answersOf(meta) {
 const answeredHtml = (a) => !a ? "" : `<b>${esc(a.author)}</b> answered ${ago(a.created_at)}: ${esc(a.body.replace(/^Answer to decision \d+ of \d+ \([^)]*\):\s*/, ""))}
   <span class="muted">(${esc(a.state === "sent" ? "sent to the session" : a.state === "read" ? "the session read it" : a.state)}${(a.replies || []).length ? ", " + a.replies.length + " repl" + (a.replies.length === 1 ? "y" : "ies") : ""})</span>`;
 
+// The answered line of a card's bar for answer a (a comment).
+function showAnswer(bar, a) {
+  let line = bar.querySelector(".doc-answered");
+  const html = answeredHtml(a);
+  if (!line) { line = document.createElement("div"); line.className = "doc-answered"; bar.prepend(line); }
+  if (line.dataset.sig !== html) { line.innerHTML = html; line.dataset.sig = html; }
+}
+
 // #4844: a new answer, or a new state of one, changes only the answered line of each card: the buttons, and the words
 // a person types in the box, stay.
 export function updateAnswers(root, meta) {
@@ -52,13 +60,9 @@ export function updateAnswers(root, meta) {
   for (const card of root.querySelectorAll(".doc-decision")) {
     const a = answers[card.dataset.decision], bar = card.querySelector(".doc-answer");
     if (!bar) continue;
-    let line = bar.querySelector(".doc-answered");
-    const html = answeredHtml(a);
-    if (!a) { if (line) line.remove(); }
-    else {
-      if (!line) { line = document.createElement("div"); line.className = "doc-answered"; bar.prepend(line); }
-      if (line.dataset.sig !== html) { line.innerHTML = html; line.dataset.sig = html; }
-    }
+    if (bar.dataset.sending) continue;  // an answer on its way shows when it came back
+    const line = bar.querySelector(".doc-answered");
+    if (!a) { if (line) line.remove(); } else showAnswer(bar, a);
     const go = bar.querySelector("[data-doc-answer]");
     if (go) go.textContent = a ? "Answer again" : "Answer";
   }
@@ -94,15 +98,26 @@ export function decorateDoc(root, source, meta, { ref, live, done, current }) {
         <input data-doc-other placeholder="${opts.length ? "or your own words" : "your answer"}" aria-label="Your answer to decision ${n}">
         <button class="btn primary" type="button" data-doc-answer>${a ? "Answer again" : "Answer"}</button></div>` : "");
     card.append(bar);
+    // #4845: one answer per click. While it goes, the card's buttons and box wait and say so; then the answer shows
+    // on the card at once, before the page's next state.
     const send = async (text) => {
       if (!actor()) return toast("Choose your name in 'You are' first", true);
       if (!text.trim()) return toast("Pick an option or write your answer", true);
+      if (bar.dataset.sending) return;
+      const go = bar.querySelector("[data-doc-answer]"), label = go ? go.textContent : "";
+      const ctl = [...bar.querySelectorAll("button, input")];
+      bar.dataset.sending = "1"; ctl.forEach(x => { x.disabled = true; });
+      if (go) go.textContent = "Sending…";
       try {
-        await act("canvas_answer", { name: ref, decision: n, text });
+        const com = await act("canvas_answer", { name: ref, decision: n, text });
         toast(`Answered decision ${n}: it went to the session`);
         const box = bar.querySelector("[data-doc-other]"); if (box) box.value = "";
+        showAnswer(bar, com);
+        if (go) go.textContent = "Answer again";
         done();
-      } catch (e) { /* toast shown */ }
+      } catch (e) { if (go) go.textContent = label; /* toast shown */ } finally {
+        delete bar.dataset.sending; ctl.forEach(x => { x.disabled = false; });
+      }
     };
     bar.addEventListener("click", (e) => {
       const o = e.target.closest("[data-doc-opt]"); if (o) return send(o.dataset.docOpt);

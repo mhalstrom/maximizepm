@@ -86,9 +86,21 @@ export function makeComments(box, { id, ref, reload, show }) {
     }
   }
 
-  async function run(op, args, done) {
+  // #4845: one action at a time. While it goes, the buttons wait and the clicked one says so; a second click does
+  // nothing (a comment came 2 to 6 times when nothing showed that the first click went).
+  let busy = false;
+  async function run(op, args, done, btn) {
     if (!actor()) return toast("Choose your name in 'You are' first", true);
-    try { const r = await act(op, args); if (done) done(r); } catch (e) { return; /* toast shown */ }
+    if (busy) return;
+    busy = true;
+    const ctl = [...box.querySelectorAll("button")], label = btn ? btn.textContent : "";
+    ctl.forEach(x => { x.disabled = true; });
+    if (btn) btn.textContent = "Sending…";
+    try { const r = await act(op, args); if (done) done(r); } catch (e) { return; /* toast shown */ } finally {
+      busy = false;
+      ctl.forEach(x => { x.disabled = false; });
+      if (btn && btn.isConnected) btn.textContent = label;
+    }
     sig = ""; await reload();
   }
 
@@ -101,6 +113,7 @@ export function makeComments(box, { id, ref, reload, show }) {
   });
   box.addEventListener("click", (e) => {
     const t = e.target.closest("button, [data-cv-show]"); if (!t) return;
+    if (busy && t.matches("button")) return;
     const k = kept();
     if (t.dataset.cvShow) return show(t.dataset.cvShow);
     if (t.hasAttribute("data-cv-cancel")) { keep(null); sig = ""; return draw(); }
@@ -109,16 +122,16 @@ export function makeComments(box, { id, ref, reload, show }) {
       if (!text) return toast("Write the comment first", true);
       const now = t.hasAttribute("data-cv-now");
       return run("canvas_comment", { name: ref, text, anchor: k && k.anchor, version: meta.version, send: now },
-        (r) => { keep(null); toast(now ? `Sent c${r.id} to the session` : `Saved c${r.id} as a draft`); });
+        (r) => { keep(null); toast(r.again ? `c${r.id} went already` : now ? `Sent c${r.id} to the session` : `Saved c${r.id} as a draft`); }, t);
     }
-    if (t.hasAttribute("data-cv-sendall")) return run("canvas_send", { name: ref }, (r) => toast(`Sent ${r.sent.length} comment(s) to ${r.to}`));
-    if (t.dataset.cvSend) return run("canvas_send", { name: ref, comments: [+t.dataset.cvSend] }, (r) => toast(`Sent to ${r.to}`));
-    if (t.dataset.cvDiscard) return run("canvas_discard", { comment: +t.dataset.cvDiscard });
-    if (t.dataset.cvResolve) return run("canvas_resolve", { comment: +t.dataset.cvResolve, note: "resolved in the page" });
+    if (t.hasAttribute("data-cv-sendall")) return run("canvas_send", { name: ref }, (r) => toast(`Sent ${r.sent.length} comment(s) to ${r.to}`), t);
+    if (t.dataset.cvSend) return run("canvas_send", { name: ref, comments: [+t.dataset.cvSend] }, (r) => toast(`Sent to ${r.to}`), t);
+    if (t.dataset.cvDiscard) return run("canvas_discard", { comment: +t.dataset.cvDiscard }, null, t);
+    if (t.dataset.cvResolve) return run("canvas_resolve", { comment: +t.dataset.cvResolve, note: "resolved in the page" }, null, t);
     if (t.dataset.cvReply) {
       const inp = box.querySelector(`[data-cv-reply-text="${t.dataset.cvReply}"]`), text = (inp && inp.value || "").trim();
       if (!text) return toast("Write the reply first", true);
-      return run("canvas_reply", { comment: +t.dataset.cvReply, text });
+      return run("canvas_reply", { comment: +t.dataset.cvReply, text }, () => { if (inp) inp.value = ""; }, t);
     }
   });
 

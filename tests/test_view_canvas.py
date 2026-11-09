@@ -437,6 +437,24 @@ class Docs(Base):
         with self.assertRaisesRegex(core.RiverError, "needs words"):
             core.canvas_answer(self.c, "relay", 2, " ", "mark")
 
+    def test_the_same_answer_or_comment_again_is_one(self):
+        # #4845: an answer and a comment came 2 to 6 times, 0 to 5 seconds apart.
+        from unittest import mock
+        msgs = lambda: [m for m in core.inbox(self.c, "ag", mark_read=False) if "Answer to decision 1" in m["body"]]
+        a = core.canvas_answer(self.c, "relay", 1, "Cloudflare", "mark")
+        b = core.canvas_answer(self.c, "relay", 1, "Cloudflare ", "mark")
+        self.assertEqual((b["id"], b.get("again"), a.get("again")), (a["id"], True, None))
+        self.assertEqual(len(msgs()), 1)
+        self.assertNotEqual(core.canvas_answer(self.c, "relay", 1, "OVH", "mark")["id"], a["id"])  # other words
+        d = core.canvas_comment(self.c, "relay", "Too long", "mark")  # a draft, then the same words sent: sent once
+        e = core.canvas_comment(self.c, "relay", "Too long", "mark", send_now=True)
+        self.assertEqual((e["id"], e["state"]), (d["id"], "sent"))
+        self.assertNotEqual(core.canvas_comment(self.c, "relay", "Too long", "mark", {"path": "h2"})["id"], d["id"])  # another part
+        later = core.now() + core.COMMENT_AGAIN + core.timedelta(seconds=1)
+        with mock.patch.object(core, "now", lambda: later):
+            self.assertNotEqual(core.canvas_answer(self.c, "relay", 1, "Cloudflare", "mark")["id"], a["id"])
+        self.assertEqual(len(msgs()), 3)
+
     def test_the_command_and_the_mcp_tool(self):
         import contextlib
         import io
@@ -480,7 +498,10 @@ try {
   await until(() => q(".doc-decision"), "the doc with its decision cards");
   const out = { pending: q(".doc-pending").textContent.trim(), cards: [...document.querySelectorAll(".doc-decision")].map(c => c.id),
                 opts: [...document.querySelectorAll("#decision-1 [data-doc-opt]")].map(b => b.textContent) };
+  // #4845: a second click while the first answer goes does nothing; the card says that it is sending.
   q('#decision-1 [data-doc-opt="Cloudflare"]').click();
+  out.sending = q("#decision-1 [data-doc-answer]").textContent; out.disabled = q('#decision-1 [data-doc-opt="OVH"]').disabled;
+  q('#decision-1 [data-doc-opt="OVH"]').click(); q('#decision-1 [data-doc-opt="Cloudflare"]').click();
   await until(() => q("#decision-1 .doc-answered"), "the answer on its card");
   out.answered = q("#decision-1 .doc-answered").textContent.replace(/\s+/g, " ").trim();
   const ed = [...document.querySelectorAll(".sp-canvas h2 .doc-edit")].find(b => /What it is/.test(b.title));
@@ -500,6 +521,9 @@ try {
         self.assertEqual(got["opts"], ["OVH", "Cloudflare"])
         self.assertIn("mark answered", got["answered"])
         self.assertIn("Cloudflare", got["answered"])
+        self.assertEqual((got["sending"], got["disabled"]), ("Sending…", True))
+        answers = [m for m in core.canvas_show(self.base.c, "relay")["comments"] if (m["anchor"] or {}).get("path") == "decision:1"]
+        self.assertEqual(len(answers), 1, answers)
         self.assertEqual(got["box"], "writing: what the relay is for")
         self.assertTrue(got["v2"])
         show = core.canvas_show(self.base.c, "relay")

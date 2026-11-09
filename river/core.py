@@ -8713,9 +8713,16 @@ def _anchor(anchor):
     return json.dumps(a) if a else None
 
 
+# The same comment again from the same person (the same canvas, part and words) within this time is one comment: a
+# second click while the first one still runs, or a click again because nothing showed yet (#4845: answers came 2 to
+# 6 times, 0 to 5 seconds apart).
+COMMENT_AGAIN = timedelta(seconds=30)
+
+
 def canvas_comment(conn, ref, body, actor=None, anchor=None, version=None, project=None, send_now=False):
     """A comment on a part of a canvas (anchor) or on the whole page. It is a draft until it is sent
-    (canvas_send); send_now sends it at once."""
+    (canvas_send); send_now sends it at once. The same comment again within COMMENT_AGAIN gives back the first one
+    (again: true), sent if send_now, and adds none."""
     if not actor:
         raise RiverError("commenting needs a name: set MAXPM_AGENT or pass --as <name>")
     if not body or not body.strip():
@@ -8726,12 +8733,15 @@ def canvas_comment(conn, ref, body, actor=None, anchor=None, version=None, proje
         v = int(version) if version else latest
         if not conn.execute("SELECT 1 FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], v)).fetchone():
             raise RiverError(f"canvas {c['name']} has no version {v}")
-        cid = conn.execute("INSERT INTO canvas_comments (canvas_id, version, author, anchor, body, state, created_at) "
-                           "VALUES (?,?,?,?,?,'draft',?)",
-                           (c["id"], v, actor, _anchor(anchor), body.strip(), iso(now()))).lastrowid
-    if send_now:
+        same = conn.execute("SELECT id, state FROM canvas_comments WHERE canvas_id=? AND author=? AND parent_id IS NULL "
+                            "AND body=? AND anchor IS ? AND created_at>=? ORDER BY id DESC LIMIT 1",
+                            (c["id"], actor, body.strip(), _anchor(anchor), iso(now() - COMMENT_AGAIN))).fetchone()
+        cid = same["id"] if same else conn.execute(
+            "INSERT INTO canvas_comments (canvas_id, version, author, anchor, body, state, created_at) "
+            "VALUES (?,?,?,?,?,'draft',?)", (c["id"], v, actor, _anchor(anchor), body.strip(), iso(now()))).lastrowid
+    if send_now and (not same or same["state"] == "draft"):
         canvas_send(conn, c["id"], actor, [cid])
-    return _comment_dict(_canvas_comment(conn, cid))
+    return dict(_comment_dict(_canvas_comment(conn, cid)), **({"again": True} if same else {}))
 
 
 def _canvas_writer(conn, c):
