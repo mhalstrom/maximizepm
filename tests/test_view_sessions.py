@@ -843,7 +843,7 @@ class WorkNames(Base):
 
 
 class NewCode(Base):
-    """#4690: an open page loads itself again when the page code changes, once, and not while the person types."""
+    """#4690, #4850: an open page sees new page code: a bar with Reload; it loads itself again only for a new state shape."""
 
     def test_page_build_follows_the_files(self):
         from unittest import mock
@@ -858,7 +858,8 @@ class NewCode(Base):
             server._PAGE_BUILD["at"] = 0
             self.assertNotEqual(server.page_build(), first)
 
-    def test_the_page_reloads_once_when_its_code_changes(self):
+    def test_a_new_version_shows_the_bar_and_the_page_waits_for_a_click(self):
+        """#4850: the served code moves at each maxpm merge; a reload by itself made the page flash and lose its place."""
         from unittest import mock
         build = {"n": 1}
         core.config_set(self.c, "setup_done", "on")  # the setup guide is a dialog: the page would wait for it
@@ -868,16 +869,14 @@ sessionStorage.setItem("loads", String(n));
 try {
   await until(() => q("#sessTitle").textContent === "ag", "the page");
   if (n === 1) {
-    q("#sessText").value = "half a message";
     await fetch("/__bump");
-    await until(() => q("#newCodeBar"), "the bar while the person types");
-    await sleep(4000);
-    check(+sessionStorage.getItem("loads") === 1, "no reload while the box holds text");
-    q("#sessText").value = "";
-    await sleep(8000);
-    post({ error: "no reload after the box was empty" });
+    await until(() => q("#newCodeBar"), "the bar");
+    check(q("#newCodeBar").textContent.includes("MaximizePM was updated."), "the bar's text");
+    await sleep(6000);
+    check(+sessionStorage.getItem("loads") === 1, "no reload by itself");
+    q("#newCodeBar button").click();
   } else {
-    await sleep(5000);
+    await sleep(3000);
     post({ loads: +sessionStorage.getItem("loads"), bar: !!q("#newCodeBar") });
   }
 } catch (e) { post({ error: String(e.stack || e) }); }
@@ -885,6 +884,32 @@ try {
         with mock.patch.object(server, "page_build", lambda: str(build["n"])):
             got = drive_page(self, driver, routes={"/__bump": lambda: build.update(n=2) or {"ok": True}})
         self.assertEqual(got, {"loads": 2, "bar": False})
+
+    def test_a_new_state_shape_reloads_once_then_only_the_bar(self):
+        """#4850: a page whose code cannot read the server's state loads itself again, at most once in 10 minutes."""
+        from unittest import mock
+        core.config_set(self.c, "setup_done", "on")
+        driver = DRIVE_HEAD + r'''
+const n = +(sessionStorage.getItem("loads") || 0) + 1;
+sessionStorage.setItem("loads", String(n));
+try {
+  if (n === 1) {
+    await sleep(8000);
+    post({ error: "no reload for another state shape" });
+  } else {
+    await until(() => q("#newCodeBar"), "the bar after the one reload");
+    await sleep(5000);
+    post({ loads: +sessionStorage.getItem("loads"), text: q("#newCodeBar span").textContent });
+  }
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        with mock.patch.object(server, "STATE_SHAPE", 99):
+            got = drive_page(self, driver)
+        self.assertEqual(got, {"loads": 2, "text": "MaximizePM was updated, and this page must load again."})
+
+    def test_the_page_and_the_server_read_the_same_state_shape(self):
+        js = (Path(server.__file__).parent / "static" / "app.js").read_text()
+        self.assertIn(f"const PAGE_SHAPE = {server.STATE_SHAPE};", js)
 
 
 class ArtifactLinks(Base):

@@ -93,10 +93,15 @@ def _build_id():
 
 _PAGE_BUILD = {"at": 0.0, "id": ""}
 
+# The shape of /api/state that the page's code reads (#4850). Raise it, with PAGE_SHAPE in static/app.js, when a
+# change of the state breaks a page that runs older code: such a page then loads itself again (at most once in 10
+# minutes). Any other change of the code only shows the page a bar with Reload.
+STATE_SHAPE = 1
+
 
 def page_build():
     """The version of the code the page runs (#4690): _build_id, read again after 2 seconds at most. An open page
-    that sees it change loads itself again, so a pushed change shows without a reload by hand."""
+    that sees it change shows a bar with Reload (#4850); it loads itself again only when STATE_SHAPE changed too."""
     if time.time() - _PAGE_BUILD["at"] > 2:
         _PAGE_BUILD.update(at=time.time(), id=_build_id())
     return _PAGE_BUILD["id"]
@@ -2866,6 +2871,7 @@ class Handler(BaseHTTPRequestHandler):
                 if DEV["on"]:
                     st["dev_build"] = _build_id()
                 st["page_build"] = page_build()
+                st["state_shape"] = STATE_SHAPE
                 st["desktop"] = DESKTOP
                 st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
                 st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes

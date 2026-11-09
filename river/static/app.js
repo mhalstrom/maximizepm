@@ -153,10 +153,14 @@ async function drawerAction(what) {
 }
 
 
-// New page code (#4690): maxpm serve sends the version of the page's files in each state. When it changes, the
-// page loads itself again (the address keeps the tab, the session, the item and the artifact; the side panel's
-// tabs stay in this browser), but not while the person types in a box, a dialog or the drawer is open, or files
-// wait to be sent: then a bar says so, and the page loads again when that ends, or at a click on Reload.
+// New page code (#4690, #4850): maxpm serve sends the version of the page's files in each state. When it changes, the
+// page shows a bar, "MaximizePM was updated", with Reload, and keeps it until a click: it never loads itself again
+// for a new version alone, because the served code moves at each maxpm merge, and a reload loses the place in an open
+// artifact or canvas. Only when the server's state has another shape than this code reads (STATE_SHAPE in
+// server.py, PAGE_SHAPE here) does the page load itself again, and at most once in 10 minutes; else the bar says
+// that the page must load again.
+const PAGE_SHAPE = 1;
+const SHAPE_RELOAD = "maxpm-shape-reload";
 let pageBuild = null;
 function busyHere() {
   const a = document.activeElement;
@@ -165,18 +169,32 @@ function busyHere() {
   if ($("#sessText") && $("#sessText").value.trim()) return true;
   return !!($("#sessFiles") && $("#sessFiles").children.length);
 }
-function newCode(build) {
-  if (!build) return false;
-  if (pageBuild == null) { pageBuild = build; return false; }
-  if (build === pageBuild) return false;
-  if (!busyHere()) { location.reload(); return true; }
+function codeBar(text) {
   let bar = $("#newCodeBar");
   if (!bar) {
     bar = document.createElement("div"); bar.id = "newCodeBar"; bar.className = "newcode"; bar.setAttribute("role", "status");
-    bar.innerHTML = `MaximizePM was updated. <button class="btn primary" type="button">Reload</button>`;
+    bar.innerHTML = `<span></span> <button class="btn primary" type="button">Reload</button>`;
     bar.querySelector("button").onclick = () => location.reload();
     document.body.append(bar);
   }
+  bar.querySelector("span").textContent = text;
+}
+// Returns true when the page loads itself again (the caller then draws nothing).
+function newCode(build, shape) {
+  if (shape != null && shape !== PAGE_SHAPE) {
+    let last = 0;
+    try { last = +sessionStorage.getItem(SHAPE_RELOAD) || 0; } catch (e) { /* no storage: the bar only */ }
+    if (!busyHere() && Date.now() - last > 10 * 60 * 1000) {
+      try { sessionStorage.setItem(SHAPE_RELOAD, String(Date.now())); } catch (e) { /* the bar stays the guard */ }
+      location.reload();
+      return true;
+    }
+    codeBar("MaximizePM was updated, and this page must load again.");
+    return false;
+  }
+  if (!build) return false;
+  if (pageBuild == null) { pageBuild = build; return false; }
+  if (build !== pageBuild) codeBar("MaximizePM was updated.");
   return false;
 }
 
@@ -193,7 +211,7 @@ async function refresh() {
   stateClosed = wantClosed();
   setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
-  if (newCode(S.page_build)) return;
+  if (newCode(S.page_build, S.state_shape)) return;
   renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); board.renderTakeovers(); projects.renderBlocked(); targets.renderTargets();
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
