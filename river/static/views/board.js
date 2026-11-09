@@ -63,7 +63,8 @@ export function renderAgents() {
     columns: [
       { formatter: "responsiveCollapse", width: 28, minWidth: 28, headerSort: false, filter: false, resizable: false },
       { title: "Name", field: "name", minWidth: 120, widthGrow: 1, responsive: 0, cssClass: "wrap",
-        html: (r) => `<span class="dot ${r.state}"></span>${hasSession(S, r.name) ? `<span class="nm link" data-session-go="${esc(r.name)}" title="Open the session of ${esc(r.name)} in the Sessions tab">${esc(r.name)}</span>` : `<span class="nm">${esc(r.name)}</span>`}${r.a.note ? `<div class="st">${esc(r.a.note)}</div>` : ""}` },
+        html: (r) => { const wn = (S.session_names || {})[r.name];  // what the session works on (#4695)
+          return `<span class="dot ${r.state}"></span>${hasSession(S, r.name) ? `<span class="nm link" data-session-go="${esc(r.name)}" title="Open the session of ${esc(r.name)} in the Sessions tab">${esc(wn || r.name)}</span>` : `<span class="nm">${esc(r.name)}</span>`}${wn ? `<div class="sid">${esc(r.name)}</div>` : ""}${r.a.note ? `<div class="st">${esc(r.a.note)}</div>` : ""}`; } },
       { title: "Holds", field: "holds", minWidth: 140, widthGrow: 1, responsive: 0, cssClass: "wrap", html: (r) => agentHolds(r.a) },
       { title: "Status", field: "state", width: 90, filter: "select", responsive: 1 },
       { title: "Kind", field: "kind", width: 80, filter: "select", responsive: 2, html: (r) => personChip(r.a.kind) },
@@ -72,7 +73,7 @@ export function renderAgents() {
       { title: "Session", field: "session", width: 150, responsive: 4, cssClass: "wrap", html: (r) => agentSession(r.a) },
     ] });
   agentsTable.set(S.agents.filter(a => showIdle || agentShown(a)).map(a => ({
-    name: a.name, state: a.state, kind: a.kind === "human" ? "human" : "agent", role: a.role || "", last_seen: a.last_seen,
+    name: a.name, state: a.state, work: (S.session_names || {})[a.name] || "", kind: a.kind === "human" ? "human" : "agent", role: a.role || "", last_seen: a.last_seen,
     session: [a.session, a.session_ref].filter(Boolean).join(" "), a,
     holds: a.holds.map(h => `#${h.id} ${h.title}`).join(" "),
     // what the Holds cell shows changes with time, so it is part of the row

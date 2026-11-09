@@ -201,3 +201,4 @@ button.srow-it { cursor: pointer; }
 .tg-sum:hover { color: var(--ink); }
 .chat-col.hide-tools .tg-sum { display: inline-block; }
 .chat-col.hide-tools .tool-group:not(.open) > :not(.tg-sum) { display: none; }
+.sess-h2 #sessTitle { font-size: 12px; margin-left: 4px; }

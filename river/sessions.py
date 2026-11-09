@@ -11,6 +11,7 @@ person types through its Open link (session_url), its terminal, or the text bar 
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -383,6 +384,61 @@ def waiting_for(conn, a, prompt=None, pane=False):
     return out
 
 
+WORK_NAME_MAX = 60
+
+
+def _short_title(t):
+    t = " ".join(re.sub(r"^#\d+\s+", "", str(t or "")).split())
+    return t if len(t) <= WORK_NAME_MAX else t[:WORK_NAME_MAX - 1].rstrip() + "…"
+
+
+def custom_title(path, tail=256 * 1024):
+    """The Claude Code session title (the last custom-title record of its transcript), or None."""
+    if not path or str(path).endswith(".zst"):
+        return None
+    text, _s, _e = _read(path, None, tail)
+    for line in reversed(text.splitlines()):
+        if "custom-title" not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "custom-title" and isinstance(d.get("customTitle"), str):
+            return d["customTitle"]
+    return None
+
+
+def work_name(conn, a, path=None, root=None, croot=None):
+    """What a session works on, as the name the page shows for it (#4695); its agent id stays its address. In this
+    order: the title of the item it holds; the goal it owns; Manager; the deploy targets it owns; the item it
+    finished last ("last: ..."); its Claude Code session title; else its agent id without the four hex digits."""
+    holds = a.get("holds") or []
+    if holds:
+        return _short_title(holds[0]["title"])
+    g = conn.execute("SELECT name FROM goals WHERE owner=? AND status='open' ORDER BY rank LIMIT 1", (a["name"],)).fetchone()
+    if g:
+        return "Goal: " + g["name"]
+    if a.get("role") == "manager":
+        return "Manager"
+    owns = [o.get("name") if isinstance(o, dict) else str(o) for o in a.get("owns") or []]
+    if owns:
+        return "Deploys " + ", ".join(owns)
+    r = conn.execute("SELECT title FROM items WHERE assignee=? AND status='done' ORDER BY closed_at DESC LIMIT 1",
+                     (a["name"],)).fetchone()
+    if r:
+        return "last: " + _short_title(r["title"])
+    if path is None:
+        _kind, path = transcript(conn, a["name"], root, croot)
+    try:
+        t = custom_title(path)
+    except (OSError, ValueError):
+        t = None
+    if t:
+        return _short_title(t)
+    return re.sub(r"-[0-9a-f]{4}$", "", a["name"])
+
+
 def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes=None):
     """The cards of the Sessions tab: one per running agent session, with its item, state, Open link, its last
     lines, and what waits for a person in it (prompts: server.pane_prompts)."""
@@ -417,7 +473,8 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
             conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
         card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "provider": provider(a.get("agent_type"), kind),
-                "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"]))), "name": a["name"], "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
+                "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"]))), "name": a["name"],
+                "title": work_name(conn, a, path, root, croot), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"),
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,

@@ -342,6 +342,18 @@ def open_for(conn, rows):
     return core.setting(conn, "notify_open", item_id=item, agent=person), person
 
 
+def _title(conn, r):
+    """The notice's title: what the session that sent it works on (#4695), else "needs you"."""
+    from . import sessions
+    who = core.origin_agent(conn, None, r["message_id"]) if r["message_id"] is not None else None
+    if not _is_ai(conn, who):
+        return "MaximizePM: needs you"
+    try:
+        return "MaximizePM: " + sessions.work_name(conn, core.agent_status(conn, who))
+    except Exception:  # a name it cannot work out: the plain title
+        return "MaximizePM: needs you"
+
+
 def compose(conn, rows):
     """One message for a batch of outbox rows on one channel. The link follows notify_open: the agent's own app
     (agent), or the page at the thing (maxpm, and agent when the agent has no web link)."""
@@ -352,7 +364,7 @@ def compose(conn, rows):
 
     if len(rows) == 1:
         r = rows[0]
-        return "MaximizePM: needs you", r["summary"], agent_url(r) or _page_link(conn, r, person)
+        return _title(conn, r), r["summary"], agent_url(r) or _page_link(conn, r, person)
     lines = [f"- {r['summary']}" for r in rows[:10]]
     if len(rows) > 10:
         lines.append(f"- and {len(rows) - 10} more")

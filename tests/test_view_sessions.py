@@ -805,6 +805,43 @@ try {
         self.assertEqual(result["tabs"], ["Items", "Artifacts", f"◇ #{self.it} header"])
 
 
+class WorkNames(Base):
+    """#4695: a session shows what it works on; its agent id stays its address."""
+
+    def name(self, who="ag"):
+        return sessions.work_name(self.c, core.agent_status(self.c, who), root=self.root, croot=self.croot)
+
+    def test_the_order_of_the_names(self):
+        from river import notify
+        self.assertEqual(self.name(), "header")  # the item it holds
+        card = self.cards()[0]
+        self.assertEqual((card["name"], card["title"]), ("ag", "header"))
+        q = core.send(self.c, "question", "Push it?", to="mark", actor="ag")["id"]
+        self.assertEqual(notify.compose(self.c, [{"summary": "s", "item_id": None, "message_id": q, "human": "mark"}])[0],
+                         "MaximizePM: header")
+        core.done(self.c, self.it, output="x", actor="ag")
+        core.goal_add(self.c, "site", "launch", "the site is live")
+        core.goal_own(self.c, "launch", actor="ag")
+        self.assertEqual(self.name(), "Goal: launch")
+        core.goal_release(self.c, "launch", actor="ag", no_handoff="test")
+        core.target_add(self.c, "prod")
+        core.target_own(self.c, "prod", actor="ag")
+        self.assertEqual(self.name(), "Deploys prod")
+        core.target_release(self.c, "prod", actor="ag")
+        self.assertEqual(self.name(), "last: header")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET assignee=NULL")
+        self.write(json.dumps({"type": "custom-title", "customTitle": "#12 Fix the \"cart\" page", "sessionId": SID}) + "\n")
+        self.assertEqual(self.name(), 'Fix the "cart" page')  # the Claude Code session title, without its #id
+        self.path.write_text("")
+        core.register(self.c, "web-app-6c44")
+        self.assertEqual(self.name("web-app-6c44"), "web-app")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='ag'")
+        self.assertEqual(self.name(), "Manager")
+        self.assertEqual(sessions._short_title("x" * 80), "x" * 59 + "…")
+
+
 class NewCode(Base):
     """#4690: an open page loads itself again when the page code changes, once, and not while the person types."""
 

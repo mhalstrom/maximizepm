@@ -2724,7 +2724,10 @@ class Handler(BaseHTTPRequestHandler):
                 st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
                 from . import sessions
                 # The agents whose session the Sessions tab shows: the Board's Open session goes there (#4687).
-                st["sessions"] = [a["name"] for a in sessions.running(conn, st["terminals"])]
+                run = sessions.running(conn, st["terminals"])
+                st["sessions"] = [a["name"] for a in run]
+                # What each running session works on, the name the page shows for it (#4695).
+                st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
                 st["relay"] = relay.status()
                 st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
                 return self._send(200, st)

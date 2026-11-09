@@ -69,7 +69,8 @@ export function sessionRow(s) {
     : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + ownNames(s).join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(ownNames(s).join(", ")) : "No item"}</span></div>`;
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
     <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
-      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}<b>${esc(s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
+      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
+      ${s.role === "manager" ? "" : `<div class="sid" title="Its agent id: maxpm --as, messages and commands use it">${esc(s.name)}</div>`}
       <div class="sub">${esc(clip(lastText, 90))}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
     </div>
     ${item}
@@ -192,6 +193,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       $("#sessState").innerHTML = provTag(j.provider) + stateChip(j);
       waitLine(j);
       $("#sessItem").innerHTML = s.name ? headerItem(s) : "";
+      $("#sessName").textContent = s.title || "";
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });
       dict.showFor(list.some(x => x.name === agent) ? (s || {}).provider || j.provider : null, !!j.terminal);
       $("#sessOpen").innerHTML = headerOpen({ ...s, session_url: j.session_url, terminal: j.terminal });
@@ -210,6 +212,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     panelFor(name);  // its own side panel tabs (#4632)
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";
+    $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
     $("#sessText").value = "";
     clearFiles();
