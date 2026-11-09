@@ -55,7 +55,9 @@ function renderInbox() {
   fillSelect("#sendTo", S.agents.map(a => a.name).filter(n => n !== me), false);
   const ib = $("#inbox");
   if (ib.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // do not wipe what they type
-  inboxTable ||= makeTable(ib, { key: "inbox", sort: [{ column: "created_at", dir: "desc" }],
+  // maxHeight: the table scrolls inside itself, so in the one-column layout (narrow screens) the inbox no longer
+  // makes the Board as long as all its messages (#4721); the column heads stay in sight.
+  inboxTable ||= makeTable(ib, { key: "inbox", sort: [{ column: "created_at", dir: "desc" }], maxHeight: "70vh",
     placeholder: "No messages.", responsiveLayout: "collapse", responsiveLayoutCollapseStartOpen: false,
     rowFormatter: (row) => { row.getElement().classList.add("msg"); row.getElement().classList.toggle("read", inboxDone(row.getData().m)); },
     columns: [
