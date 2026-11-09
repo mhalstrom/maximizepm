@@ -9,7 +9,7 @@
 // Artifacts (what it wrote or named). The chat stays in sight beside them: an item opens in a tab of its own here
 // (components/itemView.js), an artifact too. The X of the last tab shows the Artifacts list (#4646); the panel's
 // own X closes it.
-import { $, esc, ago, store, toast, pageToken } from "../lib.js";
+import { $, esc, ago, store, toast, pageToken, copyText } from "../lib.js";
 import { markdown } from "./chat.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
@@ -18,6 +18,8 @@ import { showRows, wireRows } from "../views/artifacts.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
+// The page itself runs away from the computer of maxpm serve: through the relay, or from another computer (#4711).
+export function awayFromHome(origin = location.origin) { return !LOCAL.test(origin + "/"); }
 const IMAGE = /\.(png|jpe?g|gif|webp|svg)$/i, MD = /\.(md|txt)$/i;
 
 // on: the id of the tab that shows, or "items" / "artifacts" for a list (#4685).
@@ -120,7 +122,19 @@ async function show(t) {
     }
     return;
   }
-  if (LOCAL.test(t.target)) return frame(t.target);
+  if (LOCAL.test(t.target)) {
+    if (!awayFromHome()) return frame(t.target);
+    // Seen from another computer (the relay website, #4711), the address would open that computer, not the one
+    // that runs the page: say so, with the address to copy, in place of an empty or wrong frame.
+    note(`<div class="sp-card"><b>Open this on your Mac</b><div class="muted"><code>${esc(t.target)}</code> is a page on the
+      computer that runs MaximizePM, so this browser cannot show it. Open it in a browser there.</div>
+      <button class="btn primary" type="button" data-sp-copy>Copy the address</button></div>`);
+    box.querySelector("[data-sp-copy]").addEventListener("click", async (e) => {
+      if (await copyText(t.target)) { e.target.textContent = "Copied"; setTimeout(() => { e.target.textContent = "Copy the address"; }, 1500); }
+      else toast("Could not copy", true);
+    });
+    return;
+  }
   note(`<div class="muted">Asking whether ${esc(label(t.target))} lets this page show it…</div>`);
   const r = await fetch(`api/frame-check?url=${encodeURIComponent(t.target)}&token=${encodeURIComponent(await pageToken())}`);
   const j = r.ok ? await r.json() : { frame: false };

@@ -169,6 +169,19 @@ try {
 '''
         self.assertEqual(self.drive(driver, "/sessions/ag", {"question": question}), {"ok": True})
 
+    def test_a_local_page_seen_through_the_relay_says_where_it_runs(self):
+        """#4711: on the relay website a local page (localhost, 127.0.0.1) opens the viewer's own computer, so the
+        side panel shows its address to copy in place of a frame; on the computer of maxpm serve it is a frame."""
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  const { awayFromHome } = await import("/components/sidePanel.js");
+  check(!awayFromHome(), "the test page runs on this computer");
+  for (const o of ["http://127.0.0.1:8765", "http://localhost:5173", "http://[::1]:8765"]) check(!awayFromHome(o), o + " is home");
+  for (const o of ["https://relay.example.org", "http://192.168.1.20:8765", "https://localhost.example.com"]) check(awayFromHome(o), o + " is away");
+  post({ ok: true });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
+
     def test_a_click_on_each_tab_of_the_side_panel_shows_it(self):
         """#4652: the panel's tabs once had data-tab, which the page's own click handler reads as a tab of the
         page: a click hid the Sessions tab."""
