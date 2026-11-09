@@ -696,6 +696,15 @@ def build_parser():
                        "session (or --session); maxpm serve must run")
     x.add_argument("name"); x.add_argument("--project")
     x.add_argument("--session", help="the agent whose side panel shows it (default: you)")
+    x = cvs.add_parser("section", help="a doc (#4708): replace one section of a Markdown canvas, or add it; --pending "
+                       "shows it as being written")
+    x.add_argument("name"); x.add_argument("heading", help="the section's heading, for example 'Decisions'")
+    x.add_argument("file", nargs="?", help="the section's text: a file, or - for stdin (or use --text)")
+    x.add_argument("--text"); x.add_argument("--pending", help="what the section will say; the page shows it as being written")
+    x.add_argument("--note"); x.add_argument("--project")
+    x = cvs.add_parser("answer", help="answer a decision of a doc (Decision <n> of <m>: ...) in place; it goes to the "
+                       "session that writes the doc")
+    x.add_argument("name"); x.add_argument("decision", type=int); x.add_argument("text"); x.add_argument("--project")
     x = cvs.add_parser("delete", help="take a canvas off every list"); x.add_argument("name"); x.add_argument("--project")
     x = cvs.add_parser("save", help="write a version of a canvas as a file (for a page that goes into git)")
     x.add_argument("name"); x.add_argument("path"); x.add_argument("--version", type=int); x.add_argument("--project")
@@ -3127,6 +3136,20 @@ def _canvas_dispatch(conn, a, actor):
             raise RiverError(f"the page cannot open it now ({e}); the person sees the canvas in the Artifacts tab")
     if v == "delete":
         return core.canvas_delete(conn, a.name, actor, a.project)
+    if v == "section":
+        if sum(x is not None for x in (a.text, a.file, a.pending)) != 1:
+            raise RiverError("give the section's text one way: a file, - for stdin, --text, or --pending")
+        body = a.text
+        if a.file == "-":
+            body = sys.stdin.read()
+        elif a.file:
+            try:
+                body = Path(a.file).expanduser().read_text()
+            except (OSError, UnicodeDecodeError) as e:
+                raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
+        return core.canvas_section(conn, a.name, a.heading, body, actor, a.project, a.note, a.pending)
+    if v == "answer":
+        return core.canvas_answer(conn, a.name, a.decision, a.text, actor, a.project)
     if v == "save":
         return core.canvas_save(conn, a.name, a.path, a.version, a.project, a.force)
     raise RiverError(f"unknown canvas command {v}")
@@ -3156,6 +3179,15 @@ def _comment_lines(r, indent="  "):
 
 def render_canvas(a, res):
     v = a.cvcmd
+    if v == "section":
+        print(("unchanged: " if res.get("unchanged") else "") + _canvas_line(res))
+        if not res.get("unchanged"):
+            print(f"  section '{res['section']}' {'added' if res['added'] else 'replaced'}: version {res['version']}")
+        return
+    if v == "answer":
+        print(f"answered decision {res['decision']} ({res['name']}) as c{res['id']}; it went to the session that "
+              f"writes the doc")
+        return
     if v == "put":
         print(("unchanged: " if res.get("unchanged") else "") + _canvas_line(res))
         if not res.get("unchanged"):

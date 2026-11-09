@@ -2730,6 +2730,10 @@ OPS = {
     "canvas_delete": lambda c, a, who: core.canvas_delete(c, a["name"], who, a.get("project")),
     "canvas_discard": lambda c, a, who: core.canvas_discard(c, a["comment"], who),
     "canvas_edit": lambda c, a, who: core.canvas_edit(c, a["name"], a.get("text"), who, a.get("project")),
+    "canvas_section": lambda c, a, who: core.canvas_section(c, a["name"], a.get("heading"), a.get("text"), who,
+                                                            a.get("project"), a.get("note"), a.get("pending")),
+    "canvas_answer": lambda c, a, who: core.canvas_answer(c, a["name"], a.get("decision"), a.get("text"), who,
+                                                          a.get("project")),
     # The page's Connect button for the relay: the device flow, finished in the background by maxpm serve.
     "relay_connect": lambda conn, a, who: relay.connect_from_page(bool(a.get("replace"))),
     "relay_disconnect": lambda conn, a, who: relay.disconnect(),

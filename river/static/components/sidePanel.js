@@ -21,6 +21,7 @@ import { itemViewHtml } from "./itemView.js";
 import { linkArtifacts, linkTarget } from "./artLinks.js";
 import { showRows, wireRows } from "../views/artifacts.js";
 import { makeComments, pathIn } from "./canvasComments.js";
+import { decorateDoc } from "./canvasDoc.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
@@ -216,16 +217,23 @@ async function showCanvas(t, box, note) {
     const r = await fetch(src);
     if (on !== t.id) return;
     const d = document.createElement("div"); d.className = "sp-md md sp-canvas";
-    d.innerHTML = r.ok ? markdown(await r.text()) : "MaximizePM cannot show this canvas.";  // markdown(): DOMPurify
+    const text = r.ok ? await r.text() : "";
+    if (on !== t.id) return;
+    d.innerHTML = r.ok ? markdown(text) : "MaximizePM cannot show this canvas.";  // markdown(): DOMPurify
+    // A doc (#4708): pending sections, decision cards answered in place, Edit of a section (newest version only).
+    if (r.ok) decorateDoc(d, text, meta, { ref: "c" + id, live: !t.pin, done: () => show(t) });
     t.md = d;
     // Comment mode on a drawn Markdown canvas: this page finds the part itself (the helper script does it in a frame).
     d.addEventListener("mouseover", (e) => { if (t.commenting) markPart(d, e.target === d ? null : e.target); });
     d.addEventListener("click", (e) => {
       if (!t.commenting) return;
       e.preventDefault(); e.stopPropagation();
-      const el = e.target === d ? null : e.target;
+      const el = e.target === d ? null : e.target.closest(".doc-edit, .doc-answer") ? e.target.closest(".doc-decision, h2, h3, h4, h5, h6") : e.target;
       markPart(d, null); setCommenting(t, false);
-      t.comments.pick(el ? { path: pathIn(el, d), text: (el.innerText || "").replace(/\s+/g, " ").trim().slice(0, 200),
+      // The part's own words, without the doc's controls (an edit link, a decision's answer bar).
+      const words = el ? el.cloneNode(true) : null;
+      if (words) words.querySelectorAll(".doc-edit, .doc-answer").forEach(x => x.remove());
+      t.comments.pick(el ? { path: pathIn(el, d), text: (words.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200),
                               quote: String(getSelection() || "").trim().slice(0, 500) } : null);
       side.scrollIntoView({ block: "nearest" });
     }, true);
@@ -257,6 +265,8 @@ function markPart(root, el) {
 }
 // Show: scroll the page to the part of a comment, and mark it for a moment.
 function showPart(t, path) {
+  const dec = /^decision:(\d+)$/.exec(path || "");  // an answer to a decision of a doc (#4708): its card
+  if (dec) path = "#decision-" + dec[1];
   if (t.frame && t.frame.contentWindow) return t.frame.contentWindow.postMessage({ maxpmCanvas: "show", path }, "*");
   let el = null;
   try { el = t.md && path ? t.md.querySelector(path) : null; } catch (e) { el = null; }

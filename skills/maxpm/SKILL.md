@@ -397,6 +397,11 @@ this computer, with each version, and that the user opens in the MaximizePM page
   names the item's canvases and their open comments.
 - The user can edit a Markdown canvas in the page: that is a new version by the user, and you get a note.
   Read it (`maxpm canvas show <name>`) before you put your next version, so you keep the user's change.
+- A doc (a proposal, a plan, a report for the user to answer) is a Markdown canvas that you write section by
+  section: first put the outline with each section as one line `writing: <what it will say>` (the page
+  shows it as being written), then fill each one: `maxpm canvas section <name> "<heading>" <file>` (or
+  `--text`, or `-`). Write each decision in the decision form (`maxpm guide decisions`): the page shows it
+  as a card, the user answers it in place, and the answer comes to you as a message, like a comment.
 - `maxpm canvas list` shows the canvases; `maxpm canvas show <name> [--version N] [--text]` reads one;
   `maxpm canvas save <name> <path>` writes a version as a file when it must go into git.
 

@@ -369,3 +369,138 @@ try {
         self.assertNotIn("error", got, got)
         self.assertEqual(got["on"], "On “On” h1:nth-of-type(1)")
         self.assertEqual(got["pressed"], "false", "a pick ends the comment mode")
+
+
+DOC = """# Relay
+
+## What it is
+
+writing: what the relay is for
+
+## Decisions
+
+Decision 1 of 2: Where it runs  (item #1)
+What you decide: the host.
+Your answer: "OVH" or "Cloudflare".
+
+Decision 2 of 2: Price
+Your answer: "$5 a month".
+
+```
+## inside code
+```
+"""
+
+
+class Docs(Base):
+    """#4708: a doc is a Markdown canvas written section by section, with decisions answered in place."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "mark", human=True)
+        self.doc = core.canvas_put(self.c, "relay", DOC, "ag", kind="md", title="Relay")["id"]
+
+    def body(self):
+        return core.canvas_show(self.c, "relay")["shown"]["body"]
+
+    def test_sections_replace_add_and_pending(self):
+        self.assertEqual([(s["title"], s["level"]) for s in core.md_sections(DOC)],
+                         [("Relay", 1), ("What it is", 2), ("Decisions", 2)], "a heading in code is not a section")
+        r = core.canvas_section(self.c, "relay", "what it is", "A relay that shows the page anywhere.", "ag")
+        self.assertEqual((r["version"], r["added"], r["section"]), (2, False, "what it is"))
+        self.assertIn("## What it is\n\nA relay that shows the page anywhere.\n\n## Decisions", self.body())
+        r = core.canvas_section(self.c, "relay", "Costs", None, "ag", pending="the monthly cost")
+        self.assertTrue(r["added"])
+        self.assertTrue(self.body().endswith("## Costs\n\nwriting: the monthly cost\n"))
+        # The text may come with its own heading: it is not doubled.
+        core.canvas_section(self.c, "relay", "Costs", "## Costs\n\n$5 a month.", "ag")
+        self.assertEqual(self.body().count("## Costs"), 1)
+        with self.assertRaisesRegex(core.RiverError, "sections are for a Markdown canvas"):
+            core.canvas_section(self.c, "plan", "x", "y", "ag")
+        with self.assertRaisesRegex(core.RiverError, "give the section's text"):
+            core.canvas_section(self.c, "relay", "Costs", "  ", "ag")
+        # A person's change of a section: a new version by the person, and a note to the session.
+        r = core.canvas_section(self.c, "relay", "Costs", "$4 a month.", "mark")
+        self.assertEqual((r["agent"], core.canvas_show(self.c, "relay")["versions"][-1]["author"]), ("ag", "mark"))
+        self.assertTrue(any("mark changed the section 'Costs' of doc relay" in m["body"]
+                            for m in core.inbox(self.c, "ag", mark_read=False)))
+
+    def test_decisions_are_answered_in_place(self):
+        self.assertEqual(core.doc_decisions(DOC), [{"n": 1, "of": 2, "name": "Where it runs"},
+                                                   {"n": 2, "of": 2, "name": "Price"}])
+        a = core.canvas_answer(self.c, "relay", 1, "Cloudflare", "mark")
+        self.assertEqual((a["state"], a["anchor"]["path"], a["decision"]), ("sent", "decision:1", 1))
+        self.assertTrue(any("Answer to decision 1 of 2 (Where it runs): Cloudflare" in m["body"]
+                            for m in core.inbox(self.c, "ag", mark_read=False)))
+        with self.assertRaisesRegex(core.RiverError, "has no decision 3; it has 1, 2"):
+            core.canvas_answer(self.c, "relay", 3, "x", "mark")
+        with self.assertRaisesRegex(core.RiverError, "needs words"):
+            core.canvas_answer(self.c, "relay", 2, " ", "mark")
+
+    def test_the_command_and_the_mcp_tool(self):
+        import contextlib
+        import io
+        from river import cli, mcp
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "--as", "ag", "canvas", "section", "relay", "Costs", "--pending", "the cost"])
+            cli.run(["-q", "--as", "mark", "canvas", "answer", "relay", "2", "$5 a month"])
+        self.assertIn("section 'Costs' added: version 2", out.getvalue())
+        self.assertIn("answered decision 2 (Price)", out.getvalue())
+        self.assertEqual(mcp.canvas_argv({"action": "section", "name": "relay", "heading": "Costs", "text": "x"}),
+                         ["canvas", "section", "relay", "Costs", "--text=x"])
+        self.assertEqual(mcp.canvas_argv({"action": "section", "name": "relay", "heading": "Costs", "pending": "p"}),
+                         ["canvas", "section", "relay", "Costs", "--pending=p"])
+        self.assertEqual(mcp.canvas_argv({"action": "answer", "name": "relay", "decision": 1, "text": "OVH"}),
+                         ["canvas", "answer", "relay", "1", "OVH"])
+        self.assertEqual(server.OPS["canvas_answer"](self.c, {"name": "relay", "decision": 1, "text": "OVH"}, "mark")["decision"], 1)
+
+
+class PanelDoc(ChromePanel):
+    """#4708: a doc in the side panel: a pending section, decision cards answered in place, Edit of a section."""
+
+    def test_a_doc_in_the_panel(self):
+        def put(c):
+            return core.canvas_put(c, "relay", DOC, "ag", kind="md", title="Relay")["id"]
+
+        def call(fn):
+            def run():
+                c = core.connect()
+                try:
+                    return fn(c)
+                finally:
+                    c.close()
+            return run
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  await sleep(400);
+  await fetch("/__doc");
+  await until(() => q(".doc-decision"), "the doc with its decision cards");
+  const out = { pending: q(".doc-pending").textContent.trim(), cards: [...document.querySelectorAll(".doc-decision")].map(c => c.id),
+                opts: [...document.querySelectorAll("#decision-1 [data-doc-opt]")].map(b => b.textContent) };
+  q('#decision-1 [data-doc-opt="Cloudflare"]').click();
+  await until(() => q("#decision-1 .doc-answered"), "the answer on its card");
+  out.answered = q("#decision-1 .doc-answered").textContent.replace(/\s+/g, " ").trim();
+  const ed = [...document.querySelectorAll(".sp-canvas h2 .doc-edit")].find(b => /What it is/.test(b.title));
+  ed.click();
+  await until(() => q(".doc-sec-edit textarea"), "the section's box");
+  out.box = q(".doc-sec-edit textarea").value;
+  q(".doc-sec-edit textarea").value = "It shows the page from anywhere."; q(".doc-sec-edit .btn.primary").click();
+  await until(() => q(".sp-cver") && q(".sp-cver").value === "2" && !q(".doc-pending"), "version 2");
+  out.v2 = q(".sp-canvas").textContent.includes("It shows the page from anywhere.");
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = self.tvs.drive_page(self.base, driver, routes={"/__doc": call(put)})
+        self.assertNotIn("error", got, got)
+        self.assertEqual(got["pending"], "Being written: what the relay is for")
+        self.assertEqual(got["cards"], ["decision-1", "decision-2"])
+        self.assertEqual(got["opts"], ["OVH", "Cloudflare"])
+        self.assertIn("mark answered", got["answered"])
+        self.assertIn("Cloudflare", got["answered"])
+        self.assertEqual(got["box"], "writing: what the relay is for")
+        self.assertTrue(got["v2"])
+        show = core.canvas_show(self.base.c, "relay")
+        self.assertEqual((show["version"], show["agent"]), (2, "ag"))

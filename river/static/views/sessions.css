@@ -167,6 +167,18 @@ button.srow-it { cursor: pointer; }
 .cv-picking .sp-canvas, .cv-picking .sp-canvas * { cursor: crosshair; }
 .sp-canvas .maxpm-hi { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sp-canvas .maxpm-flash { outline: 3px solid #d29922; outline-offset: 3px; }
+/* Docs (#4708): a pending section, a decision card answered in place, Edit of a section. */
+.doc-pending { color: var(--muted); font-style: italic; }
+.doc-dots { display: inline-block; width: 1.4em; }
+.doc-dots::after { content: "…"; animation: doc-dots 1.2s steps(4) infinite; display: inline-block; overflow: hidden; vertical-align: bottom; width: 0; }
+@keyframes doc-dots { to { width: 1.2em; } }
+.doc-decision { border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 8px 12px; margin: 12px 0; background: var(--panel); }
+.doc-decision > p { white-space: pre-line; margin: 4px 0; }
+.doc-answer { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); font-size: 13px; }
+.doc-answered { background: var(--bg); border-radius: 6px; padding: 4px 8px; }
+.doc-edit { font-size: 12px; font-weight: normal; border: 0; background: none; color: var(--accent); cursor: pointer; opacity: 0; padding: 0 4px; }
+.sp-canvas :is(h2, h3, h4, h5, h6):hover .doc-edit, .doc-edit:focus { opacity: 1; }
+.doc-sec-edit textarea { min-height: 160px; }
 .sp-img { max-width: 100%; height: auto; display: block; margin: auto; }
 .sp-md { padding: 12px 16px; font-size: 14px; line-height: 1.6; }
 .sp-note { padding: 16px; font-size: 13px; }

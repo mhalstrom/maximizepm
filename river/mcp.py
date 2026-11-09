@@ -62,10 +62,16 @@ TOOLS = [
                     "page or on the whole page. put (a new version; the same name in the same project is the same "
                     "canvas), list, show (a version's text, its versions and comments), comments (the comments with "
                     "their replies; open: only the ones that wait for you), comment, send (your draft comments to the "
-                    "session that wrote it), reply, resolve, delete, open (put it in front of the user: the MaximizePM page opens it in your session's side panel), save (a version as a file).",
+                    "session that wrote it), reply, resolve, delete, open (put it in front of the user: the MaximizePM page opens it in your session's side panel), save (a version as a file), "
+                    "section (a doc: replace or add one section of a Markdown canvas; pending shows it as being written), "
+                    "answer (a decision of a doc, answered in place).",
      "inputSchema": {"type": "object", "required": ["action"], "properties": {
          "action": {"type": "string", "enum": ["put", "list", "show", "comments", "comment", "send", "reply",
-                                                "resolve", "open", "delete", "save"]},
+                                                "resolve", "open", "delete", "save", "section", "answer"]},
+         "heading": {"type": "string", "description": "section: the heading of the section to replace or add (a doc)"},
+         "pending": {"type": "string", "description": "section: what the section will say; the page shows it as being "
+                                                      "written"},
+         "decision": {"type": "integer", "description": "answer: the decision's number (Decision <n> of <m>)"},
          "name": {"type": "string", "description": "the canvas (all actions except list, reply, resolve)"},
          "text": {"type": "string", "description": "put: the page's whole text; comment and reply: the comment"},
          "kind": {"type": "string", "enum": ["html", "md", "svg"], "description": "put: the kind of a new canvas"},
@@ -106,7 +112,8 @@ CHAT_INSTRUCTIONS = ("MaximizePM is the user's work queue for AI agents. In this
 def canvas_argv(a):
     """The maxpm canvas words of an MCP canvas call: the same operations as the command (#4648)."""
     act = a.get("action")
-    acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "open", "delete", "save")
+    acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "open", "delete", "save",
+            "section", "answer")
     if act not in acts:
         raise RiverError(f"canvas action is one of {', '.join(acts)}")
     words = ["canvas", act]
@@ -129,9 +136,24 @@ def canvas_argv(a):
         if a.get("text") is None:
             raise RiverError("canvas put needs the page's whole text (text)")
         words += [f"--name={words.pop()}", f"--text={a['text']}"]
+    if act == "section":
+        if not a.get("heading"):
+            raise RiverError("canvas section needs the section's heading (heading)")
+        words.append(" " + a["heading"] if a["heading"].startswith("-") else a["heading"])
+        if a.get("pending") is not None:
+            words.append(f"--pending={a['pending']}")
+        elif a.get("text") is not None:
+            words.append(f"--text={a['text']}")
+        else:
+            raise RiverError("canvas section needs the section's text (text) or what it will say (pending)")
+    if act == "answer":
+        if a.get("decision") is None or not a.get("text"):
+            raise RiverError("canvas answer needs the decision's number (decision) and the answer (text)")
+        words += [str(int(a["decision"])), " " + a["text"] if a["text"].startswith("-") else a["text"]]
     opts = {"put": ("kind", "title", "note", "item", "project"), "list": ("project", "item"),
             "show": ("version", "project"), "comments": ("project",), "comment": ("quote", "path", "version", "project"),
-            "send": ("project",), "resolve": ("note",), "open": ("project", "session"), "delete": ("project",), "save": ("version", "project")}
+            "send": ("project",), "resolve": ("note",),
+            "section": ("note", "project"), "answer": ("project",), "open": ("project", "session"), "delete": ("project",), "save": ("version", "project")}
     for k in opts.get(act, ()):
         if act == "save" and k == "path":
             continue

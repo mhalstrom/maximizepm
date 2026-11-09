@@ -8880,6 +8880,97 @@ def canvas_resolve(conn, comment_id, actor=None, note=None):
     return _comment_dict(_canvas_comment(conn, r["id"]))
 
 
+# Docs (#4708): a doc is a Markdown canvas that a session writes section by section, as on claude.ai. A section is a
+# heading and the lines up to the next heading of the same or a higher level; a section whose text is one line
+# "writing: <intent>" is pending, and the page shows it as being written.
+_MD_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_DECISION = re.compile(r"^\W*Decision (\d+) of (\d+):\s*(.+?)\s*(?:\(item #\d+\))?\s*$", re.I)
+
+
+def md_sections(text):
+    """The sections of a Markdown text: [{title, level, start, end}] with line numbers (end: the first line after the
+    section); headings inside fenced code do not count."""
+    lines, out, fence = text.split("\n"), [], None
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*(```|~~~)", line)
+        if m:
+            fence = None if fence == m.group(1) else (fence or m.group(1))
+            continue
+        h = None if fence else _MD_HEADING.match(line)
+        if h:
+            out.append({"title": h.group(2).strip(), "level": len(h.group(1)), "start": i, "end": len(lines)})
+    for k, s in enumerate(out):
+        nxt = next((x for x in out[k + 1:] if x["level"] <= s["level"]), None)
+        s["end"] = nxt["start"] if nxt else len(lines)
+    return out
+
+
+def canvas_section(conn, ref, heading, body=None, actor=None, project=None, note=None, pending=None, level=2):
+    """Replace one section of a Markdown canvas (its heading stays) as a new version, or add it at the end when no
+    section has that heading. pending: the section shows as being written ("writing: <intent>"). A person's change of a
+    section sends a note to the session that writes the doc (#4708)."""
+    c = _canvas_row(conn, ref, project)
+    if c["kind"] != "md":
+        raise RiverError(f"canvas {c['name']} is {c['kind']}: sections are for a Markdown canvas (a doc)")
+    heading = re.sub(r"^#+\s*", "", (heading or "").strip())
+    if not heading:
+        raise RiverError("say the section's heading, for example 'Decisions'")
+    if pending is not None:
+        body = f"writing: {pending.strip() or 'this section'}"
+    if body is None or not str(body).strip():
+        raise RiverError("give the section's text (a file, stdin, or --text), or --pending '<what it will say>'")
+    body = str(body).strip("\n")
+    if _MD_HEADING.match(body.split("\n", 1)[0]):  # the text came with its own heading: keep the old one
+        first = _MD_HEADING.match(body.split("\n", 1)[0])
+        if first.group(2).strip().lower() == heading.lower():
+            body = body.split("\n", 1)[1].strip("\n") if "\n" in body else ""
+    text = _canvas_latest(conn, c["id"])["body"]
+    lines = text.split("\n")
+    found = next((s for s in md_sections(text) if s["title"].lower() == heading.lower()), None)
+    if found:
+        tail = lines[found["end"]:]
+        new = lines[:found["start"] + 1] + [""] + body.split("\n") + ([""] if tail else []) + tail
+    else:
+        new = lines + ([""] if lines and lines[-1].strip() else []) + [f"{'#' * level} {heading}", ""] + body.split("\n")
+    res = canvas_put(conn, c["name"], "\n".join(new).rstrip("\n") + "\n", actor,
+                     project=_project_name(conn, c["project_id"]), item=c["item_id"],
+                     note=note or (f"section {heading}" + (" (pending)" if pending is not None else "")))
+    if _is_person(conn, actor) and not res.get("unchanged"):
+        to = _canvas_writer(conn, c)
+        if to or c["item_id"]:
+            send(conn, "note", f"{actor} changed the section '{heading}' of doc {c['name']} in the page: version "
+                 f"{res['version']}. Read it before your next version: maxpm canvas show {c['name']}",
+                 to=to, item=c["item_id"], actor=actor, level="low")
+    return dict(res, section=heading, added=not found)
+
+
+def doc_decisions(text):
+    """The decisions of a doc in the decision form (maxpm guide decisions): [{n, of, name, answer_hint}]."""
+    out = []
+    for line in text.split("\n"):
+        m = _DECISION.match(line.strip())
+        if m:
+            out.append({"n": int(m.group(1)), "of": int(m.group(2)), "name": m.group(3).strip()})
+    return out
+
+
+def canvas_answer(conn, ref, decision, answer, actor=None, project=None):
+    """A person's answer to a decision of a doc, in place (#4708): a comment on the decision, sent at once to the
+    session that writes the doc (or a fresh session for its item), as maxpm answer does for a question."""
+    c = _canvas_row(conn, ref, project)
+    if not answer or not str(answer).strip():
+        raise RiverError("an answer needs words: the option, or what you decide")
+    ds = {d["n"]: d for d in doc_decisions(_canvas_latest(conn, c["id"])["body"])}
+    n = int(str(decision).lstrip("#").replace("decision-", "").replace("decision:", ""))
+    if n not in ds:
+        raise RiverError(f"doc {c['name']} has no decision {n}; it has {', '.join(map(str, sorted(ds))) or 'none'}")
+    d = ds[n]
+    com = canvas_comment(conn, c["id"], f"Answer to decision {n} of {d['of']} ({d['name']}): {str(answer).strip()}",
+                         actor, {"path": f"decision:{n}", "text": f"Decision {n} of {d['of']}: {d['name']}"},
+                         send_now=True)
+    return dict(com, decision=n, name=d["name"])
+
+
 def canvas_delete(conn, ref, actor=None, project=None):
     """Delete a canvas: it leaves every list. Its versions stay in the database, and a put of the same name in
     the same project brings it back with a new version."""
