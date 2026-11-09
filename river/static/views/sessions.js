@@ -142,14 +142,32 @@ export function makeSessions({ isShown, onPick = () => {} }) {
 
   // The tab fills the window below the header; the view scrolls inside it, so the text bar stays in sight.
   // On a phone (#4885) the tab shows the list or the chat of one session: the chat fills the screen under the header.
+  // The keyboard of a phone (#4902): while a field of the chat has the focus and the keyboard makes the visible part
+  // (visualViewport) smaller than the window, the tab is fixed to that visible part: its top (iOS scrolls the page
+  // under the keyboard: offsetTop) and its height, so the message box sits right above the keyboard. It follows each
+  // resize and scroll of the visible part, and again after the keyboard's animation ends.
+  function keyboardOpen(lay, vv) {
+    const a = document.activeElement;
+    return !!(vv && a && lay.contains(a) && /^(TEXTAREA|INPUT)$/.test(a.tagName) && vv.height < window.innerHeight - 80);
+  }
   function fit() {
-    const lay = $("#sessLayout"), phone = window.innerWidth < 760;
-    if (!isShown() || (phone && !lay.classList.contains("phone-chat"))) return lay.style.removeProperty("height");
-    const h = phone && window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    const lay = $("#sessLayout"), phone = window.innerWidth < 760, vv = window.visualViewport;
+    const chat = isShown() && phone && lay.classList.contains("phone-chat");
+    const kb = chat && keyboardOpen(lay, vv);
+    lay.classList.toggle("phone-kb", kb);
+    if (kb) { lay.style.top = vv.offsetTop + "px"; lay.style.height = vv.height + "px"; return; }
+    lay.style.removeProperty("top");
+    if (!isShown() || (phone && !chat)) return lay.style.removeProperty("height");
+    const h = phone && vv ? vv.height : window.innerHeight;
     lay.style.height = Math.max(320, h - Math.max(0, lay.getBoundingClientRect().top)) + "px";
   }
-  window.addEventListener("resize", fit);
-  if (window.visualViewport) window.visualViewport.addEventListener("resize", fit);
+  let fitting = 0;
+  const fitSoon = () => { cancelAnimationFrame(fitting); fitting = requestAnimationFrame(fit); };
+  const fitAfter = () => { fitSoon(); setTimeout(fit, 350); };  // the keyboard opens or closes in about 300 ms
+  window.addEventListener("resize", fitSoon);
+  if (window.visualViewport) { window.visualViewport.addEventListener("resize", fitSoon); window.visualViewport.addEventListener("scroll", fitSoon); }
+  $("#sessLayout").addEventListener("focusin", fitAfter);
+  $("#sessLayout").addEventListener("focusout", fitAfter);
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
 

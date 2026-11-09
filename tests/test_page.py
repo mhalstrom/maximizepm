@@ -243,6 +243,49 @@ try {
                                "list": True, "again": True})
         self.assertLess(got["width"], 760)
 
+    def test_the_message_box_stays_above_the_phone_keyboard(self):
+        """#4902: on an iPhone the keyboard makes the visible part of the page (visualViewport) smaller and scrolls the
+        page; the Sessions tab then covers that visible part, so the message box sits right above the keyboard. A
+        browser here has no keyboard: a stand-in visualViewport says what an iPhone's says."""
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  q('nav button[data-tab="sessions"]').click();
+  await until(() => q("#sessTitle").textContent === "ag", "session ag shown");
+  const lay = q("#sessLayout"), box = q("#sessText");
+  // As for a session that the page can type into: the box shows and stays enabled (the poll hides and disables it
+  // for this one, which takes the focus away).
+  const sbar = q("#sessBar"); sbar.classList.remove("hidden"); sbar.classList.toggle = () => false; box.disabled = false;
+  Object.defineProperty(box, "disabled", { get: () => false, set: () => {}, configurable: true });
+  const vv = Object.assign(new EventTarget(), { height: Math.round(innerHeight * 0.55), offsetTop: 230, width: innerWidth });
+  Object.defineProperty(window, "visualViewport", { value: vv, configurable: true });
+  // The session waits on the person: the page opens its dialog once by itself, which takes the focus. Close it first.
+  await until(() => q("#waitDlg") && !q("#waitDlg").classList.contains("hidden"), "the wait dialog").catch(() => {});
+  if (q("#waitDlg")) q("#waitDlg").classList.add("hidden");
+  box.focus();
+  await sleep(450);
+  const r = lay.getBoundingClientRect(), bar = q("#sessBar").getBoundingClientRect();
+  const out = { kb: lay.classList.contains("phone-kb"), fixed: getComputedStyle(lay).position,
+    top: Math.round(r.top), height: Math.round(r.height), want: [vv.offsetTop, vv.height],
+    barEnd: Math.round(vv.offsetTop + vv.height - bar.bottom) };
+  // iOS moves the page while the keyboard is open. The page listens to the real visualViewport (from its load), not
+  // to this stand-in: a resize of the window runs the same fit.
+  vv.offsetTop = 260; dispatchEvent(new Event("resize"));
+  await sleep(100);
+  out.moved = Math.round(lay.getBoundingClientRect().top);
+  vv.height = innerHeight; vv.offsetTop = 0;  // the keyboard closes
+  box.blur();
+  await sleep(450);
+  out.after = { kb: lay.classList.contains("phone-kb"), top: lay.style.top, fixed: getComputedStyle(lay).position };
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag", size="390,844")
+        self.assertTrue(got["kb"], got)
+        self.assertEqual((got["fixed"], got["top"], got["height"]), ("fixed", *got["want"]))
+        self.assertGreaterEqual(got["barEnd"], 0, "the message box is inside the visible part")
+        self.assertLess(got["barEnd"], 40, "and right above the keyboard: no empty band under it")
+        self.assertEqual(got["moved"], 260)
+        self.assertEqual(got["after"], {"kb": False, "top": "", "fixed": "static"})
+
     def test_a_click_on_each_tab_of_the_side_panel_shows_it(self):
         """#4652: the panel's tabs once had data-tab, which the page's own click handler reads as a tab of the
         page: a click hid the Sessions tab."""

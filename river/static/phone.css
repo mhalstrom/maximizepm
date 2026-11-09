@@ -102,6 +102,10 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   /* A session row: its name and state, then its item under them, not in a narrow right column. */
   .slist .srow, .slist-mgr .srow { grid-template-columns: minmax(0, 1fr); }
   .slist .srow-it, .slist-mgr .srow-it { border-left: 0; border-top: 1px solid var(--line); }
+  /* The keyboard is open (sessions.js fit, #4902): the tab covers the visible part of the page, its top and height
+     set there, so the message box sits right above the keyboard. */
+  .sess-layout.phone-kb { position: fixed; left: 0; right: 0; z-index: 20; background: var(--panel); }
+  .sess-layout.phone-kb > .sess-main { padding-bottom: 6px; }
   .sess-layout.phone-chat > .sess-main { height: auto; min-height: 0; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
   #sessBack { display: inline-flex; align-items: center; min-height: 40px; padding: 4px 10px 4px 6px; white-space: nowrap; flex: none; }
   /* The head: ‹ Sessions, the name, Settings and Open session in one line; the state under it. */
