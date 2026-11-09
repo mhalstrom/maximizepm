@@ -386,6 +386,58 @@ class LinkTest(Base):
             self.until(lambda: (relay.load() or {}).get("tunnel") == "https://home-zz2345.relay.example", "new address")
             self.assertEqual(len(got), 1)
 
+    def test_keeps_the_computer_awake_while_connected(self):
+        """#4754: caffeinate -i -w <serve's pid> while relay.json exists; it ends with the connection, and the
+        setting relay_keep_awake off keeps it from starting."""
+        started = []
+
+        class Proc:
+            def __init__(self, argv):
+                self.argv, self.ended = argv, False
+                started.append(self)
+
+            def poll(self):
+                return 0 if self.ended else None
+
+            def terminate(self):
+                self.ended = True
+        relay.AWAKE_RUNNER = Proc
+        self.addCleanup(setattr, relay, "AWAKE_RUNNER", None)
+        self.start()
+        side, _ = self.hello()
+        side.send_json({"t": "welcome", "v": 3, "account": "Alice", "limits": {}})
+        self.until(lambda: relay.STATE.get("state") == "connected", "connected")
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0].argv, ["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())])
+        self.assertTrue(relay.STATE.get("awake"))
+        os.remove(relay.config_path())
+        self.until(lambda: started[0].ended, "caffeinate ends when the computer is disconnected")
+        core.config_set(self.conn, "relay_keep_awake", "off")
+        with self.assertRaises(RiverError):
+            core.config_set(self.conn, "relay_keep_awake", "maybe")
+        relay.save({"url": self.fake.url, "token": "tok", "account": "Alice", "host": "mac"})
+        side = self.fake.side(timeout=15)  # with no relay.json the link looks again every 5 s
+        side.recv_json()
+        side.send_json({"t": "welcome", "v": 3, "account": "Alice", "limits": {}})
+        self.until(lambda: relay.STATE.get("state") == "connected", "connected again")
+        self.assertEqual(len(started), 1, "relay_keep_awake off: the computer sleeps as usual")
+
+    def test_a_relay_that_stops_answering_is_dialed_again(self):
+        """#4754: a connection that looks open but carries nothing (a network change, a sleeping router) ends
+        after SILENT_LIMIT, and river dials again."""
+        for name, value in (("PING_EVERY", 0.1), ("SILENT_LIMIT", 0.6)):
+            self.addCleanup(setattr, relay, name, getattr(relay, name))
+            setattr(relay, name, value)
+        self.start()
+        side, _ = self.hello()
+        side.send_json({"t": "welcome", "v": 3, "account": "Alice", "limits": {}})
+        self.until(lambda: relay.STATE.get("state") == "connected", "connected")
+        # The relay side reads nothing more and answers no ping.
+        self.until(lambda: relay.STATE.get("state") == "waiting", "the silent connection ended")
+        self.assertIn("no answer from the relay", relay.STATE.get("error", ""))
+        again, hello = self.hello()
+        self.assertEqual(hello["t"], "hello")
+
     def test_another_protocol_says_to_update(self):
         self.start()
         side, _ = self.hello()
@@ -620,3 +672,77 @@ class PageConnect(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoginAgent(Base):
+    """#4754: maxpm serve --install-login and --remove-login (a launchd agent)."""
+
+    def setUp(self):
+        super().setUp()
+        from river import login
+        self.login = login
+        self.calls = []
+        self.loaded = False
+
+        def launchctl(argv):
+            self.calls.append(argv[1])
+            if argv[1] == "print":
+                return (0 if self.loaded else 113), ""
+            return 0, ""
+        login.LAUNCHCTL = launchctl
+        self.addCleanup(setattr, login, "LAUNCHCTL", None)
+        home = os.path.join(self.tmp.name, "home")
+        patch = mock.patch.dict(os.environ, {"HOME": home})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.conn = core.connect()
+        self.addCleanup(self.conn.close)
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        self.free = s.getsockname()[1]
+        s.close()
+        core.config_set(self.conn, "serve_port", str(self.free))
+
+    def test_install_writes_the_agent_and_starts_it_when_no_serve_runs(self):
+        import plistlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["serve", "--install-login"])
+        path = self.login.plist_path()
+        self.assertTrue(str(path).startswith(os.path.join(self.tmp.name, "home")))
+        spec = plistlib.loads(path.read_bytes())
+        self.assertEqual(spec["Label"], "com.maximizepm.serve")
+        self.assertEqual(spec["ProgramArguments"][2:], ["serve", "--port", str(self.free)])
+        self.assertTrue(spec["RunAtLoad"])
+        self.assertEqual(spec["KeepAlive"], {"SuccessfulExit": False})
+        self.assertEqual(spec["EnvironmentVariables"]["MAXPM_DB"], os.environ["MAXPM_DB"])
+        self.assertIn("bootstrap", self.calls)
+        self.assertIn("it runs now", out.getvalue())
+
+        # Loaded already (it may run this very serve): the file changes, launchd is left alone.
+        self.calls.clear()
+        self.loaded = True
+        with contextlib.redirect_stdout(io.StringIO()) as again:
+            cli.run(["serve", "--install-login"])
+        self.assertNotIn("bootstrap", self.calls)
+        self.assertNotIn("bootout", self.calls)
+        self.assertIn("next login", again.getvalue())
+
+        with contextlib.redirect_stdout(io.StringIO()) as gone:
+            cli.run(["serve", "--remove-login"])
+        self.assertFalse(path.exists())
+        self.assertIn("bootout", self.calls)
+        self.assertIn("no longer starts at login", gone.getvalue())
+
+    def test_a_serve_that_runs_already_is_not_started_twice(self):
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", self.free))
+        except OSError:
+            self.skipTest("the port was taken")
+        s.listen()
+        self.addCleanup(s.close)
+        res = self.login.install(self.conn)
+        self.assertTrue(res["already_running"])
+        self.assertFalse(res["started_now"])
+        self.assertNotIn("bootstrap", self.calls)

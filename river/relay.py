@@ -68,6 +68,7 @@ PAGE_PORT = {"port": None}  # maxpm serve's port, for the relayed page requests
 # Test hooks: tests replace these.
 OPEN_SOCKET = None  # (url, headers) -> WebSocket
 URLOPEN = None  # (request, timeout) -> response
+AWAKE_RUNNER = None  # (argv) -> an object with terminate() and poll(), in place of subprocess.Popen
 
 
 # ---------------------------------------------------------------- files
@@ -415,6 +416,54 @@ def saved_status() -> dict:
     return out
 
 
+class Awake:
+    """Keeps this computer from idle sleep while it is connected to the relay (setting relay_keep_awake):
+    caffeinate -i -w <this process>, so it ends with maxpm serve even when serve dies. macOS only."""
+
+    def __init__(self):
+        self.proc = None
+
+    def want(self) -> bool:
+        try:
+            conn = core.connect()
+            try:
+                return core.setting(conn, "relay_keep_awake") == "on"
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - no queue database: keep the default
+            return True
+
+    def on(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        if AWAKE_RUNNER is None and (core.PLATFORM != "darwin" or not os.path.exists("/usr/bin/caffeinate")):
+            return
+        argv = ["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())]
+        try:
+            if AWAKE_RUNNER is not None:
+                self.proc = AWAKE_RUNNER(argv)
+            else:
+                import subprocess
+                self.proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL)
+        except OSError:
+            self.proc = None
+        _set_state(awake=True if self.proc is not None else None)
+
+    def off(self) -> None:
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+            except OSError:
+                pass
+            self.proc = None
+        _set_state(awake=None)
+
+    def follow(self, configured: bool) -> None:
+        """On while relay.json exists and the setting is on; else off. Read again each pass of Link.run."""
+        self.on() if configured and self.want() else self.off()
+
+
 class Link:
     """Keeps the socket to the relay open while relay.json exists. One per maxpm serve."""
 
@@ -425,13 +474,22 @@ class Link:
         self.refused_token = None  # a token the relay refused: wait for a new maxpm connect
         self.part = PART  # bytes of a body in one frame: the relay's welcome may ask for less
         self.cancelled: set = set()  # ids of requests whose browser went away (cancel)
+        self.awake = Awake()
 
     def run(self) -> None:
         _set_state(state="starting")  # relay-state.json now names this maxpm serve (its pid)
+        try:
+            self._run()
+        finally:
+            self.awake.off()
+
+    def _run(self) -> None:
         backoff = 1.0
         while not self.stop.is_set():
             pause = None  # seconds to wait before the next try; None: the backoff
             cfg = load()
+            # Awake while connected or trying to connect: a computer asleep cannot dial the relay again.
+            self.awake.follow(bool(cfg) and cfg.get("token") != self.refused_token)
             if not cfg:
                 _set_state(state="off", error=None)
                 self.wait(5)

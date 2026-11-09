@@ -207,6 +207,11 @@ DEFAULT_SETTINGS = {
     # same for one pass, git shows no change in the code folder that is not committed (an agent in the middle of an
     # edit), and the new code loads. maxpm serve --restart does it at once. off: only a person restarts it.
     "serve_reload": "on",
+    # While this computer is connected to the relay (maxpm connect), maxpm serve keeps it from idle sleep
+    # (macOS caffeinate -i), so the tunnel answers while the person is away. The display still sleeps; the cost
+    # is the power of a computer that stays on (a few watts for a Mac mini or a MacBook on its charger). off:
+    # the computer sleeps as usual, and the tunnel is offline while it sleeps.
+    "relay_keep_awake": "on",
     # A lease does not run out while its agent is busy. An agent is busy when a command runs in its session (a
     # process below the agent CLI that started after the agent's last river command: a test run, a build), when its
     # tmux pane changes, when its pane shows a prompt for a person, or when its Claude Code transcript has a
@@ -1234,7 +1239,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is on or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt") and value not in ("on", "off"):
+    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "relay_keep_awake") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
         autocompact_tokens(value)

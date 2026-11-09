@@ -1122,6 +1122,10 @@ def build_parser():
     x.add_argument("--dev", action="store_true", help="restart on code change; the page reloads itself")
     x.add_argument("--restart", action="store_true",
                    help="ask the maxpm serve that runs to start again with the code on disk, and wait until it answers")
+    x.add_argument("--install-login", action="store_true",
+                   help="macOS: start maxpm serve at login and again after a crash (a launchd agent), for a computer "
+                        "you reach through the relay")
+    x.add_argument("--remove-login", action="store_true", help="remove that launchd agent")
     sk = sub.add_parser("skills", help="install the agent guides as Claude Code skills")
     sks = sk.add_subparsers(dest="scmd", required=True)
     x = sks.add_parser("install", help="link the guides (maxpm, maxpm-planner, maxpm-manager) into ~/.claude/skills")
@@ -1412,6 +1416,20 @@ def _run(args, conn):
               if res["restarted"] else
               "maxpm serve took the request but did not answer again within 60s: look at its terminal")
         return 0 if res["restarted"] else 1
+    if args.cmd == "serve" and (args.install_login or args.remove_login):
+        from . import login
+        if args.remove_login:
+            res = login.remove()
+            print(f"Removed {res['plist']}: maxpm serve no longer starts at login." if res["removed"]
+                  else "maxpm serve was not set to start at login.")
+            return 0
+        res = login.install(conn)
+        how = ("it runs now" if res["started_now"] else
+               "launchd starts it at the next login (an agent is loaded already)" if res["agent_loaded"] else
+               f"a maxpm serve already answers on port {res['port']}, so launchd starts it at the next login")
+        print(f"maxpm serve starts at login and again after a crash: {res['plist']} ({how}). Its output goes to "
+              f"{res['log']}. Undo: maxpm serve --remove-login")
+        return 0
     if args.cmd == "serve":
         from . import server
         port = args.port or int(core.setting(conn, "serve_port"))
