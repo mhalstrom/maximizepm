@@ -771,6 +771,17 @@ CREATE TABLE IF NOT EXISTS canvas_comments (
 CREATE INDEX IF NOT EXISTS canvas_versions_canvas ON canvas_versions(canvas_id, version);
 CREATE INDEX IF NOT EXISTS canvas_comments_canvas ON canvas_comments(canvas_id, state);
 
+-- The prompts that people sent to a session from the Sessions tab's message box (#4855): Up and Down in the box
+-- bring them back, newest first, on every device and through the relay. At most sessions.PROMPTS_KEEP a session.
+CREATE TABLE IF NOT EXISTS sent_prompts (
+  id          INTEGER PRIMARY KEY,
+  agent       TEXT NOT NULL,
+  author      TEXT,
+  body        TEXT NOT NULL,
+  sent_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sent_prompts_agent ON sent_prompts(agent, id);
+
 CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);

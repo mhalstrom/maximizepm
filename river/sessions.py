@@ -776,6 +776,33 @@ def session_items(conn, agent, limit=200):
     return out
 
 
+PROMPTS_KEEP = 100  # the prompts kept for each session (#4855)
+
+
+def record_prompt(conn, agent, text, who=None):
+    """Keep a prompt that a person sent to agent from the message box (#4855), for the box's Up arrow. The same
+    text as the last one is kept once; only the newest PROMPTS_KEEP of a session stay."""
+    text = (text or "").strip()
+    if not agent or not text:
+        return
+    with core.tx(conn):
+        last = conn.execute("SELECT body FROM sent_prompts WHERE agent=? ORDER BY id DESC LIMIT 1", (agent,)).fetchone()
+        if last and last["body"] == text:
+            conn.execute("UPDATE sent_prompts SET sent_at=?, author=? WHERE id=(SELECT MAX(id) FROM sent_prompts WHERE agent=?)",
+                         (core.iso(core.now()), who, agent))
+            return
+        conn.execute("INSERT INTO sent_prompts (agent, author, body, sent_at) VALUES (?,?,?,?)",
+                     (agent, who, text, core.iso(core.now())))
+        conn.execute("DELETE FROM sent_prompts WHERE agent=? AND id NOT IN "
+                     "(SELECT id FROM sent_prompts WHERE agent=? ORDER BY id DESC LIMIT ?)", (agent, agent, PROMPTS_KEEP))
+
+
+def sent_prompts(conn, agent):
+    """The prompts sent to agent from the message box, newest first (#4855): the texts only."""
+    return [r["body"] for r in conn.execute("SELECT body FROM sent_prompts WHERE agent=? ORDER BY id DESC LIMIT ?",
+                                            (agent, PROMPTS_KEEP))]
+
+
 def _transcript_settings(kind, path):
     """The settings a session's transcript shows last: Claude Code puts the model and effort on each reply and a
     line for each permission mode; Codex a turn_context at each turn."""

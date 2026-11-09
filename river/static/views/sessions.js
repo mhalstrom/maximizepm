@@ -215,6 +215,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
     $("#sessText").value = "";
+    loadPrompts(name);
     clearFiles();
     barFor(null);
     note("Reading the transcript…");
@@ -268,7 +269,43 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   text.addEventListener("input", () => { grow(); sendState(); });
   text.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!empty()) $("#sessBar").requestSubmit(); }
+    else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && recall(e.key === "ArrowUp" ? 1 : -1, e)) e.preventDefault();
   });
+  // The earlier prompts (#4855), as in a shell: Up brings back the prompts sent to this session from this box,
+  // newest first, one at a time; Down goes forward again, and past the newest one the box shows the text the person
+  // typed before the first Up (the draft), or nothing. Up acts only with the caret on the box's first line and Down
+  // only on its last line, else the caret moves as in any text box. The list comes from the server (every device,
+  // and the relay); files attached are not part of it.
+  let prompts = [], recalled = -1, draft = "";
+  function loadPrompts(name, again = false) {  // again: the box got the focus; a list in use stays as it is
+    if (!again) { prompts = []; recalled = -1; draft = ""; }
+    if (!name) return;
+    fetch("api/session-prompts?agent=" + encodeURIComponent(name)).then(r => r.ok ? r.json() : null).then(j => {
+      if (j && name === agent && recalled === -1) prompts = j.prompts || [];
+    }).catch(() => {});
+  }
+  function recall(step, e) {
+    if (e.isComposing || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || text.disabled) return false;
+    const v = text.value, at = step > 0 ? text.selectionStart : text.selectionEnd;
+    if (step > 0 ? v.slice(0, at).includes("\n") : v.slice(at).includes("\n")) return false;  // not the edge line
+    const to = recalled + step;
+    if (to < -1 || to >= prompts.length) return false;
+    if (recalled === -1) draft = v;
+    recalled = to;
+    text.value = to === -1 ? draft : prompts[to];
+    // Up leaves the caret on the first line, so the next Up goes on; Down leaves it on the last line.
+    const end = step > 0 && text.value.includes("\n") ? text.value.indexOf("\n") : text.value.length;
+    text.setSelectionRange(end, end);
+    grow(); sendState();
+    return true;
+  }
+  const sentPrompt = (to, t) => {
+    t = (t || "").trim();
+    if (to !== agent) return;
+    if (t && prompts[0] !== t) prompts.unshift(t);
+    recalled = -1; draft = "";
+  };
+  text.addEventListener("focus", () => { if (agent && recalled === -1) loadPrompts(agent, true); });
   function renderFiles() {
     const box = $("#sessFiles");
     box.replaceChildren(...files.map((f, i) => {
@@ -354,8 +391,8 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     sending = true; renderFiles();
     let ok = true;
     try {
-      const sent = files;
-      const r = await typeAction("session_send", { agent: to, text: input.value,
+      const sent = files, typed = input.value;
+      const r = await typeAction("session_send", { agent: to, text: typed,
         ...(sent.length ? { files: sent.map(f => ({ name: f.name, data: f.data })) } : {}) });
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
@@ -364,6 +401,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
                               files: (r.files || []).filter(p => !(r.images || []).includes(p)).map(p => ({
                                 path: p.split(/[\\/]/).slice(-2).join("/"), name: p.split(/[\\/]/).pop().replace(/^\d{8}-\d{6}-[a-f0-9]{8}-/, "") })) }]);
         clearFiles();
+        sentPrompt(to, typed);
         body.scrollTop = body.scrollHeight;
         input.value = "";
         grow();

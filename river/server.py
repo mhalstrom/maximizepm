@@ -1868,19 +1868,29 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
             _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
             time.sleep(PROMPT_PAUSE)
         _tmux("send-keys", "-t", pane, "Enter")
+        _keep_prompt(conn, agent, text, who)
         return {"agent": agent, "pane": pane, "sent": 2, "text": prompt, "images": image_paths, "files": paths}
     if not text:
         raise RiverError("the message is empty: type a message first (the ! dialog answers a prompt)")
     if "\n" not in text:
         keys = [{"text": text}, {"key": "Enter"}]
-        return dict(terminal_keys(conn, agent, keys, who), text=text)
+        out = dict(terminal_keys(conn, agent, keys, who), text=text)
+        _keep_prompt(conn, agent, text, who)
+        return out
     # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
     # prompt early), then Enter.
     pane = _typing_pane(conn, agent, who)
     _tmux("set-buffer", "-b", "maxpm-send", "--", text)
     _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
     _tmux("send-keys", "-t", pane, "Enter")
+    _keep_prompt(conn, agent, text, who)
     return {"agent": agent, "pane": pane, "sent": 2, "text": text}
+
+
+def _keep_prompt(conn, agent, text, who):
+    """The box's Up arrow brings the prompt back (#4855): the person's text, without the attached files."""
+    from . import sessions
+    sessions.record_prompt(conn, agent, text, who)
 
 
 PROMPT_PAUSE = 0.4  # after a pick that leaves a prompt, before the text: the CLI draws its input box again (tests: 0)

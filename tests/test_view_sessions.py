@@ -671,6 +671,93 @@ try {
         self.assertEqual([c[0] for c in self.tmux.calls].count("paste-buffer"), 1)
 
 
+class PromptHistory(TmuxBase):
+    """#4855: the message box's Up and Down bring back the prompts sent to that session, newest first."""
+
+    def setUp(self):
+        super().setUp()
+        self.pane["screen"] = "❯ \n"
+
+    def prompts(self, agent="ag"):
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.headers, out = (f"/api/session-prompts?agent={agent}", ("127.0.0.1", 5555),
+                                                    {"Host": "localhost:8765"}, {})
+        h._send = lambda code, body, ctype=None, headers=None: out.update(code=code, body=body)
+        h.do_GET()
+        self.assertEqual(out["code"], 200)
+        return out["body"]["prompts"]
+
+    def test_the_server_keeps_each_sent_prompt_for_its_session(self):
+        import base64
+        send = lambda text, **kw: server.OPS["session_send"](self.c, {"agent": "ag", "text": text, **kw}, "mark")
+        send("first one")
+        send("two\nlines")
+        send("two\nlines")  # the same again: kept once
+        send("", files=[{"name": "a.csv", "data": base64.b64encode(b"a,b").decode()}])  # files only: no prompt
+        send("  with a file  ", files=[{"name": "b.csv", "data": base64.b64encode(b"a,b").decode()}])
+        self.assertEqual(self.prompts(), ["with a file", "two\nlines", "first one"])  # the text only, newest first
+        self.assertEqual(self.prompts("other"), [])  # one list for each session
+        with self.assertRaises(core.RiverError):
+            send("")  # refused: nothing kept
+        old = sessions.PROMPTS_KEEP
+        sessions.PROMPTS_KEEP = 2
+        self.addCleanup(setattr, sessions, "PROMPTS_KEEP", old)
+        send("third")
+        self.assertEqual(self.prompts(), ["third", "with a file"])
+
+    def test_up_and_down_in_the_message_box(self):
+        for t in ("oldest", "line one\nline two", "newest"):
+            sessions.record_prompt(self.c, "ag", t, "mark")
+        core.register(self.c, "bee")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=NULL WHERE name='bee'")
+        self.tmux._pane(name="bee")
+        self.tmux.panes[-1].update(agent="bee", screen="❯ \n")
+        sessions.record_prompt(self.c, "bee", "for bee", "mark")
+        driver = DRIVE_HEAD + r'''
+const box = () => q("#sessText");
+const key = (k, at) => {
+  if (at != null) box().setSelectionRange(at, at);
+  const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
+  box().dispatchEvent(e);
+  return e.defaultPrevented;
+};
+const up = at => key("ArrowUp", at), down = at => key("ArrowDown", at);
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && !box().disabled, "the box of ag");
+  box().focus();
+  box().value = "my draft"; box().dispatchEvent(new Event("input"));
+  await until(() => up(), "Up brings the newest prompt");
+  check(box().value === "newest", "newest first: " + box().value);
+  check(up() && box().value === "line one\nline two", "then the one before");
+  check(box().selectionStart === 8, "the caret stays on the first line: " + box().selectionStart);
+  check(up() && box().value === "oldest", "Up on the first line goes on");
+  check(!up() && box().value === "oldest", "no older prompt: the box stays");
+  check(down() && box().value === "line one\nline two", "Down goes forward");
+  check(!down(3), "Down with the caret on the first line of two moves the caret only");
+  check(box().value === "line one\nline two", "the text stays");
+  check(down(box().value.length) && box().value === "newest", "Down on the last line goes forward");
+  check(down() && box().value === "my draft", "past the newest: the draft again");
+  check(!down() && box().value === "my draft", "nothing after the draft");
+  box().value = "a\nb"; box().dispatchEvent(new Event("input"));
+  check(!up(3) && box().value === "a\nb", "Up on the second line moves the caret only");
+  box().value = "sent now"; box().dispatchEvent(new Event("input"));
+  q("#sessBar").requestSubmit();
+  await until(() => box().value === "", "sent");
+  check(up() && box().value === "sent now", "the prompt just sent comes first");
+  check(down() && box().value === "", "past it: the empty box");
+  q('[data-session="bee"] .srow-main').click();
+  await until(() => q("#sessTitle").textContent === "bee" && !box().disabled, "the box of bee");
+  await until(() => up(), "Up in bee's box");
+  check(box().value === "for bee", "bee's own list: " + box().value);
+  check(!up() && box().value === "for bee", "only bee's prompts");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        drive_page(self, driver)
+        self.assertEqual(sessions.sent_prompts(self.c, "ag")[0], "sent now")
+
+
 class RowLayout(unittest.TestCase):
     """#4675: a long state chip wraps inside the row's own column, never over the item column on the right."""
 

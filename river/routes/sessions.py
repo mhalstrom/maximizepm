@@ -74,6 +74,17 @@ def session_items(h, path):
     finally:
         conn.close()
 
+def session_prompts(h, path):
+    """The prompts sent to a session from the message box, newest first, for its Up arrow (#4855)."""
+    from urllib.parse import parse_qs, urlsplit
+    from .. import sessions
+    conn = core.connect()
+    try:
+        agent = parse_qs(urlsplit(h.path).query).get("agent", [""])[0]
+        return h._send(200, {"agent": agent, "prompts": sessions.sent_prompts(conn, agent)})
+    finally:
+        conn.close()
+
 def full_screen(h, path):
     """Full screen in a tab of its own (#4620)."""
     from urllib.parse import parse_qs, urlsplit
@@ -121,6 +132,7 @@ GET = [
     (lambda path: path == "/api/file-check", file_check),
     (lambda path: path == "/api/session-settings", session_settings),
     (lambda path: path == "/api/session-items", session_items),
+    (lambda path: path == "/api/session-prompts", session_prompts),
     (lambda path: path in ("/view", "/api/view-key"), full_screen),
     (lambda path: path in ("/api/sessions", "/api/session"), running),
 ]
