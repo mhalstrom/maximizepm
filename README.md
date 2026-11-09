@@ -34,7 +34,9 @@ say "go": it runs `maxpm go`, which names the session, picks a role (owner,
 worker, unblocker, reviewer, deployer, monitor, planner, context, or idle), claims an
 item, and prints a briefing that ends
 with the command to run when the item is done. The web page shows who holds
-what and how many more sessions the ready work could use.
+what and how many more sessions the ready work could use. Its Sessions tab
+shows each running agent session as a chat: you read it, type to it, and answer
+its permission prompts and questions there.
 
 ![The board: parallel work, next up, projects, and agents](site/img/board-tour.gif)
 
@@ -74,14 +76,45 @@ projects at the same time.
   prompt (`busy_max`, 4h after its last command; the tmux and prompt signs
   need `maxpm serve` running).
   And no second agent takes an item while the first one still works on it.
-- A local web page shows the board, the graph, who is doing what, and how many
-  more agent sessions the ready work could use right now. The search field in
-  its header (or `/`) finds items, open, done, and dropped.
+- A local web page shows the board, the running agent sessions, what they
+  wrote, the graph, who is doing what, and how many more agent sessions the
+  ready work could use right now. The search field in its header (or `/`)
+  finds items, open, done, and dropped. [The page](#the-page) has the tabs.
 
 One SQLite file, one command (`maxpm`), one page. Python 3.10 or later, standard
 library only. The page ships one vendored JavaScript library,
 [Tabulator](https://tabulator.info) 6.5.3 (MIT license), so its tables work offline; the graph loads
-Mermaid from a CDN. Inspired by [Beads](https://github.com/steveyegge/beads).
+Mermaid from a CDN.
+
+## The page
+
+`maxpm serve --open` opens the page at http://127.0.0.1:8765. Each tab has an
+address of its own (`/sessions/<session>`, `/graph`, `?item=12` for an
+item), so a link, a reload, and Back show the same view.
+
+| Tab | What it shows |
+|---|---|
+| Board | What needs you, your inbox, the next ready items, the work of each project, the agents |
+| Sessions | Each running agent session as a chat, with its item, a message box, and a side panel |
+| Artifacts | The files, local pages, and claude.ai artifacts that the sessions wrote or named |
+| Projects | A card for each project: its goals, its items, what blocks them |
+| Targets | Each deploy target: what the next release ships, its review, its hooks, its deploys |
+| Capacity | How many more agent sessions the ready work could use now |
+| Graph | The dependency graph, for all projects or one |
+| Done | What was finished, by day, and the progress of each project |
+| Settings | Every setting, its default, and its overrides |
+
+![The Sessions tab: an agent's chat, with a file it wrote open in the side panel](site/img/sessions-light.png)
+
+When the open session comes to a permission prompt or asks you a question, the
+! dialog opens by itself. You pick an answer, or tell the agent what to do
+instead. For a session that runs in a tmux pane (`launch_in tmux`), the answer
+goes into its terminal, and so does what you type in the message box, with
+files and pictures.
+
+![The ! dialog: a permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
+
+![The Artifacts tab: what the sessions wrote or named, to open beside the chat or full screen](site/img/artifacts.png)
 
 ## Install
 
@@ -165,8 +198,9 @@ page finds them on this computer. The Codex command gets `--add-dir
 
 To see it with sample data first, use a database of its own:
 `MAXPM_DB=/tmp/demo.db ./seed/example.sh`. The pictures in `site/img/` come
-from `seed/shoot.js` (demo data from `seed/screenshots.sh`; it needs tmux and
-ffmpeg, and runs outside a sandbox):
+from `seed/shoot.js` (demo data from `seed/screenshots.sh`, and demo agent
+transcripts from `seed/transcripts.py`; it needs tmux and ffmpeg, and runs
+outside a sandbox):
 `cd desktop && npm ci && npx electron ../seed/shoot.js`.
 
 ## Use it
@@ -530,6 +564,19 @@ priority, areas for `next`, atomic claims with expiring leases, outside
 blockers (with `--until`, so an item comes back by itself at that time),
 blocker trees, the agent registry, capacity, settings, and the web page.
 
+- Sessions tab: each running agent session (Claude Code or Codex) as a chat,
+  read from its transcript on this computer, with its item, its state, and
+  what waits for you in it. The ! dialog answers a permission prompt or a
+  question, and opens by itself when a new one comes. For a session in a tmux
+  pane, the message box types into its terminal, with files and pictures (and
+  dictation, where the browser has it). Items and Artifacts show what the
+  session took and wrote.
+- Artifacts and the side panel: the files the sessions wrote or named (images,
+  PDF, HTML, Markdown, text, only from the project folders, their worktrees,
+  and the uploads), local pages, and claude.ai artifact links. Open shows one
+  in a tab of the side panel beside the session's chat, and closing the last
+  tab lists the session's artifacts there. Open full screen gives it a browser
+  tab of its own, at an address with a key that ends after 8 hours.
 - Goals: outcomes with a done-when test and one owner; items carry goal
   tags (none, one, or several). `maxpm go` gives an owner its goal's items,
   then what blocks them, then asks whether the goal is done; it gives an
