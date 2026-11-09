@@ -132,11 +132,24 @@ class Base(unittest.TestCase):
         old = os.environ.get("MAXPM_DB")
         os.environ["MAXPM_DB"] = os.path.join(self.tmp.name, "maxpm.db")
         self.addCleanup(lambda: os.environ.__setitem__("MAXPM_DB", old) if old else os.environ.pop("MAXPM_DB", None))
+        self.addCleanup(self.join_connect)  # runs before MAXPM_DB goes back (cleanups run last first)
         os.environ.pop("MAXPM_RELAY_URL", None)
         relay.STATE.clear()
         relay.STATE["state"] = "off"
         self.addCleanup(setattr, relay, "URLOPEN", None)
         mcp.HTTP_SESSIONS.clear()
+
+
+    def join_connect(self):
+        """The page's Connect finishes in a thread (maxpm-relay-connect) that writes relay-state.json at its end: it
+        ends before MAXPM_DB goes back, else its write finds the real ~/.maximizepm (#4906)."""
+        for t in threading.enumerate():
+            if t.name == "maxpm-relay-connect":
+                cancel = relay.PENDING.get("cancel")
+                if cancel:
+                    cancel.set()
+                t.join(10)
+                self.assertFalse(t.is_alive(), "the page's Connect thread still runs after its test")
 
 
 class FakeResponse(io.BytesIO):
@@ -294,9 +307,15 @@ class LinkTest(Base):
         thread = threading.Thread(target=self.link.run, daemon=True)
         thread.start()
 
-        def end():  # before the temporary folder goes: the link writes relay-state.json as it stops
+        def end():
+            # Before MAXPM_DB and the temporary folder go: the link writes relay-state.json as it stops, and a late
+            # write found the real ~/.maximizepm (#4906). A link that waits for the relay's welcome (up to 15 s)
+            # does not see the stop: closing the fake relay's connections ends that wait at once.
             self.stop.set()
-            thread.join(5)
+            for conn in self.fake.conns:
+                conn.close()
+            thread.join(10)
+            self.assertFalse(thread.is_alive(), "the relay link still runs after its test")
         self.addCleanup(end)
 
     def hello(self):
