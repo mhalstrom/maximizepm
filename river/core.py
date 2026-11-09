@@ -8539,7 +8539,8 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
             if not held:
                 raise RiverError("say the project of the canvas: --project <name> (or --item <id>; or run it in the "
                                  "project's folder)")
-            pid, it = held["project_id"], _item(conn, held["id"])
+            # Only the project: the item is the canvas's own before the held one, below (#4841).
+            pid = held["project_id"]
         c = conn.execute("SELECT * FROM canvases WHERE project_id=? AND name=?", (pid, name)).fetchone()
         kind = canvas_kind(kind, filename) if (kind or filename or not c) else c["kind"]
         if c and c["kind"] != kind and not c["deleted_at"]:
@@ -8563,6 +8564,11 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
             cid = c["id"]
             last = _canvas_latest(conn, cid)
             if last and last["body"] == body and not c["deleted_at"] and (title is None or title == c["title"]):
+                if item is not None and it["id"] != c["item_id"]:
+                    # The same text for another item: no new version, but the canvas moves to it (#4841).
+                    conn.execute("UPDATE canvases SET item_id=?, updated_at=? WHERE id=?", (it["id"], t, cid))
+                    _event(conn, it["id"], actor, f"canvas {name} moved here from "
+                           f"{'#' + str(c['item_id']) if c['item_id'] else 'no item'}")
                 return dict(canvas_show(conn, cid), unchanged=True)
             writer = c["agent"] if _is_person(conn, actor) and c["agent"] else actor  # a person's edit (#4769)
             conn.execute("UPDATE canvases SET title=COALESCE(?, title), kind=?, item_id=?, agent=?, updated_at=?, "

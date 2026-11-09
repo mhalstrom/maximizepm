@@ -6494,6 +6494,28 @@ class Canvas(Base):
         self.assertEqual(core.canvas_show(self.c, "release-plan", version=1)["shown"]["body"], "<h1>Plan</h1>")
         self.assertIn("canvas release-plan v2", " ".join(e["change"] for e in core.item_show(self.c, self.it)["events"]))
 
+    def test_put_keeps_the_canvas_on_its_own_item_while_the_writer_holds_another_one(self):
+        """#4841: a put with no --item keeps the canvas's own item; the held item only names a new canvas's item."""
+        a = core.canvas_put(self.c, "pages", "# v1", "ag", kind="md")
+        self.assertEqual(a["item_id"], self.it)
+        core.done(self.c, self.it, "ag")
+        other = self.add("web", "the next one")
+        core.claim(self.c, other, "ag")
+        b = core.canvas_put(self.c, "pages", "# v2", "ag")
+        self.assertEqual((b["version"], b["item_id"]), (2, self.it))
+        self.assertEqual(core.canvas_put(self.c, "fresh", "# a", "ag", kind="md")["item_id"], other)
+
+    def test_put_with_an_item_and_the_same_text_moves_the_canvas(self):
+        a = core.canvas_put(self.c, "pages", "# v1", "ag", kind="md")
+        other = self.add("web", "another")
+        b = core.canvas_put(self.c, "pages", "# v1", "ag", item=other)
+        self.assertEqual((b["unchanged"], b["version"], b["item_id"]), (True, 1, other))
+        self.assertIn("canvas pages moved here from #%d" % self.it,
+                      " ".join(e["change"] for e in core.item_show(self.c, other)["events"]))
+        # The same text and the same item: nothing changes.
+        self.assertEqual(core.canvas_put(self.c, "pages", "# v1", "ag", item=other)["item_id"], other)
+        self.assertEqual(a["id"], b["id"])
+
     def test_kind_name_size_and_project_rules(self):
         with self.assertRaisesRegex(core.RiverError, "say the kind"):
             core.canvas_put(self.c, "x", "text", "ag")
