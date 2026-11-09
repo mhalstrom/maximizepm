@@ -473,17 +473,16 @@ def view(conn, agent, cursor=None, root=None, croot=None):
 # (Write, Edit), full file paths, local pages (localhost, 127.0.0.1) and claude.ai artifact links in its own text,
 # the person's turns, and its tool calls (a screenshot's file name). Results of tools are left out: a listing of
 # files names many that nobody made.
-# The first read of a transcript takes its last ARTIFACT_BYTES; each later read takes only the lines added since.
-# Pictures that a session reads fill its transcript fast (about 1 MB each in a tool result), so a short tail missed
-# the files it named a few pictures back (#4681). Parsing 18 MB takes about 30 ms.
-ARTIFACT_BYTES = 64 * 1024 * 1024
+# Each transcript is read whole the first time, line by line, and later only from the end of the last read: a
+# session lists every file it named, in a transcript of any size. A shorter tail missed them: pictures that a
+# session reads fill its transcript fast (about 1 MB each in a tool result, #4681). 18 MB takes about 30 ms.
 ARTIFACT_DAYS = 1  # agents seen this recently, besides the running ones
-_ART_CACHE = {}  # path -> (size, mtime, end: the byte after the last line read, hits)
-# Lines that never give a hit, skipped before they are parsed: tool results (left out, see above) and Claude
+_ART_CACHE = {}  # path -> (size, mtime, end: the byte after the last complete line read, hits)
+# Lines that never give a hit, skipped before they are decoded: tool results (left out, see above) and Claude
 # Code's copies of the API requests. JSON escapes a quote in text, so these words in a message do not match.
-_ART_SKIP = ('"type":"tool_result"', '"type":"function_call_output"', '"type":"api-request')
 _FILE_RX = None
 _URL_RX = None
+_ART_SKIP = (b'"type":"tool_result"', b'"type":"function_call_output"', b'"type":"api-request')
 
 
 def _hits_in(text, at, how):
@@ -500,57 +499,70 @@ def _hits_in(text, at, how):
 
 
 def _artifact_hits(path):
-    """The hits of one transcript: its last ARTIFACT_BYTES at first, then the lines it added since the last read. A
-    file that became shorter (written again) is read again from its tail."""
+    """The hits of one transcript: all of it at first, then the lines it added since the last read. A file that
+    became shorter (written again) is read again from its start."""
     st = Path(path).stat()
     got = _ART_CACHE.get(str(path))
     if got and got[:2] == (st.st_size, st.st_mtime_ns):
         return got[3]
-    if got and st.st_size >= got[2]:
-        text, _s, end = _read(path, got[2])
-        hits = got[3] + _scan_hits(text)
-    else:
-        text, _s, end = _read(path, None, ARTIFACT_BYTES)
-        hits = _scan_hits(text)
+    start, hits = (got[2], got[3]) if got and st.st_size >= got[2] else (0, [])
+    new, end = _scan_from(path, start)
+    hits = hits + new
     _ART_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, end, hits)
     return hits
 
 
-def _scan_hits(text):
-    """The hits in the complete transcript lines of text."""
+def _scan_from(path, start):
+    """(hits, end): the hits in the complete lines from byte start on, and the byte after the last of them. A line
+    the CLI still writes waits for the next read."""
+    if str(path).endswith(".zst"):  # compressed: read as a whole (Codex logs, small)
+        text, _s, end = _read(path, start)
+        return [h for line in text.splitlines() for h in _line_hits(line.encode())], end
+    hits, end = [], start
+    with open(path, "rb") as f:
+        f.seek(start)
+        for raw in f:
+            if not raw.endswith(b"\n"):
+                break
+            end += len(raw)
+            hits += _line_hits(raw)
+    return hits, end
+
+
+def _line_hits(raw):
+    """The hits of one transcript line (bytes)."""
+    if any(k in raw for k in _ART_SKIP):
+        return []
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(d, dict):
+        return []
     hits = []
-    for line in text.splitlines():
-        if any(k in line for k in _ART_SKIP):
-            continue
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(d, dict):
-            continue
-        at = d.get("timestamp")
-        m = d.get("message") if isinstance(d.get("message"), dict) else None
-        p = d.get("payload") if isinstance(d.get("payload"), dict) else None
-        if m and d.get("type") in ("user", "assistant") and not d.get("isSidechain"):
-            content = m.get("content")
-            if isinstance(content, str):
-                hits += _hits_in(content, at, "named")
-            for x in content if isinstance(content, list) else []:
-                if not isinstance(x, dict):
-                    continue
-                if x.get("type") == "text":
-                    hits += _hits_in(x.get("text", ""), at, "named")
-                elif x.get("type") == "tool_use":
-                    inp = x.get("input") if isinstance(x.get("input"), dict) else {}
-                    if x.get("name") in ("Write", "Edit", "MultiEdit", "NotebookEdit") and inp.get("file_path"):
-                        hits += [dict(h, how="wrote") for h in _hits_in(" " + str(inp["file_path"]), at, "wrote")]
-                    else:
-                        hits += _hits_in(json.dumps(inp, ensure_ascii=False), at, "named")
-        elif p and d.get("type") == "response_item":
-            if p.get("type") == "message":
-                hits += _hits_in(_parts_text(p.get("content"), ("input_text", "output_text", "text")), at, "named")
-            elif p.get("type") in ("function_call", "custom_tool_call"):
-                hits += _hits_in(str(p.get("arguments") or p.get("input") or ""), at, "named")
+    at = d.get("timestamp")
+    m = d.get("message") if isinstance(d.get("message"), dict) else None
+    p = d.get("payload") if isinstance(d.get("payload"), dict) else None
+    if m and d.get("type") in ("user", "assistant") and not d.get("isSidechain"):
+        content = m.get("content")
+        if isinstance(content, str):
+            hits += _hits_in(content, at, "named")
+        for x in content if isinstance(content, list) else []:
+            if not isinstance(x, dict):
+                continue
+            if x.get("type") == "text":
+                hits += _hits_in(x.get("text", ""), at, "named")
+            elif x.get("type") == "tool_use":
+                inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+                if x.get("name") in ("Write", "Edit", "MultiEdit", "NotebookEdit") and inp.get("file_path"):
+                    hits += [dict(h, how="wrote") for h in _hits_in(" " + str(inp["file_path"]), at, "wrote")]
+                else:
+                    hits += _hits_in(json.dumps(inp, ensure_ascii=False), at, "named")
+    elif p and d.get("type") == "response_item":
+        if p.get("type") == "message":
+            hits += _hits_in(_parts_text(p.get("content"), ("input_text", "output_text", "text")), at, "named")
+        elif p.get("type") in ("function_call", "custom_tool_call"):
+            hits += _hits_in(str(p.get("arguments") or p.get("input") or ""), at, "named")
     return hits
 
 

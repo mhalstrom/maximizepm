@@ -797,8 +797,8 @@ class SideFiles(Base):
 
 
 class ArtifactScan(unittest.TestCase):
-    """#4681: pictures in tool results fill a transcript fast; the files a session named before them still count,
-    and a later read takes only the lines the session added."""
+    """#4681: pictures in tool results fill a transcript fast; the files a session named before them still count
+    (the first read takes the whole file), and a later read takes only the lines the session added."""
 
     def setUp(self):
         d = tempfile.TemporaryDirectory()
@@ -828,15 +828,15 @@ class ArtifactScan(unittest.TestCase):
         with open(self.path, "a") as f:
             f.write(self.line("assistant", [{"type": "text", "text": "And /p/c.png"}]))
             f.write('{"type":"assistant","message":{"content":[{"type":"text","text":"/p/half')  # still written
-        reads = []
-        real = sessions._read
-        with mock.patch.object(sessions, "_read", lambda p, c, *a: reads.append(c) or real(p, c, *a)):
+        lines = []
+        real = sessions._line_hits
+        with mock.patch.object(sessions, "_line_hits", lambda raw: lines.append(raw) or real(raw)):
             self.assertEqual(self.targets(), ["/p/a.png", "/p/b.png", "/p/c.png", "/p/typed.png"])
             with open(self.path, "a") as f:
                 f.write('.png"}]}}\n')
             self.assertIn("/p/half.png", self.targets())
-        self.assertTrue(reads and all(c is not None for c in reads), reads)  # only what came after the last read
-        # A file written again, shorter: read again from its tail.
+        self.assertEqual(len(lines), 2, lines)  # only the lines after the last read, each one once
+        # A file written again, shorter: read again from its start.
         self.path.write_text(self.line("assistant", [{"type": "text", "text": "/p/new.png"}]))
         self.assertEqual(self.targets(), ["/p/new.png"])
 
