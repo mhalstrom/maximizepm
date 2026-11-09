@@ -119,6 +119,10 @@ DEFAULT_SETTINGS = {
     # No project gets push_first in silence (#1682): the setup recommends a value (look_setup) and the person
     # confirms it; a project where nobody chose has ask_first.
     "result_look": "ask_first",
+    # Canvases (#4648): the largest version in bytes (a page carries its images and scripts inline), and how
+    # many versions of a canvas maxpm keeps (a new version then removes the oldest, but never version 1).
+    "canvas_max": "5000000",
+    "canvas_versions": "50",
     "due_warn_before": "3d",
     # Agents the page can start, as "Label=command" entries separated by ";". The first is the default.
     # "@claude-code" or "@codex" is a launch profile: river builds the command from the platform's options
@@ -707,6 +711,51 @@ CREATE TABLE IF NOT EXISTS item_usage (
   PRIMARY KEY (item_id, session_id)
 );
 
+-- Canvases (#4648): pages that a session makes and maxpm keeps, each version in full, with the comments that
+-- people write on a part of a page or on the whole page. One name per project. Private to this computer.
+CREATE TABLE IF NOT EXISTS canvases (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  name        TEXT NOT NULL,
+  title       TEXT,
+  kind        TEXT NOT NULL,                -- html, md, svg
+  item_id     INTEGER REFERENCES items(id), -- the item it belongs to (its comments go to its holder)
+  agent       TEXT,                         -- who put the latest version
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  deleted_at  TEXT,
+  UNIQUE (project_id, name)
+);
+CREATE TABLE IF NOT EXISTS canvas_versions (
+  id          INTEGER PRIMARY KEY,
+  canvas_id   INTEGER NOT NULL REFERENCES canvases(id),
+  version     INTEGER NOT NULL,
+  body        TEXT NOT NULL,
+  author      TEXT,
+  note        TEXT,
+  created_at  TEXT NOT NULL,
+  UNIQUE (canvas_id, version)
+);
+CREATE TABLE IF NOT EXISTS canvas_comments (
+  id          INTEGER PRIMARY KEY,
+  canvas_id   INTEGER NOT NULL REFERENCES canvases(id),
+  version     INTEGER NOT NULL,             -- the version it was written on
+  parent_id   INTEGER REFERENCES canvas_comments(id),  -- a reply in the thread of this comment
+  author      TEXT,
+  anchor      TEXT,                         -- JSON {path, text, quote} of the part; NULL: the whole page
+  body        TEXT NOT NULL,
+  state       TEXT NOT NULL,                -- draft, sent, read, resolved; a reply is 'reply'
+  message_id  INTEGER,                      -- the message that carried it to the session
+  created_at  TEXT NOT NULL,
+  sent_at     TEXT,
+  read_at     TEXT,
+  resolved_at TEXT,
+  resolved_by TEXT,
+  resolve_note TEXT
+);
+CREATE INDEX IF NOT EXISTS canvas_versions_canvas ON canvas_versions(canvas_id, version);
+CREATE INDEX IF NOT EXISTS canvas_comments_canvas ON canvas_comments(canvas_id, state);
+
 CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
@@ -1205,7 +1254,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"prompt_pattern is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "smtp_port",
-                 "max_sessions"):
+                 "max_sessions", "canvas_max", "canvas_versions"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "launch_agents":
@@ -8348,6 +8397,389 @@ def item_messages(conn, item_id):
     _item(conn, item_id)
     return [_msg_dict(r) for r in conn.execute(
         "SELECT m.*, NULL item_title FROM messages m WHERE m.item_id=? ORDER BY m.id", (int(item_id),))]
+
+
+# ---------------------------------------------------------------- canvases (#4648)
+# A canvas is a page that a session makes and maxpm keeps: HTML, Markdown, or SVG, each version in full, in this
+# database (private to this computer). The same operations serve every agent: the maxpm canvas command, the MCP
+# tool canvas, and HTTP on maxpm serve (/api/action) all call these functions. A person comments on a part of the
+# page or on the whole page; the comments stay drafts until the person sends them, and then one message carries
+# them to the session that wrote the canvas (or to the holder of its item).
+
+CANVAS_KINDS = ("html", "md", "svg")
+CANVAS_EXT = {".html": "html", ".htm": "html", ".md": "md", ".markdown": "md", ".svg": "svg"}
+_CANVAS_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def canvas_kind(kind=None, filename=None):
+    """The kind of a canvas: the one named, else from the file's extension."""
+    if kind:
+        kind = kind.lower().lstrip(".")
+        kind = {"markdown": "md", "htm": "html"}.get(kind, kind)
+        if kind not in CANVAS_KINDS:
+            raise RiverError(f"a canvas is one of {', '.join(CANVAS_KINDS)}; got {kind!r}")
+        return kind
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext in CANVAS_EXT:
+        return CANVAS_EXT[ext]
+    raise RiverError("say the kind of the canvas: --kind html, md, or svg (or put a file that ends in .html, .md or .svg)")
+
+
+def _canvas_row(conn, ref, project=None, deleted=False):
+    """A canvas by id (12 or c12) or by name; a name needs its project when two projects have one."""
+    ref = str(ref).strip()
+    if re.fullmatch(r"c?\d+", ref):
+        r = conn.execute("SELECT * FROM canvases WHERE id=?", (int(ref.lstrip("c")),)).fetchone()
+        rows = [r] if r else []
+    else:
+        q = "SELECT c.* FROM canvases c JOIN projects p ON p.id=c.project_id WHERE c.name=?"
+        args = [ref.lower()]
+        if project:
+            q += " AND p.name=?"
+            args.append(project)
+        rows = conn.execute(q, args).fetchall()
+    if not deleted:
+        rows = [r for r in rows if not r["deleted_at"]]
+    if not rows:
+        where = f" in project {project}" if project else ""
+        raise RiverError(f"no canvas {ref}{where}; the canvases: maxpm canvas list")
+    if len(rows) > 1:
+        names = ", ".join(_project_name(conn, r["project_id"]) for r in rows)
+        raise RiverError(f"canvas {ref} is in the projects {names}; name one: --project <name>")
+    return rows[0]
+
+
+def _canvas_latest(conn, cid):
+    return conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? ORDER BY version DESC LIMIT 1",
+                        (cid,)).fetchone()
+
+
+def _held_item(conn, actor, project_id=None):
+    """The one item that the actor holds (in progress or held), in the project when one is named; else None."""
+    if not actor:
+        return None
+    q = "SELECT id, project_id FROM items WHERE assignee=? AND status IN ('in_progress','held')"
+    args = [actor]
+    if project_id is not None:
+        q += " AND project_id=?"
+        args.append(project_id)
+    rows = conn.execute(q, args).fetchall()
+    return rows[0] if len(rows) == 1 else None
+
+
+def _canvas_info(conn, c):
+    """A canvas row as a dict for list and show: its project, latest version, and comment counts."""
+    d = dict(c)
+    d["project"] = _project_name(conn, c["project_id"])
+    v = _canvas_latest(conn, c["id"])
+    d["version"] = v["version"] if v else 0
+    d["bytes"] = len(v["body"].encode()) if v else 0
+    counts = dict(conn.execute("SELECT state, COUNT(*) FROM canvas_comments WHERE canvas_id=? AND parent_id IS NULL "
+                               "GROUP BY state", (c["id"],)).fetchall())
+    d["drafts"] = counts.get("draft", 0)
+    d["open_comments"] = counts.get("sent", 0) + counts.get("read", 0)
+    d["item_title"] = (conn.execute("SELECT title FROM items WHERE id=?", (c["item_id"],)).fetchone() or [None])[0] \
+        if c["item_id"] else None
+    return d
+
+
+def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, project=None, note=None,
+               filename=None):
+    """Store a new version of a canvas (a new canvas when the name is new in its project). The project comes
+    from the item, else the one named. The item is the one named, else the canvas's own, else the one item the
+    actor holds in that project. The same text as the latest version stores nothing new."""
+    if not actor:
+        raise RiverError("putting a canvas needs an agent name: set MAXPM_AGENT or pass --as <name>")
+    name = (name or "").strip().lower()
+    if not _CANVAS_NAME.match(name):
+        raise RiverError("a canvas name is 1 to 64 of a-z, 0-9, '.', '_' and '-', and starts with a letter or digit, "
+                         "for example release-plan")
+    if body is None or not str(body).strip():
+        raise RiverError("the canvas is empty: put the page's text (a file, stdin, or --text)")
+    body = str(body)
+    with tx(conn):
+        it = _item(conn, item) if item is not None else None
+        if it is not None:
+            pid = it["project_id"]
+            if project and _project(conn, project)["id"] != pid:
+                raise RiverError(f"item #{it['id']} is in project {_project_name(conn, pid)}, not {project}")
+        elif project:
+            pid = _project(conn, project)["id"]
+        else:
+            held = _held_item(conn, actor)
+            if not held:
+                raise RiverError("say the project of the canvas: --project <name> (or --item <id>; or run it in the "
+                                 "project's folder)")
+            pid, it = held["project_id"], _item(conn, held["id"])
+        c = conn.execute("SELECT * FROM canvases WHERE project_id=? AND name=?", (pid, name)).fetchone()
+        kind = canvas_kind(kind, filename) if (kind or filename or not c) else c["kind"]
+        if c and c["kind"] != kind and not c["deleted_at"]:
+            raise RiverError(f"canvas {name} is {c['kind']}, not {kind}; use another name for a page of another kind")
+        limit = int(setting(conn, "canvas_max", project_id=pid))
+        size = len(body.encode())
+        if size > limit:
+            raise RiverError(f"the page has {size} bytes; a canvas version holds at most {limit} (setting canvas_max). "
+                             f"Make images smaller, or link large files instead of putting them inline")
+        if it is None and c is not None and c["item_id"]:
+            it = _item(conn, c["item_id"])
+        if it is None:
+            held = _held_item(conn, actor, pid)
+            it = _item(conn, held["id"]) if held else None
+        t = iso(now())
+        if c is None:
+            cid = conn.execute("INSERT INTO canvases (project_id, name, title, kind, item_id, agent, created_at, "
+                               "updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                               (pid, name, title, kind, it["id"] if it else None, actor, t, t)).lastrowid
+        else:
+            cid = c["id"]
+            last = _canvas_latest(conn, cid)
+            if last and last["body"] == body and not c["deleted_at"] and (title is None or title == c["title"]):
+                return dict(canvas_show(conn, cid), unchanged=True)
+            conn.execute("UPDATE canvases SET title=COALESCE(?, title), kind=?, item_id=?, agent=?, updated_at=?, "
+                         "deleted_at=NULL WHERE id=?", (title, kind, it["id"] if it else c["item_id"], actor, t, cid))
+        n = conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM canvas_versions WHERE canvas_id=?", (cid,)).fetchone()[0]
+        conn.execute("INSERT INTO canvas_versions (canvas_id, version, body, author, note, created_at) VALUES (?,?,?,?,?,?)",
+                     (cid, n, body, actor, (note or "").strip() or None, t))
+        keep = int(setting(conn, "canvas_versions", project_id=pid))
+        conn.execute("DELETE FROM canvas_versions WHERE canvas_id=? AND version>1 AND version<=? ",
+                     (cid, n - max(keep, 2) + 1))
+        _event(conn, it["id"] if it else None, actor, f"canvas {name} v{n} ({size} bytes)")
+    return canvas_show(conn, cid)
+
+
+def canvas_list(conn, project=None, item=None, mine=None, deleted=False):
+    """The canvases, newest change first: all, a project's, an item's, or the ones an agent wrote last."""
+    q, args = "SELECT * FROM canvases WHERE 1=1", []
+    if project:
+        q += " AND project_id=?"
+        args.append(_project(conn, project)["id"])
+    if item is not None:
+        q += " AND item_id=?"
+        args.append(int(item))
+    if mine:
+        q += " AND agent=?"
+        args.append(mine)
+    if not deleted:
+        q += " AND deleted_at IS NULL"
+    return [_canvas_info(conn, c) for c in conn.execute(q + " ORDER BY updated_at DESC, id DESC", args)]
+
+
+def _comment_dict(r):
+    d = dict(r)
+    d["anchor"] = json.loads(r["anchor"]) if r["anchor"] else None
+    return d
+
+
+def canvas_show(conn, ref, project=None, version=None):
+    """A canvas with the text of its latest version (or one version), its versions, and its comments."""
+    c = _canvas_row(conn, ref, project)
+    d = _canvas_info(conn, c)
+    v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], int(version))).fetchone() \
+        if version else _canvas_latest(conn, c["id"])
+    if v is None:
+        kept = [str(r[0]) for r in conn.execute("SELECT version FROM canvas_versions WHERE canvas_id=? ORDER BY version",
+                                                (c["id"],))]
+        raise RiverError(f"canvas {c['name']} has no version {version}; it keeps {', '.join(kept)}")
+    d["shown"] = {"version": v["version"], "author": v["author"], "note": v["note"], "created_at": v["created_at"],
+                  "body": v["body"]}
+    d["versions"] = [dict(r) for r in conn.execute(
+        "SELECT version, author, note, created_at, LENGTH(body) chars FROM canvas_versions WHERE canvas_id=? "
+        "ORDER BY version", (c["id"],))]
+    d["comments"] = _canvas_threads(conn, c["id"])
+    return d
+
+
+def _canvas_threads(conn, cid, open_only=False, include_drafts=True):
+    """The comments of a canvas, each with its replies, open ones first, oldest first."""
+    rows = [_comment_dict(r) for r in conn.execute("SELECT * FROM canvas_comments WHERE canvas_id=? ORDER BY id", (cid,))]
+    replies = {}
+    for r in rows:
+        if r["parent_id"]:
+            replies.setdefault(r["parent_id"], []).append(r)
+    out = []
+    for r in rows:
+        if r["parent_id"]:
+            continue
+        if open_only and r["state"] not in ("sent", "read"):
+            continue
+        if not include_drafts and r["state"] == "draft":
+            continue
+        r["replies"] = replies.get(r["id"], [])
+        out.append(r)
+    order = {"sent": 0, "read": 0, "draft": 1, "resolved": 2}
+    return sorted(out, key=lambda r: (order.get(r["state"], 3), r["id"]))
+
+
+def _canvas_comment(conn, comment_id):
+    r = conn.execute("SELECT * FROM canvas_comments WHERE id=?", (int(str(comment_id).lstrip("c#")),)).fetchone()
+    if not r:
+        raise RiverError(f"no canvas comment {comment_id}; the comments: maxpm canvas comments <canvas>")
+    return r
+
+
+def _anchor(anchor):
+    """A comment's part of the page as stored JSON: {path, text, quote}; None is the whole page."""
+    if anchor in (None, "", {}):
+        return None
+    if isinstance(anchor, str):
+        try:
+            anchor = json.loads(anchor)
+        except ValueError:
+            anchor = {"quote": anchor}
+    if not isinstance(anchor, dict):
+        raise RiverError("a comment's part is {path, text, quote} (or leave it out for the whole page)")
+    a = {k: str(anchor[k])[:500] for k in ("path", "text", "quote") if anchor.get(k)}
+    return json.dumps(a) if a else None
+
+
+def canvas_comment(conn, ref, body, actor=None, anchor=None, version=None, project=None, send_now=False):
+    """A comment on a part of a canvas (anchor) or on the whole page. It is a draft until it is sent
+    (canvas_send); send_now sends it at once."""
+    if not actor:
+        raise RiverError("commenting needs a name: set MAXPM_AGENT or pass --as <name>")
+    if not body or not body.strip():
+        raise RiverError("a comment needs text")
+    c = _canvas_row(conn, ref, project)
+    with tx(conn):
+        latest = _canvas_latest(conn, c["id"])["version"]
+        v = int(version) if version else latest
+        if not conn.execute("SELECT 1 FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], v)).fetchone():
+            raise RiverError(f"canvas {c['name']} has no version {v}")
+        cid = conn.execute("INSERT INTO canvas_comments (canvas_id, version, author, anchor, body, state, created_at) "
+                           "VALUES (?,?,?,?,?,'draft',?)",
+                           (c["id"], v, actor, _anchor(anchor), body.strip(), iso(now()))).lastrowid
+    if send_now:
+        canvas_send(conn, c["id"], actor, [cid])
+    return _comment_dict(_canvas_comment(conn, cid))
+
+
+def _canvas_writer(conn, c):
+    """Who gets the comments of a canvas: the agent that put its latest version while its session is
+    registered; else None (then they go to the holder of its item)."""
+    last = _canvas_latest(conn, c["id"])
+    who = last["author"] if last else c["agent"]
+    r = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
+    return who if r and r["kind"] == "ai" else None
+
+
+def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
+    """Send the drafts of a canvas (all of the actor's, or the ones named) as one message to the session that
+    wrote it, or to the holder (or next holder) of its item. The message names the canvas, the version, each
+    part, and the command that reads them."""
+    if not actor:
+        raise RiverError("sending needs a name: set MAXPM_AGENT or pass --as <name>")
+    c = _canvas_row(conn, ref, project)
+    if comment_ids:
+        rows = [_canvas_comment(conn, x) for x in comment_ids]
+        bad = [f"c{r['id']}" for r in rows if r["canvas_id"] != c["id"] or r["state"] != "draft" or r["parent_id"]]
+        if bad:
+            raise RiverError(f"not a draft comment of canvas {c['name']}: {', '.join(bad)}")
+    else:
+        rows = conn.execute("SELECT * FROM canvas_comments WHERE canvas_id=? AND state='draft' AND parent_id IS NULL "
+                            "AND author=? ORDER BY id", (c["id"], actor)).fetchall()
+    if not rows:
+        raise RiverError(f"no draft comments on canvas {c['name']} to send; write one first: "
+                         f"maxpm canvas comment {c['name']} \"...\"")
+    to = _canvas_writer(conn, c)
+    if to is None and not c["item_id"]:
+        raise RiverError(f"the session that wrote canvas {c['name']} has ended and the canvas has no item, so nobody "
+                         f"gets the comments; give it an item: maxpm canvas put ... --name {c['name']} --item <id>")
+    latest = _canvas_latest(conn, c["id"])["version"]
+    lines = [f"{len(rows)} comment(s) on canvas {c['name']} (version {latest}"
+             + (f", {c['title']}" if c["title"] else "") + f", project {_project_name(conn, c['project_id'])}):"]
+    for r in rows:
+        a = json.loads(r["anchor"]) if r["anchor"] else None
+        part = "the whole page"
+        if a:
+            part = (f"\"{a['quote']}\"" if a.get("quote") else f"\"{(a.get('text') or '')[:120]}\"") + \
+                   (f" ({a['path']})" if a.get("path") else "")
+        on = "" if r["version"] == latest else f", on version {r['version']}"
+        lines.append(f"  c{r['id']} on {part}{on}: {r['body']}")
+    lines.append(f"Read them: maxpm canvas comments {c['name']} --open; change the page (maxpm canvas put), then "
+                 f"answer each: maxpm canvas reply c<id> \"...\" and maxpm canvas resolve c<id> --note \"...\"")
+    msg = send(conn, "note", "\n".join(lines), to=to, item=c["item_id"], actor=actor)
+    with tx(conn):
+        t = iso(now())
+        for r in rows:
+            conn.execute("UPDATE canvas_comments SET state='sent', sent_at=?, message_id=? WHERE id=?",
+                         (t, msg["id"], r["id"]))
+    return {"canvas": c["name"], "sent": [r["id"] for r in rows], "to": msg.get("to_agent") or "the next holder",
+            "message": msg["id"]}
+
+
+def canvas_comments(conn, ref, actor=None, open_only=False, project=None):
+    """The comments of a canvas with their replies. When an agent reads them, the sent ones become read."""
+    c = _canvas_row(conn, ref, project)
+    if actor and not _is_person(conn, actor):
+        with tx(conn):
+            conn.execute("UPDATE canvas_comments SET state='read', read_at=? WHERE canvas_id=? AND state='sent' "
+                         "AND author<>?", (iso(now()), c["id"], actor))
+    threads = _canvas_threads(conn, c["id"], open_only, include_drafts=not open_only)
+    return {"canvas": c["name"], "id": c["id"], "project": _project_name(conn, c["project_id"]),
+            "version": _canvas_latest(conn, c["id"])["version"], "comments": threads}
+
+
+def canvas_reply(conn, comment_id, body, actor=None):
+    """A reply in the thread of a comment. It goes to the comment's author as a note too."""
+    if not actor:
+        raise RiverError("replying needs a name: set MAXPM_AGENT or pass --as <name>")
+    if not body or not body.strip():
+        raise RiverError("a reply needs text")
+    top = _canvas_comment(conn, comment_id)
+    if top["parent_id"]:
+        top = _canvas_comment(conn, top["parent_id"])
+    c = _canvas_row(conn, top["canvas_id"], deleted=True)
+    with tx(conn):
+        v = _canvas_latest(conn, c["id"])["version"]
+        rid = conn.execute("INSERT INTO canvas_comments (canvas_id, version, parent_id, author, body, state, created_at) "
+                           "VALUES (?,?,?,?,?,'reply',?)", (c["id"], v, top["id"], actor, body.strip(), iso(now()))).lastrowid
+        if top["state"] == "sent" and actor != top["author"]:
+            conn.execute("UPDATE canvas_comments SET state='read', read_at=? WHERE id=?", (iso(now()), top["id"]))
+    if top["author"] and top["author"] != actor and conn.execute("SELECT 1 FROM agents WHERE name=?",
+                                                                 (top["author"],)).fetchone():
+        send(conn, "note", f"Reply on canvas {c['name']} to your comment c{top['id']} (\"{top['body'][:80]}\"): "
+             f"{body.strip()}", to=top["author"], item=c["item_id"], actor=actor, level="low")
+    return _comment_dict(_canvas_comment(conn, rid))
+
+
+def canvas_resolve(conn, comment_id, actor=None, note=None):
+    """Close a comment: the change is made (say in note which version), or it needs none (say why)."""
+    if not actor:
+        raise RiverError("resolving needs a name: set MAXPM_AGENT or pass --as <name>")
+    r = _canvas_comment(conn, comment_id)
+    if r["parent_id"]:
+        raise RiverError(f"c{r['id']} is a reply; resolve its comment c{r['parent_id']}")
+    if r["state"] == "resolved":
+        raise RiverError(f"comment c{r['id']} is already resolved")
+    with tx(conn):
+        conn.execute("UPDATE canvas_comments SET state='resolved', resolved_at=?, resolved_by=?, resolve_note=? WHERE id=?",
+                     (iso(now()), actor, (note or "").strip() or None, r["id"]))
+    return _comment_dict(_canvas_comment(conn, r["id"]))
+
+
+def canvas_delete(conn, ref, actor=None, project=None):
+    """Delete a canvas: it leaves every list. Its versions stay in the database, and a put of the same name in
+    the same project brings it back with a new version."""
+    c = _canvas_row(conn, ref, project)
+    with tx(conn):
+        conn.execute("UPDATE canvases SET deleted_at=? WHERE id=?", (iso(now()), c["id"]))
+        _event(conn, c["item_id"], actor, f"canvas {c['name']} deleted")
+    return {"canvas": c["name"], "id": c["id"], "deleted": True}
+
+
+def canvas_save(conn, ref, path, version=None, project=None, force=False):
+    """Write a version of a canvas as a file (for a page that must go into git)."""
+    d = canvas_show(conn, ref, project, version)
+    p = Path(os.path.expanduser(str(path).strip()))
+    if p.is_dir():
+        p = p / f"{d['name']}.{d['kind']}"
+    if p.exists() and not force:
+        raise RiverError(f"{p} exists; add --force to write over it")
+    try:
+        p.write_text(d["shown"]["body"])
+    except OSError as e:
+        raise RiverError(f"cannot write {p}: {e.strerror}")
+    return {"canvas": d["name"], "version": d["shown"]["version"], "path": str(p), "bytes": d["bytes"]}
 
 
 # ---------------------------------------------------------------- capacity

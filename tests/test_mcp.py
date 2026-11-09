@@ -68,6 +68,36 @@ class Mcp(unittest.TestCase):
         self.assertEqual(core.goal_show(c, "ship")["status"], "complete")
         c.close()
 
+    def test_canvas_tool_has_the_operations_of_the_command(self):
+        """#4648: put with the text itself (also text that starts with a dash), show, comments, reply, resolve."""
+        c = core.connect()
+        core.register(c, "ag")
+        core.register(c, "mark", human=True)
+        core.claim(c, 1, "ag")
+        c.close()
+        call = lambda i, args, who="ag": {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                                          "params": {"name": "canvas", "arguments": dict(args, **{"as": who})}}
+        r = self.talk(call(1, {"action": "put", "name": "notes", "kind": "md", "text": "---\ntitle: x\n---\n# Notes",
+                               "title": "My notes", "note": "-first"}),
+                      call(2, {"action": "comment", "name": "notes", "text": "-shorter", "quote": "Notes"}, "mark"),
+                      call(3, {"action": "send", "name": "notes"}, "mark"),
+                      call(4, {"action": "comments", "name": "notes", "open": True}),
+                      call(5, {"action": "reply", "comment": "c1", "text": "done in v2"}),
+                      call(6, {"action": "resolve", "comment": "c1", "note": "v2"}),
+                      call(7, {"action": "list"}),
+                      call(8, {"action": "show"}),
+                      call(9, {"action": "fly", "name": "notes"}))
+        text = [x["result"]["content"][0]["text"] for x in r]
+        self.assertEqual([x["result"]["isError"] for x in r], [False] * 7 + [True, True])
+        self.assertIn('notes  v1 md  demo  #1  "My notes"', text[0])
+        self.assertIn('c1 [read] mark on "Notes" (v1): -shorter', text[3])
+        self.assertIn("needs the canvas name", text[7])
+        c = core.connect()
+        d = core.canvas_show(c, "notes")
+        c.close()
+        self.assertEqual(d["shown"]["body"], "---\ntitle: x\n---\n# Notes")
+        self.assertEqual((d["shown"]["note"], d["comments"][0]["state"]), ("-first", "resolved"))
+
 
 def load(path):
     with open(path) as fh:

@@ -56,6 +56,29 @@ TOOLS = [
          "project": {"type": "string", "description": "list: only this project's goals"},
          "result": {"type": "string", "description": "done: what the goal achieved, one line"},
          "as": _AS}}},
+    {"name": "canvas",
+     "description": "Canvases: pages (HTML, Markdown, or SVG) that you make for the user and MaximizePM keeps on this "
+                    "computer, with versions; the user sees them in the MaximizePM page and comments on a part of a "
+                    "page or on the whole page. put (a new version; the same name in the same project is the same "
+                    "canvas), list, show (a version's text, its versions and comments), comments (the comments with "
+                    "their replies; open: only the ones that wait for you), comment, send (your draft comments to the "
+                    "session that wrote it), reply, resolve, delete, save (a version as a file).",
+     "inputSchema": {"type": "object", "required": ["action"], "properties": {
+         "action": {"type": "string", "enum": ["put", "list", "show", "comments", "comment", "send", "reply",
+                                                "resolve", "delete", "save"]},
+         "name": {"type": "string", "description": "the canvas (all actions except list, reply, resolve)"},
+         "text": {"type": "string", "description": "put: the page's whole text; comment and reply: the comment"},
+         "kind": {"type": "string", "enum": ["html", "md", "svg"], "description": "put: the kind of a new canvas"},
+         "title": {"type": "string"}, "note": {"type": "string", "description": "put: what changed; resolve: what "
+                                                                                 "changed, or why nothing needs to"},
+         "item": {"type": "integer", "description": "put: the item it belongs to (default: the item you hold); "
+                                                    "list: only this item's"},
+         "project": {"type": "string"}, "version": {"type": "integer"},
+         "open": {"type": "boolean", "description": "comments: only the ones that wait for an answer"},
+         "comment": {"type": "string", "description": "reply and resolve: the comment id, for example c12"},
+         "quote": {"type": "string", "description": "comment: the words of the page it is about"},
+         "path": {"type": "string", "description": "comment: the part's CSS path; save: the file to write"},
+         "as": _AS}}},
     {"name": "inbox",
      "description": "Your unread messages and the questions that wait for your answer.",
      "inputSchema": {"type": "object", "properties": {"as": _AS}}},
@@ -77,6 +100,45 @@ CHAT_INSTRUCTIONS = ("MaximizePM is the user's work queue for AI agents. In this
                      "(maxpm tool: [\"needs-you\"], then [\"prompt\", \"--all\"]), and do items that need no code, "
                      "such as writing or research (go; the result goes in done). Call the tool, then follow its briefing; "
                      "for other maxpm commands use the maxpm tool with the words after `maxpm`.")
+
+
+def canvas_argv(a):
+    """The maxpm canvas words of an MCP canvas call: the same operations as the command (#4648)."""
+    act = a.get("action")
+    acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "delete", "save")
+    if act not in acts:
+        raise RiverError(f"canvas action is one of {', '.join(acts)}")
+    words = ["canvas", act]
+    if act in ("reply", "resolve"):
+        if not a.get("comment"):
+            raise RiverError(f"canvas {act} needs the comment id (comment), for example c12")
+        words.append(str(a["comment"]))
+    elif act != "list":
+        if not a.get("name"):
+            raise RiverError(f"canvas {act} needs the canvas name (name)")
+        words.append(str(a["name"]))
+    if act in ("comment", "reply"):
+        text = a.get("text") or ""
+        words.append(" " + text if text.startswith("-") else text)  # argparse reads a leading - as an option
+    if act == "save":
+        if not a.get("path"):
+            raise RiverError("canvas save needs the file to write (path)")
+        words.append(" " + a["path"] if a["path"].startswith("-") else a["path"])
+    if act == "put":
+        if a.get("text") is None:
+            raise RiverError("canvas put needs the page's whole text (text)")
+        words += [f"--name={words.pop()}", f"--text={a['text']}"]
+    opts = {"put": ("kind", "title", "note", "item", "project"), "list": ("project", "item"),
+            "show": ("version", "project"), "comments": ("project",), "comment": ("quote", "path", "version", "project"),
+            "send": ("project",), "resolve": ("note",), "delete": ("project",), "save": ("version", "project")}
+    for k in opts.get(act, ()):
+        if act == "save" and k == "path":
+            continue
+        if a.get(k) not in (None, ""):
+            words += [f"--{k}={a[k]}"]
+    if act == "comments" and a.get("open"):
+        words.append("--open")
+    return words
 
 
 # One river command at a time: a call changes the process's folder and captures its stdout, and maxpm serve
@@ -116,6 +178,8 @@ class Server:
                 words.append(a["name"])
             if act == "done":
                 words += ["--result", a.get("result") or ""]
+        elif name == "canvas":
+            words = canvas_argv(a)
         elif name == "inbox":
             words = ["inbox"]
         elif name == "plan":

@@ -6469,3 +6469,129 @@ class ManagerWake(Base):
         core.done(self.c, y, "def456", "w1")
         core.ship(self.c, y, "boss")
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='boss' AND read_at IS NULL").fetchone()[0], 0)
+
+
+class Canvas(Base):
+    """#4648: canvases: pages that a session makes and maxpm keeps, with versions and comments."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "web")
+        core.project_add(self.c, "api")
+        core.register(self.c, "ag")
+        core.register(self.c, "mark", human=True)
+        self.it = self.add("web", "the plan")
+        core.claim(self.c, self.it, "ag")
+
+    def test_put_makes_versions_of_one_canvas_in_the_held_items_project(self):
+        a = core.canvas_put(self.c, "Release-Plan", "<h1>Plan</h1>", "ag", filename="plan.html", title="Release plan")
+        self.assertEqual((a["name"], a["kind"], a["project"], a["item_id"], a["version"]), ("release-plan", "html", "web", self.it, 1))
+        b = core.canvas_put(self.c, "release-plan", "<h1>Plan</h1><p>two</p>", "ag", note="two")
+        self.assertEqual((b["id"], b["version"], b["title"]), (a["id"], 2, "Release plan"))
+        same = core.canvas_put(self.c, "release-plan", "<h1>Plan</h1><p>two</p>", "ag")
+        self.assertTrue(same["unchanged"])
+        self.assertEqual(same["version"], 2)
+        self.assertEqual(core.canvas_show(self.c, "release-plan", version=1)["shown"]["body"], "<h1>Plan</h1>")
+        self.assertIn("canvas release-plan v2", " ".join(e["change"] for e in core.item_show(self.c, self.it)["events"]))
+
+    def test_kind_name_size_and_project_rules(self):
+        with self.assertRaisesRegex(core.RiverError, "say the kind"):
+            core.canvas_put(self.c, "x", "text", "ag")
+        with self.assertRaisesRegex(core.RiverError, "canvas name"):
+            core.canvas_put(self.c, "-bad", "text", "ag", kind="md")
+        core.canvas_put(self.c, "notes", "# a", "ag", kind="markdown")
+        with self.assertRaisesRegex(core.RiverError, "is md, not html"):
+            core.canvas_put(self.c, "notes", "<p>a</p>", "ag", kind="html")
+        core.config_set(self.c, "canvas_max", "10")
+        with self.assertRaisesRegex(core.RiverError, "canvas_max"):
+            core.canvas_put(self.c, "notes", "# a much longer page", "ag")
+        with self.assertRaisesRegex(core.RiverError, "say the project"):
+            core.canvas_put(self.c, "x", "# a", "mark", kind="md")
+        # The same name in two projects: a name alone is not enough to read it.
+        core.canvas_put(self.c, "notes", "# b", "mark", kind="md", project="api")
+        with self.assertRaisesRegex(core.RiverError, "in the projects"):
+            core.canvas_show(self.c, "notes")
+        self.assertEqual(core.canvas_show(self.c, "notes", project="api")["shown"]["body"], "# b")
+
+    def test_old_versions_go_but_version_one_stays(self):
+        core.config_set(self.c, "canvas_versions", "3")
+        for n in range(1, 7):
+            d = core.canvas_put(self.c, "p", f"# v{n}", "ag", kind="md")
+        self.assertEqual([v["version"] for v in d["versions"]], [1, 5, 6])  # three in all, version 1 among them
+
+    def test_comments_are_drafts_until_sent_then_one_message_reaches_the_writer(self):
+        core.canvas_put(self.c, "plan", "<h1>Plan</h1><p>Step one</p>", "ag", kind="html")
+        a = core.canvas_comment(self.c, "plan", "Say when", "mark", {"quote": "Step one", "path": "p:nth-of-type(1)"})
+        b = core.canvas_comment(self.c, "plan", "Good overall", "mark")
+        self.assertEqual((a["state"], a["anchor"]["quote"], b["anchor"]), ("draft", "Step one", None))
+        self.assertEqual(core.inbox(self.c, "ag", mark_read=False), [])
+        sent = core.canvas_send(self.c, "plan", "mark")
+        self.assertEqual((sent["sent"], sent["to"]), ([a["id"], b["id"]], "ag"))
+        msg = core.message_show(self.c, sent["message"])
+        self.assertEqual((msg["to_agent"], msg["item_id"]), ("ag", self.it))
+        self.assertIn(f'c{a["id"]} on "Step one" (p:nth-of-type(1)): Say when', msg["body"])
+        self.assertIn(f"c{b['id']} on the whole page: Good overall", msg["body"])
+        with self.assertRaisesRegex(core.RiverError, "no draft comments"):
+            core.canvas_send(self.c, "plan", "mark")
+        # The writer reads them (sent becomes read), answers one and resolves it.
+        got = core.canvas_comments(self.c, "plan", "ag", open_only=True)
+        self.assertEqual([r["state"] for r in got["comments"]], ["read", "read"])
+        core.canvas_reply(self.c, f"c{a['id']}", "Dates added in v2", "ag")
+        core.canvas_resolve(self.c, a["id"], "ag", "v2")
+        left = core.canvas_comments(self.c, "plan", "ag", open_only=True)["comments"]
+        self.assertEqual([r["id"] for r in left], [b["id"]])
+        full = core.canvas_show(self.c, "plan")["comments"]
+        done = [r for r in full if r["id"] == a["id"]][0]
+        self.assertEqual((done["state"], done["resolve_note"], done["replies"][0]["body"]), ("resolved", "v2", "Dates added in v2"))
+        # The reply reaches the person who wrote the comment.
+        notes = core.inbox(self.c, "mark", mark_read=False)
+        self.assertTrue(any("Dates added in v2" in m["body"] for m in notes))
+
+    def test_when_the_writer_is_gone_the_comments_go_to_the_items_next_holder(self):
+        core.canvas_put(self.c, "plan", "# Plan", "ag", kind="md")
+        core.release(self.c, self.it, actor="ag")
+        core.unregister(self.c, "ag")
+        core.canvas_comment(self.c, "plan", "More detail", "mark")
+        sent = core.canvas_send(self.c, "plan", "mark")
+        self.assertEqual(sent["to"], "the next holder")
+        self.assertEqual(core.message_show(self.c, sent["message"])["item_id"], self.it)
+        # A canvas with no item and no writer: nobody would get them.
+        core.canvas_put(self.c, "loose", "# x", "mark", kind="md", project="api")
+        core.canvas_comment(self.c, "loose", "hm", "mark")
+        with self.assertRaisesRegex(core.RiverError, "no item"):
+            core.canvas_send(self.c, "loose", "mark")
+
+    def test_list_delete_bring_back_and_save(self):
+        core.canvas_put(self.c, "plan", "# Plan", "ag", kind="md")
+        core.canvas_comment(self.c, "plan", "x", "mark")
+        row = core.canvas_list(self.c, project="web")[0]
+        self.assertEqual((row["name"], row["drafts"], row["open_comments"]), ("plan", 1, 0))
+        self.assertEqual([r["name"] for r in core.canvas_list(self.c, mine="ag")], ["plan"])
+        core.canvas_delete(self.c, "plan", "ag")
+        self.assertEqual(core.canvas_list(self.c), [])
+        with self.assertRaisesRegex(core.RiverError, "no canvas plan"):
+            core.canvas_show(self.c, "plan")
+        back = core.canvas_put(self.c, "plan", "# Plan 2", "ag")
+        self.assertEqual(back["version"], 2)
+        path = os.path.join(self.dir.name, "out")
+        os.mkdir(path)
+        saved = core.canvas_save(self.c, "plan", path, version=1)
+        self.assertEqual(open(saved["path"]).read(), "# Plan")
+        with self.assertRaisesRegex(core.RiverError, "exists"):
+            core.canvas_save(self.c, "plan", path)
+
+    def test_the_command_reads_a_file_or_stdin_and_the_kind_from_the_file_name(self):
+        from river import cli
+        f = os.path.join(self.dir.name, "chart.svg")
+        with open(f, "w") as fh:
+            fh.write("<svg></svg>")
+        old = os.environ.get("MAXPM_DB")
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(lambda: os.environ.__setitem__("MAXPM_DB", old) if old else os.environ.pop("MAXPM_DB", None))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch("sys.stdin", io.StringIO("# from stdin")):
+            cli.run(["-q", "--as", "ag", "canvas", "put", f, "--name", "chart"])
+            cli.run(["-q", "--as", "ag", "canvas", "put", "-", "--name", "doc", "--kind", "md"])
+            cli.run(["-q", "--as", "ag", "canvas", "show", "doc", "--text"])
+        self.assertIn("chart  v1 svg  web", out.getvalue())
+        self.assertTrue(out.getvalue().endswith("# from stdin"))

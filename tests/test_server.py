@@ -3487,3 +3487,38 @@ class ServerBind(unittest.TestCase):
             httpd.server_close()
 
 
+
+
+class CanvasOps(unittest.TestCase):
+    """#4648: the canvas operations over HTTP (/api/action) are the ones of maxpm canvas and the MCP tool."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+        core.project_add(self.c, "web")
+        core.register(self.c, "ag")
+        core.register(self.c, "mark", human=True)
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def test_put_comment_send_and_answer(self):
+        op = lambda name, args, who: server.OPS[name](self.c, args, who)
+        d = op("canvas_put", {"name": "plan", "kind": "html", "text": "<h1>Plan</h1>", "project": "web"}, "ag")
+        self.assertEqual((d["name"], d["version"]), ("plan", 1))
+        op("canvas_put", {"name": "plan", "text": "<h1>Plan 2</h1>", "project": "web"}, "ag")
+        c1 = op("canvas_comment", {"name": "plan", "text": "Bigger", "anchor": {"path": "h1", "text": "Plan 2"}}, "mark")
+        sent = op("canvas_send", {"name": "plan"}, "mark")
+        self.assertEqual((sent["to"], sent["sent"]), ("ag", [c1["id"]]))
+        got = op("canvas_comments", {"name": "plan", "open": True}, "ag")
+        self.assertEqual(got["comments"][0]["anchor"], {"path": "h1", "text": "Plan 2"})
+        op("canvas_reply", {"comment": c1["id"], "text": "ok"}, "ag")
+        op("canvas_resolve", {"comment": c1["id"], "note": "v3"}, "ag")
+        self.assertEqual(op("canvas_list", {}, "mark")[0]["open_comments"], 0)
+        self.assertEqual(op("canvas_show", {"name": "plan", "version": 1}, "mark")["shown"]["body"], "<h1>Plan</h1>")
+        op("canvas_delete", {"name": "plan"}, "ag")
+        self.assertEqual(op("canvas_list", {}, "mark"), [])
+        self.assertNotIn("canvas_save", server.OPS)  # writing a file stays with the command

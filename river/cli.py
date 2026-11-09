@@ -658,6 +658,45 @@ def build_parser():
     x = prs.add_parser("archive"); x.add_argument("name")
     prs.add_parser("list")
 
+    cv = sub.add_parser("canvas", help="canvases: pages that a session makes and maxpm keeps (HTML, Markdown, SVG), "
+                        "with versions and the comments people write on them")
+    cvs = cv.add_subparsers(dest="cvcmd", required=True)
+    x = cvs.add_parser("put", help="store a new version: maxpm canvas put <file> --name <name> (- reads stdin)")
+    x.add_argument("file", nargs="?", help="the page: a .html, .md or .svg file, or - for stdin (or use --text)")
+    x.add_argument("--name", required=True, help="the canvas: the same name in the same project is the same canvas")
+    x.add_argument("--text", help="the page's text itself, in place of a file")
+    x.add_argument("--kind", help="html, md, or svg (default: from the file name)")
+    x.add_argument("--title"); x.add_argument("--note", help="what changed in this version")
+    x.add_argument("--item", type=int, help="the item it belongs to (default: the item you hold)")
+    x.add_argument("--project", help="default: the item's project, or this folder's")
+    x = cvs.add_parser("list", help="the canvases, newest change first")
+    x.add_argument("--project"); x.add_argument("--item", type=int)
+    x.add_argument("--mine", action="store_true", help="only the ones whose latest version you put")
+    x.add_argument("--deleted", action="store_true", help="deleted ones too")
+    x = cvs.add_parser("show", help="a canvas: its versions, its comments, and the text of a version")
+    x.add_argument("name"); x.add_argument("--version", type=int); x.add_argument("--project")
+    x.add_argument("--text", action="store_true", help="print only the page's text")
+    x = cvs.add_parser("comments", help="the comments on a canvas with their replies (an agent's read marks sent ones read)")
+    x.add_argument("name"); x.add_argument("--open", action="store_true", help="only the ones that wait for an answer")
+    x.add_argument("--project")
+    x = cvs.add_parser("comment", help="comment on a part of a canvas (--quote, --path) or on the whole page; it is a "
+                       "draft until you send it")
+    x.add_argument("name"); x.add_argument("text")
+    x.add_argument("--quote", help="the words of the page that the comment is about")
+    x.add_argument("--path", help="the part of the page (a CSS path, for example h2:nth-of-type(3))")
+    x.add_argument("--version", type=int); x.add_argument("--project")
+    x.add_argument("--send", action="store_true", help="send it at once")
+    x = cvs.add_parser("send", help="send your draft comments (or the ones named) to the session that wrote the canvas")
+    x.add_argument("name"); x.add_argument("comments", nargs="*", help="comment ids (c12); default: all your drafts")
+    x.add_argument("--project")
+    x = cvs.add_parser("reply", help="answer a comment in its thread"); x.add_argument("comment"); x.add_argument("text")
+    x = cvs.add_parser("resolve", help="close a comment: say what changed, or why nothing needs to")
+    x.add_argument("comment"); x.add_argument("--note")
+    x = cvs.add_parser("delete", help="take a canvas off every list"); x.add_argument("name"); x.add_argument("--project")
+    x = cvs.add_parser("save", help="write a version of a canvas as a file (for a page that goes into git)")
+    x.add_argument("name"); x.add_argument("path"); x.add_argument("--version", type=int); x.add_argument("--project")
+    x.add_argument("--force", action="store_true", help="write over the file")
+
     gl = sub.add_parser("goal", help="goals: outcomes in a project that one agent owns and works toward")
     gls = gl.add_subparsers(dest="gcmd", required=True)
     x = gls.add_parser("add", help="maxpm goal add <project> <name> --outcome \"...\" --done-when \"...\"")
@@ -1846,6 +1885,8 @@ def dispatch(conn, a, actor):
         if a.pcmd == "archive":
             return core.project_archive(conn, a.name, actor)
         return core.project_list(conn)
+    if c == "canvas":
+        return _canvas_dispatch(conn, a, actor)
     if c == "goal":
         g = a.gcmd
         if g == "add":
@@ -3026,6 +3067,131 @@ def render_wait(res):
               + ". Stop now, and tell the user this session has ended and its tab can be closed.")
 
 
+def _canvas_dispatch(conn, a, actor):
+    """maxpm canvas ...: the canvas operations of core (#4648); MCP and HTTP call the same functions."""
+    v = a.cvcmd
+    if v == "put":
+        if a.text is not None and a.file:
+            raise RiverError("give the page as a file or --text, not both")
+        if a.text is not None:
+            body = a.text
+        elif a.file == "-":
+            body = sys.stdin.read()
+        elif a.file:
+            try:
+                body = Path(a.file).expanduser().read_text()
+            except (OSError, UnicodeDecodeError) as e:
+                raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
+        else:
+            raise RiverError("give the page: maxpm canvas put <file> --name <name> (or - for stdin, or --text)")
+        project = a.project
+        if not project and a.item is None and not core._held_item(conn, actor):
+            names = core.projects_for_dir(conn, os.getcwd())
+            project = names[0] if len(names) == 1 else None
+        return core.canvas_put(conn, a.name, body, actor, a.kind, a.title, a.item, project, a.note,
+                               a.file if a.file and a.file != "-" else None)
+    if v == "list":
+        return core.canvas_list(conn, a.project, a.item, actor if a.mine else None, a.deleted)
+    if v == "show":
+        return core.canvas_show(conn, a.name, a.project, a.version)
+    if v == "comments":
+        return core.canvas_comments(conn, a.name, actor, a.open, a.project)
+    if v == "comment":
+        anchor = {"quote": a.quote, "path": a.path} if (a.quote or a.path) else None
+        return core.canvas_comment(conn, a.name, a.text, actor, anchor, a.version, a.project, a.send)
+    if v == "send":
+        return core.canvas_send(conn, a.name, actor, a.comments or None, a.project)
+    if v == "reply":
+        return core.canvas_reply(conn, a.comment, a.text, actor)
+    if v == "resolve":
+        return core.canvas_resolve(conn, a.comment, actor, a.note)
+    if v == "delete":
+        return core.canvas_delete(conn, a.name, actor, a.project)
+    if v == "save":
+        return core.canvas_save(conn, a.name, a.path, a.version, a.project, a.force)
+    raise RiverError(f"unknown canvas command {v}")
+
+
+def _canvas_line(d):
+    counts = [f"{d['open_comments']} open comment(s)"] if d["open_comments"] else []
+    counts += [f"{d['drafts']} draft(s)"] if d["drafts"] else []
+    return (f"{d['name']}  v{d['version']} {d['kind']}  {d['project']}" + (f"  #{d['item_id']}" if d["item_id"] else "")
+            + (f"  \"{d['title']}\"" if d["title"] else "") + f"  by {d['agent'] or '?'} {core.show_time(d['updated_at'])}"
+            + (f"  [{', '.join(counts)}]" if counts else "") + ("  (deleted)" if d.get("deleted_at") else ""))
+
+
+def _comment_lines(r, indent="  "):
+    a = r.get("anchor")
+    part = "the whole page"
+    if a:
+        part = (f"\"{a['quote']}\"" if a.get("quote") else f"\"{(a.get('text') or '')[:80]}\"") + \
+               (f" ({a['path']})" if a.get("path") else "")
+    out = [f"{indent}c{r['id']} [{r['state']}] {r['author']} on {part} (v{r['version']}): {r['body']}"]
+    for x in r.get("replies", []):
+        out.append(f"{indent}  reply c{x['id']} {x['author']}: {x['body']}")
+    if r.get("resolve_note") or r["state"] == "resolved":
+        out.append(f"{indent}  resolved by {r.get('resolved_by')}" + (f": {r['resolve_note']}" if r.get("resolve_note") else ""))
+    return out
+
+
+def render_canvas(a, res):
+    v = a.cvcmd
+    if v == "put":
+        print(("unchanged: " if res.get("unchanged") else "") + _canvas_line(res))
+        if not res.get("unchanged"):
+            print(f"  version {res['version']} stored ({res['bytes']} bytes). People see it in the page's Artifacts; "
+                  f"their comments come to you as a message: maxpm canvas comments {res['name']} --open")
+        return
+    if v == "list":
+        if not res:
+            print("(no canvases: maxpm canvas put <file> --name <name>)")
+        for d in res:
+            print(_canvas_line(d))
+        return
+    if v == "show":
+        if a.text:
+            sys.stdout.write(res["shown"]["body"])
+            return
+        print(_canvas_line(res))
+        sh = res["shown"]
+        print(f"  shown: version {sh['version']} by {sh['author']} {core.show_time(sh['created_at'])}"
+              + (f": {sh['note']}" if sh["note"] else ""))
+        print("  versions: " + ", ".join(f"v{x['version']} {x['author']}" for x in res["versions"]))
+        for r in res["comments"]:
+            print("\n".join(_comment_lines(r)))
+        print("---- text of version %d (only the text: maxpm canvas show %s --text) ----" % (sh["version"], res["name"]))
+        print(sh["body"])
+        return
+    if v == "comments":
+        if not res["comments"]:
+            print(f"(no {'open ' if a.open else ''}comments on canvas {res['canvas']})")
+        for r in res["comments"]:
+            print("\n".join(_comment_lines(r, "")))
+        return
+    if v == "comment":
+        if res["state"] == "draft":
+            print(f"comment c{res['id']} on canvas version {res['version']} is a draft; send your drafts: "
+                  f"maxpm canvas send <canvas>")
+        else:
+            print(f"comment c{res['id']} sent")
+        return
+    if v == "send":
+        print(f"sent {', '.join('c%d' % x for x in res['sent'])} on canvas {res['canvas']} to {res['to']} "
+              f"(message #{res['message']})")
+        return
+    if v == "reply":
+        print(f"reply c{res['id']} in the thread of c{res['parent_id']}")
+        return
+    if v == "resolve":
+        print(f"comment c{res['id']} resolved")
+        return
+    if v == "delete":
+        print(f"canvas {res['canvas']} deleted (a put of the same name brings it back)")
+        return
+    if v == "save":
+        print(f"canvas {res['canvas']} version {res['version']} written to {res['path']}")
+
+
 def render(a, res):
     c = a.cmd
     if c == "wait":
@@ -3080,6 +3246,8 @@ def render(a, res):
         if res["dry_run"]:
             print("Run it again without --dry-run to add them.")
         return
+    if c == "canvas":
+        return render_canvas(a, res)
     if c == "goal" and a.gcmd == "handoff":
         return render_handoff(res, a)
     if c == "goal" and a.gcmd == "base":

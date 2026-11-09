@@ -2600,6 +2600,20 @@ def _page_reason(a, who):
 
 
 OPS = {
+    # Canvases (#4648): the same operations as maxpm canvas and the MCP tool canvas, for the page and for any
+    # agent that speaks HTTP (POST /api/action {"op": "canvas_put", "args": {...}, "actor": "<agent>"}).
+    "canvas_put": lambda c, a, who: core.canvas_put(c, a["name"], a.get("text"), who, a.get("kind"), a.get("title"),
+                                                    a.get("item"), a.get("project"), a.get("note")),
+    "canvas_list": lambda c, a, who: core.canvas_list(c, a.get("project"), a.get("item"),
+                                                      who if a.get("mine") else None, bool(a.get("deleted"))),
+    "canvas_show": lambda c, a, who: core.canvas_show(c, a["name"], a.get("project"), a.get("version")),
+    "canvas_comments": lambda c, a, who: core.canvas_comments(c, a["name"], who, bool(a.get("open")), a.get("project")),
+    "canvas_comment": lambda c, a, who: core.canvas_comment(c, a["name"], a.get("text"), who, a.get("anchor"),
+                                                            a.get("version"), a.get("project"), bool(a.get("send"))),
+    "canvas_send": lambda c, a, who: core.canvas_send(c, a["name"], who, a.get("comments"), a.get("project")),
+    "canvas_reply": lambda c, a, who: core.canvas_reply(c, a["comment"], a.get("text"), who),
+    "canvas_resolve": lambda c, a, who: core.canvas_resolve(c, a["comment"], who, a.get("note")),
+    "canvas_delete": lambda c, a, who: core.canvas_delete(c, a["name"], who, a.get("project")),
     # The page's Connect button for the relay: the device flow, finished in the background by maxpm serve.
     "relay_connect": lambda conn, a, who: relay.connect_from_page(bool(a.get("replace"))),
     "relay_disconnect": lambda conn, a, who: relay.disconnect(),
