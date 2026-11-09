@@ -126,7 +126,8 @@ try {
   window.riverOpen(ITEM);
   await until(() => q("#drawer").classList.contains("open"), "the drawer");
   q("#dClose").click();
-  await until(() => !q("#drawer").classList.contains("open"), "the drawer closes");
+  // Close goes Back (history.back, which ends later): wait for it, else it lands after the next open (#4716).
+  await until(() => !q("#drawer").classList.contains("open") && !location.search.includes("item="), "the drawer closes");
   // Escape closes it too, and takes ?item= out of the address (#4716); with a dialog open, Escape closes only the dialog.
   window.riverOpen(ITEM);
   await until(() => q("#drawer").classList.contains("open") && location.search.includes("item="), "the drawer again");
@@ -299,8 +300,8 @@ class PageAddresses(unittest.TestCase):
             self.assertIsNotNone(page, path)
             got = re.search(rb'<base href="([^"]*)">', page).group(1).decode()
             self.assertEqual(got, base, path)
-            # Through the relay the page lives under /app/: the base leads back there too.
-            self.assertEqual(urljoin("https://relay.example/app" + path, got), "https://relay.example/app/", path)
+            # On the relay's tunnel the page lives at the root, as here.
+            self.assertEqual(urljoin("https://mark-ab3cd9.relay.example" + path, got), "https://mark-ab3cd9.relay.example/", path)
             self.assertLess(page.index(b"<base"), page.index(b"app.css"), "the base comes before the first address")
         for path in ("/api/state", "/app.js", "/components/chat.js", "/items/3", "/sessions//x", "/sessions/../api"):
             self.assertIsNone(server.page_html(path), path)
