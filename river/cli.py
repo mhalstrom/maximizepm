@@ -2811,6 +2811,10 @@ def render_go(b):
             out.append("  unblocks: " + ", ".join(f"#{d['id']} {d['title']}" for d in it["unblocks_detail"]))
         if it.get("output"):
             out.append(f"  earlier output: {it['output']}")
+        for cv in b.get("canvases") or []:  # #4769
+            out.append(f"  canvas {cv['name']} v{cv['version']}: "
+                       + (f"{cv['open_comments']} open comment(s) wait for a change: {r} canvas comments {cv['name']} --open"
+                          if cv["open_comments"] else f"no open comments ({r} canvas show {cv['name']})"))
         if b.get("related"):
             out.append(f"  RELATED (look first: some of it may be done or in progress; {r} show <id>):")
             out += _related_lines(b["related"], "  ")

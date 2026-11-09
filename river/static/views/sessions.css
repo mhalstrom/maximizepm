@@ -143,6 +143,30 @@ button.srow-it { cursor: pointer; }
 /* A canvas tab (#4768): the version menu over the page. */
 .sp-cbar { display: flex; gap: 8px; align-items: center; flex: none; flex-wrap: wrap; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; position: sticky; top: 0; z-index: 1; }
 .sp-cbar select { font-size: 12px; max-width: 100%; }
+.sp-cbar .btn { font-size: 12px; padding: 2px 8px; }
+.sp-cbar .btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.cv-sp { flex: 1; }
+/* The comments of a canvas (#4769), under the page. */
+.sp-cside { flex: none; border-top: 1px solid var(--line); background: var(--panel); padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.cv-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cv-compose { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--accent); border-radius: 8px; padding: 8px; }
+.cv-compose textarea, .cv-edit textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.cv-c { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+.cv-c.cv-resolved { opacity: .7; }
+.cv-c.cv-draft { border-style: dashed; }
+.cv-h { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.cv-st { font-size: 11px; }
+.cv-b { white-space: pre-wrap; }
+.cv-r { padding-left: 10px; border-left: 2px solid var(--line); }
+.cv-acts { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.cv-acts input { flex: 1 1 140px; min-width: 0; font-size: 12.5px; }
+.cv-acts .btn { font-size: 12px; padding: 2px 8px; }
+.cv-edit { display: flex; flex-direction: column; gap: 6px; padding: 8px; flex: 1; }
+.cv-edit textarea { flex: 1; min-height: 300px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+/* Comment mode on a Markdown canvas: the part under the mouse, and a part that Show finds. */
+.cv-picking .sp-canvas, .cv-picking .sp-canvas * { cursor: crosshair; }
+.sp-canvas .maxpm-hi { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sp-canvas .maxpm-flash { outline: 3px solid #d29922; outline-offset: 3px; }
 .sp-img { max-width: 100%; height: auto; display: block; margin: auto; }
 .sp-md { padding: 12px 16px; font-size: 14px; line-height: 1.6; }
 .sp-note { padding: 16px; font-size: 13px; }

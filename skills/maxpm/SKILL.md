@@ -393,6 +393,10 @@ this computer, with each version, and that the user opens in the MaximizePM page
 - The user comments on a part of the page or on the whole page, and sends the comments to you as one
   message. Then: `maxpm canvas comments <name> --open`, change the page and put it again, and answer each
   comment: `maxpm canvas reply c<id> "..."` and `maxpm canvas resolve c<id> --note "<version, or why not>"`.
+  When your session has ended, a fresh session takes the canvas's item with the comments; the go briefing
+  names the item's canvases and their open comments.
+- The user can edit a Markdown canvas in the page: that is a new version by the user, and you get a note.
+  Read it (`maxpm canvas show <name>`) before you put your next version, so you keep the user's change.
 - `maxpm canvas list` shows the canvases; `maxpm canvas show <name> [--version N] [--text]` reads one;
   `maxpm canvas save <name> <path>` writes a version as a file when it must go into git.
 

@@ -8558,8 +8558,9 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
             last = _canvas_latest(conn, cid)
             if last and last["body"] == body and not c["deleted_at"] and (title is None or title == c["title"]):
                 return dict(canvas_show(conn, cid), unchanged=True)
+            writer = c["agent"] if _is_person(conn, actor) and c["agent"] else actor  # a person's edit (#4769)
             conn.execute("UPDATE canvases SET title=COALESCE(?, title), kind=?, item_id=?, agent=?, updated_at=?, "
-                         "deleted_at=NULL WHERE id=?", (title, kind, it["id"] if it else c["item_id"], actor, t, cid))
+                         "deleted_at=NULL WHERE id=?", (title, kind, it["id"] if it else c["item_id"], writer, t, cid))
         n = conn.execute("SELECT COALESCE(MAX(version),0)+1 FROM canvas_versions WHERE canvas_id=?", (cid,)).fetchone()[0]
         conn.execute("INSERT INTO canvas_versions (canvas_id, version, body, author, note, created_at) VALUES (?,?,?,?,?,?)",
                      (cid, n, body, actor, (note or "").strip() or None, t))
@@ -8721,10 +8722,11 @@ def canvas_comment(conn, ref, body, actor=None, anchor=None, version=None, proje
 
 
 def _canvas_writer(conn, c):
-    """Who gets the comments of a canvas: the agent that put its latest version while its session is
-    registered; else None (then they go to the holder of its item)."""
-    last = _canvas_latest(conn, c["id"])
-    who = last["author"] if last else c["agent"]
+    """Who gets the comments of a canvas: the agent that put its newest version (a person's edit in between does
+    not count, #4769) while its session is registered; else None (then they go to the holder of its item)."""
+    r = conn.execute("SELECT v.author FROM canvas_versions v JOIN agents a ON a.name=v.author AND a.kind='ai' "
+                     "WHERE v.canvas_id=? ORDER BY v.version DESC LIMIT 1", (c["id"],)).fetchone()
+    who = r["author"] if r else c["agent"]
     r = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
     return who if r and r["kind"] == "ai" else None
 
@@ -8764,14 +8766,68 @@ def canvas_send(conn, ref, actor=None, comment_ids=None, project=None):
         lines.append(f"  c{r['id']} on {part}{on}: {r['body']}")
     lines.append(f"Read them: maxpm canvas comments {c['name']} --open; change the page (maxpm canvas put), then "
                  f"answer each: maxpm canvas reply c<id> \"...\" and maxpm canvas resolve c<id> --note \"...\"")
-    msg = send(conn, "note", "\n".join(lines), to=to, item=c["item_id"], actor=actor)
+    text = "\n".join(lines)
+    item, fresh = c["item_id"], None
+    if to is None:
+        # The session that wrote it has ended (#4769). An open item nobody holds: a fresh session takes it with the
+        # comments in its notes (fresh_sessions). A closed item: a new item for the comments, which a fresh session
+        # takes; the message goes with it.
+        it = _item(conn, item)
+        if it["status"] in CLOSED_STATES:
+            new = item_add(conn, _project_name(conn, it["project_id"]), f"Answer the comments on canvas {c['name']}",
+                           priority=it["priority"], actor=actor, found_during=item,
+                           context=f"{text}\nThe canvas came from #{item}: read it first (maxpm show {item}).")
+            item = new["id"]
+        with tx(conn):
+            fresh = _want_fresh_comments(conn, item, text)
+    msg = send(conn, "note", text, to=to, item=item, actor=actor)
     with tx(conn):
         t = iso(now())
         for r in rows:
             conn.execute("UPDATE canvas_comments SET state='sent', sent_at=?, message_id=? WHERE id=?",
                          (t, msg["id"], r["id"]))
-    return {"canvas": c["name"], "sent": [r["id"] for r in rows], "to": msg.get("to_agent") or "the next holder",
-            "message": msg["id"]}
+    return {"canvas": c["name"], "sent": [r["id"] for r in rows], "message": msg["id"], "item": item,
+            "to": msg.get("to_agent") or (f"a fresh session for #{item}" if fresh else f"the next holder of #{item}")}
+
+
+def _want_fresh_comments(conn, item_id, text):
+    """Comments for an agent item that nobody holds: maxpm serve starts a fresh session for it (fresh_sessions), as
+    for an answer. Inside a tx. False when it is held, reserved, waits, or the setting is off."""
+    it = _item(conn, item_id)
+    if it["status"] != "open" or it["doer"] == "human" or it["reserved_for"] or it["assignee"]:
+        return False
+    if setting(conn, "fresh_sessions", item_id=item_id) != "on":
+        return False
+    conn.execute("UPDATE items SET fresh_start=? WHERE id=?", (iso(now()), item_id))
+    _event(conn, item_id, "maxpm", "canvas comments came: a fresh session takes it (fresh_sessions)")
+    return True
+
+
+def canvas_discard(conn, comment_id, actor=None):
+    """Delete a draft comment of one's own (it was never sent)."""
+    r = _canvas_comment(conn, comment_id)
+    if r["state"] != "draft" or r["author"] != actor:
+        raise RiverError(f"c{r['id']} is not a draft of yours; a sent comment stays (resolve it: "
+                         f"maxpm canvas resolve c{r['id']} --note \"...\")")
+    with tx(conn):
+        conn.execute("DELETE FROM canvas_comments WHERE id=?", (r["id"],))
+    return {"discarded": r["id"]}
+
+
+def canvas_edit(conn, ref, body, actor=None, project=None):
+    """A person changes a Markdown canvas in the page (#4769): a new version by that person; the session that
+    wrote it gets a note, so it reads the change before its next version."""
+    c = _canvas_row(conn, ref, project)
+    if c["kind"] != "md":
+        raise RiverError(f"canvas {c['name']} is {c['kind']}: only a Markdown canvas has an editor in the page; "
+                         "comment on it, and the session changes it")
+    res = canvas_put(conn, c["name"], body, actor, project=_project_name(conn, c["project_id"]), item=c["item_id"],
+                     note=f"edited by {actor}")
+    to = _canvas_writer(conn, c)
+    if not res.get("unchanged") and (to or c["item_id"]) and to != actor:
+        send(conn, "note", f"{actor} edited canvas {c['name']} in the page: version {res['version']}. Read it before "
+             f"your next version: maxpm canvas show {c['name']}", to=to, item=c["item_id"], actor=actor, level="low")
+    return res
 
 
 def canvas_comments(conn, ref, actor=None, open_only=False, project=None):
@@ -10141,6 +10197,9 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
                 if h and h["goal"] not in seen:
                     seen.add(h["goal"])
                     brief["handoffs"].append(h)
+        # The item's canvases (#4769): the pages a session made for it, and the comments that wait for a change.
+        brief["canvases"] = [{"name": x["name"], "version": x["version"], "open_comments": x["open_comments"]}
+                             for x in canvas_heads(conn) if x["item_id"] == it["id"]]
         # Items of a shared goal have no owner who plans them: the agent tags the items it adds itself.
         brief["shared_goals"] = [r["name"] for r in conn.execute(
             "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "

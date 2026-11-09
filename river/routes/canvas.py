@@ -21,15 +21,56 @@ from ..core import RiverError
 
 PATH = re.compile(r"^/canvas/c?(\d+)/(latest|meta|\d+)$")
 
-# Added to an HTML canvas: it tells the panel where the page is scrolled, and scrolls there again after the panel
-# loads a new version, so a live reload keeps the place the person reads (#4768). It talks only to its parent.
-HELPER = """<script>/* maxpm canvas helper (#4768) */(function () {
-  var t, P = window.parent;
+# Added to an HTML canvas. It talks only to its parent (the side panel, or /view):
+# - scroll: it says where the page is scrolled, and scrolls there again after a new version loads, so a live reload
+#   keeps the place the person reads (#4768);
+# - comment mode (#4769, as annotatetofix): it marks the part under the mouse, and a click sends that part (a short
+#   CSS path, its text, and the selected text) to the panel, which opens a comment box for it; Escape ends the mode;
+# - show: it scrolls to the part of a comment and marks it for a moment.
+HELPER = """<script>/* maxpm canvas helper (#4768, #4769) */(function () {
+  var t, P = window.parent, mode = false, hi = null;
   if (!P || P === window) return;
+  var css = document.createElement("style");
+  css.textContent = ".maxpm-hi{outline:2px solid #1f6feb!important;outline-offset:2px!important;cursor:crosshair!important}"
+    + ".maxpm-flash{outline:3px solid #d29922!important;outline-offset:3px!important}";
+  (document.head || document.documentElement).appendChild(css);
+  function path(el) {
+    var parts = [];
+    while (el && el.nodeType === 1 && el !== document.body && el !== document.documentElement && parts.length < 8) {
+      if (el.id) { parts.unshift("#" + CSS.escape(el.id)); break; }
+      var i = 1, s = el;
+      while ((s = s.previousElementSibling)) if (s.tagName === el.tagName) i++;
+      parts.unshift(el.tagName.toLowerCase() + ":nth-of-type(" + i + ")");
+      el = el.parentElement;
+    }
+    return parts.join(" > ") || "body";
+  }
+  function mark(el) { if (hi) hi.classList.remove("maxpm-hi"); hi = el; if (el) el.classList.add("maxpm-hi"); }
   addEventListener("scroll", function () { clearTimeout(t); t = setTimeout(function () {
     P.postMessage({ maxpmCanvas: "scroll", x: scrollX, y: scrollY }, "*"); }, 120); }, { passive: true });
-  addEventListener("message", function (e) { var d = e.data || {};
-    if (e.source === P && d.maxpmCanvas === "scrollTo") scrollTo(d.x || 0, d.y || 0); });
+  addEventListener("mouseover", function (e) { if (mode) mark(e.target); }, true);
+  addEventListener("click", function (e) {
+    if (!mode) return;
+    e.preventDefault(); e.stopPropagation();
+    var el = e.target, quote = String(getSelection() || "").trim();
+    mark(null);
+    P.postMessage({ maxpmCanvas: "pick", path: path(el), text: (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 200),
+                    quote: quote.slice(0, 500) }, "*");
+  }, true);
+  addEventListener("keydown", function (e) { if (mode && e.key === "Escape") P.postMessage({ maxpmCanvas: "escape" }, "*"); });
+  addEventListener("message", function (e) {
+    var d = e.data || {};
+    if (e.source !== P) return;
+    if (d.maxpmCanvas === "scrollTo") scrollTo(d.x || 0, d.y || 0);
+    if (d.maxpmCanvas === "mode") { mode = !!d.on; if (!mode) mark(null); }
+    if (d.maxpmCanvas === "show") {
+      var el = null;
+      try { el = d.path ? document.querySelector(d.path) : null; } catch (x) { el = null; }
+      if (el) { el.scrollIntoView({ block: "center", behavior: "smooth" }); el.classList.add("maxpm-flash");
+        setTimeout(function () { el.classList.remove("maxpm-flash"); }, 1600); }
+      P.postMessage({ maxpmCanvas: "shown", found: !!el }, "*");
+    }
+  });
   P.postMessage({ maxpmCanvas: "ready" }, "*");
 })();</script>"""
 

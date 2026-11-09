@@ -181,9 +181,8 @@ class CanvasOpen(Base):
                          ["canvas", "open", "plan", "--session=ag"])
 
 
-class PanelCanvas(unittest.TestCase):
-    """The canvas tab of the side panel, in Chrome: a canvas that the shown session makes opens by itself, a new
-    version loads in place, and the version menu shows an older one."""
+class ChromePanel(unittest.TestCase):
+    """The Sessions tab on session ag, in Chrome (tests/test_view_sessions.drive_page)."""
 
     def setUp(self):
         from tests import test_view_sessions as tvs
@@ -200,6 +199,11 @@ class PanelCanvas(unittest.TestCase):
             finally:
                 c.close()
         return run
+
+
+class PanelCanvas(ChromePanel):
+    """The canvas tab of the side panel: a canvas that the shown session makes opens by itself, a new version loads
+    in place, and the version menu shows an older one."""
 
     def test_a_new_canvas_opens_and_follows_its_newest_version(self):
         driver = self.tvs.DRIVE_HEAD + r'''
@@ -268,3 +272,100 @@ try {
         self.assertEqual(got["text"], 'ag opened the canvas "Release plan" in the side panel of bo.')
         self.assertEqual(got["stored"]["on"], got["stored"]["targets"][-1])
         self.assertRegex(got["stored"]["on"], r"^canvas:\d+$")
+
+class PanelComments(ChromePanel):
+    """#4769: comments in the canvas tab, in Chrome: pick a part of a Markdown canvas, a draft, Send all, the
+    session's reply, the Markdown editor; the frame's pick of an HTML canvas."""
+
+    def call(self, fn):
+        def run():
+            c = core.connect()
+            try:
+                return fn(c)
+            finally:
+                c.close()
+        return run
+
+    def test_comment_on_a_part_send_reply_and_edit(self):
+        driver = self.tvs.DRIVE_HEAD + r'''
+const chips = () => [...document.querySelectorAll(".cv-c .cv-st")].map(x => x.textContent);
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  await sleep(400);
+  await fetch("/__md");
+  await until(() => q(".sp-canvas h1") && q(".sp-cside"), "the Markdown canvas and its comments");
+  const out = { none: q(".sp-cside").textContent.includes("No comments yet") };
+  q("[data-cv-mode]").click();
+  out.pressed = q("[data-cv-mode]").getAttribute("aria-pressed");
+  q(".sp-canvas h2").click();
+  await until(() => q(".cv-compose"), "the comment box");
+  out.on = q(".cv-compose .muted").textContent.replace(/\s+/g, " ").trim();
+  const ta = q(".cv-compose textarea"); ta.value = "Add the dates"; ta.dispatchEvent(new Event("input", { bubbles: true }));
+  out.kept = JSON.parse(localStorage.getItem([...Object.keys(localStorage)].find(k => k.startsWith("river.canvas.draft.")))).text;
+  q("[data-cv-draft]").click();
+  await until(() => chips().join() === "draft", "the draft");
+  q("[data-cv-page]").click();
+  await until(() => q(".cv-compose"), "the page comment box");
+  q(".cv-compose textarea").value = "Shorter, please"; q("[data-cv-draft]").click();
+  await until(() => chips().length === 2, "two drafts");
+  out.sendall = q("[data-cv-sendall]").textContent.trim();
+  q("[data-cv-sendall]").click();
+  await until(() => chips().join() === "sent,sent", "both sent");
+  await fetch("/__reply");
+  await until(() => chips().includes("answered"), "the session's reply");
+  out.reply = q(".cv-r").textContent.replace(/\s+/g, " ").trim();
+  q("[data-cv-edit]").click();
+  await until(() => q(".cv-edit textarea"), "the editor");
+  q(".cv-edit textarea").value = "# Notes\n\n## Dates\n\nMay 1."; q("[data-cv-save]").click();
+  await until(() => q(".sp-cver") && q(".sp-cver").value === "2" && q(".sp-canvas h2"), "version 2 by mark");
+  out.v2 = q(".sp-canvas").textContent.replace(/\s+/g, " ").trim();
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        def md(c):
+            return core.canvas_put(c, "notes", "# Notes\n\n## Dates\n\nSoon.", "ag", kind="md", title="Notes")["id"]
+
+        def reply(c):
+            top = [x for x in core.canvas_comments(c, "notes", "ag")["comments"] if x["anchor"]][0]
+            return core.canvas_reply(c, top["id"], "Dates are in v2", "ag")["id"]
+        got = self.tvs.drive_page(self.base, driver, routes={"/__md": self.call(md), "/__reply": self.call(reply)})
+        self.assertNotIn("error", got, got)
+        self.assertTrue(got["none"])
+        self.assertEqual(got["pressed"], "true")
+        self.assertIn("On “Dates”", got["on"])
+        self.assertEqual(got["kept"], "Add the dates", "the box's text stays in this browser while the person writes")
+        self.assertEqual(got["sendall"], "Send all 2 drafts to the session")
+        self.assertIn("Dates are in v2", got["reply"])
+        self.assertIn("May 1.", got["v2"])
+        c = self.base.c
+        threads = core.canvas_show(c, "notes")["comments"]
+        self.assertEqual(sorted((x["state"], (x["anchor"] or {}).get("text") or "the page") for x in threads),
+                         [("read", "Dates"), ("read", "the page")])  # the session read them before its reply
+        self.assertTrue(any("2 comment(s) on canvas notes" in m["body"] for m in core.inbox(c, "ag", mark_read=False)))
+        show = core.canvas_show(c, "notes")
+        self.assertEqual((show["version"], show["versions"][-1]["author"], show["agent"]), (2, "mark", "ag"))
+
+    def test_the_frame_picks_a_part_of_an_html_canvas(self):
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  await sleep(400);
+  await fetch("/__put1");
+  await until(() => q("iframe.sp-canvas") && q("[data-cv-mode]"), "the canvas");
+  q("[data-cv-mode]").click();
+  const f = q("iframe.sp-canvas");
+  // What the helper script in the frame sends after a click on its heading.
+  window.dispatchEvent(new MessageEvent("message", { source: f.contentWindow,
+    data: { maxpmCanvas: "pick", path: "h1:nth-of-type(1)", text: "One", quote: "On" } }));
+  await until(() => q(".cv-compose"), "the comment box");
+  // A message from another window is not the frame's.
+  window.dispatchEvent(new MessageEvent("message", { source: window, data: { maxpmCanvas: "pick", path: "x", text: "Evil" } }));
+  await sleep(200);
+  post({ on: q(".cv-compose .muted").textContent.replace(/\s+/g, " ").trim(), pressed: q("[data-cv-mode]").getAttribute("aria-pressed") });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = self.tvs.drive_page(self.base, driver, routes={"/__put1": self.put("<body><h1>One</h1></body>")})
+        self.assertNotIn("error", got, got)
+        self.assertEqual(got["on"], "On “On” h1:nth-of-type(1)")
+        self.assertEqual(got["pressed"], "false", "a pick ends the comment mode")

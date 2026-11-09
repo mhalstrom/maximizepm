@@ -6553,13 +6553,55 @@ class Canvas(Base):
         core.unregister(self.c, "ag")
         core.canvas_comment(self.c, "plan", "More detail", "mark")
         sent = core.canvas_send(self.c, "plan", "mark")
-        self.assertEqual(sent["to"], "the next holder")
+        # #4769: nobody holds the open item, so a fresh session takes it, with the comments (fresh_sessions).
+        self.assertEqual(sent["to"], f"a fresh session for #{self.it}")
         self.assertEqual(core.message_show(self.c, sent["message"])["item_id"], self.it)
+        self.assertEqual(core.fresh_items(self.c), [self.it])
+        # A closed item: a new item for the comments, found during it, which a fresh session takes.
+        core.config_set(self.c, "fresh_sessions", "on")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='done', closed_at='2026-11-09T00:00:00Z' WHERE id=?", (self.it,))
+        core.canvas_comment(self.c, "plan", "And a summary", "mark")
+        later = core.canvas_send(self.c, "plan", "mark")
+        new = core.item_show(self.c, later["item"])
+        self.assertEqual((new["title"], new["found_during"]), ("Answer the comments on canvas plan", self.it))
+        self.assertIn("And a summary", new["context"])
+        self.assertEqual(later["to"], f"a fresh session for #{later['item']}")
+        self.assertEqual(core.fresh_items(self.c), [later["item"]])
         # A canvas with no item and no writer: nobody would get them.
         core.canvas_put(self.c, "loose", "# x", "mark", kind="md", project="api")
         core.canvas_comment(self.c, "loose", "hm", "mark")
         with self.assertRaisesRegex(core.RiverError, "no item"):
             core.canvas_send(self.c, "loose", "mark")
+
+    def test_a_persons_edit_discard_and_the_go_briefing(self):
+        core.canvas_put(self.c, "notes", "# Notes", "ag", kind="md")
+        res = core.canvas_edit(self.c, "notes", "# Notes\n\nMore.", "mark")
+        self.assertEqual((res["version"], res["agent"]), (2, "ag"), "a person's edit keeps the session as the writer")
+        self.assertTrue(any("mark edited canvas notes" in m["body"] for m in core.inbox(self.c, "ag", mark_read=False)))
+        core.canvas_comment(self.c, "notes", "Shorter", "mark")
+        sent = core.canvas_send(self.c, "notes", "mark")
+        self.assertEqual(sent["to"], "ag", "the comments still go to the session")
+        with self.assertRaisesRegex(core.RiverError, "only a Markdown canvas"):
+            core.canvas_put(self.c, "page", "<p>x</p>", "ag", kind="html")
+            core.canvas_edit(self.c, "page", "<p>y</p>", "mark")
+        d = core.canvas_comment(self.c, "notes", "draft", "mark")
+        with self.assertRaisesRegex(core.RiverError, "not a draft of yours"):
+            core.canvas_discard(self.c, d["id"], "ag")
+        self.assertEqual(core.canvas_discard(self.c, d["id"], "mark"), {"discarded": d["id"]})
+        with self.assertRaisesRegex(core.RiverError, "not a draft of yours"):
+            core.canvas_discard(self.c, sent["sent"][0], "mark")
+        core.release(self.c, self.it, actor="ag")
+        brief = core.go(self.c, self.dir.name, actor="ag", project="web")
+        self.assertEqual(brief["item"]["id"], self.it)
+        self.assertEqual({x["name"]: x["open_comments"] for x in brief["canvases"]}, {"notes": 1, "page": 0})
+        import contextlib
+        import io
+        from river import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.render_go(brief)  # it prints the briefing
+        self.assertIn("canvas notes v2: 1 open comment(s) wait for a change", buf.getvalue())
 
     def test_list_delete_bring_back_and_save(self):
         core.canvas_put(self.c, "plan", "# Plan", "ag", kind="md")
