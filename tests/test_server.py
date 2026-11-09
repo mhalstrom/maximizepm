@@ -3202,6 +3202,18 @@ class StaticFiles(unittest.TestCase):
         h.path = "/../server.py"
         h.do_GET()
         self.assertEqual(out["code"], 404)
+        # The brand files (#4705): the page links them, the folder holds them, and they are the files of design/.
+        page = server.page_html("/").decode()
+        root = server.STATIC.parent.parent / "design"
+        for path, ctype in (("brand/favicon.ico", "image/x-icon"), ("brand/favicon-32.png", "image/png"),
+                            ("brand/favicon-16.png", "image/png"), ("brand/apple-touch-icon.png", "image/png"),
+                            ("brand/logo-light.svg", "image/svg+xml"), ("brand/logo-dark.svg", "image/svg+xml")):
+            self.assertIn(f'"{path}"', page)
+            h.path = "/" + path
+            h.do_GET()
+            self.assertEqual((out["code"], out["ctype"]), (200, ctype), path)
+            if root.is_dir():
+                self.assertEqual(server.static_file(path)[0], (root / path.split("/")[1]).read_bytes(), path)
 
 
 def _chrome():

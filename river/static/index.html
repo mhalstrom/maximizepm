@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MaximizePM</title>
+<!-- The brand files of design/ (#4705): the tab icon and the touch icon. -->
+<link rel="icon" href="brand/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="brand/favicon-16.png">
+<link rel="apple-touch-icon" href="brand/apple-touch-icon.png">
 <link rel="stylesheet" href="vendor/tabulator/tabulator.min.css">
 <link rel="stylesheet" href="app.css">
 <!-- Each view's own styles (#4656), after the shared ones of app.css. -->
@@ -21,7 +26,7 @@
 </head>
 <body>
 <header>
-  <h1>MaximizePM</h1>
+  <h1 class="brand"><img class="logo logo-light" src="brand/logo-light.svg" alt="MaximizePM" width="129" height="24"><img class="logo logo-dark" src="brand/logo-dark.svg" alt="MaximizePM" width="129" height="24"></h1>
   <nav>
     <button data-tab="board" class="on">Board</button>
     <button data-tab="sessions" title="Every running agent session: its item, its state, and what it writes now">Sessions</button>

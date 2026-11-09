@@ -16,7 +16,10 @@ async function open() {
     return;
   }
   console.log(`MaximizePM app: ${river.url}`);
-  const win = new BrowserWindow({ width: 1400, height: 900, title: "MaximizePM",
+  // The app icon on the window (Windows, Linux) and, run from source, in the Dock; a build has it in its bundle.
+  const icon = path.join(__dirname, "icon.png");
+  if (!app.isPackaged && app.dock) app.dock.setIcon(icon);
+  const win = new BrowserWindow({ width: 1400, height: 900, title: "MaximizePM", icon,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: path.join(__dirname, "preload.js") } });
   // "Add a project folder" on the page: the system folder picker, only for the page river serves.
   ipcMain.handle("river:pick-folder", async (e) => {

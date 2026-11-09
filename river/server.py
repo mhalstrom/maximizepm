@@ -30,7 +30,7 @@ BOOT = str(time.time())  # changes when the server restarts; the page waits for 
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
                 ".map": "application/json", ".json": "application/json", ".svg": "image/svg+xml",
-                ".png": "image/png", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8",
+                ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8",
                 ".md": "text/plain; charset=utf-8"}
 
 

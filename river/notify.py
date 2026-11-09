@@ -38,6 +38,12 @@ def _log_channel(conn):
 register_channel("log", _log_channel)
 
 
+# The MaximizePM icon of a notification (#4705), from the brand files of design/: ntfy fetches it by address (the
+# phone app shows it beside the text), and terminal-notifier shows the local file in the banner.
+NTFY_ICON = "https://maximizepm.com/apple-touch-icon.png"
+MAC_ICON = Path(__file__).resolve().parent / "static" / "brand" / "apple-touch-icon.png"
+
+
 def _header(text):
     """HTTP headers are Latin-1; ntfy reads RFC 2047 for anything else."""
     try:
@@ -58,7 +64,7 @@ def _ntfy_channel(conn):
         raise RiverError("ntfy has no topic; run: maxpm notify setup ntfy")
 
     def send(title, body, url):
-        headers = {"Title": _header(title), "Tags": "bell", "Content-Type": "text/plain; charset=utf-8",
+        headers = {"Title": _header(title), "Tags": "bell", "Icon": NTFY_ICON, "Content-Type": "text/plain; charset=utf-8",
                    "Priority": core.setting(conn, "ntfy_priority")}
         if not url or _is_local(url):
             # The page runs on this computer: the phone opens it through the relay, else ntfy_click (#4673).
@@ -141,6 +147,8 @@ def _mac_channel(conn):
     def send(title, body, url):
         if notifier:
             cmd = [notifier, "-title", _tn_text(title), "-message", _tn_text(body), "-group", "maxpm"]
+            if MAC_ICON.is_file():
+                cmd += ["-contentImage", str(MAC_ICON)]  # the MaximizePM icon in the banner (#4705)
             if url:
                 cmd += ["-open", url]
         else:

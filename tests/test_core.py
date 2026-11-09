@@ -2405,6 +2405,7 @@ class Mac(Base):
         cmd = self.run_mac("/opt/homebrew/bin/terminal-notifier")
         self.assertEqual(cmd[0], "/opt/homebrew/bin/terminal-notifier")
         self.assertEqual(cmd[cmd.index("-open") + 1], "http://127.0.0.1:8765/#item-3")
+        self.assertTrue(cmd[cmd.index("-contentImage") + 1].endswith("brand/apple-touch-icon.png"))  # #4705
 
     def test_terminal_notifier_escapes_a_leading_bracket(self):
         from river import notify
@@ -2858,6 +2859,7 @@ class NotifyOpen(Base):
 
         local = "http://127.0.0.1:8765/sessions/cx?as=mark"
         self.assertEqual(send(local), "https://claude.ai/code")
+        self.assertEqual(seen[-1].get_header("Icon"), "https://maximizepm.com/apple-touch-icon.png")  # #4705
         self.assertIn("ntfy_click (https://claude.ai/code)", notify.status(self.c)["phone"])
         self.assertIn("maxpm connect", notify.phone_note(self.c))
         with open(relay.config_path(), "w") as f:
