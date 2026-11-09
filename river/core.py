@@ -92,7 +92,12 @@ DEFAULT_SETTINGS = {
     "notify_interval": "30s",
     "notify_batch_window": "60s",
     "ntfy_url": "https://ntfy.sh",
-    # Where a phone notification opens when river knows no session link for it (a local page cannot open there).
+    # Where a tap on a notification opens (#4673): maxpm (the MaximizePM page: the item's drawer, the session in
+    # the Sessions tab for its question or prompt, the Board's Needs you for a batch) or agent (the agent's own app:
+    # Claude Code's claude.ai/code session, Codex's chatgpt.com/codex; else the page). Per person: --agent <person>.
+    "notify_open": "agent",
+    # Where a phone notification opens when its link is the page on this computer and no relay (maxpm connect)
+    # makes the page reachable from the phone.
     "ntfy_click": "https://claude.ai/code",
     # The ntfy priority of each notification: min, low, default, high, or urgent. Below high, the ntfy app on
     # Android shows no pop-over banner (the message goes to the notification drawer only), so high is the default.
@@ -1240,6 +1245,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"{key} is an email address" + (" (a comma list is fine)" if key == "email_to" else ""))
     elif key == "ntfy_click" and value and not re.match(r"^https?://[^\s/]+", value):
         raise RiverError("ntfy_click is a web link, for example https://claude.ai/code")
+    elif key == "notify_open" and value not in ("maxpm", "agent"):
+        raise RiverError("notify_open is maxpm (a tap opens the MaximizePM page) or agent (the agent's own app, "
+                         "such as claude.ai/code)")
     elif key == "ntfy_priority" and value not in NTFY_PRIORITIES:
         raise RiverError("ntfy_priority is one of: " + ", ".join(NTFY_PRIORITIES)
                          + " (high and urgent show a banner on the phone)")
@@ -5777,19 +5785,34 @@ def record_session_url(conn, name, url):
                      (url, name, url))
 
 
+def origin_agent(conn, item_id=None, message_id=None):
+    """The name of who asked (a message) or added the item (its first event), if known."""
+    r = None
+    if message_id is not None:
+        r = conn.execute("SELECT from_agent who FROM messages WHERE id=?", (message_id,)).fetchone()
+    elif item_id is not None:
+        r = conn.execute("SELECT actor who FROM events WHERE item_id=? ORDER BY id LIMIT 1", (item_id,)).fetchone()
+    return r["who"] if r else None
+
+
 def origin_session_url(conn, item_id=None, message_id=None):
     """The session link of the agent that asked (a message) or added the item (its first event), if known."""
-    who = None
-    if message_id is not None:
-        r = conn.execute("SELECT from_agent FROM messages WHERE id=?", (message_id,)).fetchone()
-        who = r and r["from_agent"]
-    elif item_id is not None:
-        r = conn.execute("SELECT actor FROM events WHERE item_id=? ORDER BY id LIMIT 1", (item_id,)).fetchone()
-        who = r and r["actor"]
-    if not who:
-        return None
-    r = conn.execute("SELECT session_url FROM agents WHERE name=?", (who,)).fetchone()
+    who = origin_agent(conn, item_id, message_id)
+    r = conn.execute("SELECT session_url FROM agents WHERE name=?", (who,)).fetchone() if who else None
     return r and r["session_url"]
+
+
+CODEX_WEB = "https://chatgpt.com/codex"
+
+
+def agent_web_url(conn, name):
+    """The agent's own app on the web, for a notification about its work (notify_open agent, #4673): the session
+    link it recorded (Claude Code with Remote Control: claude.ai/code/<session>), else Codex's web app (a Codex
+    session records no task link), else None (the caller opens the MaximizePM page)."""
+    r = conn.execute("SELECT kind, session_url, agent_type FROM agents WHERE name=?", (name,)).fetchone() if name else None
+    if not r or r["kind"] != "ai":
+        return None
+    return r["session_url"] or (CODEX_WEB if r["agent_type"] == "codex" else None)
 
 
 # ---------------------------------------------------------------- needs you

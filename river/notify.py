@@ -61,7 +61,8 @@ def _ntfy_channel(conn):
         headers = {"Title": _header(title), "Tags": "bell", "Content-Type": "text/plain; charset=utf-8",
                    "Priority": core.setting(conn, "ntfy_priority")}
         if not url or _is_local(url):
-            url = core.setting(conn, "ntfy_click")
+            # The page runs on this computer: the phone opens it through the relay, else ntfy_click (#4673).
+            url = remote_page(url) or core.setting(conn, "ntfy_click")
         if url:
             headers["Click"] = url
         if token:
@@ -190,9 +191,13 @@ def mac_hint():
     return MAC_HINT
 
 
-def setup_ntfy(conn, url=None, token=None, actor=None):
-    """Make a random topic, store it, add ntfy to notify_channels, and say how to subscribe on the phone."""
+def setup_ntfy(conn, url=None, token=None, actor=None, open_=None):
+    """Make a random topic, store it, add ntfy to notify_channels, and say how to subscribe on the phone.
+    open_ (maxpm or agent) sets notify_open: for the person who runs it, else for everyone."""
     import secrets
+    person = _person(conn, actor)
+    if open_:
+        core.config_set(conn, "notify_open", open_, agent=person, actor=actor)
     topic = "maxpm-" + secrets.token_urlsafe(18).replace("_", "").replace("-", "")[:22]
     if url:
         core.config_set(conn, "ntfy_url", url, actor=actor)
@@ -213,7 +218,47 @@ def setup_ntfy(conn, url=None, token=None, actor=None):
         "     (banners, lock screen, sound) and exempt it from Focus / Do Not Disturb and battery limits.",
         "     MaximizePM sends at ntfy priority high (maxpm config set ntfy_priority urgent|default|low|min).",
         "MaximizePM shows only the end of the topic from now on (maxpm config get ntfy_topic).",
-    ]}
+    ] + open_lines(conn, person)}
+
+
+def _person(conn, name):
+    """name when it is a registered person, else None (a setting for everyone)."""
+    r = conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='human'", (name,)).fetchone() if name else None
+    return name if r else None
+
+
+OPEN_TEXT = {"maxpm": "the MaximizePM page", "agent": "the agent's own app (claude.ai/code, chatgpt.com/codex)"}
+
+
+def phone_note(conn):
+    """Where a phone tap on a link to the page goes, and why."""
+    from . import relay
+    cfg = relay.load()
+    if cfg:
+        return f"A phone opens the MaximizePM page through the relay ({relay.relay_url(cfg)}/app/)."
+    return (f"A phone cannot open the MaximizePM page: it runs only on this computer (127.0.0.1). A tap there opens "
+            f"ntfy_click ({core.setting(conn, 'ntfy_click')}) instead; maxpm connect makes the page reachable from the phone.")
+
+
+def open_lines(conn, person=None):
+    """The setup text about where a tap opens (notify_open), and the choice."""
+    v = core.setting(conn, "notify_open", agent=person)
+    flag = f" --agent {person}" if person else ""
+    return [f"A tap on a notification opens {OPEN_TEXT[v]} (notify_open {v}"
+            + (f" for {person}" if person else "") + ").",
+            f"  The other choice: maxpm config set notify_open {'agent' if v == 'maxpm' else 'maxpm'}{flag}",
+            "  " + phone_note(conn)]
+
+
+def remote_page(url):
+    """The address of a link to the page on this computer through the relay (maxpm connect), or None."""
+    import urllib.parse
+    from . import relay
+    cfg = relay.load()
+    if not cfg:
+        return None
+    u = urllib.parse.urlsplit(url or "")
+    return relay.relay_url(cfg) + "/app/" + u.path.lstrip("/") + (f"?{u.query}" if u.query else "")
 
 
 def _is_local(url):
@@ -222,29 +267,53 @@ def _is_local(url):
     return (urllib.parse.urlparse(url).hostname or "") in ("127.0.0.1", "localhost", "::1")
 
 
-def page_url(conn, item_id=None, terminal=None):
-    """The MaximizePM page: on an item (/?item=<id>), or on the session of an agent that waits on a prompt
-    (/sessions/<name>, where the person answers it, #4653)."""
+def page_url(conn, item_id=None, terminal=None, person=None):
+    """The MaximizePM page: on an item (/?item=<id>), or on the session of an agent that waits on a prompt or asked
+    a question (/sessions/<name>, where the person answers it, #4653); ?as=<person> for the person it is for."""
     import urllib.parse
     base = f"http://127.0.0.1:{SERVE_PORT['port'] or core.setting(conn, 'serve_port')}/"
-    return base + (f"sessions/{urllib.parse.quote(terminal, safe='')}" if terminal else f"?item={item_id}" if item_id else "")
+    path = f"sessions/{urllib.parse.quote(terminal, safe='')}" if terminal else ""
+    q = urllib.parse.urlencode([(k, v) for k, v in (("item", item_id if not terminal else None), ("as", person)) if v])
+    return base + path + (f"?{q}" if q else "")
+
+
+def _is_ai(conn, name):
+    return bool(name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone())
+
+
+def _page_link(conn, r, person):
+    """The page at the thing: the session of the agent that asked or waits on a prompt, else the item."""
+    who = core.origin_agent(conn, None, r["message_id"]) if r["message_id"] is not None else None
+    if _is_ai(conn, who):
+        return page_url(conn, terminal=who, person=person)
+    return page_url(conn, r["item_id"], person=person)
+
+
+def open_for(conn, rows):
+    """notify_open for a batch, and its person: a person's own value over the global one (#4673)."""
+    people = {r.get("human") for r in rows}
+    person = people.pop() if len(people) == 1 else None
+    item = rows[0]["item_id"] if len(rows) == 1 else None
+    return core.setting(conn, "notify_open", item_id=item, agent=person), person
 
 
 def compose(conn, rows):
-    """One message for a batch of outbox rows on one channel."""
+    """One message for a batch of outbox rows on one channel. The link follows notify_open: the agent's own app
+    (agent), or the page at the thing (maxpm, and agent when the agent has no web link)."""
+    mode, person = open_for(conn, rows)
+
+    def agent_url(r):
+        return core.agent_web_url(conn, core.origin_agent(conn, r["item_id"], r["message_id"])) if mode == "agent" else None
+
     if len(rows) == 1:
         r = rows[0]
-        # Open the session of the agent that asked or added the item, when it has a web link. An agent that
-        # waits on a prompt in its terminal and has no such link: its Terminal on the page.
-        url = (core.origin_session_url(conn, r["item_id"], r["message_id"])
-               or page_url(conn, r["item_id"], core.prompt_alert_agent(conn, r["message_id"])))
-        return "MaximizePM: needs you", r["summary"], url
+        return "MaximizePM: needs you", r["summary"], agent_url(r) or _page_link(conn, r, person)
     lines = [f"- {r['summary']}" for r in rows[:10]]
     if len(rows) > 10:
         lines.append(f"- and {len(rows) - 10} more")
-    # One session behind every row: open it; else the page (phones get ntfy_click instead).
-    urls = {core.origin_session_url(conn, r["item_id"], r["message_id"]) for r in rows}
-    url = urls.pop() if len(urls) == 1 and None not in urls else page_url(conn)
+    # agent: one app behind every row opens it; else the Board, with Needs you on top.
+    urls = {agent_url(r) for r in rows}
+    url = urls.pop() if len(urls) == 1 and None not in urls else page_url(conn, person=person)
     return f"MaximizePM: {len(rows)} things need you", "\n".join(lines), url
 
 
@@ -290,8 +359,9 @@ def run(conn, now_=False):
 def test(conn, channel):
     """Send a test message on one channel now, outside the outbox."""
     try:
+        here = core.session_url_from_env() if core.setting(conn, "notify_open") == "agent" else None
         _adapter(conn, channel)("MaximizePM: test", "This is a test notification from maxpm notify test.",
-                                  core.session_url_from_env() or page_url(conn))
+                                  here or page_url(conn))
     except RiverError:
         raise
     except Exception as e:
@@ -315,7 +385,11 @@ def status(conn):
         })
     return {"channels": out, "interval": core.setting(conn, "notify_interval"),
             "batch_window": core.setting(conn, "notify_batch_window"),
-            "hint": mac_hint() if "mac" in configured else None}
+            "hint": mac_hint() if "mac" in configured else None,
+            "open": core.setting(conn, "notify_open"), "open_people": {
+                r["scope"][6:]: r["value"] for r in conn.execute(
+                    "SELECT scope, value FROM settings WHERE key='notify_open' AND scope LIKE 'agent:%' ORDER BY scope")},
+            "phone": phone_note(conn) if "ntfy" in configured else None}
 
 
 def _say(text):

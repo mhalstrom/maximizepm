@@ -2344,6 +2344,7 @@ def _block_state(path):
 def setup_status(conn):
     """What the setup guide shows: each check, and whether it is done."""
     import shutil
+    from . import notify
     from .cli import instructions_layout
     folders = {}
     for p in core.project_list(conn):
@@ -2376,6 +2377,11 @@ def setup_status(conn):
         "launch_profiles": core.launch_profiles(conn),
         "notify_channels": core._channels(core.setting(conn, "notify_channels")),
         "ntfy_ready": bool(core.setting(conn, "ntfy_topic")),
+        # Where a tap on a notification opens (#4673): the global value, and each person's own.
+        "notify_open": core.setting(conn, "notify_open"),
+        "notify_open_people": {r["scope"][6:]: r["value"] for r in conn.execute(
+            "SELECT scope, value FROM settings WHERE key='notify_open' AND scope LIKE 'agent:%'")},
+        "notify_phone": notify.phone_note(conn),
         "maxpm_cmd": command_status(),
     }
 
@@ -2536,9 +2542,9 @@ def setup_agent_add(conn, label, actor=None):
     return [a for a, _ in agents]
 
 
-def setup_ntfy(conn, actor=None):
+def setup_ntfy(conn, actor=None, open_=None):
     from . import notify
-    return notify.setup_ntfy(conn, actor=actor)
+    return notify.setup_ntfy(conn, actor=actor, open_=open_)
 
 
 # Operations the page may call. Each maps JSON args to one core function.
@@ -2583,7 +2589,7 @@ OPS = {
     "folder_add": lambda c, a, who: folder_add(c, a.get("path"), a.get("name"), a.get("description") or "", a.get("move"), who),
     "setup_skills": lambda c, a, who: setup_skills(),
     "setup_agent_add": lambda c, a, who: setup_agent_add(c, a["label"], who),
-    "setup_ntfy": lambda c, a, who: setup_ntfy(c, who),
+    "setup_ntfy": lambda c, a, who: setup_ntfy(c, who, a.get("open")),
     # prompt: maxpm launch --prompt, which a command in a sandbox hands to maxpm serve.
     "launch_agent": lambda c, a, who: launch_agent(c, a.get("project"), agent=a.get("agent"), actor=who,
                                                    prompt=a.get("prompt"), **_launch_args(a)),

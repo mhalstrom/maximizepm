@@ -842,6 +842,8 @@ def build_parser():
     x = nts.add_parser("setup", help="set up a channel (ntfy: makes a secret topic and prints the phone steps)")
     x.add_argument("channel", choices=["ntfy"]); x.add_argument("--url", help="ntfy server (default https://ntfy.sh)")
     x.add_argument("--token", help="access token for a protected or self-hosted ntfy server")
+    x.add_argument("--open", choices=["maxpm", "agent"], help="where a tap opens (notify_open, for you): "
+                   "the MaximizePM page, or the agent's own app (claude.ai/code, chatgpt.com/codex)")
     x = sub.add_parser("prompt", help="a paste-ready prompt for an agent that helps a person with a human item")
     x.add_argument("id", type=int, nargs="?"); x.add_argument("--all", action="store_true", help="every item and question that waits on the person")
     x.add_argument("--for", dest="person", help="the person (default: you if you are a person, else the first registered person)")
@@ -2009,7 +2011,7 @@ def dispatch(conn, a, actor):
         if a.ncmd == "status":
             return notify.status(conn)
         if a.ncmd == "setup":
-            return notify.setup_ntfy(conn, a.url, a.token, actor)
+            return notify.setup_ntfy(conn, a.url, a.token, actor, a.open)
         if a.once or a.now:
             return {"results": notify.run(conn, now_=a.now)}
         import threading
@@ -3367,6 +3369,11 @@ def render(a, res):
                       + (f" ({'; '.join(notes)})" if notes else ""))
             if res.get("hint"):
                 print(res["hint"])
+            from .notify import OPEN_TEXT
+            print(f"a tap opens {OPEN_TEXT[res['open']]} (notify_open {res['open']}"
+                  + "".join(f"; {p}: {v}" for p, v in res["open_people"].items()) + ")")
+            if res.get("phone"):
+                print(res["phone"])
         else:
             print(f"{res['channel']}: " + ("test sent" if res["ok"] else f"failed: {res['error']}"))
         return

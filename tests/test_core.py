@@ -2200,6 +2200,13 @@ class Dispatch(Base):
 
 
 class Ntfy(Base):
+    def setUp(self):
+        super().setUp()
+        # relay.json sits beside the queue database: keep this test away from the real one.
+        p = mock.patch.dict(os.environ, {"MAXPM_DB": self.path})
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_setup_masks_and_posts(self):
         from unittest import mock
         from river import notify
@@ -2780,6 +2787,98 @@ class SessionLinks(Base):
         self.assertTrue(notify.compose(self.c, [row(step), row(other)])[2].startswith("http://127.0.0.1:"))
         # A batch from one session opens that session.
         self.assertEqual(notify.compose(self.c, [row(step), row(other, q["id"])])[2], "https://claude.ai/code/session_01Abc")
+
+
+class NotifyOpen(Base):
+    """notify_open (#4673): a tap opens the MaximizePM page at the thing, or the agent's own app."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.dict(os.environ, {"MAXPM_DB": self.path})  # relay.json beside the test queue
+        p.start()
+        self.addCleanup(p.stop)
+        core.project_add(self.c, "a")
+        core.register(self.c, "cc")  # Claude Code with Remote Control
+        core.register(self.c, "cx")  # Codex: no task link
+        core.register(self.c, "plain")  # Claude Code without Remote Control
+        core.register(self.c, "mark", human=True)
+        core.record_session_url(self.c, "cc", "https://claude.ai/code/session_01Abc")
+        self.c.execute("UPDATE agents SET agent_type='codex' WHERE name='cx'")
+        self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name IN ('cc','plain')")
+        self.c.commit()
+        self.items = {a: core.item_add(self.c, "a", f"step of {a}", doer="human", actor=a)["id"] for a in ("cc", "cx", "plain")}
+        self.q = core.send(self.c, "question", "which port?", "mark", None, None, "cx")["id"]
+
+    def url(self, *rows):
+        from river import notify
+        return notify.compose(self.c, [{"summary": "s", "item_id": i, "message_id": m, "human": h} for i, m, h in rows])[2]
+
+    def test_agent_opens_each_agent_type_else_the_page(self):
+        self.assertEqual(core.setting(self.c, "notify_open"), "agent")
+        self.assertEqual(self.url((self.items["cc"], None, None)), "https://claude.ai/code/session_01Abc")
+        self.assertEqual(self.url((self.items["cx"], None, None)), "https://chatgpt.com/codex")
+        self.assertEqual(self.url((None, self.q, "mark")), "https://chatgpt.com/codex")
+        plain = self.items["plain"]
+        self.assertRegex(self.url((plain, None, None)), rf"^http://127\.0\.0\.1:\d+/\?item={plain}$")
+        # A batch: one app behind every row opens it; else the Board, where Needs you is.
+        self.assertEqual(self.url((self.items["cx"], None, None), (None, self.q, None)), "https://chatgpt.com/codex")
+        self.assertRegex(self.url((self.items["cc"], None, None), (self.items["cx"], None, None)), r"^http://127\.0\.0\.1:\d+/$")
+
+    def test_maxpm_opens_the_page_at_the_thing_per_person(self):
+        core.config_set(self.c, "notify_open", "maxpm", agent="mark")
+        cc = self.items["cc"]
+        self.assertTrue(self.url((cc, None, "mark")).endswith(f"/?item={cc}&as=mark"))
+        self.assertTrue(self.url((None, self.q, "mark")).endswith("/sessions/cx?as=mark"))  # the ! dialog there
+        self.assertRegex(self.url((cc, None, "mark"), (None, self.q, "mark")), r"^http://127\.0\.0\.1:\d+/\?as=mark$")
+        # Somebody else (or anyone) keeps the global value.
+        self.assertEqual(self.url((cc, None, None)), "https://claude.ai/code/session_01Abc")
+        core.config_set(self.c, "notify_open", "maxpm")
+        self.assertTrue(self.url((cc, None, None)).endswith(f"/?item={cc}"))
+        with self.assertRaisesRegex(RiverError, "maxpm .* or agent"):
+            core.config_set(self.c, "notify_open", "claude")
+
+    def test_the_phone_opens_the_page_through_the_relay_else_ntfy_click(self):
+        from river import notify, relay
+        core.config_set(self.c, "ntfy_topic", "maxpm-test")
+        core.config_set(self.c, "notify_channels", "ntfy")
+        seen = []
+
+        class Resp:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def send(url):
+            with mock.patch("urllib.request.urlopen", lambda req, timeout: seen.append(req) or Resp()):
+                notify.ADAPTERS["ntfy"](self.c)("t", "b", url)
+            return seen[-1].get_header("Click")
+
+        local = "http://127.0.0.1:8765/sessions/cx?as=mark"
+        self.assertEqual(send(local), "https://claude.ai/code")
+        self.assertIn("ntfy_click (https://claude.ai/code)", notify.status(self.c)["phone"])
+        self.assertIn("maxpm connect", notify.phone_note(self.c))
+        with open(relay.config_path(), "w") as f:
+            json.dump({"url": "https://relay.example.org", "token": "tok"}, f)
+        self.assertEqual(send(local), "https://relay.example.org/app/sessions/cx?as=mark")
+        self.assertEqual(send("http://127.0.0.1:8765/"), "https://relay.example.org/app/")
+        self.assertEqual(send("https://chatgpt.com/codex"), "https://chatgpt.com/codex")
+        self.assertIn("https://relay.example.org/app/", notify.status(self.c)["phone"])
+
+    def test_setup_asks_and_status_shows_it(self):
+        from river import cli, notify
+        out = notify.setup_ntfy(self.c, actor="mark", open_="maxpm")
+        self.assertEqual(core.setting(self.c, "notify_open", agent="mark"), "maxpm")
+        self.assertEqual(core.setting(self.c, "notify_open"), "agent")
+        text = "\n".join(out["subscribe"])
+        self.assertIn("opens the MaximizePM page (notify_open maxpm for mark)", text)
+        self.assertIn("maxpm config set notify_open agent --agent mark", text)
+        st = notify.status(self.c)
+        self.assertEqual((st["open"], st["open_people"]), ("agent", {"mark": "maxpm"}))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli.render(cli.build_parser().parse_args(["notify", "status"]), st)
+        self.assertIn("a tap opens the agent's own app", buf.getvalue())
+        self.assertIn("mark: maxpm", buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -488,6 +488,13 @@ function renderSetup(st) {
   more.push(extra(st.ntfy_ready && st.notify_channels.includes("ntfy"), "Phone notifications",
     st.ntfy_ready ? "Channels: " + (st.notify_channels.map(esc).join(", ") || "none") : "Get a push on your phone when something needs you (ntfy).",
     `<button class="btn" data-su="ntfy">Turn on ntfy</button><span id="suNtfy" class="sub"></span>`));
+  // Where a tap on a notification opens (notify_open, #4673): the person's own choice, else everyone's.
+  const me = $("#actor").value, open = (me && (st.notify_open_people || {})[me]) || st.notify_open;
+  more.push(extra(true, "Where a notification opens",
+    `A tap on a notification opens <select id="suOpen" title="notify_open${me ? " for " + esc(me) : ""}">
+      <option value="maxpm" ${open === "maxpm" ? "selected" : ""}>the MaximizePM page</option>
+      <option value="agent" ${open === "agent" ? "selected" : ""}>the agent's own app (claude.ai/code, chatgpt.com/codex)</option></select>
+      <div class="muted" style="font-size:12px">${esc(st.notify_phone || "")}</div>`, ""));
   const noTracker = folderProjects.filter(p => !p.tracker);
   if (folderProjects.length) more.push(extra(noTracker.length === 0, "Issue tracker",
     folderProjects.map(p => `<div>${esc(p.name)}: ${p.tracker ? esc(p.tracker) : "none"}</div>`).join("")
@@ -540,6 +547,12 @@ $("#setupSteps").addEventListener("keydown", (e) => {
   if (btn) { e.preventDefault(); btn.click(); }
 });
 $("#setupSteps").addEventListener("change", async (e) => {
+  if (e.target.id === "suOpen") {  // for the person in "You are", else for everyone
+    const me = $("#actor").value, value = e.target.value;
+    try { await act("config_set", { key: "notify_open", value, agent: me || null }); toast(`A tap on a notification opens ${value === "maxpm" ? "the MaximizePM page" : "the agent's own app"}`); }
+    catch (err) { /* act() showed the error */ }
+    return openSetup();
+  }
   const x = e.target.closest("[data-su-opt]"); if (!x) return;
   const value = x.type === "checkbox" ? (x.checked ? "on" : "off") : x.value.trim();
   try { await act("config_set", { key: x.dataset.suOpt, value }); toast(`${x.dataset.suOpt} = ${value || "(the agent's own)"}`); }
