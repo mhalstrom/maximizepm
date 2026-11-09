@@ -3215,6 +3215,30 @@ class StaticFiles(unittest.TestCase):
             if root.is_dir():
                 self.assertEqual(server.static_file(path)[0], (root / path.split("/")[1]).read_bytes(), path)
 
+    def test_every_page_helper_a_file_calls_is_imported(self):
+        # #4715: the split of the page by view (#4656) left app.js calling chip, ago, left and personChip with no
+        # import, so the search dialog and the Ready dialog threw ReferenceError and showed no rows. A call of a
+        # function that another page file exports must come with an import, or a local definition of that name.
+        import re
+        files = [p for p in server.STATIC.rglob("*.js") if "vendor" not in p.parts]
+        exports = {}
+        for p in files:
+            for n in re.findall(r"^export (?:async )?function (\w+)", p.read_text(), re.M):
+                exports.setdefault(n, set()).add(p)
+        missing = []
+        for p in files:
+            s = p.read_text()
+            code = re.sub(r"//[^\n]*", "", s)
+            imported = set()
+            for m in re.finditer(r"import\s*\{([^}]*)\}\s*from", s):
+                imported |= {x.strip().split(" as ")[-1].strip() for x in m.group(1).split(",") if x.strip()}
+            for n, where in exports.items():
+                if p in where or n in imported or re.search(r"(?:function\s+|const\s+|let\s+|var\s+)" + n + r"\b", s):
+                    continue
+                if re.search(r"(?<![\w.$])" + n + r"\s*\(", code):
+                    missing.append(f"{p.relative_to(server.STATIC)}: {n}")
+        self.assertEqual(missing, [])
+
 
 def _chrome():
     """A Chrome (or Chromium, or Edge) on this computer, or None. MAXPM_CHROME names one."""

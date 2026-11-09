@@ -1,5 +1,5 @@
-import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId } from "./lib.js";
-import { prioNumChip, doerChip, projectChip } from "./components/chip.js";
+import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, left } from "./lib.js";
+import { chip, prioNumChip, doerChip, projectChip, personChip } from "./components/chip.js";
 import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
 import { makeDialog } from "./components/dialog.js";
