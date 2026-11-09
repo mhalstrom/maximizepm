@@ -5,7 +5,7 @@
 // The server runs with a throwaway HOME (/tmp/.../alex), so no path of this computer shows in a picture.
 // The page never clicks Start or Dispatch here: those open real terminal windows. The agents of the
 // pictures are stand-ins in panes of a tmux server of its own (TMUX_TMPDIR), never this computer's tmux:
-// they give the Terminal of an agent on the page, the alert for a prompt that waits, and maxpm view.
+// they give the ! dialog and the alert for a prompt that waits, and maxpm view.
 // A sandbox blocks the tmux socket: run this outside one.
 const { app, BrowserWindow } = require("electron");
 const { execFileSync, spawn } = require("node:child_process");
@@ -252,21 +252,17 @@ while True:
   await sleep(600); await shot("goals.png", "#tab-projects", 8);
   await js(`localStorage.removeItem("river.goal")`);  // the page remembers the goal: the pictures after this one show all work
 
-  // The Terminal of an agent on the page: its pane, with the prompt that waits there.
-  const termOpen = () => until(`(document.querySelector("#termScreen") || {}).textContent > ""`);
-  for (const theme of ["light", "dark"]) {
-    await open("?as=alex&terminal=web-agent", theme);
-    if (!await termOpen()) throw new Error("the Terminal dialog shows nothing");
-    await sleep(400);
-    await shot(`terminal-${theme}.png`, "#termDlg .box", 16);
-  }
-
-  // The tour: Board, an agent's Terminal, an item, Sessions, Artifacts, Projects, Graph, Targets, Done; two frames each.
-  for (const h of ["?as=alex", "?as=alex&terminal=web-agent", "?as=alex&item=4", "sessions/api-agent?as=alex", "artifacts?as=alex",
+  // The tour: Board; an agent's session on the Sessions tab, first with the ! dialog for its prompt, then its chat;
+  // an item, Artifacts, Projects, Graph, Targets, Done. Two frames each.
+  for (const h of ["?as=alex", "sessions/web-agent?as=alex", "?as=alex&item=4", "artifacts?as=alex",
                    "projects?as=alex", "graph?as=alex", "targets?as=alex", "done?as=alex"]) {
     await open(h); if (h.includes("graph")) await sleep(1500);
-    if (h.startsWith("sessions")) await sleep(1500);
-    if (h.includes("terminal")) { await termOpen(); await sleep(400); }
+    if (h.startsWith("sessions")) {
+      if (!await dlgOpen()) throw new Error("the ! dialog did not open for the tour");
+      await sleep(400); await frame(); await frame();
+      await js(`document.querySelector("#waitDismiss").click()`);
+      await sleep(1500);
+    }
     await frame(); await frame();
   }
   const fd = path.join(tmp, "frames"); fs.mkdirSync(fd);
