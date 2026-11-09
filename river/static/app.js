@@ -32,6 +32,7 @@ Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); } });
 let openItem = null, drawerItem = null;  // drawerItem: the open item as /api/item gave it
 const drawer = makeDrawer($("#drawer"));
+const header = document.querySelector("header");  // the page's header: on a phone one bar of 48 px (#4903)
 
 let actorPicked = false;
 
@@ -219,7 +220,7 @@ async function refresh() {
   renderGraph(false); renderLog(false); needsYou.pollNeedsYou().catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
-  document.querySelector("header").classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
+  header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);
   // The setup guide's last steps follow the queue: when a task is added or an agent picks one up, it checks again.
   const firstRun = JSON.stringify([S.items.length, S.agents.some(a => a.kind !== "human"), anyStarted()]);
@@ -351,6 +352,8 @@ function syncUrl(push) {
 function setTab(name, push = true) {
   if (push && name !== tab) history.pushState(null, "", pageUrl(drawer.isOpen() ? openItem : null, name));
   setTabName(name); document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  $("#tabName").textContent = (document.querySelector("nav button.on") || {}).textContent || "";  // a phone's bar (#4903)
+  if (header.classList.contains("tabs-open")) headerOpen(null);
   const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   renderLog(true);
@@ -804,8 +807,39 @@ $("#loopLate").onclick = () => {
   if (updateMode !== "old") updateMode = "restart";
   $("#updateBtn").onclick();
 };
-// The ⋯ of the header on a phone (#4885): the controls that do not fit in its two rows.
-$("#hdrMore").onclick = () => { const h = document.querySelector("header"); h.classList.toggle("more"); $("#hdrMore").setAttribute("aria-expanded", String(h.classList.contains("more"))); };
+// The header on a phone and a tablet. The ⋯ (#4885) shows the controls that do not fit: on a phone (#4903) as a menu
+// under the bar of 48 px. On a phone the name of the tab opens the sheet of all tabs, and the magnifier opens the
+// search. One of the two is open at a time; a tap outside them (on the scrim), Esc, or a tab closes them.
+function headerOpen(which) {
+  const was = header.classList.contains(which);
+  header.classList.remove("more", "tabs-open");
+  if (which && !was) { header.classList.add(which); header.classList.remove("hdr-hide"); }
+  $("#hdrMore").setAttribute("aria-expanded", String(header.classList.contains("more")));
+  $("#tabBtn").setAttribute("aria-expanded", String(header.classList.contains("tabs-open")));
+  $("#hdrScrim").classList.toggle("hidden", !header.classList.contains("more") && !header.classList.contains("tabs-open"));
+}
+$("#hdrMore").onclick = () => headerOpen("more");
+$("#tabBtn").onclick = () => headerOpen("tabs-open");
+$("#hdrScrim").onclick = () => headerOpen(null);
+$("#searchBtn").onclick = () => { headerOpen(null); openSearch(); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (header.classList.contains("more") || header.classList.contains("tabs-open"))) headerOpen(null); });
+// The bar of a phone hides while the person scrolls down and comes back when they scroll up a little (24 px) or come
+// near the top: a transform, so nothing under it moves. Never while the sheet, the menu, or a field of it is open.
+{
+  const phone = window.matchMedia("(max-width: 759px)");
+  let lastY = window.scrollY, upFrom = null, ticking = false;
+  const step = () => {
+    ticking = false;
+    const y = Math.max(0, window.scrollY), dy = y - lastY; lastY = y;
+    if (!phone.matches || header.classList.contains("more") || header.classList.contains("tabs-open") || header.contains(document.activeElement)
+        || y < header.offsetHeight) { upFrom = null; return header.classList.remove("hdr-hide"); }
+    if (dy > 0) { upFrom = null; if (y > header.offsetHeight) header.classList.add("hdr-hide"); }
+    else if (dy < 0) { if (upFrom == null) upFrom = y - dy; if (upFrom - y >= 24) header.classList.remove("hdr-hide"); }
+  };
+  window.addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(step); } }, { passive: true });
+  phone.addEventListener("change", step);
+  header.addEventListener("focusin", () => header.classList.remove("hdr-hide"));
+}
 checkUpdate().catch(() => {}); setInterval(() => { if (!document.hidden) checkUpdate().catch(() => {}); }, 30 * 60 * 1000);
 // A stale server is cheap to spot (no git fetch), so look for it more often than for new commits.
 setInterval(() => {

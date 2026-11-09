@@ -4,7 +4,10 @@
    Safari on iOS zooms into a text field whose font is under 16 px when a person taps it, and stays zoomed: the page
    then looks cut at the right edge. So each field on a phone or a tablet has 16 px text. */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-#hdrMore, #sessBack { display: none; }
+#hdrMore, #sessBack, #sessMore, #tabBtn, #searchBtn, header h1.brand .mark, #hdrScrim { display: none; }
+/* The box of the ⋯ controls (#4903) takes no room of its own outside a phone and a tablet: its controls sit in the
+   header's row, as before. */
+.hdr-menu { display: contents; }
 
 @media (max-width: 1023px) {
   /* A tablet: the side panel of the Sessions tab covers the chat as a drawer from the right, with its own X. */
@@ -28,10 +31,10 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   header > .spacer { display: none; }
   #search { flex: 1 1 200px; width: auto; min-width: 0; min-height: 40px; }
   #hdrMore { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 40px; font-size: 18px; line-height: 1; }
-  header:not(.more) > #theme, header:not(.more) > #relayBtn, header:not(.more) > #updateBtn, header:not(.more) > #stamp,
-  header:not(.more):not(.no-actor) > label.sub { display: none; }
-  header.more > label.sub, header.no-actor > label.sub { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
-  header > label.sub select { flex: 1; min-width: 0; }
+  header:not(.more) .hdr-menu > #theme, header:not(.more) .hdr-menu > #relayBtn, header:not(.more) .hdr-menu > #updateBtn,
+  header:not(.more) .hdr-menu > #stamp, header:not(.more):not(.no-actor) .hdr-menu > label.sub { display: none; }
+  header.more .hdr-menu > label.sub, header.no-actor .hdr-menu > label.sub { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
+  .hdr-menu > label.sub select { flex: 1; min-width: 0; }
 
   /* Tap targets of 44 px. A select draws its own box (WebKit keeps a native select at its own small height), with
      an arrow on the right. */
@@ -48,6 +51,48 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 }
 
 @media (max-width: 759px) {
+  /* The header of a phone (#4903): one bar of 48 px under the notch. The mark; the name of the tab, which opens the
+     list of all ten tabs as a sheet under the bar; the magnifier, which opens the search; the ⋯, which opens a menu
+     with the theme, the relay, Update, You are, and the time of the last update. app.js hides the bar (a transform,
+     so nothing under it moves) while the person scrolls down, and shows it again when they scroll up or come to the
+     top; never while the sheet or the menu is open. */
+  header { position: sticky; top: 0; z-index: 6; flex-wrap: nowrap; gap: 2px; box-sizing: border-box;
+    height: calc(48px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 4px 0 10px;
+    transition: transform .2s ease; }
+  header.hdr-hide { transform: translateY(calc(-100% - 1px)); }
+  header h1.brand .logo { display: none !important; }
+  header h1.brand .mark { display: block; width: 28px; height: 28px; }
+  #tabBtn { display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 44px; margin-left: 4px; padding: 0 8px;
+    background: none; border: 0; border-radius: 8px; color: var(--ink); font: 600 17px/1 inherit; cursor: pointer; }
+  #tabBtn #tabName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #tabBtn .caret { font-size: 12px; color: var(--muted); transition: transform .15s ease; }
+  header.tabs-open #tabBtn .caret { transform: rotate(180deg); }
+  header > .spacer { display: block; flex: 1 1 0; }
+  #search { display: none; }
+  #searchBtn, #hdrMore { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; min-height: 44px;
+    border: 0; background: none; color: var(--ink); font-size: 20px; }
+  /* The sheet of the tabs: each tab is a row of 48 px; the one on shows a mark at its left. */
+  header nav { display: none; }
+  header.tabs-open nav { display: flex; flex-direction: column; position: absolute; top: 100%; left: 0; right: 0; gap: 0; overflow-y: auto;
+    max-height: calc(100dvh - 48px - env(safe-area-inset-top)); padding: 4px 0 calc(4px + env(safe-area-inset-bottom));
+    background: var(--panel); border-bottom: 1px solid var(--line); box-shadow: 0 12px 24px rgba(0,0,0,.25); }
+  header.tabs-open nav button { min-height: 48px; padding: 0 20px; text-align: left; font-size: 16px; color: var(--ink);
+    border: 0; border-radius: 0; background: none; box-shadow: inset 4px 0 0 transparent; }
+  header.tabs-open nav button.on { font-weight: 600; background: var(--bg); box-shadow: inset 4px 0 0 var(--ink); }
+  /* The menu of the ⋯: a card under the bar, at the right. Until a name is chosen, You are shows there by itself. */
+  .hdr-menu { display: none; }
+  header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+    position: absolute; top: 100%; right: 6px; width: min(320px, calc(100vw - 12px)); box-sizing: border-box; padding: 10px 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 24px rgba(0,0,0,.25); }
+  .hdr-menu > select, .hdr-menu > .btn { width: 100%; }
+  .hdr-menu > #stamp { text-align: center; }
+  #hdrScrim:not(.hidden) { display: block; position: fixed; inset: 0; z-index: 5; background: rgba(0,0,0,.35); }
+  /* The search dialog covers the whole screen from the top, its field and its close button where the bar is. */
+  #searchDlg { padding: 0; }
+  #searchDlg .box { min-height: 100%; box-sizing: border-box; border: 0; border-radius: 0; box-shadow: none;
+    padding: calc(8px + env(safe-area-inset-top)) 12px calc(16px + env(safe-area-inset-bottom)); }
+  #searchDlg h2 { font-size: 17px; }
+
   /* Room at the bottom, so Safari's bar never covers the last rows. */
   main { padding: 12px 10px calc(72px + env(safe-area-inset-bottom)); }
   .panel { padding: 10px 12px; margin-bottom: 12px; }
@@ -108,18 +153,31 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .sess-layout.phone-kb > .sess-main { padding-bottom: 6px; }
   /* While the person types (#4903, point 4): only the session's head line stays above the chat; its state line and
      its item line with Items and Artifacts come back when the keyboard closes. */
-  .sess-layout.phone-kb .sess-item, .sess-layout.phone-kb .sess-head #sessState { display: none; }
+  .sess-layout.phone-kb .sess-item, .sess-layout.phone-kb .sess-head #sessState,
+  .sess-layout.phone-kb .sess-head #sessOpen { display: none !important; }
   .sess-layout.phone-chat > .sess-main { height: auto; min-height: 0; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
-  #sessBack { display: inline-flex; align-items: center; min-height: 40px; padding: 4px 10px 4px 6px; white-space: nowrap; flex: none; }
-  /* The head: ‹ Sessions, the name, Settings and Open session in one line; the state under it. */
-  .sess-head { gap: 4px 6px; flex-wrap: wrap; min-width: 0; }
-  .sess-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 0; }
-  .sess-head #sessState { order: 9; flex: 1 1 100%; min-width: 0; }
-  .sess-head #sessState .chip { white-space: normal; overflow-wrap: anywhere; }
+  #sessBack { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; padding: 0 6px;
+    white-space: nowrap; flex: none; border: 0; background: none; font-size: 22px; line-height: 1; }
+  #sessBack .sb-word { display: none; }
+  /* The head (#4903): one line of ‹, the name, the state as a dot with its word, and a ⋯. The ⋯ shows under it the
+     item line, Settings and Open session, and Items and Artifacts; the chat gets the rest of the screen. */
+  .sess-head { gap: 4px; flex-wrap: nowrap; min-width: 0; min-height: 44px; }
+  .sess-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 0; font-size: 16px; }
+  /* The state gives way to the name: at most 45 % of the line, its word cut with … (the dot stays). */
+  .sess-head #sessState { flex: 0 1 auto; min-width: 0; max-width: 45%; display: flex; }
+  .sess-head #sessState .chip { display: block; min-width: 0; padding: 0 2px; border: 0; background: none;
+    font-size: 12px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess-head #sessState .chip::before { content: ""; display: inline-block; vertical-align: 1px; width: 8px; height: 8px; margin-right: 5px;
+    border-radius: 50%; background: currentColor; }
   .sess-head .sess-noopen { display: none; }
   .sess-head #sessTitle, .sess-head .prov { display: none; }
   .sess-head .spacer { display: none; }
-  .sess-head #sessOpen { flex: none; display: flex; gap: 4px; }
+  #sessMore { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; min-height: 44px;
+    border: 0; background: none; color: var(--ink); font-size: 20px; }
+  .sess-main:not(.head-more) .sess-head #sessOpen, .sess-main:not(.head-more) .sess-item { display: none; }
+  .sess-main.head-more .sess-head { flex-wrap: wrap; }
+  .sess-main.head-more .sess-head #sessOpen { order: 10; flex: 1 1 100%; display: flex; gap: 6px; padding-top: 4px; }
+  .sess-main.head-more .sess-head #sessOpen > .btn { flex: 1 1 0; justify-content: center; }
   .sess-head .btn, .sess-head a.btn { min-height: 40px; padding: 4px 8px; font-size: 13px; display: inline-flex; align-items: center; }
   .sess-head, .sess-item, .chat-foot { flex: none; position: relative; z-index: 1; background: var(--panel); }
   .sess-item { margin: 4px 0 6px; }

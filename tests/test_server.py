@@ -3211,7 +3211,8 @@ class StaticFiles(unittest.TestCase):
         root = server.STATIC.parent.parent / "design"
         for path, ctype in (("brand/favicon.ico", "image/x-icon"), ("brand/favicon-32.png", "image/png"),
                             ("brand/favicon-16.png", "image/png"), ("brand/apple-touch-icon.png", "image/png"),
-                            ("brand/logo-light.svg", "image/svg+xml"), ("brand/logo-dark.svg", "image/svg+xml")):
+                            ("brand/logo-light.svg", "image/svg+xml"), ("brand/logo-dark.svg", "image/svg+xml"),
+                            ("brand/mark.svg", "image/svg+xml")):  # the phone's bar (#4903)
             self.assertIn(f'"{path}"', page)
             h.path = "/" + path
             h.do_GET()

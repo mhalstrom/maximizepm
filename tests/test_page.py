@@ -286,6 +286,61 @@ try {
         self.assertEqual(got["moved"], 260)
         self.assertEqual(got["after"], {"kb": False, "top": "", "fixed": "static"})
 
+    def test_the_header_of_a_phone_is_one_bar(self):
+        """#4903: at phone width the header is one bar of 48 px: the mark, the tab's name, which opens the sheet of all
+        ten tabs, the magnifier, which opens the search, and the ⋯ menu. The bar hides while the page scrolls down and
+        comes back on a scroll up; the session head is one line, and its ⋯ shows Settings, Open session, Items and
+        Artifacts."""
+        for i in range(40):
+            core.item_add(self.c, "site", f"filler {i}")
+        driver = r'''try {
+  await until(() => window.__appReady && q("#work .wp, #work .muted"), "the Board drew");
+  const box = (s) => q(s).getBoundingClientRect(), shown = (s) => box(s).height > 0;
+  const header = q("header"), out = {};
+  out.bar = Math.round(box("header").height);
+  out.parts = ["header h1.brand .mark", "#tabBtn", "#searchBtn", "#hdrMore"].every(shown) && !shown("#search") && !shown("nav")
+    && !shown("header h1.brand .logo-light") && !shown("header h1.brand .logo-dark");
+  out.name = q("#tabName").textContent;
+  q("#tabBtn").click();
+  out.sheet = [...document.querySelectorAll("nav button")].filter(b => b.getBoundingClientRect().height >= 48).length;
+  out.scrim = shown("#hdrScrim");
+  q('nav button[data-tab="projects"]').click();
+  out.picked = q("#tabName").textContent + " " + shown("nav") + " " + shown("#hdrScrim") + " " + !q("#tab-projects").classList.contains("hidden");
+  q("#hdrMore").click();
+  out.menu = shown("#hdrMenu") && shown("#updateBtn") && shown("#theme");
+  q("#hdrScrim").click();
+  out.closed = !shown("#hdrMenu");
+  q("#searchBtn").click();
+  out.search = !q("#searchDlg").classList.contains("hidden") && document.activeElement === q("#searchText");
+  q("#searchClose").click();
+  q('nav button[data-tab="board"]').click();
+  await sleep(100);
+  for (const y of [100, 200, 300, 400]) { scrollTo(0, y); await sleep(60); }
+  await sleep(100);
+  out.down = header.classList.contains("hdr-hide") && box("header").bottom <= 0;
+  for (const y of [380, 360, 340]) { scrollTo(0, y); await sleep(60); }
+  await sleep(100);
+  out.up = !header.classList.contains("hdr-hide");
+  scrollTo(0, 400); await sleep(100); scrollTo(0, 500); await sleep(100);
+  q("#hdrMore").click(); scrollTo(0, 700); await sleep(150);
+  out.menuKeeps = !header.classList.contains("hdr-hide");
+  q("#hdrMore").click(); scrollTo(0, 0);
+  q('nav button[data-tab="sessions"]').click();
+  await until(() => q("#sessTitle").textContent === "ag" && q("#sessLayout").classList.contains("phone-chat"), "the chat of ag");
+  out.head = Math.round(box(".sess-head").height) <= 48 && !shown("#sessOpen") && !shown(".sess-item") && shown("#sessMore");
+  q("#sessMore").click();
+  out.more = shown("#sessOpen") && shown(".sess-item") && q("#sessMore").getAttribute("aria-expanded") === "true";
+  q('.sess-item [data-sp-open="items"]').click();
+  await sleep(50);
+  out.moreCloses = !q("#sessMain").classList.contains("head-more");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/", size="390,844")
+        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Board", "sheet": 10, "scrim": True,
+                               "picked": "Projects false false true", "menu": True, "closed": True, "search": True,
+                               "down": True, "up": True, "menuKeeps": True, "head": True, "more": True,
+                               "moreCloses": True})
+
     def test_a_click_on_each_tab_of_the_side_panel_shows_it(self):
         """#4652: the panel's tabs once had data-tab, which the page's own click handler reads as a tab of the
         page: a click hid the Sessions tab."""

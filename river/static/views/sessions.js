@@ -168,8 +168,19 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   if (window.visualViewport) { window.visualViewport.addEventListener("resize", fitSoon); window.visualViewport.addEventListener("scroll", fitSoon); }
   $("#sessLayout").addEventListener("focusin", fitAfter);
   $("#sessLayout").addEventListener("focusout", fitAfter);
-  const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); fit(); };
+  const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
+  // The ⋯ of the session head on a phone (#4903): it shows the item line, Settings, Open session, Items and Artifacts
+  // under the one line of the head; a tap on one of them closes it again.
+  function headMore(open) {
+    $("#sessMain").classList.toggle("head-more", open);
+    $("#sessMore").setAttribute("aria-expanded", String(open));
+    fit();
+  }
+  $("#sessMore").addEventListener("click", () => headMore(!$("#sessMain").classList.contains("head-more")));
+  for (const sel of ["#sessOpen", ".sess-item"]) $("#sessMain").querySelector(sel).addEventListener("click", (e) => {
+    if (e.target.closest("button, a")) setTimeout(() => headMore(false));
+  });
 
   async function refresh() {
     if (busy || document.hidden || !isShown()) return;

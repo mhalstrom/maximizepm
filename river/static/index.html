@@ -28,8 +28,10 @@
 </head>
 <body>
 <header>
-  <h1 class="brand"><img class="logo logo-light" src="brand/logo-light.svg" alt="MaximizePM" width="129" height="24"><img class="logo logo-dark" src="brand/logo-dark.svg" alt="MaximizePM" width="129" height="24"></h1>
-  <nav>
+  <h1 class="brand"><img class="logo logo-light" src="brand/logo-light.svg" alt="MaximizePM" width="129" height="24"><img class="logo logo-dark" src="brand/logo-dark.svg" alt="MaximizePM" width="129" height="24"><img class="mark" src="brand/mark.svg" alt="MaximizePM" width="28" height="28"></h1>
+  <!-- A phone (#4903): the name of the tab opens the list of all tabs (the nav below, as a sheet), and the magnifier opens the search. -->
+  <button class="tabbtn" type="button" id="tabBtn" aria-expanded="false" aria-controls="tabNav" title="Show all tabs"><span id="tabName">Board</span> <span class="caret" aria-hidden="true">▾</span></button>
+  <nav id="tabNav">
     <button data-tab="board" class="on">Board</button>
     <button data-tab="sessions" title="Every running agent session: its item, its state, and what it writes now">Sessions</button>
     <button data-tab="artifacts" title="The pages, files and artifact links the sessions made or named">Artifacts</button>
@@ -43,7 +45,10 @@
   </nav>
   <span class="spacer"></span>
   <input type="search" id="search" placeholder="Search items" title="Find items by their words: open, done, and dropped (Enter or /)" autocomplete="off">
-  <button class="iconbtn" type="button" id="hdrMore" aria-expanded="false" aria-controls="theme" title="More: theme, relay, update, You are">⋯</button>
+  <button class="iconbtn" type="button" id="searchBtn" title="Search items" aria-label="Search items"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg></button>
+  <button class="iconbtn" type="button" id="hdrMore" aria-expanded="false" aria-controls="hdrMenu" title="More: theme, relay, update, You are">⋯</button>
+  <!-- The controls of the ⋯ on a phone and a tablet (#4885, #4903). On a desktop the box takes no room of its own (display: contents). -->
+  <div class="hdr-menu" id="hdrMenu">
   <select id="theme" title="Theme: System follows your computer's light or dark setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
   <button class="btn hidden" id="relayBtn">Connect relay</button>
   <button class="btn primary hidden" id="loopLate"></button>
@@ -52,7 +57,9 @@
     <select id="actor"></select>
   </label>
   <span class="sub" id="stamp"></span>
+  </div>
 </header>
+<div id="hdrScrim" class="hidden" aria-hidden="true"></div>
 
 <main>
   <div id="bootNote" class="boot-note muted" role="status">Loading the queue…</div>
