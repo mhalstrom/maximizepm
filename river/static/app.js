@@ -490,22 +490,22 @@ function renderSetup(st) {
         : `<label style="display:inline-flex;gap:4px;align-items:center;margin-right:10px" title="${esc(o.text)}">${esc(name)}<input data-su-opt="${esc(o.setting)}" value="${esc(o.value)}" style="width:${o.name === "model_ids" ? 380 : o.name === "prompt" ? 260 : 140}px"></label>`;
     }).join("")}</div>`).join("")
       + `<div class="muted" style="font-size:12px">For every project; set one project apart in Settings (for example claude_remote_control with the project scope). The launch dialog can change the toggles for one start.</div>`, "");
-  // A first task, then an agent that takes it.
+  // A first item, then an agent that takes it. The page says "item" everywhere, not "task" (#4705).
   const tasks = (S && S.items || []).filter(i => !["deploy", "review", "monitor"].includes(i.kind));
   const folderProjects = (S && S.projects || []).filter(p => p.path);
-  out.push(step(tasks.length > 0, "Add a first task",
-    tasks.length ? `${tasks.length} task${tasks.length === 1 ? "" : "s"} on the list.`
+  out.push(step(tasks.length > 0, "Add a first item",
+    tasks.length ? `${tasks.length} item${tasks.length === 1 ? "" : "s"} on the list.`
       : "Something small an agent can do in your project, so you can see how it goes.",
     folderProjects.length ? `<select id="suTaskProject">${folderProjects.map(p => `<option>${esc(p.name)}</option>`).join("")}</select>
       <input id="suTaskTitle" placeholder="for example: add a README that says what this project does" style="flex:1 1 280px">
-      <button class="btn primary" data-su="task">Add task</button>` : `<span class="muted">Add a project folder first.</span>`));
+      <button class="btn primary" data-su="task">Add item</button>` : `<span class="muted">Add a project folder first.</span>`));
   const started = (S && S.agents || []).some(a => a.kind !== "human") || tasks.some(i => ["in_progress", "held", "done"].includes(i.status));
   out.push(step(started, "Start an agent",
-    started ? "An agent has picked up work. Watch it on the Board; finished tasks show on Done."
-      : "An agent opens in a new Terminal window, takes your task, and gets to work. You'll see it on the Board.",
+    started ? "An agent has picked up work. Watch it on the Board; finished items show on Done."
+      : "An agent opens in a new Terminal window, takes your item, and gets to work. You'll see it on the Board.",
     tasks.length && ready.length ? agentStart(S.launch_agents, { label: "Start an agent", cls: "btn primary", attrs: 'data-launch="1"',
         title: "Open a new Terminal window in the project folder and start the chosen agent there" })
-      : `<span class="muted">Needs an agent and a task first.</span>`));
+      : `<span class="muted">Needs an agent and an item first.</span>`));
   // Extras: nice to have, not needed for a first result.
   const more = howStart ? [howStart] : [];
   const missing = Object.entries(st.skills).filter(([, v]) => v !== "installed").map(([k]) => k);
@@ -548,7 +548,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
     }
     else if (k === "skills") await act("setup_skills", {});
     else if (k === "task") {
-      const title = $("#suTaskTitle").value.trim(); if (!title) return toast("Write the task first", true);
+      const title = $("#suTaskTitle").value.trim(); if (!title) return toast("Write the item first", true);
       await act("item_add", { project: $("#suTaskProject").value, title, doer: "ai" });
     }
     else if (k === "recheck") { /* openSetup below checks again */ }

@@ -43,7 +43,7 @@ export function renderNeedsYou() {
             + `<button class="btn" data-ny="read" data-msg="${e.message_id}">Mark read</button>`)
         + (e.item_id ? `<button class="btn" data-open="${e.item_id}">Open #${e.item_id}</button>` : "");
     // One line each; a click opens the details and the buttons (design: the Board fits one screen).
-    const title = isItem ? `#${e.item_id} ${e.item_title}` : `${e.message_kind} from ${e.from_agent}: ${e.body || ""}`;
+    const title = isItem ? `#${e.item_id} ${e.item_title}` : `${e.message_kind} from ${e.from_agent === "maxpm" ? "MaximizePM" : e.from_agent}: ${e.body || ""}`;
     const open = nyOpen.has(e.id);
     const from = !isItem && e.from_agent ? ` data-agent="${esc(e.from_agent)}"` : "";
     return `<div class="nyl" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
