@@ -127,6 +127,16 @@ try {
   await until(() => q("#drawer").classList.contains("open"), "the drawer");
   q("#dClose").click();
   await until(() => !q("#drawer").classList.contains("open"), "the drawer closes");
+  // Escape closes it too, and takes ?item= out of the address (#4716); with a dialog open, Escape closes only the dialog.
+  window.riverOpen(ITEM);
+  await until(() => q("#drawer").classList.contains("open") && location.search.includes("item="), "the drawer again");
+  const esc = () => document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  q("#searchDlg").classList.remove("hidden");
+  esc();
+  check(q("#drawer").classList.contains("open"), "Escape over a dialog leaves the drawer open");
+  check(q("#searchDlg").classList.contains("hidden"), "Escape closes the dialog");
+  esc();
+  await until(() => !q("#drawer").classList.contains("open") && !location.search.includes("item="), "Escape closes the drawer");
   await sleep(500);
   post({ seen, errors });
 } catch (e) { post({ error: String(e.stack || e) + " errors: " + errors.join(" | ") }); }

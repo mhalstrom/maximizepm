@@ -77,6 +77,14 @@ function closeDrawer() {
   if (history.state && history.state.item === id) history.back();
   else history.replaceState(null, "", pageUrl(null));
 }
+// Escape closes the drawer at every width (#4716), as it closes the search and the setup guide. Something on top
+// of the drawer takes the key first: an open dialog (each closes itself) or the item pop-up. Capture phase, so
+// this looks before a dialog's own handler closes the dialog.
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || !drawer.isOpen()) return;
+  if (document.querySelector('[role="dialog"]:not(.hidden), #itemPop:not(.hidden)')) return;
+  closeDrawer();
+}, true);
 
 
 async function openDrawer(id, fresh = false) {
