@@ -5,6 +5,12 @@ replaces the federation design (#4905, `federation-design.md`), which stays as
 the earlier version. The decisions at the end are in the queue as a person's
 item; the build items come after the answers.
 
+Teams is a separate product with its own code. Open-source MaximizePM
+(Apache 2.0) gets only a generic extension point, the **remote queue**, that
+any server can implement; Teams is one such server. Section 0 draws the
+boundary; the rest of the design says, where it matters, which side a part
+is on.
+
 ## What mark asked
 
 - "we want the product to be like teams at maximizepm.com. Users can create a
@@ -17,11 +23,76 @@ item; the build items come after the answers.
 - "a shared project that lives in the cloud that users can take goals,
   shared deployments, other roles like pm which maybe is just a mcp in claude
   to make tasks."
+- "I also want teams to be completely separate from the standard maxpm, so
+  that we can promote maxpm as free and open source Apache 2.0. So it needs
+  to have a shim or something that we can use."
 - Decision A (mark): the team's data lives on our servers, in our Cloudflare
   account beside the relay. Code never: code goes through the team's
   repository host. The relay tunnel keeps its rule (nothing that passes
   through it is stored); only a team, which a person creates on purpose, is
   stored.
+
+## 0. The boundary: open-source MaximizePM and Teams
+
+### The rule
+
+- Open-source MaximizePM works complete with no Teams: no part of it needs
+  our servers, and no part of it names Teams.
+- Teams plugs into one generic, documented extension point: the **remote
+  queue**. A remote queue is a queue that lives on a server; a local
+  MaximizePM shows it next to the local queue and works its items. Teams is a
+  server that hosts remote queues; anyone can write another one.
+
+### What is in which repository
+
+| Open-source repository (maxpm, Apache 2.0) | Teams repository (private, proprietary) |
+|---|---|
+| Everything of MaximizePM today: core, CLI, page, local MCP, skills. | The `maxpm-teams` Worker at teams.maximizepm.com (section 9). |
+| The remote queue client: `maxpm remote add\|list\|login\|remove\|export`, the copy file and its sync, item numbers `#14@<remote>`, `go` across local and remote work, lease renewal, the outbox. | The Team Durable Object that hosts a team's queue, and its adapter that runs open-source `core.py` on the object's SQLite. |
+| The **remote queue protocol** (below), documented in `docs/remote-queue.md`, with a version number. | Accounts and sign-in (the relay account), teams, members, roles, invites. |
+| Queue rules that a server runs and that make sense locally too: goals with a person owner, the `merge pr` rule and its review item, `review_other_person`, hook approval by hash, the secret check on text. | Which role may call which op (an allow list per role, in front of `core`). |
+| A reference remote queue server for tests and self-hosting (decision 19). | The PM's remote MCP server with OAuth; the PM pages; billing (Stripe); export and deletion of a team; the team audit. |
+
+The Teams service uses `core.py` as a dependency at a pinned version, as the
+Apache 2.0 license allows (with its NOTICE). A rule of the queue changes in
+the open-source repository first; Teams takes the new version.
+
+### The shim: the remote queue protocol (version 1)
+
+A remote queue is an HTTPS address, for example
+`https://teams.maximizepm.com/t/acme`, that answers:
+
+- `GET <url>/.well-known/maxpm-remote`: `{protocol: 1, name, schema,
+  device_authorization_endpoint, token_endpoint, changes}`. The client
+  refuses a server whose protocol it does not know, with the reason.
+- Sign-in: the OAuth 2.0 device flow (RFC 8628), as `maxpm connect` does
+  today, gives a bearer token and a refresh token per computer. A server may
+  also issue a fixed token (`maxpm remote add <name> <url> --token-file`).
+- `POST <url>/api/action {op, args, actor, model, agent_type}`: the same
+  shape as the local page's `/api/action`. The server runs the op and
+  answers `{ok, result}`, or 409 with the refusal text that a local command
+  prints. The protocol lists the ops of version 1 (add, edit, prio, dep,
+  claim, next, renew, release, done, keep, send, answer, inbox, goal and
+  target ops, review pass and fail).
+- `GET <url>/api/changes?after=<n>`: the changed rows after change number
+  `n`, in the local schema (`{seq, rows: [{table, row}], more}`); the same
+  path as a WebSocket pushes each new change.
+- `GET <url>/api/snapshot`: the whole queue as a MaximizePM database file,
+  for the first copy and for export.
+- Identity: the server knows the person from the token; the client sends
+  its agent names; the server writes them as `<agent>@<person>`.
+
+### How a person installs the Teams part
+
+Nothing to install. The invite page of Teams shows one command:
+
+```
+maxpm remote add acme https://teams.maximizepm.com/t/acme
+```
+
+It opens the device-flow page, the person signs in with their relay account,
+and the copy starts. A PM or a viewer needs no command at all: they use the
+team pages and the MCP connector.
 
 ## What changes from the federation design
 
@@ -51,7 +122,10 @@ person; the list of what an agent of another person never gets; item numbers
 - **Team copy**: a read copy of the team queue on a member's computer, kept
   current by the team service. It shows team work offline.
 - **Team service**: the code at `teams.maximizepm.com` that holds the team
-  queues, the team pages, and the PM's MCP server.
+  queues, the team pages, and the PM's MCP server. It is in the Teams
+  repository, not in open-source MaximizePM.
+- **Remote queue**: the open-source extension point (section 0). A team is
+  a remote queue to a member's MaximizePM.
 
 ## The loop in eight steps
 
@@ -60,7 +134,7 @@ person; the list of what an agent of another person never gets; item numbers
    `https://github.com/acme/shop`.
 2. Ann invites Bob as a member and Pat as a PM. Each opens the invite link
    and signs in with GitHub or Google (a relay account, no relay plan needed).
-3. Bob runs `maxpm team join acme` once on his computer, clones the
+3. Bob runs `maxpm remote add acme <url>` once on his computer, clones the
    repository, and links it: `maxpm project path shop@acme ~/src/shop`.
 4. Pat, in Claude with the MaximizePM connector, says "add the checkout
    retry as a P1 item of shop, after #12". Claude calls the team's MCP
@@ -95,9 +169,9 @@ Code never crosses MaximizePM. MaximizePM carries queue data only.
 
 ### How a member's computer works with the team
 
-- `maxpm team join <team>` (once; the river token of `maxpm connect`
-  identifies the person) makes a team copy:
-  `~/.maximizepm/teams/<team>.db`, a file with the same schema as a local
+- `maxpm remote add <name> <url>` (once; the device flow signs the person
+  in) makes a team copy:
+  `~/.maximizepm/remotes/<name>.db`, a file with the same schema as a local
   queue. Reads (`list`, `show`, `blockers`, the page) run the normal code on
   that file.
 - Every write to a team item (`claim`, `done`, `add`, `edit`, `dep`, `send`)
@@ -127,7 +201,7 @@ Code never crosses MaximizePM. MaximizePM carries queue data only.
   person joins takes the place after their local projects; they move it with
   `maxpm project rank shop@acme 2`.
 - A person can turn team work off for their agents, per team:
-  `maxpm config set team_work off --project shop@acme` (on by default for a
+  `maxpm config set remote_work off --project shop@acme` (on by default for a
   member). `maxpm wait` wakes an agent when a team item becomes ready for it.
 - The limits stay per person: `max_sessions` and `max_leases` count local and
   team leases together. The team can also set a limit per member
@@ -180,13 +254,13 @@ Code never crosses MaximizePM. MaximizePM carries queue data only.
 
 ### Invites
 
-- An owner or a PM invites from the team page or with
-  `maxpm team invite acme --role member`. The invite is a link with a random
+- An owner or a PM invites from the team page or with the MCP tool
+  `invite`. The invite is a link with a random
   secret, for one person, that ends after 7 days.
 - The person opens the link, signs in with GitHub or Google (a relay
   account; made at this step when they have none), sees the team, the role,
   and who invited them, and accepts.
-- A member then runs `maxpm team join acme` on each computer that works for
+- A member then runs `maxpm remote add acme <url>` on each computer that works for
   the team. A PM or a viewer needs nothing on a computer.
 
 ### Removal
@@ -315,8 +389,8 @@ An owner removes a person on the members page, or the person leaves.
 - **To create a team**: the creator needs an active relay plan ($7.99 a month
   or $79 a year), as mark said.
 - **A member, PM, or viewer** needs only a relay account, not a relay plan.
-  `maxpm team join` uses the river token of `maxpm connect`, which works
-  without a plan (the plan opens the tunnel only).
+  `maxpm remote add` signs in with the device flow of the team service,
+  which needs no plan, and no `maxpm connect`.
 - **Price of a team**, options:
   - A. Per seat: $6 per member, PM, or owner seat a month ($60 a year);
     viewers free. Stripe bills one subscription with a quantity; a new seat
@@ -364,7 +438,7 @@ An owner removes a person on the members page, or the person leaves.
   with D1 Time Travel. The relay's rule "rebuild from Stripe" covers the
   accounts; it cannot cover queue data.
 - **Export**: an owner downloads the team queue at any time as a MaximizePM
-  database file (`acme.db`, the local schema) or as JSON. `maxpm team export
+  database file (`acme.db`, the local schema) or as JSON. `maxpm remote export
   acme` does the same. A team can leave us and run its queue on a local
   computer.
 - **Deletion**: an owner deletes the team; it is read-only for 7 days (undo
@@ -411,26 +485,31 @@ member's local agent takes it and finishes it, the PM sees it done.
   tests of Ordering, Claims, Goals, and Messages run against the adapter,
   and a claim answers in under 200 ms after a cold start. If it fails, the
   fallback (decision 1) makes slice 1 two weeks.
-- **Team service** (a new Worker, `maxpm-teams`, at teams.maximizepm.com):
+- **Teams repository: the service** (a new Worker, `maxpm-teams`, at teams.maximizepm.com):
   sign-in through the relay account (the relay's D1, read only, for users);
   D1 tables `teams`, `members`, `invites`, `team_tokens`, `team_audit`;
   create a team (behind a flag, no billing in slice 1); invite and accept;
-  `POST /t/<team>/api/action` with a team token; the WebSocket of changes.
+  the remote queue protocol at `/t/<team>` (discovery, device flow,
+  `api/action`, `api/changes` and its WebSocket, `api/snapshot`).
 - **The Team Durable Object** (Python): one per team, runs `core` on its
   SQLite, with the ops that a team needs (add, edit, claim through `next`,
   renew, done with `--pr`, show, list, state, send, answer).
 - **MCP**: `/mcp` with OAuth (dynamic client registration) and the tools
   `teams`, `progress`, `list`, `show`, `add`.
-- **River (local)**: `maxpm team join|list|leave`; the team copy file and its
-  sync; `14@acme` in `show`, `done`, and `release`; `go` gives a team item in
-  a folder linked to a team project; lease renewal from `maxpm serve`; the
-  outbox.
+- **Open-source repository: the shim**: `docs/remote-queue.md` (protocol 1);
+  `maxpm remote add|list|remove`; the device-flow sign-in (from
+  `maxpm connect`'s code, made generic); the copy file and its sync;
+  `14@acme` in `show`, `done`, and `release`; `go` gives a remote item in a
+  folder linked to a remote project; lease renewal from `maxpm serve`; the
+  outbox. No word of Teams, no address of ours.
 - **Page**: a read-only team Board (projects, items, who holds what) at
   `teams.maximizepm.com/<team>`, with the local page's parts.
-- **Tests**: the Team object's tests with the core tests on the adapter; a
-  local test with a fake team service that runs the loop (join, a PM add,
-  go, done, the PM's progress); the Worker's tests (no team data in the
-  relay's D1 or the River object).
+- **Tests**: in the open-source repository, the reference server (or a
+  fake of it) on a second queue file runs the loop (add the remote, an add,
+  go, done, the change rows), and a test that open-source code names no
+  Teams host. In the Teams repository, the Team object's tests with the core
+  tests on the adapter, and the Worker's tests (no team data in the relay's
+  D1 or the River object).
 
 ### Later slices
 
@@ -449,7 +528,7 @@ member's local agent takes it and finishes it, the PM sees it done.
    with the 7 days, the audit page, the secret check on text.
 8. **Mail notifications** for PMs and viewers who have no local MaximizePM.
 
-## 9. How the team service is built
+## 9. How the team service is built (Teams repository)
 
 - **A new Worker** `maxpm-teams` beside the relay Worker, in the same
   Cloudflare account, on `teams.maximizepm.com`. It reads the relay's D1 for
@@ -474,6 +553,8 @@ member's local agent takes it and finishes it, the PM sees it done.
     readiness, goals, messages). Fast, but two copies of every rule.
 
 ## Decisions for mark
+
+Decisions 17 to 23 are on the boundary of section 0.
 
 1. **Where the team queue's code runs.** A: `core.py` in a Python Durable
    Object per team (one rule set); B: a container per team; C: a TypeScript
@@ -512,3 +593,27 @@ member's local agent takes it and finishes it, the PM sees it done.
     a read-only page, no billing (behind a flag). Recommendation: yes.
 16. **The federation design (#4905)**: no build; its pool and peer parts
     stay as a record. Recommendation: yes.
+17. **The boundary**: open-source MaximizePM gets the remote queue client and
+    protocol, with no Teams name and no address of ours; Teams is a private,
+    proprietary repository. Recommendation: yes.
+18. **The form of the shim**: A, an HTTP protocol with device-flow sign-in,
+    so a person installs nothing for Teams; B, a Python plugin interface that
+    a `maxpm-teams` package fills. Recommendation: A.
+19. **A reference remote queue server in open source** (`maxpm serve
+    --remote`, one token per person, no roles): it tests the protocol and
+    lets a group self-host; Teams sells hosting, roles, the PM's MCP, pages,
+    backups, and billing. Recommendation: yes, kept minimal.
+20. **Queue rules in open-source `core`** (person owners of goals, `merge
+    pr`, `review_other_person`, hook approval, the secret check), because the
+    service runs `core`; roles, accounts, and billing stay in Teams.
+    Recommendation: yes.
+21. **Teams uses `core.py` under Apache 2.0** at a pinned version, with the
+    NOTICE. Recommendation: yes.
+22. **The relay client already in open source** (`maxpm connect`, with
+    relay.maximizepm.com as its default address): A, keep it, since
+    MaximizePM works complete without it; B, move it out with Teams.
+    Recommendation: A; decide again if the rule must be "no address of ours".
+23. **Where this design lives**: it is in the public repository now, with
+    prices and the Teams service. A: keep it; B: keep section 0 as
+    `docs/remote-queue.md` in public and move the rest to the Teams
+    repository. Recommendation: B, when the Teams repository exists.
