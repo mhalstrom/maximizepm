@@ -93,7 +93,10 @@ async function openDrawer(id, fresh = false) {
   if (urlItem() == null) history.pushState({ item: id }, "", pageUrl(id));
   else if (urlItem() !== id) history.replaceState(history.state && history.state.item != null ? { item: id } : null, "", pageUrl(id));
   const r = await fetch(`api/item/${id}`); if (!r.ok) return;
-  drawer.show(id, itemDrawerHtml(await r.json(), { S, me: actor() }), fresh);
+  const data = await r.json();
+  // Closed or moved to another item while the fetch ran (a slow refresh, then Escape): do not open it again (#4766).
+  if (openItem !== id) return;
+  drawer.show(id, itemDrawerHtml(data, { S, me: actor() }), fresh);
 }
 
 async function drawerAction(what) {

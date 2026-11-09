@@ -138,6 +138,12 @@ try {
   check(q("#searchDlg").classList.contains("hidden"), "Escape closes the dialog");
   esc();
   await until(() => !q("#drawer").classList.contains("open") && !location.search.includes("item="), "Escape closes the drawer");
+  // The 3 s refresh fetches the open item again; Escape while that fetch runs closes the drawer for good (#4766).
+  window.riverOpen(ITEM);
+  await until(() => q("#drawer").classList.contains("open") && location.search.includes("item="), "the drawer a third time");
+  window.riverOpen(ITEM); esc();
+  await sleep(1000);
+  check(!q("#drawer").classList.contains("open"), "a refresh that ends after Escape leaves the drawer closed");
   await sleep(500);
   post({ seen, errors });
 } catch (e) { post({ error: String(e.stack || e) + " errors: " + errors.join(" | ") }); }

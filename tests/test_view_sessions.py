@@ -926,6 +926,7 @@ try {
   await until(() => q("#waitDlg").classList.contains("hidden") && q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the dialog's link in the panel");
   q('#sessCol a[href^="http://localhost:5173"], #sessCol [data-url^="http://localhost:5173"]').click();
   await until(() => q(".sp-tab.on") && q(".sp-tab.on").title === "http://localhost:5173/app", "the local page in the panel");
+  await until(() => q("#sessItem [data-open]"), "the session's item");  // drawn after the session's data comes (#4766)
   q("#sessItem [data-open]").click();
   await until(() => q(".sp-item [data-file][data-checked]"), "the item's path checked");
   q(".sp-item [data-file]").click();
