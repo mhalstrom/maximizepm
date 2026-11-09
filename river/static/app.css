@@ -69,6 +69,8 @@ button.btn:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 button.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }  /* a lapsed relay plan (#4759) */
 main { padding: 16px; max-width: 1500px; margin: 0 auto; }
+/* Until the first state comes (#4888): through the relay on a phone it takes seconds. */
+.boot-note { font-size: 13px; padding: 4px 2px 12px; }
 .grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; }
 @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 12px 14px; margin-bottom: 16px; }

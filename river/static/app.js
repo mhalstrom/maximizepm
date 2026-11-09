@@ -218,6 +218,7 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   renderGraph(false); renderLog(false); needsYou.pollNeedsYou().catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
+  const boot = $("#bootNote"); if (boot) boot.remove();
   document.querySelector("header").classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);
   // The setup guide's last steps follow the queue: when a task is added or an agent picks one up, it checks again.
@@ -811,7 +812,18 @@ setInterval(() => {
   if (document.hidden || updateMode !== "update") return;  // hidden, or already asking for a restart
   fetch("api/update?fetch=0").then(r => r.ok ? r.json() : null).then(u => { if (u && u.stale) checkUpdate(); }).catch(() => {});
 }, 60 * 1000);
-refresh().then(openFromUrl).then(maybeSetup); setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
+// The tab in the address shows at once, before the state comes (#4888): Sessions, Artifacts, Done and Terminal read
+// their own data, and the others draw when the state is there. A first state that fails says so in the loading line.
+{
+  const r = readUrl();
+  if (r.tab !== "board") {
+    try { setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false); } catch (e) { /* the state draws it */ }
+  }
+}
+refresh().then(openFromUrl).then(maybeSetup).catch((e) => {
+  const boot = $("#bootNote"); if (boot) boot.textContent = `Could not load the queue (${e.message}); the page asks again every 3 seconds.`;
+});
+setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
 // A hidden tab stops the full refresh but keeps asking what needs a person, so notifications still arrive.
 setInterval(() => { if (document.hidden) needsYou.pollNeedsYou().catch(() => {}); }, 15000);
 

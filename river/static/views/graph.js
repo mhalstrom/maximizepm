@@ -60,7 +60,7 @@ function renderGraphSide(withDone) {
 }
 const graphView = makePanZoom($("#graph"));
 export async function renderGraph(force) {
-  if (tab !== "graph" || !window.mermaid) return;
+  if (tab !== "graph" || !window.mermaid || !S) return;  // no state yet (the page shows the tab before it, #4888)
   // A big queue draws as an unreadable wall: the first time, show only the project of the top ready item.
   if (!graphDefaulted) {
     graphDefaulted = true;

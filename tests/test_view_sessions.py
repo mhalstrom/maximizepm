@@ -954,7 +954,8 @@ class NewCode(Base):
 const n = +(sessionStorage.getItem("loads") || 0) + 1;
 sessionStorage.setItem("loads", String(n));
 try {
-  await until(() => q("#sessTitle").textContent === "ag", "the page");
+  // The first state too: the Sessions tab shows before it (#4888), and the page reads its build from it.
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the page");
   if (n === 1) {
     await fetch("/__bump");
     await until(() => q("#newCodeBar"), "the bar");
