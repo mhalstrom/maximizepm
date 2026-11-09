@@ -20,7 +20,7 @@ const check = (v, what) => { if (!v) throw new Error(what); };
 const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON.stringify(o));
 '''
 
-    def drive(self, driver, path="/", steps=None):
+    def drive(self, driver, path="/", steps=None, size=None):
         """Run driver (a module) on every page the browser loads, from path; it posts its result to /__result.
         steps: name -> function that the driver runs on the server side with fetch("/__step/<name>")."""
         import subprocess
@@ -67,6 +67,7 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         chrome = subprocess.Popen([
             _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
+            *([f"--window-size={size}"] if size else []),
             f"http://127.0.0.1:{httpd.server_address[1]}{path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             ran = got.wait(40)
@@ -214,7 +215,33 @@ try {
   check(!cut.length, cut.length + " rows cut off their content: " + (cut[0] && cut[0].clientHeight + " < " + cut[0].scrollHeight));
   post({ ok: true });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
-        self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
+        # A desktop window: on a phone (under 760 px, the default window here) the tab shows the list or the chat,
+        # and the list has no fixed height (#4885).
+        self.assertEqual(self.drive(driver, "/sessions/ag", size="1280,900"), {"ok": True})
+
+    def test_the_sessions_tab_on_a_phone(self):
+        """#4885: at phone width the page is no wider than the screen, each field has 16 px text (Safari on iOS zooms
+        into a smaller one), and the Sessions tab shows the chat of one session or the list: Sessions goes back to
+        the list, a row shows its chat again."""
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  q('nav button[data-tab="sessions"]').click();
+  await until(() => q("#sessTitle").textContent === "ag" && q("#tab-sessions .slist .srow"), "session ag shown");
+  const lay = q("#sessLayout"), shown = (el) => el.getBoundingClientRect().height > 0;
+  const out = { width: innerWidth, wide: document.documentElement.scrollWidth > innerWidth,
+    fonts: ["#search", "#sessText"].map(s => getComputedStyle(q(s)).fontSize),
+    chat: lay.classList.contains("phone-chat") && shown(q("#sessMain")) && !shown(q(".sess-side")) && shown(q("#sessBack")) };
+  q("#sessBack").click();
+  out.list = !lay.classList.contains("phone-chat") && shown(q(".sess-side")) && !shown(q("#sessMain"));
+  q('#sessions .srow[data-session] .srow-main').click();  // not the manager's empty row
+  await until(() => lay.classList.contains("phone-chat"), "the chat again");
+  out.again = shown(q("#sessMain")) && !shown(q(".sess-side"));
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag", size="390,844")
+        self.assertEqual(got, {"width": got.get("width"), "wide": False, "fonts": ["16px", "16px"], "chat": True,
+                               "list": True, "again": True})
+        self.assertLess(got["width"], 760)
 
     def test_a_click_on_each_tab_of_the_side_panel_shows_it(self):
         """#4652: the panel's tabs once had data-tab, which the page's own click handler reads as a tab of the

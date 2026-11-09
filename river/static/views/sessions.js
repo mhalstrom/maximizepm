@@ -141,12 +141,17 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   const note = (text) => { col.replaceChildren(); const n = document.createElement("div"); n.className = "muted sl-none"; n.textContent = text; col.append(n); };
 
   // The tab fills the window below the header; the view scrolls inside it, so the text bar stays in sight.
+  // On a phone (#4885) the tab shows the list or the chat of one session: the chat fills the screen under the header.
   function fit() {
-    const lay = $("#sessLayout");
-    if (!isShown() || window.innerWidth < 760) return lay.style.removeProperty("height");
-    lay.style.height = Math.max(320, window.innerHeight - lay.getBoundingClientRect().top) + "px";
+    const lay = $("#sessLayout"), phone = window.innerWidth < 760;
+    if (!isShown() || (phone && !lay.classList.contains("phone-chat"))) return lay.style.removeProperty("height");
+    const h = phone && window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    lay.style.height = Math.max(320, h - Math.max(0, lay.getBoundingClientRect().top)) + "px";
   }
   window.addEventListener("resize", fit);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", fit);
+  const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); fit(); };
+  $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
 
   async function refresh() {
     if (busy || document.hidden || !isShown()) return;
@@ -204,7 +209,9 @@ export function makeSessions({ isShown, onPick = () => {} }) {
 
   function pick(name, remember = true) {
     if (remember && name) store(PICKED, name);
+    if (remember || !name) phoneChat(!!name);  // a session the person picks shows its chat (on a phone, #4885)
     if (name === agent) return;
+    if (!agent && name) phoneChat(true);  // the first one at load
     if (name !== agent) dict.stop();
     col.classList.toggle("hide-tools", !viewOf(name).showTools);  // #4635
     agent = name; cursor = null; gen++; pinned = remember;

@@ -218,6 +218,7 @@ async function refresh() {
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   renderGraph(false); renderLog(false); needsYou.pollNeedsYou().catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
+  document.querySelector("header").classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);
   // The setup guide's last steps follow the queue: when a task is added or an agent picks one up, it checks again.
   const firstRun = JSON.stringify([S.items.length, S.agents.some(a => a.kind !== "human"), anyStarted()]);
@@ -349,6 +350,7 @@ function syncUrl(push) {
 function setTab(name, push = true) {
   if (push && name !== tab) history.pushState(null, "", pageUrl(drawer.isOpen() ? openItem : null, name));
   setTabName(name); document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   renderLog(true);
   if (tab === "sessions") sessionsTab.refresh();
@@ -801,6 +803,8 @@ $("#loopLate").onclick = () => {
   if (updateMode !== "old") updateMode = "restart";
   $("#updateBtn").onclick();
 };
+// The ⋯ of the header on a phone (#4885): the controls that do not fit in its two rows.
+$("#hdrMore").onclick = () => { const h = document.querySelector("header"); h.classList.toggle("more"); $("#hdrMore").setAttribute("aria-expanded", String(h.classList.contains("more"))); };
 checkUpdate().catch(() => {}); setInterval(() => { if (!document.hidden) checkUpdate().catch(() => {}); }, 30 * 60 * 1000);
 // A stale server is cheap to spot (no git fetch), so look for it more often than for new commits.
 setInterval(() => {

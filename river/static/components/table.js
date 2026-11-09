@@ -34,6 +34,8 @@ export function makeTable(el, { key, columns, index = "id", sort = [], onRow, pl
   const keep = saved(key);
   const t = new window.Tabulator(el, {
     index, height, placeholder, data: [], layout: "fitColumns",
+    // A phone (#4885): the columns that do not fit go under their row, open, so the table is no wider than the screen.
+    ...(window.innerWidth < 760 ? { responsiveLayout: "collapse", responsiveLayoutCollapseStartOpen: true } : {}),
     // Without a fixed height the table grows with its rows: draw them all (no virtual scrolling).
     renderVertical: height ? "virtual" : "basic", ...options,
     columns: columns.map(column),

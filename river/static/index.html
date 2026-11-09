@@ -22,6 +22,7 @@
 <link rel="stylesheet" href="views/graph.css">
 <link rel="stylesheet" href="views/done.css">
 <link rel="stylesheet" href="views/settings.css">
+<link rel="stylesheet" href="phone.css">
 <!-- The saved theme (header switch) before the page draws, so it does not flash the other theme. -->
 <script>try { var t = localStorage.getItem("river.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}</script>
 </head>
@@ -42,6 +43,7 @@
   </nav>
   <span class="spacer"></span>
   <input type="search" id="search" placeholder="Search items" title="Find items by their words: open, done, and dropped (Enter or /)" autocomplete="off">
+  <button class="iconbtn" type="button" id="hdrMore" aria-expanded="false" aria-controls="theme" title="More: theme, relay, update, You are">⋯</button>
   <select id="theme" title="Theme: System follows your computer's light or dark setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
   <button class="btn hidden" id="relayBtn">Connect relay</button>
   <button class="btn primary hidden" id="loopLate"></button>
