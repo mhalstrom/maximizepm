@@ -37,10 +37,12 @@ function headerOpenBtn(s) {
   const why = s.agent_type === "codex" ? "A Codex session has no web link, and this one runs in no tmux pane here" : "This session has no Remote Control link and runs in no tmux pane here";
   return `<button class="btn" type="button" disabled title="${esc(why)}">Open session</button><span class="muted sess-noopen">${esc(why)}</span>`;
 }
+// The targets a session owns: entries are {name, owner_expires_at} (or a name), shown by name (#4686).
+const ownNames = (s) => (s.owns || []).map(o => (o && o.name) || String(o));
 function headerItem(s) {
   if (s.holds && s.holds.length) return s.holds.map(h => `<button class="btn sess-itembtn" type="button" data-open="${h.id}" title="Open #${h.id} in the side panel: its notes, what it waits on, and what it unblocks">`
     + `#${h.id} ${esc(clip(h.title, 110))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}</button>`).join(" ");
-  if (s.owns && s.owns.length) return `<span class="muted">No item · owns target ${s.owns.map(esc).join(", ")}</span>`;
+  if (s.owns && s.owns.length) return `<span class="muted">No item · owns target ${ownNames(s).map(esc).join(", ")}</span>`;
   return `<span class="muted">No item</span>`;
 }
 
@@ -63,7 +65,7 @@ export function sessionRow(s) {
   const lastText = last ? (last.role === "tool" ? last.text : plainText(last.text)) : "";
   const h = s.holds && s.holds[0];
   const item = h ? `<button class="srow-it" type="button" data-open="${h.id}" title="${esc(`Open item #${h.id} ${h.title}`)}"><b>#${h.id}</b><span>${esc(clip(h.title, 48))}</span></button>`
-    : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + s.owns.join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(s.owns.join(", ")) : "No item"}</span></div>`;
+    : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + ownNames(s).join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(ownNames(s).join(", ")) : "No item"}</span></div>`;
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
     <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
       <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}<b>${esc(s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
