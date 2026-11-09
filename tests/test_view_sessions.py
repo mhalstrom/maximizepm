@@ -706,6 +706,92 @@ document.getElementById("out").textContent = "RESULT " + JSON.stringify({{chipRi
         self.assertLessEqual(got["chipRight"], got["itemLeft"], got)
 
 
+class PanelLists(Base):
+    """#4685: the chat stays in sight; Items and Artifacts are lists in the side panel, and an item opens in a tab
+    there (from the lists, from a #<id> in the chat), at /sessions/<session>/items/<id>; Edit in the drawer opens
+    the drawer. Drives the real page in Chrome."""
+
+    def test_items_and_artifacts_open_in_the_side_panel_beside_the_chat(self):
+        import subprocess
+        import threading
+        from unittest.mock import patch
+        from tests.test_server import _chrome
+        if not _chrome():
+            self.skipTest("no Chrome on this computer")
+        self.write(claude_line("assistant", [{"type": "text", "text": f"Working on #{self.it} now."}], "end_turn",
+                               at="2026-11-08T10:05:00Z"))
+        driver = r'''
+const q = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const until = async (f, what) => { for (let i = 0; i < 150; i++) { if (f()) return; await sleep(100); } throw new Error(what); };
+const check = (v, what) => { if (!v) throw new Error(what); };
+const post = o => navigator.sendBeacon("/__result", JSON.stringify(o));
+const chat = () => q("#sessBody").offsetParent !== null && q("#sessCol").textContent.includes("I read the header first.");
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && chat(), "the chat of ag");
+  check(!q("[data-sview]"), "no Chat / Items / Artifacts tabs in the middle");
+  q('[data-sp-open="items"]').click();
+  await until(() => q('.sp-list[data-list="items"] .si-row [data-open]'), "the Items list in the panel");
+  check(chat(), "the chat stays with the Items list");
+  q('.sp-list[data-list="items"] .si-row [data-open]').click();
+  await until(() => q(".sp-item h3") && q(".sp-item h3").textContent === "header", "the item in a panel tab");
+  check(chat() && !q("#drawer").classList.contains("open"), "the chat stays, and the drawer stays closed");
+  check(/\/sessions\/ag\/items\/\d+$/.test(location.pathname), "the address names the item: " + location.pathname);
+  q('[data-sp-list="artifacts"]').click();
+  await until(() => q('.sp-list[data-list="artifacts"]'), "the Artifacts list");
+  const ref = [...document.querySelectorAll("#sessCol [data-open]")].pop();
+  check(ref, "a #<id> link in the chat"); ref.click();
+  await until(() => q(".sp-item h3"), "the chat's #<id> opens in the panel");
+  check(!q("#drawer").classList.contains("open") && chat(), "not in the drawer");
+  check(document.querySelectorAll(".sp-tab:not(.sp-tab-list)").length === 1, "one tab for the item, opened twice");
+  q("[data-drawer-open]").click();
+  await until(() => q("#drawer").classList.contains("open"), "Edit in the drawer opens the drawer");
+  post({ path: location.pathname, tabs: [...document.querySelectorAll(".sp-tab")].map(t => t.textContent.replace("✕", "").trim()) });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        page = server.page_html("/sessions/ag").replace(b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
+        got, result = threading.Event(), {}
+
+        class H(server.Handler):
+            def do_GET(self):
+                if self.path.split("?")[0] == "/sessions/ag":
+                    return self._send(200, page, "text/html; charset=utf-8")
+                if self.path == "/__drive.js":
+                    return self._send(200, driver.encode(), "text/javascript; charset=utf-8")
+                return super().do_GET()
+
+            def do_POST(self):
+                if self.path == "/__result":
+                    result.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                    got.set()
+                    return self._send(204, b"")
+                return super().do_POST()
+
+        with patch.object(core, "transcripts_root", lambda: self.root):
+            try:
+                httpd = server._Server(("127.0.0.1", 0), H)
+            except PermissionError:
+                self.skipTest("no local port here")
+            httpd.daemon_threads = True
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            chrome = subprocess.Popen([
+                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                "--disable-extensions", "--window-size=1500,900", f"--user-data-dir={self.dir.name}/browser",
+                f"http://127.0.0.1:{httpd.server_address[1]}/sessions/ag?as=mark"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                ran = got.wait(40)
+            finally:
+                chrome.kill()
+                chrome.wait()
+                httpd.shutdown()
+                httpd.server_close()
+        self.assertTrue(ran, "browser test did not report")
+        self.assertNotIn("error", result, result.get("error"))
+        self.assertEqual(result["path"], f"/sessions/ag/items/{self.it}")
+        self.assertEqual(result["tabs"], ["Items", "Artifacts", f"◇ #{self.it} header"])
+
+
 class SideFiles(Base):
     """#4619: the side panel shows local files read only, with the page's token, only from the project folders,
     their worktrees and uploads, each in a sandbox of its own."""

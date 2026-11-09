@@ -5,18 +5,25 @@
 // several, an address bar, Reload, Open in a new tab, Close, and a handle to resize it (the width stays).
 // Each session has its own tabs (#4632), kept in this browser across reloads; each tab shows what it holds (file,
 // image, page, site, tool). A tool (#4631) opens as a tab too: openTool(key, title, render).
-// The X of the last tab keeps the panel open, with the list of the session's artifacts to open (#4646); the panel's
+// Two lists come first and stay (#4685): Items (what this session claimed, finished, released or gave away) and
+// Artifacts (what it wrote or named). The chat stays in sight beside them: an item opens in a tab of its own here
+// (components/itemView.js), an artifact too. The X of the last tab shows the Artifacts list (#4646); the panel's
 // own X closes it.
-import { $, esc, store, toast, pageToken } from "../lib.js";
+import { $, esc, ago, store, toast, pageToken } from "../lib.js";
 import { markdown } from "./chat.js";
+import { chip } from "./chip.js";
+import { itemViewHtml } from "./itemView.js";
 import { showRows, wireRows } from "../views/artifacts.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
 const IMAGE = /\.(png|jpe?g|gif|webp|svg)$/i, MD = /\.(md|txt)$/i;
 
-let tabs = [], on = null, n = 0, session = "", listed = false;
-const bySession = {};  // name -> {tabs, on, listed}
+// on: the id of the tab that shows, or "items" / "artifacts" for a list (#4685).
+let tabs = [], on = null, n = 0, session = "";
+const bySession = {};  // name -> {tabs, on}
+const LISTS = { items: "Items", artifacts: "Artifacts" };
+const isList = (x) => x === "items" || x === "artifacts";
 const tools = {};      // key -> render(box): the tool tabs of #4631
 const panel = () => $("#sessPanel");
 // What the panel shows changed (#4653): fn(session, target or null). The page puts it in its address.
@@ -27,7 +34,9 @@ const tell = () => told(session, (tabs.find(t => t.id === on) || {}).target || n
 export function panelTargets() { return tabs.map(t => t.target); }
 
 function isFile(target) { return /^(?:\/|~[/\\]|[a-z]:[/\\]|\\\\)/i.test(target); }
+const itemOf = (target) => (/^item:(\d+)$/.exec(target) || [])[1];
 function label(target) {
+  if (itemOf(target)) return "#" + itemOf(target);
   if (isFile(target)) return target.split(/[\\/]/).pop();
   try { const u = new URL(target); return u.host + (u.pathname.length > 1 ? u.pathname : ""); } catch (e) { return target; }
 }
@@ -37,25 +46,29 @@ async function fileUrl(path) {
 
 function kindOf(target) {
   if (target.startsWith("tool:")) return "tool";
+  if (itemOf(target)) return "item";
   if (isFile(target)) return IMAGE.test(target) ? "image" : "file";
   return LOCAL.test(target) ? "page" : "site";
 }
-const KIND_MARK = { image: "▣", file: "▤", page: "◧", site: "◎", tool: "⚙" };
+const KIND_MARK = { image: "▣", file: "▤", page: "◧", site: "◎", tool: "⚙", item: "◇" };
 
 // The tabs of each session stay in this browser (targets only; a tool tab comes back when its tool opens again).
 function save() {
   if (!session) return;
-  bySession[session] = { tabs, on, listed };
+  bySession[session] = { tabs, on };
   let all = {};
   try { all = JSON.parse(store(TABS) || "{}") || {}; } catch (e) { all = {}; }
   const keep = tabs.filter(t => kindOf(t.target) !== "tool");
-  if (keep.length) all[session] = { targets: keep.map(t => t.target), on: (tabs.find(t => t.id === on) || {}).target || "" };
+  if (keep.length || isList(on)) all[session] = { targets: keep.map(t => t.target), on: isList(on) ? "list:" + on : (tabs.find(t => t.id === on) || {}).target || "" };
   else delete all[session];
   store(TABS, JSON.stringify(all));
 }
 
 function renderTabs() {
-  $("#spTabs").innerHTML = tabs.map(t => { const k = kindOf(t.target);
+  // The two lists first, without an X (#4685); then a tab for each thing opened.
+  $("#spTabs").innerHTML = Object.entries(LISTS).map(([k, title]) => `<span class="sp-tab sp-tab-list${on === k ? " on" : ""}">`
+    + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${on === k}" data-sp-list="${k}">${title}</button></span>`).join("")
+    + tabs.map(t => { const k = kindOf(t.target);
     return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(t.target)}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}"><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
     + `<button type="button" class="sp-x" data-close="${t.id}" title="Close this tab" aria-label="Close ${esc(t.title || label(t.target))}">✕</button></span>`; }).join("");
@@ -63,10 +76,10 @@ function renderTabs() {
 }
 
 async function show(t) {
-  on = t.id; listed = false;
+  on = t.id;
   renderTabs();
   tell();
-  $("#spAddr").value = t.target;
+  $("#spAddr").value = itemOf(t.target) ? "#" + itemOf(t.target) : t.target;
   const box = $("#spBody");
   box.replaceChildren();
   const note = (html) => { const d = document.createElement("div"); d.className = "sp-note"; d.innerHTML = html; box.append(d); };
@@ -75,6 +88,17 @@ async function show(t) {
   if (kindOf(t.target) === "tool") {
     const render = tools[t.target];
     return render ? render(box) : note(`<div class="muted">This tool is not open now.</div>`);
+  }
+  if (itemOf(t.target)) {
+    note(`<div class="muted">Reading #${itemOf(t.target)}…</div>`);
+    const r = await fetch("api/item/" + itemOf(t.target)).catch(() => null);
+    if (on !== t.id) return;
+    box.replaceChildren();
+    if (!r || !r.ok) return note(`<div class="muted">There is no item #${itemOf(t.target)}.</div>`);
+    const it = await r.json();
+    if (t.title !== `#${it.id} ${it.title}`) { t.title = `#${it.id} ${it.title}`; renderTabs(); }
+    box.innerHTML = itemViewHtml(it);
+    return;
   }
   if (isFile(t.target)) {
     const src = await fileUrl(t.target);
@@ -119,25 +143,38 @@ export async function openFullScreen(target, session = "", item = "") {
   } catch (e) { if (w) w.close(); toast(e.message, true); }
 }
 
-// No tab open (#4646): the artifacts of this session (GET /api/artifacts?agent=), as in its Artifacts view (#4630).
-// Open gives one a tab; Open full screen a browser tab of its own.
-async function showList() {
-  on = null; listed = true;
-  renderTabs();
-  tell();
-  $("#spAddr").value = "";
+// The two lists of this session (#4685): Items (GET /api/session-items?agent=) and Artifacts (GET /api/artifacts?agent=,
+// the rows of the Artifacts tab). A click on an item or an artifact opens it in a tab here. After the last tab
+// closes, the Artifacts list shows (#4646). quiet: read again in place, with no "Reading" line (every 10 seconds).
+async function showList(kind = "artifacts", quiet = false) {
+  if (!quiet || on !== kind) { on = kind; renderTabs(); tell(); $("#spAddr").value = ""; }
   const box = $("#spBody"), name = session;
-  box.innerHTML = `<div class="sp-note sp-list"><b>Artifacts of ${esc(name || "this session")}</b>
-    <div class="muted">Open one in a tab, or type an address above.</div><div class="sp-arts"><div class="muted sl-none">Reading the transcript…</div></div></div>`;
-  const list = box.querySelector(".sp-arts");
-  wireRows(list, (_s, target) => openInPanel(target));
+  let list = box.querySelector(`.sp-list[data-list="${kind}"] .sp-rows`);
+  if (!quiet || !list) {
+    box.innerHTML = `<div class="sp-note sp-list" data-list="${kind}"><b>${LISTS[kind]} of ${esc(name || "this session")}</b>
+      <div class="muted">${kind === "items" ? "The items this session claimed, finished, released or gave away. Open one in a tab." : "The files, local pages and claude.ai artifacts this session wrote or named. Open one in a tab, or type an address above."}</div>
+      <div class="sp-rows${kind === "artifacts" ? " sp-arts" : ""}"><div class="muted sl-none">${kind === "items" ? "Reading the history…" : "Reading the transcript…"}</div></div></div>`;
+    list = box.querySelector(".sp-rows");
+    if (kind === "artifacts") wireRows(list, (_s, target) => openInPanel(target));
+  }
   let rows = [];
   try {
-    const r = await fetch("api/artifacts" + (name ? "?agent=" + encodeURIComponent(name) : ""));
-    rows = r.ok ? ((await r.json()).artifacts || []) : [];
+    const r = await fetch((kind === "items" ? "api/session-items" : "api/artifacts") + (name ? "?agent=" + encodeURIComponent(name) : ""));
+    rows = r.ok ? ((await r.json())[kind] || []) : [];
   } catch (e) { /* an empty list says so */ }
-  if (!listed || name !== session || !box.contains(list)) return;  // a tab or another session came first
-  showRows(list, rows, "This session wrote or named nothing the side panel can show.");
+  if (on !== kind || name !== session || !box.contains(list)) return;  // a tab or another session came first
+  if (kind === "artifacts") return showRows(list, rows, "This session wrote or named nothing the side panel can show.");
+  list.innerHTML = rows.map(x => `<div class="si-row">
+      <span class="link" data-open="${x.id}">#${x.id}</span>
+      <span class="si-t link" data-open="${x.id}">${esc(x.title)}</span>
+      <span class="si-m">${chip("c-" + esc(x.status), esc(x.status.replace("_", " ")))} <span class="muted">${esc((x.did || []).join(", "))} · ${ago(x.at)}</span></span>
+    </div>`).join("") || `<div class="muted sl-none">This session took no item yet.</div>`;
+}
+// A list of the session, from the session's header (Items, Artifacts): the panel opens on it.
+export function openList(kind) {
+  if (!isList(kind)) return;
+  reveal(true);
+  showList(kind);
 }
 
 function reveal(yes) {
@@ -147,9 +184,9 @@ function reveal(yes) {
 }
 
 export function openInPanel(target) {
-  target = String(target || "").trim();
+  target = String(target || "").trim().replace(/^#(\d+)$/, "item:$1");  // #12 in the address bar: the item
   if (!target) return;
-  if (!isFile(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https) or a full file path", true);
+  if (!isFile(target) && !itemOf(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https), a full file path, or an item (#12)", true);
   reveal(true);
   let t = tabs.find(x => x.target === target);  // the same thing again: its tab
   if (!t) { t = { id: ++n, target, title: "" }; tabs.push(t); }
@@ -177,13 +214,12 @@ export function panelFor(name) {
     try { all = JSON.parse(store(TABS) || "{}") || {}; } catch (e) { all = {}; }
     const s = all[session] || { targets: [] };
     const list = (s.targets || []).filter(x => typeof x === "string").map(target => ({ id: ++n, target, title: "" }));
-    mine = { tabs: list, on: (list.find(t => t.target === s.on) || list[list.length - 1] || {}).id ?? null };
+    const lst = /^list:(items|artifacts)$/.exec(s.on || "");
+    mine = { tabs: list, on: lst ? lst[1] : (list.find(t => t.target === s.on) || list[list.length - 1] || {}).id ?? null };
   }
-  tabs = mine.tabs; on = mine.on; listed = !!mine.listed;
-  if (!tabs.length) {
-    if (listed) { reveal(true); return showList(); }
-    $("#spTabs").innerHTML = ""; reveal(false); return tell();
-  }
+  tabs = mine.tabs; on = mine.on;
+  if (isList(on)) { reveal(true); return showList(on); }
+  if (!tabs.length) { on = null; $("#spTabs").innerHTML = ""; reveal(false); return tell(); }
   reveal(true);
   show(tabs.find(t => t.id === on) || tabs[tabs.length - 1]);
 }
@@ -197,7 +233,7 @@ function close(id) {
 
 // The panel's own X: no tabs, and no panel.
 function closePanel() {
-  tabs = []; on = null; listed = false;
+  tabs = []; on = null;
   renderTabs();
   reveal(false);
   tell();
@@ -208,18 +244,28 @@ export function wirePanel() {
   if (w >= 280) document.documentElement.style.setProperty("--sp-w", w + "px");
   $("#spTabs").addEventListener("click", (e) => {
     const x = e.target.closest("[data-close]"); if (x) return close(+x.dataset.close);
+    const l = e.target.closest("[data-sp-list]"); if (l) return showList(l.dataset.spList);
     // data-sp-tab, not data-tab: the page's own click handler reads data-tab as a tab of the page (#4652).
     const t = e.target.closest("[data-sp-tab]"); if (t) show(tabs.find(z => z.id === +t.dataset.spTab));
   });
   $("#spForm").addEventListener("submit", (e) => { e.preventDefault(); openInPanel($("#spAddr").value); });
-  $("#spReload").onclick = () => { const t = tabs.find(z => z.id === on); if (t) show(t); else if (listed) showList(); };
+  $("#spReload").onclick = () => { const t = tabs.find(z => z.id === on); if (t) show(t); else if (isList(on)) showList(on); };
   $("#spNew").onclick = async () => {
     const t = tabs.find(z => z.id === on); if (!t) return toast("Open an artifact in a tab first", true);
+    if (itemOf(t.target)) return window.open("?item=" + itemOf(t.target), "_blank", "noopener");  // the page, with its drawer
     window.open(isFile(t.target) ? await fileUrl(t.target) : t.target, "_blank", "noopener");
   };
+  // In the panel, an item link opens the item in a tab here, not in the drawer; Edit in the drawer opens the drawer.
+  $("#spBody").addEventListener("click", (e) => {
+    const d = e.target.closest("[data-drawer-open]");
+    if (d) { e.stopPropagation(); return window.riverOpen && window.riverOpen(+d.dataset.drawerOpen); }
+  });
+  // The lists follow what the session does while they show.
+  setInterval(() => { if (isList(on) && !document.hidden && !panel().classList.contains("hidden") && panel().offsetParent) showList(on, true); }, 10000);
   $("#spClose").onclick = closePanel;
   $("#spFull").onclick = () => { const t = tabs.find(z => z.id === on);
     if (t && kindOf(t.target) === "tool") return toast("A tool shows in the side panel only", true);
+    if (t && itemOf(t.target)) return window.open("?item=" + itemOf(t.target), "_blank", "noopener");
     if (t) openFullScreen(t.target, session); else toast("Open an artifact in a tab first", true); };
   // Drag the left edge to resize; the width stays for the next visit.
   const grip = $("#spGrip");

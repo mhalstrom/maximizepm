@@ -235,6 +235,7 @@ document.addEventListener("drop", async (e) => {
 const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (the Board)   /sessions   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
+//   /sessions/<session>/items/<id> (an item in the side panel, #4685)
 //   /artifacts   /artifacts/<artifact id> (opens it beside its session)   /projects   /targets   /capacity
 //   /graph   /done   /settings
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
@@ -250,7 +251,8 @@ function readUrl() {
   const q = new URLSearchParams(location.search), it = q.get("item");
   const r = { tab: TABS.includes(parts[0]) ? parts[0] : "board", session: null, art: null, as: q.get("as"), terminal: q.get("terminal"),
               item: /^\d+$/.test(it || "") ? +it : null };
-  if (r.tab === "sessions") { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null; }
+  if (r.tab === "sessions") { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
+    if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
   if (r.tab === "artifacts") r.art = parts[1] || null;
   return r;
 }
@@ -259,7 +261,7 @@ function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
   let p = tabName === "board" ? "" : tabName;
   if (tabName === "sessions" && view.session) {
     p += "/" + encodeURIComponent(view.session);
-    if (view.art) p += "/artifacts/" + view.art;
+    if (view.art) p += view.art.startsWith("item:") ? "/items/" + view.art.slice(5) : "/artifacts/" + view.art;
   }
   const q = new URLSearchParams();
   if (asParam) q.set("as", asParam);
@@ -289,7 +291,7 @@ const sessionsTab = makeSessions({ isShown: () => tab === "sessions",
 // Another tab of the side panel, or none: the same entry, with the artifact's id.
 onPanel((session, target) => {
   if (session !== view.session) return;
-  view.art = target ? artId(target) : null;
+  view.art = !target ? null : /^item:\d+$/.test(target) ? target : artId(target);
   if (tab === "sessions") syncUrl(false);
 });
 wireItemPop();  // the pop-up of every item on the page (#4622)
@@ -596,6 +598,11 @@ async function openFromUrl() {
 }
 // An artifact by its id: from the session's panel tabs, else from what the session (or any session) made.
 async function openArtifact(session, id) {
+  if (id.startsWith("item:")) {  // an item in the side panel (#4685)
+    if (tab !== "sessions") await setTab("sessions", false);
+    if (session) sessionsTab.pick(session);
+    return openInPanel(id);
+  }
   let target = session ? panelTargets().find(t => artId(t) === id) : null;
   if (!target) {
     const r = await fetch("api/artifacts" + (session ? "?agent=" + encodeURIComponent(session) : "")).catch(() => null);

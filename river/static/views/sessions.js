@@ -12,10 +12,9 @@ import { appendEntries, agePending, wireCopy, plainText } from "../components/ch
 import { openTerminal } from "../components/terminalDialog.js";
 import { openWaiting } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
-import { showRows, wireRows } from "./artifacts.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
-import { openInPanel, wirePanel, panelFor } from "../components/sidePanel.js";
+import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked" };
@@ -39,7 +38,7 @@ function headerOpenBtn(s) {
   return `<button class="btn" type="button" disabled title="${esc(why)}">Open session</button><span class="muted sess-noopen">${esc(why)}</span>`;
 }
 function headerItem(s) {
-  if (s.holds && s.holds.length) return s.holds.map(h => `<button class="btn sess-itembtn" type="button" data-open="${h.id}" title="Open #${h.id} in the drawer: its notes, what it waits on, and what it unblocks">`
+  if (s.holds && s.holds.length) return s.holds.map(h => `<button class="btn sess-itembtn" type="button" data-open="${h.id}" title="Open #${h.id} in the side panel: its notes, what it waits on, and what it unblocks">`
     + `#${h.id} ${esc(clip(h.title, 110))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}</button>`).join(" ");
   if (s.owns && s.owns.length) return `<span class="muted">No item · owns target ${s.owns.map(esc).join(", ")}</span>`;
   return `<span class="muted">No item</span>`;
@@ -113,6 +112,16 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
   wirePanel();
+  // The chat stays in sight (#4685): in this tab an item opens in the side panel, not in the drawer (a #<id> in the
+  // chat, the item of a session row or of the header, an item of the panel's lists), and Items and Artifacts open
+  // there as lists.
+  $("#tab-sessions").addEventListener("click", (e) => {
+    const l = e.target.closest("[data-sp-open]"); if (l) return openList(l.dataset.spOpen);
+    const o = e.target.closest("[data-open]");
+    if (!o || !/^\d+$/.test(o.dataset.open) || e.metaKey || e.ctrlKey) return;
+    e.preventDefault(); e.stopPropagation();
+    openInPanel("item:" + o.dataset.open);
+  });
   // A link or a file path in the chat opens in the side panel; Cmd or Ctrl+click keeps a new browser tab (#4619).
   col.addEventListener("click", (e) => {
     const f = e.target.closest("[data-file]");
@@ -202,47 +211,11 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     clearFiles();
     barFor(null);
     note("Reading the transcript…");
-    if (sview !== "chat") setView(sview);
     waitLine({});
     bar.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
 
-  // Chat | Items (#4623): the items this session claimed, finished, released or gave away, newest first.
-  let sview = "chat";
-  async function loadItems() {
-    if (sview !== "items" || !agent) return;
-    const name = agent;
-    const r = await fetch("api/session-items?agent=" + encodeURIComponent(name));
-    const j = r.ok ? await r.json() : { items: [] };
-    if (name !== agent || sview !== "items") return;
-    $("#sessItemList").innerHTML = j.items.map(x => `<div class="si-row">
-        <span class="link" data-open="${x.id}">#${x.id}</span>
-        <span class="si-t">${esc(x.title)}</span>
-        <span class="si-m">${chip("c-" + esc(x.status), esc(x.status.replace("_", " ")))} <span class="muted">${esc(x.did.join(", "))} · ${ago(x.at)}</span></span>
-      </div>`).join("") || `<div class="muted sl-none">This session took no item yet.</div>`;
-  }
-  // Artifacts (#4630): what this session wrote or named, with the rows of the Artifacts tab; also when it ended.
-  async function loadArts() {
-    if (sview !== "artifacts" || !agent) return;
-    const name = agent;
-    const r = await fetch("api/artifacts?agent=" + encodeURIComponent(name));
-    const j = r.ok ? await r.json() : { artifacts: [] };
-    if (name !== agent || sview !== "artifacts") return;
-    showRows($("#sessArtList"), j.artifacts || [], "This session wrote or named nothing the side panel can show.");
-  }
-  wireRows($("#sessArtList"), (_session, target) => openInPanel(target));
-  function setView(v) {
-    sview = v;
-    $("#sessArts").classList.toggle("hidden", v !== "artifacts");
-    if (v === "artifacts") { $("#sessArtList").innerHTML = `<div class="muted sl-none">Reading the transcript…</div>`; loadArts(); }
-    document.querySelectorAll("[data-sview]").forEach(b => { b.classList.toggle("on", b.dataset.sview === v); b.setAttribute("aria-selected", String(b.dataset.sview === v)); });
-    $("#sessBody").classList.toggle("hidden", v !== "chat");
-    $("#sessItems").classList.toggle("hidden", v !== "items");
-    if (v === "items") { $("#sessItemList").innerHTML = `<div class="muted sl-none">Reading the history…</div>`; loadItems(); }
-  }
-  document.querySelector(".sess-views").addEventListener("click", (e) => { const b = e.target.closest("[data-sview]"); if (b) setView(b.dataset.sview); });
-  setInterval(() => { if (!document.hidden && isShown()) { loadItems(); loadArts(); } }, 10000);
   document.addEventListener("maxpm-view", (e) => { if (e.detail.agent === agent) col.classList.toggle("hide-tools", !viewOf(agent).showTools); });
 
   // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it.
@@ -396,7 +369,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
   bar.addEventListener("click", (e) => {
-    if (e.target.closest("[data-open], a")) return;  // an item link opens the drawer
+    if (e.target.closest("[data-open], a")) return;  // an item link opens in the side panel
     const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
     pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);

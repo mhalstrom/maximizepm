@@ -27,7 +27,9 @@ button.srow-it { cursor: pointer; }
 .srow .sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sess-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sess-head h2 { margin: 0; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--ink); }
-.sess-item { font-size: 13px; margin: 4px 0 8px; overflow-wrap: anywhere; }
+.sess-item { font-size: 13px; margin: 4px 0 8px; overflow-wrap: anywhere; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sess-item .spacer { flex: 1; }
+.sess-lists { display: inline-flex; gap: 4px; flex: none; }
 .sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: 1px solid var(--line); padding: 12px 4px 4px; }
 .sess-main .sbar { display: flex; gap: 8px; margin-top: 8px; align-items: flex-end; }
 .sess-main .sbar.hidden, .sess-main.hidden { display: none; }
@@ -155,10 +157,7 @@ button.srow-it { cursor: pointer; }
 .prov-claude-code { color: var(--prog); border-color: var(--prog); }
 #sessState .prov { margin-right: 6px; }
 /* Chat | Items of a session (#4623). */
-.sess-views { display: flex; gap: 2px; margin: 0 0 6px; flex: none; }
-.sv { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font: inherit; font-size: 13px; padding: 4px 10px; cursor: pointer; }
-.sv.on { color: var(--ink); border-bottom-color: var(--accent); }
-.sess-main #sessItems.hidden, .sess-main #sessBody.hidden, .sess-main #sessArts.hidden { display: none; }
+.sess-main #sessBody.hidden { display: none; }
 .si-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .si-t { overflow-wrap: anywhere; }
 .si-m { grid-column: 2; font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
@@ -173,6 +172,19 @@ button.srow-it { cursor: pointer; }
 /* Side panel tabs (#4632): the kind of each, and a button to reach it from the keyboard. */
 .sp-tab .sp-tab-l { background: none; border: 0; color: inherit; font: inherit; padding: 0; cursor: pointer; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sp-k { opacity: .75; font-size: 11px; }
+/* The two lists of the panel (#4685): first, without an X. */
+.sp-tab-list { padding: 2px 8px; font-weight: 500; }
+.sp-tab-list + .sp-tab:not(.sp-tab-list) { margin-left: 6px; }
+/* An item in a panel tab (#4685): the drawer's content, to read. */
+.sp-item { padding: 12px 16px; font-size: 13px; }
+.sp-item .spi-top { display: flex; align-items: center; gap: 8px; }
+.sp-item .spi-top .spacer { flex: 1; }
+.sp-item h3 { margin: 6px 0; font-size: 17px; overflow-wrap: anywhere; }
+.sp-item .meta { color: var(--muted); font-size: 12px; margin: 6px 0; }
+.sp-item .sec { margin-top: 14px; }
+.sp-item .sec h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.sp-item .spi-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sp-list .si-row .link { cursor: pointer; }
 .sp-k-image { color: var(--ready); } .sp-k-page { color: var(--prog); } .sp-k-tool { color: var(--accent); }
 /* Dictation (#4626). */
 /* Attach (#4649): a small paperclip at the right end of the message box, left of Send. */
