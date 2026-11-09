@@ -3,7 +3,6 @@ import { $, esc, store, actor, toast, act, ago, clip, copyText } from "../lib.js
 import { prioNumChip, projectChip } from "../components/chip.js";
 import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
-import { openTerminal } from "../components/terminalDialog.js";
 import { S, nav } from "../page.js";
 import { linkArtifacts } from "../components/artLinks.js";
 import { renderStrip } from "./board.js";
@@ -40,7 +39,7 @@ export function renderNeedsYou() {
       ? `<button class="btn" data-open="${e.item_id}">Open</button><button class="btn" data-ny="claim" data-id="${e.item_id}">Claim</button><button class="btn" data-copy-prompt="${e.item_id}" title="A prompt for an agent that explains this and helps you do it">Copy prompt</button>${agentStart(S && S.launch_agents, { label: "Open agent", attrs: `data-agent-help="${e.item_id}"`, title: "Open an agent session with that prompt, in the project folder" })}<button class="btn primary" data-ny="done" data-id="${e.item_id}">Done</button>`
       : (e.message_kind === "question"
           ? `<button class="btn primary" data-ny="answer" data-msg="${e.message_id}">Answer</button>`
-          : (promptAlert(e) ? `<button class="btn primary" data-terminal="${esc(e.from_agent)}" title="${(e.body || "").startsWith("runs no watch") ? "Tell the manager to start its watch again" : "Read the prompt and answer it"}">Terminal</button>` : "")
+          : (promptAlert(e) ? `<button class="btn primary" data-session-go="${esc(e.from_agent)}" title="${(e.body || "").startsWith("runs no watch") ? "Open the manager's session in the Sessions tab: tell it to start its watch again" : "Open the session in the Sessions tab: the ! dialog shows the prompt, and you answer it there"}">Open session</button>` : "")
             + `<button class="btn" data-ny="read" data-msg="${e.message_id}">Mark read</button>`)
         + (e.item_id ? `<button class="btn" data-open="${e.item_id}">Open #${e.item_id}</button>` : "");
     // One line each; a click opens the details and the buttons (design: the Board fits one screen).
@@ -66,7 +65,8 @@ function notifyNew() {
   if (!first && "Notification" in window && Notification.permission === "granted") {
     for (const e of fresh.slice(0, 5)) {
       const n = new Notification("MaximizePM: needs you", { body: e.summary, tag: "maxpm-" + e.id });
-      n.onclick = () => { window.focus(); if (promptAlert(e)) openTerminal(e.from_agent); else if (e.item_id) nav.openDrawer(e.item_id); n.close(); };
+      // A prompt that waits: its session on the Sessions tab, where the ! dialog answers it (#4698).
+      n.onclick = () => { window.focus(); if (promptAlert(e)) nav.openSession(e.from_agent); else if (e.item_id) nav.openDrawer(e.item_id); n.close(); };
     }
   }
   store("river.ny.seen", JSON.stringify([...known, ...fresh.map(e => e.id)].slice(-500)));

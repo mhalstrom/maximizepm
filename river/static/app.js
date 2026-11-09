@@ -26,7 +26,8 @@ import { renderGraph } from "./views/graph.js";
 import { renderLog } from "./views/done.js";
 import * as settings from "./views/settings.js";
 hooks.refresh = refresh;
-Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady() });
+Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady(),
+  openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); } });
 let openItem = null;
 const drawer = makeDrawer($("#drawer"));
 

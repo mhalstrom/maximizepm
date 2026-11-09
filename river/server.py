@@ -1209,7 +1209,7 @@ def _keys_for(n, at):
     return f"{key}, then Enter" if abs(d) == 1 else f"{key} {abs(d)} times, then Enter"
 
 
-PROMPT_ANSWER = "Answer it with View Terminal in MaximizePM"
+PROMPT_ANSWER = "Answer it in its session on the Sessions tab of MaximizePM"
 
 
 def prompt_alert(agent, target, tail, pane=None, item=None):

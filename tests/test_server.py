@@ -1538,7 +1538,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(events(), [(f"alert from {name}: waits on a prompt in its terminal: {name} in tmux maxpm:0.0 "
                                      f"(pane %0). It asks to run (Bash command): rm -rf build. "
                                      f"Question: Do you want to proceed? Keys: Enter = 1. Yes (selected now); "
-                                     f"Down, then Enter = 2. No. Answer it with View Terminal in MaximizePM.", name)])
+                                     f"Down, then Enter = 2. No. Answer it in its session on the Sessions tab of MaximizePM.", name)])
         self.assertEqual(watch()["told"], [])  # once for a prompt
         # The notification opens the agent's Terminal on the page; its web session when it has one (a phone).
         (row,) = core.outbox(self.c)
@@ -1608,9 +1608,9 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(bodies("mark"), [
             f"waits on a prompt in its terminal: {name} in tmux maxpm:0.0 (pane %0). Question: Quick safety check: Is this a project "
             f"you created or one you trust? Keys: Enter = No, exit (selected now); Down, then Enter = Yes, I trust this "
-            f"folder; Esc = cancel. Answer it with View Terminal in MaximizePM."])
+            f"folder; Esc = cancel. Answer it in its session on the Sessions tab of MaximizePM."])
         # The page and the notification show it all, not the first 120 characters.
-        self.assertIn("Esc = cancel. Answer it with View Terminal", core.needs_you(self.c, "mark")[0]["summary"])
+        self.assertIn("Esc = cancel. Answer it in its session on the Sessions tab", core.needs_you(self.c, "mark")[0]["summary"])
         # Only the key hint on the screen: no question for a person to answer. The active manager looks at it.
         core.register(self.c, "boss")
         core._set_role_note(self.c, "boss", "manager", None)
@@ -1663,7 +1663,7 @@ class LaunchInTmux(unittest.TestCase):
             f"alert from {name}: waits on a prompt in its terminal: {name} in tmux maxpm:0.0 (pane %0), on #1 Fix the "
             f"build. It asks to run (Bash command (unsandboxed)): git push origin main. Auto mode held this command for "
             f"the server-side classifier to review. Question: Do you want to proceed? Keys: Enter = 1. Yes (selected "
-            f"now); Down, then Enter = 2. No; Esc = cancel. Answer it with View Terminal in MaximizePM."))
+            f"now); Down, then Enter = 2. No; Esc = cancel. Answer it in its session on the Sessions tab of MaximizePM."))
         # The agent ran no river command in its session: the notice opens the link Claude Code printed in its pane
         # (notify_open agent; the page is the default, #4673).
         (row,) = core.outbox(self.c)
