@@ -2863,11 +2863,12 @@ class NotifyOpen(Base):
         self.assertIn("ntfy_click (https://claude.ai/code)", notify.status(self.c)["phone"])
         self.assertIn("maxpm connect", notify.phone_note(self.c))
         with open(relay.config_path(), "w") as f:
-            json.dump({"url": "https://relay.example.org", "token": "tok"}, f)
-        self.assertEqual(send(local), "https://relay.example.org/app/sessions/cx?as=mark")
-        self.assertEqual(send("http://127.0.0.1:8765/"), "https://relay.example.org/app/")
+            json.dump({"url": "https://relay.example.org", "token": "tok",
+                       "tunnel": "https://mark-ab3cd9.relay.example.org"}, f)
+        self.assertEqual(send(local), "https://mark-ab3cd9.relay.example.org/sessions/cx?as=mark")
+        self.assertEqual(send("http://127.0.0.1:8765/"), "https://mark-ab3cd9.relay.example.org/")
         self.assertEqual(send("https://chatgpt.com/codex"), "https://chatgpt.com/codex")
-        self.assertIn("https://relay.example.org/app/", notify.status(self.c)["phone"])
+        self.assertIn("https://mark-ab3cd9.relay.example.org/", notify.status(self.c)["phone"])
 
     def test_setup_asks_and_status_shows_it(self):
         from river import cli, notify

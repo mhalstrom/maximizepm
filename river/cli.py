@@ -2263,7 +2263,7 @@ def connect_command(args):
     who = f" as {cfg['account']}" if cfg.get("account") else ""
     print(f"Connected to {cfg['url']}{who}. maxpm serve keeps the connection open: it connects within a few "
           "seconds when it runs (start it with maxpm serve).")
-    print("Then open your MaximizePM from any browser: " + cfg["url"] + "/app/")
+    print("Then open your MaximizePM from any browser: " + (cfg.get("tunnel") or cfg["url"] + " (Open my setup)"))
     return 0
 
 

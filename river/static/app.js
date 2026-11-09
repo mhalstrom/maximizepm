@@ -273,7 +273,7 @@ const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity
 //   /graph   /done   /settings
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
 // Terminal, then leaves the address). The artifact id is artId(target). The paths
-// are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here, /app/ through the relay.
+// are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here and on the relay's tunnel.
 const ROOT = new URL("./", document.baseURI).pathname;
 const view = { session: null, art: null };  // the session the Sessions tab shows, and the tab of its side panel
 let asParam = new URLSearchParams(location.search).get("as");
@@ -678,7 +678,7 @@ function renderRelay() {
     const who = r.account ? ` as ${r.account}` : "";
     b.textContent = r.state === "connected" ? "Relay · on" : "Relay · off";
     b.title = (r.state === "connected" ? `Connected${who} to ${r.url}` : `Not connected${who}: ${r.error || r.state}`)
-      + `\nFrom anywhere: ${r.url}/app/\nClick to disconnect this computer.`;
+      + `\nFrom anywhere: ${r.tunnel || r.url}\nClick to disconnect this computer.`;
   }
 }
 $("#relayBtn").onclick = async () => {

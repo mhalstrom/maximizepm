@@ -1,20 +1,23 @@
-"""The MaximizePM relay: the person opens this computer's MaximizePM page from any browser.
+"""The MaximizePM relay: a private tunnel from any browser to this computer's MaximizePM.
 
 `maxpm connect` signs this computer in to the relay once (a device flow: the person approves a code in the
 browser) and keeps the river token in relay.json next to the database (mode 0600, never in the settings
-table). While that file exists, `maxpm serve` keeps one outbound WebSocket to the relay open. The relay shows
-the page at https://relay.maximizepm.com/app/: each page request comes over the socket, and river passes it
-to its own maxpm serve on 127.0.0.1 with a header that marks it as relayed, so the page and its actions are the
-same as here, and the actions are recorded as <name>@relay. Standard library only.
+table). While that file exists, `maxpm serve` keeps one outbound WebSocket to the relay open. The person's
+tunnel is https://<prefix>-<random>.relay.maximizepm.com (the relay says which in its welcome): every request
+to it comes over the socket, and river passes it as it is to its own maxpm serve on 127.0.0.1 with a header
+that marks it as relayed, so the site and its actions are the same as here, and the actions are recorded as
+<name>@relay. The relay knows no MaximizePM path. Standard library only.
 
-Protocol 2 (frames are JSON text):
+Protocol 3 (frames are JSON text):
   river -> relay  hello {v, river, host, replace}
-  relay -> river  welcome {v, account, limits: {max_request, max_answer, part, timeout}}   bye {reason}
-  relay -> river  req {id, kind: "http", method, path, headers, body_b64, parts}  -> res {id, status, headers, body_b64, parts}
-  either way      part {id, i, body_b64}   (i = 1 .. parts - 1, in order)
-A body goes as base64 of its bytes, never as text. A body larger than one part (PART bytes) goes in parts: the
-req or res frame carries the first part and the count, and part frames carry the rest. Protocol 1 had no parts and
-no token header; each side refuses the other version with bye "protocol <n> needed".
+  relay -> river  welcome {v, account, tunnel, limits: {max_request, part, timeout}}   bye {reason}   tunnel {tunnel}
+  relay -> river  req {id, kind: "http", method, path, headers: [[name, value], ...], body_b64, more}
+                  part {id, i, body_b64, more}   cancel {id}
+  river -> relay  res {id, status, headers: [[name, value], ...], body_b64, more}   part {id, i, body_b64, more}
+A body is base64 of its bytes, never text, in parts of at most PART bytes: the req or res frame may carry the
+first part, part frames carry the rest (i from 1), and the last frame of a body has more: false. River gives
+maxpm serve a whole request body (at most MAX_REQUEST) and streams the answer back as it reads it. cancel: the
+browser went away. Each side refuses another version with bye "protocol <n> needed".
 """
 
 from __future__ import annotations
@@ -41,21 +44,22 @@ from . import __version__, core
 from .core import RiverError
 
 DEFAULT_URL = "https://relay.maximizepm.com"
-PROTOCOL = 2
+PROTOCOL = 3
 PING_EVERY = 30  # seconds between WebSocket pings; the relay closes a socket silent for 90 s
 SILENT_LIMIT = 90  # no frame and no pong from the relay for this long: the connection is dead
 BACKOFF_MAX = 60
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 PART = 1024 * 1024  # bytes of a body in one frame (the relay takes frames of 2 MB: a part in base64 fits)
-MAX_ANSWER = 64 * 1024 * 1024  # the largest page answer river sends (a picture or a PDF in the side panel)
 # The largest page request river takes: the page sends at most 5 files of 10 MB with one message (server.py
 # UPLOAD_MAX, UPLOADS_PER_SEND), as base64 in JSON.
 MAX_REQUEST = 72 * 1024 * 1024
 INCOMPLETE_LIMIT = 120  # seconds: a request whose parts stop coming is forgotten
-# X-Maxpm-Token: the page's token (server.PAGE_TOKEN), for the actions that type into a session.
-PAGE_REQUEST_HEADERS = ("content-type", "accept", "if-none-match", "if-modified-since", "x-maxpm-token")
-PAGE_ANSWER_HEADERS = ("content-type", "cache-control", "location", "content-disposition", "etag", "last-modified")
+# Headers of one hop: never passed on (content-length: http.client sets it from the body). An answer keeps its
+# content-length: the relay passes the exact body.
+HOP_HEADERS = frozenset(("connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization",
+                         "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length"))
+TUNNEL = {"url": None}  # this computer's tunnel, https://<name>.relay.maximizepm.com (the relay's welcome)
 # The header that marks a page request as relayed. Only this process knows the value, so no other program on
 # this computer can make maxpm serve record its actions as <name>@relay.
 PAGE_SECRET = secrets.token_urlsafe(24)
@@ -101,6 +105,13 @@ def save(cfg: dict) -> None:
 
 def relay_url(cfg: dict | None = None) -> str:
     return (os.environ.get("MAXPM_RELAY_URL") or (cfg or {}).get("url") or DEFAULT_URL).rstrip("/")
+
+
+def site_url(cfg: dict | None = None) -> str:
+    """Where a browser opens this computer's MaximizePM: the tunnel, once the relay named it; else the account
+    site, whose Open my setup button leads to the tunnel."""
+    cfg = cfg if cfg is not None else load()
+    return ((cfg or {}).get("tunnel") or relay_url(cfg)).rstrip("/")
 
 
 def host_label() -> str:
@@ -152,6 +163,8 @@ def finish_device(dev: dict, replace=False, sleep=None, clock=None, cancel=None)
         if status == 200 and body.get("river_token"):
             cfg = {"url": dev["url"], "token": body["river_token"], "account": body.get("account"),
                    "host": dev["host"], "connected_at": core.iso(core.now())}
+            if isinstance(body.get("tunnel"), str):
+                cfg["tunnel"] = body["tunnel"]
             if replace:
                 cfg["replace"] = True
             save(cfg)
@@ -377,6 +390,7 @@ def status() -> dict:
         st.setdefault("account", cfg.get("account"))
         st.setdefault("host", cfg.get("host"))
         st.setdefault("url", relay_url(cfg))
+        st.setdefault("tunnel", cfg.get("tunnel"))
     return st
 
 
@@ -384,6 +398,7 @@ def saved_status() -> dict:
     """The relay connection as the last maxpm serve wrote it (for maxpm status and maxpm connect --status)."""
     cfg = load()
     out = {"configured": bool(cfg), "account": (cfg or {}).get("account"), "url": relay_url(cfg),
+           "tunnel": (cfg or {}).get("tunnel"),
            "host": (cfg or {}).get("host"), "state": "off"}
     try:
         with open(state_path()) as f:
@@ -409,6 +424,7 @@ class Link:
         self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="maxpm-relay-call")
         self.refused_token = None  # a token the relay refused: wait for a new maxpm connect
         self.part = PART  # bytes of a body in one frame: the relay's welcome may ask for less
+        self.cancelled: set = set()  # ids of requests whose browser went away (cancel)
 
     def run(self) -> None:
         _set_state(state="starting")  # relay-state.json now names this maxpm serve (its pid)
@@ -485,6 +501,7 @@ class Link:
             if cfg.get("replace"):
                 cfg = {k: v for k, v in cfg.items() if k != "replace"}  # replace is for one connection
                 save(cfg)
+            cfg = self.retunnel(cfg, frame.get("tunnel"))
             limits = frame.get("limits") if isinstance(frame.get("limits"), dict) else {}
             part = limits.get("part")
             self.part = min(PART, part) if isinstance(part, int) and part >= 1024 else PART
@@ -492,6 +509,16 @@ class Link:
             self.loop(ws, cfg)
         finally:
             ws.close()
+
+    def retunnel(self, cfg: dict, tunnel) -> dict:
+        """The tunnel's address from the relay: kept in relay.json (links to the page use it) and in the state."""
+        tunnel = tunnel if isinstance(tunnel, str) and tunnel.startswith(("https://", "http://")) else None
+        TUNNEL["url"] = tunnel
+        if tunnel and cfg.get("tunnel") != tunnel:
+            cfg = {**cfg, "tunnel": tunnel}
+            save(cfg)
+        _set_state(tunnel=tunnel)
+        return cfg
 
     def loop(self, ws: WebSocket, cfg: dict) -> None:
         ws.sock.settimeout(1.0)
@@ -520,112 +547,173 @@ class Link:
             if kind == "close":
                 raise WebSocketError(f"the relay closed the connection ({data[0]} {data[1]})".strip())
             frame = json.loads(data)
-            if frame.get("t") == "req":
+            t = frame.get("t")
+            if t == "req":
                 self.request(ws, frame, incoming)
-            elif frame.get("t") == "part":
+            elif t == "part":
                 self.request_part(ws, frame, incoming)
-            elif frame.get("t") == "bye":
+            elif t == "cancel":
+                incoming.pop(frame.get("id"), None)
+                self.cancelled.add(frame.get("id"))
+            elif t == "tunnel":
+                cfg = self.retunnel(cfg, frame.get("tunnel"))
+            elif t == "bye":
                 raise Bye(frame.get("reason") or "no reason")
 
     def request(self, ws: WebSocket, frame: dict, incoming: dict) -> None:
-        """A page request: whole, or the first of its parts."""
-        rid, parts = frame.get("id"), frame.get("parts", 1)
-        if not isinstance(parts, int) or parts < 1 or not isinstance(rid, str):
-            return self.pool.submit(self.send_answer, ws, fail(rid, 400, "bad page request"))
+        """A request: whole (more false), or the first of its parts."""
+        rid = frame.get("id")
+        if not isinstance(rid, str):
+            return
         try:
             first = base64.b64decode(frame.get("body_b64") or "", validate=True)
         except ValueError:
-            return self.pool.submit(self.send_answer, ws, fail(rid, 400, "the body is not base64"))
-        if parts == 1:
+            return self.pool.submit(self.send_frames, ws, [fail(rid, 400, "the body is not base64")])
+        if frame.get("more") is not True:
             return self.pool.submit(self.serve_request, ws, frame, first)
-        if (parts - 1) * 1024 > MAX_REQUEST or len(first) > MAX_REQUEST:
-            return self.pool.submit(self.send_answer, ws, fail(rid, 413, f"a request is at most "
-                                                                          f"{MAX_REQUEST // (1024 * 1024)} MB"))
-        incoming[rid] = {"frame": frame, "chunks": [first], "size": len(first), "parts": parts,
-                         "at": time.monotonic()}
+        incoming[rid] = {"frame": frame, "chunks": [first], "size": len(first), "at": time.monotonic()}
 
     def request_part(self, ws: WebSocket, frame: dict, incoming: dict) -> None:
-        r = incoming.get(frame.get("id"))
+        rid = frame.get("id")
+        r = incoming.get(rid)
         if r is None:
-            return  # unknown, refused, or forgotten: the relay answers the page for it
-        rid = frame["id"]
+            return  # unknown, refused, cancelled, or forgotten: the relay answers the browser for it
         try:
             chunk = base64.b64decode(frame.get("body_b64") or "", validate=True)
         except ValueError:
             chunk = None
         if chunk is None or frame.get("i") != len(r["chunks"]):
             del incoming[rid]
-            return self.pool.submit(self.send_answer, ws, fail(rid, 400, "the parts of the request came out of order"))
+            return self.pool.submit(self.send_frames, ws, [fail(rid, 400, "the parts of the request came out of order")])
         r["chunks"].append(chunk)
         r["size"] += len(chunk)
         r["at"] = time.monotonic()
         if r["size"] > MAX_REQUEST:
             del incoming[rid]
-            return self.pool.submit(self.send_answer, ws, fail(rid, 413, f"a request is at most "
-                                                                          f"{MAX_REQUEST // (1024 * 1024)} MB"))
-        if len(r["chunks"]) == r["parts"]:
+            return self.pool.submit(self.send_frames, ws, [fail(rid, 413, f"a request is at most "
+                                                                          f"{MAX_REQUEST // (1024 * 1024)} MB")])
+        if frame.get("more") is not True:
             del incoming[rid]
             self.pool.submit(self.serve_request, ws, r["frame"], b"".join(r["chunks"]))
 
     def serve_request(self, ws: WebSocket, frame: dict, body: bytes) -> None:
-        self.send_answer(ws, handle_page(frame, body))
+        rid = frame.get("id")
 
-    def send_answer(self, ws: WebSocket, answer: dict) -> None:
+        def send(out):
+            if rid in self.cancelled:
+                raise BrokenPipeError("the browser went away")
+            ws.send_text(json.dumps(out))
         try:
-            for out in answer_frames(answer, self.part):
+            serve_page(frame, body, send, self.part)
+        except OSError:
+            pass  # the socket is gone, or the browser went away; the relay answers for it
+        finally:
+            self.cancelled.discard(rid)
+
+    def send_frames(self, ws: WebSocket, frames: list) -> None:
+        try:
+            for out in frames:
                 ws.send_text(json.dumps(out))
         except OSError:
-            pass  # the socket is gone; the relay answers the app for it
-
-
-def answer_frames(answer: dict, part: int = PART) -> list[dict]:
-    """A page answer (handle_page) as frames: res with the first part and the count, then part frames."""
-    body = answer.get("body") or b""
-    chunks = [body[at:at + part] for at in range(0, len(body), part)] or [b""]
-    head = {k: v for k, v in answer.items() if k != "body"}
-    frames = [{**head, "body_b64": base64.b64encode(chunks[0]).decode(), "parts": len(chunks)}]
-    frames += [{"t": "part", "id": answer.get("id"), "i": i, "body_b64": base64.b64encode(c).decode()}
-               for i, c in enumerate(chunks[1:], 1)]
-    return frames
+            pass
 
 
 def fail(rid, status: int, text: str) -> dict:
-    return {"t": "res", "id": rid, "status": status, "headers": {"content-type": "text/plain; charset=utf-8"},
-            "body": text.encode()}
+    return {"t": "res", "id": rid, "status": status, "headers": [["Content-Type", "text/plain; charset=utf-8"]],
+            "body_b64": base64.b64encode(text.encode()).decode(), "more": False}
 
 
 def page_request(headers) -> bool:
-    """Whether a request to maxpm serve came from the relay thread (handle_page)."""
+    """Whether a request to maxpm serve came from the relay thread (serve_page)."""
     value = headers.get("X-Maxpm-Relay") or ""
     return bool(value) and hmac.compare_digest(value, PAGE_SECRET)
 
 
-def handle_page(frame: dict, body: bytes = b"") -> dict:
-    """A page request from the relay (its whole body, as bytes) -> its answer from this computer's maxpm serve:
-    {t: res, id, status, headers, body (bytes)}. answer_frames makes the frames of it."""
+def _origin(url) -> str | None:
+    u = urlsplit(url or "")
+    return f"{u.scheme}://{u.netloc}" if u.scheme and u.netloc else None
+
+
+def request_headers(pairs, local: str) -> list:
+    """A request's headers as maxpm serve gets them: every header but this hop's. The tunnel's own origin in
+    Origin and Referer becomes this computer's (local), as a request made here has it; any other origin stays,
+    so maxpm serve refuses a request from another site as it does here."""
+    tunnel = _origin(TUNNEL["url"])
+    out = []
+    for pair in pairs if isinstance(pairs, list) else []:
+        if not (isinstance(pair, list) and len(pair) == 2 and all(isinstance(x, str) for x in pair)):
+            continue
+        k, v = pair
+        n = k.lower()
+        if n in HOP_HEADERS or n == "x-maxpm-relay" or "\r" in v or "\n" in v:
+            continue
+        if n in ("origin", "referer") and tunnel and (v == tunnel or v.startswith(tunnel + "/")):
+            v = local + v[len(tunnel):]
+        out.append((k, v))
+    return out
+
+
+def answer_headers(pairs, local: str) -> list:
+    """An answer's headers as the browser gets them: every header but this hop's (content-length stays). A
+    Location on this computer's origin goes to the tunnel's."""
+    tunnel = _origin(TUNNEL["url"])
+    out = []
+    for k, v in pairs:
+        n = k.lower()
+        if n in HOP_HEADERS and n != "content-length":
+            continue
+        if n == "location" and tunnel and (v == local or v.startswith(local + "/")):
+            v = tunnel + v[len(local):]
+        out.append([k, v])
+    return out
+
+
+def serve_page(frame: dict, body: bytes, send, part: int = PART) -> None:
+    """One request from the relay (its whole body, as bytes): maxpm serve answers it, and send(frame) gets the
+    answer's frames as river reads it, res first, then part frames."""
     rid = frame.get("id")
     path, method = frame.get("path") or "/", frame.get("method") or "GET"
-    if frame.get("kind") != "http" or not path.startswith("/") or method not in ("GET", "HEAD", "POST"):
-        return fail(rid, 400, "bad page request")
+    if frame.get("kind") != "http" or not path.startswith("/") or not method.isalpha() or not method.isupper():
+        return send(fail(rid, 400, "bad request"))
     if not PAGE_PORT["port"]:
-        return fail(rid, 502, "maxpm serve has no port")
-    headers = {k: v for k, v in (frame.get("headers") or {}).items()
-               if isinstance(k, str) and isinstance(v, str) and k.lower() in PAGE_REQUEST_HEADERS}
-    headers["X-Maxpm-Relay"] = PAGE_SECRET
+        return send(fail(rid, 502, "maxpm serve has no port"))
+    local = f"http://127.0.0.1:{PAGE_PORT['port']}"
     conn = http.client.HTTPConnection("127.0.0.1", PAGE_PORT["port"], timeout=55)
     try:
-        conn.request(method, path, body=body or None, headers=headers)
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        conn.putheader("Host", f"127.0.0.1:{PAGE_PORT['port']}")
+        for k, v in request_headers(frame.get("headers"), local):
+            conn.putheader(k, v)
+        conn.putheader("X-Maxpm-Relay", PAGE_SECRET)
+        if body or method not in ("GET", "HEAD"):
+            conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body or None)
         res = conn.getresponse()
-        data = res.read(MAX_ANSWER + 1)
-        if len(data) > MAX_ANSWER:
-            return fail(rid, 502, f"the answer is larger than the relay carries ({MAX_ANSWER // (1024 * 1024)} MB)")
-        return {"t": "res", "id": rid, "status": res.status,
-                "headers": {k.lower(): v for k, v in res.getheaders() if k.lower() in PAGE_ANSWER_HEADERS},
-                "body": data}
+        head = {"t": "res", "id": rid, "status": res.status, "headers": answer_headers(res.getheaders(), local)}
     except OSError as e:
-        return fail(rid, 502, f"maxpm serve did not answer: {e}")
+        conn.close()
+        return send(fail(rid, 502, f"maxpm serve did not answer: {e}"))
+    try:
+        chunk = b"" if method == "HEAD" else res.read(part)
+        i = 0
+        while True:
+            nxt = res.read(part) if chunk else b""
+            data = base64.b64encode(chunk).decode()
+            send({**head, "body_b64": data, "more": bool(nxt)} if i == 0 else
+                 {"t": "part", "id": rid, "i": i, "body_b64": data, "more": bool(nxt)})
+            if not nxt:
+                return
+            chunk, i = nxt, i + 1
     finally:
         conn.close()
+
+
+def handle_page(frame: dict, body: bytes = b"") -> dict:
+    """serve_page with the answer put together: {status, headers (pairs), body (bytes), frames (how many)}."""
+    frames = []
+    serve_page(frame, body, frames.append)
+    return {"id": frames[0]["id"], "status": frames[0]["status"], "headers": frames[0]["headers"],
+            "body": b"".join(base64.b64decode(f["body_b64"]) for f in frames), "frames": len(frames)}
 
 
 def start(stop: threading.Event, port: int | None = None) -> threading.Thread:

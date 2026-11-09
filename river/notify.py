@@ -243,7 +243,7 @@ def phone_note(conn):
     from . import relay
     cfg = relay.load()
     if cfg:
-        return f"A phone opens the MaximizePM page through the relay ({relay.relay_url(cfg)}/app/)."
+        return f"A phone opens the MaximizePM page through the relay ({relay.site_url(cfg)}/)."
     return (f"A phone cannot open the MaximizePM page: it runs only on this computer (127.0.0.1). A tap there opens "
             f"ntfy_click ({core.setting(conn, 'ntfy_click')}) instead; maxpm connect makes the page reachable from the phone.")
 
@@ -266,7 +266,7 @@ def remote_page(url):
     if not cfg:
         return None
     u = urllib.parse.urlsplit(url or "")
-    return relay.relay_url(cfg) + "/app/" + u.path.lstrip("/") + (f"?{u.query}" if u.query else "")
+    return relay.site_url(cfg) + "/" + u.path.lstrip("/") + (f"?{u.query}" if u.query else "")
 
 
 def _is_local(url):
