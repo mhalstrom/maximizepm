@@ -2399,6 +2399,25 @@ class Mac(Base):
         self.assertEqual(cmd[0], "/opt/homebrew/bin/terminal-notifier")
         self.assertEqual(cmd[cmd.index("-open") + 1], "http://127.0.0.1:8765/#item-3")
 
+    def test_terminal_notifier_escapes_a_leading_bracket(self):
+        from river import notify
+        seen = []
+
+        class Done:
+            returncode, stderr = 0, ""
+
+        with mock.patch("sys.platform", "darwin"), \
+                mock.patch("shutil.which", lambda name: "/opt/homebrew/bin/terminal-notifier"), \
+                mock.patch("subprocess.run", lambda cmd, **kw: seen.append(cmd) or Done()):
+            notify.ADAPTERS["mac"](self.c)("(maxpm) alert", "[maxpm alert from manager] read it", None)
+        cmd = seen[0]
+        self.assertEqual(cmd[cmd.index("-title") + 1], "\\(maxpm) alert")
+        self.assertEqual(cmd[cmd.index("-message") + 1], "\\[maxpm alert from manager] read it")
+        for text in ("{x", '"x', "'x", "\\x"):
+            self.assertEqual(notify._tn_text(text), "\\" + text)
+        self.assertEqual(notify._tn_text("#3 sign"), "#3 sign")
+        self.assertEqual(notify._tn_text(""), "")
+
     def test_failure_and_other_platforms(self):
         from unittest import mock
         from river import notify

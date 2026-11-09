@@ -139,7 +139,7 @@ def _mac_channel(conn):
 
     def send(title, body, url):
         if notifier:
-            cmd = [notifier, "-title", title, "-message", body, "-group", "maxpm"]
+            cmd = [notifier, "-title", _tn_text(title), "-message", _tn_text(body), "-group", "maxpm"]
             if url:
                 cmd += ["-open", url]
         else:
@@ -161,6 +161,14 @@ def _mac_channel(conn):
 
 
 register_channel("mac", _mac_channel)
+
+
+def _tn_text(text):
+    """terminal-notifier reads a value that starts with [ ( { or a quote as a property list, and
+    exits 2 ('Could not read the -message value'). A leading backslash escapes it, and
+    terminal-notifier removes that backslash; a text that starts with a backslash gets one more (#4674)."""
+    text = text or ""
+    return "\\" + text if text[:1] in ("[", "(", "{", '"', "'", "\\") else text
 
 MAC_HINT = "On macOS, brew install terminal-notifier makes a click on a notice open the page."
 
