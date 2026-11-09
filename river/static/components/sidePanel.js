@@ -21,7 +21,7 @@ import { itemViewHtml } from "./itemView.js";
 import { linkArtifacts, linkTarget } from "./artLinks.js";
 import { showRows, wireRows } from "../views/artifacts.js";
 import { makeComments, pathIn } from "./canvasComments.js";
-import { decorateDoc } from "./canvasDoc.js";
+import { decorateDoc, updateAnswers } from "./canvasDoc.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
@@ -172,7 +172,8 @@ async function canvasSig(t) {
 }
 
 // A canvas tab: a bar with the version menu, then the version. t.pin: a version the person chose (null follows the
-// newest); t.shown: the newest version the tab knows; t.scroll: where the person reads.
+// newest); t.shown: the newest version the tab knows; t.scroll: where the person reads. A new version, an answer, or a
+// comment later changes the drawn tab in place (updateCanvas, #4844): show() draws it whole only when it opens.
 async function showCanvas(t, box, note) {
   const id = canvasOf(t.target);
   let sig, meta;
@@ -185,43 +186,29 @@ async function showCanvas(t, box, note) {
     return;
   }
   if (on !== t.id) return;
-  const title = meta.title || meta.name;
-  if (t.title !== title) { t.title = title; renderTabs(); }
   if (t.pin && !meta.versions.some(x => x.version === t.pin)) t.pin = null;
   t.shown = meta.version;
-  const v = t.pin || meta.version;
+  const src = `canvas/${id}/${t.pin || "latest"}?${sig}`;
+  let text = null;
+  if (meta.kind === "md") {  // the text first, so the tab never stands empty while it loads
+    const r = await fetch(src);
+    text = r.ok ? await r.text() : null;
+    if (on !== t.id) return;
+  }
   box.replaceChildren();
   const bar = document.createElement("div"); bar.className = "sp-cbar";
-  bar.innerHTML = `<select class="sp-cver" aria-label="Version of the canvas">${[...meta.versions].reverse().map(x =>
-      `<option value="${x.version}"${x.version === v ? " selected" : ""}>v${x.version}${x.version === meta.version ? " (newest)" : ""} · ${esc(x.author || "")} · ${ago(x.created_at)}${x.note ? " · " + esc(clip(x.note, 40)) : ""}</option>`).join("")}</select>
-    <span class="muted">${t.pin ? `version ${t.pin} of ${meta.version} · <span class="link" data-cv-newest>show the newest</span>` : "shows each new version"}</span>
-    ${meta.item_id ? `<span class="link" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
-    <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Then click a part of the page, or select text, to comment on it">Comment</button>`}
-    <button class="btn" type="button" data-cv-page>Comment on the page</button>
-    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Change the text; it becomes a new version, and the session gets a note">Edit</button>` : ""}`;
+  t.bar = bar; t.barSig = null;
   box.append(bar);
-  bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
-  const newest = bar.querySelector("[data-cv-newest]");
-  if (newest) newest.onclick = () => { t.pin = null; show(t); };
-  const src = `canvas/${id}/${t.pin || "latest"}?${sig}`;
+  drawBar(t, meta);
   const side = document.createElement("div"); side.className = "sp-cside";
+  t.side = side;
   t.comments = makeComments(side, { id, ref: "c" + id, reload: () => loadComments(t), show: (path) => showPart(t, path) });
   t.comments.render(meta);
-  const mode = bar.querySelector("[data-cv-mode]");
-  if (mode) mode.onclick = () => setCommenting(t, !t.commenting);
-  bar.querySelector("[data-cv-page]").onclick = () => { setCommenting(t, false); t.comments.compose(null); side.scrollIntoView({ block: "nearest" }); };
-  const edit = bar.querySelector("[data-cv-edit]");
-  if (edit) edit.onclick = () => editCanvas(t, box, src, side);
-  t.frame = null; t.md = null;
+  t.frame = null; t.md = null; t.next = null;
   if (meta.kind === "md") {
-    const r = await fetch(src);
-    if (on !== t.id) return;
     const d = document.createElement("div"); d.className = "sp-md md sp-canvas";
-    const text = r.ok ? await r.text() : "";
-    if (on !== t.id) return;
-    d.innerHTML = r.ok ? markdown(text) : "MaximizePM cannot show this canvas.";  // markdown(): DOMPurify
-    // A doc (#4708): pending sections, decision cards answered in place, Edit of a section (newest version only).
-    if (r.ok) decorateDoc(d, text, meta, { ref: "c" + id, live: !t.pin, done: () => show(t) });
+    if (text === null) d.textContent = "MaximizePM cannot show this canvas.";
+    else { const doc = drawDoc(t, text, meta); d.append(...doc.root.childNodes); t.groups = doc.groups; t.text = text; }
     t.md = d;
     // Comment mode on a drawn Markdown canvas: this page finds the part itself (the helper script does it in a frame).
     d.addEventListener("mouseover", (e) => { if (t.commenting) markPart(d, e.target === d ? null : e.target); });
@@ -243,12 +230,153 @@ async function showCanvas(t, box, note) {
     return;
   }
   box.onscroll = null;
+  t.frame = canvasFrame(meta.title || meta.name, src);
+  box.append(t.frame, side);
+}
+
+// The bar of a canvas tab: drawn again only when what it shows changed, so an open version menu stays open.
+function drawBar(t, meta) {
+  const bar = t.bar, v = t.pin || meta.version;
+  const title = meta.title || meta.name;
+  if (t.title !== title) { t.title = title; renderTabs(); }
+  const sigNow = JSON.stringify([meta.versions, v, t.pin, meta.item_id, meta.item_title, meta.kind, Math.floor(Date.now() / 60000)]);
+  if (sigNow === t.barSig || bar.contains(document.activeElement)) return;
+  t.barSig = sigNow;
+  bar.innerHTML = `<select class="sp-cver" aria-label="Version of the canvas">${[...meta.versions].reverse().map(x =>
+      `<option value="${x.version}"${x.version === v ? " selected" : ""}>v${x.version}${x.version === meta.version ? " (newest)" : ""} · ${esc(x.author || "")} · ${ago(x.created_at)}${x.note ? " · " + esc(clip(x.note, 40)) : ""}</option>`).join("")}</select>
+    <span class="muted">${t.pin ? `version ${t.pin} of ${meta.version} · <span class="link" data-cv-newest>show the newest</span>` : "shows each new version"}</span>
+    ${meta.item_id ? `<span class="link" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
+    <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Then click a part of the page, or select text, to comment on it">Comment</button>`}
+    <button class="btn" type="button" data-cv-page>Comment on the page</button>
+    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Change the text; it becomes a new version, and the session gets a note">Edit</button>` : ""}`;
+  bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
+  const newest = bar.querySelector("[data-cv-newest]");
+  if (newest) newest.onclick = () => { t.pin = null; show(t); };
+  const mode = bar.querySelector("[data-cv-mode]");
+  if (mode) mode.onclick = () => setCommenting(t, !t.commenting);
+  bar.querySelector("[data-cv-page]").onclick = () => { setCommenting(t, false); t.comments.compose(null); t.side.scrollIntoView({ block: "nearest" }); };
+  const edit = bar.querySelector("[data-cv-edit]");
+  if (edit) edit.onclick = () => editCanvas(t, $("#spBody"), `canvas/${canvasOf(t.target)}/latest?${t.sig}`, t.side);
+}
+
+function canvasFrame(title, src) {
   const f = document.createElement("iframe");
   f.className = "sp-frame sp-canvas"; f.title = title;
   f.setAttribute("sandbox", "allow-scripts");  // and the server's CSP sandbox: an origin of its own
   f.src = src;
-  t.frame = f;
-  box.append(f, side);
+  return f;
+}
+
+// The text of a Markdown canvas, drawn and made a doc, in a new element: { root, groups }. groups: one per section
+// (a heading and what follows it, up to the next heading; the first holds what comes before any heading), each with
+// its key (the drawn HTML before the doc's controls) and its top-level elements after them.
+function drawDoc(t, text, meta) {
+  const root = document.createElement("div");
+  root.innerHTML = markdown(text);  // markdown(): DOMPurify
+  const of = new WeakMap(), keys = [];
+  for (const el of root.children) {
+    if (/^H[1-6]$/.test(el.tagName) || !keys.length) keys.push("");
+    keys[keys.length - 1] += el.outerHTML;
+    of.set(el, keys.length - 1);
+  }
+  // A doc (#4708): pending sections, decision cards answered in place, Edit of a section (newest version only).
+  decorateDoc(root, text, meta, { ref: "c" + canvasOf(t.target), live: !t.pin, done: () => updateCanvas(t), current: () => t.text });
+  const groups = keys.length ? keys.map(key => ({ key, els: [] })) : [{ key: "", els: [] }];
+  for (const el of root.children) {  // a decision card holds its first part: the card is in that part's section
+    const g = of.has(el) ? of.get(el) : of.get(el.firstElementChild);
+    groups[g === undefined ? groups.length - 1 : g].els.push(el);
+  }
+  return { root, groups };
+}
+
+// A new version of a drawn doc (#4844): the sections whose text is the same keep their elements (with the words a
+// person types there, an open section edit, and the place on screen); only the others are drawn again.
+function patchDoc(t, box, text, meta) {
+  const d = t.md, fresh = drawDoc(t, text, meta), old = t.groups || [];
+  const used = new Set(), groups = [];
+  let from = 0;
+  for (const g of fresh.groups) {
+    let k = -1;
+    for (let x = from; x < old.length; x++) if (!used.has(x) && old[x].key === g.key) { k = x; break; }
+    if (k >= 0) { used.add(k); from = k + 1; groups.push(old[k]); } else groups.push(g);
+  }
+  const want = groups.flatMap(g => g.els), keep = new Set(want);
+  // What the person typed in a decision's box, and where they read: the first element on screen that stays.
+  const typed = {};
+  for (const inp of d.querySelectorAll(".doc-decision [data-doc-other]")) if (inp.value) typed[inp.closest(".doc-decision").dataset.decision] = inp.value;
+  const focus = document.activeElement && d.contains(document.activeElement) && document.activeElement.matches("[data-doc-other]")
+    ? document.activeElement.closest(".doc-decision").dataset.decision : null;
+  const top = box.getBoundingClientRect().top;
+  const anchor = [...d.children].find(el => keep.has(el) && el.getBoundingClientRect().bottom > top);
+  const at = anchor ? anchor.getBoundingClientRect().top : 0;
+  for (const el of [...d.childNodes]) if (!keep.has(el)) el.remove();
+  let cur = d.firstElementChild;
+  for (const el of want) { if (el === cur) { cur = cur.nextElementSibling; continue; } d.insertBefore(el, cur); }
+  if (anchor && anchor.isConnected) box.scrollTop += anchor.getBoundingClientRect().top - at;
+  for (const [n, v] of Object.entries(typed)) {
+    const inp = d.querySelector(`.doc-decision[data-decision="${n}"] [data-doc-other]`);
+    if (inp && !inp.value) inp.value = v;
+  }
+  if (focus && !d.contains(document.activeElement)) {
+    const inp = d.querySelector(`.doc-decision[data-decision="${focus}"] [data-doc-other]`);
+    if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+  }
+  t.groups = groups; t.text = text;
+  updateAnswers(d, meta);  // the sections that stayed show the newest answers too
+}
+
+// A new version of an HTML canvas (#4844): it loads in a second frame out of sight, scrolls to the person's place,
+// and then takes the old frame's place; the old one shows until then. A frame never moves in the page: that loads it
+// again.
+function swapFrame(t, src) {
+  const old = t.frame; if (!old || !old.isConnected) return;
+  if (t.next) t.next.remove();
+  const r = old.getBoundingClientRect();
+  const f = canvasFrame(old.title, src);
+  f.style.cssText = `position:fixed;left:0;top:0;width:${Math.max(r.width, 300)}px;height:${Math.max(r.height, 300)}px;visibility:hidden;pointer-events:none`;
+  t.next = f;
+  let done = false;
+  f.swap = () => {
+    if (done || t.next !== f) return;
+    done = true; t.next = null;
+    if (!old.isConnected) { f.remove(); return; }
+    f.style.cssText = ""; old.remove(); t.frame = f;
+    if (t.commenting && f.contentWindow) f.contentWindow.postMessage({ maxpmCanvas: "mode", on: true }, "*");
+  };
+  f.onload = () => setTimeout(f.swap, 1500);  // a page with no helper script (an SVG) says no "ready"
+  old.after(f);
+}
+
+// The tab on screen again, in place: the bar, the comments, the answers, and a new version (#4844).
+async function updateCanvas(t) {
+  if (t.updating) { t.again = true; return; }
+  t.updating = true;
+  try {
+    const id = canvasOf(t.target), box = $("#spBody");
+    if (on !== t.id) return;
+    if (!t.bar || !box.contains(t.bar)) return t.shown ? show(t) : undefined;  // it showed an error: try it whole
+    const sig = await canvasSig(t);
+    const r = await fetch(`canvas/${id}/meta?${sig}`), meta = await r.json();
+    if (!r.ok || on !== t.id || !box.contains(t.bar)) return;
+    drawBar(t, meta);
+    t.comments.render(meta);
+    const changed = !t.pin && meta.version !== t.shown;
+    if (t.md && t.md.isConnected) {
+      // A person's open Edit of the whole text, or of a section, waits: the new version comes after Save or Cancel.
+      if (changed && !t.md.querySelector(".doc-sec-edit")) {
+        const rt = await fetch(`canvas/${id}/latest?${sig}`);
+        if (!rt.ok || on !== t.id || !t.md.isConnected) return;
+        patchDoc(t, box, await rt.text(), meta);
+        t.shown = meta.version;
+      } else updateAnswers(t.md, meta);
+    } else if (changed && t.frame) {
+      swapFrame(t, `canvas/${id}/latest?${sig}`);
+      t.shown = meta.version;
+    }
+  } catch (e) { /* the next state asks again */ } finally {
+    t.updating = false;
+    if (t.again) { t.again = false; updateCanvas(t); }
+  }
 }
 
 // Comment mode: the button shows it; the frame's helper script (or this page, for Markdown) picks the part.
@@ -274,12 +402,16 @@ function showPart(t, path) {
   el.scrollIntoView({ block: "center", behavior: "smooth" });
   el.classList.add("maxpm-flash"); setTimeout(() => el.classList.remove("maxpm-flash"), 1600);
 }
-// The comments again (after an action, and with each state of the page), without a reload of the page.
+// The comments again (after an action, and with each state of the page), without a reload of the page; and the
+// answers of a doc's decisions (#4844).
 async function loadComments(t) {
   if (!t.comments || !t.sig) return;
   try {
     const r = await fetch(`canvas/${canvasOf(t.target)}/meta?${t.sig}`);
-    if (r.ok && on === t.id) t.comments.render(await r.json());
+    if (!r.ok || on !== t.id) return;
+    const meta = await r.json();
+    t.comments.render(meta);
+    if (t.md && t.md.isConnected && !t.pin) updateAnswers(t.md, meta);
   } catch (e) { /* the next state asks again */ }
 }
 // Edit a Markdown canvas: its text in a box; Save makes a new version by the person, and the session gets a note.
@@ -306,6 +438,10 @@ async function editCanvas(t, box, src, side) {
 // The helper script in an HTML canvas says where the person scrolls, and asks for it after a new version loads.
 addEventListener("message", (e) => {
   const d = e.data || {}, t = tabs.find(x => x.id === on);
+  if (t && t.next && e.source === t.next.contentWindow && d.maxpmCanvas === "ready") {  // a new version, out of sight
+    if (t.scroll) e.source.postMessage({ maxpmCanvas: "scrollTo", x: t.scroll.x, y: t.scroll.y }, "*");
+    return setTimeout(t.next.swap, 60);
+  }
   if (!t || !t.frame || e.source !== t.frame.contentWindow || typeof d.maxpmCanvas !== "string") return;
   if (d.maxpmCanvas === "scroll") t.scroll = { x: +d.x || 0, y: +d.y || 0 };
   if (d.maxpmCanvas === "ready" && t.scroll) e.source.postMessage({ maxpmCanvas: "scrollTo", x: t.scroll.x, y: t.scroll.y }, "*");
@@ -339,7 +475,7 @@ export function canvasState(heads) {
   const t = tabs.find(x => x.id === on);
   if (!t || !canvasOf(t.target) || t.pin || panel().classList.contains("hidden")) return;
   const h = canvasHeads.get(canvasOf(t.target));
-  if (h && t.shown && h.version !== t.shown) return show(t);
+  if (h && t.shown && h.version !== t.shown) return updateCanvas(t);  // in place, never a new draw (#4844)
   loadComments(t);
 }
 
@@ -430,11 +566,12 @@ async function showList(kind = "artifacts", quiet = false) {
   } catch (e) { /* an empty list says so */ }
   if (on !== kind || name !== session || !box.contains(list)) return;  // a tab or another session came first
   if (kind === "artifacts") return showRows(list, rows, "This session wrote or named nothing the side panel can show.");
-  list.innerHTML = rows.map(x => `<div class="si-row">
+  const html = rows.map(x => `<div class="si-row">
       <span class="link" data-open="${x.id}">#${x.id}</span>
       <span class="si-t link" data-open="${x.id}">${esc(x.title)}</span>
       <span class="si-m">${chip("c-" + esc(x.status), esc(x.status.replace("_", " ")))} <span class="muted">${esc((x.did || []).join(", "))} · ${ago(x.at)}</span></span>
     </div>`).join("") || `<div class="muted sl-none">This session took no item yet.</div>`;
+  if (list._html !== html) { list.innerHTML = html; list._html = html; }  // the same rows are not drawn again (#4844)
 }
 // A list of the session, from the session's header (Items, Artifacts): the panel opens on it.
 export function openList(kind) {

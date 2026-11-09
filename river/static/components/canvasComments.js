@@ -59,6 +59,9 @@ export function makeComments(box, { id, ref, reload, show }) {
     // Not while the person types in a reply: the next poll draws it.
     if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea") && sig) return;
     sig = s;
+    // #4844: a reply that the person began to another comment stays when the list draws again.
+    const replies = {};
+    for (const inp of box.querySelectorAll("[data-cv-reply-text]")) if (inp.value) replies[inp.dataset.cvReplyText] = inp.value;
     box.innerHTML = `<div class="cv-head"><b>Comments</b> <span class="muted">${open.length} open${drafts.length ? ` · ${drafts.length} draft${drafts.length === 1 ? "" : "s"}` : ""}</span>
         <span class="cv-sp"></span>${drafts.length ? `<button class="btn primary" type="button" data-cv-sendall>Send ${drafts.length === 1 ? "the draft" : `all ${drafts.length} drafts`} to the session</button>` : ""}</div>
       ${k ? `<div class="cv-compose"><div class="muted">On ${esc(partText(k.anchor))}${k.anchor && k.anchor.path ? ` <code>${esc(clip(k.anchor.path, 60))}</code>` : ""}</div>
@@ -78,6 +81,9 @@ export function makeComments(box, { id, ref, reload, show }) {
             : c.state === "resolved" ? "" : `<input data-cv-reply-text="${c.id}" placeholder="Reply" aria-label="Reply to c${c.id}">
               <button class="btn" type="button" data-cv-reply="${c.id}">Reply</button><button class="btn" type="button" data-cv-resolve="${c.id}">Resolve</button>`}</div>
         </div>`; }).join("") || (k ? "" : `<div class="muted cv-none">No comments yet. Comment picks a part of the page; Comment on the page takes the whole page.</div>`)}`;
+    for (const [cid, v] of Object.entries(replies)) {
+      const inp = box.querySelector(`[data-cv-reply-text="${cid}"]`); if (inp) inp.value = v;
+    }
   }
 
   async function run(op, args, done) {

@@ -504,3 +504,71 @@ try {
         self.assertTrue(got["v2"])
         show = core.canvas_show(self.base.c, "relay")
         self.assertEqual((show["version"], show["agent"]), (2, "ag"))
+
+    def test_a_new_version_of_a_doc_changes_only_its_changed_sections(self):
+        # #4844: no draw of the whole doc for a new version or an answer: the sections that stay keep their elements,
+        # the words typed in a decision's box stay, and the place on screen stays.
+        def call(fn):
+            def run():
+                c = core.connect()
+                try:
+                    return fn(c)
+                finally:
+                    c.close()
+            return run
+        put = call(lambda c: core.canvas_put(c, "relay", DOC + "\n## Notes\n\n" + "A line of notes.\n\n" * 60,
+                                             "ag", kind="md", title="Relay")["id"])
+        section = call(lambda c: core.canvas_section(c, "relay", "What it is", "It shows the page from anywhere.", "ag")["version"])
+        answer = call(lambda c: core.canvas_answer(c, "relay", 1, "OVH", "mark")["id"])
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  await sleep(400);
+  await fetch("/__doc");
+  await until(() => q("#decision-2"), "the doc");
+  const box = q("#spBody"), card = q("#decision-1"), notes = [...document.querySelectorAll(".sp-canvas h2")].find(h => /Notes/.test(h.textContent));
+  const inp = q("#decision-2 [data-doc-other]");
+  inp.focus(); inp.value = "$6 a month";
+  box.scrollTop = 200;
+  const at = card.getBoundingClientRect().top;
+  let emptied = false;
+  const watch = new MutationObserver(() => { if (!q(".sp-canvas") || !q(".sp-cbar")) emptied = true; });
+  watch.observe(box, { childList: true, subtree: true });
+  await fetch("/__section");
+  await until(() => q(".sp-cver").value === "2" && q(".sp-canvas").textContent.includes("from anywhere"), "version 2 in place");
+  const out = { emptied, same_card: q("#decision-1") === card, same_notes: notes.isConnected,
+                typed: q("#decision-2 [data-doc-other]").value, focus: document.activeElement === q("#decision-2 [data-doc-other]"),
+                moved: Math.abs(q("#decision-1").getBoundingClientRect().top - at), pending: !!q(".doc-pending") };
+  await fetch("/__answer");
+  await until(() => q("#decision-1 .doc-answered"), "the answer on its card");
+  out.after_answer = { same_card: q("#decision-1") === card, typed: q("#decision-2 [data-doc-other]").value, emptied,
+                       answered: q("#decision-1 .doc-answered").textContent.replace(/\s+/g, " ").trim(),
+                       button: q("#decision-1 [data-doc-answer]").textContent };
+  // The Edit of a section that stayed reads the newest text.
+  const ed = [...document.querySelectorAll(".sp-canvas h2 .doc-edit")].find(b => /What it is/.test(b.title));
+  ed.click();
+  await until(() => q(".doc-sec-edit textarea"), "the section's box");
+  out.edit_box = q(".doc-sec-edit textarea").value;
+  watch.disconnect();
+  // The lists read again every 10 seconds: the same rows are not drawn again.
+  const { showRows } = await import("/views/artifacts.js");
+  const el = document.createElement("div"), row = { kind: "file", target: "/p/a.png", session: "ag", how: "wrote", at: null };
+  showRows(el, [row], "none"); const first = el.firstElementChild;
+  showRows(el, [{ ...row }], "none"); out.rows_same = el.firstElementChild === first;
+  showRows(el, [{ ...row, target: "/p/b.png" }], "none"); out.rows_new = el.firstElementChild !== first;
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = self.tvs.drive_page(self.base, driver, routes={"/__doc": put, "/__section": section, "/__answer": answer})
+        self.assertNotIn("error", got, got)
+        self.assertFalse(got["emptied"], got)
+        self.assertTrue(got["same_card"] and got["same_notes"], got)
+        self.assertEqual((got["typed"], got["focus"], got["pending"]), ("$6 a month", True, False))
+        self.assertLess(got["moved"], 2, got)
+        a = got["after_answer"]
+        self.assertTrue(a["same_card"], a)
+        self.assertEqual((a["typed"], a["emptied"], a["button"]), ("$6 a month", False, "Answer again"))
+        self.assertIn("OVH", a["answered"])
+        self.assertEqual(got["edit_box"], "It shows the page from anywhere.")
+        self.assertEqual((got["rows_same"], got["rows_new"]), (True, True))

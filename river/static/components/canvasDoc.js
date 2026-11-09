@@ -33,9 +33,41 @@ export function answerOptions(text) {
 
 const isHeading = (el) => /^H[1-6]$/.test(el.tagName);
 
+// The newest answer to each decision: {n: comment}, from the canvas's comments (anchor decision:<n>).
+function answersOf(meta) {
+  const answers = {};
+  for (const c of meta.comments || []) {
+    const n = (/^decision:(\d+)$/.exec((c.anchor && c.anchor.path) || "") || [])[1];
+    if (n && (!answers[n] || c.id > answers[n].id)) answers[n] = c;
+  }
+  return answers;
+}
+const answeredHtml = (a) => !a ? "" : `<b>${esc(a.author)}</b> answered ${ago(a.created_at)}: ${esc(a.body.replace(/^Answer to decision \d+ of \d+ \([^)]*\):\s*/, ""))}
+  <span class="muted">(${esc(a.state === "sent" ? "sent to the session" : a.state === "read" ? "the session read it" : a.state)}${(a.replies || []).length ? ", " + a.replies.length + " repl" + (a.replies.length === 1 ? "y" : "ies") : ""})</span>`;
+
+// #4844: a new answer, or a new state of one, changes only the answered line of each card: the buttons, and the words
+// a person types in the box, stay.
+export function updateAnswers(root, meta) {
+  const answers = answersOf(meta);
+  for (const card of root.querySelectorAll(".doc-decision")) {
+    const a = answers[card.dataset.decision], bar = card.querySelector(".doc-answer");
+    if (!bar) continue;
+    let line = bar.querySelector(".doc-answered");
+    const html = answeredHtml(a);
+    if (!a) { if (line) line.remove(); }
+    else {
+      if (!line) { line = document.createElement("div"); line.className = "doc-answered"; bar.prepend(line); }
+      if (line.dataset.sig !== html) { line.innerHTML = html; line.dataset.sig = html; }
+    }
+    const go = bar.querySelector("[data-doc-answer]");
+    if (go) go.textContent = a ? "Answer again" : "Answer";
+  }
+}
+
 // root: the drawn Markdown. source: its text. meta: the canvas (comments for the answers). opts: { ref, live (the
-// newest version: answers and edits allowed), done() after a change }.
-export function decorateDoc(root, source, meta, { ref, live, done }) {
+// newest version: answers and edits allowed), done() after a change, current() (the newest text: a section that a
+// new version left as it was keeps its Edit, which must read the text of that version, #4844) }.
+export function decorateDoc(root, source, meta, { ref, live, done, current }) {
   // Pending sections.
   for (const p of root.querySelectorAll("p")) {
     const m = /^writing:\s*(.*)$/is.exec(p.textContent.trim());
@@ -44,11 +76,7 @@ export function decorateDoc(root, source, meta, { ref, live, done }) {
     p.innerHTML = `<span class="doc-dots" aria-hidden="true"></span> Being written: ${esc(m[1])}`;
   }
   // Decision cards.
-  const answers = {};
-  for (const c of meta.comments || []) {
-    const n = (/^decision:(\d+)$/.exec((c.anchor && c.anchor.path) || "") || [])[1];
-    if (n && (!answers[n] || c.id > answers[n].id)) answers[n] = c;
-  }
+  const answers = answersOf(meta);
   for (const start of [...root.children]) {
     const m = DECISION.exec(start.textContent.trim().split("\n")[0]);
     if (!m || !start.parentNode) continue;
@@ -61,8 +89,7 @@ export function decorateDoc(root, source, meta, { ref, live, done }) {
     start.before(card); card.append(...parts);
     const opts = answerOptions(parts.map(x => x.textContent).join("\n")), a = answers[n];
     const bar = document.createElement("div"); bar.className = "doc-answer";
-    bar.innerHTML = (a ? `<div class="doc-answered"><b>${esc(a.author)}</b> answered ${ago(a.created_at)}: ${esc(a.body.replace(/^Answer to decision \d+ of \d+ \([^)]*\):\s*/, ""))}
-        <span class="muted">(${esc(a.state === "sent" ? "sent to the session" : a.state === "read" ? "the session read it" : a.state)}${(a.replies || []).length ? ", " + a.replies.length + " repl" + (a.replies.length === 1 ? "y" : "ies") : ""})</span></div>` : "")
+    bar.innerHTML = (a ? `<div class="doc-answered" data-sig="${esc(answeredHtml(a))}">${answeredHtml(a)}</div>` : "")
       + (live ? `<div class="cv-acts">${opts.map(o => `<button class="btn" type="button" data-doc-opt="${esc(o)}">${esc(o)}</button>`).join("")}
         <input data-doc-other placeholder="${opts.length ? "or your own words" : "your answer"}" aria-label="Your answer to decision ${n}">
         <button class="btn primary" type="button" data-doc-answer>${a ? "Answer again" : "Answer"}</button></div>` : "");
@@ -70,7 +97,12 @@ export function decorateDoc(root, source, meta, { ref, live, done }) {
     const send = async (text) => {
       if (!actor()) return toast("Choose your name in 'You are' first", true);
       if (!text.trim()) return toast("Pick an option or write your answer", true);
-      try { await act("canvas_answer", { name: ref, decision: n, text }); toast(`Answered decision ${n}: it went to the session`); done(); } catch (e) { /* toast shown */ }
+      try {
+        await act("canvas_answer", { name: ref, decision: n, text });
+        toast(`Answered decision ${n}: it went to the session`);
+        const box = bar.querySelector("[data-doc-other]"); if (box) box.value = "";
+        done();
+      } catch (e) { /* toast shown */ }
     };
     bar.addEventListener("click", (e) => {
       const o = e.target.closest("[data-doc-opt]"); if (o) return send(o.dataset.docOpt);
@@ -80,15 +112,17 @@ export function decorateDoc(root, source, meta, { ref, live, done }) {
   }
   // Edit a section.
   if (!live) return;
-  const secs = mdSections(source), lines = String(source).split("\n");
+  const find = (text, h) => mdSections(text).find(x => x.title.replace(/[*_`]/g, "").trim() === h.dataset.docTitle);
   const heads = [...root.querySelectorAll("h1, h2, h3, h4, h5, h6")];
   heads.forEach((h) => {
-    const s = secs.find(x => x.title.replace(/[*_`]/g, "").trim() === h.textContent.trim());
-    if (!s || s.level === 1) return;
+    h.dataset.docTitle = h.textContent.trim();
+    const first = find(source, h);
+    if (!first || first.level === 1) return;
     const b = document.createElement("button"); b.type = "button"; b.className = "doc-edit link"; b.textContent = "edit";
-    b.title = `Edit the section ${s.title}`; h.append(" ", b);
+    b.title = `Edit the section ${first.title}`; h.append(" ", b);
     b.onclick = (e) => {
       e.stopPropagation();
+      const text = current ? current() : source, s = find(text, h) || first, lines = String(text).split("\n");
       const ed = document.createElement("div"); ed.className = "cv-edit doc-sec-edit";
       ed.innerHTML = `<textarea aria-label="The text of the section ${esc(s.title)}"></textarea>
         <div class="cv-acts"><button class="btn primary" type="button">Save the section</button><button class="btn" type="button">Cancel</button>
@@ -104,7 +138,8 @@ export function decorateDoc(root, source, meta, { ref, live, done }) {
         if (!actor()) return toast("Choose your name in 'You are' first", true);
         try {
           const r = await act("canvas_section", { name: ref, heading: s.title, text: ed.querySelector("textarea").value });
-          toast(r.unchanged ? "No change" : `Saved the section as version ${r.version}`); done();
+          toast(r.unchanged ? "No change" : `Saved the section as version ${r.version}`);
+          cancel.onclick(); done();
         } catch (err) { /* toast shown */ }
       };
     };

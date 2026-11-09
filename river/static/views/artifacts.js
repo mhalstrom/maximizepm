@@ -19,7 +19,7 @@ function name(a) {
 // The list keeps its rows (el._rows) for wireRows.
 export function showRows(el, rows, empty) {
   el._rows = rows;
-  el.innerHTML = rows.map((a, i) => `<div class="art-row">
+  const html = rows.map((a, i) => `<div class="art-row">
       <div class="art-main"><b title="${esc(a.target)}">${esc(clip(name(a), 80))}</b>
         <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} ${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}
           ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}
@@ -29,6 +29,9 @@ export function showRows(el, rows, empty) {
         : `<button class="btn" type="button" data-art-open="${i}">Open</button>`}
         <button class="btn" type="button" data-art-full="${i}">Open full screen</button></div>
     </div>`).join("") || `<div class="muted">${esc(empty)}</div>`;
+  // #4844: the lists read again every 10 seconds; the same rows are not drawn again (a hover, a focus, and a
+  // selection stay, and nothing flashes).
+  if (el._html !== html) { el.innerHTML = html; el._html = html; }
 }
 
 // Open: openBeside(session, target); Open full screen: a browser tab of its own.
@@ -57,11 +60,14 @@ export function makeArtifacts({ isShown, openBeside }) {
       list = j.artifacts || [];
       const sel = $("#artSession"), cur = sel.value;
       const names = [...new Set(list.map(a => a.session))].sort();
-      sel.innerHTML = `<option value="">All sessions</option>` + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
-      if (names.includes(cur)) sel.value = cur;
+      const opts = `<option value="">All sessions</option>` + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+      if (sel._html !== opts && document.activeElement !== sel) {  // an open menu stays open (#4844)
+        sel.innerHTML = opts; sel._html = opts;
+        if (names.includes(cur)) sel.value = cur;
+      }
       render();
     } catch (e) {
-      $("#artList").innerHTML = `<div class="muted">Could not read the artifacts: ${esc(e.message)}</div>`;
+      $("#artList").innerHTML = `<div class="muted">Could not read the artifacts: ${esc(e.message)}</div>`; $("#artList")._html = null;
     } finally { busy = false; }
   }
   $("#artSession").addEventListener("change", render);
