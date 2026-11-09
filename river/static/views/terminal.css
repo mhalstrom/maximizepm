@@ -1,0 +1,7 @@
+/* The Terminal tab (#4803). */
+.sh-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.sh-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.sh-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.sh-row .sh-t { flex: 1 1 200px; min-width: 0; }
+.sh-row code { font-size: 12px; }
+.sh-note { font-size: 12px; }

@@ -4,6 +4,7 @@
 // The dialog has its own size (app.css): the pane's columns and rows never change it. A pane wider or taller
 // than the screen scrolls inside it, and the view stays at the end of the pane's text, where the prompt is.
 // Server: GET /api/terminal?agent=<name>, and the op terminal_keys; both answer this computer only.
+// A shell of the Terminal tab (#4803) uses the same dialog: GET /api/shell?pane=<pane> and the op shell_keys.
 import { $, esc, toast, typeAction } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 
@@ -84,7 +85,8 @@ export function keyOf(e) {
   return null;
 }
 
-let dlg = null, agent = null, timer = null, shown = null, toEnd = true, pending = [], sending = false;
+// agent: the agent's name, or for a shell (shell true) its pane.
+let dlg = null, agent = null, shell = false, timer = null, shown = null, toEnd = true, pending = [], sending = false;
 
 function el() {
   let d = $("#termDlg");
@@ -100,7 +102,7 @@ function el() {
     <div class="actions" style="margin-top:8px;align-items:center">
       ${[["Enter", "Enter"], ["Esc", "Escape"], ["↑", "Up"], ["↓", "Down"], ["Tab", "Tab"], ["Shift+Tab", "BTab"], ["Ctrl-C", "C-c"]]
         .map(([label, key]) => `<button class="btn" data-term-key="${key}">${label}</button>`).join("")}
-      <span class="muted" style="font-size:12px">Click the terminal, then type: your keys go to the agent, Esc too. Close with ✕.</span>
+      <span class="muted" style="font-size:12px">Click the terminal, then type: your keys go to it, Esc too. Close with ✕.</span>
     </div></div>`;
   document.body.appendChild(d);
   dlg = makeDialog(d, { onClose: () => { agent = null; clearTimeout(timer); } });
@@ -135,7 +137,7 @@ async function send(k) {
   try {
     while (pending.length && agent) {
       const keys = pending.splice(0, pending.length);
-      try { await typeAction("terminal_keys", { agent, keys }); }
+      try { await (shell ? typeAction("shell_keys", { pane: agent, keys }) : typeAction("terminal_keys", { agent, keys })); }
       catch (e) { pending = []; toast(e.message || "the keys did not go", true); }
     }
   } finally { sending = false; }
@@ -145,7 +147,7 @@ async function send(k) {
 // Draw one answer of /api/terminal. The view follows the end of the text while the person is there; after
 // the person scrolled up it stays there. Sideways it stays where it is.
 export function showScreen(j) {
-  $("#termNote").textContent = `${j.name || j.pane} · ${j.width}×${j.height}` + (j.ended ? " · the agent has ended: a shell runs here" : "");
+  $("#termNote").textContent = `${j.name || j.pane} · ${j.width}×${j.height}` + (j.ended && !shell ? " · the agent has ended: a shell runs here" : "");
   if (j.text === shown) return;
   const scr = $("#termScreen");
   if (String(window.getSelection()) && scr.contains(window.getSelection().anchorNode)) { shown = null; return; }  // the person selects text to copy: draw again after that
@@ -161,7 +163,7 @@ async function tick() {
   const who = agent;
   let wait = document.hidden ? 3000 : 500;
   try {
-    const r = await fetch("api/terminal?agent=" + encodeURIComponent(who));
+    const r = await fetch((shell ? "api/shell?pane=" : "api/terminal?agent=") + encodeURIComponent(who));
     const j = await r.json();
     if (who !== agent) return;
     if (!r.ok) { $("#termNote").textContent = j.error || "no terminal"; wait = 3000; }
@@ -171,10 +173,11 @@ async function tick() {
 }
 
 // Open the terminal of an agent that runs in a tmux pane (S.terminals lists them).
-export function openTerminal(name) {
+export function openTerminal(name, opts = {}) {
   el();
-  agent = name; shown = null; toEnd = true; pending = [];
-  $("#termTitle").textContent = `Terminal: ${name}`;
+  agent = name; shell = !!opts.shell; shown = null; toEnd = true; pending = [];
+  $("#termTitle").textContent = shell ? `Terminal: ${opts.title || name} on this computer` : `Terminal: ${name}`;
+  $("#termScreen").setAttribute("aria-label", shell ? "A shell on this computer. Keys you type here go to it." : "The agent's terminal. Keys you type here go to the agent.");
   $("#termNote").textContent = "\u00a0";  // keeps its line, so the screen has its size before the first answer
   $("#termScreen").innerHTML = "";
   dlg.open();

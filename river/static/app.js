@@ -21,6 +21,7 @@ import * as inbox from "./views/board-inbox.js";
 import * as projects from "./views/projects.js";
 import { makeSessions } from "./views/sessions.js";
 import { makeArtifacts } from "./views/artifacts.js";
+import { makeTerminalTab } from "./views/terminal.js";
 import * as targets from "./views/targets.js";
 import { renderCapacity } from "./views/capacity.js";
 import { renderGraph } from "./views/graph.js";
@@ -283,7 +284,7 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings"];
+const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings", "terminal"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (the Board)   /sessions   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
@@ -334,6 +335,7 @@ function setTab(name, push = true) {
   renderLog(true);
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "artifacts") artifactsTab.refresh();
+  if (tab === "terminal") terminalTab.refresh();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});  // this view shows done items, or no more
   return renderGraph(true);
 }
@@ -354,6 +356,8 @@ const artifactsTab = makeArtifacts({ isShown: () => tab === "artifacts",
     try { await setTab("sessions", false); if (session) sessionsTab.pick(session); openInPanel(target); } finally { quiet--; }
     syncUrl(true);
   } });
+// The Terminal tab (#4803): plain shells on this computer.
+const terminalTab = makeTerminalTab({ isShown: () => tab === "terminal" });
 // Setup guide: an overlay that shows until the user dismisses it for good (setting setup_done).
 let setupSeen = false;
 // Ready for agents: every ready agent item, most important first, each with Dispatch (one session for one item).

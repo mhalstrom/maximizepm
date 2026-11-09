@@ -128,6 +128,11 @@ DEFAULT_SETTINGS = {
     # (cdn.jsdelivr.net cdnjs.cloudflare.com). In every case the page runs in a sandbox of its own origin: it never
     # reads maxpm's page, its token or its data.
     "canvas_network": "on",
+    # The Terminal tab (#4803): a plain shell on this computer in the page, for a person (never an agent). On for
+    # the page on this computer; through the relay only when web_terminal_relay is on too, because whoever holds
+    # the relay sign-in could then run any command here.
+    "web_terminal": "on",
+    "web_terminal_relay": "off",
     "due_warn_before": "3d",
     # Agents the page can start, as "Label=command" entries separated by ";". The first is the default.
     # "@claude-code" or "@codex" is a launch profile: river builds the command from the platform's options
@@ -1311,7 +1316,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "relay_offline_alert" and value != "off" and not (
             300 <= _duration_or_none(value) <= 86_400):
         raise RiverError("relay_offline_alert is a time from 5m to 1d (for example 15m), or off")
-    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "relay_keep_awake") and value not in ("on", "off"):
+    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "relay_keep_awake", "web_terminal",
+                 "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
         autocompact_tokens(value)

@@ -54,7 +54,8 @@ def static_file(path, root=None):
 # The page's addresses (#4653): a path for each view, for example /sessions/<session>/artifacts/<artifact id>,
 # with ?as=<person> and ?item=<id>. Each one gets the page, with a <base> that points back to the page's root, so
 # its relative addresses (app.js, api/state) work at any depth, here and on the relay's tunnel.
-PAGE_VIEWS = ("board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings")
+PAGE_VIEWS = ("board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings",
+              "terminal")
 
 
 def page_html(path):
@@ -1704,6 +1705,12 @@ def terminal_keys(conn, agent, keys, who=None):
     {"key": "Enter"} (a key in TERMINAL_KEYS). Only a person does this: an agent does not answer another
     agent's prompts through river."""
     pane = _typing_pane(conn, agent, who)
+    return {"agent": agent, "pane": pane, "sent": send_keys(pane, keys)}
+
+
+def send_keys(pane, keys):
+    """Type keys into a tmux pane: a list of {"text": "..."} (typed as it is) and {"key": "Enter"} (a key in
+    TERMINAL_KEYS). All are checked before the first one goes. Returns how many went."""
     if not isinstance(keys, list) or len(keys) > 200:
         raise RiverError("keys is a list of at most 200 entries")
     for k in keys:
@@ -1717,7 +1724,7 @@ def terminal_keys(conn, agent, keys, who=None):
             _tmux("send-keys", "-t", pane, "-l", "--", k["text"])
         else:
             _tmux("send-keys", "-t", pane, k["key"])
-    return {"agent": agent, "pane": pane, "sent": len(keys)}
+    return len(keys)
 
 
 def _typing_pane(conn, agent, who):
@@ -2271,7 +2278,8 @@ def frame_check(url):
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
-TYPING_OPS = ("terminal_keys", "session_send", "prompt_answer", "session_setting", "session_restart")
+TYPING_OPS = ("terminal_keys", "session_send", "prompt_answer", "session_setting", "session_restart",
+              "shell_open", "shell_keys", "shell_close")  # the Terminal tab's shells (#4803)
 
 
 REPO = PKG.parent
@@ -2789,8 +2797,8 @@ OPS = {
 
 def _view_routes():
     """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
-    from .routes import artifacts, board, canvas, done, projects, sessions, settings, targets
-    views = (board, projects, sessions, artifacts, targets, done, settings, canvas)
+    from .routes import artifacts, board, canvas, done, projects, sessions, settings, targets, terminal
+    views = (board, projects, sessions, artifacts, targets, done, settings, canvas, terminal)
     for v in views:
         for key in v.OPS:
             assert key not in OPS, key
