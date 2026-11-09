@@ -2093,8 +2093,10 @@ class LaunchInTmux(unittest.TestCase):
         fifth = panes(lambda p: p["name"] != "#5 fifth" or p["running"] == "sleep")["#5 fifth"]["pane"]
         other = got["#2 second"]["pane"]
         texts = server._pane_texts([fifth, other])
-        flat = {pane: text.replace("\n", "") for pane, text in texts.items()}  # a long command line wraps
-        self.assertEqual((set(flat), "MAXPM_AGENT=shop-bbbb sleep 60" in flat[fifth], "MAXPM_FOCUS=needs: sleep 60" in flat[other]),
+        # A long command line wraps, and a wrap at a space loses the space ("sleep\n60", #4896): compare without
+        # any white space.
+        flat = {pane: "".join(text.split()) for pane, text in texts.items()}
+        self.assertEqual((set(flat), "MAXPM_AGENT=shop-bbbbsleep60" in flat[fifth], "MAXPM_FOCUS=needs:sleep60" in flat[other]),
                          ({fifth, other}, True, True))
         self.assertEqual(server._pane_texts([fifth, "%999"]), {})
         self.assertEqual([(p["name"], p["why"]) for p in server.tmux_done(self.c)],
