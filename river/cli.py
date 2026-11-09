@@ -2298,7 +2298,10 @@ def relay_line(st):
 def connect_command(args):
     from . import relay
     if args.status:
-        print(relay_line(relay.saved_status()))
+        st = relay.saved_status()
+        print(relay_line(st))
+        if st["configured"]:
+            print(f"Offline alert: {relay.alert_note(relay.offline_alert())}")
         return 0
     if args.off:
         res = relay.disconnect()

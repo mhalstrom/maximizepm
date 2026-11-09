@@ -388,6 +388,39 @@ def _plan(frame: dict) -> str:
     return plan if plan in ("trialing", "active", "canceled", "past_due", "ended") else "none"
 
 
+def offline_alert() -> dict:
+    """The offline alert that this computer asks the relay for (#4771): {"url", "after"} (the person's ntfy topic,
+    seconds), or {"off": "<why>"}. The computer cannot send it itself: it is the one that is away."""
+    try:
+        conn = core.connect()
+    except Exception as e:  # noqa: BLE001 - no queue database
+        return {"off": f"no queue database ({e})"}
+    try:
+        after = core.setting(conn, "relay_offline_alert")
+        base = core.setting(conn, "ntfy_url").rstrip("/")
+        topic = core.setting(conn, "ntfy_topic")
+        token = core.setting(conn, "ntfy_token")
+    finally:
+        conn.close()
+    if after == "off":
+        return {"off": "relay_offline_alert is off"}
+    if not topic:
+        return {"off": "no ntfy topic: maxpm notify setup ntfy"}
+    if token:
+        return {"off": "your ntfy server needs a token, and the relay keeps none"}
+    if not base.startswith("https://"):
+        return {"off": "ntfy_url is not https"}
+    return {"url": f"{base}/{topic}", "after": int(core.parse_duration(after).total_seconds())}
+
+
+def alert_note(alert: dict) -> str:
+    """The offline alert in a few words, for maxpm connect --status; the topic shows only its end."""
+    if "off" in alert:
+        return f"off ({alert['off']})"
+    minutes = alert["after"] // 60
+    return f"to your ntfy topic (...{alert['url'][-4:]}) after {minutes} minutes offline"
+
+
 def plan_note(st: dict) -> str:
     """A few words on the relay plan for maxpm connect --status and the page, or '' when there is nothing to do."""
     acct = f"{st.get('url') or ''}/account" if st.get("url") else "the relay account page"
@@ -563,8 +596,12 @@ class Link:
         opener = OPEN_SOCKET or WebSocket.open
         ws = opener(ws_url, {"Authorization": f"Bearer {cfg['token']}", "User-Agent": f"maxpm/{__version__}"})
         try:
-            ws.send_text(json.dumps({"t": "hello", "v": PROTOCOL, "river": __version__, "host": cfg.get("host"),
-                                     "replace": bool(cfg.get("replace"))}))
+            hello = {"t": "hello", "v": PROTOCOL, "river": __version__, "host": cfg.get("host"),
+                     "replace": bool(cfg.get("replace"))}
+            alert = offline_alert()
+            if "url" in alert:
+                hello["alert"] = alert  # the relay posts to it when this computer stays away (#4771)
+            ws.send_text(json.dumps(hello))
             ws.sock.settimeout(15)
             kind, data = ws.recv()
             if kind == "close":
