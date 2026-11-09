@@ -106,6 +106,9 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
      set there, so the message box sits right above the keyboard. */
   .sess-layout.phone-kb { position: fixed; left: 0; right: 0; z-index: 20; background: var(--panel); }
   .sess-layout.phone-kb > .sess-main { padding-bottom: 6px; }
+  /* While the person types (#4903, point 4): only the session's head line stays above the chat; its state line and
+     its item line with Items and Artifacts come back when the keyboard closes. */
+  .sess-layout.phone-kb .sess-item, .sess-layout.phone-kb .sess-head #sessState { display: none; }
   .sess-layout.phone-chat > .sess-main { height: auto; min-height: 0; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
   #sessBack { display: inline-flex; align-items: center; min-height: 40px; padding: 4px 10px 4px 6px; white-space: nowrap; flex: none; }
   /* The head: ‹ Sessions, the name, Settings and Open session in one line; the state under it. */
