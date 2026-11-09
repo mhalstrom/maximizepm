@@ -9,8 +9,8 @@ that marks it as relayed, so the site and its actions are the same as here, and 
 <name>@relay. The relay knows no MaximizePM path. Standard library only.
 
 Protocol 3 (frames are JSON text):
-  river -> relay  hello {v, river, host, replace}
-  relay -> river  welcome {v, account, tunnel, limits: {max_request, part, timeout}}   bye {reason}   tunnel {tunnel}
+  river -> relay  hello {v, river, host, replace, ping: true}
+  relay -> river  welcome {v, account, tunnel, limits: {max_request, part, timeout, ping}}   bye {reason}   tunnel {tunnel}
   relay -> river  req {id, kind: "http", method, path, headers: [[name, value], ...], body_b64, more}
                   part {id, i, body_b64, more}   cancel {id}
   river -> relay  res {id, status, headers: [[name, value], ...], body_b64, more}   part {id, i, body_b64, more}
@@ -18,6 +18,11 @@ A body is base64 of its bytes, never text, in parts of at most PART bytes: the r
 first part, part frames carry the rest (i from 1), and the last frame of a body has more: false. River gives
 maxpm serve a whole request body (at most MAX_REQUEST) and streams the answer back as it reads it. cancel: the
 browser went away. Each side refuses another version with bye "protocol <n> needed".
+ping (#4860): when the welcome's limits name ping (seconds), river sends the text frame {"t":"ping"} at that
+interval, and the relay answers {"t":"pong"}. Cloudflare answers WebSocket pings at its edge, so the relay's River
+object never sees them, and Cloudflare keeps a silent socket open for ten minutes and more: the text ping is how the
+relay finds a computer that hangs or went away without a close. hello says ping: true, so the relay watches only a
+river that sends it.
 """
 
 from __future__ import annotations
@@ -45,7 +50,9 @@ from .core import RiverError
 
 DEFAULT_URL = "https://relay.maximizepm.com"
 PROTOCOL = 3
-PING_EVERY = 30  # seconds between WebSocket pings; the relay closes a socket silent for 90 s
+PING_EVERY = 30  # seconds between WebSocket pings; the Node relay closes a socket silent for 90 s
+APP_PING = '{"t":"ping"}'  # the text ping (#4860): exactly these bytes, which the River object answers by itself
+APP_PING_MIN, APP_PING_MAX = 5, 300  # the seconds of a welcome's limits.ping that river takes
 SILENT_LIMIT = 90  # no frame and no pong from the relay for this long: the connection is dead
 BACKOFF_MAX = 60
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -524,6 +531,7 @@ class Link:
         self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="maxpm-relay-call")
         self.refused_token = None  # a token the relay refused: wait for a new maxpm connect
         self.part = PART  # bytes of a body in one frame: the relay's welcome may ask for less
+        self.app_ping = None  # seconds between text pings, when the relay's welcome asks for them (#4860)
         self.cancelled: set = set()  # ids of requests whose browser went away (cancel)
         self.awake = Awake()
 
@@ -597,7 +605,7 @@ class Link:
         ws = opener(ws_url, {"Authorization": f"Bearer {cfg['token']}", "User-Agent": f"maxpm/{__version__}"})
         try:
             hello = {"t": "hello", "v": PROTOCOL, "river": __version__, "host": cfg.get("host"),
-                     "replace": bool(cfg.get("replace"))}
+                     "replace": bool(cfg.get("replace")), "ping": True}
             alert = offline_alert()
             if "url" in alert:
                 hello["alert"] = alert  # the relay posts to it when this computer stays away (#4771)
@@ -618,6 +626,9 @@ class Link:
             limits = frame.get("limits") if isinstance(frame.get("limits"), dict) else {}
             part = limits.get("part")
             self.part = min(PART, part) if isinstance(part, int) and part >= 1024 else PART
+            ping = limits.get("ping")
+            self.app_ping = (ping if isinstance(ping, (int, float)) and not isinstance(ping, bool)
+                             and APP_PING_MIN <= ping <= APP_PING_MAX else None)
             _set_state(state="connected", account=frame.get("account") or cfg.get("account"), error=None,
                        plan=_plan(frame))
             self.loop(ws, cfg)
@@ -636,7 +647,7 @@ class Link:
 
     def loop(self, ws: WebSocket, cfg: dict) -> None:
         ws.sock.settimeout(1.0)
-        last_ping = time.monotonic()
+        last_ping = last_app_ping = time.monotonic()
         incoming: dict = {}  # id -> a request whose parts are still coming
         wall, mono = time.time(), time.monotonic()
         while not self.stop.is_set():
@@ -650,6 +661,9 @@ class Link:
             if now_mono - last_ping >= PING_EVERY:
                 ws.ping()
                 last_ping = now_mono
+            if self.app_ping and now_mono - last_app_ping >= self.app_ping:
+                ws.send_text(APP_PING)  # the relay's answer, {"t":"pong"}, counts as a frame heard
+                last_app_ping = now_mono
             if now_mono - ws.last_heard > SILENT_LIMIT:
                 raise WebSocketError("no answer from the relay for 90 s")
             for rid in [rid for rid, r in incoming.items() if now_mono - r["at"] > INCOMPLETE_LIMIT]:

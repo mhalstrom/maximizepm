@@ -315,7 +315,8 @@ class LinkTest(Base):
     def test_says_hello_and_answers_page_requests(self):
         self.start()
         side, hello = self.hello()
-        self.assertEqual(hello, {"t": "hello", "v": 3, "river": relay.__version__, "host": "mac", "replace": False})
+        self.assertEqual(hello, {"t": "hello", "v": 3, "river": relay.__version__, "host": "mac", "replace": False,
+                                 "ping": True})
         side.send_json({"t": "welcome", "v": 3, "account": "Alice", "limits": {}})
         self.until(lambda: relay.STATE.get("state") == "connected", "connected")
         # No maxpm serve port in this test: the answer says so (PageRelay checks a real one).
@@ -478,6 +479,35 @@ class LinkTest(Base):
         self.assertIn("no answer from the relay", relay.STATE.get("error", ""))
         again, hello = self.hello()
         self.assertEqual(hello["t"], "hello")
+
+    def test_text_pings_when_the_welcome_asks_for_them(self):
+        """#4860: Cloudflare answers WebSocket pings at its edge, so the River object finds a silent computer by a
+        text ping that it answers by itself. River sends it at the welcome's limits.ping, and none without it."""
+        for name, value in (("APP_PING_MIN", 0.05), ("PING_EVERY", 60)):
+            self.addCleanup(setattr, relay, name, getattr(relay, name))
+            setattr(relay, name, value)
+        self.start()
+        side, hello = self.hello()
+        self.assertIs(hello["ping"], True)
+        side.send_json({"t": "welcome", "v": 3, "account": "Alice", "limits": {"ping": 0.1}})
+        side.conn.settimeout(2)
+        texts = []
+        while len(texts) < 2:
+            op, data = side.frame()
+            if op == 0x1:
+                texts.append(data)
+                side.send_json({"t": "pong"})  # the River object's answer: river takes it as a frame heard
+        self.assertEqual(texts, [b'{"t":"ping"}'] * 2, "exactly the bytes that the relay answers by itself")
+        self.assertEqual(relay.STATE.get("state"), "connected")
+        # A relay whose welcome names no ping (the Node relay) gets none.
+        side.conn.close()
+        again, _ = self.hello()
+        again.send_json({"t": "welcome", "v": 3, "account": "Alice", "limits": {}})
+        self.until(lambda: relay.STATE.get("state") == "connected", "connected again")
+        again.conn.settimeout(0.5)
+        with self.assertRaises(socket.timeout):
+            again.frame()
+        self.assertIsNone(self.link.app_ping)
 
     def test_another_protocol_says_to_update(self):
         self.start()
