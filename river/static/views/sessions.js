@@ -15,6 +15,7 @@ import { openSettings } from "../components/settingsDialog.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
 import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
+import { checkPaths } from "../components/artLinks.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked" };
@@ -184,6 +185,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       if (first) { if (j.entries.length) col.replaceChildren(); else note(j.note || "No lines yet."); }
       else if (j.entries.length) col.querySelector(".sl-none")?.remove();
       appendEntries(col, j.entries, j.refs);
+      checkPaths(col, agent);  // what each path means for this session; a refused one says why (#4689)
       agePending(col);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};

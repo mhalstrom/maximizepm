@@ -5,6 +5,7 @@ import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { openTerminal } from "../components/terminalDialog.js";
 import { S, nav } from "../page.js";
+import { linkArtifacts } from "../components/artLinks.js";
 import { renderStrip } from "./board.js";
 
 // ---- Needs you: decisions and steps waiting for a person, with browser notifications.
@@ -45,10 +46,13 @@ export function renderNeedsYou() {
     // One line each; a click opens the details and the buttons (design: the Board fits one screen).
     const title = isItem ? `#${e.item_id} ${e.item_title}` : `${e.message_kind} from ${e.from_agent}: ${e.body || ""}`;
     const open = nyOpen.has(e.id);
+    const from = !isItem && e.from_agent ? ` data-agent="${esc(e.from_agent)}"` : "";
     return `<div class="nyl" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
         <span class="chips">${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span></div>
-      ${open ? `<div class="nyx"><div class="muted" style="font-size:12px">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}<div class="actions">${buttons}</div></div>` : ""}`;
+      ${open ? `<div class="nyx"${from}><div class="muted" style="font-size:12px">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}<div class="actions">${buttons}</div></div>` : ""}`;
   }).join("");
+  // Files and local pages in the details open in the side panel of the session that sent them (#4689).
+  document.querySelectorAll("#needsYou .nyx .ny-c").forEach(x => linkArtifacts(x, x.closest(".nyx").dataset.agent || null));
 }
 
 // One browser notification per event, once: seen ids live in localStorage. The first

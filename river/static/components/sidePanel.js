@@ -13,6 +13,7 @@ import { $, esc, ago, store, toast, pageToken } from "../lib.js";
 import { markdown } from "./chat.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
+import { linkArtifacts, linkTarget } from "./artLinks.js";
 import { showRows, wireRows } from "../views/artifacts.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
@@ -69,7 +70,7 @@ function renderTabs() {
   $("#spTabs").innerHTML = Object.entries(LISTS).map(([k, title]) => `<span class="sp-tab sp-tab-list${on === k ? " on" : ""}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${on === k}" data-sp-list="${k}">${title}</button></span>`).join("")
     + tabs.map(t => { const k = kindOf(t.target);
-    return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(t.target)}">`
+    return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(itemOf(t.target) ? t.title || label(t.target) : t.target)}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}"><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
     + `<button type="button" class="sp-x" data-close="${t.id}" title="Close this tab" aria-label="Close ${esc(t.title || label(t.target))}">✕</button></span>`; }).join("");
   save();
@@ -98,6 +99,7 @@ async function show(t) {
     const it = await r.json();
     if (t.title !== `#${it.id} ${it.title}`) { t.title = `#${it.id} ${it.title}`; renderTabs(); }
     box.innerHTML = itemViewHtml(it);
+    linkArtifacts(box.querySelector(".sp-item"), session);  // its files and pages open in a tab here (#4689)
     return;
   }
   if (isFile(t.target)) {
@@ -259,6 +261,8 @@ export function wirePanel() {
   $("#spBody").addEventListener("click", (e) => {
     const d = e.target.closest("[data-drawer-open]");
     if (d) { e.stopPropagation(); return window.riverOpen && window.riverOpen(+d.dataset.drawerOpen); }
+    const t = linkTarget(e.target);
+    if (t && !e.metaKey && !e.ctrlKey) { e.preventDefault(); openInPanel(t); }
   });
   // The lists follow what the session does while they show.
   setInterval(() => { if (isList(on) && !document.hidden && !panel().classList.contains("hidden") && panel().offsetParent) showList(on, true); }, 10000);

@@ -10,6 +10,13 @@ import { copyText, toast } from "../lib.js";
 marked.setOptions({ gfm: true, breaks: false });
 const PURIFY = { FORBID_TAGS: ["img", "style", "form", "input", "button", "textarea", "select", "iframe", "video", "audio", "svg", "math"],
                  FORBID_ATTR: ["style"] };
+// A file:// link (#4689): DOMPurify drops its href; its path stays as data-file, and linkPaths makes it a link
+// that opens in the side panel.
+DOMPurify.addHook("uponSanitizeAttribute", (n, data) => {
+  if (data.attrName === "href" && /^file:/i.test(data.attrValue || "")) {
+    try { n.setAttribute("data-file", decodeURIComponent(new URL(data.attrValue).pathname)); } catch (e) { /* no path */ }
+  }
+});
 DOMPurify.addHook("afterSanitizeAttributes", (n) => {
   if (n.tagName === "A") { n.setAttribute("target", "_blank"); n.setAttribute("rel", "noopener noreferrer"); }
 });
@@ -57,30 +64,52 @@ export function linkRefs(root, refs) {
   }
 }
 
-// A full path to a file the side panel can show becomes a link that opens it there (#4619). Text in a link, a
-// button or a code block stays as it is; a path in inline code does link.
-const FPATH = /(^|[\s(`'"=])((?:[a-zA-Z]:[/\\]|\\\\|~[/\\]|\/)(?:[\w.@~+-]+[/\\])*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md|txt))(?=$|[\s)`'",:;!?]|\.(?:\s|$))/g;
-export function linkPaths(root) {
+// A path to a file the side panel can show becomes a link that opens it there (#4619): a full or ~ path, a file://
+// link, and (#4689) a relative path or a bare file name, which the server looks for in the session's folder and
+// among its files (components/artLinks.js checks each one; a name it finds nothing for goes back to plain text).
+// A local page address in plain text (http://localhost, 127.0.0.1) links too. Text in a link, a button or a code
+// block stays as it is (inPre: a code block links too, for the text of a terminal); a path in inline code links.
+const EXT = "(?:png|jpe?g|gif|webp|svg|pdf|html?|md|txt)";
+const END = "(?=$|[\\s)`'\",:;!?\\]]|\\.(?:\\s|$))";
+const FPATH = new RegExp(`(^|[\\s(\`'"=\\[])(?:file://(?:localhost)?)?((?:[a-zA-Z]:[/\\\\]|\\\\\\\\|~[/\\\\]|\\/)(?:[\\w.@~+-]+[/\\\\])*[\\w@~+-][\\w.@~+-]*\\.${EXT})${END}`, "g");
+const RPATH = new RegExp(`(^|[\\s(\`'"=\\[])((?:\\.{1,2}/)?(?:[\\w.@~+-]+/)*[\\w@~+-][\\w.@~+-]*\\.${EXT})${END}`, "g");
+const LURL = /(^|[\s(`'"=[])(https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s)\]>'"`]*)?)/g;
+function linkText(root, test, rx, make, inPre) {
   const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (n) => n.parentElement.closest("pre, a, button, .link") ? NodeFilter.FILTER_REJECT
-      : /[~\/\\][^\s]*\.\w{2,4}/.test(n.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+    acceptNode: (n) => n.parentElement.closest(inPre ? "a, button, .link, .fpath-no" : "pre, a, button, .link, .fpath-no")
+      ? NodeFilter.FILTER_REJECT : test.test(n.data) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
   const nodes = [];
   for (let n; (n = walk.nextNode());) nodes.push(n);
   for (const n of nodes) {
     const frag = document.createDocumentFragment();
     let at = 0;
-    n.data.replace(FPATH, (m, pre, path, off) => {
+    n.data.replace(rx, (m, pre, what, off) => {
+      const text = m.slice(pre.length).replace(/[.,;:]+$/, "");  // a sentence's end is no part of a path
       frag.append(n.data.slice(at, off + pre.length));
-      const a = el("span", "link fpath", path);
-      a.dataset.file = path; a.title = "Open in the side panel"; a.tabIndex = 0;
-      frag.append(a);
-      at = off + m.length;
+      frag.append(make(what.replace(/[.,;:]+$/, ""), text));
+      at = off + pre.length + text.length;
       return m;
     });
     if (!at) continue;
     frag.append(n.data.slice(at));
     n.replaceWith(frag);
   }
+}
+function fileLink(path, text, rel) {
+  const a = el("span", "link fpath", text);
+  a.dataset.file = path; a.title = "Open in the side panel"; a.tabIndex = 0;
+  if (rel) a.dataset.rel = "1";
+  return a;
+}
+export function linkPaths(root, { inPre = false } = {}) {
+  root.querySelectorAll("a[data-file]").forEach((a) => a.replaceWith(fileLink(a.dataset.file, a.textContent)));
+  linkText(root, /[~\/\\][^\s]*\.\w{2,4}/, FPATH, (path, text) => fileLink(path, text), inPre);
+  linkText(root, /\.\w{2,4}\b/, RPATH, (path, text) => fileLink(path, text, true), inPre);
+  linkText(root, /https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/, LURL, (url) => {
+    const a = el("span", "link fpath", url);
+    a.dataset.url = url; a.title = "Open in the side panel"; a.tabIndex = 0;
+    return a;
+  }, inPre);
 }
 
 function el(tag, cls, text) {

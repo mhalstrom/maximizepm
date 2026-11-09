@@ -10,6 +10,7 @@ import { openTerminal } from "./components/terminalDialog.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { openInPanel, onPanel, panelTargets } from "./components/sidePanel.js";
+import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { S, tab, setState, setTabName, nav, goalSel } from "./page.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
@@ -610,6 +611,13 @@ async function openArtifact(session, id) {
   openInPanel(target);
 }
 window.addEventListener("popstate", openFromUrl);
+// A link to a session's file or page anywhere on the page (#4689): the Sessions tab, that session, its side panel.
+window.riverOpenInPanel = async (session, target) => {
+  if (tab !== "sessions") await setTab("sessions");
+  if (session) sessionsTab.pick(session);
+  openInPanel(target);
+};
+wireArtLinks();
 // Relay button: connects this MaximizePM to the relay (maxpm connect), so its page opens from any browser.
 // A click starts the sign-in: the relay page opens with a code to approve, and maxpm serve finishes it.
 let relayArmed = 0;  // a click on a connected relay asks again before it disconnects

@@ -145,7 +145,6 @@ button.srow-it { cursor: pointer; }
 .sp-list .art-row { flex-direction: column; align-items: flex-start; gap: 6px; }
 .sp-card { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .sp-card a.btn { background: var(--accent); color: var(--accent-ink); border-radius: 6px; padding: 4px 12px; text-decoration: none; font-size: 13px; }
-.link.fpath { cursor: pointer; }
 @media (max-width: 759px) {
   .sess-layout.with-panel { grid-template-columns: minmax(0, 1fr); }
   .sess-panel { height: 70vh; }

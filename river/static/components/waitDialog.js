@@ -6,6 +6,7 @@
 // Server: the op prompt_answer (with the page's token: typeAction) and the op answer.
 import { $, esc, act, toast, typeAction } from "../lib.js";
 import { makeDialog } from "./dialog.js";
+import { linkArtifacts } from "./artLinks.js";
 
 const dlg = makeDialog($("#waitDlg"));
 let agent = null, pane = false, onSent = null;
@@ -46,6 +47,9 @@ export function openWaiting(s, opts = {}) {
   agent = s.name; pane = !!s.terminal; onSent = opts.onSent || null;
   $("#waitTitle").textContent = `Waits for you: ${s.name}`;
   $("#waitList").innerHTML = s.waiting.map((w, n) => w.kind === "question" ? questionBlock(w) : promptBlock(w, n)).join("");
+  // Files and local pages in the question, the command and the terminal's text open in the side panel (#4689).
+  $("#waitList").dataset.agent = s.name;
+  $("#waitList").querySelectorAll(".wq, .wcmd, .wlines pre").forEach(x => linkArtifacts(x, s.name, { inPre: true }));
   dlg.open();
   const first = $("#waitList").querySelector("input:checked, textarea");
   if (first) first.focus();

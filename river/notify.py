@@ -267,12 +267,13 @@ def _is_local(url):
     return (urllib.parse.urlparse(url).hostname or "") in ("127.0.0.1", "localhost", "::1")
 
 
-def page_url(conn, item_id=None, terminal=None, person=None):
+def page_url(conn, item_id=None, terminal=None, person=None, art=None):
     """The MaximizePM page: on an item (/?item=<id>), or on the session of an agent that waits on a prompt or asked
-    a question (/sessions/<name>, where the person answers it, #4653); ?as=<person> for the person it is for."""
+    a question (/sessions/<name>, where the person answers it, #4653), or on one of its artifacts
+    (/sessions/<name>/artifacts/<id>, #4689); ?as=<person> for the person it is for."""
     import urllib.parse
     base = f"http://127.0.0.1:{SERVE_PORT['port'] or core.setting(conn, 'serve_port')}/"
-    path = f"sessions/{urllib.parse.quote(terminal, safe='')}" if terminal else ""
+    path = f"sessions/{urllib.parse.quote(terminal, safe='')}" + (f"/artifacts/{art}" if art else "") if terminal else ""
     q = urllib.parse.urlencode([(k, v) for k, v in (("item", item_id if not terminal else None), ("as", person)) if v])
     return base + path + (f"?{q}" if q else "")
 
@@ -281,10 +282,54 @@ def _is_ai(conn, name):
     return bool(name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone())
 
 
+def art_id(target):
+    """The page's id of an artifact (static/lib.js artId, cyrb53 in base 36): the same for the same target."""
+    m = 0xFFFFFFFF
+    h1, h2 = 0xDEADBEEF, 0x41C6CE57
+    for ch in str(target):
+        c = ord(ch)
+        h1 = ((h1 ^ c) * 2654435761) & m
+        h2 = ((h2 ^ c) * 1597334677) & m
+    h1 = (((h1 ^ (h1 >> 16)) * 2246822507) & m) ^ (((h2 ^ (h2 >> 13)) * 3266489909) & m)
+    h2 = (((h2 ^ (h2 >> 16)) * 2246822507) & m) ^ (((h1 ^ (h1 >> 13)) * 3266489909) & m)
+    n, out = 4294967296 * (2097151 & h2) + h1, ""
+    while True:
+        n, d = divmod(n, 36)
+        out = "0123456789abcdefghijklmnopqrstuvwxyz"[d] + out
+        if not n:
+            return out
+
+
+def _artifact_of(conn, who, text):
+    """The first file or local page that text names and that is an artifact of the session of who (one the side
+    panel shows), or None (#4689)."""
+    from . import server, sessions
+    hits = [h["target"] for h in sessions._hits_in(text or "", None, "named") if h["kind"] in ("file", "page")]
+    if not hits:
+        return None
+
+    def allowed(f):
+        try:
+            server.local_file(conn, f, read=False)
+            return True
+        except RiverError:
+            return False
+    try:
+        mine = {a["target"] for a in sessions.artifacts(conn, None, allowed, agent=who)}
+    except Exception:  # a transcript that cannot be read: no artifact link
+        return None
+    return next((t for t in hits if t in mine), None)
+
+
 def _page_link(conn, r, person):
-    """The page at the thing: the session of the agent that asked or waits on a prompt, else the item."""
-    who = core.origin_agent(conn, None, r["message_id"]) if r["message_id"] is not None else None
+    """The page at the thing: a file or page of the session that the notice names (#4689), the session of the
+    agent that asked or waits on a prompt, else the item."""
+    who = core.origin_agent(conn, r["item_id"], r["message_id"])
     if _is_ai(conn, who):
+        art = _artifact_of(conn, who, r.get("summary"))
+        if art:
+            return page_url(conn, terminal=who, person=person, art=art_id(art))
+    if r["message_id"] is not None and _is_ai(conn, who):
         return page_url(conn, terminal=who, person=person)
     return page_url(conn, r["item_id"], person=person)
 

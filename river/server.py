@@ -2014,6 +2014,49 @@ def local_file(conn, path, read=True):
     return (f.read_bytes() if read else b""), kind
 
 
+def file_check(conn, paths, agent=None):
+    """#4689: for each path that a session's text names, the full path it means and whether the side panel shows
+    it, else why: {path: {target, ok, why}}. A file:// link and a ~ path become full paths; a relative path or a
+    bare name is looked for in the session's folder (its transcript's cwd), then among the files the session
+    wrote or named (the newest one whose path ends with it)."""
+    from . import sessions
+    cwd, named = None, []
+    if agent:
+        _kind, tpath = sessions.transcript(conn, agent)
+        if tpath:
+            try:
+                cwd = sessions.last_cwd(tpath)
+                named = [h["target"] for h in sessions._artifact_hits(tpath) if h["kind"] == "file"]
+            except (OSError, ValueError, EOFError):
+                pass
+    return {p: _check_path(conn, p, cwd, named) for p in list(dict.fromkeys(paths))[:200]}
+
+
+def _check_path(conn, p, cwd, named):
+    import urllib.parse
+    t = str(p or "").strip()
+    if t.lower().startswith("file://"):
+        u = urllib.parse.urlsplit(t)
+        if u.netloc not in ("", "localhost"):
+            return {"target": None, "ok": False, "why": "the link names a file on another computer"}
+        t = urllib.parse.unquote(u.path)
+    if not (t.startswith(("/", "~", "\\\\")) or re.match(r"^[a-zA-Z]:[/\\]", t)):
+        found = None
+        if cwd and Path(cwd, t).is_file():
+            found = str(Path(cwd, t))
+        if not found:
+            end = "/" + re.sub(r"^(\./)+", "", t.replace("\\", "/"))
+            found = next((n for n in reversed(named) if n.replace("\\", "/").endswith(end)), None)
+        if not found:
+            return {"target": None, "ok": False, "why": "no file of this session has this name"}
+        t = found
+    try:
+        local_file(conn, t, read=False)
+        return {"target": t, "ok": True, "why": None}
+    except RiverError as e:
+        return {"target": t, "ok": False, "why": str(e)}
+
+
 # Full screen (#4620): each thing the side panel shows also has an address of its own, /view, for a browser tab of
 # its own. A new tab cannot send the page's token, so the address carries a key: an HMAC of the target and an end
 # time, made with a secret kept in the queue (it outlives a restart of maxpm serve). The key opens that one target

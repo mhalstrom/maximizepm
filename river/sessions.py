@@ -469,6 +469,23 @@ def view(conn, agent, cursor=None, root=None, croot=None):
             "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url")}
 
 
+def last_cwd(path, tail=1024 * 1024):
+    """The folder the session ran in at its last transcript line that names one (Claude Code: cwd; Codex: the
+    cwd of its turn context), or None. For relative paths in its text (#4689)."""
+    text, _s, _e = _read(path, None, tail)
+    for line in reversed(text.splitlines()):
+        if '"cwd"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        p = d.get("payload") if isinstance(d, dict) and isinstance(d.get("payload"), dict) else d
+        if isinstance(p, dict) and isinstance(p.get("cwd"), str):
+            return p["cwd"]
+    return None
+
+
 # The Artifacts tab (#4620): what the sessions made or named that the side panel can show. Files a session wrote
 # (Write, Edit), full file paths, local pages (localhost, 127.0.0.1) and claude.ai artifact links in its own text,
 # the person's turns, and its tool calls (a screenshot's file name). Results of tools are left out: a listing of

@@ -706,26 +706,75 @@ document.getElementById("out").textContent = "RESULT " + JSON.stringify({{chipRi
         self.assertLessEqual(got["chipRight"], got["itemLeft"], got)
 
 
+def drive_page(test, driver, wait=40):
+    """Load the real page at /sessions/ag in headless Chrome with driver (a module) after app.js, and return what
+    the driver posts to /__result. Skips with no Chrome or no local port."""
+    import subprocess
+    import threading
+    from unittest.mock import patch
+    from tests.test_server import _chrome
+    if not _chrome():
+        test.skipTest("no Chrome on this computer")
+    page = server.page_html("/sessions/ag").replace(b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
+    got, result = threading.Event(), {}
+
+    class H(server.Handler):
+        def do_GET(self):
+            if self.path.split("?")[0] == "/sessions/ag":
+                return self._send(200, page, "text/html; charset=utf-8")
+            if self.path == "/__drive.js":
+                return self._send(200, driver.encode(), "text/javascript; charset=utf-8")
+            return super().do_GET()
+
+        def do_POST(self):
+            if self.path == "/__result":
+                result.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                got.set()
+                return self._send(204, b"")
+            return super().do_POST()
+
+    with patch.object(core, "transcripts_root", lambda: test.root):
+        try:
+            httpd = server._Server(("127.0.0.1", 0), H)
+        except PermissionError:
+            test.skipTest("no local port here")
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        chrome = subprocess.Popen([
+            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions", "--window-size=1500,900", f"--user-data-dir={test.dir.name}/browser",
+            f"http://127.0.0.1:{httpd.server_address[1]}/sessions/ag?as=mark"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            ran = got.wait(wait)
+        finally:
+            chrome.kill()
+            chrome.wait()
+            httpd.shutdown()
+            httpd.server_close()
+    test.assertTrue(ran, "browser test did not report")
+    test.assertNotIn("error", result, result.get("error"))
+    return result
+
+
+DRIVE_HEAD = r'''
+const q = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const until = async (f, what) => { for (let i = 0; i < 150; i++) { if (f()) return; await sleep(100); } throw new Error(what); };
+const check = (v, what) => { if (!v) throw new Error(what); };
+const post = o => navigator.sendBeacon("/__result", JSON.stringify(o));
+'''
+
+
 class PanelLists(Base):
     """#4685: the chat stays in sight; Items and Artifacts are lists in the side panel, and an item opens in a tab
     there (from the lists, from a #<id> in the chat), at /sessions/<session>/items/<id>; Edit in the drawer opens
     the drawer. Drives the real page in Chrome."""
 
     def test_items_and_artifacts_open_in_the_side_panel_beside_the_chat(self):
-        import subprocess
-        import threading
-        from unittest.mock import patch
-        from tests.test_server import _chrome
-        if not _chrome():
-            self.skipTest("no Chrome on this computer")
         self.write(claude_line("assistant", [{"type": "text", "text": f"Working on #{self.it} now."}], "end_turn",
                                at="2026-11-08T10:05:00Z"))
-        driver = r'''
-const q = s => document.querySelector(s);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const until = async (f, what) => { for (let i = 0; i < 150; i++) { if (f()) return; await sleep(100); } throw new Error(what); };
-const check = (v, what) => { if (!v) throw new Error(what); };
-const post = o => navigator.sendBeacon("/__result", JSON.stringify(o));
+        driver = DRIVE_HEAD + r'''
 const chat = () => q("#sessBody").offsetParent !== null && q("#sessCol").textContent.includes("I read the header first.");
 try {
   await until(() => q("#sessTitle").textContent === "ag" && chat(), "the chat of ag");
@@ -749,47 +798,65 @@ try {
   post({ path: location.pathname, tabs: [...document.querySelectorAll(".sp-tab")].map(t => t.textContent.replace("✕", "").trim()) });
 } catch (e) { post({ error: String(e.stack || e) }); }
 '''
-        page = server.page_html("/sessions/ag").replace(b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
-        got, result = threading.Event(), {}
-
-        class H(server.Handler):
-            def do_GET(self):
-                if self.path.split("?")[0] == "/sessions/ag":
-                    return self._send(200, page, "text/html; charset=utf-8")
-                if self.path == "/__drive.js":
-                    return self._send(200, driver.encode(), "text/javascript; charset=utf-8")
-                return super().do_GET()
-
-            def do_POST(self):
-                if self.path == "/__result":
-                    result.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-                    got.set()
-                    return self._send(204, b"")
-                return super().do_POST()
-
-        with patch.object(core, "transcripts_root", lambda: self.root):
-            try:
-                httpd = server._Server(("127.0.0.1", 0), H)
-            except PermissionError:
-                self.skipTest("no local port here")
-            httpd.daemon_threads = True
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
-            chrome = subprocess.Popen([
-                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-                "--disable-extensions", "--window-size=1500,900", f"--user-data-dir={self.dir.name}/browser",
-                f"http://127.0.0.1:{httpd.server_address[1]}/sessions/ag?as=mark"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try:
-                ran = got.wait(40)
-            finally:
-                chrome.kill()
-                chrome.wait()
-                httpd.shutdown()
-                httpd.server_close()
-        self.assertTrue(ran, "browser test did not report")
-        self.assertNotIn("error", result, result.get("error"))
+        result = drive_page(self, driver)
         self.assertEqual(result["path"], f"/sessions/ag/items/{self.it}")
         self.assertEqual(result["tabs"], ["Items", "Artifacts", f"◇ #{self.it} header"])
+
+
+class ArtifactLinks(Base):
+    """#4689: the paths and links a session names open in its side panel: in the chat (a relative path, a full
+    path, a file:// link), and in the ! dialog; a refused path says why on hover, an unknown name stays text."""
+
+    def test_links_in_the_chat_and_the_dialog_open_in_the_side_panel(self):
+        proj = Path(self.dir.name) / "proj"
+        (proj / "site" / "img").mkdir(parents=True)
+        (proj / "scratch").mkdir()
+        png = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                            "1f15c4890000000d49444154789c6360f8cfc0f01f0005000201b06a2d"
+                            "6b0000000049454e44ae426082")
+        (proj / "site" / "img" / "board.png").write_bytes(png)
+        (proj / "scratch" / "shot.png").write_bytes(png)
+        core.project_add(self.c, "web", path=str(proj))
+        server._ROOTS["at"] = 0
+        self.addCleanup(server._ROOTS.update, at=0)
+        shot = str(proj / "scratch" / "shot.png")
+        self.write(json.dumps({"type": "user", "cwd": str(proj / "site"), "timestamp": "2026-11-08T10:04:00Z",
+                               "message": {"role": "user", "content": "Show me the pictures"}}) + "\n"
+                   + claude_line("assistant", [{"type": "text", "text": f"See img/board.png, `{shot}`, [the shot](file://{shot}), "
+                                                "/etc/not-here.png and nothing.png. The page: http://localhost:5173/app"}],
+                                 "end_turn", at="2026-11-08T10:05:00Z"))
+        core.item_edit(self.c, self.it, context=f"The picture: {shot}", actor="mark")
+        core.send(self.c, "question", f"Is {shot} right?", "mark", None, None, "ag")
+        driver = DRIVE_HEAD + r'''
+const files = () => [...document.querySelectorAll("#sessCol [data-file]")];
+try {
+  await until(() => q("#sessCol .fpath-no") && !q("#sessCol [data-file]:not([data-checked])"), "the chat's paths checked");
+  const no = q("#sessCol .fpath-no");
+  const plain = [...document.querySelectorAll("#sessCol .fpath, #sessCol .fpath-no")].some(x => x.textContent === "nothing.png");
+  const out = { files: files().map(x => [x.textContent, x.dataset.file]), refused: [no.textContent, no.title], plain };
+  files()[0].click();
+  await until(() => q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("board.png") && q("#spBody img.sp-img"), "board.png in a panel tab");
+  q('#sessions [data-session="ag"] .srow-main').click();
+  await until(() => !q("#waitDlg").classList.contains("hidden") && q("#waitList .wq [data-file][data-checked]"), "the ! dialog's link");
+  q("#waitList .wq [data-file]").click();
+  await until(() => q("#waitDlg").classList.contains("hidden") && q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the dialog's link in the panel");
+  q('#sessCol a[href^="http://localhost:5173"], #sessCol [data-url^="http://localhost:5173"]').click();
+  await until(() => q(".sp-tab.on") && q(".sp-tab.on").title === "http://localhost:5173/app", "the local page in the panel");
+  q("#sessItem [data-open]").click();
+  await until(() => q(".sp-item [data-file][data-checked]"), "the item's path checked");
+  q(".sp-item [data-file]").click();
+  await until(() => q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the item's path in the panel");
+  out.tabs = [...document.querySelectorAll(".sp-tab:not(.sp-tab-list)")].map(t => t.title);
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = drive_page(self, driver)
+        board = str(proj / "site" / "img/board.png")
+        self.assertEqual(got["files"], [["img/board.png", board], [shot, shot], ["the shot", shot]])
+        self.assertEqual(got["refused"][0], "/etc/not-here.png")
+        self.assertIn("cannot show this file: the side panel shows files only from", got["refused"][1])
+        self.assertFalse(got["plain"])  # a name it finds nothing for is plain text
+        self.assertEqual(got["tabs"], [board, shot, "http://localhost:5173/app", f"#{self.it} header"])
 
 
 class SideFiles(Base):
@@ -883,6 +950,56 @@ class SideFiles(Base):
                              (tmp / "-other-project" / "s1" / "scratchpad" / "a.png", "only from")):  # no such project
                 with self.assertRaisesRegex(core.RiverError, why):
                     server.local_file(self.c, str(bad))
+
+    def test_the_paths_a_session_names_resolve_or_say_why(self):
+        # #4689: a full path, a file:// link, a path relative to the session's folder, a bare name of a file it
+        # named, and the reasons for the others.
+        from unittest import mock
+        (self.proj / "site" / "img").mkdir(parents=True)
+        (self.proj / "site" / "img" / "board.png").write_bytes(b"\x89PNG")
+        shot = str(self.proj / "scratch" / "shot.png")
+        board = str(self.proj / "site" / "img" / "board.png")
+        self.write(json.dumps({"type": "user", "cwd": str(self.proj / "site"), "timestamp": "2026-11-09T01:00:00Z",
+                               "message": {"role": "user", "content": "go"}}) + "\n"
+                   + claude_line("assistant", [{"type": "text", "text": f"Saved {board}"}], "end_turn"))
+        with mock.patch.object(core, "transcripts_root", lambda: self.root):
+            got = server.file_check(self.c, [shot, "file://" + shot, "file://localhost" + shot, "img/board.png",
+                                             "board.png", "./img/board.png", "nothing.png",
+                                             str(Path(self.dir.name) / "t.db"), "file://other/x.png", "notes.py"], agent="ag")
+        ok = {p: g["target"] for p, g in got.items() if g["ok"]}
+        self.assertEqual(ok, {shot: shot, "file://" + shot: shot, "file://localhost" + shot: shot,
+                              "img/board.png": str(self.proj / "site" / "img/board.png"), "board.png": board,
+                              "./img/board.png": str(self.proj / "site" / "./img/board.png")})
+        self.assertIn("no file of this session", got["nothing.png"]["why"])
+        self.assertIn("only from the project folders", got[str(Path(self.dir.name) / "t.db")]["why"])
+        self.assertIn("another computer", got["file://other/x.png"]["why"])
+        self.assertIn("no file of this session", got["notes.py"]["why"])  # not in its folder, never named
+        self.assertEqual(self.get("/api/file-check?path=a.png")["code"], 403)  # the page's token
+        out = self.get(f"/api/file-check?path={shot}&token={server.PAGE_TOKEN}")
+        self.assertEqual(out["body"]["paths"][shot]["ok"], True)
+
+    def test_a_notice_about_a_file_of_a_session_opens_it_in_the_side_panel(self):
+        # #4689: notify_open maxpm, a question that names a file the session named: /sessions/<s>/artifacts/<id>.
+        import shutil
+        import subprocess
+        from unittest import mock
+        from river import notify
+        shot = str(self.proj / "scratch" / "shot.png")
+        self.write(claude_line("assistant", [{"type": "text", "text": f"I saved {shot}"}], "end_turn"))
+        q = core.send(self.c, "question", f"Is {shot} right?", "mark", None, None, "ag")["id"]
+        row = {"summary": f"question from ag: Is {shot} right?", "item_id": None, "message_id": q, "human": "mark"}
+        with mock.patch.object(core, "transcripts_root", lambda: self.root):
+            url = notify.compose(self.c, [row])[2]
+            self.assertTrue(url.endswith(f"/sessions/ag/artifacts/{notify.art_id(shot)}?as=mark"), url)
+            other = dict(row, summary="question from ag: which port?")
+            self.assertTrue(notify.compose(self.c, [other])[2].endswith("/sessions/ag?as=mark"))
+        node = shutil.which("node")
+        if node:  # the same id as the page's artId (static/lib.js)
+            lib = (Path(server.__file__).parent / "static" / "lib.js").as_uri()
+            js = subprocess.run([node, "--input-type=module", "-e",
+                                 f"import {{ artId }} from {json.dumps(lib)}; console.log(artId(process.argv[1]))", shot],
+                                capture_output=True, text=True, timeout=30).stdout.strip()
+            self.assertEqual(js, notify.art_id(shot))
 
     def test_the_scratchpad_folder_from_the_environment(self):
         from unittest import mock

@@ -39,6 +39,18 @@ def file(h, path):
         conn.close()
     return h._send(200, got[0], got[1], {"Content-Security-Policy": server.FILE_CSP, "X-Content-Type-Options": "nosniff"})
 
+def file_check(h, path):
+    """#4689: the paths a session's text names, checked for the side panel (with the page's token)."""
+    from urllib.parse import parse_qs, urlsplit
+    q = parse_qs(urlsplit(h.path).query)
+    if not hmac.compare_digest(q.get("token", [""])[0], server.PAGE_TOKEN):
+        return h._send(403, {"error": "this needs the page's token: reload the page"})
+    conn = core.connect()
+    try:
+        return h._send(200, {"paths": server.file_check(conn, q.get("path", []), q.get("agent", [""])[0] or None)})
+    finally:
+        conn.close()
+
 def session_settings(h, path):
     """The Settings dialog of a session (#4625)."""
     from urllib.parse import parse_qs, urlsplit
@@ -106,6 +118,7 @@ def running(h, path):
 GET = [
     (lambda path: path.startswith("/api/upload/"), upload),
     (lambda path: path in ("/api/file", "/api/frame-check"), file),
+    (lambda path: path == "/api/file-check", file_check),
     (lambda path: path == "/api/session-settings", session_settings),
     (lambda path: path == "/api/session-items", session_items),
     (lambda path: path in ("/view", "/api/view-key"), full_screen),
