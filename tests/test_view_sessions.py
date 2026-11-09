@@ -706,7 +706,7 @@ document.getElementById("out").textContent = "RESULT " + JSON.stringify({{chipRi
         self.assertLessEqual(got["chipRight"], got["itemLeft"], got)
 
 
-def drive_page(test, driver, wait=40):
+def drive_page(test, driver, wait=40, routes=None):
     """Load the real page at /sessions/ag in headless Chrome with driver (a module) after app.js, and return what
     the driver posts to /__result. Skips with no Chrome or no local port."""
     import subprocess
@@ -724,6 +724,8 @@ def drive_page(test, driver, wait=40):
                 return self._send(200, page, "text/html; charset=utf-8")
             if self.path == "/__drive.js":
                 return self._send(200, driver.encode(), "text/javascript; charset=utf-8")
+            if self.path in (routes or {}):
+                return self._send(200, routes[self.path]())
             return super().do_GET()
 
         def do_POST(self):
@@ -801,6 +803,51 @@ try {
         result = drive_page(self, driver)
         self.assertEqual(result["path"], f"/sessions/ag/items/{self.it}")
         self.assertEqual(result["tabs"], ["Items", "Artifacts", f"◇ #{self.it} header"])
+
+
+class NewCode(Base):
+    """#4690: an open page loads itself again when the page code changes, once, and not while the person types."""
+
+    def test_page_build_follows_the_files(self):
+        from unittest import mock
+        f = Path(self.dir.name) / "app.js"
+        f.write_text("1")
+        server._PAGE_BUILD["at"] = 0
+        self.addCleanup(server._PAGE_BUILD.update, at=0)
+        with mock.patch.object(server, "_watched", lambda: [f]):
+            first = server.page_build()
+            os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 5_000_000_000))
+            self.assertEqual(server.page_build(), first)  # read again after 2 seconds at most
+            server._PAGE_BUILD["at"] = 0
+            self.assertNotEqual(server.page_build(), first)
+
+    def test_the_page_reloads_once_when_its_code_changes(self):
+        from unittest import mock
+        build = {"n": 1}
+        core.config_set(self.c, "setup_done", "on")  # the setup guide is a dialog: the page would wait for it
+        driver = DRIVE_HEAD + r'''
+const n = +(sessionStorage.getItem("loads") || 0) + 1;
+sessionStorage.setItem("loads", String(n));
+try {
+  await until(() => q("#sessTitle").textContent === "ag", "the page");
+  if (n === 1) {
+    q("#sessText").value = "half a message";
+    await fetch("/__bump");
+    await until(() => q("#newCodeBar"), "the bar while the person types");
+    await sleep(4000);
+    check(+sessionStorage.getItem("loads") === 1, "no reload while the box holds text");
+    q("#sessText").value = "";
+    await sleep(8000);
+    post({ error: "no reload after the box was empty" });
+  } else {
+    await sleep(5000);
+    post({ loads: +sessionStorage.getItem("loads"), bar: !!q("#newCodeBar") });
+  }
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        with mock.patch.object(server, "page_build", lambda: str(build["n"])):
+            got = drive_page(self, driver, routes={"/__bump": lambda: build.update(n=2) or {"ok": True}})
+        self.assertEqual(got, {"loads": 2, "bar": False})
 
 
 class ArtifactLinks(Base):

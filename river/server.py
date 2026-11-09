@@ -90,6 +90,17 @@ def _build_id():
     return str(max((f.stat().st_mtime_ns for f in _watched()), default=0))
 
 
+_PAGE_BUILD = {"at": 0.0, "id": ""}
+
+
+def page_build():
+    """The version of the code the page runs (#4690): _build_id, read again after 2 seconds at most. An open page
+    that sees it change loads itself again, so a pushed change shows without a reload by hand."""
+    if time.time() - _PAGE_BUILD["at"] > 2:
+        _PAGE_BUILD.update(at=time.time(), id=_build_id())
+    return _PAGE_BUILD["id"]
+
+
 def _code_id():
     """Changes when the server's Python code changes (git pull, a commit, an edit). The page files are
     read from disk on every request, but the code runs as it was when the server started."""
@@ -2707,6 +2718,7 @@ class Handler(BaseHTTPRequestHandler):
                 st["goals"] = core.goal_list(conn, include_complete=True)
                 if DEV["on"]:
                     st["dev_build"] = _build_id()
+                st["page_build"] = page_build()
                 st["desktop"] = DESKTOP
                 st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
                 st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes

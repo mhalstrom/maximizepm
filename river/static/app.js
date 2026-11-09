@@ -137,9 +137,37 @@ async function drawerAction(what) {
 }
 
 
+// New page code (#4690): maxpm serve sends the version of the page's files in each state. When it changes, the
+// page loads itself again (the address keeps the tab, the session, the item and the artifact; the side panel's
+// tabs stay in this browser), but not while the person types in a box, a dialog or the drawer is open, or files
+// wait to be sent: then a bar says so, and the page loads again when that ends, or at a click on Reload.
+let pageBuild = null;
+function busyHere() {
+  const a = document.activeElement;
+  if (a && ["INPUT", "TEXTAREA"].includes(a.tagName) && a.id !== "actor") return true;
+  if (document.querySelector('[role="dialog"]:not(.hidden)') || drawer.isOpen()) return true;
+  if ($("#sessText") && $("#sessText").value.trim()) return true;
+  return !!($("#sessFiles") && $("#sessFiles").children.length);
+}
+function newCode(build) {
+  if (!build) return false;
+  if (pageBuild == null) { pageBuild = build; return false; }
+  if (build === pageBuild) return false;
+  if (!busyHere()) { location.reload(); return true; }
+  let bar = $("#newCodeBar");
+  if (!bar) {
+    bar = document.createElement("div"); bar.id = "newCodeBar"; bar.className = "newcode"; bar.setAttribute("role", "status");
+    bar.innerHTML = `MaximizePM was updated. <button class="btn primary" type="button">Reload</button>`;
+    bar.querySelector("button").onclick = () => location.reload();
+    document.body.append(bar);
+  }
+  return false;
+}
+
 async function refresh() {
   const r = await fetch("api/state"); setState(await r.json());
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
+  if (newCode(S.page_build)) return;
   renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); board.renderTakeovers(); projects.renderBlocked(); targets.renderTargets();
   renderRelay();
   renderGraph(false); renderLog(false); needsYou.pollNeedsYou().catch(() => {}); inbox.pollInbox().catch(() => {});
