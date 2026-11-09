@@ -134,8 +134,9 @@ button.srow-it { cursor: pointer; }
 .sp-tab.on { border-color: var(--accent); background: var(--panel); }
 .sp-tab-l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sp-x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; }
-.sp-bar { display: flex; gap: 6px; align-items: center; flex: none; }
-.sp-bar input { flex: 1; min-width: 0; font-size: 12.5px; }
+/* The address keeps at least 100 px: with less room (390) the buttons go to a second line, not over it (#4725). */
+.sp-bar { display: flex; gap: 6px; align-items: center; flex: none; flex-wrap: wrap; }
+.sp-bar input { flex: 1 1 100px; min-width: 0; font-size: 12.5px; }
 .sp-bar .btn { font-size: 12px; white-space: nowrap; }
 .sp-body { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; }
 .sp-frame { flex: 1; width: 100%; border: 0; background: #fff; min-height: 300px; }
