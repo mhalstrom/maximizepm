@@ -326,6 +326,26 @@ class LinkTest(Base):
         side.send_json({"t": "req", "id": "q2", "method": "POST", "body": {"jsonrpc": "2.0", "id": 1}})
         self.assertEqual(side.recv_json()["status"], 400, "only page requests come over the socket")
 
+    def test_the_plan_from_the_relay_shows_in_the_status(self):
+        """#4759: welcome and plan frames carry the relay plan; maxpm connect --status says when it ended or a
+        payment failed, and a relay with no payments (no plan field) is 'none'."""
+        from river import cli
+        self.start()
+        side, _ = self.hello()
+        side.send_json({"t": "welcome", "v": 3, "account": "GitHub account", "plan": "active", "limits": {}})
+        self.until(lambda: relay.STATE.get("plan") == "active", "the plan from welcome")
+        side.send_json({"t": "plan", "plan": "past_due"})
+        self.until(lambda: relay.STATE.get("plan") == "past_due", "the plan frame")
+        st = {**relay.status(), "state": "connected"}
+        self.assertIn("relay payment failed: update your card at", cli.relay_line(st))
+        side.send_json({"t": "plan", "plan": "ended"})
+        self.until(lambda: relay.STATE.get("plan") == "ended", "plan ended")
+        st = {**relay.status(), "state": "connected"}
+        self.assertIn(f"relay plan ended: renew it at {st['url']}/account", cli.relay_line(st))
+        side.send_json({"t": "plan", "plan": None})
+        self.until(lambda: relay.STATE.get("plan") == "none", "no plan")
+        self.assertEqual(relay.plan_note({**relay.status(), "state": "connected"}), "")
+
     def test_bodies_come_and_go_in_parts(self):
         """A request in parts reaches maxpm serve whole; the answer goes back in parts of the welcome's size, as
         river reads it; a new address from the relay is kept."""

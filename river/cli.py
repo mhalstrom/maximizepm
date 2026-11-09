@@ -2282,11 +2282,13 @@ def dispatch(conn, a, actor):
 
 def relay_line(st):
     """One line about the relay connection, from relay.saved_status()."""
+    from . import relay
     if not st["configured"]:
         return "Relay: not connected (maxpm connect)"
     who = f" as {st['account']}" if st.get("account") else ""
     if st["state"] == "connected":
-        return f"Relay: connected{who} ({st['url']})"
+        note = relay.plan_note(st)  # a lapsed relay plan (#4759)
+        return f"Relay: connected{who} ({st['url']})" + (f"; {note}" if note else "")
     if st["state"] == "serve not running":
         return f"Relay: signed in{who}, not connected: maxpm serve is not running"
     err = f": {st['error']}" if st.get("error") else ""

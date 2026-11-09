@@ -67,6 +67,7 @@ select, input, textarea { background: var(--bg); border: 1px solid var(--line); 
 button.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 button.btn:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }  /* a lapsed relay plan (#4759) */
 main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; }
 @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } }

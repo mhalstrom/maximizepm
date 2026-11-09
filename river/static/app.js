@@ -694,8 +694,13 @@ function renderRelay() {
     b.title = "Click again to disconnect this computer from the relay";
   } else {
     const who = r.account ? ` as ${r.account}` : "";
-    b.textContent = r.state === "connected" ? "Relay · on" : "Relay · off";
+    // A lapsed relay plan (#4759): ended carries nothing until it is renewed; past_due still works.
+    const ended = r.state === "connected" && r.plan === "ended", failed = r.state === "connected" && r.plan === "past_due";
+    b.textContent = ended ? "Relay · plan ended" : r.state === "connected" ? "Relay · on" : "Relay · off";
+    b.classList.toggle("warn", ended || failed);
     b.title = (r.state === "connected" ? `Connected${who} to ${r.url}` : `Not connected${who}: ${r.error || r.state}`)
+      + (ended ? `\nYour relay plan ended: renew it at ${r.url}/account. Until then the relay carries nothing.` : "")
+      + (failed ? `\nYour relay payment failed: update your card at ${r.url}/account.` : "")
       + `\nFrom anywhere: ${r.tunnel || r.url}\nClick to disconnect this computer.`;
   }
 }

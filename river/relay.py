@@ -381,6 +381,23 @@ def _set_state(**fields) -> None:
             pass
 
 
+def _plan(frame: dict) -> str:
+    """The relay plan in a welcome or plan frame (#4759): trialing, active, canceled, past_due, ended, or none
+    (no plan, or a relay with no payments). 'none' and not None: _set_state drops a None field."""
+    plan = frame.get("plan")
+    return plan if plan in ("trialing", "active", "canceled", "past_due", "ended") else "none"
+
+
+def plan_note(st: dict) -> str:
+    """A few words on the relay plan for maxpm connect --status and the page, or '' when there is nothing to do."""
+    acct = f"{st.get('url') or ''}/account" if st.get("url") else "the relay account page"
+    if st.get("plan") == "ended":
+        return f"relay plan ended: renew it at {acct}; until then the relay carries nothing"
+    if st.get("plan") == "past_due":
+        return f"relay payment failed: update your card at {acct}"
+    return ""
+
+
 def status() -> dict:
     """The relay connection as maxpm serve sees it now (for the page)."""
     with _STATE_LOCK:
@@ -410,6 +427,7 @@ def saved_status() -> dict:
         alive = core.pid_alive(st.get("pid")) if st.get("pid") else False
         out["state"] = st.get("state", "off") if alive else "serve not running"
         out["error"] = st.get("error") if alive else None
+        out["plan"] = st.get("plan") if alive else None
         out["since"] = st.get("at")
     elif cfg:
         out["state"] = "serve not running"
@@ -563,7 +581,8 @@ class Link:
             limits = frame.get("limits") if isinstance(frame.get("limits"), dict) else {}
             part = limits.get("part")
             self.part = min(PART, part) if isinstance(part, int) and part >= 1024 else PART
-            _set_state(state="connected", account=frame.get("account") or cfg.get("account"), error=None)
+            _set_state(state="connected", account=frame.get("account") or cfg.get("account"), error=None,
+                       plan=_plan(frame))
             self.loop(ws, cfg)
         finally:
             ws.close()
@@ -615,6 +634,8 @@ class Link:
                 self.cancelled.add(frame.get("id"))
             elif t == "tunnel":
                 cfg = self.retunnel(cfg, frame.get("tunnel"))
+            elif t == "plan":
+                _set_state(plan=_plan(frame))
             elif t == "bye":
                 raise Bye(frame.get("reason") or "no reason")
 
