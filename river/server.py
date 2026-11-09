@@ -1972,7 +1972,8 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
 
 
 # The side panel of the Sessions tab (#4619) shows local files: read only, with the page's token, and only under
-# the project folders, their git worktrees, and the uploads of sessions. Each file comes with a sandbox policy, so an
+# the project folders, their git worktrees, the Claude Code scratchpads of their sessions, and the uploads of
+# sessions (#4683). Each file comes with a sandbox policy, so an
 # HTML file runs in an origin of its own and can never act as the page (its POST has Origin null: refused).
 FILE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
               ".webp": "image/webp", ".svg": "image/svg+xml", ".pdf": "application/pdf",
@@ -2005,6 +2006,36 @@ def file_roots(conn):
     return _ROOTS["roots"]
 
 
+CLAUDE_TMP = None  # tests: the folder of Claude Code's session scratchpads (claude_tmps)
+
+
+def claude_tmps():
+    """The folders where Claude Code keeps each session's scratchpad: /tmp/claude-<uid>/<project slug>/<session id>/
+    scratchpad (on macOS /private/tmp), and CLAUDE_CODE_TMPDIR: a session sees the claude-<uid> folder itself there,
+    a person may set its parent. None on Windows."""
+    if CLAUDE_TMP:
+        return [Path(CLAUDE_TMP)]
+    if not hasattr(os, "getuid"):
+        return []
+    own = f"claude-{os.getuid()}"
+    env = os.environ.get("CLAUDE_CODE_TMPDIR")
+    bases = [Path("/tmp") / own] + ([Path(env) if Path(env).name == own else Path(env) / own] if env else [])
+    return list(dict.fromkeys(b.resolve() for b in bases))
+
+
+def _scratchpad_of(conn, f):
+    """The scratchpad folder that holds f, when it is the scratchpad of a Claude Code session in a project folder
+    or one of its worktrees (#4683): the screenshots and pages a session makes for the person go there. Else None."""
+    base = next((b for b in claude_tmps() if b in f.parents), None)
+    if base is None:
+        return None
+    rel = f.relative_to(base).parts
+    if len(rel) < 4 or rel[2] != "scratchpad":
+        return None
+    slugs = {re.sub(r"[^A-Za-z0-9]", "-", str(r)) for r in file_roots(conn)}
+    return base.joinpath(*rel[:3]) if rel[0] in slugs else None
+
+
 def local_file(conn, path, read=True):
     """(bytes, type) of a local file for the side panel; RiverError when the path is outside file_roots, hidden,
     not a file, of a type it does not show, or too large."""
@@ -2014,10 +2045,17 @@ def local_file(conn, path, read=True):
     if not f.is_absolute():
         raise RiverError("the side panel shows a file by its full path")
     f = f.resolve()
-    if any(part.startswith(".") for part in f.parts[1:]) and uploads_dir().resolve() not in f.parents:
+    root = next((r for r in file_roots(conn) if r == f or r in f.parents), None) or _scratchpad_of(conn, f)
+    hidden = [i for i, part in enumerate(f.parts) if i and part.startswith(".")]
+    # One hidden folder is allowed: .playwright-mcp right under a project folder, where the Playwright MCP saves
+    # the screenshots a session takes (#4683).
+    if root and hidden == [len(root.parts)] and f.parts[hidden[0]] == ".playwright-mcp":
+        hidden = []
+    if hidden and uploads_dir().resolve() not in f.parents:
         raise RiverError("the side panel shows no hidden files")
-    if not any(root == f or root in f.parents for root in file_roots(conn)):
-        raise RiverError("the side panel shows files only from the project folders, their worktrees, and uploads")
+    if root is None:
+        raise RiverError("the side panel shows files only from the project folders, their worktrees, their sessions' "
+                         "scratchpads, and uploads")
     kind = FILE_TYPES.get(f.suffix.lower())
     if kind is None:
         raise RiverError(f"the side panel does not show {f.suffix or 'this kind of'} files")

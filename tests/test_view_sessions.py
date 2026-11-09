@@ -768,6 +768,46 @@ class SideFiles(Base):
         self.assertEqual(self.get("/api/view-key?target=javascript:x&token=" + server.PAGE_TOKEN)["code"], 409)
         self.assertEqual(self.get(f"/api/view-key?target={quote(shot)}")["code"], 403)  # no token
 
+    def test_screenshots_in_playwright_mcp_and_the_session_scratchpad(self):
+        # #4683: the two places where a session's screenshots land; every other hidden folder stays refused.
+        import re
+        from unittest import mock
+        shots = self.proj / ".playwright-mcp"
+        shots.mkdir()
+        (shots / "home.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (self.proj / "sub" / ".playwright-mcp").mkdir(parents=True)
+        (self.proj / "sub" / ".playwright-mcp" / "x.png").write_bytes(b"\x89PNG")
+        (shots / ".git").mkdir()
+        (shots / ".git" / "y.png").write_bytes(b"\x89PNG")
+        tmp = Path(self.dir.name) / "claude-501"
+        slug = re.sub(r"[^A-Za-z0-9]", "-", str(self.proj.resolve()))
+        pad = tmp / slug / "c3a5e255-f33c" / "scratchpad"
+        (pad / "shots").mkdir(parents=True)
+        (pad / "shots" / "index.html").write_text("<p>")
+        (tmp / slug / "c3a5e255-f33c" / "tasks").mkdir()
+        (tmp / slug / "c3a5e255-f33c" / "tasks" / "out.txt").write_text("log")
+        (tmp / "-other-project" / "s1" / "scratchpad").mkdir(parents=True)
+        (tmp / "-other-project" / "s1" / "scratchpad" / "a.png").write_bytes(b"\x89PNG")
+        with mock.patch.object(server, "CLAUDE_TMP", str(tmp.resolve())):
+            self.assertEqual(server.local_file(self.c, str(shots / "home.png"))[1], "image/png")
+            self.assertEqual(server.local_file(self.c, str(pad / "shots" / "index.html"))[1], "text/html; charset=utf-8")
+            for bad, why in ((self.proj / "sub" / ".playwright-mcp" / "x.png", "hidden"),  # only right under a project
+                             (shots / ".git" / "y.png", "hidden"),
+                             (tmp / slug / "c3a5e255-f33c" / "tasks" / "out.txt", "only from"),  # not its scratchpad
+                             (tmp / "-other-project" / "s1" / "scratchpad" / "a.png", "only from")):  # no such project
+                with self.assertRaisesRegex(core.RiverError, why):
+                    server.local_file(self.c, str(bad))
+
+    def test_the_scratchpad_folder_from_the_environment(self):
+        from unittest import mock
+        if not hasattr(os, "getuid"):
+            self.skipTest("no scratchpads on Windows")
+        own = f"claude-{os.getuid()}"
+        d = Path(self.dir.name).resolve()
+        for env, want in ((str(d / own), d / own), (str(d), d / own)):  # a session's own value, or its parent
+            with mock.patch.dict(os.environ, {"CLAUDE_CODE_TMPDIR": env}):
+                self.assertEqual(server.claude_tmps(), [(Path("/tmp") / own).resolve(), want])
+
     def test_the_artifacts_of_a_session(self):
         shot = str(self.proj / "scratch" / "shot.png")
         self.write(claude_line("assistant", [{"type": "tool_use", "id": "w1", "name": "Write",
