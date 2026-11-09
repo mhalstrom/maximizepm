@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from river import cli, core, mcp, relay
 from river.core import RiverError
@@ -312,8 +313,8 @@ class LinkTest(Base):
     def test_says_hello_and_answers_page_requests(self):
         self.start()
         side, hello = self.hello()
-        self.assertEqual(hello, {"t": "hello", "v": 1, "river": relay.__version__, "host": "mac", "replace": False})
-        side.send_json({"t": "welcome", "v": 1, "account": "Alice", "limits": {}})
+        self.assertEqual(hello, {"t": "hello", "v": 2, "river": relay.__version__, "host": "mac", "replace": False})
+        side.send_json({"t": "welcome", "v": 2, "account": "Alice", "limits": {}})
         self.until(lambda: relay.STATE.get("state") == "connected", "connected")
         # No maxpm serve port in this test: the answer says so (PageRelay checks a real one).
         side.send_json({"t": "req", "id": "q1", "kind": "http", "method": "GET", "path": "/", "headers": {},
@@ -323,12 +324,59 @@ class LinkTest(Base):
         side.send_json({"t": "req", "id": "q2", "method": "POST", "body": {"jsonrpc": "2.0", "id": 1}})
         self.assertEqual(side.recv_json()["status"], 400, "only page requests come over the socket")
 
+    def test_bodies_come_and_go_in_parts(self):
+        """A request in parts reaches maxpm serve whole; a large answer goes back in parts of the welcome's size."""
+        got = []
+
+        def echo(frame, body):
+            got.append((frame["headers"], body))
+            return {"t": "res", "id": frame["id"], "status": 200, "headers": {}, "body": body[::-1]}
+        with mock.patch.object(relay, "handle_page", echo):
+            self.start()
+            side, _ = self.hello()
+            side.send_json({"t": "welcome", "v": 2, "account": "Alice", "limits": {"part": 1024}})
+            self.until(lambda: relay.STATE.get("state") == "connected", "connected")
+            body = bytes(range(256)) * 10  # 2560 bytes, not UTF-8
+            chunks = [body[:1024], body[1024:2048], body[2048:]]
+            side.send_json({"t": "req", "id": "q1", "kind": "http", "method": "POST", "path": "/api/action",
+                            "headers": {"x-maxpm-token": "t"}, "parts": 3,
+                            "body_b64": base64.b64encode(chunks[0]).decode()})
+            for i, c in enumerate(chunks[1:], 1):
+                side.send_json({"t": "part", "id": "q1", "i": i, "body_b64": base64.b64encode(c).decode()})
+            res = side.recv_json()
+            self.assertEqual((res["t"], res["id"], res["status"], res["parts"]), ("res", "q1", 200, 3))
+            back = [base64.b64decode(res["body_b64"])]
+            for i in (1, 2):
+                part = side.recv_json()
+                self.assertEqual((part["t"], part["id"], part["i"]), ("part", "q1", i))
+                back.append(base64.b64decode(part["body_b64"]))
+            self.assertEqual(got, [({"x-maxpm-token": "t"}, body)])
+            self.assertEqual(b"".join(back), body[::-1])
+            self.assertTrue(all(len(b) <= 1024 for b in back))
+
+            # A part out of order, and a request over MAX_REQUEST: refused, and nothing reaches maxpm serve.
+            side.send_json({"t": "req", "id": "q2", "kind": "http", "method": "POST", "path": "/", "headers": {},
+                            "parts": 2, "body_b64": ""})
+            side.send_json({"t": "part", "id": "q2", "i": 2, "body_b64": ""})
+            self.assertEqual(side.recv_json()["status"], 400)
+            side.send_json({"t": "req", "id": "q3", "kind": "http", "method": "POST", "path": "/", "headers": {},
+                            "parts": relay.MAX_REQUEST, "body_b64": ""})
+            self.assertEqual(side.recv_json()["status"], 413)
+            self.assertEqual(len(got), 1)
+
+    def test_another_protocol_says_to_update(self):
+        self.start()
+        side, _ = self.hello()
+        side.send_json({"t": "bye", "reason": "protocol 3 needed: update MaximizePM"})
+        self.until(lambda: "protocol 3 needed" in (relay.STATE.get("error") or ""), "the error")
+        self.assertIn("this MaximizePM speaks protocol 2", relay.STATE["error"])
+
     def test_pings_and_reconnects_after_the_socket_drops(self):
         relay.PING_EVERY, old = 0.1, relay.PING_EVERY
         self.addCleanup(setattr, relay, "PING_EVERY", old)
         self.start()
         side, _ = self.hello()
-        side.send_json({"t": "welcome", "v": 1, "account": "Alice", "limits": {}})
+        side.send_json({"t": "welcome", "v": 2, "account": "Alice", "limits": {}})
         side.conn.settimeout(2)
         pings = 0
         while pings < 2:  # river pings every PING_EVERY
@@ -340,13 +388,13 @@ class LinkTest(Base):
         self.until(lambda: relay.STATE.get("state") == "waiting", "waiting")
         again, hello = self.hello()  # the backoff starts at about a second
         self.assertEqual(hello["t"], "hello")
-        again.send_json({"t": "welcome", "v": 1, "account": "Alice", "limits": {}})
+        again.send_json({"t": "welcome", "v": 2, "account": "Alice", "limits": {}})
         self.until(lambda: relay.STATE.get("state") == "connected", "connected again")
 
     def test_stops_trying_when_the_relay_revokes_the_token(self):
         self.start()
         side, _ = self.hello()
-        side.send_json({"t": "welcome", "v": 1, "account": "Alice", "limits": {}})
+        side.send_json({"t": "welcome", "v": 2, "account": "Alice", "limits": {}})
         side.send_json({"t": "bye", "reason": "revoked"})
         self.until(lambda: relay.STATE.get("state") == "error", "error")
         self.assertIn("run maxpm connect", relay.STATE["error"])
@@ -363,14 +411,14 @@ class LinkTest(Base):
         self.start(replace=True)
         side, hello = self.hello()
         self.assertTrue(hello["replace"])
-        side.send_json({"t": "welcome", "v": 1, "account": "Alice", "limits": {}})
+        side.send_json({"t": "welcome", "v": 2, "account": "Alice", "limits": {}})
         self.until(lambda: relay.STATE.get("state") == "connected", "connected")
         self.assertNotIn("replace", relay.load(), "replace is for one connection")
 
     def test_off_ends_the_connection(self):
         self.start()
         side, _ = self.hello()
-        side.send_json({"t": "welcome", "v": 1, "account": "Alice", "limits": {}})
+        side.send_json({"t": "welcome", "v": 2, "account": "Alice", "limits": {}})
         self.until(lambda: relay.STATE.get("state") == "connected", "connected")
         os.remove(relay.config_path())
         self.until(lambda: relay.STATE.get("state") == "off", "off")
@@ -435,9 +483,9 @@ class PageRelay(Base):
         frame = {"t": "req", "id": "p1", "kind": "http", "method": method, "path": path,
                  "headers": {"content-type": "application/json", "origin": "https://evil.example"},
                  "body_b64": base64.b64encode(json.dumps(body).encode()).decode() if body is not None else ""}
-        res = relay.handle_page(frame)
+        res = relay.handle_page(frame, base64.b64decode(frame["body_b64"]))
         self.assertEqual(res["id"], "p1")
-        return res["status"], res["headers"], base64.b64decode(res["body_b64"])
+        return res["status"], res["headers"], res["body"]
 
     def test_the_same_page_and_api(self):
         status, headers, html = self.page("GET", "/")
@@ -465,6 +513,32 @@ class PageRelay(Base):
         urllib.request.urlopen(req).close()
         self.assertEqual(conn.execute("SELECT actor FROM events ORDER BY rowid DESC").fetchone()[0], "mark",
                          "a wrong secret marks nothing")
+
+    def test_the_page_token_passes(self):
+        """Typing into a session through the relay: the page's token header reaches maxpm serve (#4710)."""
+        def action(op, token=None):
+            frame = {"t": "req", "id": "p1", "kind": "http", "method": "POST", "path": "/api/action",
+                     "headers": {"content-type": "application/json", **({"x-maxpm-token": token} if token else {})}}
+            res = relay.handle_page(frame, json.dumps({"op": op, "args": {"agent": "nobody", "text": "hi"},
+                                                       "actor": "mark"}).encode())
+            return res["status"], json.loads(res["body"])
+        status, out = action("session_send")
+        self.assertEqual(status, 403)
+        self.assertIn("token", out["error"])
+        token = json.loads(self.page("GET", "/api/token")[2])["token"]
+        status, out = action("session_send", token)
+        self.assertEqual(status, 409, out)
+        self.assertIn("does not run in a tmux pane", out["error"], "past the token check")
+
+    def test_a_large_answer_goes_in_parts(self):
+        answer = {"t": "res", "id": "p1", "status": 200, "headers": {}, "body": os.urandom(10 * 1024 * 1024 + 3)}
+        frames = relay.answer_frames(answer)
+        self.assertEqual(len(frames), 11)
+        self.assertEqual((frames[0]["t"], frames[0]["parts"]), ("res", 11))
+        self.assertEqual([f["i"] for f in frames[1:]], list(range(1, 11)))
+        self.assertEqual(b"".join(base64.b64decode(f["body_b64"]) for f in frames), answer["body"])
+        empty = relay.answer_frames({"t": "res", "id": "p2", "status": 204, "headers": {}, "body": b""})
+        self.assertEqual(empty, [{"t": "res", "id": "p2", "status": 204, "headers": {}, "body_b64": "", "parts": 1}])
 
     def test_bad_frames_and_no_serve(self):
         self.assertEqual(self.page("GET", "api/state")[0], 400)

@@ -7,10 +7,14 @@ the page at https://relay.maximizepm.com/app/: each page request comes over the 
 to its own maxpm serve on 127.0.0.1 with a header that marks it as relayed, so the page and its actions are the
 same as here, and the actions are recorded as <name>@relay. Standard library only.
 
-Protocol 1 (frames are JSON text):
+Protocol 2 (frames are JSON text):
   river -> relay  hello {v, river, host, replace}
-  relay -> river  welcome {v, account, limits}   bye {reason}
-  relay -> river  req {id, kind: "http", method, path, headers, body_b64}  -> res {id, status, headers, body_b64}
+  relay -> river  welcome {v, account, limits: {max_request, max_answer, part, timeout}}   bye {reason}
+  relay -> river  req {id, kind: "http", method, path, headers, body_b64, parts}  -> res {id, status, headers, body_b64, parts}
+  either way      part {id, i, body_b64}   (i = 1 .. parts - 1, in order)
+A body goes as base64 of its bytes, never as text. A body larger than one part (PART bytes) goes in parts: the
+req or res frame carries the first part and the count, and part frames carry the rest. Protocol 1 had no parts and
+no token header; each side refuses the other version with bye "protocol <n> needed".
 """
 
 from __future__ import annotations
@@ -37,14 +41,20 @@ from . import __version__, core
 from .core import RiverError
 
 DEFAULT_URL = "https://relay.maximizepm.com"
-PROTOCOL = 1
+PROTOCOL = 2
 PING_EVERY = 30  # seconds between WebSocket pings; the relay closes a socket silent for 90 s
 SILENT_LIMIT = 90  # no frame and no pong from the relay for this long: the connection is dead
 BACKOFF_MAX = 60
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-MAX_PAGE = 4 * 1024 * 1024  # the largest page answer river sends (the relay takes 8 MB frames)
-PAGE_REQUEST_HEADERS = ("content-type", "accept", "if-none-match", "if-modified-since")
+PART = 1024 * 1024  # bytes of a body in one frame (the relay takes frames of 2 MB: a part in base64 fits)
+MAX_ANSWER = 64 * 1024 * 1024  # the largest page answer river sends (a picture or a PDF in the side panel)
+# The largest page request river takes: the page sends at most 5 files of 10 MB with one message (server.py
+# UPLOAD_MAX, UPLOADS_PER_SEND), as base64 in JSON.
+MAX_REQUEST = 72 * 1024 * 1024
+INCOMPLETE_LIMIT = 120  # seconds: a request whose parts stop coming is forgotten
+# X-Maxpm-Token: the page's token (server.PAGE_TOKEN), for the actions that type into a session.
+PAGE_REQUEST_HEADERS = ("content-type", "accept", "if-none-match", "if-modified-since", "x-maxpm-token")
 PAGE_ANSWER_HEADERS = ("content-type", "cache-control", "location", "content-disposition", "etag", "last-modified")
 # The header that marks a page request as relayed. Only this process knows the value, so no other program on
 # this computer can make maxpm serve record its actions as <name>@relay.
@@ -398,6 +408,7 @@ class Link:
         self.wait = sleep or stop.wait
         self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="maxpm-relay-call")
         self.refused_token = None  # a token the relay refused: wait for a new maxpm connect
+        self.part = PART  # bytes of a body in one frame: the relay's welcome may ask for less
 
     def run(self) -> None:
         _set_state(state="starting")  # relay-state.json now names this maxpm serve (its pid)
@@ -432,7 +443,10 @@ class Link:
                 if reason.startswith("already connected"):
                     pause = BACKOFF_MAX  # another computer holds the account; look again each minute
                 elif reason.startswith("protocol"):
-                    pause = 10 * BACKOFF_MAX  # this MaximizePM is too old for the relay: update it
+                    # This MaximizePM and the relay speak other versions: update MaximizePM (or the relay is older).
+                    _set_state(state="waiting", error=f"the relay ended the connection: {reason} (this MaximizePM "
+                                                      f"speaks protocol {PROTOCOL}); update MaximizePM")
+                    pause = 10 * BACKOFF_MAX
             except (OSError, WebSocketError, ValueError) as e:
                 _set_state(state="waiting", error=str(e) or e.__class__.__name__)
             if self.stop.is_set():
@@ -471,6 +485,9 @@ class Link:
             if cfg.get("replace"):
                 cfg = {k: v for k, v in cfg.items() if k != "replace"}  # replace is for one connection
                 save(cfg)
+            limits = frame.get("limits") if isinstance(frame.get("limits"), dict) else {}
+            part = limits.get("part")
+            self.part = min(PART, part) if isinstance(part, int) and part >= 1024 else PART
             _set_state(state="connected", account=frame.get("account") or cfg.get("account"), error=None)
             self.loop(ws, cfg)
         finally:
@@ -479,6 +496,7 @@ class Link:
     def loop(self, ws: WebSocket, cfg: dict) -> None:
         ws.sock.settimeout(1.0)
         last_ping = time.monotonic()
+        incoming: dict = {}  # id -> a request whose parts are still coming
         wall, mono = time.time(), time.monotonic()
         while not self.stop.is_set():
             now_wall, now_mono = time.time(), time.monotonic()
@@ -493,6 +511,8 @@ class Link:
                 last_ping = now_mono
             if now_mono - ws.last_heard > SILENT_LIMIT:
                 raise WebSocketError("no answer from the relay for 90 s")
+            for rid in [rid for rid, r in incoming.items() if now_mono - r["at"] > INCOMPLETE_LIMIT]:
+                del incoming[rid]
             try:
                 kind, data = ws.recv()
             except socket.timeout:
@@ -501,16 +521,77 @@ class Link:
                 raise WebSocketError(f"the relay closed the connection ({data[0]} {data[1]})".strip())
             frame = json.loads(data)
             if frame.get("t") == "req":
-                self.pool.submit(self.serve_request, ws, frame)
+                self.request(ws, frame, incoming)
+            elif frame.get("t") == "part":
+                self.request_part(ws, frame, incoming)
             elif frame.get("t") == "bye":
                 raise Bye(frame.get("reason") or "no reason")
 
-    def serve_request(self, ws: WebSocket, frame: dict) -> None:
-        answer = handle_page(frame)
+    def request(self, ws: WebSocket, frame: dict, incoming: dict) -> None:
+        """A page request: whole, or the first of its parts."""
+        rid, parts = frame.get("id"), frame.get("parts", 1)
+        if not isinstance(parts, int) or parts < 1 or not isinstance(rid, str):
+            return self.pool.submit(self.send_answer, ws, fail(rid, 400, "bad page request"))
         try:
-            ws.send_text(json.dumps(answer))
+            first = base64.b64decode(frame.get("body_b64") or "", validate=True)
+        except ValueError:
+            return self.pool.submit(self.send_answer, ws, fail(rid, 400, "the body is not base64"))
+        if parts == 1:
+            return self.pool.submit(self.serve_request, ws, frame, first)
+        if (parts - 1) * 1024 > MAX_REQUEST or len(first) > MAX_REQUEST:
+            return self.pool.submit(self.send_answer, ws, fail(rid, 413, f"a request is at most "
+                                                                          f"{MAX_REQUEST // (1024 * 1024)} MB"))
+        incoming[rid] = {"frame": frame, "chunks": [first], "size": len(first), "parts": parts,
+                         "at": time.monotonic()}
+
+    def request_part(self, ws: WebSocket, frame: dict, incoming: dict) -> None:
+        r = incoming.get(frame.get("id"))
+        if r is None:
+            return  # unknown, refused, or forgotten: the relay answers the page for it
+        rid = frame["id"]
+        try:
+            chunk = base64.b64decode(frame.get("body_b64") or "", validate=True)
+        except ValueError:
+            chunk = None
+        if chunk is None or frame.get("i") != len(r["chunks"]):
+            del incoming[rid]
+            return self.pool.submit(self.send_answer, ws, fail(rid, 400, "the parts of the request came out of order"))
+        r["chunks"].append(chunk)
+        r["size"] += len(chunk)
+        r["at"] = time.monotonic()
+        if r["size"] > MAX_REQUEST:
+            del incoming[rid]
+            return self.pool.submit(self.send_answer, ws, fail(rid, 413, f"a request is at most "
+                                                                          f"{MAX_REQUEST // (1024 * 1024)} MB"))
+        if len(r["chunks"]) == r["parts"]:
+            del incoming[rid]
+            self.pool.submit(self.serve_request, ws, r["frame"], b"".join(r["chunks"]))
+
+    def serve_request(self, ws: WebSocket, frame: dict, body: bytes) -> None:
+        self.send_answer(ws, handle_page(frame, body))
+
+    def send_answer(self, ws: WebSocket, answer: dict) -> None:
+        try:
+            for out in answer_frames(answer, self.part):
+                ws.send_text(json.dumps(out))
         except OSError:
             pass  # the socket is gone; the relay answers the app for it
+
+
+def answer_frames(answer: dict, part: int = PART) -> list[dict]:
+    """A page answer (handle_page) as frames: res with the first part and the count, then part frames."""
+    body = answer.get("body") or b""
+    chunks = [body[at:at + part] for at in range(0, len(body), part)] or [b""]
+    head = {k: v for k, v in answer.items() if k != "body"}
+    frames = [{**head, "body_b64": base64.b64encode(chunks[0]).decode(), "parts": len(chunks)}]
+    frames += [{"t": "part", "id": answer.get("id"), "i": i, "body_b64": base64.b64encode(c).decode()}
+               for i, c in enumerate(chunks[1:], 1)]
+    return frames
+
+
+def fail(rid, status: int, text: str) -> dict:
+    return {"t": "res", "id": rid, "status": status, "headers": {"content-type": "text/plain; charset=utf-8"},
+            "body": text.encode()}
 
 
 def page_request(headers) -> bool:
@@ -519,34 +600,30 @@ def page_request(headers) -> bool:
     return bool(value) and hmac.compare_digest(value, PAGE_SECRET)
 
 
-def handle_page(frame: dict) -> dict:
-    """A page request from the relay -> its answer, from this computer's maxpm serve."""
+def handle_page(frame: dict, body: bytes = b"") -> dict:
+    """A page request from the relay (its whole body, as bytes) -> its answer from this computer's maxpm serve:
+    {t: res, id, status, headers, body (bytes)}. answer_frames makes the frames of it."""
     rid = frame.get("id")
-
-    def fail(status, text):
-        return {"t": "res", "id": rid, "status": status, "headers": {"content-type": "text/plain; charset=utf-8"},
-                "body_b64": base64.b64encode(text.encode()).decode()}
-
     path, method = frame.get("path") or "/", frame.get("method") or "GET"
     if frame.get("kind") != "http" or not path.startswith("/") or method not in ("GET", "HEAD", "POST"):
-        return fail(400, "bad page request")
+        return fail(rid, 400, "bad page request")
     if not PAGE_PORT["port"]:
-        return fail(502, "maxpm serve has no port")
-    headers = {k: v for k, v in (frame.get("headers") or {}).items() if k.lower() in PAGE_REQUEST_HEADERS}
+        return fail(rid, 502, "maxpm serve has no port")
+    headers = {k: v for k, v in (frame.get("headers") or {}).items()
+               if isinstance(k, str) and isinstance(v, str) and k.lower() in PAGE_REQUEST_HEADERS}
     headers["X-Maxpm-Relay"] = PAGE_SECRET
-    body = base64.b64decode(frame.get("body_b64") or "")
     conn = http.client.HTTPConnection("127.0.0.1", PAGE_PORT["port"], timeout=55)
     try:
         conn.request(method, path, body=body or None, headers=headers)
         res = conn.getresponse()
-        data = res.read(MAX_PAGE + 1)
-        if len(data) > MAX_PAGE:
-            return fail(502, "the answer is larger than the relay takes")
+        data = res.read(MAX_ANSWER + 1)
+        if len(data) > MAX_ANSWER:
+            return fail(rid, 502, f"the answer is larger than the relay carries ({MAX_ANSWER // (1024 * 1024)} MB)")
         return {"t": "res", "id": rid, "status": res.status,
                 "headers": {k.lower(): v for k, v in res.getheaders() if k.lower() in PAGE_ANSWER_HEADERS},
-                "body_b64": base64.b64encode(data).decode()}
+                "body": data}
     except OSError as e:
-        return fail(502, f"maxpm serve did not answer: {e}")
+        return fail(rid, 502, f"maxpm serve did not answer: {e}")
     finally:
         conn.close()
 
