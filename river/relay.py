@@ -22,7 +22,8 @@ ping (#4860): when the welcome's limits name ping (seconds), river sends the tex
 interval, and the relay answers {"t":"pong"}. Cloudflare answers WebSocket pings at its edge, so the relay's River
 object never sees them, and Cloudflare keeps a silent socket open for ten minutes and more: the text ping is how the
 relay finds a computer that hangs or went away without a close. hello says ping: true, so the relay watches only a
-river that sends it.
+river that sends it. The relay decides the interval: a welcome with no ping (or one out of APP_PING_MIN to
+APP_PING_MAX) gets no text ping, only the WebSocket pings that river sends to find a dead connection itself.
 """
 
 from __future__ import annotations
@@ -50,7 +51,10 @@ from .core import RiverError
 
 DEFAULT_URL = "https://relay.maximizepm.com"
 PROTOCOL = 3
-PING_EVERY = 30  # seconds between WebSocket pings; the Node relay closes a socket silent for 90 s
+# Seconds between WebSocket pings (#4881). They stay with the text ping: Cloudflare's edge answers them without a wake
+# of the River object, so river hears a pong while no request comes, and finds a dead connection by SILENT_LIMIT
+# whatever the welcome says.
+PING_EVERY = 30
 APP_PING = '{"t":"ping"}'  # the text ping (#4860): exactly these bytes, which the River object answers by itself
 APP_PING_MIN, APP_PING_MAX = 5, 300  # the seconds of a welcome's limits.ping that river takes
 SILENT_LIMIT = 90  # no frame and no pong from the relay for this long: the connection is dead

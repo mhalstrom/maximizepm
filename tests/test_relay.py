@@ -487,7 +487,7 @@ class LinkTest(Base):
                 side.send_json({"t": "pong"})  # the River object's answer: river takes it as a frame heard
         self.assertEqual(texts, [b'{"t":"ping"}'] * 2, "exactly the bytes that the relay answers by itself")
         self.assertEqual(relay.STATE.get("state"), "connected")
-        # A relay whose welcome names no ping (the Node relay) gets none.
+        # A welcome that names no ping gets none: the relay decides the interval (#4881).
         side.conn.close()
         again, _ = self.hello()
         again.send_json({"t": "welcome", "v": 3, "account": "Alice", "limits": {}})
