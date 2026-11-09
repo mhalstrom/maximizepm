@@ -1,7 +1,8 @@
 /* The page on a phone and a tablet (#4885). It loads after the other style files. Each rule is inside a width rule:
-   the phone below 760 px, the tablet up to 1023 px; at 1024 px and up the desktop layout stays as it is.
+   up to 1023 px (a tablet, and a phone too), and below 760 px (a phone only); at 1024 px and up the desktop layout
+   stays as it is.
    Safari on iOS zooms into a text field whose font is under 16 px when a person taps it, and stays zoomed: the page
-   then looks cut at the right edge. So each field on a phone has 16 px text. */
+   then looks cut at the right edge. So each field on a phone or a tablet has 16 px text. */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 #hdrMore, #sessBack { display: none; }
 
@@ -11,11 +12,11 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .sess-layout > .sess-panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(var(--sp-w, 480px), 100vw); z-index: 12;
     border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.25); padding-top: calc(10px + env(safe-area-inset-top)); }
   .sp-grip { display: none; }
-}
 
-@media (max-width: 759px) {
-  input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { font-size: 16px; }
-  .msg .actions input, .cv-acts input, .sp-bar input, .sp-find input { font-size: 16px; }
+  /* !important: some views set a smaller size by an id (the drawer, the side panel, the table filters). */
+  input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { font-size: 16px !important; }
+  input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=hidden]), select { min-height: 40px; }
+  input[type=checkbox], input[type=radio] { width: 22px; height: 22px; }
 
   /* The header: the logo and the tabs in one row (the tabs scroll sideways), then the search with a ⋯ button that
      shows the other controls (theme, relay, update, You are). "You are" shows by itself until a name is chosen. */
@@ -32,13 +33,31 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   header.more > label.sub, header.no-actor > label.sub { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
   header > label.sub select { flex: 1; min-width: 0; }
 
+  /* Tap targets of 44 px. A select draws its own box (WebKit keeps a native select at its own small height), with
+     an arrow on the right. */
+  select { -webkit-appearance: none; appearance: none; padding-right: 28px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238a94a0'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; }
+  .sp-tab-l { min-height: 34px; }
+  button.btn { min-height: 44px; padding: 6px 12px; }
+  a.btn { min-height: 44px; display: inline-flex; align-items: center; }
+  .iconbtn { min-width: 44px; min-height: 44px; }
+  .pz-tools .btn { min-width: 44px; }
+  .tool summary { min-height: 32px; align-items: center; }
+  [data-hook] { display: inline-block; padding: 10px 4px; white-space: nowrap; }
+}
+
+@media (max-width: 759px) {
   /* Room at the bottom, so Safari's bar never covers the last rows. */
   main { padding: 12px 10px calc(72px + env(safe-area-inset-bottom)); }
   .panel { padding: 10px 12px; margin-bottom: 12px; }
 
-  /* Tap targets of 44 px. */
-  button.btn { min-height: 44px; padding: 6px 12px; }
-  .iconbtn { min-width: 44px; min-height: 44px; }
+  /* Long words (a path, a link) wrap inside their card. */
+  .pdesc, .panel, #drawer { overflow-wrap: anywhere; }
+  #drawer textarea { min-height: 96px; }
+
+  /* The rows of the search: one column (sessions.css gives .srow, a session row, two). */
+  #searchDlg .srow { display: block; border-width: 1px 0 0; border-radius: 0; background: none; }
 
   /* A panel's controls go under its title, on a line of their own. */
   .panel h2 > .spacer { flex: 1 1 100%; height: 0; }
@@ -82,6 +101,9 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .sess-layout.phone-chat > .sess-side { display: none; }
   .sess-layout:not(.phone-chat) > .sess-main { display: none; }
   .sess-layout > .sess-side .slist { max-height: none; }
+  /* A session row: its name and state, then its item under them, not in a narrow right column. */
+  .slist .srow, .slist-mgr .srow { grid-template-columns: minmax(0, 1fr); }
+  .slist .srow-it, .slist-mgr .srow-it { border-left: 0; border-top: 1px solid var(--line); }
   .sess-layout.phone-chat > .sess-main { height: auto; min-height: 0; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
   #sessBack { display: inline-flex; align-items: center; min-height: 40px; padding: 4px 10px 4px 6px; white-space: nowrap; flex: none; }
   /* The head: ‹ Sessions, the name, Settings and Open session in one line; the state under it. */
@@ -113,7 +135,6 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .sess-layout > .sess-panel { left: 0; width: 100vw; height: auto; border-left: 0; padding: calc(8px + env(safe-area-inset-top)) 10px calc(8px + env(safe-area-inset-bottom)); }
   .sp-bar #spClose { order: -1; min-width: 44px; min-height: 44px; font-size: 16px; }
   .sp-bar .btn { min-height: 40px; }
-  .sp-tab { min-height: 36px; }
 
   /* Dialogs: the whole width, from the top. */
   #setup, #stopDlg, #waitDlg, #setDlg { padding: 12px 8px; }
