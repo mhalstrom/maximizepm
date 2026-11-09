@@ -5,6 +5,7 @@ import { doerChip, projectChip, countChip } from "../components/chip.js";
 import { nyCard, goalCard, projCard } from "../components/card.js";
 import { itemTableRows, itemTableColumns } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
+import { clampHtml, fitClamps } from "../components/clamp.js";
 import { S, tab, goalSel, inGoal, nav } from "../page.js";
 
 // Projects folded closed on the Projects tab, remembered in this browser.
@@ -31,7 +32,7 @@ export function renderProjects() {
     return projCard(p, isClosed, `<div class="pmeta">${meta.map(m => `<span>${m}</span>`).join("")}</div>
       <div class="pcounts">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${countChip(open.length, "open", "c-p")}${closedN == null ? "" : countChip(closedN, "done", "c-p")}${backlog.length ? countChip(backlog.length, "in backlog", "c-p") : ""}${pg.length ? countChip(pg.length, pg.length === 1 ? "goal" : "goals", "c-p") : ""}</div>
       <div class="pbody">
-        <div class="pdesc">${p.notes ? esc(p.notes) : '<span class="muted">No description.</span>'} <span class="link" data-describe="${esc(p.name)}">edit</span></div>
+        <div class="pdesc">${clampHtml("proj:" + p.name, p.notes ? esc(p.notes) : '<span class="muted">No description.</span>', ` <span class="link" data-describe="${esc(p.name)}">edit</span>`)}</div>
         <div class="pwho">${who.length ? "Working here now: " + who.map(n => `<b>${esc(n)}</b>`).join(", ") : "Nobody works here now."}</div>
         <div class="psec">Goals</div>
         <div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<span class="link" style="font-size:12px;align-self:center" data-addgoal="${esc(p.name)}">${pg.length ? "+ goal" : "No goals yet. + Add a goal"}</span></div>
@@ -43,6 +44,7 @@ export function renderProjects() {
   const box = $("#projects"), full = html || `<div class="muted">No projects yet.</div>`;
   if (box.dataset.sig !== full) {
     box.innerHTML = full; box.dataset.sig = full;
+    fitClamps(box);
     box.querySelectorAll("[data-ptable]").forEach(ph => {
       const name = ph.dataset.ptable, known = projTables.get(name);
       if (known) ph.replaceWith(known.el);

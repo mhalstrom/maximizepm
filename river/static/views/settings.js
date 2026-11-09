@@ -2,6 +2,7 @@
 import { $, esc, toast, act } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { makeTable } from "../components/table.js";
+import { fitClamps } from "../components/clamp.js";
 import { S } from "../page.js";
 
 // Settings: one row per key; an override chip's × removes that override.
@@ -38,3 +39,6 @@ $("#setGo").addEventListener("click", async () => {
   if (scope !== "global") { if (!nm) return toast("Give the project, agent, or item", true); args[scope] = scope === "item" ? +nm : nm; }
   await act("config_set", args).then(() => toast("Saved")).catch(() => {});
 });
+
+// The help above the table folds to four lines on a phone (#4889).
+fitClamps($("#tab-settings"));
