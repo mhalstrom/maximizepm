@@ -36,6 +36,16 @@ export function makePanZoom(el) {
     v = { k, x: (W - size.w * k) / 2, y: Math.max(PAD, (H - size.h * k) / 2) };
     apply();
   }
+  // A new drawing shows whole (Fit). In a narrow box (a phone, #4890) Fit can make the text too small to read: there
+  // it starts at a readable size (READ), at the top, from the left when it is wider than the box; Fit shows it all.
+  const READ = 0.8, NARROW = 600;
+  function start() {
+    const W = el.clientWidth;
+    if (W >= NARROW || fitK() >= READ) return fit();
+    const k = clampK(READ);
+    v = { k, x: size.w * k <= W - 2 * PAD ? (W - size.w * k) / 2 : PAD, y: PAD };
+    apply();
+  }
 
   el.addEventListener("wheel", (e) => {
     e.preventDefault();
@@ -93,7 +103,7 @@ export function makePanZoom(el) {
         svg.style.maxWidth = "none"; svg.setAttribute("width", w); svg.setAttribute("height", h);
         size = { w, h };
       }
-      if (newKey !== key) { key = newKey; fit(); }
+      if (newKey !== key) { key = newKey; start(); }
       return stage;
     },
     fit,

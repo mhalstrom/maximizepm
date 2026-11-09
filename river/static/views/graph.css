@@ -24,3 +24,8 @@
   .graph-side h2 { display: none; }
   .gcard { flex: 0 0 180px; margin-bottom: 0; }
 }
+/* A phone (#4890): narrower cards, so part of the next one shows, and the row fades at its right edge: it scrolls. */
+@media (max-width: 759px) {
+  .graph-side { -webkit-mask-image: linear-gradient(to right, #000 82%, transparent); mask-image: linear-gradient(to right, #000 82%, transparent); padding-right: 40px; }
+  .gcard { flex-basis: 148px; }
+}
