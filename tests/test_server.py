@@ -3148,9 +3148,11 @@ class PageUpdate(unittest.TestCase):
         self.assertIn("commit or stash", str(e.exception))
 
     def test_stale_when_the_code_changes_after_start(self):
-        self.assertFalse(server.code_stale())
+        # BOOT_CODE comes from the import; another session may commit to this checkout while the tests run (#4775).
         old = server.BOOT_CODE
         try:
+            server.BOOT_CODE = server._code_id()
+            self.assertFalse(server.code_stale())
             server.BOOT_CODE = "0"
             self.assertTrue(server.code_stale())
         finally:
