@@ -52,7 +52,10 @@ function inboxCell(m) {
 function renderInbox() {
   const me = actor();
   $("#inboxTitle").textContent = `Inbox for ${me}` + (IB.length ? ` (${IB.filter(m => m.unread || (["question", "offer"].includes(m.kind) && m.state === "open")).length})` : "");
-  fillSelect("#sendTo", S.agents.map(a => a.name).filter(n => n !== me), false);
+  // Who a message can go to: people, and agents whose session has not ended (or that still hold or own something);
+  // not every agent that ever registered (727 on a long-used queue, #4729).
+  const reachable = a => a.kind === "human" || !["stopped", "gone"].includes(a.state) || a.holds.length || (a.owns || []).length;
+  fillSelect("#sendTo", S.agents.filter(reachable).map(a => a.name).filter(n => n !== me), false);
   const ib = $("#inbox");
   if (ib.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // do not wipe what they type
   // maxHeight: the table scrolls inside itself, so in the one-column layout (narrow screens) the inbox no longer
