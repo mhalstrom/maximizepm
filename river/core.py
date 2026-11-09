@@ -6541,14 +6541,15 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
             found[row_id] = why
 
     if gone:
-        for r in conn.execute(f"SELECT id FROM items WHERE id IN (SELECT item_id FROM deps WHERE blocked_by=?) "
-                              f"AND {open_} ORDER BY id", (cid, *at)):
+        for r in conn.execute(f"SELECT id FROM items WHERE id IN (SELECT item_id FROM deps WHERE blocked_by=? "
+                              f"AND kind<>'conflicts') AND {open_} ORDER BY id", (cid, *at)):
             add(r["id"], f"waits on #{cid}, which is {what}")
         for r in conn.execute(f"SELECT id FROM items WHERE found_during=? AND {open_} ORDER BY id", (cid, *at)):
             add(r["id"], f"found during #{cid}, which is {what}")
     elif status == "done":
-        for r in conn.execute(f"SELECT id FROM items WHERE id IN (SELECT blocked_by FROM deps WHERE item_id=?) "
-                              f"AND {open_} ORDER BY id", (cid, *at)):
+        # A conflicts link (two items that touch the same files) is no wait: such an item stays needed (#4849).
+        for r in conn.execute(f"SELECT id FROM items WHERE id IN (SELECT blocked_by FROM deps WHERE item_id=? "
+                              f"AND kind<>'conflicts') AND {open_} ORDER BY id", (cid, *at)):
             add(r["id"], f"#{cid} is done although it waited on this")
     if _REVERT_RE.search(f"{it['title']} {output or ''}"):
         for n in sorted({int(x) for x in _REF_RE.findall(f"{it['title']} {output or ''}")} - {cid}):
@@ -6559,8 +6560,8 @@ def _close_check(conn, it, status, output=None, note=None, merged_into=None, bef
     rows = _text_rows(conn, f"i.kind='work' AND i.status IN {OPEN_STATES} AND i.backlog_at IS NULL AND i.id<>? "
                             "AND (i.project_id=? OR (p.path IS NOT NULL AND p.path=?))" + (
                                 " AND i.created_at<=?" if before else ""), (cid, it["project_id"], path, *at))
-    next_steps = {r[0] for r in conn.execute("SELECT item_id FROM deps WHERE blocked_by=? UNION SELECT id FROM items "
-                                             "WHERE found_during=?", (cid, cid))} if not gone else set()
+    next_steps = {r[0] for r in conn.execute("SELECT item_id FROM deps WHERE blocked_by=? AND kind<>'conflicts' "
+                                             "UNION SELECT id FROM items WHERE found_during=?", (cid, cid))} if not gone else set()
     words_min = setting(conn, "similar_min", project_id=it["project_id"])
     kept = {r[0] for r in conn.execute("SELECT DISTINCT item_id FROM events WHERE change LIKE 'kept after the close of #%'")}
     added = {r["item_id"]: (r["actor"], parse_iso(r["at"])) for r in conn.execute(

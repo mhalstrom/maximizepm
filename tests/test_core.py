@@ -6119,6 +6119,24 @@ class CloseCheck(TextQueue):
         res = core.done(self.c, x, "archived by hand", "w1", force="done by hand")
         self.assertIn("although it waited on this", self.listed(res)[pre])
 
+    def test_a_conflicts_link_is_no_wait(self):
+        """#4849: parts of one chain touch the same files, so they get conflicts links both ways; the done of an early
+        part listed every later one as 'done although it waited on this'."""
+        one = self.add("Relay part one: the scaffold", touches=["relay"])
+        two = self.add("Relay part two: the account site", touches=["relay"], after=[one])
+        other = self.add("Relay pages: the buy page", touches=["relay"])
+        kinds = {(r["item_id"], r["blocked_by"]): r["kind"] for r in self.c.execute("SELECT * FROM deps")}
+        self.assertIn("conflicts", kinds.values())  # the links that the old check read as waits
+        res = self.finish(one, "built")
+        for later in (two, other):
+            self.assertNotIn("although it waited on this", self.listed(res).get(later, ""))
+        # A real wait is still listed when the done is forced.
+        pre = self.add("Relay part zero: the design", touches=["docs"])
+        x = self.add("Relay part three: the socket", touches=["relay"], after=[pre])
+        res = core.done(self.c, x, "built by hand", "w1", force="done by hand")
+        self.assertIn("although it waited on this", self.listed(res)[pre])
+        self.assertNotIn("although it waited on this", self.listed(res).get(two, ""))
+
     def test_a_revert_lists_the_persons_look_at_the_reverted_work(self):
         x = self.add("Show the trust prompt in a new folder")
         look = self.add("Look at the trust prompt in a new folder", doer="human", found_during=x)
