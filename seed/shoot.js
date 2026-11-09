@@ -69,8 +69,13 @@ async function main() {
   try { other = tmux("list-sessions"); } catch (e) { /* no server: right */ }
   if (other !== null) throw new Error("a tmux server answers on the socket of the pictures: " + other);
 
+  // The window is never shown (it would take the focus), so the page would read document.hidden as true, and the
+  // Sessions tab reads nothing while the page is hidden: the preload says the page is visible.
+  const preload = path.join(tmp, "visible.js");
+  fs.writeFileSync(preload, `Object.defineProperty(document, "hidden", { get: () => false });
+Object.defineProperty(document, "visibilityState", { get: () => "visible" });\n`);
   const win = new BrowserWindow({ width: W, height: H, show: false, paintWhenInitiallyHidden: true,
-    webPreferences: { backgroundThrottling: false } });
+    webPreferences: { backgroundThrottling: false, contextIsolation: false, sandbox: false, preload } });
   const js = (code) => win.webContents.executeJavaScript(code);
   let url;
   const ready = async () => { for (let i = 0; i < 50; i++) { try { await win.loadURL(url); return; } catch (e) { await sleep(200); } } };
@@ -83,11 +88,22 @@ async function main() {
     await win.loadURL(new URL(path || "", url).href);
     await until(`!!document.querySelector("#work .row, #work .card, #work > *")`);
     await sleep(1200);
-    // Paths: the throwaway HOME reads as ~, like on a person's own computer.
-    await js(`(() => { const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
-      while ((n = w.nextNode())) n.nodeValue = n.nodeValue.split(${JSON.stringify(home)}).join("~").split(${JSON.stringify(os.homedir())}).join("~"); })()`);
+    await tidyPaths();
   }
+  // Paths: the throwaway HOME reads as ~, like on a person's own computer. Again before each picture: the chat,
+  // the side panel and the lists load after the page.
+  const tidyPaths = () => js(`(() => { const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
+      while ((n = w.nextNode())) n.nodeValue = n.nodeValue.split(${JSON.stringify(home)}).join("~").split(${JSON.stringify(os.homedir())}).join("~");
+      // A field the page fills again (the side panel's address) gets ~ too: the value setter of this page does it.
+      if (!window.__tidyValue) {
+        window.__tidyValue = true;
+        const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+        Object.defineProperty(HTMLInputElement.prototype, "value", { configurable: true, get() { return d.get.call(this); },
+          set(v) { d.set.call(this, String(v).split(${JSON.stringify(home)}).join("~")); } });
+      }
+      for (const e of document.querySelectorAll("input, textarea")) e.value = e.value.split(${JSON.stringify(home)}).join("~"); })()`);
   async function shot(name, selector, pad = 0) {
+    await tidyPaths();  // first: the text with ~ is what the box measures
     let rect;
     if (selector) {
       const r = await js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null;
@@ -97,12 +113,13 @@ async function main() {
       rect = { x: Math.max(0, Math.floor(r.x - pad)), y: Math.max(0, Math.floor(r.y - pad)),
         width: Math.ceil(r.width + 2 * pad), height: Math.ceil(Math.min(r.height + 2 * pad, H)) };
     }
+    await tidyPaths();  // again: a field the page filled after the box was measured
     const img = await win.webContents.capturePage(rect);
     fs.writeFileSync(path.join(out, name), img.toPNG());
     console.log("wrote", name, JSON.stringify(img.getSize()));
   }
   const frames = [];
-  async function frame() { const img = await win.webContents.capturePage(); frames.push(img.toPNG()); }
+  async function frame() { await tidyPaths(); const img = await win.webContents.capturePage(); frames.push(img.toPNG()); }
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
   // A terminal window with this HTML as its text.
   const termPage = (inner, font = "13px/1.45") => "data:text/html;charset=utf-8," + encodeURIComponent(`<!doctype html><body style="margin:0;background:#1e1f24">
@@ -180,10 +197,17 @@ while True:
     tmux("set-option", "-p", "-t", pane, "@maxpm_agent", a.name);
   });
   console.log(river("view"));  // side by side, as a person's maxpm view leaves them
+  // The Sessions and Artifacts tabs: the projects' folder, and what two of the agents said and wrote there.
+  for (const p of ["website", "backend"]) river("--as", "alex", "project", "path", p, cwd);
+  execFileSync("python3", [path.join(repo, "seed", "transcripts.py"), cwd], { env, stdio: "ignore" });
 
   // The prompt alert comes after a short wait here.
   river("config", "set", "prompt_wait", "1s");
   river("config", "set", "notify_interval", "2s");
+  // The stand-in agent commands do nothing: a session that serve starts by itself (the review of the release, a fresh
+  // session for an answer) would show in the Sessions tab as one that never connected.
+  river("config", "set", "auto_review", "off");
+  river("config", "set", "fresh_sessions", "off");
   const s2 = await serve(env); url = s2.url; await ready();
   await open("?as=alex");
   if (!await until(`/waits on a prompt/.test((document.querySelector("#needsYou") || {}).textContent || "")`, 150)) throw new Error("no prompt alert on the page");
@@ -196,6 +220,30 @@ while True:
     await sleep(300);
     await shot(`needs-you-${theme}.png`, "#needsYouPanel", 8);
   }
+  // The Sessions tab: the ! dialog opens by itself for the prompt that waits in web-agent's terminal; then its
+  // chat, with a file it wrote open in the side panel.
+  const dlgOpen = () => until(`!document.querySelector("#waitDlg").classList.contains("hidden")`);
+  await open("sessions/web-agent?as=alex");
+  if (!await dlgOpen()) {
+    console.error(await js(`fetch("api/sessions").then(r => r.json()).then(j => JSON.stringify({ hidden: document.hidden, path: location.pathname,
+      title: document.querySelector("#sessTitle").textContent, dialogs: [...document.querySelectorAll('#setup:not(.hidden), [id$="Dlg"]:not(.hidden)')].map(e => e.id),
+      sessions: j.sessions.map(s => [s.name, s.state, (s.waiting || []).map(w => w.kind + ":" + (w.sig || "").slice(0, 8))]) }))`));
+    throw new Error("the ! dialog did not open");
+  }
+  await sleep(400); await shot("sessions-prompt.png");
+  const photos = path.join(cwd, "docs", "product-photos.md");
+  for (const theme of ["light", "dark"]) {
+    await open("sessions/web-agent?as=alex", theme);
+    await dlgOpen(); await js(`document.querySelector("#waitDismiss").click()`);
+    await js(`import("/components/sidePanel.js").then(m => m.openInPanel(${JSON.stringify(photos)}))`);
+    await until(`(document.querySelector("#spBody .sp-md") || {}).textContent > ""`);
+    await sleep(600); await shot(`sessions-${theme}.png`);
+  }
+  await open("artifacts?as=alex");
+  await until(`document.querySelectorAll("#artList .art-row").length >= 4`);
+  await shot("artifacts.png", "#tab-artifacts", 8);
+  await open("done?as=alex"); await sleep(600); await shot("done.png", "#tab-done", 8);
+  await open("settings?as=alex"); await sleep(600); await shot("settings.png");  // the window: the tab is taller
   await open("capacity?as=alex"); await shot("parallel-work.png", "#tab-capacity", 8);
   await open("graph?as=alex"); await sleep(1500); await shot("graph.png", "#tab-graph", 8);
   await open("targets?as=alex"); await shot("release.png", "#tab-targets", 8);
@@ -213,9 +261,11 @@ while True:
     await shot(`terminal-${theme}.png`, "#termDlg .box", 16);
   }
 
-  // The tour: Board, an agent's Terminal, an item, Projects, Graph, Targets, Done; two frames each.
-  for (const h of ["?as=alex", "?as=alex&terminal=web-agent", "?as=alex&item=4", "projects?as=alex", "graph?as=alex", "targets?as=alex", "done?as=alex"]) {
+  // The tour: Board, an agent's Terminal, an item, Sessions, Artifacts, Projects, Graph, Targets, Done; two frames each.
+  for (const h of ["?as=alex", "?as=alex&terminal=web-agent", "?as=alex&item=4", "sessions/api-agent?as=alex", "artifacts?as=alex",
+                   "projects?as=alex", "graph?as=alex", "targets?as=alex", "done?as=alex"]) {
     await open(h); if (h.includes("graph")) await sleep(1500);
+    if (h.startsWith("sessions")) await sleep(1500);
     if (h.includes("terminal")) { await termOpen(); await sleep(400); }
     await frame(); await frame();
   }

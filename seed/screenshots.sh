@@ -46,4 +46,13 @@ $R project target backend storefront >/dev/null
 $R --as api-agent target own storefront >/dev/null
 $R config set review on >/dev/null
 $R --as alex ship 1 >/dev/null
+# Finished work for the Done tab, by an agent that holds nothing else.
+$R register build-agent --note "build and CI work" >/dev/null
+id() { $R --json --as alex add "$@" --doer ai | sed -n 's/^  "id": \([0-9]*\),*$/\1/p'; }
+i=$(id website "Fix the cart total rounding")
+$R --as build-agent claim "$i" >/dev/null
+$R --as build-agent done "$i" --output "web/cart/total.ts: round once, at the end; 4 tests" >/dev/null
+i=$(id backend "Set up the staging database")
+$R --as build-agent claim "$i" >/dev/null
+$R --as build-agent done "$i" --output "staging Postgres on Fly.io; migrations run on deploy" >/dev/null
 echo "Loaded. Try: maxpm serve --open, maxpm status, maxpm go --project website"
