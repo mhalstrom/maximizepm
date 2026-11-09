@@ -10,7 +10,7 @@ that marks it as relayed, so the site and its actions are the same as here, and 
 
 Protocol 3 (frames are JSON text):
   river -> relay  hello {v, river, host, replace, ping: true}
-  relay -> river  welcome {v, account, tunnel, limits: {max_request, part, timeout, ping}}   bye {reason}   tunnel {tunnel}
+  relay -> river  welcome {v, account, tunnel, limits: {max_request, part, timeout, ping, gzip}}   bye {reason}   tunnel {tunnel}
   relay -> river  req {id, kind: "http", method, path, headers: [[name, value], ...], body_b64, more}
                   part {id, i, body_b64, more}   cancel {id}
   river -> relay  res {id, status, headers: [[name, value], ...], body_b64, more}   part {id, i, body_b64, more}
@@ -43,6 +43,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
@@ -66,6 +67,11 @@ PART = 1024 * 1024  # bytes of a body in one frame (the relay takes frames of 2 
 # UPLOAD_MAX, UPLOADS_PER_SEND), as base64 in JSON.
 MAX_REQUEST = 72 * 1024 * 1024
 INCOMPLETE_LIMIT = 120  # seconds: a request whose parts stop coming is forgotten
+# gzip (#4895): when the welcome's limits say gzip, river gzips a text answer that maxpm serve sent plain, for a
+# browser that accepts gzip. The page's first state is about 2 MB of JSON, and the river-relay socket is the slow
+# leg (the Mac's upload); gzip makes it about a tenth. The relay passes the gzipped bytes to the browser as they are.
+GZIP_TYPES = ("application/json", "text/", "application/javascript", "image/svg+xml", "application/xml")
+GZIP_MIN = 1024  # bytes: a shorter answer is sent as it is
 # Headers of one hop: never passed on (content-length: http.client sets it from the body). An answer keeps its
 # content-length: the relay passes the exact body.
 HOP_HEADERS = frozenset(("connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization",
@@ -503,6 +509,7 @@ class Link:
         self.refused_token = None  # a token the relay refused: wait for a new maxpm connect
         self.part = PART  # bytes of a body in one frame: the relay's welcome may ask for less
         self.app_ping = None  # seconds between text pings, when the relay's welcome asks for them (#4860)
+        self.gzip = False  # the welcome's limits.gzip: the relay passes a gzipped answer as it is (#4895)
         self.cancelled: set = set()  # ids of requests whose browser went away (cancel)
         self.awake = Awake()
 
@@ -597,6 +604,7 @@ class Link:
             ping = limits.get("ping")
             self.app_ping = (ping if isinstance(ping, (int, float)) and not isinstance(ping, bool)
                              and APP_PING_MIN <= ping <= APP_PING_MAX else None)
+            self.gzip = limits.get("gzip") is True
             _set_state(state="connected", account=frame.get("account") or cfg.get("account"), error=None,
                        plan=_plan(frame))
             self.loop(ws, cfg)
@@ -702,7 +710,7 @@ class Link:
                 raise BrokenPipeError("the browser went away")
             ws.send_text(json.dumps(out))
         try:
-            serve_page(frame, body, send, self.part)
+            serve_page(frame, body, send, self.part, self.gzip)
         except OSError:
             pass  # the socket is gone, or the browser went away; the relay answers for it
         finally:
@@ -766,9 +774,32 @@ def answer_headers(pairs, local: str) -> list:
     return out
 
 
-def serve_page(frame: dict, body: bytes, send, part: int = PART) -> None:
+def accepts_gzip(pairs) -> bool:
+    """Whether a request's Accept-Encoding takes gzip (not with q=0)."""
+    for pair in pairs if isinstance(pairs, list) else []:
+        if isinstance(pair, list) and len(pair) == 2 and str(pair[0]).lower() == "accept-encoding":
+            for token in str(pair[1]).split(","):
+                name, _, params = token.strip().partition(";")
+                if name.strip().lower() in ("gzip", "*") and params.replace(" ", "").lower() not in ("q=0", "q=0.0", "q=0.00", "q=0.000"):
+                    return True
+    return False
+
+
+def _gzip_answer(status: int, headers: list) -> bool:
+    """Whether river may gzip this answer: a text type, no encoding of its own, a body that is not tiny."""
+    h = {k.lower(): v for k, v in headers}
+    if status in (204, 304) or status < 200 or "content-encoding" in h:
+        return False
+    if not h.get("content-type", "").lower().startswith(GZIP_TYPES):
+        return False
+    size = h.get("content-length")
+    return not (size and size.isdigit() and int(size) < GZIP_MIN)
+
+
+def serve_page(frame: dict, body: bytes, send, part: int = PART, gzip: bool = False) -> None:
     """One request from the relay (its whole body, as bytes): maxpm serve answers it, and send(frame) gets the
-    answer's frames as river reads it, res first, then part frames."""
+    answer's frames as river reads it, res first, then part frames. With gzip (the welcome said so, #4895) a text
+    answer goes gzipped when the browser accepts gzip."""
     rid = frame.get("id")
     path, method = frame.get("path") or "/", frame.get("method") or "GET"
     if frame.get("kind") != "http" or not path.startswith("/") or not method.isalpha() or not method.isupper():
@@ -787,15 +818,36 @@ def serve_page(frame: dict, body: bytes, send, part: int = PART) -> None:
             conn.putheader("Content-Length", str(len(body)))
         conn.endheaders(body or None)
         res = conn.getresponse()
-        head = {"t": "res", "id": rid, "status": res.status, "headers": answer_headers(res.getheaders(), local)}
+        headers = answer_headers(res.getheaders(), local)
     except OSError as e:
         conn.close()
         return send(fail(rid, 502, f"maxpm serve did not answer: {e}"))
+    z = None
+    if gzip and method != "HEAD" and accepts_gzip(frame.get("headers")) and _gzip_answer(res.status, headers):
+        z = zlib.compressobj(6, zlib.DEFLATED, 31)  # 31: the gzip format
+        vary = [v for k, v in headers if k.lower() == "vary"]
+        headers = [[k, v] for k, v in headers if k.lower() not in ("content-length", "vary")]
+        headers += [["Content-Encoding", "gzip"], ["Vary", ", ".join(vary + ["Accept-Encoding"])]]
+    head = {"t": "res", "id": rid, "status": res.status, "headers": headers}
+
+    def blocks():
+        """The body as river sends it, in blocks of part bytes (the last one shorter): as read, or gzipped as
+        read. The gzip output is gathered first, so a body that fits in one part goes in one frame."""
+        pending = b""
+        while True:
+            raw = res.read(part)
+            pending += (z.compress(raw) if raw else z.flush()) if z else raw
+            while len(pending) >= part or (not raw and pending):
+                yield pending[:part]
+                pending = pending[part:]
+            if not raw:
+                return
     try:
-        chunk = b"" if method == "HEAD" else res.read(part)
+        gen = blocks() if method != "HEAD" else iter(())
+        chunk = next(gen, b"")
         i = 0
         while True:
-            nxt = res.read(part) if chunk else b""
+            nxt = next(gen, b"") if chunk else b""
             data = base64.b64encode(chunk).decode()
             send({**head, "body_b64": data, "more": bool(nxt)} if i == 0 else
                  {"t": "part", "id": rid, "i": i, "body_b64": data, "more": bool(nxt)})

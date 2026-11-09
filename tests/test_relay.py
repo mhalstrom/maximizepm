@@ -359,10 +359,11 @@ class LinkTest(Base):
     def test_bodies_come_and_go_in_parts(self):
         """A request in parts reaches maxpm serve whole; the answer goes back in parts of the welcome's size, as
         river reads it; a new address from the relay is kept."""
-        got = []
+        got, gzips = [], []
 
-        def echo(frame, body, send, part):
+        def echo(frame, body, send, part, gzip=False):
             got.append((frame["headers"], body))
+            gzips.append(gzip)
             data = body[::-1]
             chunks = [data[at:at + part] for at in range(0, len(data), part)]
             for i, c in enumerate(chunks):
@@ -393,6 +394,7 @@ class LinkTest(Base):
                 self.assertEqual((part["t"], part["id"], part["i"], part["more"]), ("part", "q1", i, i < 2))
                 back.append(base64.b64decode(part["body_b64"]))
             self.assertEqual(got, [([["X-Maxpm-Token", "t"]], body)])
+            self.assertEqual(gzips, [False], "a welcome with no limits.gzip: river sends answers as they are (#4895)")
             self.assertEqual(b"".join(back), body[::-1])
 
             # A part out of order, and a request over MAX_REQUEST: refused, and nothing reaches maxpm serve.
@@ -697,6 +699,37 @@ class PageRelay(Base):
                                                ("Set-Cookie", "a=1"), ("Set-Cookie", "b=2")], local),
                          [["Location", "https://alice-ab3cd9.relay.example/sessions"], ["Set-Cookie", "a=1"],
                           ["Set-Cookie", "b=2"]])
+
+    def test_a_text_answer_goes_gzipped_when_the_welcome_and_the_browser_take_it(self):
+        """#4895: the first state crosses the river-relay socket gzipped; the relay passes it as it is."""
+        import gzip as gz
+        plain = self.page("GET", "/api/state")[2]
+
+        def frames(path, gzip=True, accept="gzip, deflate, br", method="GET", part=4096):
+            out = []
+            relay.serve_page({"t": "req", "id": "g1", "kind": "http", "method": method, "path": path,
+                              "headers": [["Accept-Encoding", accept]] if accept else []}, b"", out.append, part, gzip)
+            heads = {k.lower(): v for k, v in out[0]["headers"]}
+            return out, heads, b"".join(base64.b64decode(f["body_b64"]) for f in out)
+        out, heads, body = frames("/api/state")
+        self.assertEqual((heads.get("content-encoding"), heads.get("vary"), heads.get("content-length")),
+                         ("gzip", "Accept-Encoding", None))
+        self.assertEqual(gz.decompress(body), plain)
+        self.assertLess(len(body), len(plain) * 0.6)
+        self.assertEqual([f["more"] for f in out], [True] * (len(out) - 1) + [False])
+        self.assertTrue(all(len(base64.b64decode(f["body_b64"])) <= 4096 for f in out))
+        html = frames("/", part=1024 * 1024)
+        self.assertEqual((html[1].get("content-encoding"), len(html[0])), ("gzip", 1), "one frame when it fits")
+        self.assertIn(b'id="relayBtn"', gz.decompress(html[2]))
+        # As it is: no gzip in the welcome, a browser that does not take it, HEAD, or a short answer.
+        for kw in ({"gzip": False}, {"accept": None}, {"accept": "gzip;q=0, identity"}, {"method": "HEAD"}):
+            o, h, b = frames("/api/state", **kw)
+            self.assertNotIn("content-encoding", h, kw)
+            self.assertEqual(b, b"" if kw.get("method") == "HEAD" else plain, kw)
+        token = frames("/api/token")
+        self.assertNotIn("content-encoding", token[1], "under GZIP_MIN")
+        self.assertTrue(relay.accepts_gzip([["accept-encoding", "br;q=1, *;q=0.5"]]))
+        self.assertFalse(relay.accepts_gzip([["Accept-Encoding", "br, deflate"]]))
 
     def test_bad_frames_and_no_serve(self):
         self.assertEqual(self.page("GET", "api/state")[0], 400)
