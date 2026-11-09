@@ -473,9 +473,15 @@ def view(conn, agent, cursor=None, root=None, croot=None):
 # (Write, Edit), full file paths, local pages (localhost, 127.0.0.1) and claude.ai artifact links in its own text,
 # the person's turns, and its tool calls (a screenshot's file name). Results of tools are left out: a listing of
 # files names many that nobody made.
-ARTIFACT_BYTES = 4 * 1024 * 1024
+# The first read of a transcript takes its last ARTIFACT_BYTES; each later read takes only the lines added since.
+# Pictures that a session reads fill its transcript fast (about 1 MB each in a tool result), so a short tail missed
+# the files it named a few pictures back (#4681). Parsing 18 MB takes about 30 ms.
+ARTIFACT_BYTES = 64 * 1024 * 1024
 ARTIFACT_DAYS = 1  # agents seen this recently, besides the running ones
-_ART_CACHE = {}  # path -> (size, mtime, hits)
+_ART_CACHE = {}  # path -> (size, mtime, end: the byte after the last line read, hits)
+# Lines that never give a hit, skipped before they are parsed: tool results (left out, see above) and Claude
+# Code's copies of the API requests. JSON escapes a quote in text, so these words in a message do not match.
+_ART_SKIP = ('"type":"tool_result"', '"type":"function_call_output"', '"type":"api-request')
 _FILE_RX = None
 _URL_RX = None
 
@@ -494,14 +500,28 @@ def _hits_in(text, at, how):
 
 
 def _artifact_hits(path):
-    """The hits of one transcript's last ARTIFACT_BYTES, read again only when the file changed."""
+    """The hits of one transcript: its last ARTIFACT_BYTES at first, then the lines it added since the last read. A
+    file that became shorter (written again) is read again from its tail."""
     st = Path(path).stat()
     got = _ART_CACHE.get(str(path))
     if got and got[:2] == (st.st_size, st.st_mtime_ns):
-        return got[2]
-    text, _s, _e = _read(path, None, ARTIFACT_BYTES)
+        return got[3]
+    if got and st.st_size >= got[2]:
+        text, _s, end = _read(path, got[2])
+        hits = got[3] + _scan_hits(text)
+    else:
+        text, _s, end = _read(path, None, ARTIFACT_BYTES)
+        hits = _scan_hits(text)
+    _ART_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, end, hits)
+    return hits
+
+
+def _scan_hits(text):
+    """The hits in the complete transcript lines of text."""
     hits = []
     for line in text.splitlines():
+        if any(k in line for k in _ART_SKIP):
+            continue
         try:
             d = json.loads(line)
         except ValueError:
@@ -531,7 +551,6 @@ def _artifact_hits(path):
                 hits += _hits_in(_parts_text(p.get("content"), ("input_text", "output_text", "text")), at, "named")
             elif p.get("type") in ("function_call", "custom_tool_call"):
                 hits += _hits_in(str(p.get("arguments") or p.get("input") or ""), at, "named")
-    _ART_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, hits)
     return hits
 
 

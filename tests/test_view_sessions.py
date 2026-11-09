@@ -796,6 +796,51 @@ class SideFiles(Base):
         self.assertEqual(self.get("/api/frame-check?url=x")["code"], 403)
 
 
+class ArtifactScan(unittest.TestCase):
+    """#4681: pictures in tool results fill a transcript fast; the files a session named before them still count,
+    and a later read takes only the lines the session added."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.path = Path(d.name) / "t.jsonl"
+        sessions._ART_CACHE.clear()
+        self.addCleanup(sessions._ART_CACHE.clear)
+
+    def line(self, kind, content):
+        return json.dumps({"type": kind, "timestamp": "2026-11-08T10:00:00Z",
+                           "message": {"role": kind, "content": content}}, separators=(",", ":")) + "\n"
+
+    def targets(self):
+        return sorted({h["target"] for h in sessions._artifact_hits(self.path)})
+
+    def test_names_before_many_pictures_and_only_new_lines_later(self):
+        from unittest import mock
+        picture = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 1_000_000}}
+        with open(self.path, "w") as f:
+            f.write(self.line("assistant", [{"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "/p/a.png"}}]))
+            for n in range(6):  # 6 MB of pictures, more than the 4 MB tail of before
+                f.write(self.line("user", [{"type": "tool_result", "tool_use_id": f"r{n}",
+                                            "content": [picture, {"type": "text", "text": "/p/listing.png"}]}]))
+            f.write(self.line("user", 'I typed "type":"tool_result" and /p/typed.png'))
+            f.write(self.line("assistant", [{"type": "text", "text": "Saved /p/b.png"}]))
+        self.assertEqual(self.targets(), ["/p/a.png", "/p/b.png", "/p/typed.png"])  # a tool result names none
+        with open(self.path, "a") as f:
+            f.write(self.line("assistant", [{"type": "text", "text": "And /p/c.png"}]))
+            f.write('{"type":"assistant","message":{"content":[{"type":"text","text":"/p/half')  # still written
+        reads = []
+        real = sessions._read
+        with mock.patch.object(sessions, "_read", lambda p, c, *a: reads.append(c) or real(p, c, *a)):
+            self.assertEqual(self.targets(), ["/p/a.png", "/p/b.png", "/p/c.png", "/p/typed.png"])
+            with open(self.path, "a") as f:
+                f.write('.png"}]}}\n')
+            self.assertIn("/p/half.png", self.targets())
+        self.assertTrue(reads and all(c is not None for c in reads), reads)  # only what came after the last read
+        # A file written again, shorter: read again from its tail.
+        self.path.write_text(self.line("assistant", [{"type": "text", "text": "/p/new.png"}]))
+        self.assertEqual(self.targets(), ["/p/new.png"])
+
+
 class NotConnected(TmuxBase):
     """#4621: a session that ran no maxpm command and wrote no transcript is not working."""
 
