@@ -429,7 +429,7 @@ function runSearch(delay = 0) {
 function searchRow(m) {
   const st = m.status === "open" || m.status === "backlog" ? chip("c-p", m.status) : chip("c-" + m.status, m.status.replace("_", " "));
   const when = m.closed_at ? `${m.status === "dropped" ? "dropped" : "done"} ${ago(m.closed_at)}` : `added ${ago(m.created_at)}`;
-  return `<div class="srow" data-open="${m.id}"><div class="t"><span class="link">#${m.id} ${esc(m.title)}</span></div>
+  return `<div class="qrow" data-open="${m.id}"><div class="t"><span class="link">#${m.id} ${esc(m.title)}</span></div>
     <div class="sub">${projectChip(m.project)}${st}${m.doer === "human" ? personChip("human") : ""}
       ${m.assignee && !m.closed_at ? `<span>${esc(m.assignee)}</span>` : ""}<span>${when}</span></div>
     ${m.output ? `<div class="out">${esc(clip(m.output, 220))}</div>` : ""}</div>`;
