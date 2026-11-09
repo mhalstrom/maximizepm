@@ -3866,6 +3866,22 @@ class Wait(Base):
         with self.assertRaises(RiverError):
             self.wait()  # it holds an item now
 
+    def test_a_push_that_go_cannot_take_yet_is_no_work(self):
+        # #4318: a pushed item that conflicts with another agent's item, or waits on an open prerequisite, made
+        # wait return WORK at once while go gave IDLE. It waits now, and wakes when the item gets ready.
+        core.register(self.c, "x")
+        held, pushed, pre = self.add("b", "held"), self.add("b", "pushed"), self.add("b", "prereq")
+        core.dep_add(self.c, pushed, [held], kind="conflicts")
+        core.claim(self.c, held, "x")
+        core.push(self.c, pushed, "w", None, "t")
+        core.inbox(self.c, "w")  # the push alert is read
+        self.assertEqual(self.wait()["result"], "again")
+        self.assertIsNone(core.go(self.c, self.dir.name, "w").get("item"))  # go gives no item either
+        core.done(self.c, held, "o", "x")
+        self.assertEqual(self.wait()["why"], f"#{pushed} was pushed to you")
+        core.dep_add(self.c, pushed, [pre])
+        self.assertEqual(self.wait()["result"], "again")
+
     def test_end_after_wait_max_releases_goals_and_unregisters(self):
         core.goal_add(self.c, "a", "g")
         core.goal_own(self.c, "g", "w")

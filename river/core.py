@@ -10101,10 +10101,15 @@ def _work_for(conn, actor, names, role=None):
             return f"#{got['id']} is ready: {got['title']}"
         u = unread(conn, actor)
         return "you have messages (maxpm inbox)" if u["unread"] or u["questions"] else None
-    pushed = conn.execute("SELECT id FROM items WHERE reserved_for=? AND reserved_until IS NOT NULL "
-                          "AND status='open'", (actor,)).fetchone()
+    # A push counts only when go can take it (ready_for, as in _go). A pushed item that waits on a conflict or
+    # a prerequisite is no work yet: else wait returns at once and go gives IDLE, a loop with no end (#4318).
+    pushed = [r["id"] for r in conn.execute("SELECT id FROM items WHERE reserved_for=? AND reserved_until IS NOT NULL "
+                                            "AND status='open'", (actor,))]
     if pushed:
-        return f"#{pushed['id']} was pushed to you"
+        ann = annotate(conn)
+        got = next((i for i in pushed if i in ann and ready_for(ann[i], actor)), None)
+        if got:
+            return f"#{got} was pushed to you"
     if note:
         return f"your queue has {'a stop request' if note['kind'] == 'stop' else 'an instruction'}: {note['body']}"
     q = _queue_ready(conn, actor)
