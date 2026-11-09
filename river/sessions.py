@@ -640,17 +640,30 @@ def _line_hits(raw):
     return hits
 
 
-def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=300, agent=None):
+def _stamp(at):
+    """A transcript time (2026-11-08T12:34:56.789Z) in the form of the holds table (2026-11-08T12:34:56Z)."""
+    return (at or "")[:19] + "Z"
+
+
+def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=300, agent=None, item=None, since=None):
     """[{target, kind (file, page, artifact), how (wrote, named), session, item, at}], newest first, one per target:
     from the running sessions and the agents seen in the last ARTIFACT_DAYS. allowed(path): whether the side panel
     may show that file (server.local_file); a file it may not show is left out. agent: that one session only, also
-    when it ended long ago (its session view, #4630)."""
-    if agent:
+    when it ended long ago (its session view, #4630). item: what the sessions that held that item made or named
+    while they held it, also long ago (maxpm artifacts --item, #4838). since: an ISO time; only hits from then on,
+    and without agent or item, the agents seen since then in place of ARTIFACT_DAYS."""
+    windows = {}  # agent -> [(start, end)] of its holds of item
+    if item is not None:
+        for r in conn.execute("SELECT agent, started_at, ended_at FROM holds WHERE item_id=? ORDER BY started_at", (item,)):
+            if not agent or r["agent"] == agent:
+                windows.setdefault(r["agent"], []).append((r["started_at"], r["ended_at"] or "9999"))
+        names = set(windows)
+    elif agent:
         names = {agent}
     else:
         names = {a["name"] for a in running(conn, terminals)}
-        since = core.iso(core.now() - core.timedelta(days=ARTIFACT_DAYS))
-        names |= {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND last_seen>=?", (since,))}
+        seen = since or core.iso(core.now() - core.timedelta(days=ARTIFACT_DAYS))
+        names |= {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND last_seen>=?", (seen,))}
     best = {}
     for name in sorted(names):
         kind, path = transcript(conn, name, root, croot)
@@ -660,6 +673,10 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
             hits = _artifact_hits(path)
         except (OSError, ValueError, EOFError):
             continue
+        if since:
+            hits = [h for h in hits if _stamp(h["at"]) >= since]
+        if item is not None:
+            hits = [h for h in hits if any(s <= _stamp(h["at"]) <= e for s, e in windows[name])]
         for h in hits:
             old = best.get(h["target"])
             if old is None or (h["at"] or "") > (old["at"] or "") or (h["how"] == "wrote" and old["how"] != "wrote"):
@@ -668,10 +685,12 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
     for h in sorted(best.values(), key=lambda h: h["at"] or "", reverse=True):
         if h["kind"] == "file" and allowed is not None and not allowed(h["target"]):
             continue
-        r = conn.execute("SELECT item_id FROM holds WHERE agent=? AND started_at<=? AND (ended_at IS NULL OR ended_at>=?) "
-                         "ORDER BY started_at DESC LIMIT 1", (h["session"], (h["at"] or "")[:19] + "Z", (h["at"] or "")[:19] + "Z")
-                         ).fetchone()
-        out.append(dict(h, item=r["item_id"] if r else None))
+        if item is not None:
+            out.append(dict(h, item=item))
+        else:
+            r = conn.execute("SELECT item_id FROM holds WHERE agent=? AND started_at<=? AND (ended_at IS NULL OR ended_at>=?) "
+                             "ORDER BY started_at DESC LIMIT 1", (h["session"], _stamp(h["at"]), _stamp(h["at"]))).fetchone()
+            out.append(dict(h, item=r["item_id"] if r else None))
         if len(out) >= limit:
             break
     return out

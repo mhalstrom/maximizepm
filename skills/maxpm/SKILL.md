@@ -511,6 +511,9 @@ your alert or question blocked when it sees that you stand still: you run
 - `maxpm usage`: the token cost of each done item, read from the Claude Code
   transcripts of the sessions that held it, and the medians for fresh and
   forked sessions. `maxpm show <id>` has the item's usage line.
+- `maxpm artifacts [--agent <name>] [--item <id>] [--since 2h]`: what the sessions made or named (files,
+  screenshots, canvases, local pages, claude.ai artifact links); `maxpm artifacts show <n>` prints a text
+  or the path of a picture to read. Check it before you relay a 'Look at' item.
 - `maxpm list --project <name>`: open items in order.
 
 Add `--json` to any command for machine-readable output. Errors name the rule

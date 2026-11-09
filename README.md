@@ -246,6 +246,7 @@ maxpm show 12 --brief                            # a few lines: the item, cut co
 maxpm view                                       # every agent that runs in tmux, side by side (launch_in tmux)
 maxpm capacity                                   # open slots and idle sessions
 maxpm usage                                      # the token cost of each done item, from the Claude Code transcripts
+maxpm artifacts --item 12                        # what the sessions of item 12 made (files, screenshots, canvases, links); show <n> reads one
 ```
 
 Every command gives machine-readable output with `--json` before the command

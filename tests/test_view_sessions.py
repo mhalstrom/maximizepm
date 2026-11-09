@@ -1119,6 +1119,56 @@ class SideFiles(Base):
         self.assertIn(shot, [a["target"] for a in one])
         self.assertEqual(sessions.artifacts(self.c, {}, allowed, self.root, self.croot, agent="nobody"), [])
 
+    def test_maxpm_artifacts_lists_and_shows_what_the_sessions_of_an_item_made(self):
+        # #4838: a manager in the terminal: --item (what was made while the item was held), --since, show <n>, the
+        # line in maxpm show, and the hint in the manager's findings for a Look at item.
+        import contextlib
+        import io
+        from unittest import mock
+        from river import cli, notify
+        shot = str(self.proj / "scratch" / "shot.png")
+        page = str(self.proj / "page.html")
+        self.write(claude_line("assistant", [{"type": "tool_use", "id": "w1", "name": "Write",
+                                              "input": {"file_path": page, "content": "<p>"}}], "tool_use",
+                               at="2026-11-08T10:01:00Z")
+                   + claude_line("assistant", [{"type": "text", "text": f"Saved {shot}; see https://claude.ai/artifact/ab12-cd"}],
+                                 "end_turn", at="2026-11-08T10:02:00Z"))
+        it2 = core.item_add(self.c, "site", "footer")["id"]
+        with core.tx(self.c):
+            self.c.execute("DELETE FROM holds")
+            self.c.execute("INSERT INTO holds (item_id, agent, started_at, ended_at) VALUES (?, 'ag', "
+                           "'2026-11-08T10:00:00Z', '2026-11-08T10:01:30Z'), (?, 'ag', '2026-11-08T10:01:30Z', NULL)",
+                           (self.it, it2))
+        allowed = lambda f: self.get(f"/api/file?path={f}&token={server.PAGE_TOKEN}")["code"] == 200
+        arts = lambda **k: [(a["target"], a["item"]) for a in sessions.artifacts(self.c, {}, allowed, self.root, self.croot, **k)]
+        self.assertEqual(arts(item=self.it), [(page, self.it)])
+        self.assertEqual(sorted(arts(item=it2)), sorted([(shot, it2), ("https://claude.ai/artifact/ab12-cd", it2)]))
+        self.assertEqual(arts(item=it2, agent="nobody"), [])
+        self.assertNotIn(page, [t for t, _i in arts(agent="ag", since="2026-11-08T10:01:30Z")])
+        core.canvas_put(self.c, "plan", "<p>The plan</p>", "ag", kind="html", item=it2)
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.object(core, "transcripts_root", lambda: self.root):
+                cli.run(["-q", "--as", "mark", *words])
+            return out.getvalue()
+        listed = run("artifacts", "--item", str(it2))
+        self.assertIn('canvas:', listed.splitlines()[0])  # canvases first
+        self.assertIn(shot, listed)
+        self.assertIn(f"id {notify.art_id(shot)}", listed)
+        self.assertIn(f"read one: maxpm artifacts show <n> --item {it2}", listed)
+        self.assertIn("The plan", run("artifacts", "show", "1", "--item", str(it2)))
+        self.assertIn(f"path: {shot}", run("artifacts", "show", notify.art_id(shot), "--item", str(it2)))
+        self.assertIn("Artifact tool", run("artifacts", "show", "https://claude.ai/artifact/ab12-cd", "--item", str(it2)))
+        self.assertIn("fetch('/api/action')", run("artifacts", "show", page, "--item", str(self.it)))
+        with self.assertRaises(core.RiverError):
+            cli.artifacts_cmd(self.c, cli.build_parser().parse_args(["artifacts", "show", "9", "--item", str(self.it)]))
+        self.assertIn(f"artifacts: 1, maxpm artifacts --item {self.it}", run("show", str(self.it)))
+        look = core.item_add(self.c, "site", "Look at the footer", doer="human", found_during=it2)["id"]
+        self.assertIn(f"artifacts: 3 of #{it2}, where it was found", run("show", str(look)))
+        lines = "\n".join(cli._findings_lines(core.manager_findings(self.c), "maxpm"))
+        self.assertIn(f"#{look}: maxpm artifacts --item {it2}", lines)
+
     def test_the_frame_check_needs_a_web_address(self):
         self.assertEqual(server.frame_check("javascript:alert(1)")["frame"], False)
         self.assertEqual(self.get("/api/frame-check?url=x")["code"], 403)

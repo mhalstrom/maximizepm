@@ -11108,7 +11108,7 @@ def manager_findings(conn):
             "unneeded": unneeded,
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "targets": targets, "questions": questions,
-            "human_ready": [{"id": x["id"], "title": x["title"]} for x in sorted(
+            "human_ready": [{"id": x["id"], "title": x["title"], "found_during": x["found_during"]} for x in sorted(
                                (x for x in ann.values() if x["ready"] and x["doer"] == "human" and not x["project_archived"]),
                                key=lambda x: x["sort_key"])]}
 

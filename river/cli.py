@@ -410,6 +410,10 @@ def _print_show(a):
         print("  found while doing this:", ", ".join(f"#{d['id']} {d['title']} ({d['status']})" for d in a["found_here"]))
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
+    if a.get("artifacts"):
+        x = a["artifacts"]
+        print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
+              + f", maxpm artifacts --item {x['item']}")
     if a.get("related"):
         print("  related (work like it, not linked; maxpm show <id>):")
         print("\n".join(_related_lines(a["related"])))
@@ -467,6 +471,10 @@ def _print_brief(a, n=240):
         print("  lease until:", a["lease_expires_at"])
     if a.get("message_count"):
         print(f"  messages: {a['message_count']} (maxpm thread --item {a['id']})")
+    if a.get("artifacts"):
+        x = a["artifacts"]
+        print(f"  artifacts: {x['count']}" + (f" of #{x['item']}, where it was found" if x["item"] != a["id"] else "")
+              + f", maxpm artifacts --item {x['item']}")
     if a.get("related"):
         print("  related: " + ", ".join(f"#{m['id']} {_cut(m['title'], 40)} ({_match_state(m)})" for m in a["related"]))
     print(f"  all of it: maxpm show {a['id']}")
@@ -842,6 +850,14 @@ def build_parser():
     x.add_argument("--new", metavar="HOW", help="add it although maxpm add found open or lately done items like it: "
                    "say how it differs (the history keeps it)")
 
+    x = sub.add_parser("artifacts", help="what the sessions made or named: files they wrote, screenshots, canvases, local "
+                       "pages, claude.ai artifact links (the Artifacts tab); 'maxpm artifacts show <n>' reads one")
+    x.add_argument("show", nargs="?", choices=["show"], help="show: print one row's text, or the path or link to read it")
+    x.add_argument("ref", nargs="?", help="with show: the row number of the same listing, the row's id, or its path or URL")
+    x.add_argument("--agent", help="of this session only, also one that ended long ago")
+    x.add_argument("--item", type=int, help="what the sessions that held this item made while they held it")
+    x.add_argument("--since", help="from this time on: 30d, 2h, or a date (2026-10-01)")
+    x.add_argument("-n", "--limit", type=int, default=40, help="at most this many rows (default 40)")
     x = sub.add_parser("search", help="find items by words in their title, context, notes, and output: open, done, "
                        "and dropped, newest first (run it before maxpm add)")
     x.add_argument("words", nargs="+", help="every word must occur (a light stem: test finds tests)")
@@ -2054,7 +2070,10 @@ def dispatch(conn, a, actor):
     if c == "show":
         res = core.item_show(conn, a.id)
         res["related"] = core.related(conn, a.id)
+        res["artifacts"] = _item_artifacts(conn, res)
         return res
+    if c == "artifacts":
+        return artifacts_cmd(conn, a)
     if c == "search":
         return core.search(conn, " ".join(a.words), a.project, a.status, a.since, a.limit, a.kinds)
     if c == "duplicates":
@@ -2448,6 +2467,10 @@ def _findings_lines(f, r):
                    f"--close {c['id']} --note \"<why>\"")
     if f["human_ready"]:
         out.append("  WAITS ON THE USER: " + ", ".join(f"#{x['id']} {_cut(x['title'], 40)}" for x in f["human_ready"][:6]))
+        looks = [x for x in f["human_ready"][:6] if x.get("found_during") and x["title"].lower().startswith("look at")]
+        if looks:  # #4838: check what the worker made before the person is asked to look at it
+            out.append("  BEFORE YOU RELAY A LOOK AT ITEM, check what the session made: " + ", ".join(
+                f"#{x['id']}: maxpm artifacts --item {x['found_during']}" for x in looks))
     return out or ["  nothing needs you now"]
 
 
@@ -3249,6 +3272,126 @@ def render_canvas(a, res):
         print(f"canvas {res['canvas']} version {res['version']} written to {res['path']}")
 
 
+# maxpm artifacts (#4838): the rows of the Artifacts tab in the terminal, so a manager can check what a worker made
+# (a screenshot, a page, a canvas, a claude.ai artifact link) before it relays a 'Look at' item to the person.
+ART_IMAGES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf")
+ART_TEXT_MAX = 1_000_000
+
+
+def _art_label(r):
+    if r["kind"] == "file":
+        return "image" if r["target"].lower().endswith(ART_IMAGES[:-1]) else "pdf" if r["target"].lower().endswith(".pdf") else "file"
+    return {"artifact": "claude.ai", "page": "page"}.get(r["kind"], r["kind"])
+
+
+def artifact_rows(conn, a):
+    """The rows for maxpm artifacts: the same function as the Artifacts tab (routes.artifacts.listing), each with its
+    row number n and the page's id of it."""
+    from . import notify, server
+    from .routes import artifacts as art
+    since = core._since(conn, a.since) if a.since else None
+    if a.item is not None:
+        core._item(conn, a.item)
+    terminals = None
+    if not a.agent and a.item is None:
+        try:
+            terminals = server.agent_terminals(conn)
+        except Exception:  # no terminal list (tmux or Terminal not readable here): the agents seen lately only
+            terminals = None
+    rows = art.listing(conn, a.agent, a.item, since, terminals)
+    return [dict(r, n=i + 1, id=notify.art_id(r["target"]), label=_art_label(r)) for i, r in enumerate(rows)]
+
+
+def _item_artifacts(conn, it):
+    """{count, item} for maxpm show (#4838): what the sessions that held the item made while they held it; for an
+    item with none that was found during another one (a person's 'Look at' item), that one's. None: none."""
+    import types
+    for i in (it["id"], it.get("found_during")):
+        if i is None:
+            continue
+        try:
+            n = len(artifact_rows(conn, types.SimpleNamespace(agent=None, item=i, since=None)))
+        except Exception:  # a transcript that cannot be read: no line
+            n = 0
+        if n:
+            return {"count": n, "item": i}
+    return None
+
+
+def artifacts_cmd(conn, a):
+    rows = artifact_rows(conn, a)
+    if not a.show:
+        return {"artifacts": rows[:a.limit], "total": len(rows)}
+    if not a.ref:
+        raise RiverError("name the row: maxpm artifacts show <n> (with the same --agent, --item, --since as the listing), "
+                         "or its id or path")
+    ref = a.ref.strip()
+    row = None
+    if ref.isdigit() and 1 <= int(ref) <= len(rows):
+        row = rows[int(ref) - 1]
+    row = row or next((r for r in rows if ref in (r["id"], r["target"])), None)
+    if row is None:
+        raise RiverError(f"no artifact {ref} in this listing ({len(rows)} rows); run maxpm artifacts with the same "
+                         "--agent, --item, --since to see the row numbers")
+    out = {"artifact": row}
+    if row["kind"] == "canvas":
+        c, v = core.canvas_version(conn, int(row["target"].split(":", 1)[1]))
+        out.update(text=v["body"], read=f"maxpm canvas show {c['name']} (its versions and comments)")
+    elif row["kind"] == "artifact":
+        out["read"] = ("a claude.ai artifact: read it with the Artifact tool (action read, url " + row["target"]
+                       + "); maxpm cannot fetch it")
+    elif row["kind"] == "page":
+        out["read"] = "a local page: open it with a browser tool, or curl it while its server runs"
+    else:
+        f = Path(row["target"]).expanduser()
+        if not f.is_file():
+            out["read"] = "the file is gone"
+        elif f.suffix.lower() in ART_IMAGES:
+            out["path"] = str(f)
+            out["read"] = "a picture or a PDF: read the file at this path with your file-reading tool"
+        else:
+            data = f.read_bytes()
+            out.update(path=str(f), text=data[:ART_TEXT_MAX].decode("utf-8", "replace"),
+                       cut=len(data) > ART_TEXT_MAX)
+    return out
+
+
+def render_artifacts(res, a):
+    if "artifact" in res:
+        r = res["artifact"]
+        print(f"{r['label']} {r['target']}  ({_art_where(r)})")
+        if res.get("path"):
+            print(f"path: {res['path']}")
+        if res.get("read"):
+            print(res["read"])
+        if res.get("text") is not None:
+            print()
+            print(res["text"].rstrip("\n"))
+            if res.get("cut"):
+                print(f"... (cut at {ART_TEXT_MAX} bytes; read the file itself for the rest)")
+        return
+    rows = res["artifacts"]
+    if not rows:
+        print("No artifacts" + (f" of {a.agent}" if a.agent else "") + (f" for #{a.item}" if a.item is not None else "")
+              + "." + ("" if a.agent or a.item is not None else " Without --agent or --item, the list holds the running "
+                       "sessions and the ones seen in the last day (or since --since)."))
+        return
+    for r in rows:
+        name = f' "{_cut(r["title"], 50)}" v{r["version"]}' if r["kind"] == "canvas" else ""
+        extra = f", {r['open_comments']} open comment(s)" if r.get("open_comments") else ""
+        print(f"{r['n']:>3}. {r['label']:<9} {r['target']}{name}  ({_art_where(r)}{extra}; id {r['id']})")
+    if res["total"] > len(rows):
+        print(f"... {res['total'] - len(rows)} more: -n {res['total']}")
+    flags = "".join(f" --{k} {v}" for k, v in (("agent", a.agent), ("item", a.item), ("since", a.since)) if v is not None)
+    print(f"read one: maxpm artifacts show <n>{flags}")
+
+
+def _art_where(r):
+    at = (r.get("at") or "")[:16].replace("T", " ")
+    return ", ".join(x for x in (r.get("how"), r.get("session"), f"#{r['item']}" if r.get("item") else None,
+                                 f"{at} UTC" if at else None) if x)
+
+
 def render(a, res):
     c = a.cmd
     if c == "wait":
@@ -3276,6 +3419,8 @@ def render(a, res):
         return
     if c == "go":
         return render_go(res)
+    if c == "artifacts":
+        return render_artifacts(res, a)
     if c == "search":
         return render_search(res, a.limit)
     if c == "duplicates":
