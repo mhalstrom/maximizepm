@@ -7,7 +7,7 @@ import { itemRow, itemOrder } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
 import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
-import { managerHtml, queueHtml, agentButtons } from "../components/agentActions.js";
+import { managerHtml, queueHtml, agentButtons, hasSession } from "../components/agentActions.js";
 import { S, tab, nav, inGoal } from "../page.js";
 import { NY } from "./board-needs-you.js";
 
@@ -63,7 +63,7 @@ export function renderAgents() {
     columns: [
       { formatter: "responsiveCollapse", width: 28, minWidth: 28, headerSort: false, filter: false, resizable: false },
       { title: "Name", field: "name", minWidth: 120, widthGrow: 1, responsive: 0, cssClass: "wrap",
-        html: (r) => `<span class="dot ${r.state}"></span><span class="nm">${esc(r.name)}</span>${r.a.note ? `<div class="st">${esc(r.a.note)}</div>` : ""}` },
+        html: (r) => `<span class="dot ${r.state}"></span>${hasSession(S, r.name) ? `<span class="nm link" data-session-go="${esc(r.name)}" title="Open the session of ${esc(r.name)} in the Sessions tab">${esc(r.name)}</span>` : `<span class="nm">${esc(r.name)}</span>`}${r.a.note ? `<div class="st">${esc(r.a.note)}</div>` : ""}` },
       { title: "Holds", field: "holds", minWidth: 140, widthGrow: 1, responsive: 0, cssClass: "wrap", html: (r) => agentHolds(r.a) },
       { title: "Status", field: "state", width: 90, filter: "select", responsive: 1 },
       { title: "Kind", field: "kind", width: 80, filter: "select", responsive: 2, html: (r) => personChip(r.a.kind) },

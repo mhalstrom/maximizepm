@@ -852,9 +852,6 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual(core.stop_request(self.c, "w1")["stop_reason"], "stopped from the page by mark")
         with self.assertRaisesRegex(RiverError, "say why"):
             core.stop_agent(self.c, "w1", " ", actor="m")  # maxpm stop still needs --reason
-        self.assertEqual(OPS["open_chat"](self.c, {"agent": "w1"}, "mark")["hint"][:24], "No chat to open for w1: ")
-        core.record_session_url(self.c, "w1", "https://claude.ai/code/session_x")
-        self.assertEqual(OPS["open_chat"](self.c, {"agent": "w1"}, "mark")["url"], "https://claude.ai/code/session_x")
 
     def test_launch_options_follow_each_agents_platform(self):
         old = server._login_shell_which
@@ -1159,7 +1156,7 @@ class LaunchInTmux(unittest.TestCase):
         self.tmux.end(self.tmux.panes[0])
         self.assertIn("(its agent ended: maxpm view --tidy closes it)", river("view", "--list"))
         self.assertIn(f"closed (its agent ended): #{x} work", river("view", "--tidy"))
-        # Open chat for an agent in a pane, with no web link, names maxpm view.
+        # The page knows whether tmux runs, and which pane a terminal device is.
         self.assertIs(core.state(self.c)["tmux"], False)  # the tests see no tmux (tests/__init__.py)
         with mock.patch.object(core, "tmux_path", lambda: "/opt/homebrew/bin/tmux"):
             self.assertIs(core.state(self.c)["tmux"], True)
@@ -1460,14 +1457,9 @@ class LaunchInTmux(unittest.TestCase):
         server.PS_RUNNER = lambda pids: "".join(f" {p} ttys007\n" for p in pids)
         self.addCleanup(setattr, server, "PS_RUNNER", None)
         self.assertEqual(server.agent_terminals(self.c), {name: "%0", "other-agent": "%7"})
-        # Open chat (no web link) opens the same terminal on the page, on Linux too: the session that waits on a
-        # prompt before its first river command (no process recorded for it), and the one found by its terminal.
-        self.assertEqual(server.OPS["open_chat"](self.c, {"agent": name}, "mark")["tmux_pane"], "%0")
-        self.assertEqual(server.open_chat(self.c, "other-agent")["tmux_pane"], "%7")
         # The page's state lists them, and without tmux there are none.
         server.TMUX_RUNNER = lambda a: ""
         self.assertEqual(server.agent_terminals(self.c), {})
-        self.assertEqual(server.open_chat(self.c, name).get("hint", "")[:16], "No chat to open ")
 
     def test_an_agents_terminal_answers_this_computer_only(self):
         core.config_set(self.c, "launch_in", "tmux")
@@ -2636,10 +2628,6 @@ class LaunchProfiles(unittest.TestCase):
         t = core._launch_agent_cmd(self.c, None, None, options={"remote_control": "off"}, autocompact=200000)
         self.assertEqual((t["command"], t["autocompact"]), ("claude --autocompact 300k go", None))
         core.config_unset(self.c, "claude_args")
-        # Open chat says why a session has no web link.
-        core.register(self.c, "w1")
-        core.config_set(self.c, "claude_remote_control", "off")
-        self.assertIn("Remote Control is off", server.open_chat(self.c, "w1")["hint"])
 
     def test_a_custom_prompt_follows_the_profile_prompt(self):
         import shlex
@@ -2984,6 +2972,24 @@ class ServeLoop(unittest.TestCase):
                 mock.patch.object(server, "watch_prompts", lambda c: stop.set()):
             notify.loop(stop, interval_s=1)
         self.assertIsNone(core.serve_loop(self.c)["error"])
+
+    def test_the_page_state_names_the_sessions_that_the_sessions_tab_shows(self):
+        # The Board's Open session goes to the Sessions tab (#4687): only for an agent whose session runs there.
+        def state():
+            h = server.Handler.__new__(server.Handler)
+            h.path, h.client_address, h.headers, out = "/api/state", ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}, {}
+            h._send = lambda code, body, ctype=None: out.update(body=body)
+            h.do_GET()
+            return out["body"]
+        core.register(self.c, "w-run")
+        core.register(self.c, "w-stop")
+        core.register(self.c, "mark", human=True)
+        core.stop_agent(self.c, "w-stop", "done", actor="mark")
+        st = state()
+        self.assertIn("w-run", st["sessions"])
+        self.assertNotIn("w-stop", st["sessions"])
+        self.assertNotIn("mark", st["sessions"])
+        self.assertNotIn("open_chat", server.OPS)  # the Board's own chat button is gone
 
     def test_the_page_and_the_manager_see_a_loop_that_is_late(self):
         from river import cli

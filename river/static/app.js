@@ -160,12 +160,6 @@ document.addEventListener("click", async (e) => {
     if (!ch) return;
     try { const r = await act("start_manager", launchArgs(ch)); toast(`Started ${r.agent} as ${r.session_name}, the manager`); } catch (e) { /* toast shown */ }
     return; }
-  if (t.dataset.chat) {
-    try { const r = await act("open_chat", { agent: t.dataset.chat });
-      if (r.url) window.open(r.url, "_blank", "noopener"); else if (r.focused) toast(`Opened the terminal tab of ${r.agent}`);
-      else if (r.tmux_pane) openTerminal(r.agent); else toast(r.hint, true);
-    } catch (e) { /* toast shown */ }
-    return; }
   if (t.dataset.terminal) return openTerminal(t.dataset.terminal);
   if (t.dataset.stopAgent) {
     if (!actor()) return toast("Choose your name in 'You are' first", true);
@@ -188,7 +182,8 @@ document.addEventListener("click", async (e) => {
     return; }
   if (t.dataset.untag) { await act("item_edit", { id: openItem, untag: [t.dataset.untag] }).catch(() => {}); return openDrawer(openItem, true); }
   const card = t.closest("[data-goal]"); if (card) { const g = card.dataset.goal; setGoal(goalSel() === g ? "" : g); return; }
-  // A session link (the drawer's Open session, a name in its history): the Sessions tab on that session (#4615).
+  // A session link (the drawer's Open session, a name in its history, the Board's agents and manager card, #4687):
+  // the Sessions tab on that session (#4615).
   const sgo = t.closest("[data-session-go]");
   if (sgo) { closeDrawer(); await setTab("sessions"); sessionsTab.pick(sgo.dataset.sessionGo); return; }
   const open = t.closest("[data-open]"); if (open) return openDrawer(+open.dataset.open);

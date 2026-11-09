@@ -334,58 +334,6 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     return {**t, "session_name": name}
 
 
-def open_chat(conn, agent, runner=None):
-    """Bring the person into an agent's chat: its web link when the session has one (Claude Code with
-    --remote-control); else its tmux pane, on any system (the page opens its terminal view); else, on macOS,
-    the Terminal tab that runs its process (by the tty of the PID river recorded); else a hint that says why
-    and what to do."""
-    import subprocess
-    a = core.agent_status(conn, agent)
-    if a.get("session_url"):
-        return {"agent": agent, "url": a["session_url"]}
-    # The panes of the page's Terminal button (agent_terminals): on Linux too, where agents start only in tmux,
-    # and for a session that ran no river command yet (a folder trust prompt), which has no PID yet.
-    pane = agent_terminals(conn).get(agent)
-    if pane:
-        return {"agent": agent, "tmux_pane": pane,  # the page opens its terminal view
-                "hint": f"{agent} runs in tmux ({pane}): `maxpm view` in a terminal shows it."}
-    why = ("it has no web link: Remote Control is off for Claude Code (maxpm config set claude_remote_control on)"
-           if core.setting(conn, "claude_remote_control") == "off"
-           else "it has no web link (start Claude Code with --remote-control for one)")
-    if a.get("pid") and a.get("host") == core.this_host() and core.pid_alive(a["pid"]):
-        try:
-            tty = subprocess.run(["ps", "-o", "tty=", "-p", str(a["pid"])], capture_output=True, text=True,
-                                 timeout=5).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            tty = ""
-        if tty and tty not in ("??", "?") and not (core.PLATFORM == "darwin" or runner or TERMINAL_RUNNER):
-            why = f"its terminal ({tty}) is not a tmux pane, and only a tmux pane shows on the page"
-        elif tty and tty not in ("??", "?"):
-            dev = tty if tty.startswith("/dev/") else "/dev/" + tty
-            script = "\n".join([
-                'tell application "Terminal"',
-                '  repeat with w in windows',
-                '    repeat with t in tabs of w',
-                f'      if tty of t is {_applescript_str(dev)} then',
-                '        set selected of t to true', '        set index of w to 1', '        activate',
-                '        return "ok"', '      end if', '    end repeat', '  end repeat', 'end tell', 'return "none"'])
-            run = runner or TERMINAL_RUNNER or (lambda sc: subprocess.run(
-                ["osascript", "-e", sc], capture_output=True, text=True, timeout=10).stdout)
-            try:
-                got = run(script)
-            except (OSError, subprocess.SubprocessError) as e:
-                got = str(e)
-            if (got or "").strip() == "ok":
-                return {"agent": agent, "focused": True, "tty": dev}
-            why = f"no Terminal tab runs {dev} (it may run in another terminal app)"
-        else:
-            why = "its process has no terminal (a background session)"
-    elif a.get("pid"):
-        why = f"its process runs on {a.get('host')}, not here" if a.get("host") != core.this_host() else "its process has ended"
-    return {"agent": agent, "hint": f"No chat to open for {agent}: {why}."
-            + (f" Its Claude Code session: {a['session']}." if a.get("session") else "")}
-
-
 def _open_terminal(t, env, runner=None):
     """Run the agent command (t["command"]) in the project folder (t["path"]) with env set: in a new
     Terminal tab or window on macOS (launch_in), in a new console window on Windows, or with launch_in
@@ -2643,7 +2591,6 @@ OPS = {
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
     "kill_agent": lambda c, a, who: core.kill_agent(c, a["agent"], _page_reason(a, who), who),
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
-    "open_chat": lambda c, a, who: open_chat(c, a["agent"]),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
@@ -2720,6 +2667,9 @@ class Handler(BaseHTTPRequestHandler):
                 st["desktop"] = DESKTOP
                 st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
                 st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
+                from . import sessions
+                # The agents whose session the Sessions tab shows: the Board's Open session goes there (#4687).
+                st["sessions"] = [a["name"] for a in sessions.running(conn, st["terminals"])]
                 st["relay"] = relay.status()
                 st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
                 return self._send(200, st)
