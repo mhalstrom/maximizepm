@@ -69,6 +69,9 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 12px 14px; margin-bottom: 16px; }
 .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+/* A narrow screen: the controls of a heading go to a second line, not off screen (#4717, #4718). */
+.panel h2 { flex-wrap: wrap; row-gap: 6px; }
+.panel h2 > .btn, .panel h2 > label { white-space: nowrap; }
 .row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 6px; border-top: 1px solid var(--line); cursor: pointer; }
 .row:first-child { border-top: none; }
 .row:hover { background: var(--bg); }
