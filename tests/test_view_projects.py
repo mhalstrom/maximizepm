@@ -77,3 +77,43 @@ class PageGoals(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "shared"):
             self.op("goal_own", "ag", name="ship")
         self.assertEqual(core.goal_show(self.c, "ship")["status"], "open")
+
+
+class ManyDoneRows(unittest.TestCase):
+    """#4773: the done box of the Projects tab adds and removes thousands of rows. Row by row, the page did not answer
+    for minutes (4400 done items); one replace of the table's data draws them in seconds. Drives the page in Chrome."""
+
+    def setUp(self):
+        from tests import test_view_sessions as tvs
+        self.tvs = tvs
+        self.base = tvs.Base("run")
+        self.base.setUp()
+        self.addCleanup(self.base.tearDown)
+        c = self.base.c
+        pid = c.execute("SELECT id FROM projects WHERE name='site'").fetchone()[0]
+        with core.tx(c):
+            c.executemany("INSERT INTO items (project_id, title, rank, status, output, created_at, closed_at) "
+                          "VALUES (?, ?, ?, 'done', ?, '2026-11-01T00:00:00Z', '2026-11-02T00:00:00Z')",
+                          [(pid, f"done item {n}", 1000 + n, f"what changed in {n}") for n in range(1500)])
+
+    def test_the_done_box_adds_and_removes_1500_rows_quickly(self):
+        driver = self.tvs.DRIVE_HEAD + r'''
+const rows = () => document.querySelectorAll('#projects [data-ptable="site"] .tabulator-row').length;
+try {
+  q('nav button[data-tab="projects"]').click();
+  await until(() => rows() >= 1, "the open item of site");
+  const out = { open: rows() };
+  let t = performance.now();
+  q("#showDone").click();
+  await until(() => rows() > 1500, "the done rows");
+  out.on = [rows(), Math.round(performance.now() - t)];
+  t = performance.now();
+  q("#showDone").click();
+  await until(() => rows() < 10, "the done rows gone");
+  out.off = [rows(), Math.round(performance.now() - t)];
+  post(out);
+} catch (e) { post({ error: String(e.stack || e), rows: rows() }); }
+'''
+        got = self.tvs.drive_page(self.base, driver, wait=90)
+        self.assertNotIn("error", got, got)
+        self.assertEqual((got["open"], got["on"][0], got["off"][0]), (1, 1501, 1))

@@ -3,6 +3,9 @@
 // the sort and the filters are remembered per table in this browser.
 import { store } from "../lib.js";
 
+// Above this many changed rows, set() replaces the data in one step.
+const BULK = 50;
+
 function saved(key) { try { return JSON.parse(store("river.table." + key) || "{}"); } catch (e) { return {}; } }
 
 // A column is a Tabulator column definition plus:
@@ -62,8 +65,11 @@ export function makeTable(el, { key, columns, index = "id", sort = [], onRow, pl
     const before = seen; seen = now;
     if (!loaded) { loaded = true; return t.setData(rows); }
     const gone = [...before.keys()].filter((id) => !now.has(id));
-    if (gone.length) t.deleteRow(gone);
     const changed = rows.filter((r) => before.get(r[index]) !== now.get(r[index]));
+    // Many rows in or out (a box that adds or removes the done items, #4773): one replace, which keeps the sort, the
+    // filters and the scroll. Row by row, each change lays out the whole table again: thousands of rows took minutes.
+    if (gone.length + changed.length > BULK) return t.replaceData(rows);
+    if (gone.length) t.deleteRow(gone);
     await t.updateOrAddData(changed);
     // A cell's formatter may read fields that have no column (the item behind a chip): redraw the whole row.
     for (const r of changed) { const row = t.getRow(r[index]); if (row) row.reformat(); }
