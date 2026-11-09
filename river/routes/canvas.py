@@ -15,6 +15,7 @@ GET: (test, handler) pairs that Handler.do_GET tries in order; a handler answers
 merged into server.OPS."""
 
 import re
+from pathlib import Path
 
 from .. import core, server  # noqa: F401  (server: read at call time, so tests that replace its globals still work)
 from ..core import RiverError
@@ -26,13 +27,22 @@ PATH = re.compile(r"^/canvas/c?(\d+)/(latest|meta|\d+)$")
 #   keeps the place the person reads (#4768);
 # - comment mode (#4769, as annotatetofix): it marks the part under the mouse, and a click sends that part (a short
 #   CSS path, its text, and the selected text) to the panel, which opens a comment box for it; Escape ends the mode;
-# - show: it scrolls to the part of a comment and marks it for a moment.
-HELPER = """<script>/* maxpm canvas helper (#4768, #4769) */(function () {
-  var t, P = window.parent, mode = false, hi = null;
+# - show: it scrolls to the part of a comment and marks it for a moment;
+# - find (#4877): it marks each place of the words that the panel's find box asks for (the code of
+#   static/components/findText.js, put inline here), goes to the next or previous one, and says "n of m"; after the
+#   panel says it finds ("finder"), Cmd+F or Ctrl+F in the canvas opens the panel's find box (in /view the browser's
+#   own find stays).
+FIND_JS = re.sub(r"^export ", "", (Path(__file__).resolve().parent.parent / "static" / "components" / "findText.js")
+                 .read_text(encoding="utf-8"), flags=re.M)
+HELPER = """<script>/* maxpm canvas helper (#4768, #4769, #4877) */(function () {
+  var t, P = window.parent, mode = false, hi = null, finder = false, fq = "", fm = [], fi = 0;
   if (!P || P === window) return;
+""" + FIND_JS + """
   var css = document.createElement("style");
   css.textContent = ".maxpm-hi{outline:2px solid #1f6feb!important;outline-offset:2px!important;cursor:crosshair!important}"
-    + ".maxpm-flash{outline:3px solid #d29922!important;outline-offset:3px!important}";
+    + ".maxpm-flash{outline:3px solid #d29922!important;outline-offset:3px!important}"
+    + "mark.maxpm-find{background:#ffe066!important;color:#000!important;border-radius:2px}"
+    + "mark.maxpm-find-on{background:#ff9632!important;outline:2px solid #ff9632!important}";
   (document.head || document.documentElement).appendChild(css);
   function path(el) {
     var parts = [];
@@ -57,7 +67,13 @@ HELPER = """<script>/* maxpm canvas helper (#4768, #4769) */(function () {
     P.postMessage({ maxpmCanvas: "pick", path: path(el), text: (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 200),
                     quote: quote.slice(0, 500) }, "*");
   }, true);
-  addEventListener("keydown", function (e) { if (mode && e.key === "Escape") P.postMessage({ maxpmCanvas: "escape" }, "*"); });
+  addEventListener("keydown", function (e) {
+    if (mode && e.key === "Escape") P.postMessage({ maxpmCanvas: "escape" }, "*");
+    if (finder && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === "f" || e.key === "F")) {
+      e.preventDefault();
+      P.postMessage({ maxpmCanvas: "find-open", text: String(getSelection() || "").trim().slice(0, 200) }, "*");
+    }
+  });
   addEventListener("message", function (e) {
     var d = e.data || {};
     if (e.source !== P) return;
@@ -69,6 +85,17 @@ HELPER = """<script>/* maxpm canvas helper (#4768, #4769) */(function () {
       if (el) { el.scrollIntoView({ block: "center", behavior: "smooth" }); el.classList.add("maxpm-flash");
         setTimeout(function () { el.classList.remove("maxpm-flash"); }, 1600); }
       P.postMessage({ maxpmCanvas: "shown", found: !!el }, "*");
+    }
+    if (d.maxpmCanvas === "finder") finder = true;
+    if (d.maxpmCanvas === "find") {
+      // step 0: mark again (new words go to the first place; again: the same words after a change, no scroll).
+      var q = String(d.q || "").slice(0, 200), step = +d.step || 0, root = document.body || document.documentElement;
+      finder = true;
+      if (step === 0 || q !== fq || !fm.length || !fm[0].isConnected) {
+        var keep = q === fq && d.again ? fi : 0;
+        fm = findMark(root, q, null); fi = findGo(fm, keep, !d.again); fq = q;
+      } else fi = findGo(fm, fi + step, true);
+      P.postMessage({ maxpmCanvas: "found", q: fq, n: fm.length, i: fi }, "*");
     }
   });
   P.postMessage({ maxpmCanvas: "ready" }, "*");

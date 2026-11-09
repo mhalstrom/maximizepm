@@ -57,6 +57,8 @@ class CanvasRoutes(Base):
         self.assertIn(b"<h1>Plan</h1>", out["body"])
         self.assertIn(b"maxpm canvas helper", out["body"])
         self.assertLess(out["body"].index(b"maxpm canvas helper"), out["body"].index(b"</body>"))
+        self.assertIn(b"function findMark(", out["body"])  # #4877: the find code of static/components/findText.js
+        self.assertNotIn(b"export function", out["body"])
         self.assertEqual(out["headers"]["Referrer-Policy"], "no-referrer")
         self.assertEqual(out["headers"]["X-Content-Type-Options"], "nosniff")
         # Another canvas's key opens nothing here.
@@ -369,6 +371,89 @@ try {
         self.assertNotIn("error", got, got)
         self.assertEqual(got["on"], "On “On” h1:nth-of-type(1)")
         self.assertEqual(got["pressed"], "false", "a pick ends the comment mode")
+
+
+class PanelFind(ChromePanel):
+    """#4877: Find in the side panel marks the words in a Markdown canvas (in this page) and in an HTML canvas (through
+    its helper script, in a frame of its own origin), with n of m, Enter, Shift+Enter, Esc and Cmd+F."""
+
+    def call(self, fn):
+        def run():
+            c = core.connect()
+            try:
+                return fn(c)
+            finally:
+                c.close()
+        return run
+
+    def test_find_in_a_markdown_and_an_html_canvas(self):
+        driver = self.tvs.DRIVE_HEAD + r"""
+const n = () => q("#spFindN").textContent;
+const key = (el, k, o = {}) => el.dispatchEvent(new KeyboardEvent("keydown", Object.assign({ key: k, bubbles: true, cancelable: true }, o)));
+const type = (v) => { q("#spFindQ").value = v; q("#spFindQ").dispatchEvent(new Event("input", { bubbles: true })); };
+// A new canvas opens in a tab beside the one the person reads: click it.
+const tab = async (name) => { await until(() => [...document.querySelectorAll(".sp-tab-l")].some(b => b.textContent.includes(name)), name);
+  [...document.querySelectorAll(".sp-tab-l")].find(b => b.textContent.includes(name)).click(); };
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  await sleep(400);
+  await fetch("/__md");
+  await until(() => q(".sp-canvas h1"), "the Markdown canvas");
+  const out = { hidden: q("#spFind").classList.contains("hidden") };
+  q("#spFindBtn").click();
+  out.focus = document.activeElement === q("#spFindQ");
+  type("relay");
+  await until(() => n() === "1 of 3", "three matches");
+  out.marks = [...document.querySelectorAll(".sp-canvas mark.maxpm-find")].map(m => m.textContent);
+  out.on = q(".sp-canvas mark.maxpm-find-on").textContent;
+  key(q("#spFindQ"), "Enter"); out.next = n();
+  key(q("#spFindQ"), "Enter", { shiftKey: true }); key(q("#spFindQ"), "Enter", { shiftKey: true }); out.prev = n();
+  type("nowhere"); await until(() => n() === "No match", "no match");
+  key(q("#spFindQ"), "Escape");
+  out.closed = q("#spFind").classList.contains("hidden") && !document.querySelector("mark.maxpm-find");
+  out.text = q(".sp-canvas").textContent.replace(/\s+/g, " ").trim();
+  // Cmd+F after a click in the panel opens the box again, with the words of before.
+  q(".sp-canvas h1").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+  key(document.body, "f", { metaKey: true });
+  out.reopened = !q("#spFind").classList.contains("hidden") && q("#spFindQ").value === "nowhere";
+  // An HTML canvas: the helper script in its frame marks and counts.
+  type("step");
+  await fetch("/__html");
+  await tab("Steps");
+  await until(() => q("iframe.sp-canvas"), "the HTML canvas");
+  await until(() => n() === "1 of 3", "three matches in the frame");
+  key(q("#spFindQ"), "Enter"); await until(() => n() === "2 of 3", "the next one in the frame");
+  key(q("#spFindQ"), "Enter", { shiftKey: true }); key(q("#spFindQ"), "Enter", { shiftKey: true });
+  await until(() => n() === "3 of 3", "round to the last one");
+  // A picture (an SVG canvas) is out of reach, and the box says so.
+  await fetch("/__svg");
+  await tab("Pic");
+  await until(() => /cannot read a picture/.test(n()), "the picture");
+  post(out);
+} catch (e) { post({ error: String(e.stack || e), n: n() }); }
+"""
+        def md(c):
+            return core.canvas_put(c, "notes", "# Relay notes\n\n## The relay\n\nA relay, and **more**.\n", "ag",
+                                   kind="md", title="Notes")["id"]
+
+        def html(c):
+            return core.canvas_put(c, "steps", "<body><h1>Steps</h1><p>step one, step two</p></body>", "ag",
+                                   kind="html", title="Steps")["id"]
+
+        def svg(c):
+            return core.canvas_put(c, "pic", "<svg xmlns='http://www.w3.org/2000/svg'><text y='20'>step</text></svg>",
+                                   "ag", kind="svg", title="Pic")["id"]
+        got = self.tvs.drive_page(self.base, driver, routes={"/__md": self.call(md), "/__html": self.call(html),
+                                                             "/__svg": self.call(svg)})
+        self.assertNotIn("error", got, got)
+        self.assertTrue(got["hidden"])
+        self.assertTrue(got["focus"])
+        self.assertEqual(got["marks"], ["Relay", "relay", "relay"])
+        self.assertEqual(got["on"], "Relay")
+        self.assertEqual((got["next"], got["prev"]), ("2 of 3", "3 of 3"))
+        self.assertTrue(got["closed"], "Esc closes the box and takes the marks away")
+        self.assertEqual(got["text"], "Relay notes The relay edit A relay, and more.", "the text is whole again")
+        self.assertTrue(got["reopened"])
 
 
 DOC = """# Relay

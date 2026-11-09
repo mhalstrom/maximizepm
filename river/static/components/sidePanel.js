@@ -13,7 +13,8 @@
 // Two lists come first and stay (#4685): Items (what this session claimed, finished, released or gave away) and
 // Artifacts (what it wrote or named). The chat stays in sight beside them: an item opens in a tab of its own here
 // (components/itemView.js), an artifact too. The X of the last tab shows the Artifacts list (#4646); the panel's
-// own X closes it.
+// own X closes it. Find (#4877): a box over the tab marks each place of the words in the canvas, item, list or file it
+// shows (in an HTML canvas through its helper script), with "n of m", Enter and Shift+Enter, and Esc.
 import { $, esc, ago, clip, store, toast, act, pageToken, copyText } from "../lib.js";
 import { markdown } from "./chat.js";
 import { chip } from "./chip.js";
@@ -22,6 +23,7 @@ import { linkArtifacts, linkTarget } from "./artLinks.js";
 import { showRows, wireRows } from "../views/artifacts.js";
 import { makeComments, pathIn } from "./canvasComments.js";
 import { decorateDoc, updateAnswers } from "./canvasDoc.js";
+import { findMark, findClear, findGo } from "./findText.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
@@ -186,6 +188,7 @@ async function showCanvas(t, box, note) {
     return;
   }
   if (on !== t.id) return;
+  t.kind = meta.kind;
   if (t.pin && !meta.versions.some(x => x.version === t.pin)) t.pin = null;
   t.shown = meta.version;
   const src = `canvas/${id}/${t.pin || "latest"}?${sig}`;
@@ -440,12 +443,16 @@ addEventListener("message", (e) => {
   const d = e.data || {}, t = tabs.find(x => x.id === on);
   if (t && t.next && e.source === t.next.contentWindow && d.maxpmCanvas === "ready") {  // a new version, out of sight
     if (t.scroll) e.source.postMessage({ maxpmCanvas: "scrollTo", x: t.scroll.x, y: t.scroll.y }, "*");
+    findReady(e.source);
     return setTimeout(t.next.swap, 60);
   }
   if (!t || !t.frame || e.source !== t.frame.contentWindow || typeof d.maxpmCanvas !== "string") return;
   if (d.maxpmCanvas === "scroll") t.scroll = { x: +d.x || 0, y: +d.y || 0 };
   if (d.maxpmCanvas === "ready" && t.scroll) e.source.postMessage({ maxpmCanvas: "scrollTo", x: t.scroll.x, y: t.scroll.y }, "*");
   if (d.maxpmCanvas === "ready" && t.commenting) e.source.postMessage({ maxpmCanvas: "mode", on: true }, "*");
+  if (d.maxpmCanvas === "ready") findReady(e.source);
+  if (d.maxpmCanvas === "found" && findOpen() && String(d.q || "") === find.q) findCount(+d.n || 0, +d.i || 0);
+  if (d.maxpmCanvas === "find-open") openFind(typeof d.text === "string" ? d.text.slice(0, 200) : "");
   if (d.maxpmCanvas === "escape") setCommenting(t, false);
   if (d.maxpmCanvas === "shown" && !d.found) toast("That part is not in this version of the page", true);
   if (d.maxpmCanvas === "pick" && t.comments) {
@@ -456,6 +463,108 @@ addEventListener("message", (e) => {
     const side = $("#spBody .sp-cside"); if (side) side.scrollIntoView({ block: "nearest" });
   }
 });
+
+// Find in the tab (#4877). Where it looks: the drawn text of a Markdown canvas; an HTML canvas through its helper
+// script (its own origin: this page cannot read it); else the tab's body (an item, a list, a Markdown file, a tool).
+// A page in a frame (a local page, a site, a PDF) and a picture are out of reach: the box says so.
+const find = { q: "", i: 0, marks: [], root: null };
+const FIND_SKIP = ".doc-edit, .sp-find";
+const findOpen = () => !$("#spFind").classList.contains("hidden");
+function findScope() {
+  const box = $("#spBody"), t = tabs.find(x => x.id === on);
+  if (t && canvasOf(t.target)) {
+    if (t.md && t.md.isConnected) return { root: t.md };
+    if (t.frame && t.frame.isConnected) return t.kind === "html" ? { frame: t.frame } : { none: "Find cannot read a picture" };
+  }
+  if (box.querySelector("iframe, img.sp-img")) return { none: "Find cannot read this page: click in it and use the browser's find" };
+  return { root: box };
+}
+function findCount(n, i, none) {
+  const el = $("#spFindN");
+  el.textContent = none || (!find.q ? "" : n ? `${i + 1} of ${n}` : "No match");
+  el.title = none || "";
+  el.classList.toggle("sp-find-none", !!none);
+}
+// Mark the words again. step: 0 marks them anew (the first match, or with again the same one, without a scroll: the
+// tab changed under the person); 1 and -1 go to the next and the previous match.
+function runFind(step = 0, again = false) {
+  const s = findScope();
+  if (find.root && find.root !== s.root) { findClear(find.root); find.marks = []; find.root = null; findObserved(); }
+  if (s.none) { find.marks = []; findObserved(); return findCount(0, 0, s.none); }
+  if (s.frame) {
+    if (s.frame.contentWindow) s.frame.contentWindow.postMessage({ maxpmCanvas: "find", q: find.q, step, again }, "*");
+    if (!find.q) findCount(0, 0);
+    return;
+  }
+  if (step === 0 || !find.marks.length || !find.marks[0].isConnected) {
+    const keep = again ? find.i : 0;
+    find.marks = findMark(s.root, find.q, FIND_SKIP); find.root = s.root;
+    find.i = findGo(find.marks, keep, !again);
+  } else find.i = findGo(find.marks, find.i + step, true);
+  findObserved();
+  findCount(find.marks.length, find.i);
+}
+// The marks change the tab's elements: those changes are not news for the watch below.
+let findWatch = null, findLater = 0;
+function findObserved() { if (findWatch) findWatch.takeRecords(); }
+function openFind(text = "") {
+  const box = $("#spFind"), inp = $("#spFindQ");
+  if (panel().classList.contains("hidden")) return;
+  box.classList.remove("hidden");
+  $("#spFindBtn").setAttribute("aria-expanded", "true");
+  if (text && text.length <= 200 && !/\n/.test(text)) inp.value = text;
+  inp.focus(); inp.select();
+  if (inp.value !== find.q || text) { find.q = inp.value; runFind(0); } else runFind(0, true);
+}
+function closeFind() {
+  $("#spFind").classList.add("hidden");
+  $("#spFindBtn").setAttribute("aria-expanded", "false");
+  const q = find.q; find.q = "";
+  runFind(0, true);
+  find.q = q;  // the words stay in the box for the next time
+  findCount(0, 0);
+}
+// A new frame of an HTML canvas (a new version, another tab) is ready: it finds too, and marks the words when the box
+// is open.
+function findReady(win) {
+  win.postMessage({ maxpmCanvas: "finder" }, "*");
+  if (findOpen() && find.q) win.postMessage({ maxpmCanvas: "find", q: find.q, step: 0, again: true }, "*");
+}
+function wireFind() {
+  const inp = $("#spFindQ");
+  let typing = 0;
+  inp.addEventListener("input", () => { clearTimeout(typing); typing = setTimeout(() => { find.q = inp.value; runFind(0); }, 150); });
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); return closeFind(); }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    clearTimeout(typing);
+    if (inp.value !== find.q) { find.q = inp.value; return runFind(0); }
+    runFind(e.shiftKey ? -1 : 1);
+  });
+  $("#spFindNext").onclick = () => runFind(1);
+  $("#spFindPrev").onclick = () => runFind(-1);
+  $("#spFindX").onclick = closeFind;
+  $("#spFindBtn").onclick = () => findOpen() ? closeFind() : openFind();
+  // Cmd+F or Ctrl+F while the panel has the focus, or the person clicked in it last: this box, not the browser's.
+  let inPanel = false;
+  document.addEventListener("pointerdown", (e) => { inPanel = panel().contains(e.target); }, true);
+  document.addEventListener("keydown", (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || (e.key || "").toLowerCase() !== "f") return;
+    if (panel().classList.contains("hidden") || !panel().offsetParent) return;
+    const a = document.activeElement;
+    if (!(a && a !== document.body ? panel().contains(a) : inPanel)) return;
+    e.preventDefault();
+    const sel = String(getSelection() || "").trim();
+    openFind(sel && panel().contains(getSelection().anchorNode) ? sel : "");
+  });
+  // The tab changed (another tab, a new version, a list read again): the marks follow, at the same match.
+  findWatch = new MutationObserver(() => {
+    if (!findOpen() || !find.q) return;
+    clearTimeout(findLater); findLater = setTimeout(() => runFind(0, true), 200);
+  });
+  findWatch.observe($("#spBody"), { childList: true, subtree: true, characterData: true });
+}
 
 // The page's state came (app.js, every three seconds): the canvas tab on screen loads a new version in place, and a
 // canvas that the shown session makes opens in a tab. It shows at once only when the panel shows no tab or a list,
@@ -643,6 +752,7 @@ function closePanel() {
 }
 
 export function wirePanel() {
+  wireFind();
   const w = +store(WIDTH);
   if (w >= 280) document.documentElement.style.setProperty("--sp-w", w + "px");
   $("#spTabs").addEventListener("click", (e) => {

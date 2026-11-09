@@ -138,6 +138,13 @@ button.srow-it { cursor: pointer; }
 .sp-bar { display: flex; gap: 6px; align-items: center; flex: none; flex-wrap: wrap; }
 .sp-bar input { flex: 1 1 100px; min-width: 0; font-size: 12.5px; }
 .sp-bar .btn { font-size: 12px; white-space: nowrap; }
+/* Find in the tab (#4877): the box over the tab, and the marks of the matches (the current one stronger). */
+.sp-find { display: flex; gap: 6px; align-items: center; flex: none; }
+.sp-find.hidden { display: none; }
+.sp-find input { flex: 1 1 120px; min-width: 0; font-size: 12.5px; }
+.sp-find-n { font-size: 12px; white-space: nowrap; min-width: 4.5em; text-align: right; }
+.sp-body mark.maxpm-find { background: #ffe066; color: #000; border-radius: 2px; }
+.sp-body mark.maxpm-find-on { background: #ff9632; outline: 2px solid #ff9632; }
 .sp-body { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; }
 .sp-frame { flex: 1; width: 100%; border: 0; background: #fff; min-height: 300px; }
 /* A canvas tab (#4768): the version menu over the page. */
