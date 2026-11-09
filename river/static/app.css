@@ -123,6 +123,18 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup .sub { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
 #setup .fix { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 #setup code { font-size: 12px; }
+/* The options of How agents start, Where a notification opens and the trackers (#4727): fields no wider than the
+   dialog, labels that break between words (not inside one, as .sub's overflow-wrap would), and on a narrow screen
+   one option on each line, so the fields start at one left edge. */
+#setup .su-opt { display: inline-flex; gap: 4px; align-items: center; margin-right: 10px; max-width: 100%; overflow-wrap: normal; }
+#setup .su-opt > input, #setup .su-opt > select, #setup select, #setup .su-track > input { max-width: 100%; min-width: 0; }
+#setup .su-ws { width: 140px; } #setup .su-wm { width: 260px; } #setup .su-wl { width: 380px; }
+#setup .su-track { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; max-width: 100%; }
+#setup .su-track > input { width: 220px; flex: 0 1 220px; }
+@media (max-width: 600px) {
+  #setup .su-opt { display: flex; flex-wrap: wrap; margin: 4px 0 0; }
+  #setup .su-opt > input:not([type=checkbox]), #setup .su-opt > select { flex: 1 1 100%; width: auto; }
+}
 #stopDlg { position: fixed; inset: 0; z-index: 16; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
 #stopDlg.hidden { display: none; }
 #stopDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(520px, 100%); padding: 18px 20px; }

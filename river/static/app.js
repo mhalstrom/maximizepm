@@ -492,10 +492,10 @@ function renderSetup(st) {
     profs.map(p => `<div style="margin:4px 0"><b>${esc(p.label)}</b> ${p.options.map(o => {
       const name = o.name.replace(/_/g, " ");
       return o.kind === "toggle"
-        ? `<label style="display:inline-flex;gap:4px;align-items:center;margin-right:10px" title="${esc(o.text)}"><input type="checkbox" data-su-opt="${esc(o.setting)}" ${o.value === "on" ? "checked" : ""}>${esc(name)}</label>`
+        ? `<label class="su-opt" title="${esc(o.text)}"><input type="checkbox" data-su-opt="${esc(o.setting)}" ${o.value === "on" ? "checked" : ""}>${esc(name)}</label>`
         : o.kind === "choice"
-        ? `<label style="display:inline-flex;gap:4px;align-items:center;margin-right:10px" title="${esc(o.text)}">${esc(name)}<select data-su-opt="${esc(o.setting)}"><option value="">the agent's own</option>${o.choices.map(c => `<option ${c === o.value ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>`
-        : `<label style="display:inline-flex;gap:4px;align-items:center;margin-right:10px" title="${esc(o.text)}">${esc(name)}<input data-su-opt="${esc(o.setting)}" value="${esc(o.value)}" style="width:${o.name === "model_ids" ? 380 : o.name === "prompt" ? 260 : 140}px"></label>`;
+        ? `<label class="su-opt" title="${esc(o.text)}">${esc(name)}<select data-su-opt="${esc(o.setting)}"><option value="">the agent's own</option>${o.choices.map(c => `<option ${c === o.value ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>`
+        : `<label class="su-opt" title="${esc(o.text)}">${esc(name)}<input data-su-opt="${esc(o.setting)}" value="${esc(o.value)}" class="su-w${o.name === "model_ids" ? "l" : o.name === "prompt" ? "m" : "s"}"></label>`;
     }).join("")}</div>`).join("")
       + `<div class="muted" style="font-size:12px">For every project; set one project apart in Settings (for example claude_remote_control with the project scope). The launch dialog can change the toggles for one start.</div>`, "");
   // A first item, then an agent that takes it. The page says "item" everywhere, not "task" (#4705).
@@ -534,8 +534,8 @@ function renderSetup(st) {
   if (folderProjects.length) more.push(extra(noTracker.length === 0, "Issue tracker",
     folderProjects.map(p => `<div>${esc(p.name)}: ${p.tracker ? esc(p.tracker) : "none"}</div>`).join("")
       + "If you use GitHub Issues, Jira, or Linear, agents can bring issues in and close them when they're done. Say which tracker, where, and with what tool.",
-    noTracker.map(p => `<span style="display:flex;gap:4px;align-items:center">${esc(p.name)}
-      <input data-tracker-for="${esc(p.name)}" placeholder="github owner/repo via gh" style="width:220px">
+    noTracker.map(p => `<span class="su-track">${esc(p.name)}
+      <input data-tracker-for="${esc(p.name)}" placeholder="github owner/repo via gh">
       <button class="btn" data-su="tracker" data-project="${esc(p.name)}">Save</button></span>`).join("")));
   $("#setupSteps").innerHTML = out.join("") + `<details class="more"><summary>More (optional)</summary>${more.join("")}</details>`;
 }
