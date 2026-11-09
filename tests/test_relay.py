@@ -327,26 +327,14 @@ class LinkTest(Base):
         side.send_json({"t": "req", "id": "q2", "method": "POST", "body": {"jsonrpc": "2.0", "id": 1}})
         self.assertEqual(side.recv_json()["status"], 400, "only page requests come over the socket")
 
-    def test_hello_asks_for_an_offline_alert_to_the_persons_ntfy_topic(self):
-        """#4771: the relay posts 'your Mac is offline' to the ntfy topic that hello names; the computer asks for
-        none with no topic, with a token (the relay keeps none), or with relay_offline_alert off."""
-        self.assertEqual(relay.offline_alert(), {"off": "no ntfy topic: maxpm notify setup ntfy"})
+    def test_hello_names_no_alert_topic(self):
+        """#4870: the relay sends no notification and keeps no alert topic, so hello carries none, also when the
+        person has an ntfy topic; notifications are a job of maxpm on the computer."""
         core.config_set(self.conn, "ntfy_topic", "maxpm-alice-7f3k2q9x")
-        self.assertEqual(relay.offline_alert(), {"url": "https://ntfy.sh/maxpm-alice-7f3k2q9x", "after": 900})
-        self.assertEqual(relay.alert_note(relay.offline_alert()), "to your ntfy topic (...2q9x) after 15 minutes offline")
         self.start()
         _, hello = self.hello()
-        self.assertEqual(hello["alert"], {"url": "https://ntfy.sh/maxpm-alice-7f3k2q9x", "after": 900})
-        core.config_set(self.conn, "relay_offline_alert", "1h")
-        self.assertEqual(relay.offline_alert()["after"], 3600)
-        for bad in ("1m", "2d", "soon"):
-            with self.assertRaisesRegex(core.RiverError, "5m to 1d"):
-                core.config_set(self.conn, "relay_offline_alert", bad)
-        core.config_set(self.conn, "ntfy_token", "tk_secret")
-        self.assertIn("needs a token", relay.offline_alert()["off"])
-        core.config_unset(self.conn, "ntfy_token")
-        core.config_set(self.conn, "relay_offline_alert", "off")
-        self.assertEqual(relay.alert_note(relay.offline_alert()), "off (relay_offline_alert is off)")
+        self.assertNotIn("alert", hello)
+        self.assertNotIn("relay_offline_alert", core.DEFAULT_SETTINGS)
 
     def test_the_plan_from_the_relay_shows_in_the_status(self):
         """#4759: welcome and plan frames carry the relay plan; maxpm connect --status says when it ended or a

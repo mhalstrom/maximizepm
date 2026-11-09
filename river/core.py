@@ -226,11 +226,6 @@ DEFAULT_SETTINGS = {
     # is the power of a computer that stays on (a few watts for a Mac mini or a MacBook on its charger). off:
     # the computer sleeps as usual, and the tunnel is offline while it sleeps.
     "relay_keep_awake": "on",
-    # When this computer is away from the relay this long (sleep, no network, maxpm serve stopped), the relay
-    # posts "your Mac is offline" to the person's ntfy topic (ntfy_url, ntfy_topic; maxpm notify setup ntfy).
-    # The computer gives the relay that address when it connects; the relay keeps nothing else for it. 5m to 1d,
-    # or off (#4771).
-    "relay_offline_alert": "15m",
     # A lease does not run out while its agent is busy. An agent is busy when a command runs in its session (a
     # process below the agent CLI that started after the agent's last river command: a test run, a build), when its
     # tmux pane changes, when its pane shows a prompt for a person, or when its Claude Code transcript has a
@@ -1260,14 +1255,6 @@ def _scope(conn, project=None, item=None, agent=None, kind=None) -> str:
     return "global"
 
 
-def _duration_or_none(value):
-    """Seconds of a duration such as 15m, or -1 when it is not one."""
-    try:
-        return parse_duration(value).total_seconds()
-    except (RiverError, ValueError):
-        return -1
-
-
 def config_set(conn, key, value, project=None, item=None, agent=None, actor=None, kind=None):
     if key not in DEFAULT_SETTINGS:
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
@@ -1324,9 +1311,6 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is on or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key == "relay_offline_alert" and value != "off" and not (
-            300 <= _duration_or_none(value) <= 86_400):
-        raise RiverError("relay_offline_alert is a time from 5m to 1d (for example 15m), or off")
     elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "relay_keep_awake", "web_terminal",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
