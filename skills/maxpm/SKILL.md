@@ -382,6 +382,10 @@ this computer, with each version, and that the user opens in the MaximizePM page
   scripts inline), then `maxpm canvas put <file> --name <name> [--title "..."]`. Put it again after each
   change: each put is a new version (`--note "<what changed>"`). The same name in the same project is the
   same canvas. It belongs to the item you hold, or to `--item <id>`.
+- A new canvas opens by itself in the side panel beside your session's chat on the Sessions tab, and each
+  new version shows there in place, at the same scroll position: the user watches the page while you work.
+  The page runs in a sandbox of its own origin; the setting `canvas_network` says what it may load from the
+  network (`on`, `off`, or a list of hosts). With `off`, put everything inline.
 - With no file: `maxpm canvas put - --name <name> --kind md` reads stdin; the MCP tool `canvas` (action
   `put`) and HTTP (`POST /api/action`, op `canvas_put`) take the text itself. All three do the same.
 - The user comments on a part of the page or on the whole page, and sends the comments to you as one

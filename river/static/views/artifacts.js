@@ -1,14 +1,16 @@
-// The Artifacts tab (#4620): what the sessions made or named, newest first (GET /api/artifacts): files they wrote or
+// The Artifacts tab (#4620): what the sessions made or named, newest first (GET /api/artifacts): the canvases first
+// (#4768: pages a session keeps in maxpm), then files they wrote or
 // named that the side panel can show, local pages, and claude.ai artifact links. A filter by session and by item.
 // Open shows it in the side panel beside its session's chat; Open full screen gives it a browser tab of its own.
 import { $, esc, ago, clip } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { openFullScreen } from "../components/sidePanel.js";
 
-const KIND = { file: "file", page: "local page", artifact: "claude.ai artifact" };
+const KIND = { canvas: "canvas", file: "file", page: "local page", artifact: "claude.ai artifact" };
 let list = [];
 
 function name(a) {
+  if (a.kind === "canvas") return a.title || a.name;
   if (a.kind === "file") return a.target.split(/[\\/]/).pop();
   return a.target.replace(/^https?:\/\//, "");
 }
@@ -20,8 +22,8 @@ export function showRows(el, rows, empty) {
   el.innerHTML = rows.map((a, i) => `<div class="art-row">
       <div class="art-main"><b title="${esc(a.target)}">${esc(clip(name(a), 80))}</b>
         <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} ${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}
-          ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}
-          <span class="muted art-path">${esc(clip(a.target, 120))}</span></div></div>
+          ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}
+          <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div></div>
       <div class="art-btns">${a.kind === "artifact"
         ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="claude.ai does not let another page show it in a frame">Open on claude.ai</a>`
         : `<button class="btn" type="button" data-art-open="${i}">Open</button>`}

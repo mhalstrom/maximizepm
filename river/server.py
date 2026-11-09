@@ -2104,13 +2104,29 @@ def _file_target(target):
     return str(target).startswith(("/", "~/", "~\\")) or PureWindowsPath(str(target)).is_absolute()
 
 
-def view_url(conn, target, session="", item=""):
-    """The full-screen address of a target (a full file path or a web address), valid for VIEW_HOURS."""
-    from urllib.parse import urlencode
-    if not (_file_target(target) or re.match(r"^https?://", str(target))):
-        raise RiverError("full screen shows a web address or a full file path")
+def _canvas_target(target):
+    """The canvas id of a target canvas:<id> (#4768), else None."""
+    m = re.fullmatch(r"canvas:c?(\d+)", str(target or ""))
+    return int(m.group(1)) if m else None
+
+
+def view_params(conn, target):
+    """(end, key): a full-screen key for a target (a full file path, a web address, or canvas:<id>), valid for
+    VIEW_HOURS. A canvas tab of the side panel loads its frame with it too, never with the page's token (#4768)."""
+    cid = _canvas_target(target)
+    if cid is not None:
+        core.canvas_version(conn, cid)  # refuses a canvas that is gone
+    elif not (_file_target(target) or re.match(r"^https?://", str(target))):
+        raise RiverError("full screen shows a web address, a full file path, or a canvas")
     end = int(time.time() + VIEW_HOURS * 3600)
-    q = {"t": target, "e": end, "k": view_key(conn, target, end)}
+    return end, view_key(conn, target, end)
+
+
+def view_url(conn, target, session="", item=""):
+    """The full-screen address of a target (a full file path, a web address, or canvas:<id>), valid for VIEW_HOURS."""
+    from urllib.parse import urlencode
+    end, key = view_params(conn, target)
+    q = {"t": target, "e": end, "k": key}
     if session:
         q["s"] = session
     if item:
@@ -2128,6 +2144,9 @@ def view_page(conn, q):
     if not view_ok(conn, t, end, key):
         return 403, ("<!doctype html><meta charset=utf-8><title>MaximizePM</title><body style='font:15px system-ui;padding:24px'>"
                      "This full-screen link has ended or is not valid. Open it again from the MaximizePM page.</body>")
+    cid = _canvas_target(t)
+    if cid is not None:
+        return _canvas_view(conn, cid, q, int(end), key)
     is_file = _file_target(t)
     name = re.split(r"[/\\]", t.rstrip("/\\"))[-1] if is_file else re.sub(r"^https?://", "", t)[:80]
     src = f"/api/file?path={quote(t)}&e={int(end)}&k={quote(key)}" if is_file else t
@@ -2141,7 +2160,72 @@ def view_page(conn, q):
         body = (f"<div class=card><b>{e(name)}</b><p>This site does not let another page show it in a frame.</p>"
                 f"<a class=btn href='{e(t)}' rel='noopener noreferrer'>Open it here</a></div>")
     came = " · ".join(x for x in (q.get("s") and "from " + e(q["s"]), q.get("i", "").isdigit() and f"#{q['i']}") if x)
-    return 200, f"""<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+    return 200, _view_shell(t, name, came, body, _VIEW_MD_JS)
+
+
+# Draws a Markdown target of /view (an .md file, a Markdown canvas): its text from data-src, cleaned by DOMPurify.
+_VIEW_MD_JS = """const md = document.getElementById("md");
+async function drawMd() {
+  if (!md) return;
+  const r = await fetch(md.dataset.src); const text = r.ok ? await r.text() : "MaximizePM cannot show this file.";
+  if (md.dataset.md === "1" && r.ok) {
+    const { marked } = await import("/vendor/marked/marked.esm.js");
+    const DOMPurify = (await import("/vendor/dompurify/purify.es.mjs")).default;
+    md.innerHTML = DOMPurify.sanitize(marked.parse(text), { FORBID_TAGS: ["style", "form", "input", "iframe", "script"] });
+  } else { const p = document.createElement("pre"); p.textContent = text; md.replaceChildren(p); }
+}
+await drawMd();
+"""
+
+# A canvas in /view follows its newest version (#4768): it asks for the version every three seconds and loads the
+# new one in place; the helper script in an HTML canvas keeps the scroll position.
+_VIEW_CANVAS_JS = """const cv = document.getElementById("cv"), ver = document.getElementById("ver");
+let shown = +ver.dataset.v, pos = { x: 0, y: 0 };
+addEventListener("message", (ev) => {
+  const d = ev.data || {};
+  if (!cv || ev.source !== cv.contentWindow) return;
+  if (d.maxpmCanvas === "scroll") pos = { x: d.x, y: d.y };
+  if (d.maxpmCanvas === "ready") cv.contentWindow.postMessage({ maxpmCanvas: "scrollTo", x: pos.x, y: pos.y }, "*");
+});
+setInterval(async () => {
+  if (document.hidden) return;
+  try {
+    const r = await fetch(ver.dataset.meta); if (!r.ok) return;
+    const j = await r.json();
+    if (j.version === shown) return;
+    shown = j.version; ver.textContent = "v" + shown;
+    if (cv) cv.src = cv.src; else { const y = md.scrollTop; await drawMd(); md.scrollTop = y; }
+  } catch (e) { /* the next poll asks again */ }
+}, 3000);
+"""
+
+
+def _canvas_view(conn, cid, q, end, key):
+    """/view of a canvas: its newest version in a sandboxed frame (HTML, SVG) or drawn (Markdown), live (#4768)."""
+    import html
+    from urllib.parse import quote
+    e = html.escape
+    try:
+        c, v = core.canvas_version(conn, cid)
+    except RiverError as err:
+        return 404, _view_shell("", "MaximizePM", "", f"<div class=card>{e(str(err))}</div>")
+    sig = f"e={int(end)}&k={quote(key)}"
+    src, meta = f"/canvas/{cid}/latest?{sig}", f"/canvas/{cid}/meta?{sig}"
+    if c["kind"] == "md":
+        body = f"<div id=md class=md data-src='{e(src)}' data-md=1></div>"
+    else:
+        body = f"<iframe id=cv src='{e(src)}' sandbox='allow-scripts' title='{e(c['title'] or c['name'])}'></iframe>"
+    came = " · ".join(x for x in (
+        f"<span id=ver data-v='{v['version']}' data-meta='{e(meta)}'>v{v['version']}</span>", "canvas",
+        q.get("s") and "from " + e(q["s"]), q.get("i", "").isdigit() and f"#{q['i']}") if x)
+    return 200, _view_shell(f"canvas:{cid}", c["title"] or c["name"], came, body, _VIEW_MD_JS + _VIEW_CANVAS_JS)
+
+
+def _view_shell(title, name, came, body, script=""):
+    """The HTML of a /view page: a thin bar (name, where it came from, Reload, Copy link) over the body."""
+    import html
+    e = html.escape
+    return f"""<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
 <title>{e(name)} · MaximizePM</title><style>
 :root{{--bg:#f6f7f9;--panel:#fff;--ink:#1b1f24;--muted:#5f6b7a;--line:#dde2e8;--accent:#1f6feb}}
 @media (prefers-color-scheme: dark){{:root{{--bg:#0f1216;--panel:#171b21;--ink:#e6e9ee;--muted:#9aa5b1;--line:#2a3139;--accent:#4c8dff}}}}
@@ -2154,20 +2238,12 @@ iframe{{flex:1;border:0;width:100%;background:#fff}} .fit{{flex:1;overflow:auto;
 .md{{flex:1;overflow:auto;padding:24px;max-width:56rem;margin:0 auto;width:100%;box-sizing:border-box}} .md pre{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto}}
 .card{{margin:40px auto;max-width:32rem;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}}
 </style></head><body>
-<div class=bar><b title="{e(t)}">{e(name)}</b><span class=m>{came}</span><span class=s></span>
+<div class=bar><b title="{e(title)}">{e(name)}</b><span class=m>{came}</span><span class=s></span>
 <button onclick="location.reload()">Reload</button><button id=copy>Copy link</button></div>
 {body}
 <script type=module>
 document.getElementById("copy").onclick = async (ev) => {{ try {{ await navigator.clipboard.writeText(location.href); ev.target.textContent = "Copied"; }} catch (e) {{ prompt("Copy this link", location.href); }} }};
-const md = document.getElementById("md");
-if (md) {{
-  const r = await fetch(md.dataset.src); const text = r.ok ? await r.text() : "MaximizePM cannot show this file.";
-  if (md.dataset.md === "1" && r.ok) {{
-    const {{ marked }} = await import("/vendor/marked/marked.esm.js");
-    const DOMPurify = (await import("/vendor/dompurify/purify.es.mjs")).default;
-    md.innerHTML = DOMPurify.sanitize(marked.parse(text), {{ FORBID_TAGS: ["style", "form", "input", "iframe", "script"] }});
-  }} else {{ const p = document.createElement("pre"); p.textContent = text; md.append(p); }}
-}}
+{script}
 </script></body></html>"""
 
 
@@ -2669,8 +2745,8 @@ OPS = {
 
 def _view_routes():
     """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
-    from .routes import artifacts, board, done, projects, sessions, settings, targets
-    views = (board, projects, sessions, artifacts, targets, done, settings)
+    from .routes import artifacts, board, canvas, done, projects, sessions, settings, targets
+    views = (board, projects, sessions, artifacts, targets, done, settings, canvas)
     for v in views:
         for key in v.OPS:
             assert key not in OPS, key

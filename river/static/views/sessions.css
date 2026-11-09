@@ -140,6 +140,9 @@ button.srow-it { cursor: pointer; }
 .sp-bar .btn { font-size: 12px; white-space: nowrap; }
 .sp-body { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; }
 .sp-frame { flex: 1; width: 100%; border: 0; background: #fff; min-height: 300px; }
+/* A canvas tab (#4768): the version menu over the page. */
+.sp-cbar { display: flex; gap: 8px; align-items: center; flex: none; flex-wrap: wrap; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; position: sticky; top: 0; z-index: 1; }
+.sp-cbar select { font-size: 12px; max-width: 100%; }
 .sp-img { max-width: 100%; height: auto; display: block; margin: auto; }
 .sp-md { padding: 12px 16px; font-size: 14px; line-height: 1.6; }
 .sp-note { padding: 16px; font-size: 13px; }

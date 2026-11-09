@@ -123,6 +123,11 @@ DEFAULT_SETTINGS = {
     # many versions of a canvas maxpm keeps (a new version then removes the oldest, but never version 1).
     "canvas_max": "5000000",
     "canvas_versions": "50",
+    # What a canvas page may load from the network (#4768; mark's answer 3 of #4650): on (any host), off (nothing:
+    # the page carries what it shows inline), or a list of hosts, separated by spaces or commas
+    # (cdn.jsdelivr.net cdnjs.cloudflare.com). In every case the page runs in a sandbox of its own origin: it never
+    # reads maxpm's page, its token or its data.
+    "canvas_network": "on",
     "due_warn_before": "3d",
     # Agents the page can start, as "Label=command" entries separated by ";". The first is the default.
     # "@claude-code" or "@codex" is a launch profile: river builds the command from the platform's options
@@ -1270,6 +1275,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
                  "max_sessions", "canvas_max", "canvas_versions"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
+    elif key == "canvas_network":
+        canvas_hosts(value)
     elif key == "launch_agents":
         parse_launch_agents(value)
     elif _platform_setting(key):
@@ -8563,6 +8570,50 @@ def canvas_put(conn, name, body, actor=None, kind=None, title=None, item=None, p
     return canvas_show(conn, cid)
 
 
+_CANVAS_HOST = re.compile(r"^(https?://)?(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d{1,5})?$", re.I)
+
+
+def canvas_hosts(value):
+    """The setting canvas_network: None for on (any host), [] for off, else the list of hosts."""
+    v = (value or "").strip()
+    if v.lower() == "on":
+        return None
+    if v.lower() == "off":
+        return []
+    hosts = [h for h in re.split(r"[\s,]+", v) if h]
+    bad = [h for h in hosts if not _CANVAS_HOST.match(h)]
+    if bad or not hosts:
+        raise RiverError("canvas_network is on, off, or hosts separated by spaces or commas, for example "
+                         f"'cdn.jsdelivr.net cdnjs.cloudflare.com'{'; not a host: ' + ', '.join(bad) if bad else ''}")
+    return hosts
+
+
+def canvas_heads(conn):
+    """Each canvas with its latest version number and no text: what the page polls to reload an open canvas, and
+    what the Artifacts lists show (#4768). Newest change first."""
+    return [dict(r) for r in conn.execute(
+        "SELECT c.id, c.name, c.title, c.kind, p.name AS project, c.item_id, c.agent, c.updated_at, "
+        "(SELECT MAX(version) FROM canvas_versions v WHERE v.canvas_id=c.id) AS version, "
+        "(SELECT COUNT(*) FROM canvas_comments m WHERE m.canvas_id=c.id AND m.parent_id IS NULL "
+        " AND m.state IN ('sent','read')) AS open_comments "
+        "FROM canvases c JOIN projects p ON p.id=c.project_id WHERE c.deleted_at IS NULL "
+        "ORDER BY c.updated_at DESC, c.id DESC")]
+
+
+def canvas_version(conn, cid, version=None):
+    """One version of a canvas by id (None or 'latest': the newest), with its canvas row; RiverError if gone."""
+    c = conn.execute("SELECT * FROM canvases WHERE id=? AND deleted_at IS NULL", (int(cid),)).fetchone()
+    if c is None:
+        raise RiverError(f"no canvas c{cid}")
+    if version in (None, "", "latest"):
+        v = _canvas_latest(conn, c["id"])
+    else:
+        v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], int(version))).fetchone()
+    if v is None:
+        raise RiverError(f"canvas c{cid} has no version {version}")
+    return c, v
+
+
 def canvas_list(conn, project=None, item=None, mine=None, deleted=False):
     """The canvases, newest change first: all, a project's, an item's, or the ones an agent wrote last."""
     q, args = "SELECT * FROM canvases WHERE 1=1", []
@@ -10015,6 +10066,7 @@ def state(conn, closed=True):
         "effort_levels": _levels(setting(conn, "effort_levels")),
         "settings": config_list(conn),
         "events": recent_events(conn),
+        "canvases": canvas_heads(conn),  # the page reloads an open canvas when its version changes (#4768)
         "takeovers": takeovers(conn),
         "needs_you": [dict(r) for r in conn.execute(
             "SELECT id, kind, item_id, message_id, human, summary, opened_at FROM needs_you "

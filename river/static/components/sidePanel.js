@@ -5,11 +5,14 @@
 // several, an address bar, Reload, Open in a new tab, Close, and a handle to resize it (the width stays).
 // Each session has its own tabs (#4632), kept in this browser across reloads; each tab shows what it holds (file,
 // image, page, site, tool). A tool (#4631) opens as a tab too: openTool(key, title, render).
+// A canvas (#4768, a page that a session keeps in maxpm: maxpm canvas put) opens as a tab "canvas:<id>": its newest
+// version in a frame of its own origin (or drawn, for Markdown), a version menu, and a reload in place, at the same
+// scroll position, when the session puts a new version. A new canvas of the shown session opens here by itself.
 // Two lists come first and stay (#4685): Items (what this session claimed, finished, released or gave away) and
 // Artifacts (what it wrote or named). The chat stays in sight beside them: an item opens in a tab of its own here
 // (components/itemView.js), an artifact too. The X of the last tab shows the Artifacts list (#4646); the panel's
 // own X closes it.
-import { $, esc, ago, store, toast, pageToken, copyText } from "../lib.js";
+import { $, esc, ago, clip, store, toast, pageToken, copyText } from "../lib.js";
 import { markdown } from "./chat.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
@@ -38,8 +41,12 @@ export function panelTargets() { return tabs.map(t => t.target); }
 
 function isFile(target) { return /^(?:\/|~[/\\]|[a-z]:[/\\]|\\\\)/i.test(target); }
 const itemOf = (target) => (/^item:(\d+)$/.exec(target) || [])[1];
+const canvasOf = (target) => +((/^canvas:c?(\d+)$/.exec(target) || [])[1] || 0) || null;
+// The canvases of the queue (S.canvases: id, name, title, version, agent), from the page's state (canvasState).
+let canvasHeads = new Map(), knownCanvases = null;
 function label(target) {
   if (itemOf(target)) return "#" + itemOf(target);
+  if (canvasOf(target)) { const h = canvasHeads.get(canvasOf(target)); return h ? h.title || h.name : target; }
   if (isFile(target)) return target.split(/[\\/]/).pop();
   try { const u = new URL(target); return u.host + (u.pathname.length > 1 ? u.pathname : ""); } catch (e) { return target; }
 }
@@ -49,11 +56,12 @@ async function fileUrl(path) {
 
 function kindOf(target) {
   if (target.startsWith("tool:")) return "tool";
+  if (canvasOf(target)) return "canvas";
   if (itemOf(target)) return "item";
   if (isFile(target)) return IMAGE.test(target) ? "image" : "file";
   return LOCAL.test(target) ? "page" : "site";
 }
-const KIND_MARK = { image: "▣", file: "▤", page: "◧", site: "◎", tool: "⚙", item: "◇" };
+const KIND_MARK = { image: "▣", file: "▤", page: "◧", site: "◎", tool: "⚙", item: "◇", canvas: "✎" };
 
 // The tabs of each session stay in this browser (targets only; a tool tab comes back when its tool opens again).
 function save() {
@@ -92,6 +100,7 @@ async function show(t) {
     const render = tools[t.target];
     return render ? render(box) : note(`<div class="muted">This tool is not open now.</div>`);
   }
+  if (canvasOf(t.target)) return showCanvas(t, box, note);
   if (itemOf(t.target)) {
     note(`<div class="muted">Reading #${itemOf(t.target)}…</div>`);
     const r = await fetch("api/item/" + itemOf(t.target)).catch(() => null);
@@ -144,6 +153,96 @@ async function show(t) {
   if (j.frame) return frame(t.target);
   note(`<div class="sp-card"><b>${esc(j.title || label(t.target))}</b><div class="muted">This site does not let another page show it in a frame.</div>
     <a class="btn primary" href="${esc(t.target)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></div>`);
+}
+
+// A canvas's frame loads with a full-screen key for "canvas:<id>", never with the page's token: the canvas can read
+// its own address (#4768). The key lasts hours; the tab keeps it and asks again before it ends.
+async function canvasSig(t) {
+  if (t.sig && t.sigEnd > Date.now() / 1000 + 600) return t.sig;
+  const q = new URLSearchParams({ target: t.target, session, token: await pageToken() });
+  const r = await fetch("api/view-key?" + q), j = await r.json();
+  if (!r.ok) throw new Error(j.error || "MaximizePM cannot show this canvas");
+  const u = new URLSearchParams(j.url.split("?")[1]);
+  t.sig = `e=${u.get("e")}&k=${encodeURIComponent(u.get("k"))}`; t.sigEnd = +u.get("e");
+  return t.sig;
+}
+
+// A canvas tab: a bar with the version menu, then the version. t.pin: a version the person chose (null follows the
+// newest); t.shown: the newest version the tab knows; t.scroll: where the person reads.
+async function showCanvas(t, box, note) {
+  const id = canvasOf(t.target);
+  let sig, meta;
+  try {
+    sig = await canvasSig(t);
+    const r = await fetch(`canvas/${id}/meta?${sig}`); meta = await r.json();
+    if (!r.ok) throw new Error(meta.error || "gone");
+  } catch (e) {
+    if (on === t.id) { box.replaceChildren(); note(`<div class="muted">MaximizePM cannot show this canvas: ${esc(e.message)}</div>`); }
+    return;
+  }
+  if (on !== t.id) return;
+  const title = meta.title || meta.name;
+  if (t.title !== title) { t.title = title; renderTabs(); }
+  if (t.pin && !meta.versions.some(x => x.version === t.pin)) t.pin = null;
+  t.shown = meta.version;
+  const v = t.pin || meta.version;
+  box.replaceChildren();
+  const bar = document.createElement("div"); bar.className = "sp-cbar";
+  bar.innerHTML = `<select class="sp-cver" aria-label="Version of the canvas">${[...meta.versions].reverse().map(x =>
+      `<option value="${x.version}"${x.version === v ? " selected" : ""}>v${x.version}${x.version === meta.version ? " (newest)" : ""} · ${esc(x.author || "")} · ${ago(x.created_at)}${x.note ? " · " + esc(clip(x.note, 40)) : ""}</option>`).join("")}</select>
+    <span class="muted">${t.pin ? `version ${t.pin} of ${meta.version} · <span class="link" data-cv-newest>show the newest</span>` : "shows each new version"}</span>
+    ${meta.item_id ? `<span class="link" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}`;
+  box.append(bar);
+  bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
+  const newest = bar.querySelector("[data-cv-newest]");
+  if (newest) newest.onclick = () => { t.pin = null; show(t); };
+  const src = `canvas/${id}/${t.pin || "latest"}?${sig}`;
+  if (meta.kind === "md") {
+    const r = await fetch(src);
+    if (on !== t.id) return;
+    const d = document.createElement("div"); d.className = "sp-md md sp-canvas";
+    d.innerHTML = r.ok ? markdown(await r.text()) : "MaximizePM cannot show this canvas.";  // markdown(): DOMPurify
+    box.append(d);
+    box.scrollTop = (t.scroll && t.scroll.y) || 0;
+    box.onscroll = () => { if (on === t.id) t.scroll = { x: 0, y: box.scrollTop }; };
+    return;
+  }
+  box.onscroll = null;
+  const f = document.createElement("iframe");
+  f.className = "sp-frame sp-canvas"; f.title = title;
+  f.setAttribute("sandbox", "allow-scripts");  // and the server's CSP sandbox: an origin of its own
+  f.src = src;
+  t.frame = f;
+  box.append(f);
+}
+
+// The helper script in an HTML canvas says where the person scrolls, and asks for it after a new version loads.
+addEventListener("message", (e) => {
+  const d = e.data || {}, t = tabs.find(x => x.id === on);
+  if (!t || !t.frame || e.source !== t.frame.contentWindow || typeof d.maxpmCanvas !== "string") return;
+  if (d.maxpmCanvas === "scroll") t.scroll = { x: +d.x || 0, y: +d.y || 0 };
+  if (d.maxpmCanvas === "ready" && t.scroll) e.source.postMessage({ maxpmCanvas: "scrollTo", x: t.scroll.x, y: t.scroll.y }, "*");
+});
+
+// The page's state came (app.js, every three seconds): the canvas tab on screen loads a new version in place, and a
+// canvas that the shown session makes opens in a tab. It shows at once only when the panel shows no tab or a list,
+// so it never takes a page away from the person while they read it.
+export function canvasState(heads) {
+  const list = heads || [];
+  canvasHeads = new Map(list.map(c => [c.id, c]));
+  if (knownCanvases === null) knownCanvases = new Set(list.map(c => c.id));  // the ones from before the page loaded
+  for (const c of list) {
+    if (knownCanvases.has(c.id)) continue;
+    knownCanvases.add(c.id);
+    if (!session || c.agent !== session || tabs.some(x => x.target === `canvas:${c.id}`)) continue;
+    const t = { id: ++n, target: `canvas:${c.id}`, title: c.title || c.name };
+    tabs.push(t);
+    if (on == null || isList(on)) { reveal(true); show(t); } else renderTabs();
+  }
+  const t = tabs.find(x => x.id === on);
+  if (!t || !canvasOf(t.target) || t.pin || panel().classList.contains("hidden")) return;
+  const h = canvasHeads.get(canvasOf(t.target));
+  if (h && t.shown && h.version !== t.shown) show(t);
 }
 
 // Full screen (#4620): the target alone in a browser tab of its own, at an address with a key that maxpm serve
@@ -202,7 +301,7 @@ function reveal(yes) {
 export function openInPanel(target) {
   target = String(target || "").trim().replace(/^#(\d+)$/, "item:$1");  // #12 in the address bar: the item
   if (!target) return;
-  if (!isFile(target) && !itemOf(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https), a full file path, or an item (#12)", true);
+  if (!isFile(target) && !itemOf(target) && !canvasOf(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https), a full file path, an item (#12), or a canvas (canvas:3)", true);
   reveal(true);
   let t = tabs.find(x => x.target === target);  // the same thing again: its tab
   if (!t) { t = { id: ++n, target, title: "" }; tabs.push(t); }
@@ -269,6 +368,7 @@ export function wirePanel() {
   $("#spNew").onclick = async () => {
     const t = tabs.find(z => z.id === on); if (!t) return toast("Open an artifact in a tab first", true);
     if (itemOf(t.target)) return window.open("?item=" + itemOf(t.target), "_blank", "noopener");  // the page, with its drawer
+    if (canvasOf(t.target)) return openFullScreen(t.target, session);  // its own page, with a key (#4768)
     window.open(isFile(t.target) ? await fileUrl(t.target) : t.target, "_blank", "noopener");
   };
   // In the panel, an item link opens the item in a tab here, not in the drawer; Edit in the drawer opens the drawer.

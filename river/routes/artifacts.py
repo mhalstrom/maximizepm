@@ -9,6 +9,18 @@ from ..core import RiverError  # noqa: F401
 import hmac  # noqa: F401
 
 
+def canvas_rows(conn, agent=None):
+    """The canvases as rows of the Artifacts lists, first (#4768): all of them, or the ones an agent wrote a version
+    of."""
+    wrote = None
+    if agent:
+        wrote = {r[0] for r in conn.execute("SELECT DISTINCT canvas_id FROM canvas_versions WHERE author=?", (agent,))}
+    return [{"kind": "canvas", "target": f"canvas:{c['id']}", "session": c["agent"], "how": "wrote",
+             "item": c["item_id"], "at": c["updated_at"], "title": c["title"] or c["name"], "name": c["name"],
+             "version": c["version"], "open_comments": c["open_comments"], "project": c["project"]}
+            for c in core.canvas_heads(conn) if wrote is None or c["id"] in wrote]
+
+
 def artifacts(h, path):
     """The Artifacts tab (#4620)."""
     from .. import sessions
@@ -22,8 +34,8 @@ def artifacts(h, path):
                 return False
         from urllib.parse import parse_qs, urlsplit
         one = parse_qs(urlsplit(h.path).query).get("agent", [""])[0] or None
-        return h._send(200, {"artifacts": sessions.artifacts(conn, None if one else server.agent_terminals(conn),
-                                                                allowed, agent=one)})
+        return h._send(200, {"artifacts": canvas_rows(conn, one) + sessions.artifacts(
+            conn, None if one else server.agent_terminals(conn), allowed, agent=one)})
     finally:
         conn.close()
 
