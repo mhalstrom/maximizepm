@@ -1,4 +1,4 @@
-// The Capacity tab (#4656): open agent slots, sessions with nothing ready, the open items by step.
+// The Capacity tab (#4656): open session slots, sessions with nothing ready, the open items by step.
 import { $, esc } from "../lib.js";
 import { capacityBars } from "../components/bar.js";
 import { S } from "../page.js";

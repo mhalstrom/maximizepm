@@ -115,11 +115,13 @@ export function renderStrip() {
   const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review", "monitor"].includes(i.kind)).length;
   const running = S.items.filter(i => ["in_progress", "held"].includes(i.status)).length;
   const blocked = S.items.filter(i => i.blocked_reason && !["done", "dropped"].includes(i.status)).length;
+  // Words (#4728): an agent is a worker with a name in the queue (a person is in the Agents list too); a session is
+  // one running chat of an agent. So items are ready for agents, and the slots (max_sessions) are for sessions.
   const T = (S.takeovers || []).length, slots = S.capacity ? S.capacity.spare_slots : 0;
   const b = (n, label, go, cls) => `<button data-strip="${go}" class="${n ? cls : ""}"><b>${n}</b>${label}</button>`;
   const html = b(NY.length, "need you", "needs", "hum") + (T ? b(T, "taken off your list", "takeovers", "hum") : "")
     + b(ready, "ready for agents", "ready", "good") + b(running, "in progress", "work", "")
-    + b(blocked, "blocked outside", "blocked", "bad") + b(slots, "open agent slots", "capacity", "good")
+    + b(blocked, "blocked outside", "blocked", "bad") + b(slots, "open session slots", "capacity", "good")
     + (ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
         title: "Open a new terminal tab (a console window on Windows) in the folder of the most important ready item and start the chosen agent there" }) : "");
   if ($("#strip").dataset.sig !== html) { $("#strip").innerHTML = html; $("#strip").dataset.sig = html; }
