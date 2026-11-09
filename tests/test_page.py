@@ -192,6 +192,23 @@ try {
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
 
+    def test_rows_of_a_long_session_list_keep_their_whole_height(self):
+        """#4723: in the list (a flex column of fixed height) the rows shrank and cut off their last lines; now each
+        row keeps its height and the list scrolls."""
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  q('nav button[data-tab="sessions"]').click();
+  await until(() => q("#tab-sessions .slist .srow"), "a session row");
+  const list = q("#tab-sessions .slist"), row = list.querySelector(".srow");
+  for (let i = 0; i < 15; i++) list.appendChild(row.cloneNode(true));
+  await sleep(50);
+  check(list.scrollHeight > list.clientHeight, "the list is longer than its box");
+  const cut = [...list.querySelectorAll(".srow")].filter(r => r.scrollHeight > r.clientHeight + 1);
+  check(!cut.length, cut.length + " rows cut off their content: " + (cut[0] && cut[0].clientHeight + " < " + cut[0].scrollHeight));
+  post({ ok: true });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
+
     def test_a_click_on_each_tab_of_the_side_panel_shows_it(self):
         """#4652: the panel's tabs once had data-tab, which the page's own click handler reads as a tab of the
         page: a click hid the Sessions tab."""

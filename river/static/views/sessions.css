@@ -8,7 +8,8 @@ main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
 .sess-layout > .sess-main { padding: 12px 20px 14px; }
 .sess-side .slist { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
 .sess-note { font-size: 12px; margin-top: 8px; }
-.srow { border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 8px; background: var(--bg); display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); min-width: 0; overflow: hidden; }
+/* flex: none: in the list (a flex column of fixed height) a row keeps its whole height and the list scrolls (#4723). */
+.srow { flex: none; border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 8px; background: var(--bg); display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); min-width: 0; overflow: hidden; }
 .srow-main { padding: 7px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .srow-it { border: 0; border-left: 1px solid var(--line); background: none; color: var(--ink); font: inherit; font-size: 12px; text-align: left; padding: 7px 8px; display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
 button.srow-it { cursor: pointer; }
