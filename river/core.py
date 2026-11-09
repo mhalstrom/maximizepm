@@ -9528,18 +9528,28 @@ def launch_profiles(conn):
 
 def recent_events(conn, limit=40):
     return [dict(r) for r in conn.execute(
-        "SELECT e.at, e.actor, e.change, e.item_id, i.title FROM events e LEFT JOIN items i ON i.id=e.item_id "
+        "SELECT e.id, e.at, e.actor, e.change, e.item_id, i.title FROM events e LEFT JOIN items i ON i.id=e.item_id "
         "ORDER BY e.id DESC LIMIT ?", (limit,))]
 
 
-def state(conn):
-    """Everything the web page shows, in one read."""
+def state(conn, closed=True):
+    """Everything the web page shows, in one read.
+
+    closed: False leaves done and dropped items out (the page asks for them only while a view shows them, #4709);
+    closed_counts then still says how many each project has."""
     ann = annotate(conn)
     items = sorted(ann.values(), key=lambda a: a["sort_key"])
+    shown = [a for a in items if not a["project_archived"]]
+    closed_counts = {}
+    for a in shown:
+        if a["status"] in CLOSED_STATES:
+            closed_counts[a["project"]] = closed_counts.get(a["project"], 0) + 1
     return {
         "now": iso(now()),
         "projects": project_list(conn),
-        "items": [{k: v for k, v in a.items() if k != "sort_key"} for a in items if not a["project_archived"]],
+        "items": [{k: v for k, v in a.items() if k != "sort_key"} for a in shown
+                  if closed or a["status"] not in CLOSED_STATES],
+        "closed_counts": closed_counts,
         "agents": [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents ORDER BY name")],
         "capacity": capacity(conn, ann),
         "targets": targets_view(conn, ann),

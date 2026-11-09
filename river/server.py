@@ -2711,10 +2711,15 @@ class Handler(BaseHTTPRequestHandler):
             if route[0](path):
                 return route[1](self, path)
         if path == "/api/state":
+            # The page asks with ?since=<version>[&closed=1]: then the answer holds only what changed since that
+            # version, without done items unless closed=1 (statedelta, #4709). Without since: the whole state.
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query, keep_blank_values=True).items()}
+            delta = "since" in q
             conn = core.connect()
             try:
                 core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
-                st = core.state(conn)
+                st = core.state(conn, closed=not delta or q.get("closed") == "1")
                 st["goals"] = core.goal_list(conn, include_complete=True)
                 if DEV["on"]:
                     st["dev_build"] = _build_id()
@@ -2730,6 +2735,9 @@ class Handler(BaseHTTPRequestHandler):
                 st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
                 st["relay"] = relay.status()
                 st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
+                if delta:
+                    from . import statedelta
+                    return self._send(200, statedelta.answer(statedelta.slim(st), q["since"] or None))
                 return self._send(200, st)
             finally:
                 conn.close()

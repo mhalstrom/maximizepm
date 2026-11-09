@@ -13,6 +13,7 @@ import { openInPanel, onPanel, panelTargets } from "./components/sidePanel.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { S, tab, setState, setTabName, nav, goalSel } from "./page.js";
+import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
 import * as board from "./views/board.js";
 import * as needsYou from "./views/board-needs-you.js";
@@ -28,7 +29,7 @@ import * as settings from "./views/settings.js";
 hooks.refresh = refresh;
 Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady(),
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); } });
-let openItem = null;
+let openItem = null, drawerItem = null;  // drawerItem: the open item as /api/item gave it
 const drawer = makeDrawer($("#drawer"));
 
 let actorPicked = false;
@@ -96,12 +97,14 @@ async function openDrawer(id, fresh = false) {
   const data = await r.json();
   // Closed or moved to another item while the fetch ran (a slow refresh, then Escape): do not open it again (#4766).
   if (openItem !== id) return;
+  drawerItem = data;
   drawer.show(id, itemDrawerHtml(data, { S, me: actor() }), fresh);
 }
 
 async function drawerAction(what) {
   const id = openItem;
-  const it = S.items.find(i => i.id === id);
+  // A done item is in the state only while a view shows done items: else the drawer's own copy.
+  const it = S.items.find(i => i.id === id) || (drawerItem && drawerItem.id === id ? drawerItem : null);
   try {
     if (what === "claim") await act("claim", { id });
     if (what === "done") { const out = prompt("Output note (optional)") ?? undefined; await act("done", { id, output: out || undefined }); }
@@ -176,8 +179,18 @@ function newCode(build) {
   return false;
 }
 
+// The state comes as changes since the page's last version (state.js, #4709). Done and dropped items come only while
+// a view shows them: the Projects tab with "done" on, or the Graph with its done box on.
+const stateClient = makeStateClient(async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(`state: ${r.status}`); return r.json(); });
+let stateClosed = false;
+function wantClosed() { return (tab === "projects" && $("#showDone").checked) || (tab === "graph" && $("#graphDone").checked); }
+for (const box of ["#showDone", "#graphDone"]) $(box).addEventListener("change", () => refresh().catch(() => {}));
+// Done items are not always in the state: closed_counts says how many each project has.
+function closedTotal() { return Object.values((S && S.closed_counts) || {}).reduce((a, b) => a + b, 0); }
+function anyStarted() { return closedTotal() > 0 || S.items.some(i => ["in_progress", "held", "done"].includes(i.status)); }
 async function refresh() {
-  const r = await fetch("api/state"); setState(await r.json());
+  stateClosed = wantClosed();
+  setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   if (newCode(S.page_build)) return;
   renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); board.renderTakeovers(); projects.renderBlocked(); targets.renderTargets();
@@ -186,7 +199,7 @@ async function refresh() {
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);
   // The setup guide's last steps follow the queue: when a task is added or an agent picks one up, it checks again.
-  const firstRun = JSON.stringify([S.items.length, S.agents.some(a => a.kind !== "human"), S.items.some(i => ["in_progress", "held", "done"].includes(i.status))]);
+  const firstRun = JSON.stringify([S.items.length, S.agents.some(a => a.kind !== "human"), anyStarted()]);
   if (setupDialog.isOpen() && firstRun !== setupSig && !$("#setupSteps").contains(document.activeElement)) openSetup();
   setupSig = firstRun;
 }
@@ -319,6 +332,7 @@ function setTab(name, push = true) {
   renderLog(true);
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "artifacts") artifactsTab.refresh();
+  if (S && wantClosed() !== stateClosed) refresh().catch(() => {});  // this view shows done items, or no more
   return renderGraph(true);
 }
 // A session the person picks is a new entry; one the tab picks by itself replaces the address.
@@ -503,14 +517,15 @@ function renderSetup(st) {
       + `<div class="muted" style="font-size:12px">For every project; set one project apart in Settings (for example claude_remote_control with the project scope). The launch dialog can change the toggles for one start.</div>`, "");
   // A first item, then an agent that takes it. The page says "item" everywhere, not "task" (#4705).
   const tasks = (S && S.items || []).filter(i => !["deploy", "review", "monitor"].includes(i.kind));
+  const closedN = closedTotal();
   const folderProjects = (S && S.projects || []).filter(p => p.path);
-  out.push(step(tasks.length > 0, "Add a first item",
-    tasks.length ? `${tasks.length} item${tasks.length === 1 ? "" : "s"} on the list.`
+  out.push(step(tasks.length + closedN > 0, "Add a first item",
+    tasks.length || closedN ? `${tasks.length} item${tasks.length === 1 ? "" : "s"} on the list${closedN ? `, ${closedN} done` : ""}.`
       : "Something small an agent can do in your project, so you can see how it goes.",
     folderProjects.length ? `<select id="suTaskProject">${folderProjects.map(p => `<option>${esc(p.name)}</option>`).join("")}</select>
       <input id="suTaskTitle" placeholder="for example: add a README that says what this project does" style="flex:1 1 280px">
       <button class="btn primary" data-su="task">Add item</button>` : `<span class="muted">Add a project folder first.</span>`));
-  const started = (S && S.agents || []).some(a => a.kind !== "human") || tasks.some(i => ["in_progress", "held", "done"].includes(i.status));
+  const started = (S && S.agents || []).some(a => a.kind !== "human") || closedN > 0 || tasks.some(i => ["in_progress", "held", "done"].includes(i.status));
   out.push(step(started, "Start an agent",
     started ? "An agent has picked up work. Watch it on the Board; finished items show on Done."
       : "An agent opens in a new Terminal window, takes your item, and gets to work. You'll see it on the Board.",

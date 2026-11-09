@@ -19,6 +19,8 @@ export function renderProjects() {
     const open = all.filter(i => !["done", "dropped"].includes(i.status) && !i.backlog);
     const closed = all.filter(i => ["done", "dropped"].includes(i.status));
     const backlog = all.filter(i => i.backlog);
+    // The state has done items only while "done" is on (#4709): else closed_counts counts them, for all goals.
+    const closedN = showDone ? closed.length : !G ? (S.closed_counts || {})[p.name] || 0 : null;
     const ready = open.filter(i => i.ready).length, prog = open.filter(i => ["in_progress", "held"].includes(i.status)).length;
     const closedSet = projClosed(), isClosed = closedSet.includes(p.name);
     const who = [...new Set(open.filter(i => i.assignee && ["in_progress", "held"].includes(i.status)).map(i => i.assignee))];
@@ -27,7 +29,7 @@ export function renderProjects() {
       p.target ? `deploys to <b>${esc(p.target)}</b>` : "", p.tracker ? `tracker ${esc(p.tracker)}` : ""].filter(Boolean);
     const me = actor();
     return projCard(p, isClosed, `<div class="pmeta">${meta.map(m => `<span>${m}</span>`).join("")}</div>
-      <div class="pcounts">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${countChip(open.length, "open", "c-p")}${countChip(closed.length, "done", "c-p")}${backlog.length ? countChip(backlog.length, "in backlog", "c-p") : ""}${pg.length ? countChip(pg.length, pg.length === 1 ? "goal" : "goals", "c-p") : ""}</div>
+      <div class="pcounts">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${countChip(open.length, "open", "c-p")}${closedN == null ? "" : countChip(closedN, "done", "c-p")}${backlog.length ? countChip(backlog.length, "in backlog", "c-p") : ""}${pg.length ? countChip(pg.length, pg.length === 1 ? "goal" : "goals", "c-p") : ""}</div>
       <div class="pbody">
         <div class="pdesc">${p.notes ? esc(p.notes) : '<span class="muted">No description.</span>'} <span class="link" data-describe="${esc(p.name)}">edit</span></div>
         <div class="pwho">${who.length ? "Working here now: " + who.map(n => `<b>${esc(n)}</b>`).join(", ") : "Nobody works here now."}</div>
