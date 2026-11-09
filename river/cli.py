@@ -692,6 +692,10 @@ def build_parser():
     x = cvs.add_parser("reply", help="answer a comment in its thread"); x.add_argument("comment"); x.add_argument("text")
     x = cvs.add_parser("resolve", help="close a comment: say what changed, or why nothing needs to")
     x.add_argument("comment"); x.add_argument("--note")
+    x = cvs.add_parser("open", help="put a canvas in front of the person: the page opens it in the side panel of your "
+                       "session (or --session); maxpm serve must run")
+    x.add_argument("name"); x.add_argument("--project")
+    x.add_argument("--session", help="the agent whose side panel shows it (default: you)")
     x = cvs.add_parser("delete", help="take a canvas off every list"); x.add_argument("name"); x.add_argument("--project")
     x = cvs.add_parser("save", help="write a version of a canvas as a file (for a page that goes into git)")
     x.add_argument("name"); x.add_argument("path"); x.add_argument("--version", type=int); x.add_argument("--project")
@@ -3110,6 +3114,13 @@ def _canvas_dispatch(conn, a, actor):
         return core.canvas_reply(conn, a.comment, a.text, actor)
     if v == "resolve":
         return core.canvas_resolve(conn, a.comment, actor, a.note)
+    if v == "open":
+        core.canvas_show(conn, a.name, a.project)  # a wrong name says so before maxpm serve is asked
+        try:
+            return ask_server(conn, "canvas_open", {"name": a.name, "project": a.project, "session": a.session},
+                              actor=actor)
+        except RiverError as e:
+            raise RiverError(f"the page cannot open it now ({e}); the person sees the canvas in the Artifacts tab")
     if v == "delete":
         return core.canvas_delete(conn, a.name, actor, a.project)
     if v == "save":
@@ -3189,6 +3200,11 @@ def render_canvas(a, res):
         return
     if v == "resolve":
         print(f"comment c{res['id']} resolved")
+        return
+    if v == "open":
+        who = f"the side panel of {res['session']}" if res["session"] else "the side panel"
+        print(f"canvas {res['canvas']} opens in {who} on the page (the Sessions tab shows it at once when it shows "
+              f"that session; else the page offers a Show button)")
         return
     if v == "delete":
         print(f"canvas {res['canvas']} deleted (a put of the same name brings it back)")

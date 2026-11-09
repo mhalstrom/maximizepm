@@ -9,7 +9,7 @@ import { chooseStop } from "./components/agentActions.js";
 import { openTerminal } from "./components/terminalDialog.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
-import { openInPanel, onPanel, panelTargets, canvasState } from "./components/sidePanel.js";
+import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { S, tab, setState, setTabName, nav, goalSel } from "./page.js";
@@ -196,6 +196,7 @@ async function refresh() {
   renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); board.renderTakeovers(); projects.renderBlocked(); targets.renderTargets();
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
+  canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   renderGraph(false); renderLog(false); needsYou.pollNeedsYou().catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   if (openItem != null && drawer.isOpen()) openDrawer(openItem);

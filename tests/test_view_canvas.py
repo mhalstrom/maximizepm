@@ -139,6 +139,48 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class CanvasOpen(Base):
+    """#4783: maxpm canvas open asks maxpm serve; the state carries the request for the page."""
+
+    def setUp(self):
+        super().setUp()
+        server.CANVAS_OPENS.clear()
+        self.addCleanup(server.CANVAS_OPENS.clear)
+
+    def test_the_request_goes_into_the_state_for_a_while(self):
+        core.register(self.c, "mark", human=True)
+        got = server.OPS["canvas_open"](self.c, {"name": "plan"}, "ag")
+        self.assertEqual((got["canvas"], got["session"], got["opened"]), ("plan", "ag", True))
+        other = server.OPS["canvas_open"](self.c, {"name": "plan", "session": "ag"}, "mark")
+        self.assertEqual(other["seq"], got["seq"] + 1)
+        st = self.get("/api/state")["body"]
+        self.assertEqual([(x["canvas"], x["session"], x["by"], x["title"]) for x in st["canvas_opens"]],
+                         [(self.cv, "ag", "ag", "Release plan"), (self.cv, "ag", "mark", "Release plan")])
+        with self.assertRaisesRegex(core.RiverError, "no agent nobody"):
+            server.OPS["canvas_open"](self.c, {"name": "plan", "session": "nobody"}, "ag")
+        with self.assertRaisesRegex(core.RiverError, "no canvas"):
+            server.OPS["canvas_open"](self.c, {"name": "nope"}, "ag")
+        for x in server.CANVAS_OPENS:
+            x["at"] -= server.CANVAS_OPEN_KEEP + 1
+        self.assertEqual(server.canvas_opens(), [])
+
+    def test_the_command_and_the_mcp_tool_ask_maxpm_serve(self):
+        from unittest import mock
+        import contextlib
+        import io
+        from river import cli, mcp
+        asked = []
+        with mock.patch.object(cli, "ask_server", lambda conn, op, args, actor=None, **k: asked.append((op, args, actor))
+                               or {"canvas": "plan", "id": self.cv, "session": "ag", "seq": 1, "opened": True}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.run(["-q", "--as", "ag", "canvas", "open", "plan"])
+        self.assertEqual(asked, [("canvas_open", {"name": "plan", "project": None, "session": None}, "ag")])
+        self.assertIn("canvas plan opens in the side panel of ag", out.getvalue())
+        self.assertEqual(mcp.canvas_argv({"action": "open", "name": "plan", "session": "ag"}),
+                         ["canvas", "open", "plan", "--session=ag"])
+
+
 class PanelCanvas(unittest.TestCase):
     """The canvas tab of the side panel, in Chrome: a canvas that the shown session makes opens by itself, a new
     version loads in place, and the version menu shows an older one."""
@@ -187,3 +229,42 @@ try {
         self.assertNotIn("token", got["src"])
         self.assertEqual(got["options"], ["2", "1"])
         self.assertRegex(got["pinned"], r"^canvas/\d+/1\?")
+
+    def test_canvas_open_shows_an_existing_canvas_and_offers_another_sessions(self):
+        """#4783: a canvas that existed before the page loaded opens on request; one for another session waits in
+        that session's panel, and a bar offers Show."""
+        def ask(session):
+            def run():
+                c = core.connect()
+                try:
+                    core.register(c, "bo") if session == "bo" else None
+                    return server.canvas_open(c, {"name": "plan", "session": session}, "ag")["seq"]
+                finally:
+                    c.close()
+            return run
+        server.CANVAS_OPENS.clear()
+        self.addCleanup(server.CANVAS_OPENS.clear)
+        self.put("<body><h1>Old</h1></body>")()  # before the page loads: it does not open by itself
+        driver = self.tvs.DRIVE_HEAD + r"""
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  await sleep(3500);
+  const before = !!q("iframe.sp-canvas");
+  await fetch("/__open_ag");
+  await until(() => q("iframe.sp-canvas"), "the canvas opens on request");
+  const out = { before, tab: q(".sp-tab.on").textContent.trim(), bar: !!(q("#cvOffer") && !q("#cvOffer").classList.contains("hidden")) };
+  await fetch("/__open_bo");
+  await until(() => q("#cvOffer") && !q("#cvOffer").classList.contains("hidden"), "the bar for another session");
+  out.text = q("#cvOffer .cv-offer-t").textContent;
+  out.stored = JSON.parse(localStorage.getItem("river.sidepanel.tabs") || "{}").bo;
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+        got = self.tvs.drive_page(self.base, driver, routes={"/__open_ag": ask("ag"), "/__open_bo": ask("bo")})
+        self.assertNotIn("error", got, got)
+        self.assertFalse(got["before"])
+        self.assertIn("Release plan", got["tab"])
+        self.assertFalse(got["bar"], "the Sessions tab shows ag: no bar")
+        self.assertEqual(got["text"], 'ag opened the canvas "Release plan" in the side panel of bo.')
+        self.assertEqual(got["stored"]["on"], got["stored"]["targets"][-1])
+        self.assertRegex(got["stored"]["on"], r"^canvas:\d+$")

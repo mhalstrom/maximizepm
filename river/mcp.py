@@ -62,10 +62,10 @@ TOOLS = [
                     "page or on the whole page. put (a new version; the same name in the same project is the same "
                     "canvas), list, show (a version's text, its versions and comments), comments (the comments with "
                     "their replies; open: only the ones that wait for you), comment, send (your draft comments to the "
-                    "session that wrote it), reply, resolve, delete, save (a version as a file).",
+                    "session that wrote it), reply, resolve, delete, open (put it in front of the user: the MaximizePM page opens it in your session's side panel), save (a version as a file).",
      "inputSchema": {"type": "object", "required": ["action"], "properties": {
          "action": {"type": "string", "enum": ["put", "list", "show", "comments", "comment", "send", "reply",
-                                                "resolve", "delete", "save"]},
+                                                "resolve", "open", "delete", "save"]},
          "name": {"type": "string", "description": "the canvas (all actions except list, reply, resolve)"},
          "text": {"type": "string", "description": "put: the page's whole text; comment and reply: the comment"},
          "kind": {"type": "string", "enum": ["html", "md", "svg"], "description": "put: the kind of a new canvas"},
@@ -78,6 +78,7 @@ TOOLS = [
          "comment": {"type": "string", "description": "reply and resolve: the comment id, for example c12"},
          "quote": {"type": "string", "description": "comment: the words of the page it is about"},
          "path": {"type": "string", "description": "comment: the part's CSS path; save: the file to write"},
+         "session": {"type": "string", "description": "open: the agent whose side panel shows it (default: you)"},
          "as": _AS}}},
     {"name": "inbox",
      "description": "Your unread messages and the questions that wait for your answer.",
@@ -105,7 +106,7 @@ CHAT_INSTRUCTIONS = ("MaximizePM is the user's work queue for AI agents. In this
 def canvas_argv(a):
     """The maxpm canvas words of an MCP canvas call: the same operations as the command (#4648)."""
     act = a.get("action")
-    acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "delete", "save")
+    acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "open", "delete", "save")
     if act not in acts:
         raise RiverError(f"canvas action is one of {', '.join(acts)}")
     words = ["canvas", act]
@@ -130,7 +131,7 @@ def canvas_argv(a):
         words += [f"--name={words.pop()}", f"--text={a['text']}"]
     opts = {"put": ("kind", "title", "note", "item", "project"), "list": ("project", "item"),
             "show": ("version", "project"), "comments": ("project",), "comment": ("quote", "path", "version", "project"),
-            "send": ("project",), "resolve": ("note",), "delete": ("project",), "save": ("version", "project")}
+            "send": ("project",), "resolve": ("note",), "open": ("project", "session"), "delete": ("project",), "save": ("version", "project")}
     for k in opts.get(act, ()):
         if act == "save" and k == "path":
             continue

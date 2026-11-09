@@ -245,6 +245,59 @@ export function canvasState(heads) {
   if (h && t.shown && h.version !== t.shown) show(t);
 }
 
+// maxpm canvas open (#4783): a session asks the page to put a canvas in front of the person. The requests come in
+// the state (seq, canvas, title, session); the page counts only the ones that came after it loaded. The canvas
+// opens as a tab in the side panel of the session named: at once when the Sessions tab shows that session, else
+// the tab waits in that session's panel and a bar offers Show (openSession: the Sessions tab on that session).
+let openSeen = null;
+export function canvasOpens(list, openSession) {
+  list = list || [];
+  const top = list.reduce((m, x) => Math.max(m, x.seq), 0);
+  if (openSeen === null || top < openSeen) { openSeen = top; return; }  // the first state, or a restarted server
+  for (const x of list.filter(x => x.seq > openSeen)) {
+    const target = `canvas:${x.canvas}`, name = x.session || session;
+    const visible = !$("#tab-sessions").classList.contains("hidden") && name === session;
+    if (name === session) openInPanel(target);
+    else addTab(name, target);
+    if (!visible && name) offerCanvas(x, name, openSession);
+  }
+  openSeen = top;
+}
+
+// A tab in the panel of a session that the panel does not show now: it shows when the person picks that session.
+function addTab(name, target) {
+  const mine = bySession[name];
+  if (mine) {
+    let t = mine.tabs.find(x => x.target === target);
+    if (!t) { t = { id: ++n, target, title: "" }; mine.tabs.push(t); }
+    mine.on = t.id;
+    return;
+  }
+  let all = {};
+  try { all = JSON.parse(store(TABS) || "{}") || {}; } catch (e) { all = {}; }
+  const s = all[name] || { targets: [] };
+  s.targets = (s.targets || []).filter(x => x !== target).concat(target);
+  s.on = target;
+  all[name] = s;
+  store(TABS, JSON.stringify(all));
+}
+
+function offerCanvas(x, name, openSession) {
+  let bar = $("#cvOffer");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "cvOffer"; bar.className = "cv-offer"; bar.setAttribute("role", "status");
+    bar.innerHTML = `<span class="cv-offer-t"></span><button type="button" class="cv-offer-show">Show</button>`
+      + `<button type="button" class="plain cv-offer-x" aria-label="Dismiss">×</button>`;
+    document.body.appendChild(bar);
+    bar.querySelector(".cv-offer-x").onclick = () => bar.classList.add("hidden");
+  }
+  bar.querySelector(".cv-offer-t").textContent = `${x.by || name} opened the canvas "${x.title}" in the side panel of ${name}.`;
+  bar.querySelector(".cv-offer-show").onclick = () => { bar.classList.add("hidden"); openSession(name); };
+  bar.classList.remove("hidden");
+  clearTimeout(bar._h); bar._h = setTimeout(() => bar.classList.add("hidden"), 30000);
+}
+
 // Full screen (#4620): the target alone in a browser tab of its own, at an address with a key that maxpm serve
 // signs for it. The tab opens at once (a later window.open is blocked), then goes to that address.
 export async function openFullScreen(target, session = "", item = "") {

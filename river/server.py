@@ -2675,7 +2675,45 @@ def _page_reason(a, who):
     return (a.get("reason") or "").strip() or f"stopped from the page by {who or 'a person'}"
 
 
+# Requests to open a canvas in the page (#4783): maxpm canvas open asks this server, the state carries the request,
+# and the page opens the canvas in the side panel of that session. In memory only; a request lives
+# CANVAS_OPEN_KEEP seconds, and a page counts only the ones that came after it loaded.
+CANVAS_OPENS = []
+CANVAS_OPEN_KEEP = 120
+_canvas_open_lock = threading.Lock()
+_canvas_open_seq = [0]
+
+
+def canvas_open(conn, args, who):
+    """Put a canvas in front of the person: the page opens it in the side panel of the session named (default:
+    the asker's own session), and shows it when the Sessions tab shows that session; else it offers a button."""
+    c = core.canvas_show(conn, args["name"], args.get("project"))
+    session = (args.get("session") or who or "").strip()
+    if session and not conn.execute("SELECT 1 FROM agents WHERE name=?", (session,)).fetchone():
+        raise RiverError(f"no agent {session}: name the session whose side panel shows the canvas (maxpm who)")
+    with _canvas_open_lock:
+        _canvas_open_seq[0] += 1
+        entry = {"seq": _canvas_open_seq[0], "canvas": c["id"], "name": c["name"], "title": c["title"] or c["name"],
+                 "version": c["version"], "session": session, "by": who, "at": time.time()}
+        CANVAS_OPENS.append(entry)
+        _prune_canvas_opens()
+    return {"canvas": c["name"], "id": c["id"], "session": session, "seq": entry["seq"], "opened": True}
+
+
+def _prune_canvas_opens():
+    cut = time.time() - CANVAS_OPEN_KEEP
+    CANVAS_OPENS[:] = [x for x in CANVAS_OPENS if x["at"] >= cut][-50:]
+
+
+def canvas_opens():
+    """The open requests of the last CANVAS_OPEN_KEEP seconds, for the page's state."""
+    with _canvas_open_lock:
+        _prune_canvas_opens()
+        return [{k: v for k, v in x.items() if k != "at"} for x in CANVAS_OPENS]
+
+
 OPS = {
+    "canvas_open": canvas_open,
     # Canvases (#4648): the same operations as maxpm canvas and the MCP tool canvas, for the page and for any
     # agent that speaks HTTP (POST /api/action {"op": "canvas_put", "args": {...}, "actor": "<agent>"}).
     "canvas_put": lambda c, a, who: core.canvas_put(c, a["name"], a.get("text"), who, a.get("kind"), a.get("title"),
@@ -2824,6 +2862,7 @@ class Handler(BaseHTTPRequestHandler):
                 # What each running session works on, the name the page shows for it (#4695).
                 st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
                 st["relay"] = relay.status()
+                st["canvas_opens"] = canvas_opens()  # maxpm canvas open: the page opens the canvas (#4783)
                 st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
                 if delta:
                     from . import statedelta

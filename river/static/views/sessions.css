@@ -208,3 +208,10 @@ button.srow-it { cursor: pointer; }
 .chat-col.hide-tools .tool-group:not(.open) > :not(.tg-sum) { display: none; }
 /* The agent id stays whole: it moves under the name, never breaks inside (".sid" breaks anywhere elsewhere) (#4724). */
 .sess-h2 #sessTitle { font-size: 12px; margin-left: 4px; white-space: nowrap; }
+
+/* maxpm canvas open (#4783): the bar that offers a canvas a session opened elsewhere. */
+.cv-offer { position: fixed; bottom: 16px; right: 16px; z-index: 21; display: flex; gap: 8px; align-items: center;
+  max-width: min(480px, calc(100vw - 32px)); background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
+.cv-offer.hidden { display: none; }
+.cv-offer-t { flex: 1; min-width: 0; }
