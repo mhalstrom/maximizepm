@@ -1258,7 +1258,8 @@ def build_parser():
     x = sub.add_parser("register", help="register this agent or person")
     x.add_argument("name"); x.add_argument("--human", action="store_true"); x.add_argument("--note", default="")
     x.add_argument("--session", help="the Claude Code session this agent runs in")
-    x = sub.add_parser("session", help="record the Claude Code session you run in: maxpm session \"<name>\" --ref <ref>")
+    x = sub.add_parser("session", help="record the Claude Code session you run in: maxpm session \"<name>\" --ref <ref>; "
+                       "or pin a session to the top of the Sessions tab: maxpm --as <you> session pin|unpin <agent>")
     x.add_argument("name", nargs="+", help="the name ListAgents prints; put it in quotes when it has spaces or starts with #")
     x.add_argument("--ref", help="the short code in brackets after the name in ListAgents")
     x = sub.add_parser("unregister", help="remove an agent that holds nothing"); x.add_argument("name")
@@ -2454,6 +2455,8 @@ def dispatch(conn, a, actor):
             _record_process(conn, a.name)
         return res
     if c == "session":
+        if len(a.name) == 2 and a.name[0] in ("pin", "unpin") and not a.ref:
+            return {"pin": core.session_pin(conn, a.name[1], actor, a.name[0] == "pin")}
         if not actor:
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
         return core.set_session(conn, actor, " ".join(a.name), a.ref)
@@ -4190,7 +4193,8 @@ def render(a, res):
                      if ag.get("session") else "")
                   + (f"\n    process: PID {ag['pid']} on {ag['host']}" if ag.get("pid") else "")
                   + (f"\n    chat over MCP: {ag['via']}" if ag.get("via") else "") + f"\n    holds: {holds}"
-                  + (f"\n    owns: {', '.join(o['name'] for o in ag['owns'])}" if ag.get("owns") else ""))
+                  + (f"\n    owns: {', '.join(o['name'] for o in ag['owns'])}" if ag.get("owns") else "")
+                  + (f"\n    pinned by: {', '.join(ag['pinned_by'])} (top of the Sessions tab)" if ag.get("pinned_by") else ""))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")
         return
@@ -4223,6 +4227,11 @@ def render(a, res):
         return
     if c == "register":
         print(f"{res['name']} ({res['kind']}) registered. Set MAXPM_AGENT={res['name']} in your shell.")
+        return
+    if c == "session" and "pin" in res:
+        x = res["pin"]
+        print(f"{x['agent']}: {'pinned' if x['pinned'] else 'unpinned'} for {x['person']}"
+              + (f" (pinned by {', '.join(x['pinned_by'])})" if x["pinned_by"] else ""))
         return
     if c == "session":
         print(f"{res['name']}: session {res['session']}" + (f" [{res['session_ref']}]" if res["session_ref"] else "")

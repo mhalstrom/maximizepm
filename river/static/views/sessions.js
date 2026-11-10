@@ -6,7 +6,7 @@
 // to the pane, then Enter. MaximizePM types nothing by itself.
 // Server: GET /api/sessions, GET /api/session?agent=<name>&cursor=<byte>, and the op session_send (with the
 // page's token: typeAction).
-import { $, esc, ago, clip, store, toast, typeAction } from "../lib.js";
+import { $, esc, ago, clip, store, toast, typeAction, act, actor } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { appendEntries, agePending, wireCopy, plainText } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
@@ -58,6 +58,19 @@ function waitBadge(s) {
   return n ? `<span class="wbadge" title="${n} thing(s) wait for you here: click to answer">! ${n}</span>` : "";
 }
 
+// The pin of a worker row (#5007): a pinned session stays at the top of the worker sessions. The pin is the
+// person's (You are), stored by maxpm; with nobody chosen in You are, any person's pin counts.
+const PIN_SVG = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M9.8 1.2a1 1 0 0 1 1.4 0l3.6 3.6a1 1 0 0 1 0 1.4l-.9.9a1 1 0 0 1-1.1.2l-2.4 2.4.3 2.4a1 1 0 0 1-.3.8l-.7.7a.6.6 0 0 1-.9 0L6.4 11.2 2.7 14.9a.6.6 0 0 1-.9-.9l3.7-3.7-2.4-2.4a.6.6 0 0 1 0-.9l.7-.7a1 1 0 0 1 .8-.3l2.4.3 2.4-2.4a1 1 0 0 1 .2-1.1z"/></svg>`;
+export function isPinned(s) {
+  const me = actor(), by = s.pinned_by || [];
+  return me ? by.includes(me) : by.length > 0;
+}
+function pinButton(s) {
+  if (s.role === "manager" || s.role === "expert") return "";
+  const on = isPinned(s);
+  return `<button class="srow-pin${on ? " on" : ""}" type="button" data-pin="${esc(s.name)}" aria-pressed="${on}" title="${on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions"}" aria-label="${on ? "Unpin" : "Pin"} ${esc(s.name)}">${PIN_SVG}</button>`;
+}
+
 // One row of the left bar, in two parts (#4609): the left two thirds (name, state, ! badge, last line) opens the
 // session on the right; the right third shows the item it works on and opens that item in the drawer. A session
 // that waits at a prompt or for an answer stands out (class "needs").
@@ -69,7 +82,7 @@ export function sessionRow(s) {
     : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + ownNames(s).join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(ownNames(s).join(", ")) : "No item"}</span></div>`;
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
     <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
-      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}${s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" || s.role === "expert" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
+      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}${s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" || s.role === "expert" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}${pinButton(s)}</div>
       ${s.role === "manager" ? "" : s.role === "expert"
         ? `<div class="sid expert-topic" title="${esc(`Its topic${s.model ? "; model " + s.model : ""}${s.talked_at ? "; last talk " + ago(s.talked_at) : ""}`)}">${esc(clip(s.topic || "", 120))}${s.model ? ` · ${esc(s.model)}` : ""}</div>`
         : `<div class="sid" title="Its agent id: maxpm --as, messages and commands use it">${esc(s.name)}</div>`}
@@ -228,7 +241,10 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       const ex = list.filter(x => x.role === "expert");
       expertGroup.classList.toggle("hidden", !ex.length);
       renderList(experts, ex, agent, "");
-      renderList(side, list.filter(x => x.role !== "manager" && x.role !== "expert"), agent,
+      // Pinned workers first, each group in today's order (#5007; sort is stable).
+      const workers = list.filter(x => x.role !== "manager" && x.role !== "expert");
+      workers.sort((a, b) => isPinned(b) - isPinned(a));
+      renderList(side, workers, agent,
         `<div class="muted">No other agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
       fit();
       autoWait();
@@ -484,7 +500,16 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
-  bar.addEventListener("click", (e) => {
+  bar.addEventListener("click", async (e) => {
+    const pin = e.target.closest("[data-pin]");
+    if (pin) {  // the pin does not open the session
+      e.preventDefault();
+      if (!actor()) return toast("Choose your name in 'You are' first", true);
+      const on = !pin.classList.contains("on");
+      try { await act("session_pin", { agent: pin.dataset.pin, on }); } catch (_) { return; }
+      refresh();
+      return;
+    }
     if (e.target.closest("[data-open], a")) return;  // an item link opens in the side panel
     const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
     pick(r.dataset.session);
@@ -492,7 +517,8 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    const r = (e.key === "Enter" || e.key === " ") && e.target.closest(".srow-main") && e.target.closest("[data-session]");
+    const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin]") && e.target.closest(".srow-main")
+      && e.target.closest("[data-session]");
     if (!r) return;
     e.preventDefault(); pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);

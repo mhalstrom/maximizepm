@@ -262,3 +262,10 @@ button.srow-it { cursor: pointer; }
   border-radius: 8px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
 .cv-offer.hidden { display: none; }
 .cv-offer-t { flex: 1; min-width: 0; }
+
+/* The pin of a worker row (#5007): faint until hover or focus; a pinned row shows it in the accent color. */
+.srow-pin { flex: none; display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); opacity: .45; cursor: pointer; }
+.srow:hover .srow-pin, .srow-pin:focus-visible { opacity: 1; }
+.srow-pin:hover { background: var(--line); }
+.srow-pin.on { color: var(--accent); opacity: 1; }
+@media (hover: none) { .srow-pin { opacity: .8; } }

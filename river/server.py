@@ -3017,6 +3017,7 @@ OPS = {
                                                    summary=a.get("summary"), sources=a.get("sources") or (),
                                                    canvases=a.get("canvases") or (), sessions=a.get("sessions") or (),
                                                    **_launch_args(a)),
+    "session_pin": lambda c, a, who: core.session_pin(c, a["agent"], who, a.get("on", True) is not False),
     "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason"), bool(a.get("done"))),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],

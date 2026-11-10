@@ -509,7 +509,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"])), said), "name": a["name"],
                 "title": work_name(conn, a, path, root, croot), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"), "topic": a.get("expert_topic"),
-                "talked_at": a.get("talked_at"),
+                "talked_at": a.get("talked_at"), "pinned_by": a.get("pinned_by") or [],
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,
                 "session_url": a.get("session_url"), "terminal": bool((terminals or {}).get(a["name"])),

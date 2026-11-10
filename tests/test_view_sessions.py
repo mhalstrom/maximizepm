@@ -208,6 +208,37 @@ class Sessions(Base):
         self.assertIn("const popsUp = (s) => (s.waiting || []).filter(w => !w.old);", js)
         self.assertIn("if (!s || !popsUp(s).some(", js)
 
+    def test_a_person_pins_a_session_to_the_top_until_it_ends(self):
+        """#5007 (mark: 'a way to pin sessions to the top of the worker sessions area'): the pin is stored by maxpm for
+        the person, shows on the card, in who and its --json, and goes when the session's agent row goes."""
+        import contextlib
+        import io
+        from river import cli
+        with self.assertRaisesRegex(core.RiverError, "a pin is a person's"):
+            core.session_pin(self.c, "ag", "ag")
+        self.assertEqual(server.OPS["session_pin"](self.c, {"agent": "ag"}, "mark")["pinned_by"], ["mark"])
+        self.assertEqual(self.cards()[0]["pinned_by"], ["mark"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "-q", "who"])
+        self.assertIn("pinned by: mark (top of the Sessions tab)", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "-q", "session", "unpin", "ag"])
+        self.assertEqual(out.getvalue().strip(), "ag: unpinned for mark")
+        self.assertEqual(self.cards()[0]["pinned_by"], [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["--as", "mark", "-q", "session", "pin", "ag"])
+        self.assertEqual(core.agent_status(self.c, "ag")["pinned_by"], ["mark"])
+        # The session ends: its agent row goes, and the pin with it.
+        core.release(self.c, self.it, "ag")
+        core.unregister(self.c, "ag", "ag")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM session_pins").fetchone()[0], 0)
+        # The page: a pin button on worker rows only, and pinned workers first in their group.
+        js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text()
+        self.assertIn('if (s.role === "manager" || s.role === "expert") return "";', js)
+        self.assertIn("workers.sort((a, b) => isPinned(b) - isPinned(a));", js)
+
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET activity_prompt='{}' WHERE name='ag'")

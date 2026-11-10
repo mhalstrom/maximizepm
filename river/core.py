@@ -720,6 +720,15 @@ BEGIN
      AND NOT EXISTS (SELECT 1 FROM holds WHERE item_id = NEW.id AND agent = NEW.assignee AND ended_at IS NULL);
 END;
 
+-- A person pinned a session to the top of the worker sessions on the Sessions tab (#5007). The pin goes with the
+-- agent: when the session ends and its agent row goes, so does the pin.
+CREATE TABLE IF NOT EXISTS session_pins (
+  person      TEXT NOT NULL,
+  agent       TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE ON UPDATE CASCADE,
+  pinned_at   TEXT NOT NULL,
+  PRIMARY KEY (person, agent)
+);
+
 -- The Claude Code sessions (CLAUDE_CODE_SESSION_ID: the transcript's file name) each agent ran commands in.
 CREATE TABLE IF NOT EXISTS agent_sessions (
   agent       TEXT NOT NULL,
@@ -6708,7 +6717,30 @@ def agent_status(conn, name):
         (name,))]
     a["owns"] = [dict(r) for r in conn.execute(
         "SELECT name, owner_expires_at FROM targets WHERE owner=? ORDER BY name", (name,))]
+    a["pinned_by"] = [r["person"] for r in conn.execute(
+        "SELECT person FROM session_pins WHERE agent=? ORDER BY pinned_at, person", (name,))]
     return a
+
+
+def session_pin(conn, agent, actor=None, on=True):
+    """A person pins a session to the top of the worker sessions on the Sessions tab, or unpins it (#5007). The pin is
+    the person's (the page shows their own pins first), stays across reloads and restarts of maxpm serve, and goes
+    when the session ends (its agent row goes)."""
+    if not actor:
+        raise RiverError("a pin is a person's: pass --as <your name>")
+    who = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone()
+    if who is None or who["kind"] != "human":
+        raise RiverError(f"a pin is a person's, and {actor} is not a registered person: pass --as <your name> "
+                         f"(maxpm register <name> --human)")
+    _agent(conn, agent)
+    with tx(conn):
+        if on:
+            conn.execute("INSERT OR IGNORE INTO session_pins (person, agent, pinned_at) VALUES (?,?,?)",
+                         (actor, agent, iso(now())))
+        else:
+            conn.execute("DELETE FROM session_pins WHERE person=? AND agent=?", (actor, agent))
+    return {"agent": agent, "person": actor, "pinned": on,
+            "pinned_by": agent_status(conn, agent)["pinned_by"]}
 
 
 def _rel_path(path, root, cwd=None):
