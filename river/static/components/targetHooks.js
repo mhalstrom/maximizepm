@@ -12,17 +12,21 @@ export function hookRun(last) {
 }
 
 // t: a target of the state (name, hooks). events: {event: when it occurs} (state.hook_events), in their order.
+// Folded (#5082): the summary names the hooks, and a hook that failed shows there in the warn color.
 export function hooksHtml(t, events) {
   const hooks = t.hooks || [], name = esc(t.name);
   const link = (event, label, clear) => `<span class="link" data-hook="${esc(event)}" data-target="${name}"${clear ? ' data-clear="1"' : ""} title="${esc(clear ? "Remove this hook" : (events || {})[event] ? "MaximizePM runs the command when " + events[event] : "")}">${esc(label)}</span>`;
-  const lines = hooks.map(h => {
-    const r = hookRun(h.last);
-    const ran = (r.item ? `last run for <span class="link" data-open="${r.item}">#${r.item}</span>: ` : "") + esc(r.text);
-    return `<div class="st" style="margin-top:4px"><b>${esc(h.event)}</b>: <code style="font-size:12px" title="${esc(h.command)}">${esc(clip(h.command, 200))}</code>
-        <span class="${r.bad ? "" : "muted"}" style="font-size:12px${r.bad ? ";color:var(--warn)" : ""}">(${ran})</span>
-        <span style="font-size:12px">${link(h.event, "change")} · ${link(h.event, "remove", true)}</span></div>`;
+  const runs = hooks.map(h => hookRun(h.last));
+  const lines = hooks.map((h, i) => {
+    const r = runs[i];
+    const ran = (r.item ? `<span class="link" data-open="${r.item}">#${r.item}</span> ` : "") + esc(r.text);
+    return `<div class="st hook t-s"><b>${esc(h.event)}</b> <code title="${esc(h.command)}">${esc(clip(h.command, 60))}</code>
+        <span class="${r.bad ? "" : "muted"}"${r.bad ? ' style="color:var(--warn)"' : ""}>${ran}</span>
+        ${link(h.event, "change")} · ${link(h.event, "remove", true)}</div>`;
   }).join("");
   const free = Object.keys(events || {}).filter(e => !hooks.some(h => h.event === e));
-  return `<div class="st" style="margin-top:6px"><b>Hooks</b> <span class="muted" style="font-size:12px">${hooks.length ? "MaximizePM runs each command when its event occurs; a hook that fails does not undo the event" : "none: a hook is a command that MaximizePM runs when a release event occurs"}</span></div>
-      ${lines}${free.length ? `<div class="muted" style="font-size:12px;margin-top:4px">add a hook for: ${free.map(e => link(e, e)).join(" · ")}</div>` : ""}`;
+  const bad = hooks.filter((h, i) => runs[i].bad).map(h => esc(h.event));
+  const head = hooks.length ? `Hooks: ${hooks.map(h => esc(h.event)).join(", ")}` : "Hooks: none";
+  return `<details data-fold="hooks-${name}" title="Commands that MaximizePM runs when a release event occurs; a hook that fails does not undo the event"><summary>${head}${bad.length ? ` · <span style="color:var(--warn)">${bad.join(", ")} failed</span>` : ""}</summary>
+      ${lines}${free.length ? `<div class="muted t-s hook-add">add: ${free.map(e => link(e, e)).join(" · ")}</div>` : ""}</details>`;
 }
