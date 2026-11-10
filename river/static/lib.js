@@ -24,6 +24,19 @@ export function ago(iso) {
   if (s < 86400) return Math.round(s / 3600) + "h ago"; return Math.round(s / 86400) + "d ago";
 }
 export function left(iso) { const m = Math.round((Date.parse(iso) - Date.now()) / 60000); return m >= 60 * 24 ? Math.round(m / 1440) + "d" : m >= 60 ? Math.round(m / 60) + "h" : m + "m"; }
+// The short title of an item (#5086): its own short title, else the first words of its title. The same rule as
+// core.short_title: no leading #<id> and no (...), cut at the first ':', ';' or dash that leaves three words or more,
+// at most 7 words. The pages show it; the full title is the hover and the item page.
+export function shortTitle(it) {
+  if (!it) return "";
+  if (it.short) return it.short;
+  let t = String(it.title || "").replace(/^#\d+\s+/, "").replace(/\s*\([^()]*\)/g, "").split(/\s+/).filter(Boolean).join(" ");
+  const m = t.match(/[:;]|\s[-\u2013\u2014]\s/);
+  if (m && t.slice(0, m.index).split(" ").length >= 3) t = t.slice(0, m.index).replace(/[ ,.]+$/, "");
+  const w = t.split(" ");
+  if (w.length > 7) t = w.slice(0, 7).join(" ").replace(/[ ,.:;]+$/, "") + "\u2026";
+  return t.length <= 60 ? t : t.slice(0, 59).trimEnd() + "\u2026";
+}
 export function clip(s, n) { s = String(s || "").trim(); return s.length > n ? s.slice(0, n) + "…" : s; }
 export async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall back below */ }

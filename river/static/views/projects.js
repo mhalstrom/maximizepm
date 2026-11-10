@@ -1,6 +1,6 @@
 // The Projects tab (#4656): a card for each project with its goals and items, blocked items, and the forms
 // that add an item, a goal or a project.
-import { $, esc, store, actor, toast, act, ago, left, clip } from "../lib.js";
+import { $, esc, store, actor, toast, act, ago, left, clip, shortTitle } from "../lib.js";
 import { doerChip, projectChip, countChip } from "../components/chip.js";
 import { nyCard, goalCard, projCard } from "../components/card.js";
 import { itemTableRows, itemTableColumns } from "../components/itemRow.js";
@@ -61,7 +61,7 @@ const projTables = new Map();
 export function renderBlocked() {
   const B = S.items.filter(i => i.blocked_reason && !["done", "dropped"].includes(i.status));
   $("#blockedPanel").classList.toggle("hidden", !B.length);
-  $("#blockedList").innerHTML = B.map(i => nyCard(`<b class="link" data-open="${i.id}" title="${esc(i.title)}">#${i.id} ${esc(clip(i.title, 70))}</b> ${projectChip(i.project)}${i.doer === "human" ? doerChip(i) : ""}`, `<div class="ny-c t-s" title="${esc(i.blocked_reason)}">${esc(clip(i.blocked_reason, 90))}</div>
+  $("#blockedList").innerHTML = B.map(i => nyCard(`<b class="link" data-open="${i.id}" title="${esc(i.title)}">#${i.id} ${esc(shortTitle(i))}</b> ${projectChip(i.project)}${i.doer === "human" ? doerChip(i) : ""}`, `<div class="ny-c t-s" title="${esc(i.blocked_reason)}">${esc(clip(i.blocked_reason, 90))}</div>
       <div class="muted t-s"${i.blocked_set_by ? ` title="set by ${esc(i.blocked_set_by)}"` : ""}>${i.blocked_at ? ago(i.blocked_at) : ""}${i.blocked_until ? `${i.blocked_at ? " · " : ""}<span title="${esc(i.blocked_until_text)}; then ready by itself">${left(i.blocked_until)} left</span>` : ""}</div>`)).join("");
 }
 

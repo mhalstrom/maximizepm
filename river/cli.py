@@ -371,6 +371,8 @@ def render_duplicates(groups):
 
 def _print_show(a):
     print(_fmt_item(a))
+    if a.get("short"):
+        print("  short:", a["short"])
     if a.get("kind") == "deploy":
         print(f"  deploy item for target {a['target']} (owner: {a.get('target_owner') or 'nobody'}; only the owner takes it)")
     if a.get("kind") == "deploy" and a.get("cut_at"):
@@ -872,6 +874,8 @@ def build_parser():
 
     x = sub.add_parser("add", help="add an item: maxpm add [project] \"title\" (project from --blocks/--found-during or the folder)")
     x.add_argument("words", nargs="*", metavar="[project] title")
+    x.add_argument("--short", help="the short title every page shows: about 6 plain words, no ids, no file names, no "
+                   "quotes (the title stays the full text, on the item page and in a hover)")
     x.add_argument("--no-goal-context", dest="no_goal_context", action="store_true",
                    help="an item of a goal that needs no goal context: its session starts fresh, not as a fork of the base")
     x.add_argument("--from", dest="plan_file", metavar="FILE",
@@ -944,6 +948,8 @@ def build_parser():
                    "cleanup, a change of the order, reading production logs to write a task); it has its own default "
                    "model and starts in a new session. work: any other task")
     x.add_argument("id", type=int); x.add_argument("--title"); x.add_argument("--notes")
+    x.add_argument("--short", help="the short title every page shows: about 6 plain words, no ids, no file names, no "
+                   "quotes; \"\" removes it")
     x.add_argument("--no-goal-context", dest="goal_context", action="store_false", default=None,
                    help="its session starts fresh, not as a fork of its goal's base")
     x.add_argument("--goal-context", dest="goal_context", action="store_true", help="undo --no-goal-context")
@@ -1307,6 +1313,11 @@ def build_parser():
     x.add_argument("name", nargs="+", help="the name ListAgents prints; put it in quotes when it has spaces or starts with #")
     x.add_argument("--ref", help="the short code in brackets after the name in ListAgents")
     x = sub.add_parser("unregister", help="remove an agent that holds nothing"); x.add_argument("name")
+    x = sub.add_parser("now", help="what you do now, in about 10 plain words, for your row on the Sessions tab: "
+                       "run it when you start an item and at each new step")
+    x.add_argument("words", nargs="*", metavar="text", help="what you do now, for example: Runs the tests after the fix")
+    x.add_argument("--work", help="a short name of your work (about 6 words), when you hold no item or its short title "
+                   "does not say it")
     x = sub.add_parser("note", help="set your status note; with an agent, --holder-of, or --item: send a note")
     x.add_argument("words", nargs="+", metavar="[agent] text")
     x.add_argument("--holder-of", type=int, help="send the note to whoever holds this item")
@@ -2304,7 +2315,7 @@ def dispatch(conn, a, actor):
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
                             backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
-                            kind=a.kind)
+                            kind=a.kind, short=a.short)
         if a.no_goal_context:
             core.item_goal_context(conn, res["id"], False, actor)
         return res
@@ -2315,7 +2326,7 @@ def dispatch(conn, a, actor):
             core.item_goal_context(conn, a.id, a.goal_context, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
                               a.due, a.goal, a.untag, core.parse_refs(a.ref, a.ref_url), a.unref, _models(a),
-                              tier=a.tier, kind=a.kind)
+                              tier=a.tier, kind=a.kind, short=a.short)
     if c == "list":
         return core.item_list(conn, a.project, a.status, a.all, a.goal, a.ref)
     if c == "show":
@@ -2535,6 +2546,10 @@ def dispatch(conn, a, actor):
         return core.set_session(conn, actor, " ".join(a.name), a.ref)
     if c == "unregister":
         return core.unregister(conn, a.name, actor)
+    if c == "now":
+        if not actor:
+            raise RiverError("set MAXPM_AGENT or pass --as <name>")
+        return core.agent_now(conn, actor, " ".join(a.words), a.work)
     if c == "note":
         if not actor:
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
@@ -3121,6 +3136,10 @@ def render_go(b):
         out += _chat_lines(r, bool(it)) + [""]
     if it:
         out.append(f"YOUR ITEM #{it['id']}: {it['title']}")
+        # The pages show the short title (#5086): the item has none yet, so this session writes it now.
+        out.append(f"  short:   {it['short']}" if it.get("short") else
+                   f"  short:   none yet. Write it now: {r} edit {it['id']} --short \"<about 6 plain words: no ids, "
+                   f"no file names>\"")
         if it.get("found_during"):
             out.append(f"  (found during #{it['found_during']}; now it is the most important ready item)")
         if it["notes"]:
@@ -3227,6 +3246,7 @@ def render_go(b):
             out += [
                 "",
                 "Rules as before. Short form:",
+                f"  what you do now:       {r} now \"<about 10 plain words>\"   at each new step",
                 f"  needs something first: {r} add \"<title>\" --blocks {it['id']} --keep|--release",
                 f"  needs an item that exists: {r} dep {it['id']} --on <its id> --release   (a note alone is no link)",
                 f"  other work found:      {r} add \"<title>\" --found-during {it['id']}",
@@ -3243,6 +3263,8 @@ def render_go(b):
                 "",
                 "Rules:",
                 f"  - Do this item only. Read `{r} show {it['id']}` again if you need the links.",
+                f"  - Say what you do, for your row on the Sessions tab: {r} now \"<about 10 plain words>\" when you",
+                f"    start and at each new step (no ids, file names or commands).",
                 f"  - The item is vague: make a reasonable choice and say what you chose in --output. Ask the user",
                 f"    (a human item, below) only when a wrong guess would be costly.",
                 f"  - It needs something first: {r} add \"<title>\" --blocks {it['id']} --keep   (small; you do it now)",
@@ -4240,6 +4262,10 @@ def render(a, res):
             print(res["migrated"])
         else:
             print(json.dumps(res, ensure_ascii=False))
+        return
+    if c == "now":
+        print(f"{res['name']}: " + "; ".join(x for x in (res["headline"] and "work: " + res["headline"],
+                                                         res["doing"] and "now: " + res["doing"]) if x))
         return
     if c == "note":
         print(f"{res['name']}: status note set")

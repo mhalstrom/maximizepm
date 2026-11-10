@@ -6,7 +6,7 @@
 // to the pane, then Enter. MaximizePM types nothing by itself.
 // Server: GET /api/sessions, GET /api/session?agent=<name>&cursor=<byte>, and the op session_send (with the
 // page's token: typeAction).
-import { $, esc, ago, clip, store, toast, typeAction, act, actor } from "../lib.js";
+import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { appendEntries, agePending, wireCopy, plainText } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
@@ -47,7 +47,7 @@ function headerOpenBtn(s) {
 const ownNames = (s) => (s.owns || []).map(o => (o && o.name) || String(o));
 function headerItem(s) {
   if (s.holds && s.holds.length) return s.holds.map(h => `<button class="btn sess-itembtn" type="button" data-open="${h.id}" title="Open #${h.id} in the side panel: its notes, what it waits on, and what it unblocks">`
-    + `#${h.id} ${esc(clip(h.title, 110))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}</button>`).join(" ");
+    + `#${h.id} ${esc(shortTitle(h))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}</button>`).join(" ");
   if (s.owns && s.owns.length) return `<span class="muted">No item · owns target ${ownNames(s).map(esc).join(", ")}</span>`;
   return `<span class="muted">No item</span>`;
 }
@@ -76,25 +76,36 @@ function pinButton(s) {
   return `<button class="srow-pin${on ? " on" : ""}" type="button" data-pin="${esc(s.name)}" aria-pressed="${on}" title="${on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions"}" aria-label="${on ? "Unpin" : "Pin"} ${esc(s.name)}">${PIN_SVG}</button>`;
 }
 
-// One row of the left bar, in two parts (#4609): the left two thirds (name, state, ! badge, last line) opens the
-// session on the right; the right third shows the item it works on and opens that item in the drawer. A session
-// that waits at a prompt or for an answer stands out (class "needs").
-export function sessionRow(s) {
+// One row of the left bar, two lines as in a Messages list (#5086): line 1 is a short name of the work (the session's
+// own headline, or the short title of its item), line 2 what it does now in plain words (its 'maxpm now' text, or
+// the plain words of its last tool call, or what it waits for). At the right: the ! badge, the state dot and the
+// time; the pin and End show on hover (the pin also while it is on). The agent id, the item, the target and the last
+// message are the hover of the row and the head of the opened session. A session that waits at a prompt or for an
+// answer stands out (class "needs").
+const DOT = { working: "active", expert: "active", prompt: "needs", answer: "needs", idle: "away", starting: "away",
+              stopping: "gone", ended: "gone" };
+function rowHover(s) {
   const last = s.last.length ? s.last[s.last.length - 1] : null;
   const lastText = last ? (last.role === "tool" ? last.text : plainText(last.text)) : "";
   const h = s.holds && s.holds[0];
-  const item = h ? `<button class="srow-it" type="button" data-open="${h.id}" title="${esc(`Open item #${h.id} ${h.title}`)}"><b>#${h.id}</b><span>${esc(clip(h.title, 48))}</span></button>`
-    : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + ownNames(s).join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(ownNames(s).join(", ")) : "No item"}</span></div>`;
-  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}" data-state="${esc(s.state)}">
-    <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
-      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}${s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" || s.role === "expert" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</div>
-      ${s.role === "manager" ? "" : s.role === "expert"
-        ? `<div class="sid expert-topic" title="${esc(`Its topic${s.model ? "; model " + s.model : ""}${s.talked_at ? "; last talk " + ago(s.talked_at) : ""}`)}">${esc(clip(s.topic || "", 120))}${s.model ? ` · ${esc(s.model)}` : ""}</div>`
-          + (s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : "")
-        : `<div class="sid" title="Its agent id: maxpm --as, messages and commands use it">${esc(s.name)}</div>`}
-      <div class="sub">${esc(clip(lastText, 90))}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
+  return [s.name + (s.provider ? " · " + s.provider.label : ""), s.state_label,
+    h ? `#${h.id} ${h.title}` : "", ownNames(s).length ? "Owns target " + ownNames(s).join(", ") : "",
+    lastText ? "Last: " + clip(lastText, 300) : ""].filter(Boolean).join("\n");
+}
+// The kind of agent, only when it is not Claude Code: a small letter mark (Codex: C).
+function provIcon(p) {
+  return p && p.id !== "claude-code" ? `<span class="prov prov-ic prov-${esc(p.id)}" title="Runs in ${esc(p.label)}" aria-label="${esc(p.label)}">${esc(p.label.slice(0, 1))}</span>` : "";
+}
+export function sessionRow(s) {
+  const role = s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : "";
+  const head = s.role === "expert" ? s.name : s.role === "manager" && s.title === "Manager" ? "" : s.title || s.name;
+  const line2 = s.role === "expert" && s.topic ? s.topic : s.doing || s.state_label;
+  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-state="${esc(s.state)}">
+    <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
+      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span>${s.at ? `<span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</div>
+      <div class="sub">${esc(clip(line2, 120))}</div>
+      ${s.role === "expert" && s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : ""}
     </div>
-    ${item}
   </div>`;
 }
 

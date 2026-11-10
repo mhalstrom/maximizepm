@@ -9,7 +9,7 @@ main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
 .sess-side .slist { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
 .sess-note { font-size: 12px; margin-top: 8px; }
 /* flex: none: in the list (a flex column of fixed height) a row keeps its whole height and the list scrolls (#4723). */
-.srow { flex: none; border: 0; border-bottom: 1px solid var(--line); border-left: 2px solid transparent; border-radius: 0; background: none; display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); min-width: 0; overflow: hidden; }
+.srow { flex: none; border: 0; border-bottom: 1px solid var(--line); border-left: 2px solid transparent; border-radius: 0; background: none; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; overflow: hidden; }
 .srow-main { padding: 7px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .srow-it { border: 0; background: none; color: var(--ink); font: inherit; font-size: 12px; text-align: left; padding: 7px 8px; display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
 button.srow-it { cursor: pointer; }
@@ -26,6 +26,18 @@ button.srow-it { cursor: pointer; }
 .srow-h .chip { flex: 0 1 auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; border-radius: 9px; }
 .srow-h .spacer, .sess-head .spacer { flex: 1; }
 .srow .sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Two lines, as in a Messages list (#5086): the name of the work on one line (cut with …), then what it does now. At
+   the right only the ! badge, the state dot and the time; the pin and End show on hover (the pin also while on), and
+   on a touch screen End is in the head of the opened session. */
+.srow-main > .srow-h { flex-wrap: nowrap; }
+.srow-h b.srow-t { flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-base); }
+.srow-h .dot { flex: none; margin: 0 0 0 var(--sp-1); }
+.dot.needs { background: var(--warn); }
+.srow-h .sago { flex: none; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
+.srow .srow-main > .sub { font-size: var(--fs-m); }
+.prov.prov-ic { font-size: var(--fs-xs); padding: 0 var(--sp-1); border-radius: var(--r-xs); line-height: 1.3; }
+.srow:not(:hover):not(:focus-within) .srow-pin:not(.on), .srow:not(:hover):not(:focus-within) .srow-end.iconbtn { display: none; }
+@media (hover: none) { .srow .srow-end.iconbtn, .srow .srow-pin:not(.on) { display: none; } }
 .sess-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sess-head h2 { margin: 0; font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--ink); }
 .sess-item { font-size: 13px; margin: 4px 0 8px; overflow-wrap: anywhere; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

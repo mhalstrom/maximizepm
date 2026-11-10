@@ -1,5 +1,5 @@
 // Item rows, and the one order items take in a list.
-import { esc } from "../lib.js";
+import { esc, shortTitle } from "../lib.js";
 import { goalChips, prioChip, dueChip, doerChip, replanChip, statusChip, modelChip, agentChip, tierChip } from "./chip.js";
 
 // Ready first, then more important, then what unblocks more, then the project's own order.
@@ -11,7 +11,7 @@ export function itemOrder(a, b) {
 export function itemRow(it, why) {
   return `<div class="row" data-id="${it.id}"${it.status === "open" ? ' draggable="true"' : ""}>
     <div class="id">#${it.id}</div>
-    <div class="t"><div class="title">${esc(it.title)}</div>${it.blocked_reason && it.status === "open" ? `<div class="blk">${esc(it.blocked_text)}</div>` : ""}${why ? `<div class="why">${esc(why)}</div>` : ""}</div>
+    <div class="t"><div class="title" title="${esc(it.title)}">${esc(shortTitle(it))}</div>${it.blocked_reason && it.status === "open" ? `<div class="blk">${esc(it.blocked_text)}</div>` : ""}${why ? `<div class="why">${esc(why)}</div>` : ""}</div>
     <div class="chips">${goalChips(it)}${prioChip(it)}${dueChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${replanChip(it)}${statusChip(it)}</div></div>`;
 }
 
@@ -37,7 +37,7 @@ export function itemTableColumns(why = () => "") {
     { title: "#", field: "id", width: 60, filter: false },
     { title: "Title", field: "title", minWidth: 200, widthGrow: 3, html: (r) => {
       const it = r.it, w = why(it);
-      return `<div class="title">${esc(it.title)}</div>${it.blocked_reason && it.status === "open" ? `<div class="blk">${esc(it.blocked_text)}</div>` : ""}${w ? `<div class="why">${esc(w)}</div>` : ""}`;
+      return `<div class="title" title="${esc(it.title)}">${esc(shortTitle(it))}</div>${it.blocked_reason && it.status === "open" ? `<div class="blk">${esc(it.blocked_text)}</div>` : ""}${w ? `<div class="why">${esc(w)}</div>` : ""}`;
     } },
     { title: "Status", field: "status", width: 130, filter: "select", html: (r) => statusChip(r.it) + replanChip(r.it) },
     { title: "P", field: "prio", width: 92, filter: "select", html: (r) => prioChip(r.it) },

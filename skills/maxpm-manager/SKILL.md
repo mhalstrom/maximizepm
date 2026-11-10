@@ -286,6 +286,8 @@ for a good task, and the commands.
 ### Writing good tasks
 
 - One outcome per item that one agent or person can finish and check.
+- A short title for the pages: `--short "<about 6 plain words>"` (no ids, no
+  file names, no quotes of the person). The title keeps the full sentence.
 - Give an agent what it needs to start without searching. `--context`: why the
   item exists, where to look, decisions already made. `--touches`: the files
   it changes. `--check`: the command that shows it works. `maxpm next` and

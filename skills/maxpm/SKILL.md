@@ -96,6 +96,10 @@ your type from your CLI's environment.
    Leave out `--claim` to look first. Add `-n 5` to see five.
 2. `maxpm show <id>` for the notes, what it waits on, and what it unblocks.
    `maxpm show <id> --brief` prints a few lines: no history, long text cut.
+   The item has no short title (the go briefing says `short: none yet`): write
+   one now, `maxpm edit <id> --short "<about 6 plain words>"`: the pages show it.
+   Then, and at each new step, say what you do for your row on the Sessions
+   tab: `maxpm now "<about 10 plain words>"` (no ids, file names, or commands).
 3. Do the work. Every `maxpm` command renews your lease. If you work a long
    time without one, run `maxpm heartbeat` (default lease 30 minutes). MaximizePM
    also renews it while a command runs in your session (a long test run) or
@@ -238,6 +242,8 @@ without a goal stay in the normal queue.
 One command, no ids copied by hand. The project comes from the item you name
 with `--blocks` or `--found-during`, or from the folder you are in; name it
 first only when neither applies (`maxpm add <project> "<title>"`).
+Give each item a short title, `--short "<about 6 plain words>"` (no ids, no
+file names, no quotes): every page shows it, and the title stays the full text.
 
 Look first: `maxpm search "<words>"` lists the items, open, done, and
 dropped, that hold every word, newest first (`--status open`, `--since 30d`,

@@ -7859,3 +7859,53 @@ class Canvas(Base):
             cli.run(["-q", "--as", "ag", "canvas", "show", "doc", "--text"])
         self.assertIn("chart  v1 svg  web", out.getvalue())
         self.assertTrue(out.getvalue().endswith("# from stdin"))
+
+
+class ShortTitles(Base):
+    """#5086: each item has a short title that the pages show (about 6 words); the title stays the full text. A session
+    says what it does now with maxpm now."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "web")
+        core.register(self.c, "ag")
+
+    def test_add_edit_and_the_rules(self):
+        iid = core.item_add(self.c, "web", "Make the GitHub tests workflow green: fix the 7 Windows failures",
+                            actor="ag", short="  Fix the  Windows test runs ")["id"]
+        self.assertEqual(core.item_show(self.c, iid)["short"], "Fix the Windows test runs")
+        core.item_edit(self.c, iid, short="Green tests on Windows", actor="ag")
+        self.assertEqual(core.item_show(self.c, iid)["short"], "Green tests on Windows")
+        self.assertIn("short title: Green tests on Windows", [e["change"] for e in core.item_show(self.c, iid)["events"]])
+        for bad in ("Fix #12 now", "Edit river/core.py", "see https://x.io", "one two three four five six seven eight nine"):
+            with self.assertRaises(core.RiverError, msg=bad):
+                core.item_edit(self.c, iid, short=bad, actor="ag")
+        core.item_edit(self.c, iid, short="", actor="ag")
+        self.assertIsNone(core.item_show(self.c, iid)["short"])
+
+    def test_the_fallback_is_the_first_words_of_the_title(self):
+        st = core.short_title
+        self.assertEqual(st("#5073 Make the GitHub tests workflow of maximizepm green: fix the 7 Windows failures"),
+                         "Make the GitHub tests workflow of maximizepm…")
+        self.assertEqual(st("When the Quiet look (#5043) is done: new screenshots"), "When the Quiet look is done")
+        self.assertEqual(st("Fix it: now"), "Fix it: now")  # fewer than three words before the colon: no cut there
+        self.assertEqual(st("long title", "Short one"), "Short one")
+        self.assertEqual(st("x" * 80), "x" * 59 + "…")
+
+    def test_now_and_the_briefing(self):
+        from river import cli
+        iid = core.item_add(self.c, "web", "A long title of the work: with more words", actor="t")["id"]
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(os.environ.pop, "MAXPM_DB", None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "--as", "ag", "now", "Runs the tests after the fix", "--work", "Windows tests"])
+            cli.render_go(core.go(self.c, None, "ag", project="web"))
+        a = core._agent(self.c, "ag")
+        self.assertEqual((a["doing"], a["headline"]), ("Runs the tests after the fix", "Windows tests"))
+        self.assertIn(f'short:   none yet. Write it now: maxpm --as ag edit {iid} --short', out.getvalue())
+        self.assertIn('maxpm --as ag now "<about 10 plain words>"', out.getvalue())
+        with self.assertRaises(core.RiverError):
+            core.agent_now(self.c, "ag", "Edits river/cli.py")
+        with self.assertRaises(core.RiverError):
+            core.agent_now(self.c, "ag", "")

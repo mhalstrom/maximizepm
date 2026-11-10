@@ -1,6 +1,6 @@
 // The Board tab (#4656): the status strip, Next up, Work, the manager, agents and people, Recent, and taken over
 // items. Its Needs you and Inbox panels have files of their own (board-needs-you.js, board-inbox.js).
-import { $, esc, store, actor, toast, act, ago, left, clip, hooks } from "../lib.js";
+import { $, esc, store, actor, toast, act, ago, left, clip, hooks, shortTitle } from "../lib.js";
 import { chip, personChip, projectChip } from "../components/chip.js";
 import { nyCard } from "../components/card.js";
 import { itemRow, itemOrder } from "../components/itemRow.js";
@@ -37,7 +37,7 @@ function giveWork(a) {
   const since = a.waiting_since ? ` since ${ago(a.waiting_since)}` : "";
   if (!ready.length) return `<div class="st">${chip("c-ready", "waiting" + since)} no ready item in ${esc(where.join(", ") || "its projects")}</div>`;
   return `<div class="st give-row">${chip("c-ready", "waiting" + since)}
-    <select class="give-sel" data-give-item="${esc(a.name)}">${ready.map(i => `<option value="${i.id}"${giveChoice[a.name] == i.id ? " selected" : ""}>#${i.id} ${esc(clip(i.title, 50))}</option>`).join("")}</select>
+    <select class="give-sel" data-give-item="${esc(a.name)}">${ready.map(i => `<option value="${i.id}"${giveChoice[a.name] == i.id ? " selected" : ""}>#${i.id} ${esc(shortTitle(i))}</option>`).join("")}</select>
     ${button("Give work", { data: { give: a.name } })}</div>`;
 }
 
@@ -89,8 +89,8 @@ export function renderManager() {
 function agentHolds(a) {
   return `${a.role === "waiting" && !a.holds.length ? giveWork(a) : ""}
       ${(S.goals || []).filter(g => g.owner === a.name && g.status === "open").map(g => `<div class="st">owns goal <span class="link" data-goal="${esc(g.name)}">${esc(g.name)}</span>${g.owner_expires_at ? " · " + left(g.owner_expires_at) + " left" : ""}</div>`).join("")}
-      ${a.holds.map(h => `<div class="st">holds <span class="link" data-open="${h.id}">#${h.id} ${esc(h.title)}</span>${h.lease_expires_at ? " · " + left(h.lease_expires_at) + " left" : ""}</div>`).join("") || '<div class="st">holds nothing</div>'}
-      ${S.items.filter(i => i.status === "open" && i.reserved_until && i.reserved_for === a.name).map(i => `<div class="st">pushed <span class="link" data-open="${i.id}">#${i.id} ${esc(i.title)}</span> · ${left(i.reserved_until)} left · <span class="link" data-unpush="${i.id}">cancel</span></div>`).join("")}
+      ${a.holds.map(h => `<div class="st">holds <span class="link" data-open="${h.id}" title="${esc(h.title)}">#${h.id} ${esc(shortTitle(h))}</span>${h.lease_expires_at ? " · " + left(h.lease_expires_at) + " left" : ""}</div>`).join("") || '<div class="st">holds nothing</div>'}
+      ${S.items.filter(i => i.status === "open" && i.reserved_until && i.reserved_for === a.name).map(i => `<div class="st">pushed <span class="link" data-open="${i.id}" title="${esc(i.title)}">#${i.id} ${esc(shortTitle(i))}</span> · ${left(i.reserved_until)} left · <span class="link" data-unpush="${i.id}">cancel</span></div>`).join("")}
       ${queueHtml((S.queues || {})[a.name], a.name)}${agentButtons(a, S)}`;
 }
 // A chat over the local /mcp of maxpm serve (agents.via).
@@ -106,7 +106,7 @@ export function renderTakeovers() {
   const words = { "took over": "took over", "done": "marked done", "dropped": "dropped" };
   const head = `<div class="nyl" data-takeovers-toggle="1"><span class="t">${takeoversOpen ? "▾" : "▸"} ${T.length} item${T.length === 1 ? "" : "s"} an agent took off your list: review or undo</span><span class="chips">${button("OK all", { data: { "takeovers-okall": 1 }, title: "Accept all of them" })}</span></div>`;
   if (!takeoversOpen) { $("#takeovers").innerHTML = head; return; }
-  $("#takeovers").innerHTML = head + T.map(t => nyCard(`<b>#${t.id} ${esc(t.title)}</b> ${projectChip(t.project)}<span class="muted t-s">${ago(t.takeover_at)}</span>`, `<div class="ny-c"><b>${esc(t.takeover_by)}</b> ${words[t.takeover_kind] || t.takeover_kind} it: ${esc(t.takeover_note || "")}</div>
+  $("#takeovers").innerHTML = head + T.map(t => nyCard(`<b title="${esc(t.title)}">#${t.id} ${esc(shortTitle(t))}</b> ${projectChip(t.project)}<span class="muted t-s">${ago(t.takeover_at)}</span>`, `<div class="ny-c"><b>${esc(t.takeover_by)}</b> ${words[t.takeover_kind] || t.takeover_kind} it: ${esc(t.takeover_note || "")}</div>
       <div class="actions">${button("Open", { data: { open: t.id } })}${button("Undo: give it back to me", { data: { "undo-takeover": t.id } })}${button("OK", { kind: "primary", data: { "takeover-ok": t.id } })}</div>`)).join("");
 }
 

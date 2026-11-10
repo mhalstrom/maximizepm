@@ -1,6 +1,6 @@
 // The Targets tab (#4656): each deploy target, what it ships, Deploy now, its hooks and its deploys. Only what a person
 // acts on shows; the rest is a hover or folded (#5082).
-import { $, esc, toast, act, ago, left, clip } from "../lib.js";
+import { $, esc, toast, act, ago, left, clip, shortTitle } from "../lib.js";
 import { ownerChip } from "../components/chip.js";
 import { nyCard } from "../components/card.js";
 import { button } from "../components/button.js";
@@ -23,7 +23,7 @@ function releaseLine(t) {
 }
 
 // The items of a release: the id, a short title, and the state only when it is not done.
-const shipList = (s) => s.map(x => `<span class="link" data-open="${x.id}" title="${esc(x.title)}">#${x.id}</span> ${esc(clip(x.title, 40))}${x.status === "done" ? "" : ` <span class="muted">(${esc(x.status.replace("_", " "))})</span>`}`).join("; ");
+const shipList = (s) => s.map(x => `<span class="link" data-open="${x.id}" title="${esc(x.title)}">#${x.id}</span> ${esc(shortTitle(x))}${x.status === "done" ? "" : ` <span class="muted">(${esc(x.status.replace("_", " "))})</span>`}`).join("; ");
 
 function pendingHtml(d) {
   const state = d.ready ? "ready" : d.status === "open" ? (d.cut_at ? "cut " + ago(d.cut_at) : "collecting")

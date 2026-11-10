@@ -1,5 +1,5 @@
 // The item drawer: the panel on the right with one item's details, actions, and history.
-import { esc, ago, left, clip } from "../lib.js";
+import { esc, ago, left, clip, shortTitle } from "../lib.js";
 import { chip, statusChip, prioChip, doerChip, modelChip, agentChip, tierChip } from "./chip.js";
 import { input, textarea, select, field, two, renderKeepingEdits } from "./form.js";
 import { agentStart } from "./agentStart.js";
@@ -104,6 +104,7 @@ export function itemDrawerHtml(it, { S, me }) {
     </div>
     <div class="sec"><h4>Details</h4><div class="form">
       ${input({ id: "dTitle", value: it.title })}
+      ${field("Short title", input({ id: "dShort", placeholder: "about 6 words: what the lists show", value: it.short || "" }))}
       ${textarea({ id: "dNotes", rows: 3, placeholder: "Notes" }, it.notes)}
       ${field("Context", textarea({ id: "dContext", rows: 2, placeholder: "what a new agent must know to start" }, it.context))}
       ${field("Touches", input({ id: "dTouches", placeholder: "files it changes, comma separated", value: (it.touches || []).join(", ") }))}
@@ -121,7 +122,7 @@ export function itemDrawerHtml(it, { S, me }) {
     </div></div>
     ${it.output ? `<div class="sec"><h4>Output</h4><div>${esc(it.output)}</div></div>` : ""}
     <div class="sec"><h4>Waits on</h4>
-      ${it.waits_on_detail.map(w => `<div><span class="link" data-open="${w.id}">#${w.id} ${esc(w.title)}</span> <span class="muted">(${w.status})</span> <span class="link" data-undep="${w.id}">remove</span></div>`).join("") || '<div class="muted">nothing</div>'}
+      ${it.waits_on_detail.map(w => `<div><span class="link" data-open="${w.id}" title="${esc(w.title)}">#${w.id} ${esc(shortTitle(w))}</span> <span class="muted">(${w.status})</span> <span class="link" data-undep="${w.id}">remove</span></div>`).join("") || '<div class="muted">nothing</div>'}
       <div class="actions" style="margin-top:6px"><input id="dDep" placeholder="ids, e.g. 4, 9" style="width:140px"><button class="btn" data-do="dep">Add</button></div>
     </div>
     <div class="sec"><h4>Blocker tree</h4><div class="tree">${esc(treeText(it.tree))}</div>${offerHelpHtml(it, me)}</div>
@@ -130,7 +131,7 @@ export function itemDrawerHtml(it, { S, me }) {
       <div class="actions" style="margin-top:6px"><select id="dMsgKind"><option value="note">note</option><option value="question">question</option><option value="alert">alert</option></select>
         <input id="dMsgBody" placeholder="${it.assignee ? "to " + esc(it.assignee) : "to whoever takes it next"}" style="flex:1"><button class="btn" data-do="msg">Send</button></div>
     </div>
-    <div class="sec"><h4>Unblocks</h4>${it.unblocks_detail.map(w => `<div><span class="link" data-open="${w.id}">#${w.id} ${esc(w.title)}</span> <span class="muted">(${w.status})</span></div>`).join("") || '<div class="muted">nothing</div>'}</div>
+    <div class="sec"><h4>Unblocks</h4>${it.unblocks_detail.map(w => `<div><span class="link" data-open="${w.id}" title="${esc(w.title)}">#${w.id} ${esc(shortTitle(w))}</span> <span class="muted">(${w.status})</span></div>`).join("") || '<div class="muted">nothing</div>'}</div>
     ${it.status === "open" && !it.backlog ? `<div class="sec"><h4>Push to agent</h4>
       ${it.reserved_until ? `<div>Pushed to <b>${esc(it.reserved_for)}</b> by ${esc(it.reserved_by || "?")} · ${left(it.reserved_until)} left · <span class="link" data-unpush="${it.id}">cancel</span></div>`
         : `<div class="actions"><select id="dPushTo">${S.agents.filter(a => a.name !== me).map(a => `<option>${esc(a.name)}</option>`).join("")}</select>

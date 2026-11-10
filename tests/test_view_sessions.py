@@ -993,9 +993,10 @@ try {
 
 
 class RowLayout(unittest.TestCase):
-    """#4675: a long state chip wraps inside the row's own column, never over the item column on the right."""
+    """#5086: a row is two lines: a long name of the work stays on one line (cut with …), and the dot and the time
+    stay inside the row (was #4675: the state chip and the item column)."""
 
-    def test_a_long_state_chip_stays_in_its_column(self):
+    def test_a_long_name_stays_on_one_line(self):
         import subprocess
         import tempfile
         from tests.test_server import _chrome
@@ -1004,12 +1005,13 @@ class RowLayout(unittest.TestCase):
         static = Path(server.__file__).parent / "static"
         page = f"""<!doctype html><meta charset="utf-8">
 <link rel="stylesheet" href="{(static / 'app.css').as_uri()}"><link rel="stylesheet" href="{(static / 'views/sessions.css').as_uri()}">
-<body style="width:300px;margin:8px"><div class="srow" id="row"><div class="srow-main"><div class="srow-h"><b>maximizepm-d450</b>
-<span class="spacer"></span><span class="chip c-waiting" id="chip">not connected yet: it ran no maxpm command</span></div>
-<div class="sub">last line</div></div><button class="srow-it" id="it"><b>#4675</b><span>A long item title</span></button></div>
+<body style="width:300px;margin:8px"><div class="srow" id="row"><div class="srow-main"><div class="srow-h"><b class="srow-t" id="t">Make the GitHub tests workflow of maximizepm green now</b>
+<span class="spacer"></span><span class="dot active"></span><span class="sago" id="ago">12m ago</span></div>
+<div class="sub" id="sub">Runs the tests after the fix of the Windows paths and more words</div></div></div>
 <pre id="out"></pre><script>
-const c = document.getElementById("chip").getBoundingClientRect(), i = document.getElementById("it").getBoundingClientRect();
-document.getElementById("out").textContent = "RESULT " + JSON.stringify({{chipRight: c.right, itemLeft: i.left}});
+const r = (id) => document.getElementById(id).getBoundingClientRect();
+document.getElementById("out").textContent = "RESULT " + JSON.stringify({{row: r("row").right, ago: r("ago").right,
+  t: r("t").height, sub: r("sub").height, h: r("row").height}});
 </script>"""
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "row.html"
@@ -1024,7 +1026,10 @@ document.getElementById("out").textContent = "RESULT " + JSON.stringify({{chipRi
         if "RESULT " not in dom:
             self.skipTest("Chrome gave no page here")
         got = json.loads(dom.split("RESULT ", 1)[1].split("<", 1)[0].replace("&quot;", '"'))
-        self.assertLessEqual(got["chipRight"], got["itemLeft"], got)
+        self.assertLessEqual(got["ago"], got["row"], got)
+        self.assertLess(got["t"], 26, got)    # one line
+        self.assertLess(got["sub"], 22, got)  # one line
+        self.assertLess(got["h"], 64, got)    # two lines in all
 
 
 def drive_page(test, driver, wait=40, routes=None):
@@ -1306,7 +1311,7 @@ try {
   q("#endDlg [data-end-reason]").value = "the plan changed";
   q('#endDlg [data-end-go="stop"]').click();
   await until(() => q('#sessions [data-session="ag"]').dataset.state === "stopping", "the row shows ending");
-  const chip = q('#sessions [data-session="ag"] .chip').textContent;
+  const chip = q('#sessions [data-session="ag"] .dot').title;
   await until(() => q('#sessOpen [data-end="ag"]').textContent === "Ending…", "the header says Ending");
   q('#sessOpen [data-end="ag"]').click();
   await until(() => !q("#endDlg").classList.contains("hidden"), "the dialog again");
@@ -1365,7 +1370,7 @@ class WorkNames(Base):
         core.target_own(self.c, "prod", actor="ag")
         self.assertEqual(self.name(), "Deploys prod")
         core.target_release(self.c, "prod", actor="ag")
-        self.assertEqual(self.name(), "last: header")
+        self.assertEqual(self.name(), "header")  # the item it finished last, with no "last:" (#5086)
         with core.tx(self.c):
             self.c.execute("UPDATE items SET assignee=NULL")
         self.write(json.dumps({"type": "custom-title", "customTitle": "#12 Fix the \"cart\" page", "sessionId": SID}) + "\n")
@@ -1377,6 +1382,38 @@ class WorkNames(Base):
             self.c.execute("UPDATE agents SET role='manager' WHERE name='ag'")
         self.assertEqual(self.name(), "Manager")
         self.assertEqual(sessions._short_title("x" * 80), "x" * 59 + "…")
+
+
+class FriendlyRows(WorkNames):
+    """#5086: line 1 of a row is the item's short title or the session's own headline; line 2 what it does now, in
+    plain words: its maxpm now text, the plain words of its last tool call, or what it waits for."""
+
+    def test_two_lines(self):
+        core.item_edit(self.c, self.it, short="Fix the page header", actor="ag")
+        self.assertEqual(self.name(), "Fix the page header")
+        core.agent_now(self.c, "ag", "Runs the tests after the fix", headline="Header fix and tests")
+        self.assertEqual(self.name(), "Header fix and tests")
+        a = core.agent_status(self.c, "ag")
+        self.assertEqual(sessions.doing_now(a, "working", "working", []), "Runs the tests after the fix")
+        self.assertEqual(sessions.doing_now(a, "idle", "idle: waits for work", []), "Waits for work")
+        with core.tx(self.c):  # an old text gives way to the last tool call
+            self.c.execute("UPDATE agents SET doing_at='2020-01-01T00:00:00Z'")
+        a = core.agent_status(self.c, "ag")
+        self.assertEqual(sessions.doing_now(a, "working", "working", [{"role": "tool", "plain": "Runs the tests"}]),
+                         "Runs the tests")
+        self.assertIn("doing", self.cards()[0])
+
+    def test_plain_words_of_a_tool_call(self):
+        p = sessions.plain_tool
+        self.assertEqual(p("Bash", {"command": "python3 -m unittest", "description": "Run all tests"}), "Runs all tests")
+        self.assertEqual(p("Bash", {"command": "git push origin main"}), "Pushes the change")
+        self.assertEqual(p("Bash", {"command": "ls", "description": "List files in /tmp"}), "Searches the code")
+        self.assertEqual(p("mcp__playwright__browser_navigate", {"url": "http://127.0.0.1:8792/projects"}),
+                         "Opens a page in a browser")
+        self.assertEqual(p("mcp__claude_ai_Gmail__search_threads", {}), "Uses Gmail")
+        self.assertEqual(p("Read", {"file_path": "/a/b.py"}), "Reads the code")
+        self.assertEqual(p("exec_command", '{"cmd": "pytest -q"}'), "Runs the tests")
+        self.assertEqual(p("Agent", {"description": "Fix #12 in river/x.py"}), "Asks a helper agent")
 
 
 class NewCode(Base):

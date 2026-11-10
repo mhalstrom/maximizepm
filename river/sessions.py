@@ -162,6 +162,80 @@ def _tool_line(name, inp):
     return f"{name}: {_clip(' '.join(str(what).split()), TOOL_MAX)}" if what else str(name)
 
 
+# What a tool call does, in plain words for a person (#5086): the second line of a row on the Sessions tab when the
+# session wrote no 'maxpm now' lately. Never a tool name, a link, a path, or an id.
+_TOOL_WORDS = [
+    (r"^(Read|NotebookRead|view_image)$", "Reads the code"),
+    (r"^(Edit|MultiEdit|NotebookEdit|apply_patch)$", "Edits the code"),
+    (r"^Write$", "Writes a file"),
+    (r"^(Grep|Glob|LS|LSP)$", "Searches the code"),
+    (r"^WebSearch$", "Searches the web"),
+    (r"^WebFetch$", "Reads a web page"),
+    (r"^(TodoWrite|TaskCreate|TaskUpdate|update_plan)$", "Plans the next steps"),
+    (r"^(AskUserQuestion|request_user_input)$", "Asks you a question"),
+    (r"^(ToolSearch|Skill)$", "Reads a guide"),
+    (r"^(Monitor|ScheduleWakeup|TaskOutput|BashOutput|SendMessage)$", "Waits for a helper"),
+    (r"^Artifact", "Publishes a page"),
+    (r"(?i)__browser_(navigate|tabs|navigate_back)$|__navigate$|__tabs_", "Opens a page in a browser"),
+    (r"(?i)__browser_take_screenshot$|__computer$|__gif_creator$|__upload_image$", "Looks at a page in a browser"),
+    (r"(?i)__browser_|__read_page$|__find$|__form_input$|__javascript_tool$|__get_page_text$", "Works in a browser"),
+]
+_CMD_WORDS = [
+    (r"\b(unittest|pytest|npm (run )?test|cargo test|go test|jest|vitest)\b", "Runs the tests"),
+    (r"\bgit (commit)\b", "Commits the change"),
+    (r"\bgit (push)\b", "Pushes the change"),
+    (r"\bgit (log|show|diff|status|blame)\b", "Reads the history of the code"),
+    (r"\bgit (pull|fetch|merge|rebase|worktree|checkout|switch)\b", "Updates the code"),
+    (r"\bmaxpm\b", "Updates the queue"),
+    (r"\b(npm|pip|brew|cargo|uv) (install|add|ci)\b", "Installs tools"),
+    (r"\b(npm run build|make|cargo build|tsc)\b", "Builds the code"),
+    (r"\b(grep|rg|find|ls)\b", "Searches the code"),
+    (r"\b(cat|sed -n|head|tail|less|wc)\b", "Reads the code"),
+    (r"\b(curl|wget)\b", "Reads a web page"),
+    (r"\b(sleep|wait)\b", "Waits"),
+]
+_NOT_A_VERB = {"git", "npm", "python", "python3", "the", "a", "an", "all", "new", "maxpm", "this", "each", "no"}
+
+
+def _third(desc):
+    """'Run the tests' -> 'Runs the tests': a Claude Code command description, as the session does it now."""
+    w = desc.split(" ", 1)
+    v = w[0]
+    if not re.fullmatch(r"[A-Z][a-z]+", v) or v.lower() in _NOT_A_VERB or v.endswith("ing") or (
+            v.endswith("s") and not v.endswith("ss")):
+        return desc
+    v = v[:-1] + "ies" if re.search(r"[^aeiou]y$", v) else v + "es" if re.search(r"(s|sh|ch|x|z|o)$", v) else v + "s"
+    return " ".join([v] + w[1:])
+
+
+def plain_tool(name, inp):
+    """What a tool call does, in at most about 10 plain words, or None."""
+    name = str(name or "")
+    if isinstance(inp, str):
+        try:
+            inp = json.loads(inp)
+        except ValueError:
+            inp = {"command": inp}
+    inp = inp if isinstance(inp, dict) else {}
+    desc = " ".join(str(inp.get("description") or "").split())
+    # A short description with no path, link, id or code is the session's own plain words (Bash, Agent).
+    if desc and len(desc) <= 70 and not re.search(r"(?<![\w&])#\d+|https?://|\S/|/\S|`|\$|__", desc):
+        return _third(desc[0].upper() + desc[1:]).rstrip(".")
+    if name in ("Agent", "Task"):
+        return "Asks a helper agent"
+    for pat, words in _TOOL_WORDS:
+        if re.search(pat, name):
+            return words
+    cmd = inp.get("command") or inp.get("cmd") or ""
+    cmd = " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
+    if cmd or name in ("Bash", "shell", "exec_command", "local_shell", "PowerShell"):
+        return next((w for pat, w in _CMD_WORDS if re.search(pat, cmd)), "Runs a command")
+    m = re.match(r"mcp__(?:claude_ai_|plugin_[a-z]+_)?([A-Za-z0-9-]+?)(?:_[A-Za-z0-9]+)?__", name)
+    if m:
+        return "Uses " + m.group(1).replace("-", " ").replace("_", " ")
+    return "Works"
+
+
 def _detail(inp):
     """A tool call's input as the page shows it opened: the command itself, else the input as JSON."""
     if isinstance(inp, str):
@@ -206,6 +280,7 @@ def _claude(d):
                 out.append({"at": at, "role": "assistant", "text": _clip(x["text"], TEXT_MAX)})
             elif x.get("type") == "tool_use":
                 out.append({"at": at, "role": "tool", "text": _tool_line(x.get("name"), x.get("input")),
+                            "plain": plain_tool(x.get("name"), x.get("input")),
                             "id": x.get("id"), "detail": _detail(x.get("input"))})
         stop = m.get("stop_reason")
         return out, ("idle" if stop in ("end_turn", "stop_sequence") else "working" if stop else None)
@@ -263,7 +338,7 @@ def _codex(d):
     if t in ("function_call", "custom_tool_call", "local_shell_call"):
         inp = p.get("arguments") if t == "function_call" else p.get("input") if t == "custom_tool_call" else p.get("action")
         return [{"at": at, "role": "tool", "text": _tool_line(p.get("name") or "shell", inp), "id": p.get("call_id"),
-                 "detail": _detail(inp)}], None
+                 "plain": plain_tool(p.get("name") or "shell", inp), "detail": _detail(inp)}], None
     if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output") and p.get("call_id"):
         return [{"at": at, "role": "result", "for": p["call_id"],
                  "text": _clip(_result_text(p.get("output")), DETAIL_MAX)}], None
@@ -414,11 +489,11 @@ def waiting_for(conn, a, prompt=None, pane=False, said=None):
 
 
 WORK_NAME_MAX = 60
+DOING_FRESH = 15 * 60  # seconds: a 'maxpm now' text older than this gives way to the plain words of the last tool call
 
 
-def _short_title(t):
-    t = " ".join(re.sub(r"^#\d+\s+", "", str(t or "")).split())
-    return t if len(t) <= WORK_NAME_MAX else t[:WORK_NAME_MAX - 1].rstrip() + "…"
+def _short_title(t, short=None):
+    return core.short_title(t, short)
 
 
 def custom_title(path, tail=256 * 1024):
@@ -440,11 +515,20 @@ def custom_title(path, tail=256 * 1024):
 
 def work_name(conn, a, path=None, root=None, croot=None):
     """What a session works on, as the name the page shows for it (#4695); its agent id stays its address. In this
-    order: the title of the item it holds; the goal it owns; Manager; the deploy targets it owns; the item it
-    finished last ("last: ..."); its Claude Code session title; else its agent id without the four hex digits."""
+    order: its own headline (maxpm now --work) for its item; the short title of the item it holds; the goal it owns; Manager; the deploy targets it owns; the item it
+    finished last; its Claude Code session title; else its agent id without the four hex digits."""
     holds = a.get("holds") or []
+    head, head_at = a.get("headline"), a.get("headline_at") or ""
     if holds:
-        return _short_title(holds[0]["title"])
+        # The session's own headline (maxpm now --work) when it wrote it for this item; else the item's short title.
+        if head and head_at >= (holds[0].get("claimed_at") or ""):
+            return head
+        return _short_title(holds[0]["title"], holds[0].get("short"))
+    if head:
+        last = conn.execute("SELECT MAX(closed_at) t FROM items WHERE assignee=? AND status='done'",
+                            (a["name"],)).fetchone()["t"]
+        if head_at >= (last or ""):
+            return head
     g = conn.execute("SELECT name FROM goals WHERE owner=? AND status='open' ORDER BY rank LIMIT 1", (a["name"],)).fetchone()
     if g:
         return "Goal: " + g["name"]
@@ -453,10 +537,10 @@ def work_name(conn, a, path=None, root=None, croot=None):
     owns = [o.get("name") if isinstance(o, dict) else str(o) for o in a.get("owns") or []]
     if owns:
         return "Deploys " + ", ".join(owns)
-    r = conn.execute("SELECT title FROM items WHERE assignee=? AND status='done' ORDER BY closed_at DESC LIMIT 1",
+    r = conn.execute("SELECT title, short FROM items WHERE assignee=? AND status='done' ORDER BY closed_at DESC LIMIT 1",
                      (a["name"],)).fetchone()
-    if r:
-        return "last: " + _short_title(r["title"])
+    if r:  # the item it finished last; its line 2 says that it waits (#5086: no 'last:')
+        return _short_title(r["title"], r["short"])
     if path is None:
         _kind, path = transcript(conn, a["name"], root, croot)
     try:
@@ -466,6 +550,27 @@ def work_name(conn, a, path=None, root=None, croot=None):
     if t:
         return _short_title(t)
     return re.sub(r"-[0-9a-f]{4}$", "", a["name"])
+
+
+def doing_now(a, key, label, entries):
+    """The second line of a session's row (#5086): what it does now, in plain words. While it works: its own words
+    (maxpm now) from the last DOING_FRESH and from its present item, else the plain words of its last tool call;
+    else what it waits for."""
+    if key not in ("working", "expert"):
+        t = re.sub(r"^idle: ", "", label or key)
+        return t[:1].upper() + t[1:]
+    at = a.get("doing_at")
+    held = (a.get("holds") or [{}])[0].get("claimed_at") or ""
+    if a.get("doing") and at and at >= held and (core.now() - core.parse_iso(at)).total_seconds() < DOING_FRESH:
+        return a["doing"]
+    for e in reversed(entries or ()):
+        if e.get("role") == "tool":
+            return e.get("plain") or "Works"
+        if e.get("role") == "assistant":
+            return "Writes to you" if key == "expert" else "Thinks about the next step"
+        if e.get("role") == "user":
+            return "Reads your message"
+    return "Works"
 
 
 def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes=None):
@@ -508,7 +613,8 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
             label = STATES[key]
         adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
             conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
-        card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "provider": provider(a.get("agent_type"), kind),
+        card = {"doing": doing_now(a, key, label, tail["entries"]),
+                "adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "provider": provider(a.get("agent_type"), kind),
                 "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"])), said), "name": a["name"],
                 "title": work_name(conn, a, path, root, croot), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"), "topic": a.get("expert_topic"),

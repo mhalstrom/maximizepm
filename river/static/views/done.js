@@ -1,5 +1,5 @@
 // The Done tab (#4656): what was finished, grouped by day, and the progress of each project.
-import { $, esc } from "../lib.js";
+import { $, esc, shortTitle } from "../lib.js";
 import { projectChip } from "../components/chip.js";
 import { bar, pct } from "../components/bar.js";
 import { makeTable } from "../components/table.js";
@@ -17,7 +17,7 @@ function makeLogTable() {
     groupBy: "day", groupHeader: (day, count) => `<b>${esc(logDay(day))}</b> <span class="muted">${count} done</span>`,
     columns: [
       { title: "#", field: "id", width: 64, filter: false },
-      { title: "Title", field: "title", minWidth: 180, cssClass: "wrap", html: (r) => `<span title="${esc(r.output)}">${esc(r.title)}</span>` },
+      { title: "Title", field: "title", minWidth: 180, cssClass: "wrap", html: (r) => `<span title="${esc(r.title + (r.output ? "\n\n" + r.output : ""))}">${esc(shortTitle(r))}</span>` },
       { title: "Project", field: "project", width: 150, filter: "select", html: (r) => projectChip(r.project) },
       { title: "By", field: "by", width: 130, filter: "select" },
       { title: "Finished", field: "closed_at", width: 96, filter: false, html: (r) => logTime(r.closed_at) },
@@ -33,7 +33,7 @@ export async function renderLog(force) {
   if (!force && sig === logSig) return;
   logSig = sig;
   logTable ||= makeLogTable();
-  logTable.set(L.by_day.flatMap(d => d.items.map(it => ({ id: it.id, title: it.title, project: it.project, output: it.output || "",
+  logTable.set(L.by_day.flatMap(d => d.items.map(it => ({ id: it.id, title: it.title, short: it.short, project: it.project, output: it.output || "",
     by: it.by_agent && it.by_agent !== "?" ? it.by_agent : "", closed_at: it.closed_at, day: d.day }))));
   const win = L.since ? $("#logSince").selectedOptions[0].textContent : null;
   $("#progress").innerHTML = L.progress.map(p => {

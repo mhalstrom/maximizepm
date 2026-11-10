@@ -17,7 +17,7 @@ VIEWS = Path(__file__).resolve().parent.parent / "river" / "static" / "views"
 # file: {kind: count}. A file or a kind that is not here allows 0.
 ALLOW = {
     "sessions.css": {"color": 7, "px": 357},
-    "sessions.js": {"button": 9, "px": 1},
+    "sessions.js": {"button": 8, "px": 1},
 }
 
 HEX = r"#[0-9a-fA-F]{3,8}\b"

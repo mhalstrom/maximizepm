@@ -1127,6 +1127,10 @@ def _migrate(conn):
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "pid" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN pid INTEGER")
+    # What the session works on and does now, in its own short words (maxpm now, #5086).
+    for col in ("headline", "headline_at", "doing", "doing_at"):
+        if col not in acols:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "auto" not in {r["name"] for r in conn.execute("PRAGMA table_info(deps)")}:
         conn.execute("ALTER TABLE deps ADD COLUMN auto INTEGER NOT NULL DEFAULT 0")
     icols = {r["name"] for r in conn.execute("PRAGMA table_info(items)")}
@@ -1165,6 +1169,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN needs_check INTEGER NOT NULL DEFAULT 0")
     if "tier" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN tier TEXT")
+    if "short" not in icols:  # the short title the pages show (#5086)
+        conn.execute("ALTER TABLE items ADD COLUMN short TEXT")
     if "ran_model" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN ran_model TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(queue_entries)")}:
@@ -3754,11 +3760,73 @@ def _check_tier(tier):
     return "expert" if t == "expert" else ""
 
 
+SHORT_WORDS = 8     # a short title or a headline: about 6 words, at most this many (#5086)
+SHORT_CHARS = 50
+DOING_WORDS = 14    # what a session does now: about 10 words
+DOING_CHARS = 90
+SHORT_RULE = ("about 6 plain words that name the work, as a person says it: no item ids, no file names, no quotes, "
+              "no commands")
+
+
+DOING_RULE = "plain words for a person: no item ids, no file names, no links, no commands"
+
+
+def _check_words(text, words, chars, what, example, rule=SHORT_RULE):
+    t = " ".join(str(text or "").split())
+    if len(t.split()) > words or len(t) > chars:
+        raise RiverError(f"{what} is too long ({len(t.split())} words, {len(t)} characters): at most {words} words "
+                         f"and {chars} characters, {rule}. For example: {example}")
+    if re.search(r"(?<![\w&])#\d+|\bhttps?://|\S/|/\S|`", t):
+        raise RiverError(f"{what} {t!r} has an id, a link, a path or code: {rule}. For example: {example}")
+    return t
+
+
+def check_short(text):
+    """An item's short title, cleaned; "" clears it. The pages show it; the title stays the full text (#5086)."""
+    return _check_words(text, SHORT_WORDS, SHORT_CHARS, "the short title", "'Fix the Windows test failures'")
+
+
+def short_title(title, short=None, words=SHORT_WORDS - 1):
+    """The short title of an item, else the first words of its title: no leading '#<id>' and no '(...)', cut at the
+    first ':', ';' or dash that leaves three words or more, and at most `words` words (#5086). The page has the same rule
+    (lib.js shortTitle)."""
+    if short:
+        return short
+    t = re.sub(r"\s*\([^()]*\)", "", re.sub(r"^#\d+\s+", "", str(title or "")))
+    t = " ".join(t.split())
+    m = re.search(r"[:;]|\s[-\u2013\u2014]\s", t)
+    if m and len(t[:m.start()].split()) >= 3:
+        t = t[:m.start()].rstrip(" ,.")
+    w = t.split()
+    if len(w) > words:
+        t = " ".join(w[:words]).rstrip(" ,.:;") + "\u2026"
+    return t if len(t) <= 60 else t[:59].rstrip() + "\u2026"
+
+
+def agent_now(conn, name, doing, headline=None):
+    """maxpm now: what a session does now (about 10 words) and, with headline, a short name of its work (about 6),
+    in its own plain words. The Sessions tab shows them as the two lines of its row (#5086)."""
+    doing = _check_words(doing, DOING_WORDS, DOING_CHARS, "the text", "'Runs the tests after the fix'",
+                         DOING_RULE) if doing else ""
+    head = _check_words(headline, SHORT_WORDS, SHORT_CHARS, "the headline", "'Short titles on every page'") \
+        if headline is not None else None
+    if not doing and not head:
+        raise RiverError('say what you do now: maxpm now "<about 10 words>" [--work "<about 6 words>"]')
+    at = iso(now())
+    with tx(conn):
+        _agent(conn, name)
+        if doing:
+            conn.execute("UPDATE agents SET doing=?, doing_at=? WHERE name=?", (doing, at, name))
+        if head is not None:
+            conn.execute("UPDATE agents SET headline=?, headline_at=? WHERE name=?", (head or None, at, name))
+    return {"name": name, "doing": doing or None, "headline": head}
+
+
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
              goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
-             kind=None):
-    """Add an item. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
+             kind=None, short=None):
+    """Add an item. `short`: the short title the pages show (check_short); the title stays the full one. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `backlog`: a note on why nobody takes it now; the item goes to the backlog at once.
     `check_similar` (maxpm add): refuse with SimilarWork when the same work is open or was done lately
     (similar_items); `new` says how this item differs, and adds it anyway (the history keeps it).
@@ -3769,6 +3837,7 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     second session start the same work within seconds (#4942)."""
     tier = _check_tier(tier)
     kind = _check_kind(kind)
+    short = check_short(short) if short is not None else None
     if kind == "operational" and doer == "human":
         raise RiverError("an operational task is for an agent session; leave out --kind, or --doer human")
     if tier and doer == "human":
@@ -3808,6 +3877,8 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
              check or "", iso(now())))
         iid = cur.lastrowid
         _event(conn, iid, actor, f"added to {p['name']} at P{priority}")
+        if short:
+            conn.execute("UPDATE items SET short=? WHERE id=?", (short, iid))
         if new is not None:
             _event(conn, iid, actor, f"added as new work" + (f" although like {', '.join('#' + str(m['id']) for m in like)}"
                                                              if like else "") + f": {new.strip()}")
@@ -4028,11 +4099,15 @@ def add_plan(conn, project, text, actor=None, priority=2, doer="any", dry_run=Fa
 
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
               context=None, touches=None, check=None, due=None, goals=None, untag=None, refs=None, unref=None,
-              models=None, tier=None, kind=None):
+              models=None, tier=None, kind=None, short=None):
     tier = _check_tier(tier)
     kind = _check_kind(kind)
+    short = check_short(short) if short is not None else None
     with tx(conn):
         it = _item(conn, item_id)
+        if short is not None and (it["short"] or "") != short:
+            conn.execute("UPDATE items SET short=? WHERE id=?", (short or None, it["id"]))
+            _event(conn, it["id"], actor, f"short title: {short}" if short else "short title removed")
         if kind is not None and it["kind"] != kind:
             if it["kind"] not in TASK_KINDS:
                 raise RiverError(f"#{it['id']} is a {it['kind']} item; only a task of kind {' or '.join(TASK_KINDS)} "
@@ -6850,7 +6925,7 @@ def agent_status(conn, name):
     a["state"] = _agent_state(conn, a)
     a["can_kill"] = bool(a.get("pid")) and a.get("host") == this_host() and a["state"] != "gone"
     a["holds"] = [dict(r) for r in conn.execute(
-        "SELECT id, title, status, lease_expires_at, hold_expires_at FROM items WHERE assignee=? "
+        "SELECT id, title, short, status, claimed_at, lease_expires_at, hold_expires_at FROM items WHERE assignee=? "
         "AND status IN ('in_progress','held') ORDER BY id",
         (name,))]
     a["owns"] = [dict(r) for r in conn.execute(
@@ -8900,9 +8975,9 @@ def item_show(conn, item_id, ann=None):
         raise RiverError(f"no item {item_id}")
     a = {k: v for k, v in ann[iid].items() if k != "sort_key"}
     label = lambda x: "ready" if ann[x]["ready"] else "backlog" if ann[x]["backlog"] else ann[x]["status"]
-    a["waits_on_detail"] = [{"id": b, "title": ann[b]["title"], "status": label(b),
+    a["waits_on_detail"] = [{"id": b, "title": ann[b]["title"], "short": ann[b].get("short"), "status": label(b),
                              "kind": "feeds" if b in a["fed_by"] else "blocks"} for b in a["waits_on"]]
-    a["unblocks_detail"] = [{"id": d, "title": ann[d]["title"], "status": label(d)} for d in a["unblocks"]]
+    a["unblocks_detail"] = [{"id": d, "title": ann[d]["title"], "short": ann[d].get("short"), "status": label(d)} for d in a["unblocks"]]
     a["fed_by_detail"] = [{"id": d, "title": ann[d]["title"], "status": ann[d]["status"], "output": ann[d]["output"]}
                           for d in a["fed_by"]]
     a["conflicts_detail"] = [{"id": d, "title": ann[d]["title"], "status": ann[d]["status"],
@@ -10115,7 +10190,7 @@ def completed(conn, project=None, since="7d"):
     cutoff = iso(now() - parse_duration(since)) if since else None
     if project is not None:
         project = _project(conn, project)["name"]
-    sql = ("SELECT i.id, i.title, i.output, i.closed_at, p.name project, "
+    sql = ("SELECT i.id, i.title, i.short, i.output, i.closed_at, p.name project, "
            "(SELECT e.actor FROM events e WHERE e.item_id=i.id AND e.change LIKE 'done%' ORDER BY e.id DESC LIMIT 1) by_agent "
            "FROM items i JOIN projects p ON p.id=i.project_id WHERE i.status='done' AND p.archived=0")
     args = []
