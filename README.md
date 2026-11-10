@@ -710,7 +710,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   notices; `maxpm inbox`, `maxpm answer`, `maxpm thread`, an unread count on
   every command.
 - Needs you (`maxpm needs-you`): one list of what waits on a person, most
-  important first, with notifications by phone (ntfy), email (SMTP), macOS
+  important first, with notifications by phone (ntfy), macOS
   banner (a click opens the page with terminal-notifier), and browser. `maxpm notify setup ntfy` makes a secret topic and
   prints the phone steps; `maxpm notify test <channel>` and `maxpm notify
   status` check a channel. A tap on a notification opens the MaximizePM page

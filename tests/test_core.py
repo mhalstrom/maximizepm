@@ -2350,76 +2350,27 @@ class Ntfy(Base):
             core.config_set(self.c, "ntfy_url", "ntfy.sh")
 
 
-class Email(Base):
-    def setUp(self):
-        super().setUp()
-        from unittest import mock
-        from pathlib import Path
+class EmailRemoved(Base):
+    def test_old_email_settings_do_nothing(self):
+        # The email channel is gone (#4986, mark: not completed, can be removed). A row of its settings that a
+        # person set earlier stays in the settings table and does nothing; config list and unset still work.
         from river import notify
-        self.notify, self.mock = notify, mock
-        self.pw = Path(self.dir.name) / "smtp-password"
-        self._p = mock.patch.object(notify, "PASSWORD_FILE", self.pw)
-        self._p.start()
-        self._e = mock.patch.dict(os.environ, {}, clear=False)
-        self._e.start()
-        os.environ.pop("MAXPM_SMTP_PASSWORD", None)
-        for k, v in (("email_to", "me@example.com"), ("smtp_host", "smtp.example.com"),
-                     ("smtp_user", "bot@example.com")):
-            core.config_set(self.c, k, v)
-
-    def tearDown(self):
-        self._p.stop()
-        self._e.stop()
-        super().tearDown()
-
-    def test_sends_with_starttls_and_login(self):
-        self.pw.write_text("s3cret\n")
-        self.pw.chmod(0o600)
-        box = []
-
-        class FakeSMTP:
-            def __init__(self, host, port, timeout): box.append(("open", host, port))
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def starttls(self): box.append(("starttls",))
-            def login(self, u, p): box.append(("login", u, p))
-            def send_message(self, m): box.append(("send", m["To"], m["From"], m["Subject"], m.get_content()))
-
-        with self.mock.patch("smtplib.SMTP", FakeSMTP):
-            self.notify.ADAPTERS["email"](self.c)("River: needs you", "#3 sign", "http://127.0.0.1:8765/#item-3")
-        self.assertEqual(box[0], ("open", "smtp.example.com", 587))
-        self.assertEqual(box[1:3], [("starttls",), ("login", "bot@example.com", "s3cret")])
-        self.assertEqual(box[3][1:4], ("me@example.com", "bot@example.com", "River: needs you"))
-        self.assertIn("#item-3", box[3][4])
-
-    def test_password_rules(self):
-        with self.assertRaises(RiverError):
-            self.notify.ADAPTERS["email"](self.c)  # user set, no password
-        self.pw.write_text("x")
-        self.pw.chmod(0o644)
-        if os.name != "nt":  # Windows has no POSIX modes: river skips this check there
-            with self.assertRaises(RiverError):
-                self.notify.smtp_password()
-        os.environ["MAXPM_SMTP_PASSWORD"] = "from-env"
-        self.assertEqual(self.notify.smtp_password(), "from-env")
-        self.assertNotIn("from-env", str(core.config_list(self.c)))
-        with self.assertRaises(RiverError):
-            core.config_set(self.c, "email_to", "not an address")
-
-    def test_email_has_its_own_batch_window(self):
-        from river import notify
-        sent = []
-        notify.register_channel("email", lambda conn: lambda t, b, u: sent.append(t))
-        try:
-            core.project_add(self.c, "a")
-            core.config_set(self.c, "notify_channels", "email")
-            self.add("a", "sign", doer="human")
-            self.c.execute("UPDATE notifications SET created_at=?", (core.iso(core.now() - timedelta(minutes=2)),))
-            self.assertFalse(notify.run(self.c)[0]["sent"])  # 2m old, email waits 10m
-            self.c.execute("UPDATE notifications SET created_at=?", (core.iso(core.now() - timedelta(minutes=11)),))
-            self.assertTrue(notify.run(self.c)[0]["sent"])
-        finally:
-            notify.register_channel("email", notify._email_channel)
+        self.assertNotIn("email", notify.ADAPTERS)
+        for k in ("email_to", "email_from", "smtp_host", "smtp_port", "smtp_user", "email_batch_window"):
+            self.assertNotIn(k, core.DEFAULT_SETTINGS)
+            with self.assertRaisesRegex(RiverError, "unknown setting"):
+                core.config_set(self.c, k, "x")
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'email_to', 'me@example.com')")
+        self.assertIn("email_to", str(core.config_list(self.c)["overrides"]))
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["config", "get"])
+        self.assertIn("notify_channels", out.getvalue())
+        core.config_unset(self.c, "email_to")
+        self.assertNotIn("email_to", str(core.config_list(self.c)["overrides"]))
 
 
 class Mac(Base):

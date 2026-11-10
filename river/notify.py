@@ -83,57 +83,6 @@ def _ntfy_channel(conn):
 register_channel("ntfy", _ntfy_channel)
 
 
-PASSWORD_FILE = Path("~/.config/maxpm/smtp-password")
-
-
-def smtp_password():
-    """MAXPM_SMTP_PASSWORD, or a file only its owner can read. Never the settings table."""
-    import os
-    import stat
-    if os.environ.get("MAXPM_SMTP_PASSWORD"):
-        return os.environ["MAXPM_SMTP_PASSWORD"]
-    f = PASSWORD_FILE.expanduser()
-    if not f.exists():
-        return None
-    # Windows has no POSIX modes (chmod does nothing there); the file sits in the user's own profile folder.
-    if os.name != "nt" and f.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        raise RiverError(f"refused: {f} can be read by other users; run: chmod 600 {f}")
-    return f.read_text().strip()
-
-
-def _email_channel(conn):
-    import smtplib
-    from email.message import EmailMessage
-    to = core.setting(conn, "email_to")
-    host = core.setting(conn, "smtp_host")
-    port = int(core.setting(conn, "smtp_port"))
-    user = core.setting(conn, "smtp_user")
-    sender = core.setting(conn, "email_from") or user
-    missing = [k for k, v in (("email_to", to), ("smtp_host", host), ("email_from", sender)) if not v]
-    if missing:
-        raise RiverError(f"email needs {', '.join(missing)}: maxpm config set <key> <value>")
-    password = smtp_password()
-    if user and not password:
-        raise RiverError(f"email: smtp_user is set but there is no password; set MAXPM_SMTP_PASSWORD "
-                         f"or write it to {PASSWORD_FILE} (chmod 600)")
-
-    def send(title, body, url):
-        msg = EmailMessage()
-        msg["Subject"], msg["From"], msg["To"] = title, sender, to
-        msg.set_content(body + (f"\n\nOpen: {url}\n" if url else "\n"))
-        smtp = smtplib.SMTP_SSL(host, port, timeout=20) if port == 465 else smtplib.SMTP(host, port, timeout=20)
-        with smtp:
-            if port != 465:
-                smtp.starttls()
-            if user:
-                smtp.login(user, password)
-            smtp.send_message(msg)
-    return send
-
-
-register_channel("email", _email_channel)
-
-
 def _mac_channel(conn):
     """A macOS banner. terminal-notifier (if on PATH) opens the page on click; osascript is the
     fallback, and a click on its banner opens Script Editor, so the page link goes in the subtitle."""
@@ -399,7 +348,8 @@ def run(conn, now_=False):
         by_channel.setdefault(r["channel"], []).append(r)
     results = []
     for channel, rows in sorted(by_channel.items()):
-        # A channel may have its own window (email_batch_window); else notify_batch_window.
+        # A channel may have its own window (<channel>_batch_window, when DEFAULT_SETTINGS has one); else
+        # notify_batch_window.
         key = f"{channel}_batch_window" if f"{channel}_batch_window" in core.DEFAULT_SETTINGS else "notify_batch_window"
         window = core.parse_duration(core.setting(conn, key))
         oldest = min(core.parse_iso(r["created_at"]) for r in rows)

@@ -104,12 +104,6 @@ DEFAULT_SETTINGS = {
     "ntfy_priority": "high",
     "ntfy_topic": "",
     "ntfy_token": "",
-    "email_to": "",
-    "email_from": "",
-    "smtp_host": "",
-    "smtp_port": "587",
-    "smtp_user": "",
-    "email_batch_window": "10m",
     "timezone": "",
     "auto_continue": "on",
     # The look of a person at a finished result (a page, a text, a design), for each project (#1668).
@@ -1297,7 +1291,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             re.compile(value)
         except re.error as e:
             raise RiverError(f"prompt_pattern is a regular expression, and this one has an error: {e}")
-    elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "smtp_port",
+    elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port",
                  "max_sessions", "canvas_max", "canvas_versions"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
@@ -1341,9 +1335,6 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         autocompact_tokens(value)
     elif key == "default_prerequisite_mode" and value not in ("keep", "release"):
         raise RiverError("default_prerequisite_mode is keep or release")
-    elif key in ("email_to", "email_from") and value and not all(
-            re.match(r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$", x.strip()) for x in value.split(",")):
-        raise RiverError(f"{key} is an email address" + (" (a comma list is fine)" if key == "email_to" else ""))
     elif key == "ntfy_click" and value and not re.match(r"^https?://[^\s/]+", value):
         raise RiverError("ntfy_click is a web link, for example https://claude.ai/code")
     elif key == "notify_open" and value not in ("maxpm", "agent"):
