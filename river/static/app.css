@@ -363,4 +363,13 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .composer.has-text .cmp-mic:not(.on) { display: none; }
 .cmp-plus:focus-visible, .cmp-mic:focus-visible, .cmp-send:focus-visible { outline: var(--hair-2) solid var(--accent); outline-offset: var(--hair); }
 @keyframes micpulse { 50% { opacity: .55; } }
-@media (prefers-reduced-motion: reduce) { .cmp-mic.on { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .cmp-mic.on, .mic-float.on { animation: none; } }
+/* The microphone of every other box that takes text (components/dictate.js, #5107): a fixed overlay at the box's right
+   edge while it has the focus, so it moves nothing; its line (listening, an error) under the box. */
+.mic-float { position: fixed; z-index: 40; width: var(--sp-7); height: var(--sp-7); display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 50%; background: var(--panel); color: var(--muted); cursor: pointer; box-shadow: var(--shadow-pop); }
+.mic-float:hover { color: var(--ink); }
+.mic-float.on { color: var(--warn); animation: micpulse 1.2s ease-in-out infinite; }
+.mic-float.hidden, .mic-note.hidden { display: none; }
+.mic-note { position: fixed; z-index: 40; max-width: min(280px, calc(100vw - 2 * var(--sp-6))); padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-s); background: var(--panel); color: var(--muted); font-size: var(--fs-s); box-shadow: var(--shadow-pop); }

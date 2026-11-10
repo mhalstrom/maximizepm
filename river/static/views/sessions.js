@@ -324,7 +324,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       $("#sessItem").innerHTML = (s.name ? headerItem(s) : "") + cacheBadge(j.cache);
       $("#sessName").textContent = s.title || "";
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });
-      dict.showFor(list.some(x => x.name === agent) ? (s || {}).provider || j.provider : null, !!j.terminal);
+      dict.showFor(list.some(x => x.name === agent) && !!j.terminal);
       $("#sessOpen").innerHTML = headerOpen({ ...s, running: list.some(x => x.name === agent), session_url: j.session_url,
                                               terminal: j.terminal });
       renderGive(agent);

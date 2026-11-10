@@ -60,6 +60,17 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, not $TAG"; exit 1; }
           npm version --no-git-tag-version --allow-same-version "${TAG#v}"
+      - name: The dictation helper (#5107), for Apple silicon and Intel, into river/bin, which the app bundles
+        run: |
+          # SpeechAnalyzer needs the macOS 26 SDK: the newest Xcode 26 of the runner.
+          xc=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$xc" ] && sudo xcode-select -s "$xc"
+          mkdir -p river/bin
+          swiftc -O -target arm64-apple-macos26.0 river/dictate/main.swift -o "$RUNNER_TEMP/dictate-arm64"
+          swiftc -O -target x86_64-apple-macos26.0 river/dictate/main.swift -o "$RUNNER_TEMP/dictate-x64"
+          lipo -create "$RUNNER_TEMP/dictate-arm64" "$RUNNER_TEMP/dictate-x64" -output river/bin/maxpm-dictate
+          codesign --force --sign - river/bin/maxpm-dictate
+          lipo -info river/bin/maxpm-dictate
       - name: Build the .dmg files (unsigned)
         working-directory: desktop
         run: npm run dist

@@ -12,6 +12,7 @@ import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
+import { installMics } from "./components/dictate.js";
 import { S, tab, setState, setTabName, nav, goalSel, setPlan, planView, scope, planShown } from "./page.js";
 import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
@@ -442,6 +443,7 @@ onPanel((session, target) => {
   if (tab === "sessions") syncUrl(false);
 });
 wireItemPop();  // the pop-up of every item on the page (#4622)
+installMics(() => S);  // a microphone in every box that takes text (#5107)
 // Open in the Artifacts tab: the thing in the side panel, beside the chat of the session that made it.
 const artifactsTab = makeArtifacts({ isShown: () => tab === "sessions" && view.pane === "arts",
   openBeside: async (session, target) => {

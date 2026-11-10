@@ -20,7 +20,7 @@ const check = (v, what) => { if (!v) throw new Error(what); };
 const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON.stringify(o));
 '''
 
-    def drive(self, driver, path="/", steps=None, size=None):
+    def drive(self, driver, path="/", steps=None, size=None, flags=()):
         """Run driver (a module) on every page the browser loads, from path; it posts its result to /__result.
         steps: name -> function that the driver runs on the server side with fetch("/__step/<name>")."""
         import subprocess
@@ -67,7 +67,7 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         chrome = subprocess.Popen([
             _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
-            *([f"--window-size={size}"] if size else []),
+            *([f"--window-size={size}"] if size else []), *flags,
             f"http://127.0.0.1:{httpd.server_address[1]}{path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             ran = got.wait(40)
@@ -264,6 +264,43 @@ try {
     def test_a_hover_moves_nothing_on_any_tab_at_phone_width(self):
         """#5106: the same sweep at 390 px."""
         self.sweep_hovers("390,844")
+
+    def test_dictation_in_a_box_and_in_the_message_box(self):
+        """#5107: a box that takes text gets a microphone while it has the focus; the page records (Chrome's fake
+        microphone here), sends the audio to serve, and the helper's text goes in at the cursor, the words not final
+        yet first, then the final text. The message box of a chat has its own microphone, for every provider."""
+        from river import dictation
+        from tests.test_dictation import FAKE
+        fake = Path(self.dir.name, "fake.py")
+        fake.write_text(FAKE)
+        old, dictation.HELPER = dictation.HELPER, [__import__("sys").executable, str(fake)]
+        self.addCleanup(setattr, dictation, "HELPER", old)
+        driver = r'''try {
+  await until(() => window.__appReady && q("#work .wp, #work .muted"), "the Board drew");
+  q("#searchBtn").click();  // the search dialog: its field takes words
+  const box = q("#searchText");
+  await until(() => !q("#searchDlg").classList.contains("hidden"), "the search dialog");
+  box.value = "find "; box.focus(); box.setSelectionRange(5, 5);
+  const mic = q(".mic-float");
+  await until(() => !mic.classList.contains("hidden"), "the microphone shows beside the focused box");
+  const out = { left: mic.getBoundingClientRect().left > box.getBoundingClientRect().left };
+  mic.click();
+  await until(() => /^find heard \d+ bytes/.test(box.value), "words not final yet show in the box");
+  out.focus = document.activeElement === box && mic.classList.contains("on");
+  mic.click();
+  await until(() => /^find \d+ bytes in [a-z]{2}(-[A-Z]{2})?\.$/.test(box.value) && !mic.classList.contains("on"), "the final text");
+  out.final = true;
+  q("#searchClose").click();
+  await until(() => mic.classList.contains("hidden"), "the microphone goes with the focus");
+  q('nav button[data-tab="sessions"]').click();
+  await until(() => q("#sessMic") && !q("#sessMic").classList.contains("hidden"), "the message box has its microphone");
+  q("#sessText").focus();
+  await sleep(100);
+  out.own = mic.classList.contains("hidden");  // no second microphone over the message box
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/", flags=("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"))
+        self.assertEqual(got, {"left": True, "focus": True, "final": True, "own": True})
 
     def test_a_new_prompt_or_question_of_the_open_session_opens_the_dialog_once(self):
         """#4663: the ! dialog opens by itself when the open session comes to a prompt or asks a question; Dismiss

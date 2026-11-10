@@ -14,7 +14,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, relay
+from . import core, dictation, relay
 from .core import RiverError
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -3067,6 +3067,8 @@ def canvas_opens():
         return [{k: v for k, v in x.items() if k != "at"} for x in CANVAS_OPENS]
 
 
+DICTATE_OPS = ("dictate_start", "dictate_audio", "dictate_stop")
+
 OPS = {
     "canvas_open": canvas_open,
     # Canvases (#4648): the same operations as maxpm canvas and the MCP tool canvas, for the page and for any
@@ -3140,6 +3142,11 @@ OPS = {
                                                    summary=a.get("summary"), sources=a.get("sources") or (),
                                                    canvases=a.get("canvases") or (), sessions=a.get("sessions") or (),
                                                    **_launch_args(a)),
+    # Dictation (#5107): the page's audio goes to the helper on this Mac; each reply has the text so far. They touch
+    # no queue (DICTATE_OPS).
+    "dictate_start": lambda c, a, who: dictation.start(a.get("lang")),
+    "dictate_audio": lambda c, a, who: dictation.audio(a["id"], a.get("pcm")),
+    "dictate_stop": lambda c, a, who: dictation.stop(a["id"]),
     "session_pin": lambda c, a, who: core.session_pin(c, a["agent"], who, a.get("on", True) is not False),
     "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason"), bool(a.get("done"))),
     "expert_fresh": lambda c, a, who: fresh_expert(c, a["name"], who, new=a.get("new")),
@@ -3224,6 +3231,7 @@ class Handler(BaseHTTPRequestHandler):
                 st["page_build"] = page_build()
                 st["state_shape"] = STATE_SHAPE
                 st["desktop"] = DESKTOP
+                st["dictation"] = dictation.engine()  # "mac": speech to text on this Mac (#5107); else the browser's
                 st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
                 st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
                 from . import sessions
@@ -3377,6 +3385,8 @@ class Handler(BaseHTTPRequestHandler):
                                                  "old: reload the page"})
             actor = body.get("actor") or None
             _same_queue(body.get("args", {}).get("db"))  # only a river command sends it (cli.ask_server)
+            if body.get("op") in DICTATE_OPS:  # audio, a few times a second: no queue, no history (#5107)
+                return self._send(200, {"ok": True, "result": op(None, body.get("args", {}), actor)})
             conn = core.connect()
             # The page shown through the relay (relay.handle_page): its actions are recorded as <name>@relay.
             via = core.EVENT_VIA.set("relay" if relay.page_request(self.headers) else None)

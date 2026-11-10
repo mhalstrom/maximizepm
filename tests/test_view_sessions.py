@@ -328,10 +328,10 @@ class Sessions(Base):
         self.assertEqual((card["provider"]["id"], card["provider"]["label"]), ("codex", "Codex"))  # #4627
         cc = sessions.provider(None, "claude")
         self.assertEqual((cc["id"], cc["label"]), ("claude-code", "Claude Code"))
-        # #4626: both CLIs record their own computer's microphone, so the page dictates text for each.
-        self.assertEqual((cc["voice"], card["provider"]["voice"]), ("dictate", "dictate"))
+        # #4626: both CLIs record their own computer's microphone; the page dictates for every provider (#5107).
+        self.assertNotIn("voice", cc)
         self.assertIn("/voice", cc["voice_cli"])
-        self.assertIsNone(sessions.provider("other-cli")["voice"])
+        self.assertIsNone(sessions.provider("other-cli")["voice_cli"])
         self.assertIsNone(sessions.provider(None, None))
         if sessions._zstd():  # Codex compresses a log when the session ends
             log.unlink()

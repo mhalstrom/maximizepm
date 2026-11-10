@@ -562,9 +562,11 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   read from its transcript on this computer, with its item, its state, and
   what waits for you in it. The ! dialog answers a permission prompt or a
   question, and opens by itself when a new one comes. For a session in a tmux
-  pane, the message box types into its terminal, with files and pictures (and
-  dictation, where the browser has it). Items and Artifacts show what the
-  session took and wrote.
+  pane, the message box types into its terminal, with files and pictures.
+  Items and Artifacts show what the session took and wrote.
+- Dictation: every box that takes text has a microphone. On a Mac with macOS 26
+  the Mac turns speech into text on the device (Apple's SpeechAnalyzer), also
+  for the page on your phone; elsewhere the browser's own speech recognition does.
 - Artifacts and the side panel: the files the sessions wrote or named (images,
   PDF, HTML, Markdown, text, only from the project folders, their worktrees,
   and the uploads), local pages, and claude.ai artifact links. Open shows one

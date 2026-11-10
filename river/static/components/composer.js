@@ -12,7 +12,7 @@ export const SEND_SVG = svg("M8 12.8V3.6M4.2 7.4L8 3.6l3.8 3.8", 2);
 export function composerHtml(prefix, { placeholder, label, attachTitle, sendTitle }) {
   return `<input id="${prefix}PickFiles" type="file" multiple hidden>` +
     `<button id="${prefix}Attach" class="cmp-plus" type="button" title="${attachTitle}" aria-label="Attach files">${PLUS_SVG}</button>` +
-    `<div class="cmp-pill"><textarea id="${prefix}Text" rows="1" placeholder="${placeholder}" aria-label="${label}"></textarea>` +
+    `<div class="cmp-pill" data-mic="own"><textarea id="${prefix}Text" rows="1" placeholder="${placeholder}" aria-label="${label}"></textarea>` +
     `<button id="${prefix}Mic" class="cmp-mic hidden" type="button" aria-pressed="false" aria-label="Dictate">${MIC_SVG}</button>` +
     `<button id="${prefix}Send" class="cmp-send" type="submit" title="${sendTitle}" aria-label="Send">${SEND_SVG}</button></div>`;
 }
