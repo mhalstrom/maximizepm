@@ -121,12 +121,19 @@ def _mac_channel(conn):
 register_channel("mac", _mac_channel)
 
 
+# The first characters that NSUserDefaults misreads in a terminal-notifier value: [ ( { < and a double quote
+# start a property list, and a - starts the next option, so every batch ("- one\n- two") failed (#5042).
+# A single quote is safe, but the escape does no harm; a backslash gets one more, as terminal-notifier
+# removes one.
+_TN_ESCAPE = ("[", "(", "{", "<", '"', "'", "-", "\\")
+
+
 def _tn_text(text):
-    """terminal-notifier reads a value that starts with [ ( { or a quote as a property list, and
-    exits 2 ('Could not read the -message value'). A leading backslash escapes it, and
-    terminal-notifier removes that backslash; a text that starts with a backslash gets one more (#4674)."""
+    """terminal-notifier reads its values through NSUserDefaults. A value that starts with one of _TN_ESCAPE
+    comes back empty, and terminal-notifier exits 2 ('Could not read the -message value'). A leading backslash
+    escapes it, and terminal-notifier removes that backslash (#4674, #5042)."""
     text = text or ""
-    return "\\" + text if text[:1] in ("[", "(", "{", '"', "'", "\\") else text
+    return "\\" + text if text[:1] in _TN_ESCAPE else text
 
 MAC_HINT = "On macOS, brew install terminal-notifier makes a click on a notice open the page."
 

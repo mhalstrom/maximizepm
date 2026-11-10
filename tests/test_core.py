@@ -2517,8 +2517,30 @@ class Mac(Base):
         cmd = seen[0]
         self.assertEqual(cmd[cmd.index("-title") + 1], "\\(maxpm) alert")
         self.assertEqual(cmd[cmd.index("-message") + 1], "\\[maxpm alert from manager] read it")
-        for text in ("{x", '"x', "'x", "\\x"):
-            self.assertEqual(notify._tn_text(text), "\\" + text)
+        for text in ("[x", "(x", "{x", "<x", '"x', "'x", "-x", "\\x"):
+            with self.subTest(text=text):
+                self.assertEqual(notify._tn_text(text), "\\" + text)
+
+    def test_terminal_notifier_escapes_a_batch(self):
+        """A batch body starts with '- ', which NSUserDefaults read as the next option: every batch failed (#5042)."""
+        from river import notify
+        seen = []
+
+        class Done:
+            returncode, stderr = 0, ""
+
+        for i in (1, 2):
+            self.c.execute("INSERT INTO needs_you(kind, summary, opened_at) VALUES ('item', ?, '2026-11-09T00:00:00Z')",
+                           (f"#{i} a step is ready for a person",))
+        rows = [dict(r, item_id=None, message_id=None, human=None)
+                for r in self.c.execute("SELECT id, summary FROM needs_you ORDER BY id")]
+        title, body, url = notify.compose(self.c, rows)
+        self.assertTrue(body.startswith("- "))
+        with mock.patch("sys.platform", "darwin"), \
+                mock.patch("shutil.which", lambda name: "/opt/homebrew/bin/terminal-notifier"), \
+                mock.patch("subprocess.run", lambda cmd, **kw: seen.append(cmd) or Done()):
+            notify.ADAPTERS["mac"](self.c)(title, body, url)
+        self.assertEqual(seen[0][seen[0].index("-message") + 1], "\\" + body)
         self.assertEqual(notify._tn_text("#3 sign"), "#3 sign")
         self.assertEqual(notify._tn_text(""), "")
 
