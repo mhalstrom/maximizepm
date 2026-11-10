@@ -12495,6 +12495,8 @@ def serve_loop(conn):
 
 
 RULE_WINDOW = timedelta(hours=24)  # a broken rule of a closed task shows this long after the close
+# mark's decision that the deploy is a hook (#4977, 2026-11-10): before it, the manager ran releases by agreement.
+DEPLOY_RULE_SINCE = "2026-11-10T05:11:00Z"
 AUTOMATION_SETTINGS = ("auto_review", "fresh_sessions", "auto_continue")  # a global value off its default shows
 
 
@@ -12513,17 +12515,21 @@ def broken_rules(conn):
             out.append({"key": f"review:{r['id']}", "rule": "a review starts in a new session",
                         "text": f"review #{r['id']} is held by {r['assignee']}, which held #{used} before",
                         "fix": f"maxpm release {r['id']} --note \"a review starts in a new session\""})
-    hooked = hooked_targets(conn)
-    for r in conn.execute("SELECT id, target, status, assignee, closed_at FROM items WHERE kind='deploy' AND "
-                          "(status='in_progress' OR (status='done' AND closed_at > ?)) ORDER BY id", (since,)).fetchall():
+    # When each target got its deploy hook: a deploy counts against the rule only when the hook was there when the
+    # session took it (held) or closed it (done); a release before the hook existed ran by hand, as it had to.
+    hooked = {r["name"]: r["set_at"] for r in conn.execute(
+        "SELECT t.name, h.set_at FROM hooks h JOIN targets t ON t.id=h.target_id WHERE h.event='deploy'")}
+    for r in conn.execute("SELECT id, target, status, assignee, claimed_at, closed_at FROM items WHERE kind='deploy' "
+                          "AND (status='in_progress' OR (status='done' AND closed_at > ?)) ORDER BY id", (since,)).fetchall():
         by = r["assignee"] if r["status"] == "in_progress" else _done_by(conn, r["id"])
-        if r["target"] in hooked and by and _is_ai(conn, by):
+        at = r["claimed_at"] if r["status"] == "in_progress" else r["closed_at"]
+        if r["target"] in hooked and by and _is_ai(conn, by) and at and at >= hooked[r["target"]]:
             out.append({"key": f"typed:{r['id']}", "rule": "no session types a production command",
                         "text": f"deploy #{r['id']} of {r['target']} (it has a deploy hook) is "
                                 + ("held" if r["status"] == "in_progress" else "closed") + f" by the session {by}",
                         "fix": "maxpm serve runs the hook; a session releases the deploy item: maxpm release "
                                f"{r['id']}" if r["status"] == "in_progress" else "none now; see that it does not happen again"})
-        elif r["status"] == "done" and by and conn.execute(
+        elif r["status"] == "done" and by and r["closed_at"] >= DEPLOY_RULE_SINCE and conn.execute(
                 "SELECT 1 FROM agents WHERE name=? AND role='manager' AND kind='ai'", (by,)).fetchone():
             out.append({"key": f"manager-deploy:{r['id']}", "rule": "the manager does not deploy",
                         "text": f"deploy #{r['id']} of {r['target']} was closed by the manager {by}",

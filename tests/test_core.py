@@ -4735,8 +4735,14 @@ class BrokenRules(Base):
         b = self.add("site", "form")
         core.claim(self.c, b, "dev")
         dep2 = core.done(self.c, b, "commit", "dev", ship_it=True)["shipped_in"]
-        with core.tx(self.c):
-            self.c.execute("UPDATE items SET status='in_progress', assignee='ops' WHERE id=?", (dep2,))
+        with core.tx(self.c):  # taken before the hook was set: a release by hand, as it had to be
+            self.c.execute("UPDATE items SET status='in_progress', assignee='ops', claimed_at=? WHERE id=?",
+                           (core.iso(core.now() - timedelta(hours=1)), dep2))
+            self.c.execute("UPDATE hooks SET set_at=?", (core.iso(core.now() - timedelta(minutes=5)),))
+        self.assertNotIn(f"typed:{dep2}", self.keys())
+        self.assertNotIn(f"manager-deploy:{dep}", [k for k in self.keys() if k.startswith("typed:")])
+        with core.tx(self.c):  # taken after it
+            self.c.execute("UPDATE items SET claimed_at=? WHERE id=?", (core.iso(core.now()), dep2))
         self.assertIn(f"typed:{dep2}", self.keys())
         # A switch left on: an automation setting off its default.
         core.config_set(self.c, "auto_continue", "off", actor="mgr")
