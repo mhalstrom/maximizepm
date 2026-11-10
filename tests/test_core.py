@@ -4122,6 +4122,31 @@ class Models(Base):
         b2 = core.go(self.c, self.dir.name, "s2", model="opus")
         self.assertEqual(b2["item"]["id"], big)
 
+    def test_push_give_and_queue_refuse_a_session_whose_model_the_limits_exclude(self):
+        """#4950: each way to hand an item to a session applies the same limit as claim; before, a push or a
+        queue entry held the item for a session that could never claim it, and give moved the lease to it."""
+        for n, m in (("weak", "claude-opus-5-5"), ("strong", "fable")):
+            core.register(self.c, n)
+            core.set_agent_model(self.c, n, m)
+        core.register(self.c, "mark", human=True)
+        x = core.item_add(self.c, "a", "for fable", models={"min_model": "fable"})["id"]
+        with self.assertRaisesRegex(RiverError, "push #%d to weak: needs at least fable" % x):
+            core.push(self.c, x, "weak", None, "mark")
+        with self.assertRaisesRegex(RiverError, "queue #%d to weak: needs at least fable" % x):
+            core.queue_add(self.c, "weak", x, actor="mark")
+        self.assertIsNone(core._item(self.c, x)["reserved_for"])
+        with self.assertRaisesRegex(RiverError, "needs at least fable"):
+            core.next_item(self.c, "a", claim=True, actor="weak") or core.claim(self.c, x, "weak")
+        with self.assertRaisesRegex(RiverError, "pick another model"):
+            core.launch_target(self.c, item=x, model="claude-opus-5-5", actor="mark")
+        core.claim(self.c, x, "strong")
+        with self.assertRaisesRegex(RiverError, "give #%d to weak" % x):
+            core.give(self.c, x, "weak", "strong")
+        self.assertEqual(core._item(self.c, x)["assignee"], "strong")
+        core.release(self.c, x, "strong")
+        core.push(self.c, x, "strong", None, "mark")  # a session whose model fits
+        core.accept(self.c, x, "strong")
+
     def test_a_full_model_id_has_the_limits_of_its_ladder_name(self):
         """#4950: go --model claude-opus-5-5 took an item with --min-model fable, because the full id was not
         in the ladder and an unknown model passed every limit."""

@@ -3885,6 +3885,7 @@ def push(conn, item_id, to, note=None, actor=None):
         if author_refusal(conn, it, to):
             raise RiverError(f"refused: {to} worked on what release review #{item_id} covers; push it to an agent "
                              f"that did not, or let maxpm serve start one")
+        _refuse_model_to(conn, it, to, "push")
         ttl = parse_duration(setting(conn, "reserve_ttl", item_id=it["id"], agent=to))
         until = now() + ttl
         conn.execute("UPDATE items SET reserved_for=?, reserved_until=?, reserved_by=? WHERE id=?",
@@ -3969,6 +3970,7 @@ def give(conn, item_id, to, actor=None):
         rec = _agent(conn, to)
         if to == actor:
             raise RiverError("you already have it")
+        _refuse_model_to(conn, it, to, "give")
         t = now()
         if it["assignee"] == actor and it["status"] in ("in_progress", "held"):
             if rec["role"] == "planner":
@@ -5033,6 +5035,7 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
         if author_refusal(conn, it, agent):
             raise RiverError(f"refused: {agent} worked on what release review #{it['id']} covers; queue it for an "
                              f"agent that did not")
+        _refuse_model_to(conn, it, agent, "queue")
         q = conn.execute("SELECT agent FROM queue_entries WHERE item_id=?", (it["id"],)).fetchone()
         if q:
             raise RiverError(f"#{it['id']} is already in the queue of {q['agent']}" + (
@@ -6344,6 +6347,16 @@ def _model_refusal(conn, it, actor, any_type=False):
     if ok and model:
         ok, why = model_check(parse_ladder(ladder_text), model, m["min_model"], m["max_model"])
     return None if ok else why
+
+
+def _refuse_model_to(conn, it, to, verb):
+    """Refuse to hand an item to a session whose model the item's min or max limit excludes: a push, a give,
+    or a queue entry would hold the item for a session that may not claim it (#4950). The agent type is not
+    checked here: a person may push an item to a session of another type, and that session takes it."""
+    why = _model_refusal(conn, it, to, any_type=True)
+    if why:
+        raise RiverError(f"refused: {verb} #{it['id']} to {to}: {why}. Choose a session whose model fits, or "
+                         f"change the limit: maxpm edit {it['id']} --min-model|--max-model <model>")
 
 
 def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=1, near=None, mine=False,
