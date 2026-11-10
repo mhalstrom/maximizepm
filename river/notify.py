@@ -440,6 +440,7 @@ def loop(stop, interval_s=None):
             server.watch_busy(conn)  # an agent that is busy with no river command keeps its leases
             core.tell_watch_late(conn)  # a manager that runs no watch while a message is due: tell the person
             server.adopt_sessions(conn)  # tmux_adopt: a session outside tmux, quiet at its prompt, moves into a pane
+            server.revive_sessions(conn)  # a session whose process ended with no stop resumes in a pane (#5061)
             server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session
             core.end_quiet_experts(conn)  # an expert nobody talked with for expert_idle_end ends (#4955)
             server.auto_release(conn)  # a ready review gets a reviewer, a ready deploy its deployer

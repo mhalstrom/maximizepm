@@ -212,6 +212,12 @@ DEFAULT_SETTINGS = {
     # nothing for ADOPT_QUIET, with no prompt, question or background work open; then it ends the old process and
     # resumes the same chat in a pane (claude --resume, codex resume) with the same name, item and context.
     "tmux_adopt": "on",
+    # revive_sessions on: maxpm serve resumes a session whose process ended with no stop, End or unregister (a crash,
+    # a closed window or pane) in a tmux pane at once (claude --resume, codex resume): the same name, model, item and
+    # chat, and the manager gets a notice (#5061). Only a session that holds an item, a goal or a target, or the
+    # manager, and only when it ran a river command or a hook in the last revive_within.
+    "revive_sessions": "on",
+    "revive_within": "2h",
     "idle_end": "15m",
     # An expert session (maxpm expert start|adopt, #4955) is one that a person talks with for hours or days: no wait END,
     # no idle_end, no hand-over. maxpm serve ends it when nobody typed or sent it a prompt for expert_idle_end
@@ -1347,7 +1353,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "question_popup_max", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -1405,7 +1411,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "relay_keep_awake", "web_terminal",
+    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "web_terminal",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":

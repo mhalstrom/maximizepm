@@ -533,6 +533,89 @@ PERMISSION = """⏺ Bash(git push)
 """
 
 
+class Revive(Base):
+    """revive_sessions (#5061, mark 2026-11-10: 'the session is missing from tmux so we need to get it back there'):
+    a session whose process ended with no stop resumes its chat in a tmux pane, and the manager hears of it."""
+
+    def setUp(self):
+        import subprocess
+        from tests.test_server import FakeTmux
+        super().setUp()
+        self.platform, core.PLATFORM = core.PLATFORM, "linux"
+        self.tmux = server.TMUX_RUNNER = FakeTmux()
+        self.tmux_path, core.tmux_path = core.tmux_path, lambda: "/usr/bin/tmux"
+        roots, core.transcripts_root = core.transcripts_root, lambda: self.root
+        self.addCleanup(setattr, core, "transcripts_root", roots)
+        proc = subprocess.Popen(["sleep", "60"])  # the agent CLI, which then ends with no stop (a crash)
+        info = core.proc_info(proc.pid)
+        proc.kill()
+        proc.wait(5)
+        if info is None:
+            self.skipTest("no ps here (an agent sandbox)")
+        self.pid = proc.pid
+        core.register(self.c, "mgr")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, pid_cmd=?, model='opus' WHERE name='ag'", (self.pid, info[2]))
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        self.write(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn", cwd=self.dir.name))
+
+    def tearDown(self):
+        core.PLATFORM, server.TMUX_RUNNER, core.tmux_path = self.platform, None, self.tmux_path
+        server.REVIVE["at"].clear()
+        super().tearDown()
+
+    def notices(self):
+        return [r[0] for r in self.c.execute("SELECT body FROM messages WHERE to_agent='mgr' AND kind='notice'")]
+
+    def test_a_session_that_ended_with_no_stop_resumes_in_a_pane(self):
+        moved = server.revive_sessions(self.c)
+        self.assertEqual(list(moved), ["ag"])
+        pane = self.tmux.panes[0]
+        self.assertEqual(pane["agent"], "ag")
+        line = pane["keys"][0]
+        self.assertIn(f"--resume {SID} ", line)
+        self.assertIn(f"--model {core.model_id(self.c, 'claude-code', 'opus')} ", line)
+        self.assertIn("MAXPM_AGENT=ag ", line)
+        a = core.agent_status(self.c, "ag")
+        self.assertEqual((a["pid"], [h["id"] for h in a["holds"]]), (None, [self.it]))  # it keeps its item
+        (note,) = self.notices()
+        self.assertIn(f"ag ended with no stop (its process {self.pid} is gone) while it held #{self.it}", note)
+        self.assertIn("resumed its chat in tmux pane %0", note)
+        # Its new process has not run a river command yet (no pid): nothing more to do.
+        self.assertEqual(server.revive_sessions(self.c), {})
+
+    def test_an_end_on_purpose_stays_ended(self):
+        # A stop (maxpm stop, End, kill) sets stop_at; the session stays ended.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET stop_at=? WHERE name='ag'", (core.iso(core.now()),))
+        self.assertEqual(server.revive_sessions(self.c), {})
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET stop_at=NULL WHERE name='ag'")
+        # A session that holds nothing (its task is done) is not brought back.
+        core.done(self.c, self.it, "x", "ag")
+        self.assertEqual(server.revive_sessions(self.c), {})
+        # Nor one that ran nothing for revive_within, nor any with revive_sessions off.
+        core.claim(self.c, core.item_add(self.c, "site", "footer")["id"], "ag")
+        old = core.iso(core.now() - core.timedelta(hours=3))
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET last_seen=?, activity_at=NULL, pid=? WHERE name='ag'", (old, self.pid))
+        self.assertEqual(server.revive_sessions(self.c), {})
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET last_seen=? WHERE name='ag'", (core.iso(core.now()),))
+        core.config_set(self.c, "revive_sessions", "off")
+        self.assertEqual(server.revive_sessions(self.c), {})
+        core.config_set(self.c, "revive_sessions", "on")
+        self.assertEqual(list(server.revive_sessions(self.c)), ["ag"])
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "revive_sessions", "sometimes")
+        self.assertEqual(self.tmux.panes[0]["agent"], "ag")
+        # A live process is never resumed.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'", (os.getpid(), core.proc_info(os.getpid())[2]))
+        server.REVIVE["at"].clear()
+        self.assertEqual(server.revive_sessions(self.c), {})
+
+
 class TmuxBase(Base):
     """An agent in a fake tmux pane that shows a permission prompt."""
 

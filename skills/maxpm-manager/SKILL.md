@@ -71,7 +71,10 @@ Stop when the user tells you to, and tell the user what you did.
   items or has queued items): `maxpm stop <agent> --reason "..."`. If it does
   not end and its items block others, ask the user first; only with their yes,
   `maxpm stop <agent> --kill --reason "..."` (uncommitted work in its folder is
-  lost).
+  lost). A session whose process ended with no stop while it held an item, a
+  goal or a target comes back by itself: `maxpm serve` resumes its chat in a
+  tmux pane within a minute (setting `revive_sessions`) and sends you a notice.
+  Stop it only when it ended on purpose.
 - **LEASE RAN OUT** on an item: its session stopped mid-item. Queue it for an
   agent (`maxpm queue add <agent> <id>`), or launch one for it
   (`maxpm launch --item <id>`). The taker checks what is done first.

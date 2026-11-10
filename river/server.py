@@ -1101,6 +1101,67 @@ def adopt_sessions(conn, runner=None, end=None):
     return moved
 
 
+REVIVE = {"at": {}}  # agent -> when maxpm serve last resumed it: the next resume waits REVIVE_RETRY
+REVIVE_RETRY = 600
+
+
+def revive_sessions(conn, runner=None):
+    """One pass of the loop of maxpm serve (revive_sessions, #5061; mark 2026-11-10: 'the session is missing from
+    tmux so we need to get it back there'): a session whose process ended with no stop, End or unregister (a
+    crash, a closed window or pane, a pane that another serve closed as on 2026-11-10, #5054) resumes its chat in
+    a tmux pane at once, with the same name, model, item and context, and the manager gets a notice. An end on
+    purpose sets a stop (maxpm stop, End, kill) or removes the agent (unregister, wait END, idle_end, expert end):
+    such a session stays ended. Only a session that holds an item, a goal or a target, or the manager when no other
+    is active, and only one that ran a river command or a hook in the last revive_within. A session resumes at
+    most once per REVIVE_RETRY. Returns {agent: pane}."""
+    from . import sessions
+    if core.setting(conn, "revive_sessions") != "on" or core.PLATFORM == "win32" or (
+            TMUX_RUNNER is None and not _tmux_cmd()):
+        return {}
+    since = core.iso(core.now() - core.parse_duration(core.setting(conn, "revive_within")))
+    rows = conn.execute(
+        "SELECT * FROM agents WHERE kind='ai' AND stop_at IS NULL AND pid IS NOT NULL AND host=? AND pid_cmd IS NOT "
+        "NULL AND coalesce(via, '')<>'http' AND max(last_seen, coalesce(activity_at, '')) >= ? ORDER BY name",
+        (core.this_host(), since)).fetchall()
+    out, t = {}, time.time()
+    for r in rows:
+        name, pid = r["name"], r["pid"]
+        if t - REVIVE["at"].get(name, 0) < REVIVE_RETRY:
+            continue
+        if core.pid_alive(pid):
+            info = core.proc_info(pid)
+            if info is None or info[2] == r["pid_cmd"]:
+                continue  # it runs (or ps cannot tell)
+        a = core.agent_status(conn, name)
+        goal = conn.execute("SELECT 1 FROM goals WHERE owner=? AND status='open'", (name,)).fetchone()
+        manager = r["role"] == "manager" and core.active_manager(conn, but=name) is None
+        if not (a["holds"] or a["owns"] or goal or manager):
+            continue
+        kind, path = sessions.transcript(conn, name)
+        if not path:
+            continue
+        try:
+            cwd = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)["cwd"]
+        except (OSError, ValueError, EOFError):
+            continue
+        REVIVE["at"][name] = t
+        held = ", ".join(f"#{h['id']}" for h in a["holds"]) or ("the manager" if manager else "its goal or target")
+        try:
+            pane = move_into_tmux(conn, a, kind, path, cwd, runner, ended=True,
+                                  why="ended with no stop (revive_sessions) and resumes in a tmux pane")
+            body = (f"{name} ended with no stop (its process {pid} is gone) while it held {held}: MaximizePM resumed "
+                    f"its chat in tmux pane {pane or '?'}. If it ended on purpose: maxpm stop {name} --reason \"...\"")
+            out[name] = pane
+        except RiverError as e:
+            body = f"{name} ended with no stop (its process {pid} is gone) while it held {held}, and did not resume: {e}"
+            print(f"revive_sessions: {name}: {e}", flush=True)
+        to = core.active_manager(conn, but=name)
+        if to:
+            with core.tx(conn):
+                core._send(conn, "notice", "maxpm", body, to=to)
+    return out
+
+
 def _end_process(pid, grace=5.0):
     """End a process: taskkill on Windows; SIGTERM then SIGKILL on Unix. True when it has ended."""
     if os.name == "nt":
@@ -1126,7 +1187,7 @@ def _end_process(pid, grace=5.0):
 
 
 def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=None,
-                   why="moves into a tmux pane (tmux_adopt)"):
+                   why="moves into a tmux pane (tmux_adopt)", ended=False):
     """Move one agent session into a tmux pane (tmux_adopt): end its process (only one process may write a chat),
     then resume the same chat in a new pane of the maxpm tmux session, in its folder, with the same MAXPM_AGENT.
     The agent keeps its items, goals and targets: its leases run from now, and its old process id is cleared, so
@@ -1139,11 +1200,12 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
     names = core.projects_for_dir(conn, cwd)
     project_id = held["project_id"] if held else core._project(conn, names[0])["id"] if names else None
     t = core.resume_command(conn, name, sessions.PLATFORMS[kind], sid, project_id, overrides, transcript=path)
-    info = core.proc_info(pid)
-    if info is not None and info[2] != a["pid_cmd"]:
-        raise RiverError(f"PID {pid} now runs another command ({info[2][:80]}); nothing moved")
-    if not (end or _end_process)(pid):
-        raise RiverError(f"its process {pid} did not end; nothing moved")
+    if not ended:  # ended: its process ended already (revive_sessions); a pid that came again is another's
+        info = core.proc_info(pid)
+        if info is not None and info[2] != a["pid_cmd"]:
+            raise RiverError(f"PID {pid} now runs another command ({info[2][:80]}); nothing moved")
+        if not (end or _end_process)(pid):
+            raise RiverError(f"its process {pid} did not end; nothing moved")
     with core.tx(conn):
         conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL, busy_at=NULL WHERE name=?", (name,))
         core._touch_agent(conn, name)
