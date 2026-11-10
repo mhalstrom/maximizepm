@@ -173,8 +173,8 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual((r["alerted"], r["started"], sent), ({}, {}, []))
         self.assertIn(dep, r["deploying"])
         import time
-        for _ in range(200):  # the hook runs in a thread of maxpm serve
-            if core._item(self.c, dep)["status"] == "done":
+        for _ in range(600):  # the hook runs in a thread of maxpm serve: wait until it ends (its queue closed)
+            if core._item(self.c, dep)["status"] == "done" and not server.HOOKS["running"]:
                 break
             time.sleep(0.05)
         it = core.item_show(self.c, dep)
@@ -214,9 +214,12 @@ class LaunchAgent(unittest.TestCase):
             n = self.c.execute("SELECT COUNT(*) FROM events WHERE item_id=? AND change LIKE 'hook deploy:%'",
                                (dep,)).fetchone()[0]
             self.assertIn(dep, server.auto_release(self.c, runner=[].append)["deploying"])
-            for _ in range(200):  # the hook runs in a thread of maxpm serve
+            # The hook runs in a thread of maxpm serve. Its history line comes before the end of the deploy
+            # (_deploy_hook_end, which takes in the later release): wait until the thread ends (#5073: Windows).
+            for _ in range(600):
                 if self.c.execute("SELECT COUNT(*) FROM events WHERE item_id=? AND change LIKE 'hook deploy:%'",
-                                  (dep,)).fetchone()[0] > n and core._item(self.c, dep)["status"] != "in_progress":
+                                  (dep,)).fetchone()[0] > n and core._item(self.c, dep)["status"] != "in_progress" \
+                        and not server.HOOKS["running"]:
                     break
                 time.sleep(0.05)
         deploy()
@@ -268,8 +271,8 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual((r["alerted"], r["started"], sent), ({}, {}, []))
         self.assertIn(dep, r["deploying"])
         import time
-        for _ in range(200):  # the hook runs in a thread of maxpm serve
-            if core._item(self.c, dep)["status"] == "done":
+        for _ in range(600):  # the hook runs in a thread of maxpm serve: wait until it ends (its queue closed)
+            if core._item(self.c, dep)["status"] == "done" and not server.HOOKS["running"]:
                 break
             time.sleep(0.05)
         self.assertEqual(core._item(self.c, dep)["status"], "done")
