@@ -40,11 +40,23 @@
 /* Sizes and the dialog look (#5028): views and parts use these, not literal px. Space: 2 4 6 8 10 12 16 24. */
 :root {
   --sp-0: 2px; --sp-1: 4px; --sp-2: 6px; --sp-3: 8px; --sp-4: 10px; --sp-5: 12px; --sp-6: 16px; --sp-7: 24px;
-  --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-base: 14px; --fs-l: 17px; --fs-xl: 18px;
+  --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-base: 14px; --fs-l: 17px; --fs-xl: 18px; --fs-2xl: 24px;
   --r-s: 6px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px; --hair-2: 2px;
   /* Widths of a field or a list: xs 80, s 120, m 160, l 220. --board-top: the header and strip above a Board column. */
   --w-xs: 80px; --w-s: 120px; --w-m: 160px; --w-l: 220px; --board-top: 150px;
   --tap: 44px;  /* the least size of a control on a phone */
+  /* Widths and heights of view parts that no space token gives (#5046): one name for each, so a view holds no px. */
+  --w-input-s: 90px;   /* a short filter field (Artifacts: Item #) */
+  --w-input-m: 180px;  /* the least width of a reason field beside its button (Targets) */
+  --w-form: 640px;     /* a settings form */
+  --w-col: 200px;      /* the base width of a row's title column before it wraps (Terminal) */
+  --w-tool: 32px;      /* a tool button of a box, such as zoom (Graph) */
+  --w-side: 260px;     /* the card column beside the graph */
+  --w-card: 180px; --w-card-phone: 148px;  /* a card in a row that scrolls sideways (Graph) */
+  --h-spark: 56px;     /* a small preview drawing in a card */
+  --h-bars: 70px; --w-bar: 60px;  /* the bar chart of the Capacity tab */
+  --h-box-min: 320px; --h-above-box: 210px;  /* the Graph box: the least height, and the page above it */
+  --fade: 40px;        /* the faded right edge of a row that scrolls sideways */
   --scrim: rgba(0,0,0,.45); --shadow-dlg: 0 12px 40px rgba(0,0,0,.25);
 }
 :root { color-scheme: light dark; }
@@ -76,6 +88,8 @@ select, input, textarea, button { font: inherit; color: var(--ink); }
 select, input, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
 button.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 button.btn:hover { border-color: var(--accent); }
+/* A card that is one button (button.js kind "card", #5046): no button look; the card's class draws it. */
+button.cardbtn { display: block; width: 100%; text-align: left; font: inherit; color: var(--ink); cursor: pointer; }
 button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 button.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }  /* a lapsed relay plan (#4759) */
 main { padding: 16px; max-width: 1500px; margin: 0 auto; }

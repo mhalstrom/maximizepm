@@ -35,7 +35,7 @@ export function renderProjects() {
         <div class="pdesc">${clampHtml("proj:" + p.name, p.notes ? esc(p.notes) : '<span class="muted">No description.</span>', ` <span class="link" data-describe="${esc(p.name)}">edit</span>`)}</div>
         <div class="pwho">${who.length ? "Working here now: " + who.map(n => `<b>${esc(n)}</b>`).join(", ") : "Nobody works here now."}</div>
         <div class="psec">Goals</div>
-        <div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<span class="link" style="font-size:12px;align-self:center" data-addgoal="${esc(p.name)}">${pg.length ? "+ goal" : "No goals yet. + Add a goal"}</span></div>
+        <div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<span class="link t-s" style="align-self:center" data-addgoal="${esc(p.name)}">${pg.length ? "+ goal" : "No goals yet. + Add a goal"}</span></div>
         <div class="psec">Open items (${open.length})${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}</div>
         <div class="ptable" data-ptable="${esc(p.name)}"></div>
       </div>`);
@@ -65,7 +65,7 @@ export function renderBlocked() {
   const B = S.items.filter(i => i.blocked_reason && !["done", "dropped"].includes(i.status));
   $("#blockedPanel").classList.toggle("hidden", !B.length);
   $("#blockedList").innerHTML = B.map(i => nyCard(`<b class="link" data-open="${i.id}">#${i.id} ${esc(i.title)}</b> ${projectChip(i.project)}${doerChip(i)}`, `<div class="ny-c">${esc(i.blocked_reason)}</div>
-      <div class="muted" style="font-size:12px">${i.blocked_at ? "since " + ago(i.blocked_at) : "since: not recorded"} · ${i.blocked_until ? `until ${esc(i.blocked_until_text)} (${left(i.blocked_until)} left), then ready by itself` : "until someone clears it"}${i.blocked_set_by ? " · set by " + esc(i.blocked_set_by) : ""}</div>`)).join("");
+      <div class="muted t-s">${i.blocked_at ? "since " + ago(i.blocked_at) : "since: not recorded"} · ${i.blocked_until ? `until ${esc(i.blocked_until_text)} (${left(i.blocked_until)} left), then ready by itself` : "until someone clears it"}${i.blocked_set_by ? " · set by " + esc(i.blocked_set_by) : ""}</div>`)).join("");
 }
 
 async function goalAction(what, name) {

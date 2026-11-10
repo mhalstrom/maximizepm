@@ -10,6 +10,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Element | Part | Notes |
 |---|---|---|
 | Button | `button.js`: `button(html, {kind, cls, title, data, pressed})`, `buttonEl(text, ...)` | kind `""`, `primary`, `warn`; CSS `.btn`, `.primary`, `.warn` |
+| Card that is a button | `button.js`: `button(html, {kind: "card", cls})` | CSS `.cardbtn` takes the button look away; the card class (`cls`) draws it (Graph `.gcard`) |
 | Icon button (✕ ↑ ↓ ⋯) | `button.js`: `iconButton(symbol, label, ...)`, or `kind: "icon"` | CSS `.iconbtn`; a label for screen readers |
 | Toggle (pin, filter) | `button(..., {pressed})` | `aria-pressed` and the class `on` |
 | Chip, badge | `chip.js`: `chip`, `statusChip`, `prioChip`, `dueChip`, `doerChip`, ... | colors from `.c-*` classes |
@@ -26,7 +27,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | End a session | `endSession.js`: `endButton(s, {icon})`, `endSession(s)` | the confirm dialog: stop request, expert end, End now (#5041) |
 | Toast | `lib.js`: `toast(text, err)` | |
 | Form field | `form.js`; `folderForm.js` for a project folder | classes `.form`, `.two`, `label`, `.actions` |
-| Long text on a phone | `clamp.js` | |
+| Long text on a phone | `clamp.js` | `clampHtml`; a clamp written in a view's HTML gets its More from `fitClamps` |
 | Empty list | `empty.js`: `empty(html, {inline})` | "No open items." |
 | Table | `table.js` (Tabulator) | |
 | Chat | `chat.js` | |
@@ -38,7 +39,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
   color in a view. `--scrim` (behind a dialog) and `--shadow-dlg` are the same in both.
 - Space: `--sp-0` 2 px, `--sp-1` 4, `--sp-2` 6, `--sp-3` 8, `--sp-4` 10, `--sp-5` 12, `--sp-6` 16,
   `--sp-7` 24.
-- Text: `--fs-xs` 11 px, `--fs-s` 12, `--fs-m` 13, `--fs-base` 14, `--fs-l` 17, `--fs-xl` 18. For a
+- Text: `--fs-xs` 11 px, `--fs-s` 12, `--fs-m` 13, `--fs-base` 14, `--fs-l` 17, `--fs-xl` 18, `--fs-2xl` 24 (a big number). For a
   line in a view: the classes `t-s` (12 px) and `t-m` (13 px), not a `style` attribute.
 - Corners: `--r-s` 6 px, `--r-m` 8, `--r-l` 10, `--r-xl` 12, `--r-pill`; a line: `--hair` (1 px),
   `--hair-2` (2 px).
@@ -46,6 +47,10 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
   `--board-top` (150 px): the header and the strip above a Board column.
 - A size between two tokens: `calc()` of tokens, for example `calc(var(--sp-2) + var(--hair))` for 7 px.
 - `--tap`: 44 px, the least size of a control on a phone.
+- Widths and heights of view parts that no space token gives: `--w-input-s` 90 px, `--w-input-m` 180, `--w-form`
+  640, `--w-col` 200, `--w-tool` 32, `--w-side` 260, `--w-card` 180, `--w-card-phone` 148, `--h-spark` 56, `--h-bars`
+  70, `--w-bar` 60, `--h-box-min` 320, `--h-above-box` 210, `--fade` 40. A value between two space tokens is a
+  `calc()` of tokens (14 px: `calc(var(--sp-5) + var(--sp-0))`); add a named token only for a size of a part.
 
 A media query cannot read a token: write its width as a number. The page uses 600, 640, 800 and
 1000 px (app.css), and 759 (a phone) and 1023 px (phone.css).

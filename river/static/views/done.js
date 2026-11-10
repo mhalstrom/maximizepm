@@ -40,7 +40,7 @@ export async function renderLog(force) {
     const done = pct(p.done, p.total);
     return `<div class="prog"><div class="prog-h"><b>${esc(p.project)}</b><span class="muted">${p.done}/${p.total} · ${done}%</span></div>
       ${bar(done)}
-      ${win ? `<div class="muted" style="font-size:12px;margin-top:2px">+${p.done_in_window} in the ${esc(win)}</div>` : ""}</div>`;
+      ${win ? `<div class="muted t-s" style="margin-top:var(--sp-0)">+${p.done_in_window} in the ${esc(win)}</div>` : ""}</div>`;
   }).join("") || `<div class="muted">No items.</div>`;
 }
 $("#logProject").addEventListener("change", () => renderLog(true));

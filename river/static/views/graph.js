@@ -1,5 +1,6 @@
 // The Graph tab (#4656): the dependency graph (Mermaid, ELK) and a card for each project.
 import { $, esc, left } from "../lib.js";
+import { button } from "../components/button.js";
 import { makePanZoom } from "../components/panZoom.js";
 import { graphItems, graphText, GRAPH_LIMITS, GRAPH_MAX } from "../components/graphText.js";
 import { S, tab, goalSel, inGoal } from "../page.js";
@@ -49,8 +50,8 @@ function renderGraphSide(withDone) {
   sideSig = sig;
   const card = (name, label, items, extra) => {
     const ready = items.filter(i => i.ready).length;
-    return `<button class="gcard${graphProj === name ? " on" : ""}${items.length ? "" : " empty"}" data-gproj="${esc(name)}" aria-pressed="${graphProj === name}">
-      <b>${esc(label)}</b><span class="gc-n">${items.length} ${withDone ? "items" : "open"} · ${ready} ready</span>${extra}</button>`;
+    return button(`<b>${esc(label)}</b><span class="gc-n">${items.length} ${withDone ? "items" : "open"} · ${ready} ready</span>${extra}`,
+      { kind: "card", cls: "gcard" + (items.length ? "" : " empty"), data: { gproj: name }, pressed: graphProj === name });
   };
   $("#graphSide").innerHTML = `<h2>Projects</h2>` + card("", "All projects", per.flatMap(x => x.items), "")
     + per.map(({ p, items }) => card(p.name, p.name, items, items.length ? miniGraph(items) : `<span class="gc-none">No ${withDone ? "" : "open "}items</span>`)).join("");

@@ -1,7 +1,7 @@
 /* The Terminal tab (#4803). */
-.sh-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
-.sh-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
-.sh-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-.sh-row .sh-t { flex: 1 1 200px; min-width: 0; }
-.sh-row code { font-size: 12px; }
-.sh-note { font-size: 12px; }
+.sh-head { display: flex; gap: var(--sp-5); align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.sh-list { display: flex; flex-direction: column; gap: var(--sp-3); margin: var(--sp-4) 0; }
+.sh-row { display: flex; gap: var(--sp-4); align-items: center; flex-wrap: wrap; border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); }
+.sh-row .sh-t { flex: 1 1 var(--w-col); min-width: 0; }
+.sh-row code { font-size: var(--fs-s); }
+.sh-note { font-size: var(--fs-s); }

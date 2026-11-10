@@ -29,19 +29,19 @@
           <textarea id="addNotes" rows="2" placeholder="Notes"></textarea>
           <button class="btn primary" id="addGo">Add</button>
         </div>
-        <details style="margin-top:8px"><summary>Add a goal</summary>
-          <div class="form" style="margin-top:8px">
+        <details style="margin-top:var(--sp-3)"><summary>Add a goal</summary>
+          <div class="form" style="margin-top:var(--sp-3)">
             <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="lower-case, e.g. launch-legal"></label></div>
             <label>Outcome<textarea id="goalOutcome" rows="2" placeholder="What is true when this goal is reached"></textarea></label>
             <label>Done when<input id="goalDoneWhen" placeholder="The test the owner checks before declaring it done"></label>
             <button class="btn" id="goalGo">Add goal</button>
           </div>
         </details>
-        <details style="margin-top:8px"><summary>Add a project</summary>
-          <div class="sub" style="margin-top:8px">A project is usually a folder you work in: MaximizePM links it, and agents started there use the queue.</div>
+        <details style="margin-top:var(--sp-3)"><summary>Add a project</summary>
+          <div class="sub" style="margin-top:var(--sp-3)">A project is usually a folder you work in: MaximizePM links it, and agents started there use the queue.</div>
           <div id="projFolderForm"></div>
-          <div class="sub" style="margin-top:8px">A project without a folder (for example tasks for people):</div>
-          <div class="form" style="margin-top:4px"><input id="projName" placeholder="name (lower-case)"><button class="btn" id="projGo">Add project</button></div>
+          <div class="sub" style="margin-top:var(--sp-3)">A project without a folder (for example tasks for people):</div>
+          <div class="form" style="margin-top:var(--sp-1)"><input id="projName" placeholder="name (lower-case)"><button class="btn" id="projGo">Add project</button></div>
         </details>
       </div>
     </div>

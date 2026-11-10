@@ -1,19 +1,19 @@
 /* The Capacity tab: the counts, the advice, the open items by step. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
-.stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-4); }
 @media (max-width: 700px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-.stat { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-.stat .n { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.stat .l { color: var(--muted); font-size: 12px; }
+.stat { border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); }
+.stat .n { font-size: var(--fs-2xl); font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat .l { color: var(--muted); font-size: var(--fs-s); }
 .stat.good .n { color: var(--ready); } .stat.bad .n { color: var(--warn); } .stat.hum .n { color: var(--human); }
-.advice { margin: 10px 0 0; padding: 0; list-style: none; }
-.advice li { padding: 6px 10px; border-radius: 6px; margin-top: 6px; }
+.advice { margin: var(--sp-4) 0 0; padding: 0; list-style: none; }
+.advice li { padding: var(--sp-2) var(--sp-4); border-radius: var(--r-s); margin-top: var(--sp-2); }
 .advice .launch { background: var(--ready-bg); color: var(--ready); }
 .advice .too_many, .advice .stuck { background: var(--warn-bg); color: var(--warn); }
 .advice .human { background: var(--human-bg); color: var(--human); }
-.layers { display: flex; align-items: flex-end; gap: 6px; height: 70px; margin-top: 12px; }
-.layer { flex: 1; max-width: 60px; display: flex; flex-direction: column-reverse; align-items: stretch; position: relative; }
-.layer .a { background: var(--accent); border-radius: 3px 3px 0 0; }
+.layers { display: flex; align-items: flex-end; gap: var(--sp-2); height: var(--h-bars); margin-top: var(--sp-5); }
+.layer { flex: 1; max-width: var(--w-bar); display: flex; flex-direction: column-reverse; align-items: stretch; position: relative; }
+.layer .a { background: var(--accent); border-radius: calc(var(--sp-1) - var(--hair)) calc(var(--sp-1) - var(--hair)) 0 0; }
 .layer .h { background: var(--human); opacity: .75; }
-.layer .cap { position: absolute; bottom: -16px; width: 100%; text-align: center; font-size: 11px; color: var(--muted); }
-.legend { font-size: 11px; color: var(--muted); margin-top: 20px; display: flex; gap: 12px; }
-.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.layer .cap { position: absolute; bottom: calc(-1 * var(--sp-6)); width: 100%; text-align: center; font-size: var(--fs-xs); color: var(--muted); }
+.legend { font-size: var(--fs-xs); color: var(--muted); margin-top: calc(var(--sp-6) + var(--sp-1)); display: flex; gap: var(--sp-5); }
+.sw { display: inline-block; width: calc(var(--sp-3) + var(--hair)); height: calc(var(--sp-3) + var(--hair)); border-radius: var(--sp-0); margin-right: var(--sp-1); vertical-align: calc(-1 * var(--hair)); }

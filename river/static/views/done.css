@@ -1,4 +1,4 @@
 /* The Done tab: the progress of each project. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
-.prog { margin-bottom: 10px; }
-.prog-h { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.prog { margin-bottom: var(--sp-4); }
+.prog-h { display: flex; justify-content: space-between; gap: var(--sp-3); font-size: var(--fs-m); }
 .prog-h .muted { font-variant-numeric: tabular-nums; }

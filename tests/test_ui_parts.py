@@ -16,23 +16,9 @@ VIEWS = Path(__file__).resolve().parent.parent / "river" / "static" / "views"
 
 # file: {kind: count}. A file or a kind that is not here allows 0.
 ALLOW = {
-    "artifacts.css": {"px": 12},
-    "artifacts.html": {"px": 3},
-    "capacity.css": {"px": 26},
-    "done.css": {"px": 3},
-    "done.js": {"px": 2},
-    "graph.css": {"color": 2, "px": 37},
-    "graph.html": {"px": 4},
-    "graph.js": {"button": 1},
-    "projects.css": {"px": 31},
-    "projects.html": {"px": 6},
-    "projects.js": {"px": 2},
     "sessions.css": {"color": 10, "px": 375},
     "sessions.html": {"button": 1},
     "sessions.js": {"button": 9, "px": 1},
-    "settings.html": {"button": 1, "px": 5},
-    "targets.js": {"button": 1, "px": 13},
-    "terminal.css": {"px": 11},
 }
 
 HEX = r"#[0-9a-fA-F]{3,8}\b"

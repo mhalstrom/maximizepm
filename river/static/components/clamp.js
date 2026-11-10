@@ -9,7 +9,11 @@ const opened = new Set();
 export function clampHtml(id, inner, after = "") {
   const open = opened.has(id);
   return `<span class="clamp${open ? " open" : ""}" data-clamp="${id.replace(/"/g, "&quot;")}"><span class="clamp-text">${inner}</span>` +
-    `<button type="button" class="clamp-more" aria-expanded="${open}">${open ? "Less" : "More"}</button>${after}</span>`;
+    moreButton(open) + `${after}</span>`;
+}
+
+function moreButton(open) {
+  return `<button type="button" class="clamp-more" aria-expanded="${open}">${open ? "Less" : "More"}</button>`;
 }
 
 // A text measures 0 while its tab is hidden, so each one is measured again when its size changes: when its tab
@@ -28,7 +32,12 @@ function measure(text) {
 }
 
 /** Measures the clamped texts under root and watches them; call it after the view drew its markup. */
+// A clamp written in a view's HTML (the Settings help) has no More of its own: it gets one here, so a view makes no
+// button (#5046).
 export function fitClamps(root) {
+  for (const box of root.querySelectorAll(".clamp")) {
+    if (!box.querySelector(":scope > .clamp-more")) box.querySelector(".clamp-text")?.insertAdjacentHTML("afterend", moreButton(box.classList.contains("open")));
+  }
   for (const t of root.querySelectorAll(".clamp-text")) { measure(t); if (watch) watch.observe(t); }
 }
 

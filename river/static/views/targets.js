@@ -2,6 +2,7 @@
 import { $, esc, toast, act, ago, left, clip } from "../lib.js";
 import { ownerChip } from "../components/chip.js";
 import { nyCard } from "../components/card.js";
+import { button } from "../components/button.js";
 import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { hooksHtml } from "../components/targetHooks.js";
@@ -15,7 +16,7 @@ function releaseGate(t) {
     : `<span style="color:var(--warn)">not set</span>: maxpm config set release_approval review|person --project &lt;a project of ${n}&gt;`;
   const cad = r.cadence ? `every ${esc(r.cadence)} at most` + (r.cadence_reason ? `: ${esc(clip(r.cadence_reason, 160))}` : ` (no reason given: maxpm target cadence ${n} ${esc(r.cadence)} --reason "…")`)
     : "off: each release starts when the one before it is done" + (r.cadence_reason ? `: ${esc(clip(r.cadence_reason, 160))}` : "");
-  return `<div class="muted" style="font-size:12px">release gate: ${gate}<br>cadence: ${cad}</div>`;
+  return `<div class="muted t-s">release gate: ${gate}<br>cadence: ${cad}</div>`;
 }
 
 export function renderTargets() {
@@ -24,22 +25,22 @@ export function renderTargets() {
   if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // do not wipe a reason they type
   const shipList = (s) => s.map(x => `<span class="link" data-open="${x.id}">#${x.id}</span> ${esc(clip(x.title, 50))} <span class="muted">(${esc(x.status.replace("_", " "))})</span>`).join("; ") || '<span class="muted">nothing yet</span>';
   $("#targets").innerHTML = T.map(t => nyCard(`<b>${esc(t.name)}</b>
-        ${ownerChip(t.owner)}${t.owner ? `<span class="muted" style="font-size:12px">${t.owner_expires_at ? left(t.owner_expires_at) + " left" : ""}</span>` : ""}
-        <span class="muted" style="font-size:12px">${t.project_names.length ? "projects: " + t.project_names.map(esc).join(", ") : "no projects"}</span>`, `${t.description ? `<div class="ny-c">${esc(clip(t.description, 300))}</div>` : ""}
-      <div class="muted" style="font-size:12px">${t.monitor ? "after each deploy, the deploy session watches: " + esc(clip(t.monitor, 200)) : `nothing to watch after a deploy (the deploy session watches what you set: maxpm target monitor ${esc(t.name)} "&lt;what to watch, for how long&gt;")`}</div>
+        ${ownerChip(t.owner)}${t.owner ? `<span class="muted t-s">${t.owner_expires_at ? left(t.owner_expires_at) + " left" : ""}</span>` : ""}
+        <span class="muted t-s">${t.project_names.length ? "projects: " + t.project_names.map(esc).join(", ") : "no projects"}</span>`, `${t.description ? `<div class="ny-c">${esc(clip(t.description, 300))}</div>` : ""}
+      <div class="muted t-s">${t.monitor ? "after each deploy, the deploy session watches: " + esc(clip(t.monitor, 200)) : `nothing to watch after a deploy (the deploy session watches what you set: maxpm target monitor ${esc(t.name)} "&lt;what to watch, for how long&gt;")`}</div>
       ${releaseGate(t)}
       ${hooksHtml(t, S.hook_events)}
-      ${t.pending.map(d => `<div class="st" style="margin-top:4px"><span class="link" data-open="${d.id}">#${d.id}</span> ${d.ready ? "ready to deploy" : d.status === "open" ? (d.cut_at ? "cut " + ago(d.cut_at) : "collecting") : esc(d.status.replace("_", " ")) + (d.assignee ? " · " + esc(d.assignee) : "")}: ${shipList(d.ships)}${d.review ? `<div class="muted" style="font-size:12px">first a review: <span class="link" data-open="${d.review.id}">#${d.review.id}</span> (${esc(d.review.status.replace("_", " "))}${d.review.assignee ? " · " + esc(d.review.assignee) : ""})</div>` : ""}</div>`).join("") || '<div class="st muted">No pending ship requests.</div>'}
-      ${t.release && t.release.text ? `<div class="muted" style="font-size:12px">${esc(t.release.text)}${t.release.last ? ` · last release ${ago(t.release.last.at)}` : ""}</div>` : ""}
-      <div class="actions" style="margin-top:6px">${t.release && t.release.waits
-        ? `<input id="relwhy-${esc(t.name)}" placeholder="why this release cannot wait for the cadence" style="flex:1;min-width:180px"> <button class="btn" data-relnow="${esc(t.name)}" title="Start this release sooner than the cadence permits; the reason goes in the history of the deploy item">Release now</button>`
+      ${t.pending.map(d => `<div class="st" style="margin-top:var(--sp-1)"><span class="link" data-open="${d.id}">#${d.id}</span> ${d.ready ? "ready to deploy" : d.status === "open" ? (d.cut_at ? "cut " + ago(d.cut_at) : "collecting") : esc(d.status.replace("_", " ")) + (d.assignee ? " · " + esc(d.assignee) : "")}: ${shipList(d.ships)}${d.review ? `<div class="muted t-s">first a review: <span class="link" data-open="${d.review.id}">#${d.review.id}</span> (${esc(d.review.status.replace("_", " "))}${d.review.assignee ? " · " + esc(d.review.assignee) : ""})</div>` : ""}</div>`).join("") || '<div class="st muted">No pending ship requests.</div>'}
+      ${t.release && t.release.text ? `<div class="muted t-s">${esc(t.release.text)}${t.release.last ? ` · last release ${ago(t.release.last.at)}` : ""}</div>` : ""}
+      <div class="actions" style="margin-top:var(--sp-2)">${t.release && t.release.waits
+        ? `<input id="relwhy-${esc(t.name)}" placeholder="why this release cannot wait for the cadence" style="flex:1;min-width:var(--w-input-m)"> ${button("Release now", { data: { relnow: t.name }, title: "Start this release sooner than the cadence permits; the reason goes in the history of the deploy item" })}`
         : t.pending.some(d => d.status === "open" && d.ships.length)
         ? agentStart(S.launch_agents, [
             { label: "Deploy now", cls: "btn primary", attrs: `data-deploy="${esc(t.name)}"`, title: "Start the deploy now: the owner gets an alert, or the chosen agent opens to take it" },
             { label: "Review and deploy", attrs: `data-deploy="${esc(t.name)}" data-review="1"`, title: "First one review of everything it ships (review steps per project), then the deploy" }])
-        : '<span class="muted" style="font-size:12px">Nothing to deploy: ship items first (maxpm ship &lt;id&gt;, or done --ship).</span>'}</div>
-      <div class="st" style="margin-top:6px"><b>Deploys</b></div>
-      ${(t.history || []).map(h => `<div class="st" style="margin-top:4px"><span class="link" data-open="${h.id}">#${h.id}</span> ${ago(h.closed_at)}${h.done_by ? " by " + esc(h.done_by) : ""}${h.output ? ": " + esc(clip(h.output, 200)) : ""}<div class="muted" style="font-size:12px">shipped ${shipList(h.ships)}</div></div>`).join("") || '<div class="st muted">Never deployed.</div>'}`)).join("") || `<div class="muted">No deploy targets. Add one: maxpm target add &lt;name&gt; --description "how it deploys"</div>`;
+        : '<span class="muted t-s">Nothing to deploy: ship items first (maxpm ship &lt;id&gt;, or done --ship).</span>'}</div>
+      <div class="st" style="margin-top:var(--sp-2)"><b>Deploys</b></div>
+      ${(t.history || []).map(h => `<div class="st" style="margin-top:var(--sp-1)"><span class="link" data-open="${h.id}">#${h.id}</span> ${ago(h.closed_at)}${h.done_by ? " by " + esc(h.done_by) : ""}${h.output ? ": " + esc(clip(h.output, 200)) : ""}<div class="muted t-s">shipped ${shipList(h.ships)}</div></div>`).join("") || '<div class="st muted">Never deployed.</div>'}`)).join("") || `<div class="muted">No deploy targets. Add one: maxpm target add &lt;name&gt; --description "how it deploys"</div>`;
 }
 
 // A click on this view's controls; true when it was one (the frame then stops).
