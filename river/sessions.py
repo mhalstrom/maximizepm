@@ -593,16 +593,30 @@ _URL_RX = None
 _ART_SKIP = (b'"type":"tool_result"', b'"type":"function_call_output"', b'"type":"api-request')
 
 
+_ART_KEY_RX = None
+
+
+def artifact_key(target):
+    """One key for each thing (#5000), as the page's targetKey (static/lib.js) for a claude.ai artifact:
+    https://claude.ai/artifact/<id> or code/artifact/<uuid>, whatever the scheme, the case of the host, and what
+    follows the id. Other targets are their own key."""
+    import re
+    global _ART_KEY_RX
+    _ART_KEY_RX = _ART_KEY_RX or re.compile(r"^https?://(?:www\.)?claude\.ai/((?:code/)?artifact/)([\w-]+)", re.I)
+    m = _ART_KEY_RX.match(target or "")
+    return f"https://claude.ai/{m.group(1).lower()}{m.group(2)}" if m else target
+
+
 def _hits_in(text, at, how):
     import re
     global _FILE_RX, _URL_RX
     _FILE_RX = _FILE_RX or re.compile(r"(?<![\w.:/\\-])((?:[a-zA-Z]:[/\\]|\\\\|~/|/)(?:[\w.@~+-]+[/\\])*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md))\b")
     _URL_RX = _URL_RX or re.compile(r"https?://(?:(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:/[^\s)\]>'\"`\\]*)?"
-                                    r"|claude\.ai/(?:code/)?artifact/[\w-]+)")
+                                    r"|(?i:claude\.ai/(?:code/)?artifact/)[\w-]+)")
     out = [{"target": m, "kind": "file", "how": how, "at": at} for m in _FILE_RX.findall(text or "")]
     for u in _URL_RX.findall(text or ""):
         u = u.rstrip(".,;:")
-        out.append({"target": u, "kind": "artifact" if "claude.ai/" in u else "page", "how": how, "at": at})
+        out.append({"target": artifact_key(u), "kind": "artifact" if "claude.ai/" in u.lower() else "page", "how": how, "at": at})
     return out
 
 
@@ -680,7 +694,9 @@ def _stamp(at):
 
 
 def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=300, agent=None, item=None, since=None):
-    """[{target, kind (file, page, artifact), how (wrote, named), session, item, at}], newest first, one per target:
+    """[{target, kind (file, page, artifact), how (wrote, named), session, sessions, item, at}], newest first, one per
+    target (artifact_key: the same claude.ai artifact under two addresses is one row, #5000); session: the one that
+    named it last (or wrote it), sessions: each session that named it, that one first. Rows come
     from the running sessions and the agents seen in the last ARTIFACT_DAYS. allowed(path): whether the side panel
     may show that file (server.local_file); a file it may not show is left out. agent: that one session only, also
     when it ended long ago (its session view, #4630). item: what the sessions that held that item made or named
@@ -698,7 +714,7 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
         names = {a["name"] for a in running(conn, terminals)}
         seen = since or core.iso(core.now() - core.timedelta(days=ARTIFACT_DAYS))
         names |= {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND last_seen>=?", (seen,))}
-    best = {}
+    best, by = {}, {}  # by: key -> {session: when it named it last}
     for name in sorted(names):
         kind, path = transcript(conn, name, root, croot)
         if not path:
@@ -712,13 +728,18 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
         if item is not None:
             hits = [h for h in hits if any(s <= _stamp(h["at"]) <= e for s, e in windows[name])]
         for h in hits:
-            old = best.get(h["target"])
+            key = artifact_key(h["target"])
+            old = best.get(key)
+            last = by.setdefault(key, {})
+            last[name] = max(last.get(name) or "", h["at"] or "")
             if old is None or (h["at"] or "") > (old["at"] or "") or (h["how"] == "wrote" and old["how"] != "wrote"):
-                best[h["target"]] = dict(h, session=name)
+                best[key] = dict(h, target=key, session=name)
     out = []
     for h in sorted(best.values(), key=lambda h: h["at"] or "", reverse=True):
         if h["kind"] == "file" and allowed is not None and not allowed(h["target"]):
             continue
+        others = sorted((n for n in by[h["target"]] if n != h["session"]), key=lambda n: by[h["target"]][n], reverse=True)
+        h = dict(h, sessions=[h["session"], *others])
         if item is not None:
             out.append(dict(h, item=item))
         else:

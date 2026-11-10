@@ -21,7 +21,7 @@ export function showRows(el, rows, empty) {
   el._rows = rows;
   const html = rows.map((a, i) => `<div class="art-row">
       <div class="art-main"><b title="${esc(a.target)}">${esc(clip(name(a), 80))}</b>
-        <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} ${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}
+        <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} ${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}${(a.sessions || []).length > 1 ? `, also ${esc(a.sessions.slice(1).join(", "))}` : ""}
           ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}
           <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div></div>
       <div class="art-btns">${a.kind === "artifact"
@@ -45,7 +45,9 @@ export function wireRows(el, openBeside) {
 
 function render() {
   const s = $("#artSession").value, item = $("#artItem").value.replace(/\D/g, "");
-  showRows($("#artList"), list.filter(a => (!s || a.session === s) && (!item || String(a.item) === item)),
+  // One row for each thing (#5000), with each session that named it; with a session filter, Open shows it beside that one.
+  const mine = (a) => !s || a.session === s ? a : { ...a, how: "named", session: s, sessions: [s, ...a.sessions.filter(x => x !== s)] };
+  showRows($("#artList"), list.filter(a => (!s || (a.sessions || [a.session]).includes(s)) && (!item || String(a.item) === item)).map(mine),
            list.length ? "Nothing matches the filter." : "The sessions made or named nothing the side panel can show yet.");
 }
 
@@ -59,7 +61,7 @@ export function makeArtifacts({ isShown, openBeside }) {
       const j = await r.json();
       list = j.artifacts || [];
       const sel = $("#artSession"), cur = sel.value;
-      const names = [...new Set(list.map(a => a.session))].sort();
+      const names = [...new Set(list.flatMap(a => a.sessions || [a.session]))].sort();
       const opts = `<option value="">All sessions</option>` + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
       if (sel._html !== opts && document.activeElement !== sel) {  // an open menu stays open (#4844)
         sel.innerHTML = opts; sel._html = opts;

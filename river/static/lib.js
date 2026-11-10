@@ -60,6 +60,24 @@ export async function typeAction(op, args) {
   }
 }
 
+// One key for each thing the side panel shows (#5000): the same thing under two addresses is one tab and one row.
+// A claude.ai artifact is https://claude.ai/artifact/<id> (or code/artifact/<uuid>), without what follows its id (a
+// query, a hash, a ')' or '.' that a chat link took along), whatever the scheme or the case of the host; a canvas
+// canvas:<n> (canvas:c3 too); an item item:<n> (#12 too); a file path with / for \ and no / at its end; another web
+// address as the browser writes it (its host in lower case, a / for an empty path; its hash stays: a local page can
+// show other views by it).
+// sessions.artifact_key does the same for the Artifacts list.
+export function targetKey(target) {
+  const s = String(target || "").trim();
+  const art = /^https?:\/\/(?:www\.)?claude\.ai\/((?:code\/)?artifact\/)([\w-]+)/i.exec(s);
+  if (art) return "https://claude.ai/" + art[1].toLowerCase() + art[2];
+  const cv = /^canvas:c?(\d+)$/i.exec(s); if (cv) return "canvas:" + +cv[1];
+  const it = /^(?:item:|#)(\d+)$/.exec(s); if (it) return "item:" + +it[1];
+  if (/^(?:\/|~[/\\]|[a-z]:[/\\]|\\\\)/i.test(s)) return s.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
+  if (/^https?:\/\//i.test(s)) { try { return new URL(s).href; } catch (e) { return s; } }
+  return s;
+}
+
 // The id of an artifact in the page's address (#4653): a short hash of its target (a file path or a web address),
 // the same in every browser, so /sessions/<session>/artifacts/<id> names one thing. 53 bits (cyrb53), in base 36.
 export function artId(target) {

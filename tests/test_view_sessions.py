@@ -937,6 +937,42 @@ try {
         self.assertEqual(result["tabs"], ["Items", "Artifacts", f"◇ #{self.it} header"])
 
 
+class PanelOneTab(Base):
+    """#5000: the same claude.ai artifact, opened from two links of different form and from another session's link,
+    is one tab in the side panel; a second open shows that tab, and its label names who opened it last."""
+
+    def test_one_tab_for_one_artifact(self):
+        self.write(claude_line("assistant", [{"type": "text", "text": "Published [the page](https://claude.ai/artifact/AbC12?v=1) "
+                                                                      "and see https://claude.ai/artifact/AbC12 too"}],
+                               "end_turn", at="2026-11-08T10:05:00Z"))
+        core.register(self.c, "boss")
+        driver = DRIVE_HEAD + r'''
+const links = () => [...document.querySelectorAll('#sessCol a[href*="claude.ai/artifact"]')];
+const arts = () => [...document.querySelectorAll(".sp-tab:not(.sp-tab-list)")].filter(t => t.title.includes("claude.ai/artifact"));
+const onArt = () => q(".sp-tab.on") && q(".sp-tab.on").title.includes("claude.ai/artifact");
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && links().length >= 2, "two links to the artifact in the chat");
+  links()[0].click();
+  await until(() => arts().length === 1, "a tab for the artifact");
+  window.riverOpenInPanel("ag", "#ITEM");
+  await until(() => q(".sp-tab.on") && !onArt(), "another tab on top");
+  links()[1].click();
+  await until(onArt, "the second link shows the artifact's tab");
+  check(arts().length === 1, "one tab for the artifact, opened from two links: " + arts().map(t => t.title));
+  window.riverOpenInPanel("ag", "#ITEM");
+  await until(() => q(".sp-tab.on") && !onArt(), "the item on top again");
+  window.riverOpenInPanel(null, "http://Claude.AI/artifact/AbC12#x");
+  await until(onArt, "a third address of it shows its tab");
+  post({ arts: arts().map(t => t.title), by: q(".sp-tab.on .sp-tab-l").dataset.by || "",
+         fits: document.documentElement.scrollWidth <= window.innerWidth });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''.replace("ITEM", str(self.it))
+        result = drive_page(self, driver)
+        self.assertEqual(result["arts"], ["https://claude.ai/artifact/AbC12"])
+        self.assertEqual(result["by"], "ag")
+        self.assertTrue(result["fits"])
+
+
 class WorkNames(Base):
     """#4695: a session shows what it works on; its agent id stays its address."""
 
@@ -1276,6 +1312,41 @@ class SideFiles(Base):
         one = sessions.artifacts(self.c, {}, allowed, self.root, self.croot, agent="ag")
         self.assertIn(shot, [a["target"] for a in one])
         self.assertEqual(sessions.artifacts(self.c, {}, allowed, self.root, self.croot, agent="nobody"), [])
+
+    def test_one_row_for_one_claude_ai_artifact_with_each_session_that_named_it(self):
+        # #5000: a worker publishes an artifact, the manager names it again in another form; one row, both sessions.
+        import shutil
+        import subprocess
+        art = "https://claude.ai/artifact/9bimT1oWobMH8TBekRjK3q"
+        self.write(claude_line("assistant", [{"type": "text", "text": f"Published: {art})."}], "end_turn",
+                               at="2026-11-08T10:01:00Z"))
+        core.register(self.c, "boss")
+        sid2 = "22222222-2222-4222-8222-222222222222"
+        core.record_claude_session(self.c, "boss", sid2)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, host=? WHERE name='boss'", (os.getpid(), core.this_host()))
+        (self.root / "-boss").mkdir()
+        (self.root / "-boss" / f"{sid2}.jsonl").write_text(
+            claude_line("assistant", [{"type": "text", "text": "Look at http://Claude.AI/artifact/9bimT1oWobMH8TBekRjK3q?v=2 "
+                                                               "and https://claude.ai/Code/Artifact/ab-12"}], "end_turn",
+                        at="2026-11-08T10:05:00Z"))
+        rows = [a for a in sessions.artifacts(self.c, {}, None, self.root, self.croot) if a["kind"] == "artifact"]
+        self.assertEqual([(a["target"], a["session"], a["sessions"]) for a in rows],
+                         [(art, "boss", ["boss", "ag"]), ("https://claude.ai/code/artifact/ab-12", "boss", ["boss"])])
+        self.assertEqual(sessions.artifact_key("https://claude.ai/artifact/X1_y-2#top"), "https://claude.ai/artifact/X1_y-2")
+        self.assertEqual(sessions.artifact_key("/a/b.md"), "/a/b.md")
+        node = shutil.which("node")
+        if node:  # the page's targetKey (static/lib.js) gives the same key, and one key for each thing it shows
+            lib = (Path(server.__file__).parent / "static" / "lib.js").as_uri()
+            cases = [art + ").", "http://claude.ai/artifact/9bimT1oWobMH8TBekRjK3q?x=1#y", "https://claude.ai/code/artifact/ab-12/",
+                     "canvas:c3", "#12", "/a/b/", "http://LOCALHOST:5173", "http://localhost:5173/#/a"]
+            js = subprocess.run([node, "--input-type=module", "-e",
+                                 f"import {{ targetKey }} from {json.dumps(lib)}; "
+                                 "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(targetKey)))", json.dumps(cases)],
+                                capture_output=True, text=True, timeout=30)
+            self.assertEqual(json.loads(js.stdout), [art, art, "https://claude.ai/code/artifact/ab-12", "canvas:3", "item:12",
+                                                     "/a/b", "http://localhost:5173/", "http://localhost:5173/#/a"], js.stderr)
+            self.assertEqual([sessions.artifact_key(x) for x in cases[:3]], json.loads(js.stdout)[:3])
 
     def test_maxpm_artifacts_lists_and_shows_what_the_sessions_of_an_item_made(self):
         # #4838: a manager in the terminal: --item (what was made while the item was held), --since, show <n>, the

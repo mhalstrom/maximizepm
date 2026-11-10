@@ -132,10 +132,10 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   // A link or a file path in the chat opens in the side panel; Cmd or Ctrl+click keeps a new browser tab (#4619).
   col.addEventListener("click", (e) => {
     const f = e.target.closest("[data-file]");
-    if (f) { e.preventDefault(); openInPanel(f.dataset.file); return; }
+    if (f) { e.preventDefault(); openInPanel(f.dataset.file, agent); return; }
     const a = e.target.closest("a[href]");
     if (!a || a.hasAttribute("download") || e.metaKey || e.ctrlKey || e.shiftKey || !/^https?:\/\//i.test(a.getAttribute("href"))) return;
-    e.preventDefault(); openInPanel(a.href);
+    e.preventDefault(); openInPanel(a.href, agent);
   });
   col.addEventListener("keydown", (e) => {
     const f = e.key === "Enter" && e.target.closest("[data-file]"); if (f) { e.preventDefault(); openInPanel(f.dataset.file); }

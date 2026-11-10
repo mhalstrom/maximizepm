@@ -377,7 +377,7 @@ wireItemPop();  // the pop-up of every item on the page (#4622)
 const artifactsTab = makeArtifacts({ isShown: () => tab === "artifacts",
   openBeside: async (session, target) => {
     quiet++;
-    try { await setTab("sessions", false); if (session) sessionsTab.pick(session); openInPanel(target); } finally { quiet--; }
+    try { await setTab("sessions", false); if (session) sessionsTab.pick(session); openInPanel(target, session); } finally { quiet--; }
     syncUrl(true);
   } });
 // The Terminal tab (#4803): plain shells on this computer.
@@ -693,14 +693,14 @@ async function openArtifact(session, id) {
   if (!target) { if (tab !== "sessions" && !session) await setTab("artifacts", false); return toast("That artifact is not in the list any more", true); }
   if (tab !== "sessions") await setTab("sessions", false);
   if (session) sessionsTab.pick(session);
-  openInPanel(target);
+  openInPanel(target, session);
 }
 window.addEventListener("popstate", openFromUrl);
 // A link to a session's file or page anywhere on the page (#4689): the Sessions tab, that session, its side panel.
 window.riverOpenInPanel = async (session, target) => {
   if (tab !== "sessions") await setTab("sessions");
   if (session) sessionsTab.pick(session);
-  openInPanel(target);
+  openInPanel(target, session);
 };
 wireArtLinks();
 // Relay button: connects this MaximizePM to the relay (maxpm connect), so its page opens from any browser.

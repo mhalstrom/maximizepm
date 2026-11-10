@@ -15,7 +15,7 @@
 // (components/itemView.js), an artifact too. The X of the last tab shows the Artifacts list (#4646); the panel's
 // own X closes it. Find (#4877): a box over the tab marks each place of the words in the canvas, item, list or file it
 // shows (in an HTML canvas through its helper script), with "n of m", Enter and Shift+Enter, and Esc.
-import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText } from "../lib.js";
+import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText, targetKey } from "../lib.js";
 import { canvasMarkdown, drawDiagrams } from "./canvasMd.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
@@ -44,6 +44,10 @@ export function onPanel(fn) { told = fn; }
 const tell = () => told(session, (tabs.find(t => t.id === on) || {}).target || null);
 // The targets of this session's tabs, to find an artifact by its id.
 export function panelTargets() { return tabs.map(t => t.target); }
+// The tab of a thing in a list of tabs: one tab for each thing, whatever address named it (#5000, lib.targetKey).
+const tabOf = (list, target) => { const k = targetKey(target); return list.find(x => targetKey(x.target) === k); };
+// A new tab keeps the address it was opened with, but a claude.ai artifact gets the one form of its address.
+const firstTarget = (target) => /^https?:\/\/(?:www\.)?claude\.ai\//i.test(target) ? targetKey(target) : target;
 
 function isFile(target) { return /^(?:\/|~[/\\]|[a-z]:[/\\]|\\\\)/i.test(target); }
 const itemOf = (target) => (/^item:(\d+)$/.exec(target) || [])[1];
@@ -76,7 +80,8 @@ function save() {
   let all = {};
   try { all = JSON.parse(store(TABS) || "{}") || {}; } catch (e) { all = {}; }
   const keep = tabs.filter(t => kindOf(t.target) !== "tool");
-  if (keep.length || isList(on)) all[session] = { targets: keep.map(t => t.target), on: isList(on) ? "list:" + on : (tabs.find(t => t.id === on) || {}).target || "" };
+  if (keep.length || isList(on)) all[session] = { targets: keep.map(t => t.target), on: isList(on) ? "list:" + on : (tabs.find(t => t.id === on) || {}).target || "",
+    by: Object.fromEntries(keep.filter(t => t.by).map(t => [t.target, t.by])) };
   else delete all[session];
   store(TABS, JSON.stringify(all));
 }
@@ -86,8 +91,9 @@ function renderTabs() {
   $("#spTabs").innerHTML = Object.entries(LISTS).map(([k, title]) => `<span class="sp-tab sp-tab-list${on === k ? " on" : ""}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${on === k}" data-sp-list="${k}">${title}</button></span>`).join("")
     + tabs.map(t => { const k = kindOf(t.target);
-    return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(itemOf(t.target) ? t.title || label(t.target) : t.target)}">`
-    + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}"><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
+    const tip = itemOf(t.target) ? t.title || label(t.target) : t.target;  // who opened it last, on the label (#5000)
+    return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(tip)}">`
+    + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}" title="${esc(tip + (t.by ? `\nopened by ${t.by}` : ""))}"${t.by ? ` data-by="${esc(t.by)}"` : ""}><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
     + `<button type="button" class="sp-x" data-close="${t.id}" title="Close this tab" aria-label="Close ${esc(t.title || label(t.target))}">✕</button></span>`; }).join("");
   save();
 }
@@ -613,8 +619,8 @@ export function canvasState(heads) {
   for (const c of list) {
     if (knownCanvases.has(c.id)) continue;
     knownCanvases.add(c.id);
-    if (!session || c.agent !== session || tabs.some(x => x.target === `canvas:${c.id}`)) continue;
-    const t = { id: ++n, target: `canvas:${c.id}`, title: c.title || c.name };
+    if (!session || c.agent !== session || tabOf(tabs, `canvas:${c.id}`)) continue;
+    const t = { id: ++n, target: `canvas:${c.id}`, title: c.title || c.name, by: c.agent };
     tabs.push(t);
     if (on == null || isList(on)) { reveal(true); show(t); } else renderTabs();
   }
@@ -637,27 +643,30 @@ export function canvasOpens(list, openSession) {
   for (const x of list.filter(x => x.seq > openSeen)) {
     const target = `canvas:${x.canvas}`, name = x.session || session;
     const visible = !$("#tab-sessions").classList.contains("hidden") && name === session;
-    if (name === session) openInPanel(target);
-    else addTab(name, target);
+    if (name === session) openInPanel(target, x.by || name);
+    else addTab(name, target, x.by || name);
     if (!visible && name) offerCanvas(x, name, openSession);
   }
   openSeen = top;
 }
 
 // A tab in the panel of a session that the panel does not show now: it shows when the person picks that session.
-function addTab(name, target) {
+function addTab(name, target, by) {
   const mine = bySession[name];
   if (mine) {
-    let t = mine.tabs.find(x => x.target === target);
-    if (!t) { t = { id: ++n, target, title: "" }; mine.tabs.push(t); }
+    let t = tabOf(mine.tabs, target);
+    if (!t) { t = { id: ++n, target: firstTarget(target), title: "" }; mine.tabs.push(t); }
+    if (by) t.by = by;
     mine.on = t.id;
     return;
   }
   let all = {};
   try { all = JSON.parse(store(TABS) || "{}") || {}; } catch (e) { all = {}; }
   const s = all[name] || { targets: [] };
-  s.targets = (s.targets || []).filter(x => x !== target).concat(target);
-  s.on = target;
+  const have = (s.targets || []).find(x => targetKey(x) === targetKey(target)) || firstTarget(target);
+  s.targets = (s.targets || []).filter(x => targetKey(x) !== targetKey(target)).concat(have);
+  if (by) s.by = { ...(s.by || {}), [have]: by };
+  s.on = have;
   all[name] = s;
   store(TABS, JSON.stringify(all));
 }
@@ -703,7 +712,7 @@ async function showList(kind = "artifacts", quiet = false) {
       <div class="muted">${kind === "items" ? "The items this session claimed, finished, released or gave away. Open one in a tab." : "The files, local pages and claude.ai artifacts this session wrote or named. Open one in a tab, or type an address above."}</div>
       <div class="sp-rows${kind === "artifacts" ? " sp-arts" : ""}"><div class="muted sl-none">${kind === "items" ? "Reading the history…" : "Reading the transcript…"}</div></div></div>`;
     list = box.querySelector(".sp-rows");
-    if (kind === "artifacts") wireRows(list, (_s, target) => openInPanel(target));
+    if (kind === "artifacts") wireRows(list, (s, target) => openInPanel(target, s));
   }
   let rows = [];
   try {
@@ -732,13 +741,16 @@ function reveal(yes) {
   if (!yes) $("#spBody").replaceChildren();
 }
 
-export function openInPanel(target) {
+// by: the session (or person) that opened it; the tab's tooltip names the last one.
+export function openInPanel(target, by) {
   target = String(target || "").trim().replace(/^#(\d+)$/, "item:$1");  // #12 in the address bar: the item
   if (!target) return;
   if (!isFile(target) && !itemOf(target) && !canvasOf(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https), a full file path, an item (#12), or a canvas (canvas:3)", true);
   reveal(true);
-  let t = tabs.find(x => x.target === target);  // the same thing again: its tab
-  if (!t) { t = { id: ++n, target, title: "" }; tabs.push(t); }
+  // The same thing again, from any link, list, or session: its tab shows and reads it again (#5000).
+  let t = tabOf(tabs, target);
+  if (!t) { t = { id: ++n, target: firstTarget(target), title: "" }; tabs.push(t); }
+  if (by) t.by = by;
   show(t);
 }
 
@@ -762,9 +774,11 @@ export function panelFor(name) {
     let all = {};
     try { all = JSON.parse(store(TABS) || "{}") || {}; } catch (e) { all = {}; }
     const s = all[session] || { targets: [] };
-    const list = (s.targets || []).filter(x => typeof x === "string").map(target => ({ id: ++n, target, title: "" }));
+    const list = [];  // the tabs kept before #5000 may hold one thing twice: one tab for it
+    for (const target of (s.targets || []).filter(x => typeof x === "string"))
+      if (!tabOf(list, target)) list.push({ id: ++n, target, title: "", by: (s.by || {})[target] });
     const lst = /^list:(items|artifacts)$/.exec(s.on || "");
-    mine = { tabs: list, on: lst ? lst[1] : (list.find(t => t.target === s.on) || list[list.length - 1] || {}).id ?? null };
+    mine = { tabs: list, on: lst ? lst[1] : ((s.on && tabOf(list, s.on)) || list[list.length - 1] || {}).id ?? null };
   }
   tabs = mine.tabs; on = mine.on;
   if (isList(on)) { reveal(true); return showList(on); }
