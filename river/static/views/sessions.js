@@ -49,7 +49,9 @@ const ownNames = (s) => (s.owns || []).map(o => (o && o.name) || String(o));
 // Links to Plan (#5102 step 7, design #4657): the project and goals of the session's item, and a goal or target it
 // owns. Rows of the ⋯ menu (#5115).
 function planLinks(s) {
-  const it = s.holds && s.holds[0] && ((S && S.items) || []).find(i => i.id === s.holds[0].id);
+  // The session's row names its item's project and goals (#5124); the page's state is the fallback.
+  const h = s.holds && s.holds[0];
+  const it = h && (h.project ? h : ((S && S.items) || []).find(i => i.id === h.id));
   const link = (view, project, goal, text, title) => button(esc(text), { cls: MI,
     data: { "plan-go": view, project, ...(goal ? { goal } : {}) }, title });
   const out = [];

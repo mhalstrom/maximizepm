@@ -68,6 +68,15 @@ PROVIDERS = {
 }
 
 
+def _place(conn, item_id):
+    """{project, goals} of an item: where the session's links to Plan go."""
+    r = conn.execute("SELECT p.name FROM items i JOIN projects p ON p.id = i.project_id WHERE i.id=?", (item_id,)).fetchone()
+    goals = [g["name"] for g in conn.execute(
+        "SELECT g.name FROM item_goals ig JOIN goals g ON g.id = ig.goal_id WHERE ig.item_id=? ORDER BY g.rank, g.name",
+        (item_id,))]
+    return {"project": r["name"] if r else None, "goals": goals}
+
+
 def provider(agent_type, kind=None):
     """{id, label} of a session's chat provider: its agent type, else the kind of its transcript."""
     pid = agent_type or PLATFORMS.get(kind or "")
@@ -619,7 +628,9 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "role": a.get("role"), "note": a.get("note"), "topic": a.get("expert_topic"),
                 "assistant_for": a.get("assistant_for"),
                 "talked_at": a.get("talked_at"), "pinned_by": a.get("pinned_by") or [],
-                "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
+                # Its project and goals too, so the head's links to Plan need no other answer (#5124).
+                "holds": [{"id": h["id"], "title": h["title"], "status": h["status"], **_place(conn, h["id"])}
+                          for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,
                 # End (#5041): who asked it to stop and why, and End now for a process on this computer.
                 "stop_by": a.get("stop_by"), "stop_reason": a.get("stop_reason"), "pid": a.get("pid"),

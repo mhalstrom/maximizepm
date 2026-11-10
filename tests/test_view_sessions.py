@@ -1120,6 +1120,16 @@ const post = o => navigator.sendBeacon("/__result", JSON.stringify(o));
 '''
 
 
+class HoldPlace(Base):
+    def test_a_held_item_names_its_project_and_goals(self):
+        """#5124: the session's row names where its item lives, so the head's links to Plan need no other answer."""
+        core.goal_add(self.c, "site", "launch", outcome="live", done_when="it answers")
+        core.item_edit(self.c, self.it, actor="mark", goals=["launch"])
+        (card,) = self.cards()
+        self.assertEqual(card["holds"][0] | {}, {"id": self.it, "title": "header", "status": "in_progress",
+                                                 "project": "site", "goals": ["launch"]})
+
+
 class PersonTurns(Base):
     """#5088, mark 2026-11-10: 'what happened to the user messages in chats? i can't see them currently'. A worker
     that had unregistered ran 'maxpm --as manager-36ec who' in its own Claude Code session, with no MAXPM_AGENT in
