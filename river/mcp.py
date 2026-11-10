@@ -64,15 +64,17 @@ TOOLS = [
                     "their replies; open: only the ones that wait for you), comment, send (your draft comments to the "
                     "session that wrote it), reply, resolve, delete, open (put it in front of the user: the MaximizePM page opens it in your session's side panel), save (a version as a file), "
                     "section (a doc: replace or add one section of a Markdown canvas; pending shows it as being written), "
-                    "answer (a decision of a doc, answered in place).",
+                    "answer (a decision of a doc, answered in place), kit (the starter page of the canvas kit: a "
+                    "visual HTML page with a task graph, cards, side by side, bars, a timeline, a mockup, pictures "
+                    "with notes, and decision cards; fill it and put it).",
      "inputSchema": {"type": "object", "required": ["action"], "properties": {
          "action": {"type": "string", "enum": ["put", "list", "show", "comments", "comment", "send", "reply",
-                                                "resolve", "open", "delete", "save", "section", "answer"]},
+                                                "resolve", "open", "delete", "save", "section", "answer", "kit"]},
          "heading": {"type": "string", "description": "section: the heading of the section to replace or add (a doc)"},
          "pending": {"type": "string", "description": "section: what the section will say; the page shows it as being "
                                                       "written"},
          "decision": {"type": "integer", "description": "answer: the decision's number (Decision <n> of <m>)"},
-         "name": {"type": "string", "description": "the canvas (all actions except list, reply, resolve)"},
+         "name": {"type": "string", "description": "the canvas (all actions except list, reply, resolve, kit)"},
          "text": {"type": "string", "description": "put: the page's whole text; comment and reply: the comment"},
          "kind": {"type": "string", "enum": ["html", "md", "svg"], "description": "put: the kind of a new canvas"},
          "title": {"type": "string"}, "note": {"type": "string", "description": "put: what changed; resolve: what "
@@ -113,7 +115,7 @@ def canvas_argv(a):
     """The maxpm canvas words of an MCP canvas call: the same operations as the command (#4648)."""
     act = a.get("action")
     acts = ("put", "list", "show", "comments", "comment", "send", "reply", "resolve", "open", "delete", "save",
-            "section", "answer")
+            "section", "answer", "kit")
     if act not in acts:
         raise RiverError(f"canvas action is one of {', '.join(acts)}")
     words = ["canvas", act]
@@ -121,7 +123,7 @@ def canvas_argv(a):
         if not a.get("comment"):
             raise RiverError(f"canvas {act} needs the comment id (comment), for example c12")
         words.append(str(a["comment"]))
-    elif act != "list":
+    elif act not in ("list", "kit"):
         if not a.get("name"):
             raise RiverError(f"canvas {act} needs the canvas name (name)")
         words.append(str(a["name"]))

@@ -15,8 +15,8 @@
 // (components/itemView.js), an artifact too. The X of the last tab shows the Artifacts list (#4646); the panel's
 // own X closes it. Find (#4877): a box over the tab marks each place of the words in the canvas, item, list or file it
 // shows (in an HTML canvas through its helper script), with "n of m", Enter and Shift+Enter, and Esc.
-import { $, esc, ago, clip, store, toast, act, pageToken, copyText } from "../lib.js";
-import { markdown } from "./chat.js";
+import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText } from "../lib.js";
+import { canvasMarkdown, drawDiagrams } from "./canvasMd.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
 import { linkArtifacts, linkTarget } from "./artLinks.js";
@@ -130,8 +130,8 @@ async function show(t) {
       if (!r.ok) return note(esc((await r.json().catch(() => ({}))).error || "MaximizePM cannot show this file"));
       const d = document.createElement("div"); d.className = "sp-md md";
       const text = await r.text();
-      d.innerHTML = /\.md$/i.test(t.target) ? markdown(text) : `<pre>${esc(text)}</pre>`;  // markdown(): DOMPurify
-      box.append(d);
+      d.innerHTML = /\.md$/i.test(t.target) ? canvasMarkdown(text) : `<pre>${esc(text)}</pre>`;  // DOMPurify
+      box.append(d); drawDiagrams(d);
     } else {
       frame(src);  // a PDF or an HTML file: the server sends it in a sandbox of its own
     }
@@ -213,6 +213,7 @@ async function showCanvas(t, box, note) {
     if (text === null) d.textContent = "MaximizePM cannot show this canvas.";
     else { const doc = drawDoc(t, text, meta); d.append(...doc.root.childNodes); t.groups = doc.groups; t.text = text; }
     t.md = d;
+    drawDiagrams(d);  // ```mermaid blocks as pictures (#4983)
     // Comment mode on a drawn Markdown canvas: this page finds the part itself (the helper script does it in a frame).
     d.addEventListener("mouseover", (e) => { if (t.commenting) markPart(d, e.target === d ? null : e.target); });
     d.addEventListener("click", (e) => {
@@ -275,7 +276,7 @@ function canvasFrame(title, src) {
 // its key (the drawn HTML before the doc's controls) and its top-level elements after them.
 function drawDoc(t, text, meta) {
   const root = document.createElement("div");
-  root.innerHTML = markdown(text);  // markdown(): DOMPurify
+  root.innerHTML = canvasMarkdown(text);  // DOMPurify; data: pictures only (#4983)
   const of = new WeakMap(), keys = [];
   for (const el of root.children) {
     if (/^H[1-6]$/.test(el.tagName) || !keys.length) keys.push("");
@@ -325,6 +326,7 @@ function patchDoc(t, box, text, meta) {
     if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
   }
   t.groups = groups; t.text = text;
+  drawDiagrams(d);
   updateAnswers(d, meta);  // the sections that stayed show the newest answers too
 }
 
@@ -363,6 +365,7 @@ async function updateCanvas(t) {
     if (!r.ok || on !== t.id || !box.contains(t.bar)) return;
     drawBar(t, meta);
     t.comments.render(meta);
+    if (t.frame && t.frame.contentWindow) postAnswers(t.frame.contentWindow, meta);
     const changed = !t.pin && meta.version !== t.shown;
     if (t.md && t.md.isConnected) {
       // A person's open Edit of the whole text, or of a section, waits: the new version comes after Save or Cancel.
@@ -415,6 +418,7 @@ async function loadComments(t) {
     const meta = await r.json();
     t.comments.render(meta);
     if (t.md && t.md.isConnected && !t.pin) updateAnswers(t.md, meta);
+    if (t.frame && t.frame.contentWindow) postAnswers(t.frame.contentWindow, meta);
   } catch (e) { /* the next state asks again */ }
 }
 // Edit a Markdown canvas: its text in a box; Save makes a new version by the person, and the session gets a note.
@@ -438,6 +442,37 @@ async function editCanvas(t, box, src, side) {
   };
 }
 
+// The answers to the decision cards of a kit page (#4983), for its script: {n: {author, text, state}}.
+function postAnswers(win, meta, extra) {
+  const answers = {};
+  for (const c of meta.comments || []) {
+    const n = (/^decision:(\d+)$/.exec((c.anchor && c.anchor.path) || "") || [])[1];
+    if (n && (!answers[n] || c.id > answers[n].id)) answers[n] = c;
+  }
+  const out = {};
+  for (const [n, c] of Object.entries(answers)) out[n] = { author: c.author, state: c.state, text: c.body.replace(/^Answer to decision \d+ of \d+ \([^)]*\):\s*/, "") };
+  win.postMessage(Object.assign({ maxpmCanvas: "answers", answers: out }, extra || {}), "*");
+}
+async function canvasMeta(t) {
+  const r = await fetch(`canvas/${canvasOf(t.target)}/meta?${t.sig || await canvasSig(t)}`);
+  if (!r.ok) throw new Error("no canvas");
+  return r.json();
+}
+// A kit decision card's answer (#4983). The page is a stranger's: only an answer that the person just clicked or
+// typed counts (the click in the frame activates this page too), and it goes the way of a doc's answer.
+async function frameAnswer(t, win, d) {
+  const n = +d.decision, text = String(d.text || "").slice(0, 2000).trim();
+  const fail = (error) => win.postMessage({ maxpmCanvas: "answers", decision: n, error, answers: {} }, "*");
+  if (!Number.isInteger(n) || !text) return fail("Pick an option or write your answer.");
+  if (navigator.userActivation && !navigator.userActivation.isActive) return fail("Click the answer again.");
+  if (!actor()) { toast("Choose your name in 'You are' first", true); return fail("Choose your name in 'You are' first."); }
+  try {
+    await act("canvas_answer", { name: "c" + canvasOf(t.target), decision: n, text });
+    toast(`Answered decision ${n}: it went to the session`);
+    postAnswers(win, await canvasMeta(t), { sent: n });
+  } catch (err) { fail(String(err && err.message || "The answer did not go.")); }
+}
+
 // The helper script in an HTML canvas says where the person scrolls, and asks for it after a new version loads.
 addEventListener("message", (e) => {
   const d = e.data || {}, t = tabs.find(x => x.id === on);
@@ -454,6 +489,8 @@ addEventListener("message", (e) => {
   if (d.maxpmCanvas === "found" && findOpen() && String(d.q || "") === find.q) findCount(+d.n || 0, +d.i || 0);
   if (d.maxpmCanvas === "find-open") openFind(typeof d.text === "string" ? d.text.slice(0, 200) : "");
   if (d.maxpmCanvas === "escape") setCommenting(t, false);
+  if (d.maxpmCanvas === "answers?" && !t.pin) canvasMeta(t).then(m => postAnswers(e.source, m)).catch(() => {});
+  if (d.maxpmCanvas === "answer" && !t.pin) frameAnswer(t, e.source, d);
   if (d.maxpmCanvas === "shown" && !d.found) toast("That part is not in this version of the page", true);
   if (d.maxpmCanvas === "pick" && t.comments) {
     // What the frame says is data from a page a session wrote: strings only, cut short; the box shows it escaped.

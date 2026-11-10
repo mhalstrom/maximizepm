@@ -268,3 +268,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
   .clamp:not(.short) .clamp-more { display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px 0 0;
     background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; }
 }
+
+/* A Markdown canvas (#4983): its pictures (put inline) and its ```mermaid diagrams (drawn as pictures). */
+.md img { max-width: 100%; height: auto; border-radius: 6px; }
+.md img:not([src]) { display: none; }  /* a picture from the network: the canvas loads nothing */
+.md .cv-diagram { margin: 12px 0; text-align: center; overflow-x: auto; }
+.md .cv-diagram img { max-width: 100%; border-radius: 0; }

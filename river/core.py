@@ -8730,6 +8730,96 @@ CANVAS_EXT = {".html": "html", ".htm": "html", ".md": "md", ".markdown": "md", "
 _CANVAS_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
+# The canvas kit (#4983): styles and a script that maxpm adds to an HTML canvas with <meta name="maxpm-kit">, so a
+# session writes only the content of a visual page (task graphs, cards, side by side, bars, timelines, mockups,
+# pictures with notes, decision cards). maxpm canvas kit prints the starter page with every part.
+CANVAS_KIT_DIR = Path(__file__).resolve().parent / "static" / "canvaskit"
+_KIT_META = re.compile(r"<meta\s[^>]*name\s*=\s*[\"']?maxpm-kit\b", re.I)
+_KIT_IDS = re.compile(r"\bdata-items?\s*=\s*[\"']([^\"']*)[\"']", re.I)
+_PICTURE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+                  ".webp": "image/webp", ".svg": "image/svg+xml"}
+
+
+def canvas_kit():
+    """The kit's starter page (every part, with comments) and how to use it."""
+    return {"starter": (CANVAS_KIT_DIR / "starter.html").read_text(encoding="utf-8"),
+            "how": "Copy the starter to a file, keep the parts you need, fill them, then: maxpm canvas put <file> "
+                   "--name <name>. maxpm adds the kit's styles and script when the page is shown (light and dark, "
+                   "phone width). Put it again after each change; each put is a new version."}
+
+
+def uses_kit(body):
+    """Whether an HTML canvas asks for the kit (<meta name="maxpm-kit">)."""
+    return bool(_KIT_META.search(body or ""))
+
+
+def canvas_items(conn, body, limit=300):
+    """The queue items that a kit canvas names (data-items="12 13", data-item="12"), with their state now and what
+    each waits on among them: {id: {title, status, assignee, doer, blocked, backlog, waits, deps}}."""
+    ids = []
+    for m in _KIT_IDS.finditer(body or ""):
+        for x in re.split(r"[\s,]+", m.group(1)):
+            x = x.lstrip("#")
+            if x.isdigit() and int(x) not in ids:
+                ids.append(int(x))
+    ids = ids[:limit]
+    if not ids:
+        return {}
+    q = ",".join("?" * len(ids))
+    rows = conn.execute(f"SELECT id, title, status, assignee, doer, blocked_reason, backlog_at FROM items WHERE id IN ({q})",
+                        ids).fetchall()
+    deps = conn.execute(f"SELECT d.item_id, d.blocked_by, b.status FROM deps d JOIN items b ON b.id=d.blocked_by "
+                        f"WHERE d.item_id IN ({q}) AND d.kind IN ('blocks','feeds')", ids).fetchall()
+    out = {}
+    for r in rows:
+        mine = [d for d in deps if d["item_id"] == r["id"]]
+        out[str(r["id"])] = {"title": r["title"], "status": r["status"], "assignee": r["assignee"], "doer": r["doer"],
+                             "blocked": bool(r["blocked_reason"]), "backlog": bool(r["backlog_at"]),
+                             "waits": any(d["status"] in OPEN_STATES for d in mine),
+                             "deps": [d["blocked_by"] for d in mine if d["blocked_by"] in ids]}
+    return out
+
+
+def inline_pictures(body, kind, base, max_bytes=3_000_000):
+    """A page with each local picture that it names (Markdown ![..](shot.png), HTML <img src="shot.png">) put inline as
+    a data: address, so the canvas shows it on any screen (#4983). base: the folder of the page's file. Returns
+    (body, inlined count, the paths not found)."""
+    import base64
+    done, missing = [0], []
+
+    def data(path):
+        if re.match(r"^(?:[a-z][a-z0-9+.-]*:|//|#)", path, re.I):
+            return None
+        f = Path(os.path.expanduser(path))
+        f = f if f.is_absolute() else Path(base) / f
+        t = _PICTURE_TYPES.get(f.suffix.lower())
+        if not t:
+            return None
+        try:
+            raw = f.read_bytes()
+        except OSError:
+            missing.append(path)
+            return None
+        if len(raw) > max_bytes:
+            missing.append(f"{path} (more than {max_bytes // 1_000_000} MB)")
+            return None
+        done[0] += 1
+        return f"data:{t};base64," + base64.b64encode(raw).decode()
+
+    def md(m):
+        d = data(m.group(2))
+        return m.group(0) if d is None else f"![{m.group(1)}]({d}{m.group(3) or ''})"
+
+    def img(m):
+        d = data(m.group(3))
+        return m.group(0) if d is None else f"{m.group(1)}{m.group(2)}{d}{m.group(2)}"
+
+    if kind == "md":
+        body = re.sub(r"!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(\s+\"[^\"]*\")?\s*\)", md, body)
+    body = re.sub(r"(<img\b[^>]*?\ssrc\s*=\s*)([\"'])([^\"']+)\2", img, body, flags=re.I)
+    return body, done[0], missing
+
+
 def canvas_kind(kind=None, filename=None):
     """The kind of a canvas: the one named, else from the file's extension."""
     if kind:
@@ -9272,7 +9362,11 @@ def canvas_answer(conn, ref, decision, answer, actor=None, project=None):
     c = _canvas_row(conn, ref, project)
     if not answer or not str(answer).strip():
         raise RiverError("an answer needs words: the option, or what you decide")
-    ds = {d["n"]: d for d in doc_decisions(_canvas_latest(conn, c["id"])["body"])}
+    body = _canvas_latest(conn, c["id"])["body"]
+    if c["kind"] == "html":  # a kit decision card (#4983): its heading holds "Decision <n> of <m>: <name>"
+        import html as _html
+        body = _html.unescape(re.sub(r"<[^>]+>", "\n", body))
+    ds = {d["n"]: d for d in doc_decisions(body)}
     n = int(str(decision).lstrip("#").replace("decision-", "").replace("decision:", ""))
     if n not in ds:
         raise RiverError(f"doc {c['name']} has no decision {n}; it has {', '.join(map(str, sorted(ds))) or 'none'}")

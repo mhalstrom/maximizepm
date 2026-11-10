@@ -115,6 +115,22 @@ def csp(conn, project_id):
     return "; ".join(rules)
 
 
+def with_kit(conn, body):
+    """An HTML canvas that asks for the kit (#4983, <meta name="maxpm-kit">): the kit's styles first in its head (the
+    page's own styles come after, so they win), and before its last </body> the states of the queue items it names
+    (read now, so a task graph shows them as they are) and the kit's script."""
+    import json
+    css = (core.CANVAS_KIT_DIR / "kit.css").read_text(encoding="utf-8")
+    js = (core.CANVAS_KIT_DIR / "kit.js").read_text(encoding="utf-8")
+    items = json.dumps(core.canvas_items(conn, body)).replace("</", "<\\/")
+    style = f"<style>{css}</style>"
+    m = re.search(r"<head\b[^>]*>", body, re.I)
+    body = body[:m.end()] + style + body[m.end():] if m else style + body
+    tail = f'<script type="application/json" id="maxpm-items">{items}</script><script>{js}</script>'
+    i = body.lower().rfind("</body>")
+    return body[:i] + tail + body[i:] if i >= 0 else body + tail
+
+
 def with_helper(body):
     """The HTML of a canvas with the helper script before its last </body>, else at its end."""
     i = body.lower().rfind("</body>")
@@ -143,7 +159,8 @@ def canvas(h, path):
         headers = {"Content-Security-Policy": csp(conn, c["project_id"]), "X-Content-Type-Options": "nosniff",
                    "Referrer-Policy": "no-referrer"}
         if c["kind"] == "html":
-            return h._send(200, with_helper(v["body"]).encode(), "text/html; charset=utf-8", headers)
+            body = with_kit(conn, v["body"]) if core.uses_kit(v["body"]) else v["body"]
+            return h._send(200, with_helper(body).encode(), "text/html; charset=utf-8", headers)
         if c["kind"] == "svg":
             return h._send(200, v["body"].encode(), "image/svg+xml", headers)
         return h._send(200, v["body"].encode(), "text/plain; charset=utf-8", headers)  # md: the page draws it

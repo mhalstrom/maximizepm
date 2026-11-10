@@ -703,6 +703,8 @@ def build_parser():
     x.add_argument("--title"); x.add_argument("--note", help="what changed in this version")
     x.add_argument("--item", type=int, help="the item it belongs to (default: the item you hold)")
     x.add_argument("--project", help="default: the item's project, or this folder's")
+    x = cvs.add_parser("kit", help="the starter page of the canvas kit: a visual HTML page (task graph, cards, side by "
+                       "side, bars, timeline, mockup, pictures with notes, decision cards) that you fill and put")
     x = cvs.add_parser("list", help="the canvases, newest change first")
     x.add_argument("--project"); x.add_argument("--item", type=int)
     x.add_argument("--mine", action="store_true", help="only the ones whose latest version you put")
@@ -3361,12 +3363,24 @@ def _canvas_dispatch(conn, a, actor):
                 raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
         else:
             raise RiverError("give the page: maxpm canvas put <file> --name <name> (or - for stdin, or --text)")
+        pictures = (0, [])
+        if a.file and a.file != "-":  # local pictures go inline, so the canvas shows them anywhere (#4983)
+            try:
+                kind = core.canvas_kind(a.kind, a.file)
+            except RiverError:
+                kind = None  # canvas_put says what is wrong, or takes the kind of the canvas that exists
+            if kind in ("md", "html"):
+                body, n, missing = core.inline_pictures(body, kind, Path(a.file).expanduser().resolve().parent)
+                pictures = (n, missing)
         project = a.project
         if not project and a.item is None and not core._held_item(conn, actor):
             names = core.projects_for_dir(conn, os.getcwd())
             project = names[0] if len(names) == 1 else None
-        return core.canvas_put(conn, a.name, body, actor, a.kind, a.title, a.item, project, a.note,
-                               a.file if a.file and a.file != "-" else None)
+        res = core.canvas_put(conn, a.name, body, actor, a.kind, a.title, a.item, project, a.note,
+                              a.file if a.file and a.file != "-" else None)
+        return dict(res, pictures_inline=pictures[0], pictures_missing=pictures[1]) if any(pictures) else res
+    if v == "kit":
+        return core.canvas_kit()
     if v == "list":
         return core.canvas_list(conn, a.project, a.item, actor if a.mine else None, a.deleted)
     if v == "show":
@@ -3434,6 +3448,10 @@ def _comment_lines(r, indent="  "):
 
 def render_canvas(a, res):
     v = a.cvcmd
+    if v == "kit":
+        print(res["starter"].rstrip())
+        print(f"<!-- {res['how']} -->")
+        return
     if v == "section":
         print(("unchanged: " if res.get("unchanged") else "") + _canvas_line(res))
         if not res.get("unchanged"):
@@ -3448,6 +3466,10 @@ def render_canvas(a, res):
         if not res.get("unchanged"):
             print(f"  version {res['version']} stored ({res['bytes']} bytes). People see it in the page's Artifacts; "
                   f"their comments come to you as a message: maxpm canvas comments {res['name']} --open")
+        if res.get("pictures_inline"):
+            print(f"  {res['pictures_inline']} local picture(s) put inline")
+        for m in res.get("pictures_missing") or []:
+            print(f"  picture not put inline: {m}")
         return
     if v == "list":
         if not res:

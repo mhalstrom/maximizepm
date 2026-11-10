@@ -1,0 +1,146 @@
+/* The maxpm canvas kit (#4983): the styles that maxpm puts into an HTML canvas with <meta name="maxpm-kit">. A page
+   that uses the kit writes only its content with these classes (maxpm canvas kit prints the parts). Light and dark
+   follow the reader's system; every part fits a 390 px phone. The page's own <style> comes after this one, so it
+   wins. */
+:root {
+  --kit-bg: #f6f7f9; --kit-panel: #fff; --kit-ink: #1b1f24; --kit-muted: #5f6b7a; --kit-line: #dde2e8;
+  --kit-accent: #1f6feb; --kit-soft: #eef3fd;
+  --kit-good: #1a7f37; --kit-good-bg: #e6f4ea; --kit-warn: #9a6700; --kit-warn-bg: #fff4d6;
+  --kit-bad: #cf222e; --kit-bad-bg: #fde8ea; --kit-info: #0969da; --kit-info-bg: #e7f0fd;
+  --kit-idle: #6e7781; --kit-idle-bg: #eef0f3;
+  --kit-radius: 10px; color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --kit-bg: #0f1216; --kit-panel: #171b21; --kit-ink: #e6e9ee; --kit-muted: #9aa5b1; --kit-line: #2a3139;
+    --kit-accent: #4c8dff; --kit-soft: #1a2433;
+    --kit-good: #3fb950; --kit-good-bg: #12261a; --kit-warn: #d29922; --kit-warn-bg: #2a2110;
+    --kit-bad: #f85149; --kit-bad-bg: #2d1416; --kit-info: #58a6ff; --kit-info-bg: #102238;
+    --kit-idle: #8b949e; --kit-idle-bg: #20262d;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--kit-bg); color: var(--kit-ink);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+body { padding: 20px 16px 48px; }
+.kit { max-width: 64rem; margin: 0 auto; }
+.kit h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 4px; }
+.kit h2 { font-size: 1.2rem; margin: 32px 0 10px; padding-top: 8px; border-top: 1px solid var(--kit-line); }
+.kit h3 { font-size: 1rem; margin: 0 0 6px; }
+.kit p { margin: 0 0 10px; }
+.kit a { color: var(--kit-accent); }
+.kit code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--kit-soft); padding: 1px 4px; border-radius: 4px; }
+.kit img { max-width: 100%; height: auto; }
+.kit-sub, .kit-muted { color: var(--kit-muted); }
+.kit-sub { margin: 0 0 16px; }
+
+/* Chips: a short state or label. data-tone: good, warn, bad, info, idle. */
+.kit-chip { display: inline-block; font-size: 12px; line-height: 18px; padding: 0 8px; border-radius: 9px;
+  background: var(--kit-idle-bg); color: var(--kit-idle); white-space: nowrap; vertical-align: 1px; }
+[data-tone=good] > .kit-chip, .kit-chip[data-tone=good] { background: var(--kit-good-bg); color: var(--kit-good); }
+[data-tone=warn] > .kit-chip, .kit-chip[data-tone=warn] { background: var(--kit-warn-bg); color: var(--kit-warn); }
+[data-tone=bad] > .kit-chip, .kit-chip[data-tone=bad] { background: var(--kit-bad-bg); color: var(--kit-bad); }
+[data-tone=info] > .kit-chip, .kit-chip[data-tone=info] { background: var(--kit-info-bg); color: var(--kit-info); }
+
+/* Cards in a grid: one column on a phone, more on a wide screen. */
+.kit-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); gap: 12px; margin: 12px 0; }
+.kit-card { background: var(--kit-panel); border: 1px solid var(--kit-line); border-radius: var(--kit-radius); padding: 14px;
+  border-top: 3px solid var(--kit-line); min-width: 0; }
+.kit-card[data-tone=good] { border-top-color: var(--kit-good); } .kit-card[data-tone=warn] { border-top-color: var(--kit-warn); }
+.kit-card[data-tone=bad] { border-top-color: var(--kit-bad); } .kit-card[data-tone=info] { border-top-color: var(--kit-info); }
+.kit-card > :last-child { margin-bottom: 0; }
+.kit-card ul { margin: 6px 0 0; padding-left: 18px; }
+
+/* Numbers in tiles. */
+.kit-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 9rem), 1fr)); gap: 10px; margin: 12px 0; }
+.kit-stat { background: var(--kit-panel); border: 1px solid var(--kit-line); border-radius: var(--kit-radius); padding: 10px 12px; }
+.kit-stat b { display: block; font-size: 1.6rem; line-height: 1.2; }
+.kit-stat span { color: var(--kit-muted); font-size: 13px; }
+
+/* Side by side: two or more columns; stacked on a phone. */
+.kit-split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: 12px; margin: 12px 0; }
+.kit-split > * { background: var(--kit-panel); border: 1px solid var(--kit-line); border-radius: var(--kit-radius); padding: 14px; min-width: 0; }
+.kit-split > [data-pick] { border: 2px solid var(--kit-accent); }
+
+/* A table that scrolls sideways on a phone instead of the page. */
+.kit-table { overflow-x: auto; margin: 12px 0; border: 1px solid var(--kit-line); border-radius: var(--kit-radius); background: var(--kit-panel); }
+.kit-table table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.kit-table th, .kit-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--kit-line); vertical-align: top; }
+.kit-table tr:last-child td { border-bottom: 0; }
+.kit-table th { background: var(--kit-soft); font-weight: 600; white-space: nowrap; }
+
+/* A timeline: an ordered list; data-when on each item. */
+.kit-timeline { list-style: none; margin: 12px 0; padding: 0 0 0 18px; border-left: 2px solid var(--kit-line); }
+.kit-timeline > li { position: relative; margin: 0 0 14px; padding-left: 8px; }
+.kit-timeline > li::before { content: ""; position: absolute; left: -25px; top: 6px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--kit-panel); border: 2px solid var(--kit-accent); }
+.kit-timeline > li[data-tone=good]::before { background: var(--kit-good); border-color: var(--kit-good); }
+.kit-timeline > li[data-tone=warn]::before { border-color: var(--kit-warn); }
+.kit-when { color: var(--kit-muted); font-size: 12px; }
+
+/* A bar chart: each child has data-value; kit.js draws the bars. */
+.kit-bars { margin: 12px 0; background: var(--kit-panel); border: 1px solid var(--kit-line); border-radius: var(--kit-radius); padding: 12px; }
+.kit-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; row-gap: 3px; margin: 0 0 10px; font-size: 14px; }
+.kit-bar:last-child { margin-bottom: 0; }
+.kit-bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kit-bar-track { display: block; grid-column: 1 / -1; height: 10px; background: var(--kit-soft); border-radius: 5px; overflow: hidden; }
+.kit-bar-fill { display: block; height: 100%; background: var(--kit-accent); border-radius: 5px; min-width: 2px; }
+.kit-bar[data-tone=good] .kit-bar-fill { background: var(--kit-good); } .kit-bar[data-tone=warn] .kit-bar-fill { background: var(--kit-warn); }
+.kit-bar[data-tone=bad] .kit-bar-fill { background: var(--kit-bad); } .kit-bar[data-tone=idle] .kit-bar-fill { background: var(--kit-idle); }
+.kit-bar-value { color: var(--kit-muted); font-variant-numeric: tabular-nums; }
+
+/* A graph: queue items (data-items) or your own nodes (.kit-node with data-after); kit.js lays it out in rows. */
+.kit-graph { position: relative; margin: 12px 0; padding: 12px; background: var(--kit-panel); border: 1px solid var(--kit-line);
+  border-radius: var(--kit-radius); overflow: hidden; }
+.kit-graph svg.kit-edges { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.kit-graph svg.kit-edges path { fill: none; stroke: var(--kit-muted); stroke-width: 1.5; opacity: .7; }
+.kit-layer { position: relative; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 0 0 28px; }
+.kit-layer:last-of-type { margin-bottom: 0; }
+.kit-node { position: relative; background: var(--kit-panel); border: 1px solid var(--kit-line); border-left: 4px solid var(--kit-idle);
+  border-radius: 8px; padding: 6px 9px; flex: 0 1 13.5rem; min-width: 0; font-size: 13px; line-height: 1.35; }
+.kit-graph:not(.kit-narrow) .kit-layer { flex-wrap: nowrap; }
+.kit-node[data-tone=good] { border-left-color: var(--kit-good); } .kit-node[data-tone=warn] { border-left-color: var(--kit-warn); }
+.kit-node[data-tone=bad] { border-left-color: var(--kit-bad); } .kit-node[data-tone=info] { border-left-color: var(--kit-info); }
+.kit-node-id { color: var(--kit-muted); font-size: 12px; }
+.kit-node-title { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin: 2px 0 4px; }
+.kit-node-who { color: var(--kit-muted); font-size: 12px; margin-left: 4px; }
+.kit-node-after { display: none; color: var(--kit-muted); font-size: 12px; margin-top: 3px; }
+.kit-layer-label { display: none; }
+.kit-narrow .kit-layer { justify-content: flex-start; gap: 8px; margin-bottom: 16px; }
+.kit-narrow .kit-layer-label { display: block; flex-basis: 100%; font-size: 12px; font-weight: 600; color: var(--kit-muted);
+  text-transform: uppercase; letter-spacing: .03em; }
+.kit-narrow .kit-node { flex: 0 0 calc(50% - 4px); }
+.kit-narrow .kit-node-after { display: block; }
+.kit-legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.kit-item { white-space: normal; }
+.kit-item .kit-chip { margin-left: 4px; }
+
+/* A mockup: a frame at a phone or desktop width (data-width). */
+.kit-frame { margin: 12px auto; background: var(--kit-panel); border: 1px solid var(--kit-line); border-radius: 14px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.08); overflow: hidden; max-width: 100%; }
+.kit-frame[data-width="390"] { width: 390px; } .kit-frame[data-width="768"] { width: 768px; } .kit-frame[data-width="1280"] { width: 1280px; }
+.kit-frame > .kit-frame-bar { display: flex; gap: 6px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--kit-line);
+  font-size: 12px; color: var(--kit-muted); background: var(--kit-soft); }
+.kit-frame > .kit-frame-bar::before { content: "● ● ●"; letter-spacing: 1px; opacity: .5; }
+.kit-frame > .kit-frame-body { padding: 12px; overflow: auto; }
+
+/* A picture with notes: numbered pins at left/top percents, the notes in the caption. */
+.kit-shot { margin: 12px 0; }
+.kit-shot-box { position: relative; display: inline-block; max-width: 100%; }
+.kit-shot-box img { display: block; border: 1px solid var(--kit-line); border-radius: 8px; }
+.kit-pin { position: absolute; transform: translate(-50%, -50%); width: 24px; height: 24px; border-radius: 50%; background: var(--kit-bad);
+  color: #fff; font: 600 13px/24px sans-serif; text-align: center; box-shadow: 0 0 0 2px #fff; }
+.kit-shot figcaption ol { margin: 8px 0 0; padding-left: 22px; }
+
+/* A decision card: the decision form; kit.js adds the buttons, and the answer goes to the session. */
+.kit-decision { background: var(--kit-panel); border: 1px solid var(--kit-line); border-left: 4px solid var(--kit-accent);
+  border-radius: var(--kit-radius); padding: 14px; margin: 14px 0; }
+.kit-decision dl { margin: 8px 0; } .kit-decision dt { font-weight: 600; margin-top: 8px; } .kit-decision dd { margin: 2px 0 0; }
+.kit-answer { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--kit-line); }
+.kit-answer button { font: inherit; font-size: 14px; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--kit-line);
+  background: var(--kit-panel); color: var(--kit-ink); cursor: pointer; min-height: 32px; }
+.kit-answer button.kit-primary { background: var(--kit-accent); border-color: var(--kit-accent); color: #fff; }
+.kit-answer input { font: inherit; font-size: 14px; flex: 1 1 10rem; min-width: 0; padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--kit-line); background: var(--kit-bg); color: var(--kit-ink); min-height: 32px; }
+.kit-answered { flex-basis: 100%; font-size: 14px; color: var(--kit-good); }
+.kit-note { flex-basis: 100%; font-size: 13px; color: var(--kit-muted); }

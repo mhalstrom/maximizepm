@@ -681,3 +681,190 @@ try {
         self.assertIn("OVH", a["answered"])
         self.assertEqual(got["edit_box"], "It shows the page from anywhere.")
         self.assertEqual((got["rows_same"], got["rows_new"]), (True, True))
+
+
+KIT_PAGE = """<!doctype html><html><head><meta charset=utf-8><meta name="maxpm-kit"><style>h1{{color:red}}</style></head>
+<body><main class="kit"><h1>Plan</h1><div class="kit-graph" data-items="{a} #{b}, 99999"></div>
+<p>Waits on <span data-item="{b}"></span>.</p>
+<section class="kit-decision" data-decision="1" data-options="A|B"><h3>Decision 1 of 2: Split the goal</h3>
+<dl><dt>Your answer</dt><dd>"A" or "B"</dd></dl></section></main></body></html>"""
+
+
+class Kit(Base):
+    """#4983: the canvas kit: maxpm adds its styles, the states of the items it names, and its script to an HTML
+    canvas with <meta name="maxpm-kit">; local pictures go inline at put; a kit decision card is answered in place."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "mark", human=True)
+        self.a = core.item_add(self.c, "web", "Read the tasks </script><b>")["id"]
+        self.b = core.item_add(self.c, "web", "Propose the parts", after=[self.a])["id"]
+        self.kit = core.canvas_put(self.c, "visual", KIT_PAGE.format(a=self.a, b=self.b), "ag", kind="html")["id"]
+
+    def test_a_kit_page_gets_the_styles_the_item_states_and_the_script(self):
+        _, sig = self.key(f"canvas:{self.kit}")
+        body = self.get(f"/canvas/{self.kit}/latest?{sig}")["body"].decode()
+        self.assertLess(body.index(".kit-graph"), body.index("h1{color:red}"), "the page's own styles come after the kit's")
+        self.assertIn("maxpm canvas kit", body)
+        self.assertLess(body.index('id="maxpm-items"'), body.index("maxpm canvas helper"))
+        raw = body.split('id="maxpm-items">', 1)[1].split("</script>", 1)[0]
+        items = json.loads(raw.replace("<\\/", "</"))
+        self.assertEqual(set(items), {str(self.a), str(self.b)}, "an id that is not in the queue is left out")
+        self.assertEqual(items[str(self.b)]["deps"], [self.a])
+        self.assertTrue(items[str(self.b)]["waits"])
+        self.assertEqual(items[str(self.a)]["title"], "Read the tasks </script><b>")
+        self.assertNotIn("</script><b>", raw, "a title cannot end the script")
+        core.release(self.c, self.it, "ag")
+        core.claim(self.c, self.a, "ag")
+        core.done(self.c, self.a, "ag")
+        body = self.get(f"/canvas/{self.kit}/latest?{sig}")["body"].decode()
+        items = json.loads(body.split('id="maxpm-items">', 1)[1].split("</script>", 1)[0].replace("<\\/", "</"))
+        self.assertEqual((items[str(self.a)]["status"], items[str(self.b)]["waits"]), ("done", False),
+                         "the states are read when the page loads, not when it was put")
+        _, sig = self.key()
+        plain = self.get(f"/canvas/{self.cv}/latest?{sig}")["body"].decode()
+        self.assertNotIn("maxpm-items", plain)
+        self.assertNotIn(".kit-graph", plain)
+
+    def test_a_kit_decision_card_is_answered_in_place(self):
+        a = core.canvas_answer(self.c, "visual", 1, "A", "mark")
+        self.assertEqual((a["decision"], a["name"], a["anchor"]["path"]), (1, "Split the goal", "decision:1"))
+        self.assertTrue(any("Answer to decision 1 of 2 (Split the goal): A" in m["body"]
+                            for m in core.inbox(self.c, "ag", mark_read=False)))
+        with self.assertRaisesRegex(core.RiverError, "has no decision 2; it has 1"):
+            core.canvas_answer(self.c, "visual", 2, "B", "mark")
+
+    def test_local_pictures_go_inline_at_put(self):
+        import base64
+        import contextlib
+        import io
+        from river import cli
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+        d = os.path.join(self.dir.name, "pages")
+        os.makedirs(os.path.join(d, "img"))
+        with open(os.path.join(d, "img", "shot.png"), "wb") as f:
+            f.write(png)
+        with open(os.path.join(d, "notes.md"), "w") as f:
+            f.write("# Notes\n\n![The page](img/shot.png \"title\")\n\n![Gone](gone.png)\n\n![Web](https://x.test/a.png)\n")
+        with open(os.path.join(d, "page.html"), "w") as f:
+            f.write("<html><body><img alt=x src='img/shot.png'><img src=\"data:image/png;base64,AA\"></body></html>")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "--as", "ag", "canvas", "put", os.path.join(d, "notes.md"), "--name", "notes"])
+            cli.run(["-q", "--as", "ag", "canvas", "put", os.path.join(d, "page.html"), "--name", "page"])
+        md = core.canvas_show(self.c, "notes")["shown"]["body"]
+        self.assertIn('![The page](data:image/png;base64,iVBOR', md)
+        self.assertIn(' "title")', md)
+        self.assertIn("![Gone](gone.png)", md)
+        self.assertIn("https://x.test/a.png", md)
+        self.assertIn("<img alt=x src='data:image/png;base64,iVBOR", core.canvas_show(self.c, "page")["shown"]["body"])
+        self.assertIn("1 local picture(s) put inline", out.getvalue())
+        self.assertIn("picture not put inline: gone.png", out.getvalue())
+
+    def test_the_kit_command_the_mcp_tool_and_http(self):
+        import contextlib
+        import io
+        from river import cli, mcp
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "canvas", "kit"])
+        self.assertIn('<meta name="maxpm-kit">', out.getvalue())
+        for part in ("kit-graph", "kit-cards", "kit-split", "kit-bars", "kit-timeline", "kit-frame", "kit-shot",
+                     "kit-decision", "data-item="):
+            self.assertIn(part, out.getvalue())
+        self.assertEqual(mcp.canvas_argv({"action": "kit"}), ["canvas", "kit"])
+        self.assertIn("maxpm-kit", server.OPS["canvas_kit"](self.c, {}, "ag")["starter"])
+        self.assertTrue(core.uses_kit(core.canvas_kit()["starter"]))
+        self.assertFalse(core.uses_kit("<p>maxpm-kit</p>"))
+
+
+class PanelKit(ChromePanel):
+    """#4983: in the side panel, a kit decision card's answer goes to the session only after the person's own click;
+    a Markdown canvas shows pictures put inline (and no picture from the network) and draws ```mermaid diagrams."""
+
+    def put_kit(self):
+        def run():
+            c = core.connect()
+            try:
+                body = ('<html><head><meta name="maxpm-kit"></head><body><section class="kit-decision" data-decision="1" '
+                        'data-options="A|B"><h3>Decision 1 of 1: Split</h3></section></body></html>')
+                return core.canvas_put(c, "plan", body, "ag", kind="html", title="Release plan")["version"]
+            finally:
+                c.close()
+        return run
+
+    def put_md(self):
+        def run():
+            c = core.connect()
+            try:
+                png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                body = (f"# Notes\n\n![shot]({png})\n\n![web](https://example.com/x.png)\n\n"
+                        "```mermaid\nflowchart TD\n  A[Read] --> B[Plan]\n```\n")
+                return core.canvas_put(c, "notes", body, "ag", kind="md", title="Notes")["version"]
+            finally:
+                c.close()
+        return run
+
+    def test_a_kit_answer_and_a_markdown_canvas(self):
+        c = core.connect()
+        core.register(c, "mark", human=True)
+        c.close()
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  const you = q("#actor"); if (![...you.options].some(o => o.value === "mark")) you.append(new Option("mark", "mark"));
+  you.value = "mark";
+  await sleep(400);
+  await fetch("/__kit");
+  await until(() => q("iframe.sp-canvas"), "the kit canvas");
+  const f = q("iframe.sp-canvas"), out = {};
+  const send = (data) => window.dispatchEvent(new MessageEvent("message", { source: f.contentWindow, data }));
+  // No click of the person: the frame's answer is refused.
+  Object.defineProperty(navigator, "userActivation", { configurable: true, value: { isActive: false } });
+  send({ maxpmCanvas: "answer", decision: 1, text: "B" });
+  await sleep(500);
+  out.before = (await (await fetch("/__answers")).json()).n;
+  Object.defineProperty(navigator, "userActivation", { configurable: true, value: { isActive: true } });
+  send({ maxpmCanvas: "answer", decision: 1, text: "A" });
+  for (let i = 0; i < 50 && (await (await fetch("/__answers")).json()).n !== 1; i++) await sleep(100);
+  out.answer = (await (await fetch("/__answers")).json()).body;
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+
+        def answers():
+            c = core.connect()
+            try:
+                rows = [x for x in core.canvas_comments(c, "plan", "mark")["comments"]
+                        if (x.get("anchor") or {}).get("path") == "decision:1"]
+                return {"n": len(rows), "body": rows[0]["body"] if rows else ""}
+            finally:
+                c.close()
+        got = self.tvs.drive_page(self.base, driver, routes={"/__kit": self.put_kit(), "/__answers": answers})
+        self.assertNotIn("error", got, got)
+        self.assertEqual(got["before"], 0, "an answer with no click of the person does not count")
+        self.assertEqual(got["answer"], "Answer to decision 1 of 1 (Split): A")
+
+    def test_a_markdown_canvas_with_pictures_and_a_diagram(self):
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && /updated/.test(q("#stamp").textContent), "the session ag");
+  await sleep(400);
+  const out = {};
+  await fetch("/__md");
+  await until(() => q(".sp-md.sp-canvas"), "the markdown canvas");
+  const md = q(".sp-md.sp-canvas");
+  out.imgs = [...md.querySelectorAll("img:not(.cv-diagram img)")].map(i => (i.getAttribute("src") || "").slice(0, 22));
+  if (window.mermaid) {
+    await until(() => md.querySelector(".cv-diagram img"), "the diagram");
+    out.diagram = md.querySelector(".cv-diagram img").getAttribute("src").slice(0, 26);
+  }
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = self.tvs.drive_page(self.base, driver, routes={"/__md": self.put_md()})
+        self.assertNotIn("error", got, got)
+        self.assertEqual(got["imgs"][0], "data:image/png;base64,")
+        self.assertEqual(got["imgs"][1:], [""], "a picture from the network keeps no address: it loads nothing")
+        if "diagram" in got:
+            self.assertEqual(got["diagram"], "data:image/svg+xml;charset")

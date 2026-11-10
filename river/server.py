@@ -2331,6 +2331,8 @@ async function drawMd() {
     const { marked } = await import("/vendor/marked/marked.esm.js");
     const DOMPurify = (await import("/vendor/dompurify/purify.es.mjs")).default;
     md.innerHTML = DOMPurify.sanitize(marked.parse(text), { FORBID_TAGS: ["style", "form", "input", "iframe", "script"] });
+    const { drawDiagrams } = await import("/components/canvasMd.js");  // ```mermaid blocks as pictures (#4983)
+    drawDiagrams(md);
   } else { const p = document.createElement("pre"); p.textContent = text; md.replaceChildren(p); }
 }
 await drawMd();
@@ -2880,6 +2882,7 @@ OPS = {
     # agent that speaks HTTP (POST /api/action {"op": "canvas_put", "args": {...}, "actor": "<agent>"}).
     "canvas_put": lambda c, a, who: core.canvas_put(c, a["name"], a.get("text"), who, a.get("kind"), a.get("title"),
                                                     a.get("item"), a.get("project"), a.get("note")),
+    "canvas_kit": lambda c, a, who: core.canvas_kit(),
     "canvas_list": lambda c, a, who: core.canvas_list(c, a.get("project"), a.get("item"),
                                                       who if a.get("mine") else None, bool(a.get("deleted"))),
     "canvas_show": lambda c, a, who: core.canvas_show(c, a["name"], a.get("project"), a.get("version")),

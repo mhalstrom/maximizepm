@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The maxpm canvas kit: maxpm adds its styles and script to a page with this line. Keep the parts you need, delete
+     the rest, and fill them: maxpm canvas put page.html --name <name>. Put again after each change. -->
+<meta name="maxpm-kit">
+<title>Title of the page</title>
+</head><body><main class="kit">
+
+<h1>Title of the page</h1>
+<p class="kit-sub">One line: what this page is for and what the reader decides or checks.</p>
+
+<!-- Numbers in tiles. -->
+<div class="kit-stats">
+  <div class="kit-stat"><b>54</b><span>open tasks</span></div>
+  <div class="kit-stat"><b>12</b><span>for a person</span></div>
+</div>
+
+<!-- A task graph from queue items: maxpm fills each title, state and holder when the page loads, and draws an arrow
+     for each 'waits on' between the items you list. -->
+<h2>The plan</h2>
+<div class="kit-graph" data-items="101 102 103 104"></div>
+
+<!-- A graph of your own: data-after names the nodes that come first. -->
+<div class="kit-graph">
+  <div class="kit-node" id="read" data-tone="good">Read the tasks</div>
+  <div class="kit-node" id="parts" data-after="read" data-tone="info">Propose the parts</div>
+  <div class="kit-node" id="yes" data-after="parts" data-tone="warn">Your yes</div>
+</div>
+
+<!-- One item in a sentence: its title and state. -->
+<p>Waits on <span data-item="102"></span>.</p>
+
+<!-- Cards: data-tone good, warn, bad, info. -->
+<h2>Parts</h2>
+<div class="kit-cards">
+  <div class="kit-card" data-tone="info"><h3>Part one</h3><p>What it holds.</p><span class="kit-chip" data-tone="info">18 tasks</span></div>
+  <div class="kit-card" data-tone="warn"><h3>Part two</h3><ul><li>A point</li><li>Another</li></ul></div>
+</div>
+
+<!-- Side by side (stacked on a phone); data-pick marks the recommended one. -->
+<div class="kit-split">
+  <div data-pick><h3>A (recommended)</h3><p>What happens, the cost, the risk.</p></div>
+  <div><h3>B</h3><p>What happens, the cost, the risk.</p></div>
+</div>
+
+<!-- A bar chart. -->
+<div class="kit-bars" data-unit="tasks">
+  <div data-value="2320">Worker</div>
+  <div data-value="310" data-tone="warn">Reviewer</div>
+</div>
+
+<!-- A table (it scrolls sideways on a phone). -->
+<div class="kit-table"><table>
+  <tr><th>Role</th><th>Use</th></tr>
+  <tr><td>Worker</td><td>2,320 tasks</td></tr>
+</table></div>
+
+<!-- A timeline. -->
+<ol class="kit-timeline">
+  <li data-when="2026-11-10" data-tone="good">Proposal written</li>
+  <li data-when="next">Sub-goals made</li>
+</ol>
+
+<!-- A mockup at phone width (data-width 390, 768 or 1280). -->
+<div class="kit-frame" data-width="390"><div class="kit-frame-bar">Sessions</div><div class="kit-frame-body">The design here.</div></div>
+
+<!-- A picture with notes: pins at left/top percents; the notes in the same order. A local file
+     (src="shot.png") is put inline by maxpm canvas put. -->
+<figure class="kit-shot"><div class="kit-shot-box"><img src="shot.png" alt="The page">
+  <span class="kit-pin" style="left:30%;top:20%">1</span></div>
+  <figcaption><ol><li>What is wrong here.</li></ol></figcaption></figure>
+
+<!-- A decision in the decision form (maxpm guide decisions). The reader answers on the card; the answer comes to you
+     as a message. data-options: the answers, as in "Your answer". -->
+<section class="kit-decision" data-decision="1" data-options="A|B|C">
+  <h3>Decision 1 of 1: Short name</h3>
+  <dl>
+    <dt>What you decide</dt><dd>One question, with the kind of answer.</dd>
+    <dt>Why it matters</dt><dd>What it changes, and what waits on it.</dd>
+    <dt>Options</dt><dd>A: ... B: ... C: ...</dd>
+    <dt>My recommendation</dt><dd>A, because ...</dd>
+    <dt>Your answer</dt><dd>"A", "B" or "C"</dd>
+  </dl>
+</section>
+
+</main></body></html>
