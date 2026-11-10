@@ -279,6 +279,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       if (!r.ok) throw new Error(j.error || "failed");
       list = j.sessions;
       proposals = j.proposals || [];
+      forgetDrafts(list);
       // At load: the session chosen last, else the first. A session that ended gives way to the first.
       if (!pane && (!agent || (!pinned && !list.some(s => s.name === agent)))) {
         const want = store(PICKED);
@@ -371,6 +372,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (name === agent) return;
     if (!agent && name) phoneChat(true);  // the first one at load
     if (name !== agent) dict.stop();
+    saveDraft();  // the session it leaves keeps its text, cursor and files (#5112)
     col.classList.toggle("hide-tools", !viewOf(name).showTools);  // #4635
     agent = name; cursor = null; gen++; pinned = remember; lastCache = null;
     onPick(name, remember);  // the page's address (#4653); the panel then names its tab
@@ -380,9 +382,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
     for (const id of ["#sessState", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
     renderGive(name);
-    $("#sessText").value = "";
     loadPrompts(name);
-    clearFiles();
+    loadDraft(name);
     barFor(null);
     note("Reading the transcript…");
     waitLine({});
@@ -500,7 +501,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   };
   // Dictation (#4626): the microphone puts speech into the box as text.
   const dict = makeDictation({ button: $("#sessMic"), input: text, status: $("#sessDictate"), changed: () => { grow(); sendState(); } });
-  text.addEventListener("input", () => { grow(); sendState(); });
+  text.addEventListener("input", () => { grow(); sendState(); saveDraft(); });
+  text.addEventListener("blur", saveDraft);  // its cursor
+  window.addEventListener("pagehide", saveDraft);
   text.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!empty()) $("#sessBar").requestSubmit(); }
     else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && recall(e.key === "ArrowUp" ? 1 : -1, e)) e.preventDefault();
@@ -530,7 +533,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     // Up leaves the caret on the first line, so the next Up goes on; Down leaves it on the last line.
     const end = step > 0 && text.value.includes("\n") ? text.value.indexOf("\n") : text.value.length;
     text.setSelectionRange(end, end);
-    grow(); sendState();
+    grow(); sendState(); saveDraft();
     return true;
   }
   const sentPrompt = (to, t) => {
@@ -556,8 +559,41 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     box.classList.toggle("hidden", !files.length);
     sendState();
   }
+  // Each session's draft (#5112, mark: 'we need to maintain what is in the input for each session when we switch
+  // session as well as when we reload'): the text of its box, the cursor, and the files attached but not sent, in
+  // this browser (localStorage, by the session's name). A file is saved on the server when it is attached
+  // (session_upload), so the draft holds its id, not its bytes. Send empties the draft; a session that ended loses it.
+  const DRAFT = "river.draft.";
+  function readDraft(name) { try { return JSON.parse(localStorage.getItem(DRAFT + name) || "null"); } catch (e) { return null; } }
+  function saveDraft() {
+    if (!agent) return;
+    const d = { text: text.value, start: text.selectionStart, end: text.selectionEnd,
+                files: files.filter(f => f.id).map(f => ({ name: f.name, type: f.type, id: f.id })) };
+    try {
+      if (!d.text && !d.files.length) localStorage.removeItem(DRAFT + agent);
+      else localStorage.setItem(DRAFT + agent, JSON.stringify(d));
+    } catch (e) { /* no storage here: the draft lives until the page goes */ }
+  }
+  function loadDraft(name) {
+    files.forEach(f => { if (f.url && f.url.startsWith("blob:")) URL.revokeObjectURL(f.url); });
+    const d = (name && readDraft(name)) || {};
+    text.value = d.text || "";
+    files = (d.files || []).map(f => ({ ...f, reading: false, url: /^image\/(png|jpeg|gif|webp)$/.test(f.type || "")
+      ? `api/upload/${encodeURIComponent(name)}/${encodeURIComponent(f.id)}` : null }));
+    renderFiles(); grow();
+    if (d.start != null) { try { text.setSelectionRange(d.start, d.end ?? d.start); } catch (e) { /* hidden */ } }
+  }
+  // A saved file taken out of the box goes from the server too.
+  const dropSaved = (owner, id) => typeAction("session_upload_drop", { agent: owner, id }).catch(() => {});
+  function forgetDrafts(running) {  // the sessions that ended
+    try {
+      for (const k of Object.keys(localStorage)) {
+        if (k.startsWith(DRAFT) && !running.some(s => s.name === k.slice(DRAFT.length))) localStorage.removeItem(k);
+      }
+    } catch (e) { /* no storage */ }
+  }
   function clearFiles() {
-    files.forEach(f => { if (f.url) URL.revokeObjectURL(f.url); });
+    files.forEach(f => { if (f.url && f.url.startsWith("blob:")) URL.revokeObjectURL(f.url); });
     files = []; renderFiles();
   }
   function addFile(file) {
@@ -568,8 +604,19 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const f = { name: file.name || "file", type: file.type, reading: true,
       url: /^image\/(png|jpeg|gif|webp)$/.test(file.type) ? URL.createObjectURL(file) : null };
     files.push(f); renderFiles();
-    const r = new FileReader();
-    r.onload = () => { if (!files.includes(f)) return; f.data = String(r.result).split(",")[1]; f.reading = false; renderFiles(); };
+    const r = new FileReader(), owner = agent;
+    // Saved on the server at once: the draft keeps its id through a switch and a reload (#5112).
+    r.onload = () => {
+      if (!files.includes(f)) return;
+      typeAction("session_upload", { agent: owner, name: f.name, data: String(r.result).split(",")[1] }).then((u) => {
+        if (!files.includes(f)) return dropSaved(owner, u.id);  // taken out while it was saved
+        f.id = u.id; f.reading = false; renderFiles(); saveDraft();
+      }, (e) => {
+        if (!files.includes(f)) return;
+        files.splice(files.indexOf(f), 1); if (f.url) URL.revokeObjectURL(f.url);
+        renderFiles(); toast(`Could not attach ${f.name}: ${e.message}`, true);
+      });
+    };
     r.onerror = () => {
       if (!files.includes(f)) return;
       files.splice(files.indexOf(f), 1); if (f.url) URL.revokeObjectURL(f.url);
@@ -579,7 +626,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   }
   $("#sessFiles").addEventListener("click", (e) => {
     const b = e.target.closest("[data-rm]"); if (!b || sending) return;
-    const [f] = files.splice(+b.dataset.rm, 1); if (f.url) URL.revokeObjectURL(f.url); renderFiles(); text.focus();
+    const [f] = files.splice(+b.dataset.rm, 1); if (f.url && f.url.startsWith("blob:")) URL.revokeObjectURL(f.url);
+    if (f.id) dropSaved(agent, f.id);
+    renderFiles(); saveDraft(); text.focus();
   });
   $("#sessAttach").addEventListener("click", () => $("#sessPickFiles").click());
   $("#sessPickFiles").addEventListener("change", (e) => { [...e.target.files].forEach(addFile); e.target.value = ""; });
@@ -634,7 +683,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
           const typed = input.value;
           await refresh();
           pick(r.session_name);
-          input.value = typed;  // pick empties the box; the person sends the text to the new expert
+          input.value = typed;  // the new expert's box gets the text; the person sends it to the new expert
+          grow(); sendState(); saveDraft();
         } catch (_) { /* act shows the error */ }
         return;
       }
@@ -644,7 +694,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     try {
       const sent = files, typed = input.value;
       const r = await typeAction("session_send", { agent: to, text: typed,
-        ...(sent.length ? { files: sent.map(f => ({ name: f.name, data: f.data })) } : {}) });
+        ...(sent.length ? { files: sent.map(f => f.id ? { name: f.name, id: f.id } : { name: f.name, data: f.data }) } : {}) });
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
         appendEntries(col, [{ role: "user", sent: true, track: !!r.text, text: r.text || (sent.length ? "" : "(Enter)"),
@@ -656,6 +706,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
         body.scrollTop = body.scrollHeight;
         input.value = "";
         grow();
+        saveDraft();  // sent: the draft is empty
       }
     } catch (err) { toast(err.message, true); ok = !/tmux pane/.test(err.message); }
     finally { sending = false; renderFiles(); if (!input.disabled) { sendState(); input.focus(); } if (!ok) barFor(false); }

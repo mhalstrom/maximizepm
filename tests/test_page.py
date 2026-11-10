@@ -490,6 +490,57 @@ try {
         self.assertEqual(core._proposal(self.c, p["id"])["state"], "started")
         self.assertEqual(core.expert_task(self.c, "px") is not None, True)
 
+    def test_each_session_keeps_its_draft_through_a_switch_and_a_reload(self):
+        """#5112 (mark: 'we need to maintain what is in the input for each session when we switch session as well as
+        when we reload'): text typed for session A, then B, both come back after a switch and after a reload of the
+        page, with A's cursor and its attached file (saved at once; the draft holds its id). Send empties A's draft."""
+        self.pane["screen"] = "❯ \n"
+        core.register(self.c, "wt")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='waiting', waiting_in='site' WHERE name='wt'")
+        self.tmux._pane(name="wt")
+        self.tmux.panes[-1].update(agent="wt", screen="❯ \n")
+        driver = r'''try {
+  const go = async (name) => {
+    history.pushState(null, "", "/sessions/" + name); dispatchEvent(new PopStateEvent("popstate"));
+    await until(() => q("#sessTitle").textContent === name && !q("#sessText").disabled, "the chat of " + name);
+  };
+  const type = (t) => { const x = q("#sessText"); x.focus(); x.setRangeText(t, x.selectionStart, x.selectionEnd, "end");
+                        x.dispatchEvent(new InputEvent("input", { bubbles: true, data: t, inputType: "insertText" })); };
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag" && !q("#sessText").disabled, "the chat of ag");
+  if (!sessionStorage.getItem("reloaded")) {
+    type("first line for ag");
+    const x = q("#sessText"); x.setSelectionRange(5, 5);  // the cursor in the middle
+    const dt = new DataTransfer(); dt.items.add(new File(["notes"], "notes.txt", { type: "text/plain" }));
+    q("#sessPickFiles").files = dt.files; q("#sessPickFiles").dispatchEvent(new Event("change"));
+    await until(() => q("#sessFiles .sess-file") && !q("#sessSend").disabled, "the file is attached and saved");
+    await go("wt");
+    check(q("#sessText").value === "" && !q("#sessFiles .sess-file"), "wt starts with an empty box");
+    type("a note for wt");
+    await go("ag");
+    const back = { text: q("#sessText").value, at: q("#sessText").selectionStart, file: q("#sessFiles").textContent.includes("notes.txt") };
+    sessionStorage.setItem("back", JSON.stringify(back));
+    sessionStorage.setItem("reloaded", "1");
+    location.reload();
+  } else {
+    const out = { back: JSON.parse(sessionStorage.getItem("back")) };
+    await until(() => q("#sessText").value, "ag's draft after the reload");
+    out.ag = { text: q("#sessText").value, at: q("#sessText").selectionStart, file: q("#sessFiles").textContent.includes("notes.txt") };
+    await go("wt");
+    out.wt = q("#sessText").value;
+    await go("ag");
+    q("#sessBar").requestSubmit();
+    await until(() => q("#sessText").value === "", "Send empties the box");
+    out.after = localStorage.getItem("river.draft.ag");
+    post(out);
+  }
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag")
+        same = {"text": "first line for ag", "at": 5, "file": True}
+        self.assertEqual(got, {"back": same, "ag": same, "wt": "a note for wt", "after": None})
+        sent = [c[-1] for c in self.tmux.calls if c[0] == "set-buffer"]
+        self.assertTrue(any(x.startswith(" Attached files:") and "notes.txt\n\nfirst line for ag" in x for x in sent), sent)
+
     def test_the_sessions_tab_on_a_phone(self):
         """#4885: at phone width the page is no wider than the screen, each field has 16 px text (Safari on iOS zooms
         into a smaller one), and the Sessions tab shows the chat of one session or the list: Sessions goes back to

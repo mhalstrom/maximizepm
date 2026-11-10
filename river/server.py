@@ -2170,6 +2170,32 @@ def tidy_uploads(days=UPLOAD_DAYS):
     return gone
 
 
+def session_upload(conn, agent, data, name=None, who=None):
+    """A file attached in the message box (#5112): saved at once, so the session's draft keeps its id, not its bytes,
+    through a switch of sessions and a reload of the page. Send names it by the id."""
+    _typing_pane(conn, agent, who)
+    path = Path(save_upload(agent, data, name))
+    return {"id": path.name, "url": f"api/upload/{agent}/{path.name}"}
+
+
+def session_upload_drop(conn, agent, fid, who=None):
+    """The person took a saved file out of the message box before Send (#5112): it goes."""
+    path = Path(_uploaded(agent, fid))
+    path.unlink(missing_ok=True)
+    return {"dropped": path.name}
+
+
+def _uploaded(agent, fid):
+    """The path of a file session_upload saved for this agent, from its id; a refusal when it is not there."""
+    if not isinstance(fid, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", fid) or fid.startswith("."):
+        raise RiverError("a file id names a saved file of this session")
+    path = uploads_dir() / agent / fid
+    if not path.is_file():
+        raise RiverError(f"the attached file {fid.split('-', 3)[-1]} is gone (uploads go after {UPLOAD_DAYS} days); "
+                         f"attach it again")
+    return str(path)
+
+
 def session_send(conn, agent, text, who=None, images=None, files=None):
     """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
     Enter; text of several lines goes as one bracketed paste. An empty message sends nothing (#4617): the ! dialog
@@ -2182,14 +2208,18 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
         raise RiverError(f"at most {UPLOADS_PER_SEND} files go with one message")
     if attachments:
         pane = _typing_pane(conn, agent, who)
-        paths = []
+        paths, saved = [], []
         try:
             for f in attachments:
                 if not isinstance(f, dict):
                     raise RiverError("a file needs its name and base64 data")
-                paths.append(save_upload(agent, f.get("data"), f.get("name")))
+                if f.get("id") is not None:  # saved before, with the draft (#5112)
+                    paths.append(_uploaded(agent, f["id"]))
+                else:
+                    saved.append(save_upload(agent, f.get("data"), f.get("name")))
+                    paths.append(saved[-1])
         except (RiverError, OSError):
-            for path in paths:
+            for path in saved:
                 Path(path).unlink(missing_ok=True)
             raise
         image_paths = [p for p in paths if Path(p).suffix.lower() in UPLOAD_TYPES]
@@ -2634,7 +2664,7 @@ def frame_check(url):
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
-TYPING_OPS = ("terminal_keys", "session_send", "prompt_answer", "session_setting", "session_restart",
+TYPING_OPS = ("terminal_keys", "session_send", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
               "shell_open", "shell_keys", "shell_close")  # the Terminal tab's shells (#4803)
 
 

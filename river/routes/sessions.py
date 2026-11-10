@@ -141,6 +141,8 @@ GET = [
 OPS = {
     "session_send": lambda c, a, who: server.session_send(c, a["agent"], a.get("text", ""), who, a.get("images"),
                                                           a.get("files")),
+    "session_upload": lambda c, a, who: server.session_upload(c, a["agent"], a.get("data"), a.get("name"), who),
+    "session_upload_drop": lambda c, a, who: server.session_upload_drop(c, a["agent"], a.get("id"), who),
     "session_setting": lambda c, a, who: server.session_setting_live(c, a["agent"], a["key"], a.get("value"), who),
     "session_restart": lambda c, a, who: server.session_restart(c, a["agent"], a.get("changes"),
                                                                 bool(a.get("make_default")), who),

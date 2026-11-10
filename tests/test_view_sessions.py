@@ -744,6 +744,32 @@ class Uploads(TmuxBase):
             self.assertEqual([f["name"] for f in last["files"]], [n + (".bin" if n == "shot.png" else "") for n, _ in payloads])
             self.assertNotIn("images", last)
 
+    def test_a_draft_keeps_a_saved_file_and_send_takes_it_by_its_id(self):
+        """#5112: a file attached in the message box is saved at once; the draft keeps its id, and Send names it."""
+        import base64
+        png = b"\x89PNG\r\n\x1a\n" + b"\0" * 20
+        self.assertIn("session_upload", server.TYPING_OPS)  # it needs the page's token
+        up = server.OPS["session_upload"](self.c, {"agent": "ag", "name": "shot.png", "data": base64.b64encode(png).decode()}, "mark")
+        self.assertTrue(up["id"].endswith("shot.png") and up["url"] == f"api/upload/ag/{up['id']}", up)
+        self.assertEqual(server.upload_file("ag/" + up["id"]), (png, "image/png"))  # the preview after a reload
+        r = server.OPS["session_send"](self.c, {"agent": "ag", "text": "look", "files": [
+            {"name": "shot.png", "id": up["id"]}, {"name": "a.txt", "data": base64.b64encode(b"hi").decode()}]}, "mark")
+        self.assertEqual(r["images"], [str(server.uploads_dir() / "ag" / up["id"])])
+        self.assertEqual(Path(r["files"][1]).read_bytes(), b"hi")
+        for bad, why in (("../t.db", "names a saved file"), (".x", "names a saved file"), ("20260101-gone-x.png", "is gone")):
+            with self.assertRaisesRegex(core.RiverError, why):
+                server.OPS["session_send"](self.c, {"agent": "ag", "files": [{"id": bad}]}, "mark")
+        # A send that fails keeps the files of the draft; it removes only the ones it saved itself.
+        with self.assertRaises(core.RiverError):
+            server.OPS["session_send"](self.c, {"agent": "ag", "files": [
+                {"id": up["id"]}, {"name": "b.txt", "data": base64.b64encode(b"x").decode()}, {"id": "gone"}]}, "mark")
+        self.assertTrue((server.uploads_dir() / "ag" / up["id"]).is_file())
+        self.assertFalse(any(p.name.endswith("b.txt") for p in (server.uploads_dir() / "ag").iterdir()))
+        # Taken out of the box before Send: the saved file goes.
+        self.assertIn("session_upload_drop", server.TYPING_OPS)
+        server.OPS["session_upload_drop"](self.c, {"agent": "ag", "id": up["id"]}, "mark")
+        self.assertFalse((server.uploads_dir() / "ag" / up["id"]).exists())
+
     def test_mixed_files_and_images_and_safe_names(self):
         import base64
         png = b"\x89PNG\r\n\x1a\n" + b"\0" * 20
