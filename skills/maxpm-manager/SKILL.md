@@ -146,8 +146,9 @@ Stop when the user tells you to, and tell the user what you did.
   keeps it open, and the release starts again from its beginning: a fix item
   with the output, a new review of the fix, then the hook again. Nobody runs the
   command again by hand or repairs production by hand. A target where a push
-  to main is the release needs no deploy hook. `maxpm target deployer <t> off`
-  stops the hook too.
+  to main is the release needs no deploy hook. The hook replaces the deployer:
+  it runs whatever `maxpm target deployer` says. To stop it:
+  `maxpm target hook <t> deploy --clear`.
 - **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
   `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
   folder of the release; a waiting session that worked on the release does not get it.

@@ -1934,11 +1934,15 @@ def auto_release(conn, runner=None):
         out["started"][a["id"]] = name
         ann = None
     deploys = conn.execute("SELECT i.id, i.status, i.target, t.owner, t.deployer FROM items i JOIN targets t ON t.name=i.target "
-                           f"WHERE i.kind='deploy' AND i.status IN {core.OPEN_STATES} AND t.deployer<>'off' "
-                           "ORDER BY i.id").fetchall()
+                           f"WHERE i.kind='deploy' AND i.status IN {core.OPEN_STATES} ORDER BY i.id").fetchall()
     seen = set()
     hooked = core.hooked_targets(conn)
     for d in deploys:
+        # A deploy hook replaces the deployer: it runs whatever the deployer mode is (#5066: release #4912 waited
+        # 7 minutes after its review because toolscaled-prod had a hook and deployer off). Without a hook, off
+        # means maxpm serve starts nothing.
+        if d["deployer"] == "off" and d["target"] not in hooked:
+            continue
         if d["target"] in seen:
             continue  # one deploy item at a time for each target: the first open one
         seen.add(d["target"])

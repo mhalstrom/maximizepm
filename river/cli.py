@@ -3959,9 +3959,6 @@ def render(a, res):
                 if res.get("review") != "on":
                     print(f"  the review is off for {t}: the hook runs with no review. Turn it on: "
                           f"maxpm config set review on --project deploy-{t}")
-                if res.get("deployer") == "off":
-                    print(f"  the deployer mode of {t} is off: maxpm serve runs no deploy hook. Turn it on: "
-                          f"maxpm target deployer {t} launch")
             free = [e for e in res["events"] if e not in {h["event"] for h in res["hooks"]}]
             if free:
                 print(f"  set one: maxpm target hook {res['target']} <event> \"<command>\"   events with no hook:")
@@ -3986,12 +3983,16 @@ def render(a, res):
         print("  monitor: " + (res.get("monitor") or f"none (the deploy session watches the release as it says, when "
                                                       f"you set one: maxpm target monitor {res['name']} \"<what to watch, for "
                                                       f"how long>\")"))
-        print("  deployer: " + {"launch": "launch (maxpm serve alerts the owner when a deploy is ready, and starts a "
-                                          "deployer session when the owner cannot take it)",
-                                "standing": "standing (maxpm serve keeps a deployer session that owns the target while "
-                                            "a release waits on its review)",
-                                "off": "off (maxpm serve starts nothing; the owner or a person deploys)"}[res["deployer"]]
-              + f"; change it: maxpm target deployer {res['name']} launch|standing|off")
+        modes = {"launch": "launch (maxpm serve alerts the owner when a deploy is ready, and starts a deployer session "
+                           "when the owner cannot take it)",
+                 "standing": "standing (maxpm serve keeps a deployer session that owns the target while a release "
+                             "waits on its review)",
+                 "off": "off (maxpm serve starts nothing; the owner or a person deploys)"}
+        if any(h["event"] == "deploy" for h in res.get("hooks") or []):
+            mode = f"not used: the deploy hook releases, whatever the mode ({res['deployer']}) (#5066)"
+        else:
+            mode = modes[res["deployer"]]
+        print(f"  deployer: {mode}; change it: maxpm target deployer {res['name']} launch|standing|off")
         for line in _release_lines(res["release"]):
             print("  " + line)
         for line in _hook_lines(res["name"], res.get("hooks") or []):

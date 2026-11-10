@@ -182,6 +182,31 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn("deploy hook: exit 0", it["output"])
         self.assertEqual(server.auto_release(self.c, runner=sent.append)["deploying"], {})
 
+    def test_a_deploy_hook_runs_while_the_deployer_is_off(self):
+        # #5066: release #4912 waited 7 minutes: the deploy loop took only targets with deployer<>off.
+        rv, dep = self._release(owner="ops")
+        core.register(self.c, "mark", human=True)
+        core.target_hook(self.c, "web", "deploy", f'"{sys.executable}" -c "print(\'released\')"', actor="mark")
+        core.target_deployer(self.c, "web", "off", "mark")
+        core.register(self.c, "rev")
+        core.claim(self.c, rv, "rev")
+        core.review_pass(self.c, rv, "ok", "rev")
+        sent = []
+        r = server.auto_release(self.c, runner=sent.append)
+        self.assertEqual((r["alerted"], r["started"], sent), ({}, {}, []))
+        self.assertIn(dep, r["deploying"])
+        import time
+        for _ in range(200):  # the hook runs in a thread of maxpm serve
+            if core._item(self.c, dep)["status"] == "done":
+                break
+            time.sleep(0.05)
+        self.assertEqual(core._item(self.c, dep)["status"], "done")
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["target", "show", "web"])
+        self.assertIn("deployer: not used: the deploy hook releases", out.getvalue())
+
     def test_serve_starts_a_new_session_for_an_operational_task(self):
         # #4973: an operational task starts in a new session; a used session that waits does not get it.
         core.project_add(self.c, "site", path=self.dir.name)
