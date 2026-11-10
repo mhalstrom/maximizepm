@@ -561,7 +561,8 @@ TMUX_SESSION = "maxpm"
 TMUX_RUNNER = None
 TMUX_SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "nu"}
 # One line per pane: the free text (the session's name) comes last.
-_TMUX_PANE = "#{pane_id}|#{window_id}|#{@maxpm_tile}|#{window_panes}|#{pane_current_command}|#{pane_tty}|#{@maxpm_agent}|#{@maxpm_started}|#{@maxpm_name}"
+_TMUX_PANE = ("#{pane_id}|#{window_id}|#{@maxpm_tile}|#{window_panes}|#{pane_current_command}|#{pane_tty}|#{@maxpm_agent}|"
+              "#{@maxpm_started}|#{@maxpm_db}|#{@maxpm_name}")
 # A new pane shows a shell first: tmux starts the login shell, the shell reads its files, and only then it runs
 # the command line river typed. For START_GRACE seconds after river opened a pane, a shell there is a session
 # that starts, not one that ended. Without it, a tidy pass a few seconds after a start closed the pane before
@@ -623,14 +624,38 @@ def _tmux_panes(everywhere=False):
                 check=False)
     rows, t = [], core.now().timestamp()
     for line in (out or "").splitlines():
-        f = line.split("|", 8)
-        if len(f) == 9:
+        f = line.split("|", 9)
+        if len(f) == 10:
             shell = f[4].lstrip("-") in TMUX_SHELLS
             starting = shell and f[7].isdigit() and t - int(f[7]) < START_GRACE
             rows.append({"pane": f[0], "window": f[1], "tile": f[2] == "1", "window_panes": int(f[3] or 1),
                          "running": f[4].lstrip("-"), "ended": shell and not starting, "starting": starting,
-                         "tty": f[5], "agent": f[6] or None, "name": f[8]})
+                         "tty": f[5], "agent": f[6] or None, "db": f[8] or None, "name": f[9]})
     return rows
+
+
+def _queue_db():
+    """The database of this queue, as river tags the panes it opens with it (@maxpm_db)."""
+    return str(core.db_path().expanduser().resolve())
+
+
+def _own_pane(p):
+    """Whether this queue opened the pane: its @maxpm_db is this queue's database. A pane with no tag (opened
+    before river tagged panes) belongs to the main queue only. Every maxpm serve tidies the one tmux server of
+    the user, also a serve of a test or demo queue (MAXPM_DB): there the real agents are not in the queue, so it
+    closed their panes while they ran. On 2026-11-10 two demo serves closed the panes of six live sessions in 15
+    minutes, the session that started one of them too (#5054). A queue tidies only its own panes."""
+    return p.get("db") == _queue_db() if p.get("db") else _queue_db() == _main_db()
+
+
+def _main_db():
+    """The main queue's database in the user's real home folder: a demo may set HOME to a folder of its own."""
+    try:
+        import pwd
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):  # Windows
+        home = os.path.expanduser("~")
+    return str(Path(home, ".maximizepm", "maxpm.db").resolve())
 
 
 def _tmux_pane_of(tty):
@@ -665,6 +690,7 @@ def _tmux_open(t, env, line):
         pane = pane or _tmux("new-window", "-d", "-t", f"={TMUX_SESSION}:", "-n", name, *new)
     _tmux("set-option", "-p", "-t", pane, "@maxpm_name", name)
     _tmux("set-option", "-p", "-t", pane, "@maxpm_started", str(int(core.now().timestamp())))
+    _tmux("set-option", "-p", "-t", pane, "@maxpm_db", _queue_db())  # only this queue tidies the pane (#5054)
     if env.get("MAXPM_AGENT"):
         _tmux("set-option", "-p", "-t", pane, "@maxpm_agent", env["MAXPM_AGENT"])
     _tmux("send-keys", "-t", pane, "-l", line)
@@ -712,6 +738,7 @@ def _done_panes(conn, panes, terminals=None):
     since an answer would only let it read the stop and end. A pane with no agent name (a session for a person's
     item) is done only by its shell. terminals: agent_terminals(conn), when the caller has it."""
     import re
+    panes = [p for p in panes if _own_pane(p)]  # another queue's pane is never done here (#5054)
     done = {p["pane"]: "its agent ended" for p in panes if p["ended"]}
     if conn is None:
         return done
@@ -892,6 +919,9 @@ def auto_tidy(conn):
         if _tmux("kill-pane", "-t", p["pane"], check=False) is not None:
             closed.append({"pane": p["pane"], "name": p["name"], "why": why})
             screens.pop(p["pane"], None)
+            # The history says when a pane closed and why: a session that disappeared can be traced (#5054).
+            with core.tx(conn):
+                core._event(conn, None, "maxpm", f"tidy closed the tmux pane {p['pane']} ({p['name']}): {why}")
     TIDY["screens"] = screens
     if not busy:
         TIDY["at"] = t

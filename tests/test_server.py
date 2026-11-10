@@ -1009,7 +1009,7 @@ class FakeTmux:
         if cmd == "split-window":
             return None if self.full else self._pane(window=opt("-t"))
         if cmd == "set-option" and "-p" in a:
-            pane[{"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started"}[a[-2]]] = a[-1]
+            pane[{"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started", "@maxpm_db": "db"}[a[-2]]] = a[-1]
         elif cmd == "set-option" and "-w" in a and "@maxpm_tile" in a:
             self.windows[opt("-t")]["tile"] = "" if "-u" in a else "1"
         elif cmd == "send-keys":
@@ -1029,7 +1029,9 @@ class FakeTmux:
         elif cmd == "list-panes":
             return "\n".join("|".join([p["id"], p["window"], self.windows[p["window"]]["tile"],
                                        str(sum(q["window"] == p["window"] for q in self.panes)), p["running"],
-                                       "/dev/ttys00" + p["id"][1:], p["agent"], p.get("started", ""), p["name"]])
+                                       "/dev/ttys00" + p["id"][1:], p["agent"], p.get("started", ""),
+                                       # A pane made with no "db" is this test's queue's own; "" is a pane with no tag (#5054).
+                                       p.get("db", str(core.db_path().resolve())), p["name"]])
                              for p in self.panes)
         elif cmd == "show-options":
             return "C-b"
@@ -1478,6 +1480,45 @@ class LaunchInTmux(unittest.TestCase):
         calls = len(self.tmux.calls)
         self.assertEqual([p["name"] for p in server.tmux_done(self.c)], [panes[other]["name"]])
         self.assertFalse(any(c[0] == "display-message" for c in self.tmux.calls[calls:]))
+
+    def test_a_serve_of_another_queue_never_closes_a_pane(self):
+        """#5054: a demo maxpm serve (MAXPM_DB on a demo queue) tidied the user's one tmux server. The live agents were
+        not in its queue, so it closed their panes while they ran. A queue tags the panes it opens with its database
+        and tidies only those; a pane with no tag belongs to the main queue only."""
+        from unittest import mock
+        core.config_set(self.c, "launch_in", "tmux")
+        clock = [core.now()]
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+        core.item_add(self.c, "shop", "work")
+        mine = server.launch_agent(self.c, "shop")["session_name"]
+        own = self.tmux.panes[0]
+        self.assertEqual(own["db"], str(core.db_path().resolve()))  # the pane carries this queue's database
+        # Sessions of the main queue: a live one with its tag, a live one opened before the tags, and an ended one.
+        main = "/Users/x/.maximizepm/maxpm.db"
+        live, old, ended = (self.tmux._pane(name=n) for n in ("#1 live", "#2 old", "#3 ended"))
+        panes = {p["id"]: p for p in self.tmux.panes}
+        for pid, db in ((live, main), (old, ""), (ended, main)):
+            panes[pid].update(name=f"#{pid[1:]} other", agent=f"other-{pid[1:]}", db=db, screen="at its prompt")
+        panes[ended]["running"] = "zsh"
+        self.assertNotEqual(server._queue_db(), server._main_db())  # MAXPM_DB names a queue that is not the main one
+        with mock.patch.dict(os.environ, {"HOME": self.dir.name}):  # a demo's HOME does not make its queue the main one
+            self.assertNotEqual(server._queue_db(), server._main_db())
+        self.assertEqual(server.tmux_done(self.c), [])
+        # The serve of this queue tidies every tidy_every: the other queue's panes stay, live or ended. Its own agent
+        # left the queue: that pane closes, and the history says so.
+        core.unregister(self.c, mine)
+        for seconds in (0, 60, 180):
+            clock[0] += core.timedelta(seconds=seconds)
+            server.auto_tidy(self.c)
+        self.assertEqual({p["id"] for p in self.tmux.panes}, {live, old, ended})
+        self.assertEqual([r["change"] for r in self.c.execute("SELECT change FROM events WHERE change LIKE 'tidy %'")],
+                         [f"tidy closed the tmux pane {own['id']} ({own['name']}): {mine} is not in the queue any more"])
+        # The main queue tidies a pane with no tag: there the ended one closes.
+        panes[old]["running"] = "zsh"
+        with mock.patch.object(server, "_main_db", server._queue_db):
+            self.assertEqual([p["pane"] for p in server.tmux_done(self.c)], [old])
 
     def test_river_serve_tidies_every_tidy_every_and_never_a_busy_agent(self):
         import threading
