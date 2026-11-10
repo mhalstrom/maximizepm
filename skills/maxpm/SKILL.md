@@ -450,6 +450,11 @@ A worker never takes an expert-tier task; a session started for it does
 (Start, `maxpm launch --item <id>`), and is an expert from its start. The
 short form: `maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`
 adds the task and starts its session (`--item <id>` takes a task that exists).
+The user asks you for an expert ("ask the manager for a Fable expert to review
+this"): `maxpm expert request "<what it does>" --model <m> --for <person>
+--context "<what it reads, its rules, where its output goes>"`, not an alert in
+free text. It adds the expert-tier task (found during your item) and alerts the
+manager with the line that starts it as an expert; go on with your work.
 In a session that holds the task already: `maxpm --as <you> expert adopt`.
 `maxpm go` then gives you role EXPERT. As an expert:
 

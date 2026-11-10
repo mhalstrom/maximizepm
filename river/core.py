@@ -12196,6 +12196,68 @@ def expert_propose(conn, name, topic=None, project=None, item=None, model=None, 
     return _proposal(conn, cur.lastrowid)
 
 
+def expert_request(conn, topic, actor=None, model=None, person=None, name=None, context=None, item=None,
+                   project=None, cwd=None, blocked=False):
+    """maxpm expert request (#5036): a session asks for an expert, often on a person's word ('ask the manager to
+    setup a fable expert to review your copy'). A request in free text went wrong: the manager added a plain task
+    and launched a worker. So the request itself adds the expert-tier task (found during the requester's item, with
+    the model asked for), and alerts the manager, or the person when no manager runs, with the exact line that starts
+    the expert. maxpm launch --item <id> of that task starts an expert too. Returns the task and the start line."""
+    if not actor:
+        raise RiverError("ask as the session that needs the expert: maxpm --as <you> expert request \"<topic>\" ...")
+    topic = (topic or "").strip()
+    if not topic:
+        raise RiverError("say what the expert does: maxpm expert request \"<topic>\"")
+    if name is not None and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name):
+        raise RiverError("an expert's name uses letters, digits, '.', '_', '-' (up to 64)")
+    if name is not None and conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+        raise RiverError(f"{name} is a session already; pick another name, or leave out --name")
+    held = _item(conn, item) if item is not None else _held_item(conn, actor)
+    if held is not None:
+        held = _item(conn, held["id"])
+    if person is not None:
+        p_row = _agent(conn, person)
+        if p_row["kind"] != "human":
+            raise RiverError(f"{person} is an agent; --for names the person who talks with the expert")
+    if project is None:
+        if held is not None:
+            project = _project_name(conn, held["project_id"])
+        else:
+            project = next(iter(projects_for_dir(conn, cwd)), None) if cwd else None
+    if not project:
+        raise RiverError("name the project the expert works in: --project <name>")
+    if not model:
+        model = session_model(conn, held)[0] if held is not None else None
+    if not model:
+        raise RiverError("say which model the expert runs: --model <name> (the person's word, else the model of "
+                         "the work it continues)")
+    lines = [f"Expert request of {actor}" + (f" for {person}" if person else "")
+             + (f", found during #{held['id']}" if held is not None else "") + "."]
+    if (context or "").strip():
+        lines.append(context.strip())
+    if name is None:
+        base = f"{project}-expert"
+        name, n = base, 1
+        while conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+            n += 1
+            name = f"{base}-{n}"
+    iid = item_add(conn, project, topic, actor=actor, context="\n".join(lines), tier="expert",
+                   found_during=held["id"] if held is not None else None,
+                   models={"model": model, "max_model": model})["id"]
+    start = f"maxpm expert start {name} --item {iid}"
+    to = active_manager(conn) or person or next(
+        (r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC")), None)
+    sent = None
+    if to:
+        body = (f"EXPERT REQUEST: {topic} ({model})" + (f", for {person}" if person else "") + f". It is the "
+                f"expert-tier task #{iid}. Start it as an expert: {start}   (or maxpm launch --item {iid}; never a "
+                f"plain task for a worker)")
+        sent = send(conn, "alert", body, to=to, item=iid, actor=actor, blocked=blocked)["id"]
+    return {"expert_request": {"item": iid, "topic": topic, "model": model, "name": name, "project": project,
+                               "start": start, "to": to, "message": sent,
+                               "found_during": held["id"] if held is not None else None}}
+
+
 def expert_proposal_end(conn, pid, state, actor=None, why=None, expert=None):
     """Close an open proposal: started (the person clicked Continue in an expert) or dismissed. The manager hears
     it: after a start, it points the next turn about the topic to the expert; after Dismiss, it talks on itself."""

@@ -1086,6 +1086,17 @@ def build_parser():
     y.add_argument("--project", help="the project whose folder it works in")
     y.add_argument("--model", help="its model; else the model of the work it continues")
     y.add_argument("--effort", help="its effort level")
+    y = xs.add_parser("request", help="ask for an expert (a person asked you for one): adds the expert-tier task and "
+                      "alerts the manager with the line that starts it as an expert")
+    y.add_argument("topic", help="what the expert does: the title of its task")
+    y.add_argument("--model", help="its model (the person's word); else the model of the work it continues")
+    y.add_argument("--for", dest="person", help="the person who talks with the expert")
+    y.add_argument("--name", help="the expert's name (default: <project>-expert)")
+    y.add_argument("--context", help="what it reads, the rules it keeps, where its output goes")
+    y.add_argument("--item", type=int, help="the work it continues (default: the item you hold)")
+    y.add_argument("--project", help="its project (default: that of the item, else of this folder)")
+    y.add_argument("--blocked", action="store_true", help="you cannot go on until the expert answers: the manager "
+                   "wakes at once")
     xs.add_parser("proposals", help="the open expert proposals")
     y = xs.add_parser("accept", help="start a proposed expert (the page's Continue in an expert)")
     y.add_argument("id", help="the proposal (p<id>)")
@@ -2031,6 +2042,9 @@ def _expert_cmd(conn, a, actor):
             core.item_edit(conn, held["id"], actor=actor, tier="expert")
             core.expert_make(conn, actor, held["title"], core._project_name(conn, held["project_id"]), actor)
         return {"adopted": core.expert_view(conn, core._agent(conn, actor))}
+    if e == "request":
+        return core.expert_request(conn, a.topic, actor, a.model, a.person, a.name, a.context, a.item, a.project,
+                                   os.getcwd(), a.blocked)
     if e in ("propose", "proposals", "accept", "dismiss"):
         if e == "proposals":
             return {"expert_proposals": core.expert_proposals(conn)}
@@ -2936,6 +2950,14 @@ def render_expert(res):
                   "a session one in its chat: maxpm --as <name> expert adopt --topic \"...\"")
         for x in res["experts"]:
             print(line(x))
+    elif "expert_request" in res:
+        r = res["expert_request"]
+        print(f"added the expert-tier task #{r['item']} {r['topic']} ({r['model']})"
+              + (f", found during #{r['found_during']}" if r.get("found_during") else ""))
+        print(f"  it starts as an expert: {r['start']}   (or maxpm launch --item {r['item']})")
+        print(f"  alerted {r['to']} (message #{r['message']}): it starts the expert" if r.get("to") else
+              "  nobody to tell: no manager runs and no person is known; ask a person to run the line above")
+        print("  Go on with your work; the expert sends its findings when it has them.")
     elif "adopted" in res:
         x = res["adopted"]
         print(f"{x['name']} is now an expert on: {x['topic']}")

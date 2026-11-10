@@ -2780,6 +2780,50 @@ class Experts(Base):
         core.item_edit(self.c, self.ready, actor="mark", tier="normal")
         self.assertIsNone(core._item(self.c, self.ready)["tier"])
 
+    def test_a_request_for_an_expert_adds_an_expert_tier_task_and_tells_the_manager_how_to_start_it(self):
+        """#5036: a session asked the manager for 'a fable expert' in free text; the manager added a plain task and
+        launched a worker. maxpm expert request adds the expert-tier task itself (found during the requester's item,
+        with the model asked for) and alerts the manager with the exact expert start line; a launch of that task
+        (push and go) gives an expert."""
+        from river import cli
+        core.register(self.c, "w1")
+        core.register(self.c, "mgr")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        self.c.commit()
+        core.claim(self.c, self.ready, "w1")
+        with self.assertRaisesRegex(RiverError, "--for names the person"):
+            core.expert_request(self.c, "review the copy", "w1", "fable", person="mgr")
+        r = core.expert_request(self.c, "review the copy of the landing page", "w1", "fable", person="mark",
+                                context="Rules: keep the six prompts word for word.")["expert_request"]
+        it = core._item(self.c, r["item"])
+        self.assertEqual((it["tier"], it["model"], it["max_model"], it["found_during"], r["name"], r["to"]),
+                         ("expert", "fable", "fable", self.ready, "a-expert", "mgr"))
+        self.assertIn("Expert request of w1 for mark, found during", it["context"])
+        self.assertIn("keep the six prompts", it["context"])
+        self.assertEqual(r["start"], f"maxpm expert start a-expert --item {r['item']}")
+        alert = core.message_show(self.c, r["message"])
+        self.assertEqual((alert["kind"], alert["to_agent"]), ("alert", "mgr"))
+        self.assertIn(f"EXPERT REQUEST: review the copy of the landing page (fable), for mark", alert["body"])
+        self.assertIn(r["start"], alert["body"])
+        # A worker never takes it; the session launched for it is an expert.
+        with self.assertRaisesRegex(RiverError, "expert-tier task"):
+            core.claim(self.c, r["item"], "w1")
+        core.register(self.c, "a-1f2e")
+        core.push(self.c, r["item"], "a-1f2e", "launched for it", "mgr")
+        self.assertEqual(core.go(self.c, self.dir.name, "a-1f2e", focus=f"item:{r['item']}")["role"], "expert")
+        # The next request takes the next free name; with no manager, the person hears it.
+        self.c.execute("UPDATE agents SET role=NULL WHERE name='mgr'")
+        self.c.commit()
+        core.register(self.c, "a-expert")
+        r2 = core.expert_request(self.c, "a second look", "w1", "opus")["expert_request"]
+        self.assertEqual((r2["name"], r2["to"]), ("a-expert-2", "mark"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_expert({"expert_request": r2})
+        self.assertIn(f"it starts as an expert: maxpm expert start a-expert-2 --item {r2['item']}", out.getvalue())
+        with self.assertRaisesRegex(RiverError, "say which model"):
+            core.expert_request(self.c, "no model", "mark", project="a")
+
     def test_adopt_makes_the_held_task_expert_tier(self):
         from river import cli
         old_env = os.environ.get("MAXPM_DB")

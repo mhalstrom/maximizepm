@@ -151,6 +151,13 @@ Stop when the user tells you to, and tell the user what you did.
   becomes a long talk (see "Hand a long talk to an expert"),
   `maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`; only
   the user ends one (`maxpm expert end <name> [--done]`), or `expert_idle_end` does.
+- **A request for an expert** (an `EXPERT REQUEST` alert from `maxpm expert
+  request`, or a session or the user asks for "an expert", "a Fable expert"):
+  start an expert, never a worker. Run the line the alert names,
+  `maxpm expert start <name> --item <id>` (or `--topic "..." --model <m>` when
+  no task exists). A plain `maxpm add` and `maxpm launch --item` of a task
+  without `--tier expert` starts a worker (#5036); a session started so is made
+  an expert in its chat: `maxpm --as <name> expert adopt`.
 - **NOT CONNECTED**: a session MaximizePM started ran no maxpm command. Tell the
   user (its terminal may wait on a prompt; for an agent in tmux the user reads
   and answers it with the agent's Terminal button on the page, and only a
