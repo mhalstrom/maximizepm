@@ -440,6 +440,16 @@ days, and shows them; add with `--new` only when it is different work. `maxpm
 duplicates` lists the open items that look like the same work: merge them, or
 link them when they are different parts.
 
+### Goals and sub-goals
+
+A goal keeps its tasks' context: few sessions do them, and each owner writes the
+handoff for the next. Split a large goal into sub-goals with owners (`maxpm goal
+add <project> <name> --parent <goal>`, then tag its tasks), so the work runs in
+parallel and each part keeps its context; give each sub-goal a handoff and a
+first task. A shared goal (`--shared`) is the exception: a label for tasks that
+do not depend on each other; the worker that finishes one of its tasks keeps
+its handoff.
+
 ## Operational work goes into a task
 
 Work on the operation of the system is a task of its own, not something you do
