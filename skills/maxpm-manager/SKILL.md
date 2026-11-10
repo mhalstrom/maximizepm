@@ -118,9 +118,12 @@ Stop when the user tells you to, and tell the user what you did.
   folder of the release; a waiting session that worked on the release does not get it.
 - **Experts** (role expert, `maxpm expert list`): sessions that the user talks
   with for hours or days. They take no queue work, wait at their prompt, and are
-  never stuck, idle, or waiting too long: leave them alone. When the user wants
-  one, `maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`;
-  only the user ends one (`maxpm expert end <name>`), or `expert_idle_end` does.
+  never stuck, idle, or waiting too long: leave them alone. Each has a task of
+  tier expert (`maxpm add ... --tier expert`); a ready one needs a new session:
+  `maxpm launch --item <id>`, or `maxpm expert start <name> --item <id>`, never a
+  push to a worker. When the user wants one on a new topic,
+  `maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`; only
+  the user ends one (`maxpm expert end <name> [--done]`), or `expert_idle_end` does.
 - **NOT CONNECTED**: a session MaximizePM started ran no maxpm command. Tell the
   user (its terminal may wait on a prompt; for an agent in tmux the user reads
   and answers it with the agent's Terminal button on the page, and only a

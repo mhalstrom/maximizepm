@@ -23,7 +23,7 @@ OPS = {
                                                 a.get("context", ""), a.get("touches"), a.get("check", ""),
                                                 a.get("blocks"), a.get("mode"), a.get("found_during"),
                                                 [int(x) for x in a.get("feeds", [])], a.get("due"),
-                                                goals=a.get("goals"), models=a.get("models")),
+                                                goals=a.get("goals"), models=a.get("models"), tier=a.get("tier")),
     "goal_add": lambda c, a, who: core.goal_add(c, a["project"], a["name"], a.get("outcome", ""), a.get("done_when", ""),
                                                 who, shared=bool(a.get("shared"))),
     "goal_edit": lambda c, a, who: core.goal_edit(c, a["name"], a.get("outcome"), a.get("done_when"), a.get("new_name"), who,

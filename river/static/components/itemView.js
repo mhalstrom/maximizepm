@@ -3,7 +3,7 @@
 // other items open in the panel too. "Edit in the drawer" opens the drawer for its actions and fields.
 // Server: GET /api/item/<id> (the drawer's data).
 import { esc, ago, left } from "../lib.js";
-import { statusChip, prioChip, doerChip, modelChip, agentChip } from "./chip.js";
+import { statusChip, prioChip, doerChip, modelChip, agentChip, tierChip } from "./chip.js";
 import { msgLine } from "./drawer.js";
 
 const links = (list) => list.map(w => `<div><span class="link" data-open="${w.id}">#${w.id} ${esc(w.title)}</span> <span class="muted">(${esc(w.status)})</span></div>`).join("")
@@ -16,7 +16,7 @@ export function itemViewHtml(it) {
     <div class="spi-top"><span class="muted">#${it.id} · ${esc(it.project)}</span><span class="spacer"></span>
       <button class="btn" type="button" data-drawer-open="${it.id}" title="Open #${it.id} in the drawer: claim, done, release, edit its fields">Edit in the drawer</button></div>
     <h3>${esc(it.title)}</h3>
-    <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${modelChip(it)}${statusChip(it)}</div>
+    <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${statusChip(it)}</div>
     ${holder ? `<div class="meta">Held by <b>${esc(holder)}</b>${it.lease_expires_at ? " · lease " + left(it.lease_expires_at) + " left" : ""}</div>` : ""}
     <div class="meta">${esc(it.reason || "")}</div>
     ${text("Notes", it.notes)}${text("Context", it.context)}${text("Output", it.output)}

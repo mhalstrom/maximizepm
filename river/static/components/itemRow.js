@@ -1,6 +1,6 @@
 // Item rows, and the one order items take in a list.
 import { esc } from "../lib.js";
-import { goalChips, prioChip, dueChip, doerChip, replanChip, statusChip, modelChip, agentChip } from "./chip.js";
+import { goalChips, prioChip, dueChip, doerChip, replanChip, statusChip, modelChip, agentChip, tierChip } from "./chip.js";
 
 // Ready first, then more important, then what unblocks more, then the project's own order.
 export function itemOrder(a, b) {
@@ -12,7 +12,7 @@ export function itemRow(it, why) {
   return `<div class="row" data-id="${it.id}"${it.status === "open" ? ' draggable="true"' : ""}>
     <div class="id">#${it.id}</div>
     <div class="t"><div class="title">${esc(it.title)}</div>${it.blocked_reason && it.status === "open" ? `<div class="blk">${esc(it.blocked_text)}</div>` : ""}${why ? `<div class="why">${esc(why)}</div>` : ""}</div>
-    <div class="chips">${goalChips(it)}${prioChip(it)}${dueChip(it)}${doerChip(it)}${agentChip(it)}${modelChip(it)}${replanChip(it)}${statusChip(it)}</div></div>`;
+    <div class="chips">${goalChips(it)}${prioChip(it)}${dueChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${replanChip(it)}${statusChip(it)}</div></div>`;
 }
 
 // Items as table rows (components/table.js): one flat row per item, with plain values to sort and

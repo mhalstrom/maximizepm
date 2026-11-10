@@ -1,6 +1,6 @@
 // The item drawer: the panel on the right with one item's details, actions, and history.
 import { esc, ago, left, clip } from "../lib.js";
-import { chip, statusChip, prioChip, doerChip, modelChip, agentChip } from "./chip.js";
+import { chip, statusChip, prioChip, doerChip, modelChip, agentChip, tierChip } from "./chip.js";
 import { input, textarea, select, field, two, renderKeepingEdits } from "./form.js";
 import { agentStart } from "./agentStart.js";
 
@@ -81,7 +81,7 @@ export function itemDrawerHtml(it, { S, me }) {
   return `
     <div style="display:flex;align-items:center;gap:8px"><span class="muted">#${it.id} · ${esc(it.project)}</span><span class="spacer" style="flex:1"></span><button class="btn" id="dClose">Close</button></div>
     <h3>${esc(it.title)}</h3>
-    <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${modelChip(it)}${statusChip(it)}</div>
+    <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${statusChip(it)}</div>
     ${holder ? `<div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Held by</span> <b>${esc(holder)}</b>
       ${running(S, holder) ? `<button class="btn" data-session-go="${esc(holder)}" title="Open the session of ${esc(holder)} in the Sessions tab">Open session</button>`
         : `<span class="muted" style="font-size:12px">its session does not run now</span>`}</div>` : ""}

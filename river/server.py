@@ -357,34 +357,52 @@ EXPERT_PROMPT = ("You are {name}, an expert session of MaximizePM on: {topic}. A
 
 
 def start_expert(conn, name, topic=None, project=None, resume=False, runner=None, agent=None, actor=None, model=None,
-                 effort=None, launch_in=None, options=None):
-    """maxpm expert start (#4955): open an agent session that is an expert on a topic, in the folder of its project.
+                 effort=None, launch_in=None, options=None, item=None):
+    """maxpm expert start (#4955, #4959): open an agent session for an expert-tier task, in the folder of its project.
+    The task: item (made expert-tier), else on resume the open expert-tier task it had before, else a new
+    expert-tier task with the topic as its title. The session claims it before it opens, so every expert has a task.
     resume: claude --resume of the last Claude Code session the expert ran in, so the talk goes on with its context;
-    with none, a fresh session that reads its notes. The topic and project of an expert that ended come from its
-    history when not given again."""
+    with none, a fresh session that reads its notes. The model is the person's choice: a limit of the task that
+    excludes it moves to it."""
     old = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
     if old is not None and old["role"] != "expert":
         raise RiverError(f"{name} is a session that runs now ({old['role'] or 'no role'}); pick another name, or make that "
-                         f"session an expert in its own chat: maxpm --as {name} expert adopt --topic \"...\"")
+                         f"session an expert in its own chat: maxpm --as {name} expert adopt")
     if old is not None and old["pid"] and old["host"] == core.this_host() and core.pid_alive(old["pid"]):
         raise RiverError(f"the expert {name} runs now (process {old['pid']}); talk with it in its session, or end it "
                          f"first: maxpm expert end {name}")
     was_topic, was_project = core.expert_topic_of(conn, name)
-    topic, project = topic or was_topic, project or was_project
-    if not topic:
-        raise RiverError(f"{name} was never an expert, so it needs a topic: maxpm expert start {name} --topic \"...\"")
-    p = core._project(conn, project) if project else next(
-        (core._project(conn, x["name"]) for x in core.project_list(conn) if x.get("path")), None)
-    if p is None or not p["path"]:
-        raise RiverError("an expert starts in the folder of a project: name one that has a folder, --project <name> "
-                         "(maxpm project path <name> <folder>)")
+    task = core._item(conn, item) if item is not None else core.expert_task(conn, name) if resume or old else None
+    if task is not None and task["assignee"] not in (None, name):
+        raise RiverError(f"#{task['id']} is held by {task['assignee']}")
+    if task is not None and task["status"] not in ("open", "in_progress", "held"):
+        raise RiverError(f"#{task['id']} is {task['status']}; an expert takes an open task")
+    if task is None:
+        topic = topic or was_topic
+        if not topic:
+            raise RiverError(f"{name} needs a task: --topic \"...\" adds an expert-tier task with that title, or "
+                             f"--item <id> takes one")
+        project = project or was_project or next((x["name"] for x in core.project_list(conn) if x.get("path")), None)
+        if not project:
+            raise RiverError("an expert starts in the folder of a project: maxpm project path <name> <folder>")
+        task = core._item(conn, core.item_add(conn, project, topic, actor=actor, tier="expert")["id"])
+    elif task["tier"] != "expert":
+        core.item_edit(conn, task["id"], actor=actor, tier="expert")
+    p = core._project(conn, core._project_name(conn, task["project_id"]))
+    if not p["path"]:
+        raise RiverError(f"project {p['name']} has no folder, so MaximizePM cannot start a session: "
+                         f"maxpm project path {p['name']} <folder>")
     launch_in = core._launch_in(conn, p["id"], launch_in)
     _can_open_terminal(runner, f"cd {p['path']} && claude go", launch_in)
+    topic = task["title"]
     first = EXPERT_PROMPT.format(name=name, topic=topic)
     sid = core.last_claude_session(conn, name) if resume else None
     core.expert_make(conn, name, topic, p["name"], actor)
     if model:
         core.set_agent_model(conn, name, model)
+        _fit_task_model(conn, task, name, model, actor)
+    if core._item(conn, task["id"])["assignee"] != name:
+        core.claim(conn, task["id"], name)
     if sid:
         r = core.resume_command(conn, name, "claude-code", sid, p["id"], {"prompt": first, "model": model,
                                                                           "effort": effort})
@@ -392,12 +410,23 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     else:
         t = core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt=first)
         t = {**t, "env": {"MAXPM_AGENT": name, **t["env"]}}
-    t.update(project=p["name"], path=p["path"], launch_in=launch_in, session_title=name)
+    t.update(project=p["name"], path=p["path"], launch_in=launch_in, session_title=name, task=task["id"])
     _open_terminal(t, t["env"], runner)
     with core.tx(conn):
-        core._event(conn, None, actor or "maxpm", f"expert {name} started" + (f" (resumes session {sid})" if sid else
-                                                                          (" (fresh: no session to resume)" if resume else "")))
+        core._event(conn, task["id"], actor or "maxpm", f"expert {name} started" + (
+            f" (resumes session {sid})" if sid else (" (fresh: no session to resume)" if resume else "")))
     return {**t, "session_name": name, "topic": topic}
+
+
+def _fit_task_model(conn, task, name, model, actor):
+    """The person chose the expert's model: a min or max limit of its task that excludes it moves to that model."""
+    ladder = core.parse_ladder(core.setting(conn, "model_ladder"))
+    fam, pos = core._family(ladder, model)
+    why = core._model_refusal(conn, core._item(conn, task["id"]), name, any_type=True)
+    if fam is None or not why:
+        return
+    lname = ladder[fam][pos]
+    core.item_edit(conn, task["id"], actor=actor, models={"max_model" if "at most" in why else "min_model": lname})
 
 
 def _open_terminal(t, env, runner=None):
@@ -2843,7 +2872,7 @@ OPS = {
     "item_edit": lambda c, a, who: core.item_edit(c, a["id"], a.get("title"), a.get("notes"), a.get("doer"),
                                                   a.get("project"), who, a.get("context"), a.get("touches"),
                                                   a.get("check"), a.get("due"), goals=a.get("goals"),
-                                                  untag=a.get("untag"), models=a.get("models")),
+                                                  untag=a.get("untag"), models=a.get("models"), tier=a.get("tier")),
     "prio": lambda c, a, who: core.item_prio(c, a["id"], a["priority"], who),
     "move": lambda c, a, who: core.item_move(c, a["id"], a.get("before"), a.get("after"), who),
     "dep_add": lambda c, a, who: core.dep_add(c, a["id"], [int(x) for x in a["on"]], who, a.get("kind", "blocks")),
@@ -2883,8 +2912,8 @@ OPS = {
     "kill_agent": lambda c, a, who: core.kill_agent(c, a["agent"], _page_reason(a, who), who),
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "start_expert": lambda c, a, who: start_expert(c, a["name"], a.get("topic"), a.get("project"), bool(a.get("resume")),
-                                                   agent=a.get("agent"), actor=who, **_launch_args(a)),
-    "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason")),
+                                                   agent=a.get("agent"), actor=who, item=a.get("item"), **_launch_args(a)),
+    "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason"), bool(a.get("done"))),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},

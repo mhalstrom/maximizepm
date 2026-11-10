@@ -1061,7 +1061,7 @@ class LaunchInTmux(unittest.TestCase):
         core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         x = core.item_add(self.c, "shop", "ready work")["id"]
-        with self.assertRaisesRegex(RiverError, "needs a topic"):
+        with self.assertRaisesRegex(RiverError, "needs a task"):
             server.start_expert(self.c, "fab")
         t = server.start_expert(self.c, "fab", "the competitor research", "shop", model="fable")
         pane = self.tmux.panes[0]
@@ -1072,6 +1072,9 @@ class LaunchInTmux(unittest.TestCase):
         a = core._agent(self.c, "fab")
         self.assertEqual((a["role"], a["expert_topic"], a["expert_project"], a["model"]),
                          ("expert", "the competitor research", "shop", "fable"))
+        # #4959: it added an expert-tier task with the topic as its title, and it holds that task.
+        task = core._item(self.c, t["task"])
+        self.assertEqual((task["title"], task["tier"], task["assignee"]), ("the competitor research", "expert", "fab"))
         with self.assertRaisesRegex(RiverError, "a session that runs now"):
             core.register(self.c, "w1")
             server.start_expert(self.c, "w1", "x", "shop")
@@ -1099,6 +1102,13 @@ class LaunchInTmux(unittest.TestCase):
                                                                     "11111111-1111-4111-8111-111111111111"))
         self.assertIn("--resume 11111111-1111-4111-8111-111111111111", self.tmux.panes[-1]["keys"][0])
         self.assertEqual(core._agent(self.c, "fab")["role"], "expert")
+        self.assertEqual(core._item(self.c, task["id"])["assignee"], "fab")  # it took its task again
+        # The person's model choice moves a limit of the task that excludes it.
+        core.config_set(self.c, "default_max_model", "opus")
+        y = core.item_add(self.c, "shop", "design review talk")["id"]
+        t2 = server.start_expert(self.c, "fab2", item=y, model="fable")
+        self.assertEqual((t2["task"], core._item(self.c, y)["tier"], core._item(self.c, y)["max_model"],
+                          core._item(self.c, y)["assignee"]), (y, "expert", "fable", "fab2"))
 
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]

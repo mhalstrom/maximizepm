@@ -2621,14 +2621,79 @@ class Experts(Base):
         with self.assertRaisesRegex(RiverError, "an agent may not end the expert fab"):
             core.expert_end(self.c, "fab", "worker1")
         core.claim(self.c, self.ready, "fab")
-        with self.assertRaisesRegex(RiverError, "fab holds #%d" % self.ready):
-            core.expert_end(self.c, "fab", "mark")
-        core.release(self.c, self.ready, "fab")
-        self.assertEqual(core.expert_end(self.c, "fab", "mark")["ended"], "fab")
+        # An end gives back what it holds (#4959): the item is open again.
+        out = core.expert_end(self.c, "fab", "mark")
+        self.assertEqual((out["ended"], out["released"], out["done"]), ("fab", [self.ready], []))
+        self.assertEqual(core._item(self.c, self.ready)["status"], "open")
         with self.assertRaisesRegex(RiverError, "not registered"):
             core.expert_end(self.c, "fab", "mark")
         with self.assertRaisesRegex(RiverError, "needs a topic"):
             core.expert_make(self.c, "fab", "  ", "a")
+
+    def test_an_expert_tier_task_goes_only_to_a_session_started_for_it(self):
+        """#4959: expert is a tier of a task. A worker never gets it from go, next, wait, or Dispatch; the session
+        started for it (pushed: launch --item) takes it and is an expert from its start; it keeps the task while the
+        person talks with it; the end gives it back, or closes it with done."""
+        core.register(self.c, "w1")
+        t = core.item_add(self.c, "a", "talk through the Teams design", 0, tier="expert")["id"]
+        self.assertEqual(core._item(self.c, t)["tier"], "expert")
+        with self.assertRaisesRegex(RiverError, "tier is normal or expert"):
+            core.item_add(self.c, "a", "x", tier="guru")
+        with self.assertRaisesRegex(RiverError, "a person's item has no tier"):
+            core.item_add(self.c, "a", "x", doer="human", tier="expert")
+        self.assertEqual([i["id"] for i in core.next_item(self.c, "a", actor="w1", limit=5)], [self.ready])
+        self.assertEqual(core.go(self.c, self.dir.name, "w1")["item"]["id"], self.ready)
+        core.release(self.c, self.ready, "w1")
+        with self.assertRaisesRegex(RiverError, "expert-tier task: a person talks it through"):
+            core.claim(self.c, t, "w1")
+        self.assertIsNone(core.waiting_agent_for(self.c, "a", t))
+        # Capacity still counts it as ready work, so Start and the manager start a session for it.
+        self.assertIn(t, core.capacity(self.c)["ready_for_agents"])
+        # launch --item: a new session, the task pushed to it; its first go takes it, and it is an expert.
+        core.register(self.c, "new1")
+        core.push(self.c, t, "new1", "launched for it", "mark")
+        b = core.go(self.c, self.dir.name, "new1", focus=f"item:{t}")
+        self.assertEqual((b["role"], b["item"], [h["id"] for h in b["holds"]]), ("expert", None, [t]))
+        a = core._agent(self.c, "new1")
+        self.assertEqual((a["role"], a["expert_topic"]), ("expert", "talk through the Teams design"))
+        self.assertEqual(core.expert_view(self.c, a)["task"], t)
+        # Days of talk: the lease does not run out.
+        later = core.now() + core.timedelta(days=2)
+        with mock.patch.object(core, "now", lambda: later):
+            core.activity(self.c, "mark")
+        self.assertEqual(core._item(self.c, t)["assignee"], "new1")
+        # The end gives the task back; --resume (expert_task) finds it; --done closes it.
+        core.expert_end(self.c, "new1", "mark")
+        self.assertEqual(core._item(self.c, t)["status"], "open")
+        self.assertEqual(core.expert_task(self.c, "new1")["id"], t)
+        core.expert_make(self.c, "new1", "talk through the Teams design", "a")
+        core.claim(self.c, t, "new1")
+        self.assertEqual(core.expert_end(self.c, "new1", "mark", "decided", done_task=True)["done"], [t])
+        self.assertEqual(core._item(self.c, t)["status"], "done")
+        # A task can change tier.
+        core.item_edit(self.c, self.ready, actor="mark", tier="expert")
+        self.assertEqual(core._item(self.c, self.ready)["tier"], "expert")
+        core.item_edit(self.c, self.ready, actor="mark", tier="normal")
+        self.assertIsNone(core._item(self.c, self.ready)["tier"])
+
+    def test_adopt_makes_the_held_task_expert_tier(self):
+        from river import cli
+        old_env = os.environ.get("MAXPM_DB")
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(lambda: os.environ.pop("MAXPM_DB") if old_env is None else os.environ.update(MAXPM_DB=old_env))
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                cli.run(list(words))
+            return out.getvalue()
+        with self.assertRaisesRegex(RiverError, "an expert has a task"):
+            run("--as", "fab", "-q", "expert", "adopt")
+        core.claim(self.c, self.ready, "fab")
+        self.assertIn("fab is now an expert on: ready work", run("--as", "fab", "-q", "expert", "adopt"))
+        self.assertEqual(core._item(self.c, self.ready)["tier"], "expert")
+        x = run("-q", "add", "a", "a design talk", "--tier", "expert")
+        self.assertIn("design talk", x)
 
     def test_cli_adopt_notes_list_and_end(self):
         from river import cli
@@ -2643,6 +2708,7 @@ class Experts(Base):
             return out.getvalue()
         self.assertIn("fab is now an expert on: research", run("--as", "fab", "-q", "expert", "adopt", "--topic",
                                                                "research", "--project", "a"))
+        self.assertEqual(core.expert_view(self.c, core._agent(self.c, "fab"))["topic"], "research")
         self.assertIn("EXPERT on: research", run("--as", "fab", "-q", "go", "--project", "a"))
         self.assertIn("no notes yet", run("--as", "fab", "-q", "expert", "notes", "fab"))
         f = os.path.join(self.dir.name, "notes.md")

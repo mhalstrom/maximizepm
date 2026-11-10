@@ -467,6 +467,7 @@ CREATE TABLE IF NOT EXISTS items (
   min_model         TEXT,                     -- hard limits, one model per family, comma list
   max_model         TEXT,
   agent             TEXT,                     -- the agent type that takes it: a launch platform (codex, claude-code)
+  tier              TEXT,                     -- 'expert': a task that a person talks through with an expert session (#4959)
   backlog_at        TEXT,                     -- in the backlog since then: kept, never offered (maxpm activate ends it)
   backlog_note      TEXT,                     -- why not now
   created_at        TEXT NOT NULL,
@@ -1095,6 +1096,8 @@ def _migrate(conn):
             conn.execute(f"ALTER TABLE items ADD COLUMN {col} TEXT")
     if "needs_check" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN needs_check INTEGER NOT NULL DEFAULT 0")
+    if "tier" not in icols:
+        conn.execute("ALTER TABLE items ADD COLUMN tier TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(queue_entries)")}:
         conn.execute("ALTER TABLE queue_entries ADD COLUMN native_status TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
@@ -3225,9 +3228,23 @@ def touches_list(text):
     return [x for x in (text or "").split("\n") if x]
 
 
+TIERS = ("normal", "expert")
+
+
+def _check_tier(tier):
+    """The tier of a task (#4959): 'expert' (an expert session takes it; the person talks it through with it), or
+    None for a normal task ('normal' or '' clears it)."""
+    if tier is None:
+        return None
+    t = str(tier).strip().lower()
+    if t not in TIERS + ("",):
+        raise RiverError(f"tier is {' or '.join(TIERS)}")
+    return "expert" if t == "expert" else ""
+
+
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
-             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False):
+             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None):
     """Add an item. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `backlog`: a note on why nobody takes it now; the item goes to the backlog at once.
     `check_similar` (maxpm add): refuse with SimilarWork when the same work is open or was done lately
@@ -3237,6 +3254,10 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     and Dispatch and the launches refuse it; it is free again when the actor's session stops or is gone
     (_sweep). Without it, a session that adds an item for its own work while it holds another item saw a
     second session start the same work within seconds (#4942)."""
+    tier = _check_tier(tier)
+    if tier and doer == "human":
+        raise RiverError("an expert-tier task is for an agent session that a person talks with; a person's item has "
+                         "no tier: leave out --tier, or --doer human")
     if mine:
         if not actor:
             raise RiverError("--mine needs an agent name: set MAXPM_AGENT or pass --as <name>")
@@ -3305,6 +3326,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             why = backlog.strip() or "added to the backlog"
             conn.execute("UPDATE items SET backlog_at=?, backlog_note=? WHERE id=?", (iso(now()), why, iid))
             _event(conn, iid, actor, f"moved to the backlog: {why}")
+        if tier:
+            conn.execute("UPDATE items SET tier=? WHERE id=?", (tier, iid))
+            _event(conn, iid, actor, f"tier {tier}: an expert session takes it, and a person talks it through with it")
         if mine:
             _agent(conn, actor)
             conn.execute("UPDATE items SET reserved_for=?, reserved_until=NULL, reserved_by=? WHERE id=?",
@@ -3478,9 +3502,15 @@ def add_plan(conn, project, text, actor=None, priority=2, doer="any", dry_run=Fa
 
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
               context=None, touches=None, check=None, due=None, goals=None, untag=None, refs=None, unref=None,
-              models=None):
+              models=None, tier=None):
+    tier = _check_tier(tier)
     with tx(conn):
         it = _item(conn, item_id)
+        if tier is not None and (it["tier"] or "") != tier:
+            if tier and it["doer"] == "human":
+                raise RiverError(f"#{it['id']} is a person's item; an expert-tier task is for an agent session")
+            conn.execute("UPDATE items SET tier=? WHERE id=?", (tier or None, it["id"]))
+            _event(conn, it["id"], actor, f"tier {tier or 'normal'}")
         if models:
             _set_models(conn, it, models, actor)
         if refs:
@@ -4930,6 +4960,10 @@ def ready_list(conn, project=None, unblocks=None, doer_for=None, ann=None, near=
     """
     ann = ann or annotate(conn)
     pool = [a for a in ann.values() if ready_for(a, actor) and not a["project_archived"]]
+    if actor:
+        # An expert-tier task goes to a session started for it (launch --item, maxpm expert start), not to a worker
+        # that asks for work (#4959): only the session it is reserved for sees it.
+        pool = [a for a in pool if a.get("tier") != "expert" or a["reserved_for"] == actor]
     if project:
         names = _names(conn, project)
         pool = [a for a in pool if a["project"] in names]
@@ -5592,7 +5626,13 @@ def _sweep(conn):
     expired = conn.execute(
         "SELECT id, assignee FROM items WHERE status='in_progress' AND lease_expires_at < ?", (t,)).fetchall()
     busy = busy_now(conn, {r["assignee"] for r in expired}) if expired else set()
+    experts = {x["name"] for x in conn.execute("SELECT name FROM agents WHERE role='expert'")} if expired else set()
     for r in expired:
+        if r["assignee"] in experts:
+            # An expert holds its task while the person talks with it, for days (#4959): no lease runs out.
+            conn.execute("UPDATE items SET lease_expires_at=? WHERE id=?",
+                         (iso(now() + _lease_for(conn, r["id"], r["assignee"])), r["id"]))
+            continue
         if r["assignee"] in busy:  # a long command (a test run, a build): the agent works, and keeps its item
             conn.execute("UPDATE items SET lease_expires_at=? WHERE id=?",
                          (iso(now() + _lease_for(conn, r["id"], r["assignee"])), r["id"]))
@@ -6288,6 +6328,10 @@ def _claim_row(conn, item_id, actor):
                              if it0["reserved_for"] == actor and it0["status"] == "open" else ""))
     if it0["backlog_at"] and it0["status"] == "open":
         raise RiverError(_backlog_claim_refusal(it0))
+    if it0["tier"] == "expert" and ag["kind"] == "ai" and ag["role"] != "expert" and it0["reserved_for"] != actor:
+        raise RiverError(f"refused: #{item_id} is an expert-tier task: a person talks it through with a session of its "
+                         f"own, so a worker does not take it. A new session starts for it: maxpm launch --item {item_id}, "
+                         f"or maxpm expert start <name> --item {item_id}")
     if it0["doer"] == "human" and ag["kind"] == "ai":
         raise RiverError(f"refused: #{item_id} is for a person. If you can do it or work around it, take it over "
                          f"(the user is told, and can undo it): maxpm takeover {item_id} --note \"<how you will do it>\"")
@@ -6494,6 +6538,10 @@ def claim(conn, item_id, actor=None):
                              f"(a command runs there). Take other work (maxpm go). A person or a manager ends that "
                              f"session first: maxpm stop {first} --reason \"...\"")
         _claim_row(conn, a["id"], actor)
+        it = _item(conn, a["id"])
+        if it["tier"] == "expert" and _agent(conn, actor)["kind"] == "ai":
+            # The session that takes an expert-tier task is an expert from its start (#4959).
+            _make_expert(conn, actor, it["title"], _project_name(conn, it["project_id"]), actor)
     return item_show(conn, item_id)
 
 
@@ -9811,6 +9859,8 @@ def waiting_agent_for(conn, project, item_id=None):
     item_id, only one whose model the item's limits allow, and for a release review, none that worked on
     the release (release_authors)."""
     it = _item(conn, item_id) if item_id is not None else None
+    if it is not None and it["tier"] == "expert":
+        return None  # a new session starts for an expert-tier task; a waiting worker does not get it (#4959)
     authors = release_authors(conn, it["id"]) if it is not None and it["kind"] == "review" else set()
     for r in conn.execute("SELECT name, waiting_in FROM agents WHERE role='waiting' AND kind='ai' "
                           "ORDER BY waiting_since").fetchall():
@@ -10368,6 +10418,12 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
     and its brief says which deploy it follows and whom to alert."""
     brief = _go(conn, cwd, actor, project, role, session, focus, model, chat, agent_type)
     it = brief.get("item")
+    if it and it.get("tier") == "expert" and _agent(conn, brief["agent"])["role"] == "expert":
+        # It took an expert-tier task (launched for it): from now on it is an expert session (#4959).
+        brief.update(role="expert", item=None, holds=[it], expert=expert_view(conn, _agent(conn, brief["agent"])),
+                     why=f"you took the expert-tier task #{it['id']}: you are an expert session, and the person "
+                         f"talks it through with you")
+        return brief
     if it and it["kind"] == "monitor":
         brief["role"] = "monitor"
         brief["monitor"] = _monitor_brief(conn, it)
@@ -11141,6 +11197,17 @@ def expert_notes_name(name):
     return "expert-" + re.sub(r"[^a-z0-9._-]", "-", name.lower())[:57]
 
 
+def _make_expert(conn, name, topic, project=None, actor=None):
+    """Inside a tx: make a registered agent an expert session (role expert, its topic, its project)."""
+    t = iso(now())
+    was = _agent(conn, name)
+    conn.execute("UPDATE agents SET role='expert', note=?, expert_topic=?, expert_project=COALESCE(?, expert_project), "
+                 "talked_at=COALESCE(talked_at, ?), waiting_since=NULL, waiting_in=NULL, wait_token=NULL, stop_at=NULL, "
+                 "stop_by=NULL, stop_reason=NULL WHERE name=?", (f"{EXPERT_NOTE}{topic[:120]}", topic, project, t, name))
+    if was["role"] != "expert" or was["expert_topic"] != topic:
+        _event(conn, None, actor or name, f"{name} is an {EXPERT_NOTE}{topic}" + (f" (project {project})" if project else ""))
+
+
 def expert_make(conn, name, topic, project=None, actor=None):
     """Make an agent an expert session: role expert, its topic, the project whose folder it works in. A name that is
     not registered is registered (maxpm expert start names the new session). The agent keeps what it holds."""
@@ -11155,13 +11222,22 @@ def expert_make(conn, name, topic, project=None, actor=None):
         register(conn, name, note=f"{EXPERT_NOTE}{topic[:120]}")
     elif r["kind"] == "human":
         raise RiverError(f"{name} is a person; an expert is an agent session")
-    t = iso(now())
     with tx(conn):
-        conn.execute("UPDATE agents SET role='expert', note=?, expert_topic=?, expert_project=COALESCE(?, expert_project), "
-                     "talked_at=?, waiting_since=NULL, waiting_in=NULL, wait_token=NULL, stop_at=NULL, stop_by=NULL, "
-                     "stop_reason=NULL WHERE name=?", (f"{EXPERT_NOTE}{topic[:120]}", topic, project, t, name))
-        _event(conn, None, actor or name, f"{name} is an {EXPERT_NOTE}{topic}" + (f" (project {project})" if project else ""))
+        _make_expert(conn, name, topic, project, actor)
+        conn.execute("UPDATE agents SET talked_at=? WHERE name=?", (iso(now()), name))
     return expert_view(conn, _agent(conn, name))
+
+
+def expert_task(conn, name):
+    """The expert-tier task of an expert: the one it holds, else the newest open one it claimed before (its start
+    again takes it), or None."""
+    r = conn.execute("SELECT * FROM items WHERE assignee=? AND tier='expert' AND status IN ('in_progress','held') "
+                     "ORDER BY id LIMIT 1", (name,)).fetchone()
+    if r:
+        return r
+    return conn.execute("SELECT i.* FROM events e JOIN items i ON i.id=e.item_id WHERE e.actor=? AND e.change LIKE "
+                        "'claimed%' AND i.tier='expert' AND i.status='open' ORDER BY e.id DESC LIMIT 1",
+                        (name,)).fetchone()
 
 
 def expert_topic_of(conn, name):
@@ -11187,7 +11263,10 @@ def last_claude_session(conn, name):
 def expert_view(conn, a):
     t = a["talked_at"] or a["last_seen"]
     limit = parse_duration(setting(conn, "expert_idle_end", agent=a["name"]))
-    return {"name": a["name"], "topic": a["expert_topic"], "project": a["expert_project"], "model": a["model"],
+    task = conn.execute("SELECT id, title FROM items WHERE assignee=? AND tier='expert' AND status IN "
+                        "('in_progress','held') ORDER BY id LIMIT 1", (a["name"],)).fetchone()
+    return {"name": a["name"], "topic": task["title"] if task else a["expert_topic"], "task": task and task["id"],
+            "project": a["expert_project"], "model": a["model"],
             "talked_at": t, "state": _agent_state(conn, a), "session": a["session"], "session_url": a["session_url"],
             "notes": expert_notes_name(a["name"]),
             "ends_at": iso(parse_iso(t) + limit) if limit.total_seconds() else None,
@@ -11211,20 +11290,33 @@ def _may_end_expert(conn, name, actor):
                          f"itself ends it")
 
 
-def expert_end(conn, name, actor=None, why=None):
-    """End an expert now (a person's word): the senders of what it did not read hear it, and it is unregistered.
-    Refused while it holds an item or owns a target."""
+def _expert_let_go(conn, name, why, done_task=False):
+    """Before an expert ends: its expert-tier task is done (done_task: the talk is over) or goes back to the queue
+    (maxpm expert start <name> --resume takes it again); any other item it was told to claim goes back too."""
+    out = {"done": [], "released": []}
+    for r in conn.execute("SELECT id, tier FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                          (name,)).fetchall():
+        if done_task and r["tier"] == "expert":
+            done(conn, r["id"], f"the talk with the expert {name} ended: {why}", name)
+            out["done"].append(r["id"])
+        else:
+            release(conn, r["id"], f"the expert {name} ended ({why}); start it again with its context: maxpm expert "
+                                   f"start {name} --resume", name)
+            out["released"].append(r["id"])
+    return out
+
+
+def expert_end(conn, name, actor=None, why=None, done_task=False):
+    """End an expert now (a person's word): its task is done (done_task) or goes back to the queue, the senders of
+    what it did not read hear it, and it is unregistered."""
     _expert(conn, name)
     _may_end_expert(conn, name, actor)
-    held = [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held')",
-                                          (name,))]
-    if held:
-        raise RiverError(f"{name} holds {', '.join('#' + str(i) for i in held)}; it finishes or releases that first "
-                         f"(maxpm release <id>)")
-    out = end_idle(conn, name, why or f"ended by {actor or name}")
+    why = why or f"ended by {actor or name}"
+    let = _expert_let_go(conn, name, why, done_task)
+    out = end_idle(conn, name, why)
     if out is None:
         raise RiverError(f"{name} cannot end now: it owns a target or waits on a person's answer")
-    return {**out, "resume": f"maxpm expert start {name} --resume"}
+    return {**out, **let, "resume": f"maxpm expert start {name} --resume"}
 
 
 def end_quiet_experts(conn):
@@ -11237,6 +11329,7 @@ def end_quiet_experts(conn):
         if not limit.total_seconds() or quiet < limit:
             continue
         why = f"an expert with no talk for {setting(conn, 'expert_idle_end', agent=a['name'])} (expert_idle_end)"
+        _expert_let_go(conn, a["name"], why)
         if end_idle(conn, a["name"], why):
             out[a["name"]] = why
     return out

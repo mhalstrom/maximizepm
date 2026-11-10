@@ -852,6 +852,8 @@ def build_parser():
                         "title first: maxpm add \"title\" --backlog \"why not now\")")
     x.add_argument("--new", metavar="HOW", help="add it although maxpm add found open or lately done items like it: "
                    "say how it differs (the history keeps it)")
+    x.add_argument("--tier", choices=core.TIERS, help="expert: a task that a person talks through with an expert "
+                   "session (a session started for it takes it; a worker never does); normal: any worker")
     x.add_argument("--mine", action="store_true",
                    help="you do this work now (a request in your chat, a note you write while you hold another "
                         "item): reserve it for you at once, so no other session starts it; claim or close it yourself")
@@ -882,6 +884,8 @@ def build_parser():
     x.add_argument("--note", help="why they are the same work (required)")
 
     x = sub.add_parser("edit", help="change title, notes, doer, or project")
+    x.add_argument("--tier", choices=core.TIERS, help="expert: a task that a person talks through with an expert "
+                   "session (a session started for it takes it; a worker never does); normal: any worker")
     x.add_argument("id", type=int); x.add_argument("--title"); x.add_argument("--notes")
     x.add_argument("--no-goal-context", dest="goal_context", action="store_false", default=None,
                    help="its session starts fresh, not as a fork of its goal's base")
@@ -1000,7 +1004,8 @@ def build_parser():
     xs = x.add_subparsers(dest="ecmd")
     y = xs.add_parser("start", help="open an expert session on a topic in a new terminal tab, window, or tmux pane")
     y.add_argument("name", help="its name (letters, digits, '.', '_', '-')")
-    y.add_argument("--topic", help="what it knows and what you ask it about (again from its history when it ran before)")
+    y.add_argument("--topic", help="what it knows and what you ask it about: the title of the expert-tier task it adds")
+    y.add_argument("--item", type=int, help="take this task (it becomes expert-tier) instead of adding one")
     y.add_argument("--project", help="the project whose folder it works in (default: its last one, else the first "
                                      "project with a folder)")
     y.add_argument("--resume", action="store_true", help="resume its last Claude Code chat, with its context")
@@ -1011,12 +1016,15 @@ def build_parser():
     g.add_argument("--tab", dest="launch_in", action="store_const", const="tab")
     g.add_argument("--window", dest="launch_in", action="store_const", const="window")
     g.add_argument("--tmux", dest="launch_in", action="store_const", const="tmux")
-    y = xs.add_parser("adopt", help="make this session an expert (run it in the session, with --as <its name>)")
-    y.add_argument("--topic", required=True, help="what it knows and what the person asks it about")
+    y = xs.add_parser("adopt", help="make this session an expert: the task it holds becomes expert-tier (run it in the "
+                      "session, with --as <its name>)")
+    y.add_argument("--topic", help="with no task in hand: add an expert-tier task with this title and take it")
     y.add_argument("--project", help="its project (default: the project of this folder)")
     y = xs.add_parser("end", help="end an expert (a person, the manager, or the expert itself)")
     y.add_argument("name")
     y.add_argument("--reason", help="why (its unread senders hear it)")
+    y.add_argument("--done", action="store_true", help="the talk is over: its expert-tier task is done (else it goes "
+                   "back to the queue, and expert start --resume takes it again)")
     xs.add_parser("list", help="the experts: topic, model, last talk, when they end")
     y = xs.add_parser("notes", help="an expert's notes (a canvas): read them, or --put a new version")
     y.add_argument("name")
@@ -1934,12 +1942,26 @@ def _expert_cmd(conn, a, actor):
         if not actor:
             raise RiverError("run it in the session that becomes the expert, with its name: maxpm --as <name> expert "
                              "adopt --topic \"...\"")
-        project = a.project or next(iter(core.projects_for_dir(conn, os.getcwd())), None)
-        return {"adopted": core.expert_make(conn, actor, a.topic, project, actor)}
+        held = conn.execute("SELECT id, title, project_id FROM items WHERE assignee=? AND status IN "
+                            "('in_progress','held') ORDER BY tier='expert' DESC, id LIMIT 1", (actor,)).fetchone()
+        if held is None and not a.topic:
+            raise RiverError("an expert has a task: claim the task you talk through with the person first, or give "
+                             "--topic \"...\" to add an expert-tier task with that title")
+        if held is None:
+            project = a.project or next(iter(core.projects_for_dir(conn, os.getcwd())), None)
+            if not project:
+                raise RiverError("name the project of the task: --project <name>")
+            iid = core.item_add(conn, project, a.topic, actor=actor, tier="expert")["id"]
+            core.expert_make(conn, actor, a.topic, project, actor)
+            core.claim(conn, iid, actor)
+        else:
+            core.item_edit(conn, held["id"], actor=actor, tier="expert")
+            core.expert_make(conn, actor, held["title"], core._project_name(conn, held["project_id"]), actor)
+        return {"adopted": core.expert_view(conn, core._agent(conn, actor))}
     if e == "end":
         if in_sandbox():
             core._expert(conn, a.name)
-        return {"ended_expert": core.expert_end(conn, a.name, actor, a.reason)}
+        return {"ended_expert": core.expert_end(conn, a.name, actor, a.reason, a.done)}
     if e == "notes":
         topic, project = core.expert_topic_of(conn, a.name)
         if topic is None:
@@ -1960,12 +1982,12 @@ def _expert_cmd(conn, a, actor):
                                  "version": (got or {}).get("shown", {}).get("version")}}
     # start: it opens a terminal, so a sandboxed CLI asks the running maxpm serve, as maxpm launch does.
     args = {"name": a.name, "topic": a.topic, "project": a.project, "resume": a.resume, "agent": a.agent,
-            "model": a.model, "effort": a.effort, "launch_in": a.launch_in}
+            "model": a.model, "effort": a.effort, "launch_in": a.launch_in, "item": a.item}
     if in_sandbox():
         return {"expert_started": {**ask_server(conn, "start_expert", args, actor, timeout=40), "via_serve": True}}
     from . import server
     return {"expert_started": server.start_expert(conn, a.name, a.topic, a.project, a.resume, agent=a.agent, actor=actor,
-                                                  model=a.model, effort=a.effort, launch_in=a.launch_in)}
+                                                  model=a.model, effort=a.effort, launch_in=a.launch_in, item=a.item)}
 
 
 def dispatch(conn, a, actor):
@@ -2132,7 +2154,7 @@ def dispatch(conn, a, actor):
         res = core.item_add(conn, project, title, a.priority, a.notes, a.doer, a.after, actor,
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
-                            backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine)
+                            backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier)
         if a.no_goal_context:
             core.item_goal_context(conn, res["id"], False, actor)
         return res
@@ -2142,7 +2164,8 @@ def dispatch(conn, a, actor):
         if a.goal_context is not None:
             core.item_goal_context(conn, a.id, a.goal_context, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
-                              a.due, a.goal, a.untag, core.parse_refs(a.ref, a.ref_url), a.unref, _models(a))
+                              a.due, a.goal, a.untag, core.parse_refs(a.ref, a.ref_url), a.unref, _models(a),
+                              tier=a.tier)
     if c == "list":
         return core.item_list(conn, a.project, a.status, a.all, a.goal, a.ref)
     if c == "show":
@@ -2784,8 +2807,10 @@ def render_expert(res):
         print(f"  MaximizePM does not end it as a worker, and gives it no queue work. Keep its notes: "
               f"maxpm --as {x['name']} expert notes {x['name']} --put <file>. Run maxpm --as {x['name']} go for the rules.")
     elif "ended_expert" in res:
-        print(f"ended the expert {res['ended_expert']['ended']}. Start it again with its context: "
-              f"{res['ended_expert']['resume']}   (close its terminal or pane if it is still open)")
+        e = res["ended_expert"]
+        print(f"ended the expert {e['ended']}." + (f" Done: {', '.join('#' + str(i) for i in e['done'])}." if e.get("done") else "")
+              + (f" Back in the queue: {', '.join('#' + str(i) for i in e['released'])}." if e.get("released") else "")
+              + f" Start it again with its context: {e['resume']}   (close its terminal or pane if it is still open)")
     elif "expert_notes" in res:
         n = res["expert_notes"]
         if n["text"]:
@@ -2796,7 +2821,7 @@ def render_expert(res):
     elif "expert_started" in res:
         t = res["expert_started"]
         how = "a tmux pane" if t.get("launch_in") == "tmux" else f"a new Terminal {t.get('launch_in') or 'tab'}"
-        print(f"started the expert {t['session_name']} in {how} ({t['project']}): {t['topic']}"
+        print(f"started the expert {t['session_name']} in {how} ({t['project']}) on #{t.get('task')}: {t['topic']}"
               + (f"; it resumes session {t['resumed']}" if t.get("resumed") else ""))
 
 
@@ -2849,8 +2874,13 @@ def render_go(b):
                 f"  - Messages to you come into this session; read them with {r} inbox, and answer them.",
                 "  - Stand at your prompt after each answer."]
         for h in b.get("holds") or ():
-            out.append(f"  You hold #{h['id']} {h['title']} (the person asked you to): finish it, "
-                       f"{r} done {h['id']} --output \"...\", or {r} release {h['id']}.")
+            if h.get("tier") == "expert":
+                out.append(f"  Your task: #{h['id']} {h['title']} (expert tier). You keep it while the person talks with "
+                           f"you; no lease runs out. When the person says the talk is done: {r} done {h['id']} --output "
+                           f"\"<what was decided, where it is written>\".")
+            else:
+                out.append(f"  You hold #{h['id']} {h['title']} (the person asked you to): finish it, "
+                           f"{r} done {h['id']} --output \"...\", or {r} release {h['id']}.")
         print("\n".join(out).rstrip())
         return
     notes = b.get("queue_instructions") or []

@@ -128,7 +128,7 @@ $("#showBacklog").addEventListener("change", renderProjects);
 $("#addGo").addEventListener("click", async () => {
   const title = $("#addTitle").value.trim(); if (!title) return toast("Title is empty", true);
   const ids = (el) => $(el).value.split(/[\s,]+/).filter(Boolean).map(Number);
-  const res = await act("item_add", { project: $("#addProject").value, title, priority: +$("#addPrio").value, doer: $("#addDoer").value, after: ids("#addAfter"), feeds: ids("#addFeeds"), notes: $("#addNotes").value, goals: $("#addGoal").value ? [$("#addGoal").value] : [] }).catch(() => null);
+  const res = await act("item_add", { project: $("#addProject").value, title, priority: +$("#addPrio").value, doer: $("#addDoer").value, tier: $("#addTier").value || undefined, after: ids("#addAfter"), feeds: ids("#addFeeds"), notes: $("#addNotes").value, goals: $("#addGoal").value ? [$("#addGoal").value] : [] }).catch(() => null);
   if (res) { $("#addTitle").value = ""; $("#addAfter").value = ""; $("#addFeeds").value = ""; $("#addNotes").value = ""; toast(`Added #${res.id}`); }
 });
 $("#projGo").addEventListener("click", async () => { const n = $("#projName").value.trim(); if (n) { await act("project_add", { name: n }).catch(() => {}); $("#projName").value = ""; } });

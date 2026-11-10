@@ -418,16 +418,23 @@ this computer, with each version, and that the user opens in the MaximizePM page
 ## Expert sessions
 
 An expert is a session that the user talks with for hours or days about one
-topic (a research paper, a design). The user starts one
-(`maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`), or
-makes a session one in its own chat: `maxpm --as <you> expert adopt --topic "..."`.
-`maxpm go` then gives you role EXPERT and no item. As an expert:
+task (a research paper, a design). Expert is a tier of a task:
+`maxpm add "<title>" --tier expert` (`maxpm edit <id> --tier expert|normal`).
+A worker never takes an expert-tier task; a session started for it does
+(Start, `maxpm launch --item <id>`), and is an expert from its start. The
+short form: `maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`
+adds the task and starts its session (`--item <id>` takes a task that exists).
+In a session that holds the task already: `maxpm --as <you> expert adopt`.
+`maxpm go` then gives you role EXPERT. As an expert:
 
-- Answer the user. Take no queue work by yourself, and run no `maxpm wait`;
-  stand at your prompt. MaximizePM does not end you for that. You end when a
-  person runs `maxpm expert end <you>`, or after `expert_idle_end` (7d) with no
-  talk. `maxpm expert start <you> --resume` starts your chat again.
-- Claim an item only when the user tells you to.
+- Answer the user. Take no other queue work by yourself, and run no
+  `maxpm wait`; stand at your prompt. You keep your task while the user talks
+  with you, and MaximizePM does not end you for that. You end when a person
+  runs `maxpm expert end <you>` (`--done` closes the task), or after
+  `expert_idle_end` (7d) with no talk; your task then goes back to the queue,
+  and `maxpm expert start <you> --resume` takes it again with your chat.
+- When the user says the talk is done: `maxpm done <task> --output "..."`.
+- Claim another item only when the user tells you to.
 - Add the work you find (`maxpm add ...`), and ask the manager to launch it.
 - Keep your notes current: your topic, what you learned, the decisions of your
   talks: `maxpm --as <you> expert notes <you> --put <file>`. A session that

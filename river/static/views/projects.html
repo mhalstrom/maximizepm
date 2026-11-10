@@ -21,8 +21,9 @@
           </div>
           <div class="two">
             <label>Who can do it<select id="addDoer"><option value="any">anyone</option><option value="ai">agent</option><option value="human">human</option></select></label>
-            <label>Waits on (ids)<input id="addAfter" placeholder="e.g. 3, 7"></label>
+            <label title="Expert: a session started for it takes it, and you talk it through with that session for as long as you need; a worker never takes it">Tier<select id="addTier"><option value="">normal</option><option value="expert">expert</option></select></label>
           </div>
+          <label>Waits on (ids)<input id="addAfter" placeholder="e.g. 3, 7"></label>
           <label>Reads the output of (ids; it also waits on them)<input id="addFeeds" placeholder="e.g. 4"></label>
           <label>Goal (optional)<select id="addGoal"><option value="">no goal</option></select></label>
           <textarea id="addNotes" rows="2" placeholder="Notes"></textarea>

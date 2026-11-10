@@ -55,6 +55,10 @@ export function agentChip(it) {
   const from = it.agent_from && it.agent_from !== "item" ? ` (${it.agent_from === "agent_rules" ? "agent_rules" : it.agent_from + " default"})` : "";
   return chip("c-ai", "for " + esc(it.agent), `agent type ${it.agent}${from}: sessions of another type skip it, and Start opens this type`);
 }
+// An expert-tier task (#4959): a session started for it takes it, and the person talks it through with that session.
+export function tierChip(it) {
+  return it.tier === "expert" ? chip("c-ai", "expert", "expert tier: a session started for it takes it (Start, launch --item, maxpm expert start), and you talk it through with that session; a worker never takes it") : "";
+}
 export function goalChips(it) { return (it.goals || []).map(g => chip("c-goal", esc(g), "goal")).join(""); }
 export function projectChip(name) { return chip("c-p", esc(name)); }
 export function ownerChip(owner, shared) {
