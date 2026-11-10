@@ -1670,6 +1670,49 @@ class LaunchInTmux(unittest.TestCase):
         core.config_set(self.c, "notify_open", "agent")
         self.assertEqual(notify.compose(self.c, [row])[2], "https://claude.ai/code/session_01AbC")
 
+    def test_a_working_session_whose_reply_ends_in_a_question_waits_at_no_prompt(self):
+        # #4943: the manager's reply ended in "Do you want to continue ...?", the person's messages were queued while a
+        # Bash call ran, and the Sessions tab said it waited at a permission prompt, with the queued message (cut at
+        # its line break) and the tool call lines as the options to pick.
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mark", human=True)
+        core.item_add(self.c, "shop", "work")
+        name = server.launch_agent(self.c)["session_name"]
+        pane = self.tmux.panes[0]
+        self.addCleanup(server.PROMPTS.clear)
+        rule = "─" * 60
+        working = (
+            "⏺ One more result: the options paper now follows your notes.\n\n"
+            "  Do you want to continue with part 3, the new order of the landing page with a price and trust section?\n\n"
+            "❯ I have some things to discuss with you and then we can continue\n\n"
+            "⏺ OK. Tell me what you want to discuss.\n\n"
+            "❯ ok so agents that are waiting for work have their script that waits. if there is no\n"
+            "  task the agent auto deregisters itself before it sees our messages\n\n"
+            "⏺ Finding the wait command and native message delivery\n"
+            "  ⎿  $ cd ~/Projects/shop && grep -n wait cli.py\n"
+            "     Running…\n\n"
+            "✢ Finding the wait command… (12s · ↓ 1.2k tokens · esc to interrupt)\n\n"
+            f"{rule}\n❯ {{typed}}\n{rule}\n  ⏵⏵ auto mode on (shift+tab to cycle)")
+        for typed, status in (("", True), ("1. Do you want to keep it?", True), ("1. Do you want to keep it?", False)):
+            pane["screen"] = working.format(typed=typed)
+            if not status:  # no status line under the input box: its rule ends the screen
+                pane["screen"] = pane["screen"].rsplit("\n", 1)[0]
+            self.assertEqual(server.pane_prompts(self.c, {name: pane["id"]}), {}, (typed, status))
+            self.assertEqual(server.watch_prompts(self.c)["waiting"], {}, (typed, status))
+            server.IDLE.clear()  # no prompt, so the same screen twice is a pane at rest (a prompt never is)
+            server._idle_panes(self.c, {name}, core.timedelta(0))
+            self.assertEqual(server._idle_panes(self.c, {name}, core.timedelta(0)), {name: pane["id"]})
+        server.IDLE.clear()
+        # The same session at a real permission prompt: the dialog takes the place of the spinner and the input box.
+        pane["screen"] = working.split("\n✢")[0] + (
+            f"\n{rule}\n Bash command\n\n   cd ~/Projects/shop && grep -n wait cli.py\n\n Do you want to proceed?\n"
+            " ❯ 1. Yes\n   2. Yes, and don't ask again for grep commands in /x/shop\n"
+            "   3. No, and tell Claude what to do differently (esc)\n\n Esc to cancel · Tab to amend")
+        p = server.pane_prompts(self.c, {name: pane["id"]})[name]
+        self.assertEqual((p["question"], p["command"], len(p["options"])),
+                         ("Do you want to proceed?", "cd ~/Projects/shop && grep -n wait cli.py", 3))
+        self.assertEqual(server.watch_prompts(self.c)["waiting"], {name: "Do you want to proceed?"})
+
     def test_tmux_is_the_default_when_tmux_is_installed(self):
         from unittest import mock
         core.register(self.c, "mark", human=True)

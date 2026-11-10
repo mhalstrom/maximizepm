@@ -184,6 +184,8 @@ DEFAULT_SETTINGS = {
     # matches prompt_pattern (a regular expression; empty: no watch) and those lines stay the same for
     # prompt_wait, each person gets an alert, with the agent's Terminal on the page. The words are those of
     # Claude Code and Codex; add the words of another CLI or a new version with | (maxpm config set).
+    # A match is a prompt only at the end of the screen: under the menu come only a key hint, a frame, or a
+    # rule (#4943); reply text that asks a question, and the input box, are no prompt.
     "prompt_pattern": r"Do you (want to|trust)|Would you like to|[Ee]nter to confirm|[❯›]\s*\d+\.\s",
     "prompt_wait": "20s",
     # A Claude Code session that river starts gets hooks (the launch option claude_activity_hooks) that report

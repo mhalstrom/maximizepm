@@ -615,7 +615,7 @@ def _done_panes(conn, panes, terminals=None):
     texts = _pane_texts(sorted(set(maybe) - stopped)) if pattern else dict.fromkeys(maybe, "")
     rx = re.compile(pattern) if pattern else None
     for pane, why in maybe.items():
-        if pane in stopped or (pane in texts and not (rx and any(rx.search(x) for x in _prompt_tail(texts[pane])))):
+        if pane in stopped or (pane in texts and not (rx and _prompt_found(_prompt_tail(texts[pane]), rx))):
             done[pane] = why
     return done
 
@@ -1176,10 +1176,40 @@ def _prompt_parts(tail):
             question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
             break
     return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
+            "top": top, "end": end if options else None, "lines": lines,
             **_prompt_command(lines[:qat] if qat is not None else [])}
 
 
-_RULE = None
+def _prompt_found(tail, rx):
+    """The parts of the prompt (_prompt_parts) that a pane's last lines show, or None (#4943). A prompt is the last
+    thing on the screen: below its menu (or, with no menu, below the last line that matches prompt_pattern) come
+    only a key hint, a frame, or a rule. Claude Code and Codex hide the input box and the spinner while they ask.
+    Before, a match anywhere in the last lines was a prompt: a working session whose reply ended in "Do you want
+    to continue with ...?" waited at a prompt, and the person's queued message (marked ❯) and the tool call lines
+    under it were its options; an answer would have typed a choice into the working session. Also no prompt: a
+    marked line directly under a rule (the input box, with the person's text in it), and pattern words only above
+    the prompt's question or menu (the reply text)."""
+    if not any(rx.search(x) for x in tail):
+        return None
+    parts = _prompt_parts(tail)
+    lines, top, end = parts["lines"], parts["top"], parts["end"]
+    if end is None:
+        end = max(n for n, x in enumerate(tail) if rx.search(x)) + 1
+    elif top > 0 and _RULE.match(lines[top - 1]):
+        return None  # the input box: a rule, then the marked line with what the person typed
+    if not all(_footer(x) for x in lines[end:]):
+        return None  # more under it: the spinner, the input box, the status line, or the next tool call
+    if not any(rx.search(x) for x in tail[min(parts["start"], end - 1):]):
+        return None
+    return parts
+
+
+def _footer(line):
+    """A line that may come under a prompt's menu: empty after its frame, a rule, or a key hint."""
+    return not line.strip() or bool(_RULE.match(line) or _HINT.search(line))
+
+
+_RULE = re.compile(r"^\s*[─━╌╍┄┅═-]{8,}\s*$")  # a dashed rule: Claude Code's input box and its command box
 
 
 def _prompt_command(lines):
@@ -1188,8 +1218,6 @@ def _prompt_command(lines):
     mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
     Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it."""
     import re
-    global _RULE
-    _RULE = _RULE or re.compile(r"^\s*[─━╌╍┄┅═-]{8,}\s*$")
     why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
     head = next((n for n in range(len(lines) - 1, -1, -1)
                  if re.match(r"^\s*(\w+ )?(command|file|edit|fetch|tool)\b", lines[n].strip(), re.I)
@@ -1290,7 +1318,7 @@ def watch_prompts(conn):
             if screen["ended"]:
                 continue  # a shell: what the agent printed stays, and nobody waits there
             tail = _prompt_tail(_plain(screen["text"]))
-            if any(rx.search(x) for x in tail):
+            if _prompt_found(tail, rx):
                 held = conn.execute("SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                                     "ORDER BY id", (agent,)).fetchone()
                 body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held))
@@ -1362,7 +1390,7 @@ def _idle_panes(conn, names, after):
         except RiverError:
             continue  # the pane closed since the list
         text = _plain(screen["text"])
-        if screen["ended"] or (rx and any(rx.search(x) for x in _prompt_tail(text))):
+        if screen["ended"] or (rx and _prompt_found(_prompt_tail(text), rx)):
             IDLE.pop(agent, None)  # a shell, or a prompt that a person answers
             continue
         st = IDLE.get(agent)
@@ -1416,7 +1444,7 @@ def watch_busy(conn):
         if agent not in names:
             continue
         text = _plain(screen["text"])
-        if (agent in BUSY and BUSY[agent] != text) or (rx and any(rx.search(x) for x in _prompt_tail(text))):
+        if (agent in BUSY and BUSY[agent] != text) or (rx and _prompt_found(_prompt_tail(text), rx)):
             busy.add(agent)
         BUSY[agent] = text
     for agent in sorted(names - busy):
@@ -1909,9 +1937,9 @@ def pane_prompts(conn, terminals):
     texts = _pane_texts(sorted(set(terminals.values())))
     for agent, pane in terminals.items():
         tail = _prompt_tail(_plain(texts.get(pane) or ""))
-        if not any(rx.search(x) for x in tail):
+        parts = _prompt_found(tail, rx)
+        if not parts:
             continue
-        parts = _prompt_parts(tail)
         options = [o[0] for o in parts["options"]]
         sig = "\x1f".join([parts["question"] or "", parts["command"] or "", *options])
         out[agent] = {"question": parts["question"], "options": options,
