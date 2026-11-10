@@ -1144,11 +1144,18 @@ class LaunchInTmux(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             cli.render_expert({"expert_started": {**t2, "launch_in": "tmux"}})
         self.assertTrue(out.getvalue().startswith(f"started the expert pm2 on fable (#{y}: its model is fable)"))
-        # launch --item: the model of the work it continues, of the agent's family.
+        # launch --item of a plain item found during the Fable work: the default model (#4979: only an expert inherits).
         z = core.item_add(self.c, "shop", "fix what the design found", found_during=design)["id"]
         r = server.dispatch_item(self.c, z)
-        self.assertEqual((r["model"], r["model_id"]), ("fable", "fable"))
-        self.assertIn("MAXPM_MODEL=fable", self.tmux.panes[-1]["keys"][0])
+        self.assertIsNone(r["model"])  # the agent CLI's own default: a default is not forced on the CLI
+        self.assertNotIn("fable", self.tmux.panes[-1]["keys"][0])
+        # expert start --item of an item that a Fable session worked on: Fable (its last session's model).
+        q = core.item_add(self.c, "shop", "a second design", models={"max_model": "fable"})["id"]
+        core.claim(self.c, q, "w7005")
+        core.release(self.c, q, actor="w7005")
+        t3 = server.start_expert(self.c, "pm3", item=q)
+        self.assertEqual((t3["model"], t3["model_why"], core._item(self.c, q)["tier"]),
+                         ("fable", f"#{q}: its last session ran on fable", "expert"))
 
     def test_the_manager_hands_a_talk_to_an_expert_with_the_talk_so_far(self):
         """#4969: the expert's task holds the talk so far (summary, sources, canvases, sessions to read); the manager

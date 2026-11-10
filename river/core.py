@@ -1579,9 +1579,9 @@ def ladder_short(ladder, model):
 
 def work_model(conn, it):
     """(ladder name, why) of the model that the work of an item ran on or was meant for, when it is stronger than the
-    default model of its project; else (None, None). A continuation of that work (an item found during it or added
-    before it, an expert that takes it up) gets the same model (#4961: an expert for a design that a Fable session
-    wrote started on the default Opus). The sources: the model of the last session that claimed it (ran_model), its
+    default model of its project; else (None, None). An expert that takes up that work gets the same model (#4961: an
+    expert for a design that a Fable session wrote started on the default Opus); a plain item never does (#4979). The
+    sources: the model of the last session that claimed it (ran_model), its
     own model, its own min model, and its own max model when that is above the default max (a raised ceiling: the
     work was meant for that model)."""
     ladder = parse_ladder(setting(conn, "model_ladder"))
@@ -1611,8 +1611,8 @@ def work_model(conn, it):
 
 
 def _inherit_model(conn, iid, src_id, actor):
-    """Inside a tx: a new item that continues the work of src_id gets its model when that is stronger than the
-    default (work_model), and a max limit that allows it."""
+    """Inside a tx: a new expert task that continues the work of src_id gets its model when that is stronger than the
+    default (work_model), and a max limit that allows it. A plain item never inherits (#4979)."""
     src = _item(conn, src_id)
     m, why = work_model(conn, src)
     if not m:
@@ -1631,15 +1631,18 @@ def _inherit_model(conn, iid, src_id, actor):
 
 
 def session_model(conn, it, family=None, defaults=True):
-    """(model, why) for a new session that takes this item: the model of the work it continues (work_model), the model
-    its last session ran on, its own model, its recommended default (with defaults), else its min limit; each one only
-    when the item's limits allow it, and (family) only a model of the agent's family. (None, why) when none fits:
-    the agent CLI's own default runs."""
+    """(model, why) for a new session that takes this item: for an expert task, the model of the work it continues
+    (work_model) and the model its last session ran on; then its own model, its recommended default (with defaults),
+    else its min limit; each one only when the item's limits allow it, and (family) only a model of the agent's
+    family. (None, why) when none fits: the agent CLI's own default runs. A plain item never takes the model its
+    last session ran on (#4979: a Fable session that took it once does not make the next one Fable)."""
     ladder = parse_ladder(setting(conn, "model_ladder"))
     m = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn), setting(conn, "model_ladder"))
-    w, why = work_model(conn, it)
-    cands = [(w, why), (it["ran_model"], f"#{it['id']}: its last session ran on {it['ran_model']}"),
-             (it["model"], f"#{it['id']}'s own model")]
+    cands = []
+    if "tier" in it.keys() and it["tier"] == "expert":
+        w, why = work_model(conn, it)
+        cands += [(w, why), (it["ran_model"], f"#{it['id']}: its last session ran on {it['ran_model']}")]
+    cands.append((it["model"], f"#{it['id']}'s own model"))
     if defaults and m["model_from"] != "item":
         cands.append((m["model"], f"the default model ({m['model_from']})"))
     cands.append((it["min_model"], f"#{it['id']} needs at least {it['min_model']}"))
@@ -3475,8 +3478,12 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             why = backlog.strip() or "added to the backlog"
             conn.execute("UPDATE items SET backlog_at=?, backlog_note=? WHERE id=?", (iso(now()), why, iid))
             _event(conn, iid, actor, f"moved to the backlog: {why}")
+        # Only an expert task inherits the model of the work it takes up (#4979, mark: 'we do not use fable except
+        # when specifically asked and for expert discussions'); a plain item, also one found during or added before
+        # a Fable item, takes the default model and limits.
         src = found_during if found_during is not None else blocks
-        if src is not None and not (models and any(models.get(f) for f in ("model", "min_model", "max_model"))):
+        if src is not None and tier == "expert" and not (models and any(models.get(f) for f in
+                                                                        ("model", "min_model", "max_model"))):
             _inherit_model(conn, iid, int(src), actor)
         if tier:
             conn.execute("UPDATE items SET tier=? WHERE id=?", (tier, iid))
@@ -6538,7 +6545,7 @@ def _claim_row(conn, item_id, actor):
         conn.execute("UPDATE messages SET state='accepted', read_at=COALESCE(read_at, ?) "
                      "WHERE kind='alert' AND item_id=? AND to_agent=? AND state='open'", (iso(t), item_id, actor))
     _event(conn, item_id, actor, f"claimed (lease {_short(ttl)})")
-    if ag["model"]:  # the model the work runs on: a continuation of it takes the same (#4961)
+    if ag["model"]:  # the model the work runs on: an expert that takes it up takes the same (#4961, #4979)
         conn.execute("UPDATE items SET ran_model=? WHERE id=?",
                      (ladder_short(parse_ladder(setting(conn, "model_ladder")), ag["model"]) or ag["model"], item_id))
     if it0["kind"] in ("review", "deploy"):

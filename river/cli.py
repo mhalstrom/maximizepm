@@ -2653,9 +2653,10 @@ def render_manage(b):
     out += ["",
             "Your job: plan with the user, and keep the other agents working together. You take no items.",
             f"  launch:  {r} launch [--project P | --item N] [--model M] [--effort E] [--dry-run]",
-            "  models:  an expert or a continuation gets the model of the work it continues (with no --model, launch and "
-            "expert start take it from the item, and say which and why). Do not ask the user about a model choice "
-            "that the request already implies.",
+            "  models:  only an expert gets the model of the work it takes up (with no --model, expert start takes it "
+            "from the item, and says which and why). Any other item, also one found during Fable work, takes the "
+            "default model. Fable (or min model fable) only when the user asks for it. Do not ask the user about a "
+            "model choice that the request already implies.",
             f"  experts: a talk that becomes a long talk about one topic goes to an expert: one line to the user, then "
             f"{r} expert start <name> --topic \"...\" --summary-file <path> [--canvas C] [--source S] --session {me}. "
             "The task holds the talk so far; you do no long design talk in your own context.",

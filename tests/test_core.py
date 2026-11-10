@@ -4454,9 +4454,11 @@ class Models(Base):
         core.push(self.c, x, "strong", None, "mark")  # a session whose model fits
         core.accept(self.c, x, "strong")
 
-    def test_a_continuation_takes_the_model_of_the_work_it_continues(self):
-        """#4961: an expert for a design that a Fable session wrote started on the default Opus. An item found during,
-        or added before, an item whose work ran on a stronger model than the default gets that model."""
+    def test_only_an_expert_takes_the_model_of_the_work_it_takes_up(self):
+        """#4961: an expert for a design that a Fable session wrote started on the default Opus, so an expert task
+        found during, or added before, an item whose work ran on a stronger model gets that model. #4979 (mark: 'we do
+        not use fable except when specifically asked and for expert discussions'): a plain item found during or
+        added before that work takes the default model and limits."""
         core.config_set(self.c, "default_model", "opus")
         core.config_set(self.c, "default_max_model", "opus")
         design = core.item_add(self.c, "a", "design", models={"max_model": "fable"})["id"]
@@ -4464,18 +4466,26 @@ class Models(Base):
         core.set_agent_model(self.c, "fab", "claude-fable-5-2")
         core.claim(self.c, design, "fab")
         self.assertEqual(core._item(self.c, design)["ran_model"], "fable")
-        talk = core.item_add(self.c, "a", "talk it through", found_during=design)
+        talk = core.item_add(self.c, "a", "talk it through", found_during=design, tier="expert")
         self.assertEqual((talk["model"], talk["max_model"]), ("fable", "fable"))
         self.assertTrue(any("it continues the work of #%d" % design in e["change"] for e in talk["events"]))
-        pre = core.item_add(self.c, "a", "a step before", blocks=design, mode="keep", actor="fab")
-        self.assertEqual(pre["model"], "fable")
-        # The adder's own choice wins; work at the default passes nothing on.
-        own = core.item_add(self.c, "a", "small fix", found_during=design, models={"model": "sonnet"})
+        # Plain items found during or added before the Fable work: the default, and no history line about it.
+        for kw in ({"found_during": design}, {"blocks": design, "mode": "keep", "actor": "fab"}):
+            it = core.item_add(self.c, "a", "a plain task", **kw)
+            raw = core._item(self.c, it["id"])
+            self.assertEqual((raw["model"], raw["min_model"], raw["max_model"]), (None, None, None))
+            self.assertEqual((it["model"], it["max_model"]), ("opus", "opus"))
+            self.assertFalse(any("continues the work" in e["change"] for e in it["events"]))
+            self.assertEqual(core.session_model(self.c, raw), ("opus", "the default model (global)"))
+        # A plain item that a Fable session claimed once: its next session takes the default, not Fable.
+        self.assertEqual(core.session_model(self.c, core._item(self.c, design)), ("opus", "the default model (global)"))
+        # The adder's own choice wins, for an expert task too.
+        own = core.item_add(self.c, "a", "small talk", found_during=design, tier="expert", models={"model": "sonnet"})
         raw = core._item(self.c, own["id"])  # item_show gives the effective limits, with the defaults
         self.assertEqual((raw["model"], raw["max_model"]), ("sonnet", None))
         plain = core.item_add(self.c, "a", "plain")["id"]
         self.assertEqual(core.work_model(self.c, core._item(self.c, plain)), (None, None))
-        follow = core.item_add(self.c, "a", "follow-up", found_during=plain)
+        follow = core.item_add(self.c, "a", "follow-up", found_during=plain, tier="expert")
         raw = core._item(self.c, follow["id"])
         self.assertEqual((raw["model"], raw["max_model"]), (None, None))
         # An old item with no session model: a max raised above the default max says the work was meant for it.
