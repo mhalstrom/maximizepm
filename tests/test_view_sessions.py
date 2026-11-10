@@ -810,6 +810,14 @@ try {
   ui.refresh();
   await until(() => q("#sessText").disabled === false && q("#sessTitle").textContent === "ag", "composer ready");
   check(q("#sessSend").disabled && !q("#sessAttach").disabled, "empty Send off, Attach available");
+  // #5078: the iMessage form: an empty field shows no send arrow; text brings it; line icons, no emoji.
+  check(!q("#sessBar").classList.contains("has-text") && getComputedStyle(q("#sessSend")).display === "none", "empty: no send arrow");
+  check(q(".cmp-pill").contains(q("#sessText")) && q(".cmp-pill").contains(q("#sessSend")) && q("#sessAttach").querySelector("svg"), "pill holds text and send; + is an icon");
+  check(!/\p{Extended_Pictographic}/u.test(q("#sessBar").textContent), "no emoji in the message box");
+  q("#sessText").value = "hi"; q("#sessText").dispatchEvent(new Event("input", { bubbles: true }));
+  check(q("#sessBar").classList.contains("has-text") && getComputedStyle(q("#sessSend")).display !== "none", "text: the send arrow shows");
+  q("#sessText").value = ""; q("#sessText").dispatchEvent(new Event("input", { bubbles: true }));
+  check(!q("#sessBar").classList.contains("has-text"), "empty again: the arrow goes");
   const dt = new DataTransfer(); dt.items.add(new File(["a,b\n1,2"], "table.csv", { type: "text/csv" }));
   q("#sessText").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
   const drop = new DataTransfer(); drop.items.add(new File(["PK"], "archive.zip", { type: "application/zip" }));

@@ -19,6 +19,7 @@ import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
 import { endButton, endSession } from "../components/endSession.js";
 import { buttonEl } from "../components/button.js";
+import { composerHtml, composerState } from "../components/composer.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
@@ -388,7 +389,9 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     if (document.querySelector('#setup:not(.hidden), [id$="Dlg"]:not(.hidden)')) return;
     showWaiting(s);
   }
-  // The composer grows with the text; Enter sends, Shift+Enter starts a new line.
+  // The composer (components/composer.js, #5078) grows with the text; Enter sends, Shift+Enter starts a new line.
+  $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message this session", label: "Message for the session's terminal",
+    attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line." });
   const text = $("#sessText");
   const grow = () => { text.style.height = "auto"; text.style.height = Math.min(text.scrollHeight, window.innerHeight / 3) + "px"; };
   // Empty messages send nothing. Files being read reserve a slot, and Send waits until they are ready.
@@ -397,6 +400,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   const empty = () => !text.value.trim() && !files.length;
   const sendState = () => {
     $("#sessSend").disabled = text.disabled || sending || empty() || files.some(f => f.reading);
+    composerState($("#sessBar"), !empty());
     $("#sessAttach").disabled = $("#sessPickFiles").disabled = text.disabled || sending;
   };
   // Dictation (#4626): the microphone puts speech into the box as text.

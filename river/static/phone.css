@@ -187,12 +187,12 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .sess-lists .btn:last-child { border-radius: 0 8px 8px 0; border-left-width: 0; }
   .sess-main .sbody { padding: 10px 2px 4px; overscroll-behavior: contain; }
   .msg { font-size: 15px; }
+  /* The message box (#5078): larger round buttons, and 16 px text so iOS does not zoom into the field. */
+  .composer { --h-cmp: 40px; --h-cmp-in: 32px; }
+  .cmp-pill textarea { font-size: 16px; }
   .msg-user .bubble, .msg-files, .msg-imgs { max-width: 85%; }
   .msg-agent, .md, .md p, .md li { overflow-wrap: anywhere; min-width: 0; }
   .md pre, .md table { max-width: 100%; }
-  .sess-main .sbar { gap: 6px; align-items: flex-end; }
-  .sess-main .sbar textarea { padding: 9px 12px; min-height: 44px; font-size: 16px; }
-  .sess-main .sbar > button { flex: none; min-width: 44px; min-height: 44px; }
 
   /* The side panel takes the whole screen; its X closes it. */
   .sess-layout > .sess-panel { left: 0; width: 100vw; height: auto; border-left: 0; padding: calc(8px + env(safe-area-inset-top)) 10px calc(8px + env(safe-area-inset-bottom)); }

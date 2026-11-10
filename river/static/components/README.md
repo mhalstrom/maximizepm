@@ -30,6 +30,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Long text on a phone | `clamp.js` | `clampHtml`; a clamp written in a view's HTML gets its More from `fitClamps` |
 | Empty list | `empty.js`: `empty(html, {inline})` | "No open items." |
 | Table | `table.js` (Tabulator) | |
+| Message box of a chat | `composer.js`: `composerHtml(prefix, {...})`, `composerState(form, hasText)` | round + to attach, one pill field, the mic while empty, a round send arrow with text; line icons `PLUS_SVG`, `MIC_SVG`, `SEND_SVG` (#5078) |
 | Chat | `chat.js` | |
 
 ## Tokens (app.css `:root`)

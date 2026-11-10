@@ -45,6 +45,7 @@
   /* Widths of a field or a list: xs 80, s 120, m 160, l 220. --board-top: the header and strip above a Board column. */
   --w-xs: 80px; --w-s: 120px; --w-m: 160px; --w-l: 220px; --board-top: 150px;
   --tap: 44px;  /* the least size of a control on a phone */
+  --h-cmp: 34px; --h-cmp-in: 28px;  /* the message box: the + and the pill, the round buttons in the pill (#5078) */
   /* Widths and heights of view parts that no space token gives (#5046): one name for each, so a view holds no px. */
   --w-input-s: 90px;   /* a short filter field (Artifacts: Item #) */
   --w-input-m: 180px;  /* the least width of a reason field beside its button (Targets) */
@@ -305,3 +306,29 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .end-check { display: flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-m); margin: var(--sp-3) 0; }
 .end-now { margin-top: var(--sp-4); padding: var(--sp-3); border: var(--hair) solid var(--warn); border-radius: var(--r-m); background: var(--warn-bg); font-size: var(--fs-m); }
 .end-now .actions { justify-content: flex-end; margin-top: var(--sp-2); }
+/* The message box of a chat (components/composer.js, #5078): a round + on the left, then one pill field that holds the
+   text, the microphone while it is empty, and a round send arrow when it has text. No outline, a quiet focus. */
+.composer { display: flex; align-items: flex-end; gap: var(--sp-3); }
+.cmp-plus { flex: none; width: var(--h-cmp); height: var(--h-cmp); border-radius: 50%; border: 0; padding: 0; background: var(--bubble);
+  color: var(--muted); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.cmp-plus:hover:not(:disabled) { color: var(--ink); }
+.cmp-plus:disabled { opacity: .45; cursor: default; }
+.cmp-pill { flex: 1; min-width: 0; min-height: var(--h-cmp); display: flex; align-items: flex-end; gap: var(--sp-1);
+  background: var(--bubble); border: var(--hair) solid transparent; border-radius: calc(var(--h-cmp) / 2);
+  padding: var(--sp-0) var(--sp-0) var(--sp-0) var(--sp-5); }
+.cmp-pill:focus-within { border-color: var(--line); }
+.cmp-pill textarea { flex: 1; min-width: 0; border: 0; border-radius: 0; background: transparent; resize: none; outline: none;
+  box-shadow: none; padding: var(--sp-1) 0; line-height: 1.45; max-height: 33vh; overflow-y: auto; font: inherit; color: var(--ink); }
+.cmp-mic, .cmp-send { flex: none; width: var(--h-cmp-in); height: var(--h-cmp-in); border-radius: 50%; border: 0; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.cmp-mic { background: none; color: var(--muted); }
+.cmp-mic:hover { color: var(--ink); }
+.cmp-mic.on { color: var(--warn); animation: micpulse 1.2s ease-in-out infinite; }
+.cmp-mic.hidden { display: none; }
+.cmp-send { display: none; background: var(--accent); color: var(--accent-ink); }
+.cmp-send:disabled { opacity: .45; cursor: default; }
+.composer.has-text .cmp-send { display: inline-flex; }
+.composer.has-text .cmp-mic:not(.on) { display: none; }
+.cmp-plus:focus-visible, .cmp-mic:focus-visible, .cmp-send:focus-visible { outline: var(--hair-2) solid var(--accent); outline-offset: var(--hair); }
+@keyframes micpulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .cmp-mic.on { animation: none; } }
