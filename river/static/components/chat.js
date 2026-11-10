@@ -184,8 +184,25 @@ function entryNode(e) {
     d.append(body);
     return d;
   }
+  // A compaction or a resume (#5120): one thin line across the chat with what happened and when; the start of the
+  // session the same, with no time. The summary of a compaction is folded under it, closed.
+  if (e.role === "divider") {
+    const d = el("div", "chat-div", e.at ? `${e.text} · ${when(e.at)}` : e.text);
+    d.setAttribute("role", "separator");
+    if (e.kind) d.dataset.kind = e.kind;
+    return d;
+  }
+  if (e.role === "summary") {
+    const d = el("details", "chat-summary");
+    d.append(el("summary", "", "Summary"));
+    const b = el("div", "md");
+    b.innerHTML = markdown(e.text);  // sanitized by DOMPurify
+    d.append(b);
+    return d;
+  }
   return el("div", "msg-event", e.text);
 }
+const when = (at) => new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
 // Add transcript lines to the chat column. A tool result fills the tool call it belongs to (when that call is
 // shown); it never shows as a line of its own.
@@ -225,6 +242,15 @@ export function appendEntries(col, entries, refs) {
     if (e.role === "tool" || e.role === "event") toolGroup(col).append(node), countGroup(col.lastElementChild);
     else col.append(node);
   }
+}
+
+// Earlier lines at the top of the chat (#5120: scrolling up): drawn as appendEntries draws them, then put before the
+// first line. With none left before them (start), the chat begins with 'Start of the session'.
+export function prependEntries(col, entries, refs, start = false) {
+  const tmp = document.createElement("div");
+  if (start) appendEntries(tmp, [{ role: "divider", kind: "start", text: "Start of the session" }]);
+  appendEntries(tmp, entries, refs);
+  col.prepend(...tmp.childNodes);
 }
 
 // Each run of tool calls (and "a background task ended" lines) sits in one group (#4635). With the chat's tool

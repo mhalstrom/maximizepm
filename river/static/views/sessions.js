@@ -8,7 +8,7 @@
 // page's token: typeAction).
 import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle } from "../lib.js";
 import { chip } from "../components/chip.js";
-import { appendEntries, agePending, wireCopy, plainText } from "../components/chat.js";
+import { appendEntries, prependEntries, agePending, wireCopy, plainText } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
 import { openWaiting, closeWaiting } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
@@ -176,6 +176,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   let pane = null;
   const PANES = { you: "#sessYou", arts: "#sessArts" };
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null;
+  let older = null, readingOlder = false;  // where the earlier lines of the chat start (#5120), and a read of them
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
   const experts = $("#sessExpertRows"), expertGroup = $("#sessExperts"), assist = $("#sessAssist");
@@ -323,7 +324,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       const first = cursor == null, atEnd = body.scrollHeight - over - body.scrollTop - body.clientHeight < 60;
       if (first) { if (j.entries.length) col.replaceChildren(); else note(j.note || "No lines yet."); }
       else if (j.entries.length) col.querySelector(".sl-none")?.remove();
-      appendEntries(col, j.entries, j.refs);
+      if (first) { older = j.older || null; readingOlder = false; }
+      if (first && !older && j.entries.length) prependEntries(col, j.entries, j.refs, true);
+      else appendEntries(col, j.entries, j.refs);
       checkPaths(col, agent);  // what each path means for this session; a refused one says why (#4689)
       agePending(col);
       cursor = j.cursor;
@@ -344,6 +347,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       // The first read shows the end; later new lines are followed. With no new line the chat stays where it is, so
       // a poll while the person types moves nothing (#5111).
       if (first || (atEnd && j.entries.length)) body.scrollTop = body.scrollHeight;
+      if (first) moreAbove();
     } catch (e) { /* the next poll tries again */ }
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
   }
@@ -354,6 +358,27 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     markYou(pane === "you");
     $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
   }
+  // Scrolling up reads the earlier lines (#5120), a page at a time, across compactions and into the transcript of the
+  // session it was resumed from; the lines in sight stay where they are.
+  function moreAbove() { if (older && !readingOlder && body.scrollTop < body.clientHeight) readOlder(); }
+  async function readOlder() {
+    const mine = gen, at = older;
+    readingOlder = true;
+    try {
+      const r = await fetch(`api/session?agent=${encodeURIComponent(agent)}&file=${encodeURIComponent(at.file)}`
+                            + (at.before != null ? `&before=${at.before}` : ""));
+      const j = await r.json();
+      if (mine !== gen) return;
+      if (!r.ok) { older = null; return; }
+      const h = body.scrollHeight, top = body.scrollTop;
+      older = j.older || null;
+      prependEntries(col, j.entries, j.refs, !older);
+      checkPaths(col, agent);
+      body.scrollTop = top + body.scrollHeight - h;
+    } catch (e) { return; } finally { if (mine === gen) readingOlder = false; }
+    if (mine === gen) moreAbove();
+  }
+  body.addEventListener("scroll", moreAbove, { passive: true });
   function showPane(kind, byPerson = true) {
     if (pane !== kind) {
       if (pane) $(PANES[pane]).classList.add("hidden");

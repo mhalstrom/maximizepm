@@ -11,6 +11,7 @@ from river import core, server, sessions
 
 SID = "11111111-2222-3333-4444-555555555555"
 SID2 = "66666666-7777-8888-9999-000000000000"
+SID3 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 TID = "01a14170-419d-7241-afac-300125038d9d"
 
 
@@ -73,6 +74,74 @@ class Base(unittest.TestCase):
 
     def cards(self):
         return sessions.views(self.c, {}, self.root, self.croot)
+
+
+class History(Base):
+    """#5120 (mark: 'When compacting, We lose all of the old Chat history ... a dividing line ... and then we can still
+    view the old messages'): a compaction is a divider with the summary folded under it, and scrolling up reads every
+    earlier line, across compactions and into the transcript a resumed session came from."""
+
+    def lines(self, first, n):
+        return "".join(claude_line("user", f"question {i}") + claude_line("assistant", [{"type": "text", "text": f"answer {i}"}],
+                                                                           "end_turn") for i in range(first, first + n))
+
+    def boundary(self, n):
+        return (json.dumps({"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted",
+                            "timestamp": f"2026-11-08T1{n}:00:00Z"}) + "\n"
+                + claude_line("user", f"This session is being continued ... summary {n}", isCompactSummary=True,
+                              isVisibleInTranscriptOnly=True))
+
+    def scroll_up(self, got):
+        """Every page of the chat, from the first read up to the start of the session."""
+        out, older, pages = list(got["entries"]), got["older"], 0
+        while older:
+            page = sessions.older_page(self.c, "ag", older["file"], older["before"], self.root, self.croot)
+            self.assertLessEqual(len(page["entries"]), sessions.LIMIT + 1)
+            out, older, pages = page["entries"] + out, page["older"], pages + 1
+        return out, pages
+
+    def test_two_compactions_show_two_dividers_and_scrolling_up_reads_every_line(self):
+        self.path.write_text("")
+        self.write(self.lines(0, 200) + self.boundary(1) + self.lines(200, 200) + self.boundary(2) + self.lines(400, 200))
+        got = sessions.view(self.c, "ag", None, self.root, self.croot)
+        self.assertEqual(len(got["entries"]), sessions.LIMIT)
+        self.assertIsNotNone(got["older"])
+        every, pages = self.scroll_up(got)
+        self.assertGreaterEqual(pages, 3)
+        talk = [e["text"] for e in every if e["role"] in ("user", "assistant")]
+        self.assertEqual(talk, [f"{w} {i}" for i in range(600) for w in ("question", "answer")])  # each once, in order
+        marks = [(e["role"], e.get("kind")) for e in every if e["role"] in ("divider", "summary")]
+        self.assertEqual(marks, [("divider", "compacted"), ("summary", None)] * 2)
+        at = [n for n, e in enumerate(every) if e["role"] == "divider"]
+        self.assertEqual([every[n - 1]["text"] for n in at], ["answer 199", "answer 399"])  # each where it happened
+        self.assertIn("summary 1", every[at[0] + 1]["text"])
+        self.assertFalse(any("summary" in e["text"] for e in every if e["role"] == "user"))  # never the person's turn
+
+    def test_a_resumed_session_goes_on_in_the_same_chat(self):
+        self.path.write_text("")
+        self.write(self.lines(0, 5))
+        other = self.root / "-other" / f"{SID2}.jsonl"  # a session id in another folder is not this chat
+        other.parent.mkdir()
+        other.write_text(self.lines(900, 3))
+        core.record_claude_session(self.c, "ag", SID2)
+        new = self.path.parent / f"{SID3}.jsonl"
+        new.write_text(claude_line("user", "go on", at="2026-11-09T09:00:00Z") + self.lines(5, 3))
+        core.record_claude_session(self.c, "ag", SID3)
+        got = sessions.view(self.c, "ag", None, self.root, self.croot)
+        self.assertEqual([e["text"] for e in got["entries"][:2]], ["Resumed", "go on"])  # the new file, whole
+        every, _ = self.scroll_up(got)
+        self.assertEqual([e["text"] for e in every if e["role"] != "divider"],
+                         [f"{w} {i}" for i in range(5) for w in ("question", "answer")] + ["go on"]
+                         + [f"{w} {i}" for i in range(5, 8) for w in ("question", "answer")])
+        (div,) = [e for e in every if e["role"] == "divider"]
+        self.assertEqual((div["kind"], div["at"], every[10]), ("resumed", "2026-11-09T09:00:00Z", div))
+        with self.assertRaises(core.RiverError):
+            sessions.older_page(self.c, "ag", other.name, None, self.root, self.croot)
+
+    def test_a_codex_compaction_is_a_divider_with_its_summary(self):
+        got, _ = sessions._codex(json.loads(codex_line("compacted", {"message": "what was done so far"})))
+        self.assertEqual([(e["role"], e.get("kind"), e["text"]) for e in got],
+                         [("divider", "compacted", "Compacted"), ("summary", None, "what was done so far")])
 
 
 class Sessions(Base):

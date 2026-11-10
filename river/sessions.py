@@ -131,6 +131,27 @@ def transcript(conn, agent, root=None, croot=None):
 def _read(path, cursor, tail=TAIL_BYTES):
     """(text, start, end): the complete lines of the file from byte `cursor` on (None: its last `tail` bytes), the
     byte where that text starts, and the byte after its last complete line, the next cursor."""
+    raw, start, end = _read_raw(path, cursor, tail)
+    return raw.decode("utf-8", "replace"), start, end
+
+
+def _bytes(path, start, end):
+    """The bytes of the file from start to end (a .zst log: of its decompressed text)."""
+    if str(path).endswith(".zst"):
+        return _zstd().ZstdDecompressor().decompress(Path(path).read_bytes())[start:end]
+    with open(path, "rb") as f:
+        f.seek(start)
+        return f.read(max(0, end - start))
+
+
+def _size(path):
+    if str(path).endswith(".zst"):
+        return len(_zstd().ZstdDecompressor().decompress(Path(path).read_bytes()))
+    return Path(path).stat().st_size
+
+
+def _read_raw(path, cursor, tail=TAIL_BYTES):
+    """_read, as bytes."""
     if str(path).endswith(".zst"):
         data = _zstd().ZstdDecompressor().decompress(Path(path).read_bytes())  # a session that writes: what is there
         size = len(data)
@@ -147,7 +168,7 @@ def _read(path, cursor, tail=TAIL_BYTES):
         cut = chunk.find(b"\n") + 1
         chunk, start = chunk[cut:], start + cut
     end = chunk.rfind(b"\n") + 1  # a line the CLI still writes waits for the next read
-    return chunk[:end].decode("utf-8", "replace"), start, start + end
+    return chunk[:end], start, start + end
 
 
 def _clip(s, n):
@@ -275,10 +296,17 @@ def _parts_text(content, kinds):
 
 def _claude(d):
     """The page lines of one Claude Code transcript line, and its turn state (working, idle, or None)."""
+    # A compaction (#5120): Claude Code keeps the lines before it in the file and writes a compact_boundary line, then
+    # the summary as a user line. The chat shows a divider, and the summary folded under it, never as the person's turn.
+    if d.get("type") == "system" and d.get("subtype") == "compact_boundary" and not d.get("isSidechain"):
+        return [{"at": d.get("timestamp"), "role": "divider", "kind": "compacted", "text": "Compacted"}], None
     if d.get("type") not in ("user", "assistant") or d.get("isSidechain") or d.get("isMeta"):
         return [], None
     m = d.get("message") if isinstance(d.get("message"), dict) else {}
     at, content, out = d.get("timestamp"), m.get("content"), []
+    if d.get("isCompactSummary"):
+        text = content if isinstance(content, str) else _parts_text(content, ("text",))
+        return [{"at": at, "role": "summary", "text": _clip(text.strip(), TEXT_MAX)}], None
     if d["type"] == "assistant":
         for x in content if isinstance(content, list) else []:
             if not isinstance(x, dict):
@@ -330,6 +358,11 @@ def _codex(d):
     """The page lines of one Codex session log line, and its turn state."""
     p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
     at, t = d.get("timestamp"), p.get("type")
+    if d.get("type") == "compacted":  # Codex's compaction (#5120): its summary is the payload's message
+        out = [{"at": at, "role": "divider", "kind": "compacted", "text": "Compacted"}]
+        if isinstance(p.get("message"), str) and p["message"].strip():
+            out.append({"at": at, "role": "summary", "text": _clip(p["message"].strip(), TEXT_MAX)})
+        return out, None
     if d.get("type") == "event_msg":
         return [], {"task_started": "working", "task_complete": "idle", "turn_aborted": "idle"}.get(t)
     if d.get("type") != "response_item":
@@ -356,36 +389,122 @@ _TAIL_CACHE = {}  # (path, tail) -> (size, mtime, the answer of entries(kind, pa
 
 
 def entries(kind, path, cursor=None, limit=LIMIT, tail=TAIL_BYTES):
-    """{entries, cursor, turn}: the page lines of the transcript after cursor (None: its last part), at most limit
-    of them (the newest), the cursor of the next read, and the state of the last turn (working, idle, or None)."""
+    """{entries, cursor, turn, before}: the page lines of the transcript after cursor (None: its last part), at most
+    limit of them (the newest), the cursor of the next read, the state of the last turn (working, idle, or None), and
+    the byte where the line of the first entry starts: the earlier lines are before it (older_page)."""
     if cursor is None:
         st = Path(path).stat()
         got = _TAIL_CACHE.get((str(path), tail))
         if not got or got[:2] != (st.st_size, st.st_mtime_ns):
             got = _TAIL_CACHE[(str(path), tail)] = (st.st_size, st.st_mtime_ns, _entries(kind, path, None, tail=tail))
-        return dict(got[2], entries=got[2]["entries"][-limit:])
-    return _entries(kind, path, cursor, limit)
+        r = got[2]
+    else:
+        r = _entries(kind, path, cursor)
+    k = _first(r["offs"], limit)
+    return {"entries": r["entries"][k:], "cursor": r["cursor"], "turn": r["turn"], "cwd": r["cwd"],
+            "before": r["offs"][k] if k else r["start"]}
 
 
-def _entries(kind, path, cursor, limit=LIMIT, tail=TAIL_BYTES):
-    text, _start, end = _read(path, cursor, tail)
+def _first(offs, limit):
+    """The index of the first of the newest `limit` entries, moved back so that one line's entries stay together."""
+    k = max(0, len(offs) - limit)
+    while 0 < k < len(offs) and offs[k - 1] == offs[k]:
+        k -= 1
+    return k
+
+
+def _parse(kind, raw, start):
+    """The page lines of the transcript bytes raw (complete lines; the first starts at byte start), with the byte
+    where the line of each one starts, the state of the last turn, and the folder the session runs in."""
     parse = _claude if kind == "claude" else _codex
-    out, turn, cwd = [], None, None
-    for line in text.splitlines():
+    out, offs, turn, cwd, at = [], [], None, None, start
+    for line in raw.splitlines(keepends=True):
+        here, at = at, at + len(line)
         if not line.strip():
             continue
         try:
-            d = json.loads(line)
+            d = json.loads(line.decode("utf-8", "replace"))
         except ValueError:
             continue
         if not isinstance(d, dict):
             continue
         got, st = parse(d)
         out += got
+        offs += [here] * len(got)
         turn = st or turn
         p = d.get("payload") if isinstance(d.get("payload"), dict) else d  # the folder the session runs in
         cwd = p.get("cwd") if isinstance(p.get("cwd"), str) else cwd
-    return {"entries": out[-limit:], "cursor": end, "turn": turn, "cwd": cwd}
+    return {"entries": out, "offs": offs, "turn": turn, "cwd": cwd}
+
+
+def _entries(kind, path, cursor, limit=LIMIT, tail=TAIL_BYTES):
+    raw, start, end = _read_raw(path, cursor, tail)
+    r = _parse(kind, raw, start)
+    k = max(0, len(r["entries"]) - limit) if cursor is not None else 0
+    return {"entries": r["entries"][k:], "offs": r["offs"][k:], "cursor": end, "turn": r["turn"], "cwd": r["cwd"],
+            "start": start}
+
+
+def _page_back(kind, path, before, limit=LIMIT):
+    """(entries, before): the newest `limit` page lines of the transcript that end before byte `before`, and the byte
+    where the first of their lines starts (0: the start of the file). It reads backward in growing windows."""
+    window = 256 * 1024
+    while True:
+        start = max(0, before - window)
+        raw = _bytes(path, start, before)
+        if start > 0:
+            cut = raw.find(b"\n") + 1
+            if not cut:  # one line longer than the window
+                window *= 4
+                continue
+            raw, start = raw[cut:], start + cut
+        r = _parse(kind, raw, start)
+        if len(r["entries"]) >= limit or start == 0:
+            break
+        window *= 4
+    k = _first(r["offs"], limit)
+    return r["entries"][k:], (r["offs"][k] if k else start)
+
+
+def transcript_chain(conn, agent, kind, path):
+    """The transcripts of one agent's chat, oldest first, the newest (path) last (#5120): a session that Claude Code
+    resumed into a new file (a new session id of the agent, agent_sessions) goes on in the same chat. Only files in the
+    folder of the newest one count: a session id that another session recorded for this agent is not its chat."""
+    if kind != "claude":
+        return [path]
+    out = []
+    for r in conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen, rowid", (agent,)):
+        p = Path(path).parent / f"{r['session_id']}.jsonl"
+        if p != Path(path) and p not in out and p.is_file():
+            out.append(p)
+    return out + [Path(path)]
+
+
+def _older(chain, i, before, entries):
+    """(entries, older): the page lines with a 'Resumed' divider when they reach the start of a file after the first,
+    and where the next earlier page starts ({file, before}; None at the start of the session)."""
+    if before > 0:
+        return entries, {"file": Path(chain[i]).name, "before": before}
+    if i > 0:
+        return ([{"at": entries[0]["at"] if entries else None, "role": "divider", "kind": "resumed", "text": "Resumed"}]
+                + entries), {"file": Path(chain[i - 1]).name, "before": None}
+    return entries, None
+
+
+def older_page(conn, agent, file, before=None, root=None, croot=None):
+    """GET /api/session?agent=&file=&before= (#5120): the page lines of the agent's chat before byte `before` of its
+    transcript `file` (None: its end), at most LIMIT, and where the next earlier page starts (older; None: the start of
+    the session). Scrolling up in the chat reads the whole session this way, across every compaction."""
+    kind, path = transcript(conn, agent, root, croot)
+    if not path:
+        raise core.RiverError(f"no transcript of {agent} on this computer")
+    chain = transcript_chain(conn, agent, kind, path)
+    i = next((n for n, p in enumerate(chain) if Path(p).name == file), None)
+    if i is None:
+        raise core.RiverError(f"{file} is not a transcript of {agent}")
+    got, b = _page_back(kind, chain[i], _size(chain[i]) if before is None else max(0, int(before)))
+    got, older = _older(chain, i, b, got)
+    return {"agent": agent, "entries": got, "older": older, "refs": item_refs(conn, got)}
 
 
 def state(conn, a, turn, waiting=None):
@@ -679,8 +798,12 @@ def view(conn, agent, cursor=None, root=None, croot=None):
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
     key, label = state(conn, a, turn)
+    older = None
+    if cursor is None:  # the first read: where the earlier lines start, for scrolling up (#5120)
+        chain = transcript_chain(conn, agent, kind, path)
+        got["entries"], older = _older(chain, len(chain) - 1, got["before"], got["entries"])
     return {"agent": agent, "transcript": kind, "provider": provider(a.get("agent_type"), kind),
-            "entries": got["entries"], "cursor": got["cursor"],
+            "entries": got["entries"], "cursor": got["cursor"], "older": older,
             "refs": item_refs(conn, got["entries"]),
             "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url"),
             "cache": cache_state(conn, agent, found=(kind, path)) if a.get("role") == "expert" else None}

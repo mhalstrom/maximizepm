@@ -139,6 +139,12 @@ button.srow-it { cursor: pointer; }
 .tool-body pre { margin: var(--sp-2) 0 var(--sp-3) var(--sp-6); background: var(--bg); border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); max-height: var(--h-pre); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--fs-s)/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .tool-out { color: var(--muted); }
 .msg-event { text-align: center; font-size: var(--fs-s); color: var(--muted); margin: 0 0 var(--sp-4); }
+/* A compaction, a resume, the start of the session (#5120): a thin line with its words in the middle. */
+.chat-div { display: flex; align-items: center; gap: var(--sp-2); margin: var(--sp-2) 0 var(--sp-4); font-size: var(--fs-xs); color: var(--muted); }
+.chat-div::before, .chat-div::after { content: ""; flex: 1; border-top: var(--hair) solid var(--line); }
+.chat-summary { margin: calc(-1 * var(--sp-2)) 0 var(--sp-4); font-size: var(--fs-s); color: var(--muted); text-align: center; }
+.chat-summary > summary { cursor: pointer; }
+.chat-summary > .md { text-align: left; margin-top: var(--sp-2); padding: var(--sp-3); border: var(--hair) solid var(--line); border-radius: var(--r-m); color: var(--ink); }
 .sess-wait { font-size: var(--fs-m); margin-top: var(--sp-3); padding: var(--sp-2) var(--sp-4); border-radius: var(--r-m); background: var(--warn-bg); color: var(--warn); }
 .sess-wait.hidden { display: none; }
 /* The manager's proposal of an expert (#4990): a card above the message box, Continue in an expert or Dismiss. */

@@ -119,6 +119,9 @@ def running(h, path):
                                                                ended_panes=ended),
                                  "proposals": core.expert_proposals(conn)})
         cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
+        if "file" in q:  # scrolling up: the page of lines before a byte of one of its transcripts (#5120)
+            before = q.get("before", [""])[0]
+            return h._send(200, sessions.older_page(conn, agent, q["file"][0], int(before) if before.isdigit() else None))
         return h._send(200, dict(sessions.view(conn, agent, int(cursor) if cursor.isdigit() else None),
                                     terminal=bool(terminals.get(agent))))
     except RiverError as e:

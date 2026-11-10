@@ -399,6 +399,40 @@ try {
         self.assertEqual(len(typed), 1, typed)
         self.assertRegex(next(str(x) for x in typed[0] if "bytes" in str(x)), r"^\d+ bytes in [a-z]{2}(-[A-Z]{2})?\.$")
 
+    def test_the_chat_scrolls_up_through_two_compactions_to_the_start(self):
+        """#5120: a compaction is a thin divider with its summary folded closed under it; scrolling up loads the earlier
+        lines a page at a time, and the lines in sight stay where they are, up to 'Start of the session'."""
+        from tests.test_view_sessions import History
+        h = History.__new__(History)
+        self.path.write_text("")
+        self.write(h.lines(0, 200) + h.boundary(1) + h.lines(200, 200) + h.boundary(2) + h.lines(400, 200))
+        driver = r'''try {
+  const col = q("#sessCol"), body = q("#sessBody");
+  const talk = () => col.querySelectorAll(".msg-user, .msg-agent").length;
+  await until(() => window.__appReady && talk() > 100, "the chat of ag");
+  const out = { first: talk(), jumps: [] };
+  for (let i = 0; i < 20 && !col.querySelector('.chat-div[data-kind="start"]'); i++) {
+    const anchor = col.firstElementChild;
+    body.scrollTop = 0;
+    const y = anchor.getBoundingClientRect().top;
+    await until(() => col.firstElementChild !== anchor, "earlier lines came");
+    out.jumps.push(Math.round(anchor.getBoundingClientRect().top - y));
+  }
+  const divs = [...col.querySelectorAll(".chat-div")];
+  out.all = talk();
+  out.divs = divs.map(d => d.dataset.kind);
+  out.compacted = divs.filter(d => d.dataset.kind === "compacted").every(d => /^Compacted · /.test(d.textContent));
+  out.summaries = [...col.querySelectorAll("details.chat-summary")].map(d => d.open);
+  out.start = col.firstElementChild.textContent;
+  out.person = [...col.querySelectorAll(".msg-user")].some(m => /summary/.test(m.textContent));
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/")
+        self.assertLess(got.get("first", 0), 1200, got)
+        self.assertEqual((got["all"], got["divs"], got["compacted"], got["summaries"], got["start"], got["person"]),
+                         (1200, ["start", "compacted", "compacted"], True, [False, False], "Start of the session", False))
+        self.assertTrue(got["jumps"] and all(abs(j) <= 1 for j in got["jumps"]), got["jumps"])
+
     def test_a_new_prompt_or_question_of_the_open_session_opens_the_dialog_once(self):
         """#4663: the ! dialog opens by itself when the open session comes to a prompt or asks a question; Dismiss
         keeps it closed until something new waits."""
