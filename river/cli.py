@@ -21,9 +21,9 @@ Items live in projects and can wait on other items. `maxpm next` gives the
 most important ready item in the area you choose; `--claim` takes it.
 
 Agent sessions: run `maxpm go` in the project folder. It names the session,
-picks a role (owner, worker, unblocker, reviewer, deployer, planner,
-or idle), claims an item, and prints a briefing. Run it again after each item. To plan work with the user instead,
-run `maxpm plan`: an overview, the open questions, and the planner's rules.
+picks a role (owner, worker, unblocker, reviewer, deployer, or idle), claims
+an item, and prints a briefing. Run it again after each item. To direct the
+agents and plan with the user, run `maxpm manage`.
 
 By hand:
   maxpm register <your-name> [--human] --note "what you work on"
@@ -38,20 +38,21 @@ Work loop:
 
 More:
   maxpm guide          how an agent works from the queue (the full loop)
-  maxpm guide planner  how to split work into items and dependencies
+  maxpm guide manager  the manager, and how to write tasks (dependencies, priorities)
   maxpm guide setup    how to set up your agents to use MaximizePM
   maxpm --help         every command
 """
 
 # The block maxpm init puts in AGENTS.md: only what an agent needs before its first maxpm command.
-# How to work (keep going, wait, report) is in the go and plan briefings, which update with maxpm.
+# How to work (keep going, wait, report) is in the go briefing, which updates with maxpm.
 AGENT_SNIPPET = """## Work queue
 
 This project uses MaximizePM (`maxpm`) to track work and who is doing it.
 When the user says "go" (or asks you to take work from the queue), run
 `maxpm go` in this folder and follow the briefing it prints, to its end.
-When the user says "plan", run `maxpm plan` and follow its briefing.
 """
+# The block before #4978 (the planner role is gone): a file that holds only it still counts as only the block.
+OLD_SNIPPET = AGENT_SNIPPET + 'When the user says "plan", run `maxpm plan` and follow its briefing.\n'
 
 SETUP = """Setting up agents to use MaximizePM
 
@@ -68,7 +69,7 @@ SETUP = """Setting up agents to use MaximizePM
 
 3. Claude Code only, optional: install the skills so they load when needed:
      ln -s <repo>/skills/maxpm ~/.claude/skills/maxpm
-     ln -s <repo>/skills/maxpm-planner ~/.claude/skills/maxpm-planner
+     ln -s <repo>/skills/maxpm-manager ~/.claude/skills/maxpm-manager
 
 4. Give each agent session its own name (maxpm register <name>). A person
    registers with --human and usually wants longer claims:
@@ -1021,7 +1022,7 @@ def build_parser():
     x.add_argument("--step", help="with --watch: return after this long at most (a foreground shell: below its time limit)")
     x.add_argument("--chat", action="store_true", default=os.environ.get("MAXPM_CHAT") == "1",
                    help="a chat app session with no folder (default $MAXPM_CHAT=1)")
-    x = sub.add_parser("plan", help="start a planner session: overview, open questions, and the planner's rules")
+    x = sub.add_parser("plan", help="the planner role is gone (#4978): says where planning happens now")
     x.add_argument("--project", help="project name(s) to focus on (default: this folder's, else all)")
     x.add_argument("--chat", action="store_true", default=os.environ.get("MAXPM_CHAT") == "1",
                    help="a chat app session with no folder (default $MAXPM_CHAT=1)")
@@ -1336,7 +1337,7 @@ def build_parser():
     x.add_argument("--remove-login", action="store_true", help="remove that launchd agent")
     sk = sub.add_parser("skills", help="install the agent guides as Claude Code skills")
     sks = sk.add_subparsers(dest="scmd", required=True)
-    x = sks.add_parser("install", help="link the guides (maxpm, maxpm-planner, maxpm-manager) into ~/.claude/skills")
+    x = sks.add_parser("install", help="link the guides (maxpm, maxpm-manager) into ~/.claude/skills")
     x.add_argument("--dir", default="~/.claude/skills", help="skills folder (default ~/.claude/skills)")
     x.add_argument("--copy", action="store_true", help="copy the files instead of linking them")
     x.add_argument("--force", action="store_true", help="replace a folder that is not a link (your edits there are lost)")
@@ -1354,9 +1355,9 @@ def build_parser():
                    help="take over the relay account from another computer that is connected to it now")
     x.add_argument("--relay", metavar="URL", help="the relay (default https://relay.maximizepm.com, or $MAXPM_RELAY_URL)")
     x.add_argument("--no-browser", action="store_true", help="print the link instead of opening the browser")
-    x = sub.add_parser("guide", help="how to use MaximizePM: worker loop, planner, or agent setup")
+    x = sub.add_parser("guide", help="how to use MaximizePM: worker loop, manager (and writing tasks), or agent setup")
     x.add_argument("which", nargs="?", default="worker",
-                   choices=["worker", "planner", "manager", "setup", "decisions"])
+                   choices=["worker", "manager", "setup", "decisions"])
     x = sub.add_parser("setup-agent", help="print (or append) the instructions block for CLAUDE.md / AGENTS.md")
     x.add_argument("--append", metavar="FILE", help="append the block to this file if it is not there yet")
     x.add_argument("--claude-desktop", action="store_true",
@@ -1502,7 +1503,11 @@ def install_skills(dest, copy=False, force=False):
     import shutil
     dest.mkdir(parents=True, exist_ok=True)
     out = []
-    for name in ("maxpm", "maxpm-planner", "maxpm-manager"):
+    gone = dest / "maxpm-planner"  # the planner guide is gone (#4978): a link to it would point at nothing
+    if gone.is_symlink():
+        gone.unlink()
+        out.append(f"removed {gone} (the planner role is gone)")
+    for name in ("maxpm", "maxpm-manager"):
         src, dst = GUIDES / name, dest / name
         if not (src / "SKILL.md").is_file():
             raise RiverError(f"no guide at {src}; reinstall MaximizePM")
@@ -1572,7 +1577,7 @@ def run(argv=None):
         elif args.which == "decisions":
             print(core.DECISION_FORMAT)
         else:
-            name = {"planner": "maxpm-planner", "manager": "maxpm-manager"}.get(args.which, "maxpm")
+            name = {"manager": "maxpm-manager"}.get(args.which, "maxpm")
             text = (GUIDES / name / "SKILL.md").read_text()
             print(text.split("---", 2)[2].strip() if text.startswith("---") else text)
         return 0
@@ -1690,7 +1695,7 @@ def _run(args, conn):
             print(line)
     sys.stdout.flush()
     if not (args.cmd in ("wait", "unregister") and conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone() is None):
-        _footer(conn, res["agent"] if args.cmd in ("go", "plan") else actor)
+        _footer(conn, res["agent"] if args.cmd == "go" else actor)
     if not args.quiet and not args.json:
         h = _hint(args, res, actor)
         if h:
@@ -1888,7 +1893,7 @@ def _imports_agents(text):
 
 
 def _only_block(text):
-    return not text.replace(AGENT_SNIPPET, "").strip()
+    return not text.replace(OLD_SNIPPET, "").replace(AGENT_SNIPPET, "").strip()
 
 
 def instructions_layout(folder):
@@ -2343,7 +2348,7 @@ def dispatch(conn, a, actor):
         _record_process(conn, res["agent"])
         return res
     if c == "plan":
-        return {**core.plan(conn, os.getcwd(), actor, a.project), "chat": a.chat}
+        return {"plan_removed": True}
     if c == "manage":
         if a.watch:
             if not actor:
@@ -2633,19 +2638,13 @@ def render_status(res):
         print(" -", adv["text"])
 
 
-PLAN_RULES = """You are a PLANNER. Talk with the user about what they want done, then write it into the queue.
-Ask the user what outcome they want before you add items.
-Change the plan only; do not take or do the work (claims refuse for this session).
-  Projects:      {r} project add <name> --description "..." [--path <dir>] [--target <t>] --result-look ask_first|push_first
-                 (describe, rank, target). result_look is the user's choice: state your recommendation and its
-                 reason, and let the user confirm it. The reply of project add prints the rule.
-  Items:         {r} add <project> "<title>" --doer ai|human --context "..." --touches <files> --check "<cmd>"
-  Order:         {r} dep <id> --on <id> [--kind feeds|conflicts]   Importance: {r} prio <id> 0 (on the outcome only)
-  Model:         --model sonnet|opus|fable --effort low..max (advice); --min-model/--max-model only when a wrong model is costly
-  Fix:           {r} edit <id> ...   {r} move <id> --before <id>   {r} drop <id>   {r} blocked <id> --reason "..."
-  Progress:      maxpm status   maxpm log --since 7d   maxpm blockers <id>
-Ask the user about each open question below that matters to what they want. The full guide: maxpm guide planner
-When the user wants work done in this session instead: {r} go"""
+PLAN_GONE = """There is no planner role in MaximizePM (mark, 2026-11-10: 'get rid of planner').
+Planning happens in the talk and during the work:
+  - Directing the agents and planning with the user: the manager (maxpm manage).
+  - A long design talk: an expert (maxpm expert start), which writes the tasks at its end.
+  - Work you find while you work: maxpm add "<title>" --found-during <id>.
+How to write a good task (dependencies, priorities, context, the backlog): maxpm guide manager, section Writing tasks.
+To take work instead: maxpm go"""
 
 
 def _findings_lines(f, r):
@@ -2772,84 +2771,6 @@ def render_manage(b):
     if b.get("chat"):
         out += [""] + _chat_lines(r, False)[:1] + [
             "  launch still works from a chat: it opens a terminal on this computer with a coding agent."]
-    print("\n".join(out))
-
-
-def render_plan(b):
-    me = b["agent"]
-    r = f"maxpm --as {me}"
-    out = [f"You are MaximizePM agent {me}. Role: PLANNER."
-           + (f" Focus: {', '.join(b['projects'])}." if b["projects"] else " Focus: every project.")]
-    if core.queue_note():
-        out.append(core.queue_note() + ". Tell the user if that is not what they meant.")
-    if b.get("chat"):
-        out += [""] + _chat_lines(r, False)[:1]
-    elif not b.get("folder_has_project", True):
-        out += ["",
-                f"THIS FOLDER HAS NO PROJECT: {b['cwd']}",
-                "  The projects below are other work. Leave them alone unless the user names them.",
-                "  If the user's goal is about this folder, create its project first, then add items to it:",
-                f"  {r} project add <name> --description \"<what it covers>\" --path {b['cwd']} "
-                f"--result-look ask_first|push_first",
-                f"  --result-look is how a finished result gets the user's look: {LOOK_RULE}.",
-                f"  Tell the user your recommendation and its reason, and take the value the user confirms. With no "
-                f"value the project has ask_first."]
-    if b["new_name"]:
-        out.append(f"Your shell may not keep environment variables, so pass --as {me} on every maxpm command.")
-    out += ["", PLAN_RULES.format(r=r)]
-    for n, t in (b.get("trackers") or {}).items():
-        if t:
-            out += ["", f"TRACKER: project {n} uses {t}.",
-                    "  Import its open issues with that tool before you plan new work:",
-                    "  - Link form <tracker>:<key>: github:owner/repo#12, jira:PROJ-123, linear:ENG-42",
-                    "  - Skip an issue MaximizePM has already: maxpm list --ref <tracker>:<key>",
-                    f"  - Add the others: {r} add {n} \"<issue title>\" --ref <tracker>:<key> --ref-url <issue link> "
-                    "--context \"<what the issue says>\"",
-                    "  - Keep the tracker's priority (-p 0..4) and order, and link what must come first: "
-                    f"{r} dep <id> --on <id>",
-                    "  Ask the user before you import a large backlog, or issues that belong to other people."]
-        else:
-            out += ["", f"No tracker is recorded for {n}. If the user uses one (Jira, GitHub Issues, Linear...),",
-                    f"  record it once, in words an agent can act on: {r} project tracker {n} \"<tracker> <where> via <tool>\""]
-    out += ["", "OVERVIEW"]
-    print("\n".join(out))
-    render_status(b["status"])
-    q = b["questions"]
-    out = ["", "OPEN QUESTIONS" + ("" if b.get("folder_has_project", True) else " (other projects, not this folder)")]
-    def section(title, rows, fmt, limit=10):
-        if not rows:
-            return
-        out.append(f"{title} ({len(rows)}):")
-        out.extend("  " + fmt(x) for x in rows[:limit])
-        if len(rows) > limit:
-            out.append(f"  ... {len(rows) - limit} more")
-    section("Projects with no description", q["projects_without_description"],
-            lambda n: f"{n}   ({r} project describe {n} \"...\")")
-    section("Stuck on something outside the queue", q["stuck"],
-            lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  ({x['blocked_text']})"
-                      + (f" (holds up {x['holds_up']})" if x["holds_up"] else ""))
-    section("Marked replan: work grew after an agent started (split, re-scope, then maxpm replanned <id>)",
-            q["replan"], lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  "
-                                   f"({x['late_prereqs']} prerequisites added while claimed)")
-    section("Due dates", q.get("due", []), lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  "
-            f"({'OVERDUE' if x['due_state'] == 'overdue' else 'due soon' if x['due_state'] == 'soon' else 'due'} "
-            f"{x['due_text']}; {x['open_before']} open before it)")
-    section("May be done or stale (check each, then maxpm check <id> done|partial|open)", q.get("suspect", []),
-            lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  ({', '.join(x['reasons'])})"
-            + (f"; still needed: maxpm keep {x['id']} --close {x['closes'][0]}" if x.get("closes") else ""))
-    section("Waiting on a human", q["human_waiting"], lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'])}")
-    section("Wait on a backlog item: they cannot be ready (maxpm activate <backlog id>, or maxpm undep <id> --on <backlog id>)",
-            q.get("waits_on_backlog", []), lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'], 60)}  "
-            f"(waits on {', '.join('#' + str(b) for b in x['backlog'])})")
-    section("Look like the same work (merge: maxpm merge <keep-id> <other-id> --note \"<why>\")",
-            q.get("duplicates", []), lambda g: f"[{g['project']}] " + "  =  ".join(
-                f"#{m['id']} {_cut(m['title'], 45)}" for m in g["items"]) + f"  (score {g['score']:.2f})")
-    section("Items with no notes or context", q["items_without_notes"],
-            lambda x: f"#{x['id']:<4} [{x['project']}] {_cut(x['title'])}")
-    if len(out) == 2:
-        out.append("(none)")
-    if q.get("backlog"):
-        out.append(f"\nBacklog: {q['backlog']} item(s) that nobody plans to take now (maxpm backlog).")
     print("\n".join(out))
 
 
@@ -3346,33 +3267,15 @@ def render_go(b):
             out += ["YOUR GOAL WAITS ON OTHERS, and nothing else here is ready for you.",
                     "  Ask or offer help to the holders above, then run go again later.",
                     f"  Or hand it on: {r} goal give {gb['name']} --to <agent>   or: {r} goal release {gb['name']}"]
-    elif b["role"] == "planner":
-        out.append("NO READY WORK. Your job: plan the project into items that agents and people can take.")
-        if b.get("open_items"):
-            out.append("Open items that cannot move:")
-            for o in b["open_items"]:
-                why = o["blocked_text"] if o["blocked_reason"] else (
-                    "waits on " + ",".join(f"#{x}" for x in o["open_blockers"]) if o["open_blockers"] else "held")
-                why += "".join(f"; waits on a backlog item #{x}" for x in o.get("backlog_blockers") or ())
-                out.append(f"  #{o['id']} {o['title']}  ({why})")
-        if b.get("backlog"):
-            out.append(f"{b['backlog']} item(s) in the backlog: nobody plans to take them now (maxpm backlog; "
-                       f"maxpm activate <id> makes one open again, with the user's yes for a person's item).")
-        out += [
-            "",
-            "Steps:",
-            "  1. Read the project description and the code or documents it names. Ask the user when the goal is unclear.",
-            f"  2. Add items, one checkable outcome each: {r} add <project> \"<title>\" --doer ai|human --notes \"<files, commands, how to know it is done>\"",
-            f"  3. Link what must come first: {r} dep <id> --on <id> ...   Set importance on the outcome only: {r} prio <id> 0",
-            f"  4. Then run {r} go to take the first item, or stop and let other sessions take them.",
-            f"  (Full planning guide: maxpm guide planner)",
-        ]
     elif b.get("chat"):
         out += ["NOTHING FOR THIS CHAT NOW.",
-                "Tell the user what waits on them (below), and ask what they want to do: plan (maxpm plan), "
-                "manage the agents (maxpm manage), or answer what waits on them. Do not wait for work in a chat."]
+                "Tell the user what waits on them (below), and ask what they want to do: manage the agents and "
+                "plan (maxpm manage), or answer what waits on them. Do not wait for work in a chat."]
     else:
         out.append("NOTHING FOR YOU NOW.")
+        if b.get("nothing_planned"):
+            out.append(f"  {b['why'][0].upper() + b['why'][1:]}. Tell the user; what they want done next becomes tasks "
+                       f"(maxpm add; how: maxpm guide manager, section Writing tasks).")
         if b.get("queue_waiting"):
             out.append("Your queue holds items that are not ready yet: " + ", ".join(
                 f"#{e['item']} {_cut(e['title'], 40)}" for e in b["queue_waiting"][:5]) + "; maxpm wait wakes you when one is.")
@@ -3380,7 +3283,7 @@ def render_go(b):
             out.append(f"  #{h['id']} {h['title']}  (held by {h['assignee']})")
         for w in b.get("waits_on_backlog", [])[:5]:
             out.append(f"  #{w['id']} {_cut(w['title'], 50)}  (waits on a backlog item "
-                       + ",".join(f"#{x}" for x in w["backlog"]) + "; a person or a planner decides: maxpm activate <id>)")
+                       + ",".join(f"#{x}" for x in w["backlog"]) + "; a person or the manager decides: maxpm activate <id>)")
         if b.get("backlog"):
             out.append(f"  {b['backlog']} item(s) here are in the backlog: nobody takes them now (maxpm backlog).")
         how = ([
@@ -3807,7 +3710,8 @@ def render(a, res):
         _print_show(res)
         return
     if c == "plan":
-        return render_plan(res)
+        print(PLAN_GONE)
+        return
     if c == "manage":
         return render_manage(res)
     if c == "add" and isinstance(res, dict) and "dry_run" in res:

@@ -27,10 +27,15 @@ esac
 
 if [ "$SKILLS" = 1 ] && [ -d "$HOME/.claude" ]; then
   mkdir -p "$HOME/.claude/skills"
-  for s in maxpm maxpm-planner; do
+  for s in maxpm maxpm-manager; do
     ln -sfn "$ROOT/skills/$s" "$HOME/.claude/skills/$s"
     echo "linked ~/.claude/skills/$s"
   done
+  # The planner guide is gone (#4978): remove its link, which would point at nothing.
+  if [ -L "$HOME/.claude/skills/maxpm-planner" ]; then
+    rm "$HOME/.claude/skills/maxpm-planner"
+    echo "removed ~/.claude/skills/maxpm-planner"
+  fi
 fi
 
 cat <<'NEXT'

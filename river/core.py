@@ -4296,7 +4296,7 @@ def _count_late(conn, parent, n, actor):
     """Count prerequisites added to a claimed item; at replan_threshold, mark it replan.
 
     Work found after an agent starts means the item was bigger than planned, so
-    a planner looks at it again (maxpm plan lists it; maxpm replanned clears it)."""
+    someone splits it or changes its scope (maxpm replanned clears it)."""
     conn.execute("UPDATE items SET late_prereqs=late_prereqs+? WHERE id=?", (n, parent))
     it = _item(conn, parent)
     limit = int(setting(conn, "replan_threshold", item_id=parent, agent=actor))
@@ -4307,7 +4307,7 @@ def _count_late(conn, parent, n, actor):
 
 
 def replanned(conn, item_id, note=None, actor=None):
-    """Clear the replan mark after a planner looked at the item again; the count starts over."""
+    """Clear the replan mark after someone looked at the item again; the count starts over."""
     with tx(conn):
         it = _item(conn, item_id)
         conn.execute("UPDATE items SET replan=0, late_prereqs=0 WHERE id=?", (it["id"],))
@@ -4733,7 +4733,7 @@ def unblock(conn, item_id, actor=None):
 
 def _refuse_backlog(it, verb):
     if it["backlog_at"] and it["status"] == "open":
-        raise RiverError(f"refused: #{it['id']} is in the backlog, so it is not {verb}; a person or a planner makes "
+        raise RiverError(f"refused: #{it['id']} is in the backlog, so it is not {verb}; a person or the manager makes "
                          f"it open again first: maxpm activate {it['id']}")
 
 
@@ -6906,7 +6906,7 @@ def _claim_row(conn, item_id, actor):
     why = _model_refusal(conn, it0, actor, any_type=it0["reserved_for"] == actor)
     if why:
         raise RiverError(f"refused: #{item_id} {why}. Take other work (maxpm go), or a session with an allowed "
-                         f"model or agent type takes it; a planner can change them: maxpm edit {item_id} "
+                         f"model or agent type takes it; the manager can change them: maxpm edit {item_id} "
                          f"--min-model/--max-model/--agent")
     it = _item(conn, item_id)
     if it["kind"] == "deploy":
@@ -7063,7 +7063,7 @@ def needs_folder(a):
 def _backlog_claim_refusal(it):
     return (f"refused: #{it['id']} is in the backlog (nobody plans to take it now"
             + (f": {it['backlog_note']}" if it["backlog_note"] else "")
-            + f"). Take other work (maxpm go); a person or a planner makes it open again: maxpm activate {it['id']}")
+            + f"). Take other work (maxpm go); a person or the manager makes it open again: maxpm activate {it['id']}")
 
 
 def claim(conn, item_id, actor=None):
@@ -11256,7 +11256,7 @@ def state(conn, closed=True):
 
 # ---------------------------------------------------------------- go
 
-ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "planner", "manager", "context", "expert", "idle")
+ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "manager", "context", "expert", "idle")
 
 
 def _owned_goal(conn, actor, names):
@@ -11364,7 +11364,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
         if not names and chat:
             names = [p["name"] for p in project_list(conn)]
             if not names:
-                raise RiverError("no projects in this queue yet: plan first (maxpm plan), or add one: maxpm project add <name>")
+                raise RiverError("no projects in this queue yet: add one: maxpm project add <name>")
         if not names:
             listing = "; ".join(f"{p['name']}" + (f" ({p['path']})" if p.get("path") else "") for p in project_list(conn))
             q = queue_note()
@@ -11694,14 +11694,12 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
     brief["waits_on_backlog"] = [{"id": a["id"], "title": a["title"], "backlog": a["backlog_blockers"]}
                                  for a in sorted(open_in_area, key=lambda a: a["sort_key"]) if a["backlog_blockers"]]
     needs_plan = not open_in_area or (not held_by_others and len(outside) == len([a for a in open_in_area if a["status"] == "open"]))
-    if role == "planner" or (role is None and needs_plan):
-        brief.update(role="planner", item=None,
-                     open_items=[{"id": a["id"], "title": a["title"], "blocked_reason": a["blocked_reason"],
-                                  "blocked_text": a["blocked_text"], "open_blockers": a["open_blockers"],
-                                  "backlog_blockers": a["backlog_blockers"]} for a in open_in_area],
-                     why=("the project has no open items" if not open_in_area
-                          else "every open item waits on something outside the queue"))
-        _set_role_note(conn, actor, "planner", None)
+    if needs_plan:  # there is no planner role (#4978): the session waits, and says why
+        brief["nothing_planned"] = True
+        brief.update(role="idle", item=None, held_by_others=[],
+                     why=("the project has no open items: the user or the manager adds the next ones"
+                          if not open_in_area else "every open item waits on something outside the queue"))
+        _set_role_note(conn, actor, "idle", None)
         return brief
 
     brief.update(role="idle", item=None,
@@ -12770,56 +12768,3 @@ def tell_watch_late(conn):
         if told or closed:
             sync_needs_you(conn)
     return {"late": {n: len(d) for n, (_, d) in late.items()}, "told": told, "closed": closed}
-
-
-def plan(conn, cwd, actor=None, project=None):
-    """Start or continue a planner session: the overview plus the questions a planner should raise with the user."""
-    names = _names(conn, project) if project else projects_for_dir(conn, cwd)
-    new_name = False
-    if not actor:
-        import secrets
-        actor = f"{names[0]}-plan-{secrets.token_hex(2)}" if names else f"planner-{secrets.token_hex(2)}"
-        new_name = True
-    if not conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone():
-        register(conn, actor, note="role: planner")
-        new_name = True
-    activity(conn, actor)
-    held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held')", (actor,)).fetchall()
-    if held:
-        raise RiverError(f"{actor} holds {', '.join('#' + str(r['id']) for r in held)}; a planner holds no work. "
-                         f"Finish or release it first, or plan from a new session: maxpm plan (without --as)")
-    _set_role_note(conn, actor, "planner", None)
-
-    ann = annotate(conn)
-    live = sorted((a for a in ann.values() if not a["project_archived"] and a["status"] in OPEN_STATES),
-                  key=lambda a: a["sort_key"])
-    focus = [a for a in live if (not names or a["project"] in names) and not a["backlog"]]
-    backlog_here = [a for a in live if (not names or a["project"] in names) and a["backlog"]]
-    brief_item = lambda a: {"id": a["id"], "project": a["project"], "title": a["title"]}
-    no_notes = [a for a in focus if not a["notes"].strip() and not a["context"].strip() and a["kind"] != "deploy"]
-    stuck = [dict(brief_item(a), reason=a["blocked_reason"], blocked_text=a["blocked_text"],
-                  blocked_until=a["blocked_until"], holds_up=a["unblocks_count"])
-             for a in focus if a["blocked_reason"]]
-    stuck.sort(key=lambda x: -x["holds_up"])
-    return {
-        "agent": actor, "new_name": new_name, "projects": names, "role": "planner",
-        "trackers": {n: setting(conn, "tracker", project_id=_project(conn, n)["id"]) for n in names},
-        "cwd": cwd, "folder_has_project": bool(names) or project is not None,
-        "status": status(conn),
-        "questions": {
-            "projects_without_description": [p["name"] for p in project_list(conn)
-                                             if not p["notes"].strip() and (not names or p["name"] in names)],
-            "items_without_notes": [brief_item(a) for a in no_notes],
-            "human_waiting": [brief_item(a) for a in focus if a["ready"] and a["doer"] == "human"],
-            "stuck": stuck,
-            "replan": [dict(brief_item(a), late_prereqs=a["late_prereqs"]) for a in focus if a["replan"]],
-            "suspect": [s for s in cleanup(conn) if not names or s["project"] in names],
-            "due": [dict(brief_item(a), due_text=a["due_text"], due_state=a["due_state"],
-                         open_before=len(a["open_blockers"])) for a in sorted(
-                        (a for a in focus if a["due"]), key=lambda a: a["due"])],
-            "waits_on_backlog": [dict(brief_item(a), backlog=a["backlog_blockers"])
-                                 for a in focus if a["backlog_blockers"]],
-            "backlog": len(backlog_here),
-            "duplicates": duplicates(conn, ",".join(names)) if names else duplicates(conn),
-        },
-    }

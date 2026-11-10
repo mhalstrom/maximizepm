@@ -488,7 +488,7 @@ class Go(Base):
         # The guides say it too.
         self.assertIn("maxpm project add <name> --result-look ask_first|push_first", cli.SETUP)
         self.assertIn("A project\n       where nobody chose has this value.", cli.SETUP)
-        self.assertIn("--result-look ask_first|push_first", cli.PLAN_RULES)
+        self.assertIn("--result-look ask_first|push_first", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text())
 
     def test_a_project_linked_to_another_folder_moves_only_with_move(self):
         other = os.path.join(self.dir.name, "other")
@@ -534,11 +534,16 @@ class Go(Base):
         self.assertEqual(b["role"], "unblocker")
         self.assertEqual(b["item"]["id"], a1)
 
-    def test_planner_when_empty_or_outside_blocked(self):
-        self.assertEqual(core.go(self.c, self.web)["role"], "planner")
+    def test_nothing_planned_when_empty_or_outside_blocked(self):
+        # There is no planner role (#4978): the session is idle and says why.
+        b = core.go(self.c, self.web)
+        self.assertEqual((b["role"], b.get("nothing_planned")), ("idle", True))
+        self.assertIn("the project has no open items", b["why"])
         x = self.add("web", "x")
         core.block(self.c, x, "waiting on design")
-        self.assertEqual(core.go(self.c, self.web)["role"], "planner")
+        b = core.go(self.c, self.web)
+        self.assertEqual((b["role"], b["why"]), ("idle", "every open item waits on something outside the queue"))
+        self.assertNotIn("planner", core.ROLES)
 
     def test_auto_continue_setting(self):
         self.add("web", "x")
@@ -1430,30 +1435,18 @@ class Ship(Base):
 
 
 class Plan(Base):
-    def test_plan_brief_refuses_claims_and_go_switches_back(self):
-        core.project_add(self.c, "a", notes="thing")
-        core.project_add(self.c, "b")
-        x = self.add("a", "x")
-        b = core.plan(self.c, self.dir.name)
-        me = b["agent"]
-        self.assertTrue(me.startswith("planner-"))
-        q = b["questions"]
-        self.assertEqual(q["projects_without_description"], ["b"])
-        self.assertEqual([i["id"] for i in q["items_without_notes"]], [x])
-        self.assertEqual(core.agent_status(self.c, me)["role"], "planner")
-        self.assertEqual(core.capacity(self.c)["agents_idle"], [])
-        with self.assertRaises(RiverError):
-            core.claim(self.c, x, me)
-        core.project_path(self.c, "a", self.dir.name)
-        g = core.go(self.c, self.dir.name, me)
-        self.assertEqual((g["role"], g["item"]["id"]), ("worker", x))
+    def test_plan_says_the_planner_role_is_gone(self):
+        # #4978, mark: 'get rid of planner'. maxpm plan stays only as a notice (CLAUDE.md files still name it).
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            self.assertEqual(cli.run(["plan"]), 0)
+        self.assertIn("There is no planner role", out.getvalue())
+        self.assertIn("maxpm guide manager, section Writing tasks", out.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            cli.run(["guide", "planner"])
+        self.assertIn("## Writing tasks", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text())
 
-    def test_plan_refuses_a_session_that_holds_work(self):
-        core.project_add(self.c, "a")
-        core.register(self.c, "ag")
-        core.claim(self.c, self.add("a", "x"), "ag")
-        with self.assertRaises(RiverError):
-            core.plan(self.c, self.dir.name, "ag")
 
 
 class DueDates(Base):
@@ -1991,15 +1984,17 @@ class SkillsInstall(unittest.TestCase):
             dest = Path(d)
             lines = cli.install_skills(dest)
             self.assertTrue((dest / "maxpm").is_symlink())
-            self.assertTrue((dest / "maxpm-planner" / "SKILL.md").is_file())
-            cli.install_skills(dest)  # again: links are replaced
+            self.assertFalse((dest / "maxpm-planner").exists())
+            (dest / "maxpm-planner").symlink_to(dest / "gone", target_is_directory=True)  # a link from before #4978
+            self.assertIn(f"removed {dest / 'maxpm-planner'} (the planner role is gone)", cli.install_skills(dest))
+            self.assertFalse((dest / "maxpm-planner").is_symlink())
             (dest / "maxpm").unlink()
             (dest / "maxpm").mkdir()
             with self.assertRaises(RiverError):
                 cli.install_skills(dest)  # a real folder may hold edits
             cli.install_skills(dest, copy=True, force=True)
             self.assertFalse((dest / "maxpm").is_symlink())
-            self.assertEqual(len(lines), 3)  # maxpm, maxpm-planner, maxpm-manager
+            self.assertEqual(len(lines), 2)  # maxpm, maxpm-manager
             self.assertTrue((dest / "maxpm-manager" / "SKILL.md").is_file())
 
 
@@ -2146,8 +2141,6 @@ class KeepRelease(Base):
         core.item_add(self.c, "a", "two", actor="ag", blocks=self.p, mode="keep")
         st = core._item(self.c, self.p)
         self.assertEqual((st["status"], st["replan"], st["late_prereqs"]), ("held", 1, 2))  # still kept
-        q = core.plan(self.c, self.dir.name, "bo")["questions"]
-        self.assertEqual([(x["id"], x["late_prereqs"]) for x in q["replan"]], [(self.p, 2)])
         core.replanned(self.c, self.p, "split into two", "ag")
         st = core._item(self.c, self.p)
         self.assertEqual((st["replan"], st["late_prereqs"]), (0, 0))
@@ -4166,7 +4159,6 @@ class ProjectTracker(Base):
         core.project_tracker(self.c, "a", "github o/r via gh", "t")
         self.assertEqual(core.project_show(self.c, "a")["tracker"], "github o/r via gh")
         self.assertEqual(core.project_list(self.c)[0]["tracker"], "github o/r via gh")
-        self.assertEqual(core.plan(self.c, self.dir.name, "p")["trackers"], {"a": "github o/r via gh"})
         core.item_add(self.c, "a", "x", actor="t")
         self.assertEqual(core.go(self.c, self.dir.name, "w")["trackers"], {"a": "github o/r via gh"})
         core.project_tracker(self.c, "a", "none", "t")
@@ -6681,14 +6673,12 @@ class Backlog(Base):
         core.reopen(self.c, x, "mark")  # a closed item leaves the backlog: reopened, it is ready
         self.assertTrue(core.annotate(self.c)[x]["ready"])
 
-    def test_planner_and_manager_skip_the_backlog(self):
+    def test_the_manager_and_go_skip_the_backlog(self):
         x = self.add("web", "someday")
         core.backlog(self.c, x, "later", "mark")
         self.assertEqual(core.manager_findings(self.c)["uncovered"], [])
-        p = core.plan(self.c, self.web, "pl")
-        self.assertEqual(p["questions"]["backlog"], 1)
-        self.assertNotIn(x, [i["id"] for i in p["questions"]["items_without_notes"]])
-        self.assertEqual(core.go(self.c, self.web, "w1")["role"], "planner")  # nothing open: plan
+        b = core.go(self.c, self.web, "w1")
+        self.assertEqual((b["role"], b["item"], b["backlog"]), ("idle", None, 1))  # nothing open
         self.assertEqual([s["id"] for s in core.cleanup(self.c)], [])
 
     def test_the_columns_come_by_migration(self):
@@ -6862,7 +6852,6 @@ class SimilarWork(TextQueue):
         self.assertEqual([m["id"] for m in g[0]["items"]], [a, b])
         self.assertIn("1 group(s)", self.cli("duplicates"))
         self.assertIn(f"#{a}", self.cli("duplicates", "--project", "web"))
-        self.assertTrue(core.plan(self.c, os.getcwd(), "planner-1", project="web")["questions"]["duplicates"])
         core.send(self.c, "note", "about b", to="w2", item=b, actor="w1")
         core.queue_add(self.c, "w2", item=b, actor="mark")
         with self.assertRaises(RiverError):

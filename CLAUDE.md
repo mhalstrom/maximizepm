@@ -3,7 +3,6 @@
 This project uses MaximizePM (`maxpm`) to track work and who is doing it.
 When the user says "go" (or asks you to take work from the queue), run
 `maxpm go` in this folder and follow the briefing it prints, to its end.
-When the user says "plan", run `maxpm plan` and follow its briefing.
 
 ## Working on MaximizePM itself
 

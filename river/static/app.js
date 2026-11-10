@@ -593,7 +593,7 @@ function renderSetup(st) {
   const more = howStart ? [howStart] : [];
   const missing = Object.entries(st.skills).filter(([, v]) => v !== "installed").map(([k]) => k);
   if (st.claude_home) more.push(extra(missing.length === 0, "Claude Code skills",
-    missing.length ? "Teach Claude Code MaximizePM's full workflow (missing: " + missing.join(", ") + ")." : "maxpm and maxpm-planner are installed.",
+    missing.length ? "Teach Claude Code MaximizePM's full workflow (missing: " + missing.join(", ") + ")." : "maxpm and maxpm-manager are installed.",
     `<button class="btn" data-su="skills">Install skills</button>`));
   more.push(extra(st.ntfy_ready && st.notify_channels.includes("ntfy"), "Phone notifications",
     st.ntfy_ready ? "Channels: " + (st.notify_channels.map(esc).join(", ") || "none") : "Get a push on your phone when something needs you (ntfy).",

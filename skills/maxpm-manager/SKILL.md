@@ -256,7 +256,174 @@ Stop when the user tells you to, and tell the user what you did.
 - GOAL DONE? (a goal with no owner, no open item, and finished work): decide whether its done-when holds.
   Yes: `maxpm goal done <goal> --result "<one line>"`. No: add the items it still needs
   (`maxpm add "<title>" --goal <goal>`). Ask the user only when only they can tell.
-- Planning: everything in `maxpm guide planner` (add, dep, prio, edit).
+- Planning: the section Writing tasks below (add, dep, prio, edit, the backlog).
+
+## Writing tasks
+
+There is no planner role (mark, 2026-11-10: 'get rid of planner'). Planning happens in the talk and during the work:
+you, a worker, and an expert at the end of a design talk write the tasks. These are the rules
+for a good task, and the commands.
+
+### Writing good tasks
+
+- One outcome per item that one agent or person can finish and check.
+- Give an agent what it needs to start without searching. `--context`: why the
+  item exists, where to look, decisions already made. `--touches`: the files
+  it changes. `--check`: the command that shows it works. `maxpm next` and
+  `maxpm go` print these three in one block. Use `--notes` for anything else.
+- Mark who can do it: `--doer human` for account, legal, and payment steps;
+  `--doer ai` for code and text work; `any` otherwise.
+- Record every "needs first" as a dependency. The tool refuses loops.
+
+### How the order works
+
+An item is ready when it is open, has no outside blocker, everything it
+waits on is done or dropped, and no item it conflicts with is in progress.
+A conflict keeps two agents apart: the agent that holds the other item can
+take the item (it edits the same files in sequence).
+MaximizePM adds a conflict by itself when two open items' `--touches` overlap (the
+same file, or a directory and a file in it); change the touches and MaximizePM
+removes it. Use `feeds` when the later item needs a name, path, or signature
+that the earlier item creates: the earlier item's `--output` shows in the
+later item's briefing. Ready items sort by:
+
+1. Effective priority: the best priority of the item and of every open item
+   that waits on it, directly or indirectly. A P3 task that blocks a P0 task
+   is P0.
+2. Project rank.
+3. How many open items it unblocks.
+4. Manual order (`maxpm move`).
+5. Age.
+
+So set a high priority only on the outcome you care about (for example, "submit
+Stripe activation" P0); its prerequisites inherit it. Do not raise every step.
+
+### The backlog
+
+Move an item to the backlog when nobody plans to take it now: an idea for
+later, work after a launch, a nice-to-have. It keeps its notes, links,
+priority, and goal tags, but go, next, launch, capacity, the manager's
+findings, needs-you, and the notifications never offer it. The counts show it
+apart ("2 in backlog"). Do not use the backlog for work that waits on
+something: that is `maxpm blocked` (an outside reason) or `maxpm dep` (another
+item).
+
+- Only an open item goes there: an agent that holds it releases it first.
+  Release items (deploy, review) never do.
+- Items that wait on it cannot be ready while it is in the backlog, so
+  `maxpm backlog` names them and asks for `--force "<why>"`. Better: move them
+  to the backlog first, or remove the link. `maxpm blockers` and the go
+  briefing say "waits on a backlog item #N".
+- A person's item goes to the backlog only with the person's yes: ask first
+  (`maxpm ask <person> "Move #N to the backlog? <why>"`), as for a drop.
+- A goal names its backlog items apart, and `goal done` refuses while they
+  are tagged, as for open items: activate, untag, or `--drop-open`.
+- `maxpm backlog` lists it. Look at it with the user when you plan the next
+  stage, and run `maxpm activate <id>` for what now has a plan.
+
+### Model and effort
+
+Each item can recommend a model (`--model`) and an effort level (`--effort`:
+one of the `effort_levels` setting, `low, medium, high, xhigh, max`). The
+recommendation says which agent to start; it never keeps a session off the item.
+Pick the weakest model that does the item well:
+
+- A weaker model (sonnet, luna) and low effort: routine, well specified work.
+  Checks, renames, text changes, a fix whose cause is known.
+- A middle model (opus, terra or sol) and medium or high effort: normal
+  feature work that follows code already there.
+- The strongest model (fable, astra) and high effort or more: design with
+  few examples to follow, a hard bug, security, or data that is costly to lose.
+
+Hard limits keep sessions off an item: `--min-model opus` (weaker sessions skip
+it) and `--max-model sonnet` (do not spend a strong model on it). Set a limit
+only when a wrong model is costly; the recommendation is enough otherwise.
+The `model_ladder` setting orders the models, weakest first, one list per
+family: `claude: haiku, sonnet, opus, fable; openai: luna, terra, sol, astra`. There
+is no order across families, so a limit applies only to sessions of its
+family. Name one model per family to limit both: `--min-model opus,sol`.
+
+Defaults come from settings: `default_model`, `default_effort`,
+`default_min_model`, `default_max_model`, per project (`--project`) or per
+item kind (`--kind deploy`). An item's own value wins. A session declares its
+model with `MAXPM_MODEL=<model>` or `maxpm go --model <model>`.
+
+### Projects and targets
+
+```
+maxpm project add <name> [--rank N] --description "..." --result-look ask_first|push_first
+maxpm project describe <name> "..."
+maxpm project show <name>
+maxpm project rank <name> <N>                          # 1 = most important overall
+maxpm project rename <name> <new>                      # all of it follows; the old name stops at once
+maxpm project list
+maxpm target add <name> --description "how it deploys"  # where projects ship to
+maxpm project target <name> <target>                   # each project has at most one
+maxpm target show <target>                             # its projects and owner
+maxpm target rename <target> <new>                     # with its deploy project deploy-<target>
+maxpm target own <target>                              # one owner per target runs its deploys
+maxpm target monitor <target> "<what to watch, for how long>"   # the deploy session watches the release
+maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect
+maxpm target cut <target> --rev <commit>               # fix the release's items now; later ships join the next one
+maxpm target hook <target> <event> "<command>"         # MaximizePM runs it on release-cut, review-passed, review-failed, or deployed (a person or the manager sets it)
+maxpm target give <target> --to <agent>                # or: maxpm target release <target>
+```
+
+A target has at most one owner. Ownership lasts `owner_ttl` (default 8h) and
+every command by the owner renews it; when it expires the target is free and
+the old owner gets a notice. `maxpm target own` names the current owner when
+it refuses. When that owner is away or gone (`away_after`, default 1h),
+`maxpm target own <target> --takeover "<why>"` moves the target at once and
+tells the old owner why. A person can give any target:
+`maxpm target give <target> --to <agent>`.
+
+`maxpm ship <id>` (or `maxpm done <id> --ship`) puts an item in its target's
+open deploy item, in the project `deploy-<target>`. One open deploy item per
+target collects requests from every project on it; once the owner claims it,
+the next request starts a new one. The deploy item waits on what it ships and
+takes the best priority among them.
+
+Write the description for an agent that must decide whether it fits: what the
+project covers, where it lives (repository, directories), and what knowledge
+helps. Agents read `maxpm project list` to pick an area. `--result-look` says how the user looks
+at a finished result of the project (the guide of the worker explains both values).
+
+### The commands
+
+```
+maxpm add <project> "<title>" [-p 0-4] [--doer any|ai|human] [--after <id> ...] [--feeds <id> ...] [--notes "..."]
+          [--context "..."] [--touches <file> ...] [--check "<command>"]
+          [--model <m>] [--effort <level>] [--min-model <m>] [--max-model <m>] [--agent codex|claude-code]
+maxpm add [project] --from plan.md [--dry-run]   # one item per line of an outline: a line waits on
+                                    # the lines indented under it; 'P0' at the start and '(human)' or
+                                    # '(ai)' at the end set priority and doer; '[x]' lines are skipped
+maxpm dep <id> --on <id> ...        # <id> waits on the others
+maxpm dep <id> --on <id> --kind feeds      # waits, then reads their output in its context
+                                           # (changes an existing --after link to feeds; show marks it)
+maxpm dep <id> --on <id> --kind conflicts  # no order, never in progress together
+maxpm undep <id> --on <id> ...
+maxpm prio <id> <0-4>               # 0 is most important
+maxpm move <id> --before|--after <id>   # manual order inside a project
+maxpm edit <id> [--title] [--notes] [--doer] [--project] [--context] [--touches ...] [--check] [--due <date>|none]
+          [--model|--effort|--min-model|--max-model|--agent <value>|none]
+maxpm blocked <id> --reason "..." [--until "mon 07:00 America/New_York"] / maxpm unblock <id>
+maxpm drop <id> / maxpm reopen <id>
+maxpm replanned <id> [--note "..."]   # clear the replan mark after you split or re-scope the item
+maxpm backlog <id> --note "<why not now>" [--force "<why the items that wait on it may wait>"]
+maxpm backlog [--project <name>]    # the backlog by project and priority
+maxpm activate <id> [--note "..."]  # out of the backlog: open again
+maxpm add ... --backlog ["<why not now>"]   # add it straight to the backlog
+maxpm search "<words>" [--status open|done|...] [--since 30d] [--project <name>]   # before you add
+maxpm add ... --new "<how it differs>"   # add although add found work like it
+maxpm duplicates [--project <name>]      # open items that look like the same work
+maxpm merge <keep-id> <other-id> --note "<why the same>"   # drop the other as a duplicate, move its links
+```
+
+Before you add work, search for it: the queue may hold it already, open or
+done. `maxpm add` refuses an item like an open one or one done in the last 14
+days, and shows them; add with `--new` only when it is different work. `maxpm
+duplicates` lists the open items that look like the same work: merge them, or
+link them when they are different parts.
 
 ## Operational work goes into a task
 

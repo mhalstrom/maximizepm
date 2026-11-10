@@ -2736,7 +2736,7 @@ def setup_status(conn):
         "projects_without_folder": [p["name"] for p in core.project_list(conn) if not p["path"]],
         "people": [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")],
         "claude_home": Path("~/.claude").expanduser().is_dir(),
-        "skills": {n: ("installed" if (skills / n / "SKILL.md").is_file() else "missing") for n in ("maxpm", "maxpm-planner")},
+        "skills": {n: ("installed" if (skills / n / "SKILL.md").is_file() else "missing") for n in ("maxpm", "maxpm-manager")},
         "launch_agents": [label for label, _ in agents],
         "launch_in": core._launch_in(conn, None),
         # Each Start button agent, and whether its program is on this computer (the first word of its command).

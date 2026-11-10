@@ -31,7 +31,7 @@ of your time thinking about organization.
 You put work items into projects and say which items wait on
 which, and link each project to its folder. Open an agent in that folder and
 say "go": it runs `maxpm go`, which names the session, picks a role (owner,
-worker, unblocker, reviewer, deployer, monitor, planner, context, or idle), claims an
+worker, unblocker, reviewer, deployer, context, or idle), claims an
 item, and prints a briefing that ends
 with the command to run when the item is done. The web page shows who holds
 what and how many more sessions the ready work could use. Its Sessions tab
@@ -121,7 +121,7 @@ files and pictures.
 ```sh
 git clone https://github.com/mhalstrom/maximizepm
 cd maximizepm
-./install.sh          # links `maxpm` into ~/.local/bin, and the maxpm and maxpm-planner skills into ~/.claude/skills
+./install.sh          # links `maxpm` into ~/.local/bin, and the maxpm and maxpm-manager skills into ~/.claude/skills
 ```
 
 The command is `maxpm`.
@@ -137,8 +137,7 @@ dependencies):
 pipx install git+https://github.com/mhalstrom/maximizepm
 ```
 
-The package carries the agent guides (`maxpm guide`, `maxpm guide planner`,
-`maxpm guide manager`);
+The package carries the agent guides (`maxpm guide`, `maxpm guide manager`);
 `maxpm skills install` links them into `~/.claude/skills` (`--copy` copies
 them instead). The queue database is one file per user, `~/.maximizepm/maxpm.db`; set
 `MAXPM_DB` to use another file. `maxpm db path` shows the file in use. If your
@@ -238,7 +237,6 @@ maxpm goal handoff checkout --file handoff.md    # the owner's notes for the nex
 maxpm goal done checkout --result "live since 2026-10-02"
 maxpm goal list                                  # open goals, owners, progress (also: show, rank, give, release, reopen)
 maxpm blockers 12                                # tree of what item 12 waits on
-maxpm plan                                       # planner session: overview, open questions; plans, takes no work
 maxpm status                                     # every project's counts, recent completions, who works on what
 maxpm log --since 7d                             # done items by day, with output and progress per project
 maxpm who                                        # who holds what (--all: also stopped and gone agents that hold nothing)
@@ -460,8 +458,8 @@ deletes data or costs money, and an item that says so.
 ## How agents learn it
 
 The command teaches itself: `maxpm` with no arguments prints a quick start,
-`maxpm guide` the full work loop, `maxpm guide planner` how to plan,
-`maxpm guide manager` the manager's rules, `maxpm guide setup` the setup
+`maxpm guide` the full work loop, `maxpm guide manager` the manager's rules
+and how to write tasks, `maxpm guide setup` the setup
 steps, and `maxpm guide decisions` how an agent puts a decision to a person
 in chat. `maxpm go` prints a briefing with the role, the item, the rules, and
 the command to run next. `maxpm setup-agent` prints the instructions block
@@ -539,8 +537,8 @@ with their own tools; MaximizePM keeps the links and reminds them.
    ```
 
    `maxpm init --tracker "..."` does the same when you set up a folder.
-3. Import: `maxpm plan` names the tracker and tells the planner to add each
-   open issue that MaximizePM does not have yet, with a link:
+3. Import: the `maxpm go` briefing names the tracker; the manager or a session
+   adds each open issue that MaximizePM does not have yet, with a link:
    `maxpm add "Fix login" --ref github:acme/shop#12` (GitHub links get a URL
    by themselves), or `--ref jira:API-7 --ref-url https://acme.atlassian.net/browse/API-7`.
    `maxpm list --ref <ref>` finds the items of an issue. MaximizePM refuses a
@@ -606,8 +604,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   from the prompt cache. It does so only when the base has the same model and
   folder and a session used it less than `base_warm` (50m) ago.
   `maxpm add ... --no-goal-context` starts an item fresh.
-- `maxpm go` roles: owner, worker, unblocker, reviewer, deployer, monitor,
-  planner, context, manager, idle. After `done`, an agent takes the next item at once
+- `maxpm go` roles: owner, worker, unblocker, reviewer, deployer, context,
+  manager, expert, idle. After `done`, an agent takes the next item at once
   (`auto_continue`). With no item, it runs `maxpm wait` (a blocking command
   costs no tokens; in Claude Code a background command, so a message that a
   person types reaches the session at once), which returns when work is pushed
@@ -719,16 +717,15 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   `maxpm notify run`). Phone notifications go out at ntfy priority `high`
   (`ntfy_priority`), so the phone shows a banner; the ntfy app also needs the
   phone's permission for banners and the lock screen.
-- Planning and shipping: `maxpm plan`, deploy targets (`maxpm target add`,
+- Planning and shipping: tasks with dependencies and priorities (`maxpm guide
+  manager`, section Writing tasks), deploy targets (`maxpm target add`,
   `describe`, `own`, `release`, `give`, `show`, `list`, `cadence`, `cut`,
   `release-now`), `maxpm ship`.
 - Deploy monitoring: `maxpm target monitor <target> "<what to watch, for how
-  long>"`. When a deploy item is claimed, MaximizePM adds a monitor item for that
-  release (sonnet, low effort, at most sonnet, unless settings for
-  `--kind monitor` say otherwise), and the running `maxpm serve` opens a
-  session for it (`MAXPM_FOCUS=monitor:<id>`). The session watches, then
-  finishes the item, or alerts the deployer and adds a person's item with the
-  evidence and a proposed rollback. The Targets tab shows the monitor of each deploy.
+  long>"`. Watching the release is part of the deploy task: after the deploy,
+  the deploy session watches as the text says, then finishes the item, or
+  alerts the manager and adds a person's item with the evidence and a proposed
+  rollback.
 - Review before release (`maxpm config set review on`): each release gets one
   review item that waits on everything it ships, and the deploy waits on the
   review. `review_prompt` holds your review process (for example

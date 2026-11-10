@@ -12,7 +12,7 @@ most important item that is ready (nothing it waits on is open).
 ## Fastest start
 
 Run `maxpm go` in the project folder and follow the briefing. It names you,
-picks your role (owner, worker, unblocker, reviewer, deployer, planner, context, idle), claims
+picks your role (owner, worker, unblocker, reviewer, deployer, context, idle), claims
 an item when there is one, and ends with the command to run next. Pass `--as <your-name>` on
 every later command. When the briefing asks, record your Claude Code session
 name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents
@@ -289,7 +289,8 @@ Name the item in commit messages (`Fix the header (#12)`), so a check finds it.
     commands. More than `keep_prereq_limit` (3) open prerequisites: MaximizePM
     releases instead and marks the item `replan`.
     After `replan_threshold` (3) prerequisites are added to a claimed item,
-    MaximizePM also marks it `replan`, and `maxpm plan` lists it for a planner.
+    MaximizePM also marks it `replan`: split it or change its scope, then
+    `maxpm replanned <id>`.
   - `--release` (the default): it is large or better for someone else. Your
     item goes back to the queue, waiting on the new one. Run `maxpm go` again.
   `maxpm keep <id>` holds a released item again; `maxpm release <id>` ends a hold.
@@ -303,7 +304,7 @@ Name the item in commit messages (`Fix the header (#12)`), so a check finds it.
 - Something unrelated: `maxpm add "<title>" --found-during <id>`.
   Do not do it inside your current item. An idea that nobody needs now goes
   to the backlog: add `--backlog "<why not now>"`. Nobody is offered a backlog
-  item until a person or a planner runs `maxpm activate <id>`.
+  item until a person or the manager runs `maxpm activate <id>`.
 - Waiting on something outside the queue: `maxpm blocked <id> --reason "<what>"`.
   Add `--until <time>` (`2h`, `2026-09-28T07:00`, `'mon 07:00 America/New_York'`)
   when you know when it ends: the item becomes ready by itself then.
@@ -470,6 +471,10 @@ In a session that holds the task already: `maxpm --as <you> expert adopt`.
 - When the user says the talk is done: `maxpm done <task> --output "..."`.
 - Claim another item only when the user tells you to.
 - Add the work you find (`maxpm add ...`), and ask the manager to launch it.
+  At the end of a design talk, write its tasks yourself: one outcome each,
+  with `--context` (why, where, what is decided), `--touches`, `--check`, and
+  each "needs first" as a link (`maxpm dep`); a high priority only on the
+  outcome. The rules and commands: `maxpm guide manager`, section Writing tasks.
 - Keep your notes current: your topic, what you learned, the decisions of your
   talks, what is open, and the files and canvases that matter:
   `maxpm --as <you> expert notes <you> --put <file>`. Write them after each

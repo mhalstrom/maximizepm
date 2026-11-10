@@ -138,7 +138,8 @@ class ChatApp(unittest.TestCase):
         r = srv.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         self.assertIn("no folder, no shell", r["result"]["instructions"])
         tools = srv.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-        self.assertTrue({"plan", "manage"} <= {t["name"] for t in tools})
+        self.assertIn("manage", {t["name"] for t in tools})
+        self.assertNotIn("plan", {t["name"] for t in tools})  # no planner role (#4978)
         go = self.call(srv, "go")
         self.assertIn(f"YOUR ITEM #{self.text}: draft chapter one", go)
         self.assertRegex(srv.agent, r"^chat-")
@@ -155,12 +156,7 @@ class ChatApp(unittest.TestCase):
         self.assertEqual({core.item_show(c, i)["status"] for i in (self.code, self.test)}, {"open"})
         c.close()
 
-    def test_plan_and_manage_in_a_chat(self):
-        srv = mcp.Server()
-        plan = self.call(srv, "plan")
-        self.assertIn("Focus: every project.", plan)
-        self.assertNotIn("THIS FOLDER HAS NO PROJECT", plan)
-        self.assertIn("IN A CHAT", plan)
+    def test_manage_in_a_chat(self):
         srv = mcp.Server()
         m = self.call(srv, "manage")
         self.assertRegex(srv.agent, r"^manager-")

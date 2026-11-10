@@ -2,10 +2,10 @@
 
 Run it with `maxpm mcp`. Every tool runs the same code as the `maxpm` command
 and returns the same text, so an agent reads the same briefings either way.
-The server remembers the agent name that `go`, `plan`, or `manage` gives, and
+The server remembers the agent name that `go` or `manage` gives, and
 passes it as --as on later calls that do not name one. With MAXPM_CHAT=1 (the
 Claude desktop entry that `maxpm setup-agent --claude-desktop` writes) the
-session is a chat with no folder: go, plan, and manage brief it for that.
+session is a chat with no folder: go and manage brief it for that.
 Standard library only.
 """
 
@@ -91,11 +91,6 @@ TOOLS = [
     {"name": "inbox",
      "description": "Your unread messages and the questions that wait for your answer.",
      "inputSchema": {"type": "object", "properties": {"as": _AS}}},
-    {"name": "plan",
-     "description": "Plan with the user: MaximizePM names you a planner and prints the overview, the open questions, "
-                    "and the planner's rules (add items, dependencies, priorities).",
-     "inputSchema": {"type": "object", "properties": {
-         "as": _AS, "project": {"type": "string", "description": "project name(s) to focus on (default: all)"}}}},
     {"name": "manage",
      "description": "Run the other agents (one manager at a time): what needs attention (stuck agents, projects "
                     "with ready work and no agent, what waits on the user) and the manager's commands.",
@@ -105,7 +100,7 @@ TOOLS = [
 
 INSTRUCTIONS = "Call go to take work from the MaximizePM queue, and follow its briefing."
 CHAT_INSTRUCTIONS = ("MaximizePM is the user's work queue for AI agents. In this chat (no folder, no shell) you can: "
-                     "plan work with the user (plan), run the coding agents (manage), go through what waits on the user "
+                     "run the coding agents and plan work with the user (manage), go through what waits on the user "
                      "(maxpm tool: [\"needs-you\"], then [\"prompt\", \"--all\"]), and do items that need no code, "
                      "such as writing or research (go; the result goes in done). Call the tool, then follow its briefing; "
                      "for other maxpm commands use the maxpm tool with the words after `maxpm`.")
@@ -207,13 +202,11 @@ class Server:
             words = canvas_argv(a)
         elif name == "inbox":
             words = ["inbox"]
-        elif name == "plan":
-            words = ["plan"] + (["--project", a["project"]] if a.get("project") else [])
         elif name == "manage":
             words = ["manage"] + (["--takeover", a["takeover"]] if a.get("takeover") else [])
         else:
             raise RiverError(f"unknown tool {name!r}")
-        if self.chat and words and words[0] in ("go", "plan", "manage") and "--chat" not in words:
+        if self.chat and words and words[0] in ("go", "manage") and "--chat" not in words:
             words = words[:1] + ["--chat"] + words[1:]
         who = a.get("as") or self.agent
         if who and "--as" not in words:
