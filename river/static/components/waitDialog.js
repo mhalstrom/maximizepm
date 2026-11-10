@@ -43,6 +43,9 @@ function questionBlock(w) {
 }
 
 // opts.onSent(text): the chat shows the person's turn at once.
+// Close it: the page left the session (the You view of the first page, #5102), and it opens again only for something new.
+export function closeWaiting() { dlg.close(); }
+
 export function openWaiting(s, opts = {}) {
   agent = s.name; pane = !!s.terminal; onSent = opts.onSent || null;
   $("#waitTitle").textContent = `Waits for you: ${s.name}`;

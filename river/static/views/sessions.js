@@ -10,7 +10,7 @@ import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle } f
 import { chip } from "../components/chip.js";
 import { appendEntries, agePending, wireCopy, plainText } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
-import { openWaiting } from "../components/waitDialog.js";
+import { openWaiting, closeWaiting } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
@@ -344,6 +344,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       if (pane) $(PANES[pane]).classList.add("hidden");
       pane = kind; dict.stop(); agent = null; cursor = null; gen++; clearTimeout(timer); pinned = true;
       main.classList.add("hidden"); $(PANES[kind]).classList.remove("hidden");
+      closeWaiting();  // the ! dialog of a session the page showed before (at load, the session chosen last)
       bar.querySelectorAll("[data-session]").forEach(r => r.classList.remove("on"));
       panelFor(null);
     }

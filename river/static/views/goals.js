@@ -9,7 +9,7 @@ import { bar, pct } from "../components/bar.js";
 import { button } from "../components/button.js";
 import { S, scope } from "../page.js";
 
-const sessionLink = (name) => `<span class="link" data-session-go="${esc(name)}" title="Open the session of ${esc(name)}">${esc((S.session_names || {})[name] || name)}</span>`;
+const sessionLink = (name) => `<span class="link" data-session-go="${esc(name)}" title="Open the session of ${esc(name)}: ${esc((S.session_names || {})[name] || "")}">${esc(name)}</span>`;
 const hasSession = (name) => (S.sessions || []).includes(name);
 const who = (name) => hasSession(name) ? sessionLink(name) : esc(name);
 

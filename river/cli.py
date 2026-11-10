@@ -917,7 +917,7 @@ def build_parser():
                         "item): reserve it for you at once, so no other session starts it; claim or close it yourself")
 
     x = sub.add_parser("artifacts", help="what the sessions made or named: files they wrote, screenshots, canvases, local "
-                       "pages, claude.ai artifact links (the Artifacts tab); 'maxpm artifacts show <n>' reads one")
+                       "pages, claude.ai artifact links (Sessions > Artifacts on the page); 'maxpm artifacts show <n>' reads one")
     x.add_argument("show", nargs="?", choices=["show"], help="show: print one row's text, or the path or link to read it")
     x.add_argument("ref", nargs="?", help="with show: the row number of the same listing, the row's id, or its path or URL")
     x.add_argument("--agent", help="of this session only, also one that ended long ago")
@@ -3480,7 +3480,7 @@ def _canvas_dispatch(conn, a, actor):
             return ask_server(conn, "canvas_open", {"name": a.name, "project": a.project, "session": a.session},
                               actor=actor)
         except RiverError as e:
-            raise RiverError(f"the page cannot open it now ({e}); the person sees the canvas in the Artifacts tab")
+            raise RiverError(f"the page cannot open it now ({e}); the person sees the canvas in Sessions > Artifacts")
     if v == "delete":
         return core.canvas_delete(conn, a.name, actor, a.project)
     if v == "section":

@@ -142,7 +142,7 @@ Object.defineProperty(document, "visibilityState", { get: () => "visible" });\n`
   const river = riverIn(env);
   river("config", "set", "setup_done", "on");  // first, so the Recent panel shows only the demo work
   execFileSync("sh", [path.join(repo, "seed", "screenshots.sh")], { env, stdio: "ignore" });
-  // The briefing picture: before the page pictures, so the board keeps the state the seed made.
+  // The briefing picture: before the page pictures, so the page keeps the state the seed made.
   const brief = river("--as", "web-agent", "go", "--project", "website");
 
   // Two more agents at work, so maxpm view has four panes.
@@ -212,10 +212,13 @@ while True:
   await open("?as=alex");
   if (!await until(`/waits on a prompt/.test((document.querySelector("#needsYou") || {}).textContent || "")`, 150)) throw new Error("no prompt alert on the page");
 
+  // Plan > Overview in both themes, and the You view of Sessions (the first page while something waits on alex),
+  // with the alert's row open: its Open session button shows (#5102).
   for (const theme of ["light", "dark"]) {
+    await open("plan/overview?as=alex", theme);
+    await shot(`plan-${theme}.png`);
     await open("?as=alex", theme);
-    await shot(`board-${theme}.png`);
-    // The alert's row open: its Terminal button shows.
+    await until(`/waits on a prompt/.test((document.querySelector("#needsYou") || {}).textContent || "")`);
     await js(`[...document.querySelectorAll("#needsYou .nyl")].find(e => /waits on a prompt/.test(e.textContent)).click()`);
     await sleep(300);
     await shot(`needs-you-${theme}.png`, "#needsYouPanel", 8);
@@ -242,20 +245,22 @@ while True:
   await open("artifacts?as=alex");
   await until(`document.querySelectorAll("#artList .art-row").length >= 4`);
   await shot("artifacts.png", "#sessArts", 8);
-  await open("done?as=alex"); await sleep(600); await shot("done.png", "#tab-done", 8);
+  // The views of Plan (#5102): Done, Overview (the capacity numbers), Graph (with the step bars), Releases, and Goals
+  // with the scope of one goal; then the scope goes back to all projects for the pictures after them.
+  await open("plan/done?as=alex"); await sleep(600); await shot("done.png", "#plan-done", 8);
   await open("settings?as=alex"); await sleep(600); await shot("settings.png");  // the window: the tab is taller
-  await open("capacity?as=alex"); await shot("parallel-work.png", "#tab-capacity", 8);
-  await open("graph?as=alex"); await sleep(1500); await shot("graph.png", "#tab-graph", 8);
-  await open("targets?as=alex"); await shot("release.png", "#tab-targets", 8);
-  await open("projects?as=alex");
-  await js(`(() => { const s = document.querySelector("#goalFilter"); s.value = "checkout-launch"; s.dispatchEvent(new Event("change")); })()`);
-  await sleep(600); await shot("goals.png", "#tab-projects", 8);
-  await js(`localStorage.removeItem("river.goal")`);  // the page remembers the goal: the pictures after this one show all work
+  await open("plan/overview?as=alex"); await shot("parallel-work.png", "#plan-overview", 8);
+  await open("plan/graph?as=alex"); await sleep(1500); await shot("graph.png", "#plan-graph", 8);
+  await open("plan/releases?as=alex"); await shot("release.png", "#plan-releases", 8);
+  await open("plan/goals?project=website&goal=checkout-launch&as=alex");
+  await sleep(600); await shot("goals.png", "#plan-goals", 8);
+  await js(`localStorage.removeItem("river.scope")`);  // the page remembers the scope: the pictures after this one show all work
 
-  // The tour: Board; an agent's session on the Sessions tab, first with the ! dialog for its prompt, then its chat;
-  // an item, Artifacts, Projects, Graph, Targets, Done. Two frames each.
-  for (const h of ["?as=alex", "sessions/web-agent?as=alex", "?as=alex&item=4", "artifacts?as=alex",
-                   "projects?as=alex", "graph?as=alex", "targets?as=alex", "done?as=alex"]) {
+  // The tour: the You view; an agent's session on the Sessions tab, first with the ! dialog for its prompt, then its
+  // chat; an item, Artifacts, and Plan: Overview, Items, Goals, Graph, Releases, Done. Two frames each.
+  for (const h of ["?as=alex", "sessions/web-agent?as=alex", "sessions/web-agent?as=alex&item=4", "artifacts?as=alex",
+                   "plan/overview?as=alex", "plan/items?as=alex", "plan/goals?as=alex", "plan/graph?as=alex",
+                   "plan/releases?as=alex", "plan/done?as=alex"]) {
     await open(h); if (h.includes("graph")) await sleep(1500);
     if (h.startsWith("sessions")) {
       if (!await dlgOpen()) throw new Error("the ! dialog did not open for the tour");
