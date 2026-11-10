@@ -128,7 +128,7 @@ class FakeRelay:
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.clean_tmp)
         old = os.environ.get("MAXPM_DB")
         os.environ["MAXPM_DB"] = os.path.join(self.tmp.name, "maxpm.db")
         self.addCleanup(lambda: os.environ.__setitem__("MAXPM_DB", old) if old else os.environ.pop("MAXPM_DB", None))
@@ -139,6 +139,16 @@ class Base(unittest.TestCase):
         self.addCleanup(setattr, relay, "URLOPEN", None)
         mcp.HTTP_SESSIONS.clear()
 
+
+    def clean_tmp(self):
+        """A thread of the page server (they are not joined) may still close its queue when the test ends; Windows
+        refuses to delete an open file (WinError 32), so the delete tries again for up to five seconds (#5096)."""
+        for _ in range(50):
+            try:
+                return self.tmp.cleanup()
+            except OSError:
+                time.sleep(0.1)
+        self.tmp.cleanup()
 
     def join_connect(self):
         """The page's Connect finishes in a thread (maxpm-relay-connect) that writes relay-state.json at its end: it
