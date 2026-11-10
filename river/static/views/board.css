@@ -1,8 +1,4 @@
-/* The Board tab: the status strip, Needs you, Inbox, Work, the agents table. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
-.msg .body { white-space: pre-wrap; margin: var(--sp-1) 0; }
-.msg.read { opacity: .65; }
-.msg .actions input { flex: 1; min-width: var(--w-s); }
-.thread { margin: var(--sp-2) 0 0 var(--sp-5); padding-left: var(--sp-3); border-left: var(--hair-2) solid var(--line); font-size: var(--fs-m); }
+/* The Board tab: the status strip, Next up, Work, the agents table. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
 .agent { padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
 .agent:first-child { border-top: none; }
 .agent .nm { font-weight: 600; }
@@ -12,9 +8,6 @@
 #agents .nm { font-weight: 600; }
 #agents .tabulator-responsive-collapse table { font-size: var(--fs-s); }
 #agents .tabulator-responsive-collapse td { padding: var(--sp-0) var(--sp-3) var(--sp-0) 0; }
-#needsYouPanel, #takeoverPanel { border-top: var(--hair-2) solid var(--human); }  /* a colored rule, no outline (#5043) */
-#takeoverPanel h2 { color: var(--ink); }
-#needsYouPanel h2 { color: var(--ink); }
 .strip { display: flex; gap: calc(var(--sp-7) + var(--sp-1)); flex-wrap: wrap; margin-bottom: var(--sp-5); }
 /* The counts are text: the label over the number, no box (#5043). */
 .strip button { display: flex; flex-direction: column-reverse; align-items: flex-start; gap: 0; background: none; border: 0; padding: var(--sp-1) 0; cursor: pointer; color: var(--muted); font-size: var(--fs-s); }
@@ -25,30 +18,25 @@
 .strip button.primary b { color: var(--accent-ink); }
 .strip select { align-self: stretch; }
 .strip .agentStart { align-items: stretch; }
-.dash { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, .8fr); gap: var(--sp-6); align-items: start; }
+.dash { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: var(--sp-6); align-items: start; }
 .dash .col { max-height: calc(100vh - var(--board-top)); overflow-y: auto; padding-right: var(--sp-0); }
 .dash .col .panel:last-child { margin-bottom: 0; }
-@media (max-width: 1100px) { .dash { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); } #colAgents { grid-column: 1 / -1; max-height: none; overflow: visible; } }
+@media (max-width: 1000px) { .dash { grid-template-columns: minmax(0, 1fr); } .dash .col { max-height: none; overflow: visible; } }
 @media (max-width: 800px) { .dash { grid-template-columns: minmax(0, 1fr); } .dash .col { max-height: none; overflow: visible; } }
-/* Less text (#5083): Needs you and Next up first; the More line under Next up shows the other areas one by one. With
-   no area of the right column shown, the Board has two columns. On a phone the columns open up, so the panels stack
-   as Needs you, Next up, the More line, then the areas shown. */
+/* Less text (#5083): Next up first; the More line under Next up shows the other areas one by one. With
+   no area of the right column shown, the Board has one column. On a phone the columns open up, so the panels stack
+   as Next up, the More line, then the areas shown. */
 .board-more { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1); margin: 0 0 var(--sp-6); padding: 0 var(--sp-0); font-size: var(--fs-m); }
 @media (max-width: 759px) { .board-more { padding: 0 var(--sp-5); } }  /* the side padding of a panel on a phone */
 .board-more .more-pick.on { color: var(--ink); font-weight: 600; }
 .more-off { display: none !important; }
-.dash.no-side { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); }
+.dash.no-side { grid-template-columns: minmax(0, 1fr); }
 @media (max-width: 800px) {
   .dash, .dash.no-side { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .dash > .col { display: contents; }
-  #colWork > .panel:first-child { order: 1; } #boardMore { order: 2; } #inboxPanel { order: 3; } #workPanel { order: 4; }
+  #colWork > .panel:first-child { order: 1; } #boardMore { order: 2; } #workPanel { order: 4; }
   #managerPanel { order: 5; } #agentsPanel { order: 6; } #recentPanel { order: 7; }
 }
-.nyl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-3); align-items: center; padding: var(--sp-2) var(--sp-1); border-top: var(--hair) solid var(--line); cursor: pointer; }
-.nyl:first-child { border-top: none; }
-.nyl:hover { background: var(--bg); }
-.nyl .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.nyx { padding: 0 var(--sp-1) var(--sp-3); }
 .wp { border-top: var(--hair) solid var(--line); }
 .wp:first-child { border-top: none; }
 .wp-h { display: flex; gap: var(--sp-3); align-items: baseline; padding: calc(var(--sp-2) + var(--hair)) var(--sp-1); cursor: pointer; }
@@ -57,11 +45,7 @@
 .wp-h .counts { color: var(--muted); font-size: var(--fs-s); margin-left: auto; white-space: nowrap; }
 .wp-items { padding: 0 0 var(--sp-2) var(--sp-6); }
 .wp-more { font-size: var(--fs-s); padding: var(--sp-1) var(--sp-2); }
-#needsYouPanel h2 { flex-wrap: wrap; row-gap: var(--sp-1); }
-/* The send form, Claim next with an agent, the register form, and Give work of a waiting agent (#5028: no inline styles). */
-.send-row { margin-top: var(--sp-3); }
-#sendItem { width: var(--w-xs); }
-#sendBody { flex: 1; min-width: var(--w-m); }
+/* Claim next with an agent, the register form, and Give work of a waiting agent (#5028: no inline styles). */
 .panel h2 .claim-agent { font-size: var(--fs-s); font-weight: 400; text-transform: none; letter-spacing: normal; display: flex; align-items: center; gap: var(--sp-1); }
 .reg-details, .reg-details > .form { margin-top: var(--sp-3); }
 .form label.reg-human { flex-direction: row; display: flex; align-items: center; gap: var(--sp-2); }

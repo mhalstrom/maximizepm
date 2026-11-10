@@ -1,0 +1,29 @@
+<!-- The You view of the Sessions tab (#5102 step 1, design #4657): what waits on the person in "You are". The You row
+     at the top of the session list opens it. maxpm serve puts it into sessions.html, at view: you. -->
+<div class="panel sess-main sess-you hidden" id="sessYou">
+  <div class="sess-head">
+    <button class="btn" type="button" id="youBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
+    <h2 class="sess-h2">You</h2>
+  </div>
+  <div class="you-body">
+    <div class="you-part hidden" id="takeoverPanel">
+      <div id="takeovers"></div>
+    </div>
+    <div class="you-part hidden" id="needsYouPanel">
+      <h2>Needs you <span class="spacer"></span><span id="agentAllSlot"></span><button class="btn" id="copyAll" title="Copy one prompt for an agent that walks you through all of these">Copy prompt</button><button class="btn hidden" id="notifyOn" title="Turn on browser notifications">Notify me</button></h2>
+      <div id="needsYou"></div>
+    </div>
+    <div class="muted hidden t-m you-none" id="nothingForYou">Nothing waits on you now.</div>
+    <div class="you-part hidden" id="inboxPanel">
+      <h2><span id="inboxTitle">Inbox</span> <span class="spacer"></span><label class="sub"><input type="checkbox" id="inboxAll"> show read</label></h2>
+      <div id="inbox"></div>
+      <div class="actions send-row">
+        <select id="sendKind"><option value="note">note</option><option value="question">question</option><option value="alert">alert</option></select>
+        <select id="sendTo"></select>
+        <input id="sendItem" placeholder="or item #">
+        <input id="sendBody" placeholder="message">
+        <button class="btn" id="sendGo">Send</button>
+      </div>
+    </div>
+  </div>
+</div>

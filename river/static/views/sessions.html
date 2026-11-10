@@ -3,6 +3,8 @@
   <div class="sess-layout" id="sessLayout">
     <aside class="panel sess-side" aria-label="Running sessions">
       <h2 title="Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the message box of a session that runs in a tmux pane.">Running sessions</h2>
+      <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. -->
+      <div id="sessYouRow" class="slist-mgr slist-you" aria-label="You"></div>
       <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
       <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
         <div class="slist-h">Experts</div>
@@ -32,6 +34,7 @@
         <form id="sessBar" class="sbar composer" autocomplete="off"></form>
       </div>
     </div>
+    <!-- view: you -->
     <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
       <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
       <div class="sp-tabs" id="spTabs"></div>

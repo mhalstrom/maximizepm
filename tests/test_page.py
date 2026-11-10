@@ -303,6 +303,35 @@ try {
                                "list": True, "again": True})
         self.assertLess(got["width"], 760)
 
+    def test_the_you_row_opens_what_waits_on_you(self):
+        """#5102 step 1 (design #4657): the You row at the top of the Sessions list has a ! badge with what waits on
+        the person, and opens the You view (Needs you, the inbox) at /you in place of a session's chat; a session row
+        shows its chat again, Back returns to You, and the Board's 'need you' count goes there too."""
+        core.config_set(self.c, "setup_done", "on")
+        core.item_add(self.c, "site", "Approve the logo", doer="human")
+        core.send(self.c, "question", "Which color?", to="mark", actor="ag")
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessYouRow .wbadge"), "the You row with its badge");
+  const shown = (el) => el.getBoundingClientRect().height > 0;
+  const out = { badge: q("#sessYouRow .wbadge").textContent.trim() };
+  q("#sessYouRow .srow-main").click();
+  await until(() => location.pathname === "/you" && shown(q("#sessYou")), "the You view at /you");
+  await until(() => q("#needsYou").textContent.includes("Approve the logo") && q("#inboxTitle").textContent.includes("mark"), "Needs you and the inbox");
+  out.you = !shown(q("#sessMain")) && q("#sessYouRow .srow").classList.contains("on") && !q("#sessions .srow.on");
+  q('#sessions .srow[data-session="ag"] .srow-main').click();
+  await until(() => location.pathname === "/sessions/ag" && shown(q("#sessMain")), "the chat of ag");
+  out.chat = !shown(q("#sessYou")) && !q("#sessYouRow .srow").classList.contains("on");
+  history.back();
+  await until(() => location.pathname === "/you" && shown(q("#sessYou")), "Back shows You again");
+  q('nav button[data-tab="board"]').click();
+  await until(() => q("#strip [data-strip=needs]"), "the Board's strip");
+  q("#strip [data-strip=needs]").click();
+  await until(() => location.pathname === "/you" && shown(q("#sessYou")), "need you goes to You");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag")
+        self.assertEqual(got, {"badge": "! 2", "you": True, "chat": True})
+
     def test_the_message_box_stays_above_the_phone_keyboard(self):
         """#4902: on an iPhone the keyboard makes the visible part of the page (visualViewport) smaller and scrolls the
         page; the Sessions tab then covers that visible part, so the message box sits right above the keyboard. A
@@ -493,7 +522,8 @@ class PageAddresses(unittest.TestCase):
         import re
         from urllib.parse import urljoin
         for path, base in [("/", "./"), ("/sessions", "./"), ("/sessions/", "../"), ("/sessions/ag", "../"),
-                           ("/sessions/ag/artifacts/k3x9", "../../../"), ("/graph", "./"), ("/artifacts/k3x9", "../")]:
+                           ("/sessions/ag/artifacts/k3x9", "../../../"), ("/graph", "./"), ("/artifacts/k3x9", "../"),
+                           ("/you", "./")]:
             page = server.page_html(path)
             self.assertIsNotNone(page, path)
             got = re.search(rb'<base href="([^"]*)">', page).group(1).decode()

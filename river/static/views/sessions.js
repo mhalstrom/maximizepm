@@ -21,6 +21,7 @@ import { endButton, endSession } from "../components/endSession.js";
 import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
 import { makeMenu } from "../components/menu.js";
+import { markYou } from "./you.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
@@ -143,8 +144,9 @@ function renderList(el, list, picked, empty) {
   el.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === picked));
 }
 
-export function makeSessions({ isShown, onPick = () => {} }) {
+export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
   let list = [], busy = false, again = false, proposals = [];
+  let you = false;  // the You view shows (#5102): what waits on the person, in place of a session's chat
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
@@ -157,6 +159,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   // there as lists.
   $("#tab-sessions").addEventListener("click", (e) => {
     const l = e.target.closest("[data-sp-open]"); if (l) return openList(l.dataset.spOpen);
+    if (e.target.closest("#sessYou")) return;  // the You view opens an item in the drawer, as the Board did
     const o = e.target.closest("[data-open]");
     if (!o || !/^\d+$/.test(o.dataset.open) || e.metaKey || e.ctrlKey) return;
     e.preventDefault(); e.stopPropagation();
@@ -231,6 +234,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   $("#sessLayout").addEventListener("focusout", fitAfter);
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
+  $("#youBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   // The ⋯ of the session head on a phone (#4903): it shows the item line, Settings, Open session, Items and Artifacts
   // under the one line of the head; a tap on one of them closes it again.
   const more = makeMenu($("#sessMore"), $("#sessMain"), { cls: "head-more", onChange: () => fit(),
@@ -250,7 +254,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       list = j.sessions;
       proposals = j.proposals || [];
       // At load: the session chosen last, else the first. A session that ended gives way to the first.
-      if (!agent || (!pinned && !list.some(s => s.name === agent))) {
+      if (!you && (!agent || (!pinned && !list.some(s => s.name === agent)))) {
         const want = store(PICKED);
         pick((list.find(s => s.name === want) || list.find(s => s.role === "manager") || list[0] || {}).name || null, false);
       }
@@ -263,7 +267,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       const workers = list.filter(x => x.role !== "manager" && x.role !== "expert");
       workers.sort((a, b) => isPinned(b) - isPinned(a));
       renderList(side, workers, agent,
-        `<div class="muted">No other agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
+        `<div class="muted">No other agent session runs now. Start one with Start an agent, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
       proposeCard();
       fit();
       autoWait();
@@ -305,7 +309,20 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
   }
 
+  // The You view (#5102): in place of a session's chat. The row of the list shows as chosen; no session polls.
+  function showYou(byPerson = true) {
+    if (!you) {
+      you = true; dict.stop(); agent = null; cursor = null; gen++; clearTimeout(timer); pinned = true;
+      main.classList.add("hidden"); $("#sessYou").classList.remove("hidden");
+      bar.querySelectorAll("[data-session]").forEach(r => r.classList.remove("on"));
+      panelFor(null);
+    }
+    markYou(true);
+    phoneChat(true);
+    onYou(byPerson);
+  }
   function pick(name, remember = true) {
+    if (you && name) { you = false; $("#sessYou").classList.add("hidden"); markYou(false); }
     if (remember && name) store(PICKED, name);
     if (remember || !name) phoneChat(!!name);  // a session the person picks shows its chat (on a phone, #4885)
     if (name === agent) return;
@@ -594,6 +611,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
   bar.addEventListener("click", async (e) => {
+    if (e.target.closest("[data-you]")) return showYou(true);
     const end = e.target.closest("[data-end]");
     if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
     const pin = e.target.closest("[data-pin]");
@@ -612,6 +630,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you]")) { e.preventDefault(); return showYou(true); }
     const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");
     if (!r) return;
@@ -620,5 +639,5 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     if (s && popsUp(s).length) showWaiting(s);
   });
   setInterval(refresh, 3000);
-  return { refresh: () => { refresh(); fit(); }, pick };
+  return { refresh: () => { refresh(); fit(); }, pick, showYou, isYou: () => you };
 }

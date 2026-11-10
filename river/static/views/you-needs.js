@@ -1,4 +1,5 @@
-// The Board's Needs you panel (#4656): decisions and steps that wait for a person, with browser notifications.
+// Needs you in the You view of Sessions (#4656, #5102): decisions and steps that wait for a person, with browser
+// notifications.
 import { $, esc, store, actor, toast, act, ago, clip, copyText } from "../lib.js";
 import { prioNumChip, projectChip } from "../components/chip.js";
 import { agentStart } from "../components/agentStart.js";
@@ -6,6 +7,7 @@ import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { S, nav } from "../page.js";
 import { linkArtifacts } from "../components/artLinks.js";
 import { renderStrip } from "./board.js";
+import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 
 // ---- Needs you: decisions and steps waiting for a person, with browser notifications.
@@ -29,7 +31,7 @@ export function renderNeedsYou() {
   $("#notifyOn").classList.toggle("hidden", !("Notification" in window) || Notification.permission !== "default");
   $("#needsYouPanel").classList.toggle("hidden", !NY.length);
   $("#nothingForYou").classList.toggle("hidden", !!NY.length || !!(S && (S.takeovers || []).length));
-  renderStrip();
+  renderStrip(); renderYou();
   const sig = JSON.stringify([NY.map(e => [e.id, e.summary, e.item_status]), [...nyOpen]]);
   if (sig === nySig) return;
   nySig = sig;

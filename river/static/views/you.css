@@ -1,0 +1,22 @@
+/* The You view of the Sessions tab (#5102 step 1): the You row of the list, Needs you, the items an agent took over, and
+   the inbox (moved from the Board). The view takes the place of a session's chat (class sess-main), and scrolls. */
+.slist-you .srow-you .srow-t { font-weight: 700; }
+.sess-you .you-body { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) var(--sp-1) var(--sp-1); }
+.sess-you .you-body > * { max-width: 60rem; margin: 0 auto var(--sp-7); }
+.sess-you.hidden, .you-part.hidden { display: none; }
+.you-part h2 { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; row-gap: var(--sp-1); margin: 0 0 var(--sp-3); font-size: calc(var(--fs-base) + var(--hair)); font-weight: 600; color: var(--ink); }
+.you-part h2 .spacer { flex: 1; }
+#needsYouPanel, #takeoverPanel { border-top: var(--hair-2) solid var(--human); padding-top: var(--sp-3); }  /* a colored rule, no outline (#5043) */
+.you-none { padding: var(--sp-3) 0; }
+.msg .body { white-space: pre-wrap; margin: var(--sp-1) 0; }
+.msg.read { opacity: .65; }
+.msg .actions input { flex: 1; min-width: var(--w-s); }
+.thread { margin: var(--sp-2) 0 0 var(--sp-5); padding-left: var(--sp-3); border-left: var(--hair-2) solid var(--line); font-size: var(--fs-m); }
+.nyl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-3); align-items: center; padding: var(--sp-2) var(--sp-1); border-top: var(--hair) solid var(--line); cursor: pointer; }
+.nyl:first-child { border-top: none; }
+.nyl:hover { background: var(--bg); }
+.nyl .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nyx { padding: 0 var(--sp-1) var(--sp-3); }
+.send-row { margin-top: var(--sp-3); }
+#sendItem { width: var(--w-xs); }
+#sendBody { flex: 1; min-width: var(--w-m); }

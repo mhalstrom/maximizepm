@@ -1,4 +1,4 @@
-// The Board's Inbox panel (#4656): messages for the person in "You are", with the answer each kind needs, and the
+// The inbox in the You view of Sessions (#4656, #5102): messages for the person in "You are", with the answer each kind needs, and the
 // form that sends one.
 import { $, esc, actor, toast, act, ago, clip, fillSelect } from "../lib.js";
 import { chip } from "../components/chip.js";
@@ -6,6 +6,7 @@ import { makeTable } from "../components/table.js";
 import { msgLine } from "../components/drawer.js";
 import { S } from "../page.js";
 import { button } from "../components/button.js";
+import { renderYou } from "./you.js";
 
 // ---- Inbox: messages for the person in "You are", with the answer each kind needs.
 // inboxGen goes up after an action or a change of person, so every inbox row redraws (clears sent text).
@@ -17,13 +18,13 @@ export async function pollInbox() {
   if (!me) return;
   const r = await fetch(`api/inbox?agent=${encodeURIComponent(me)}${$("#inboxAll").checked ? "&all=1" : ""}`); if (!r.ok) return;
   IB = (await r.json()).messages;
-  renderInbox();
+  renderInbox(); renderYou();
 }
 
 // The inbox as a table. The Message column holds the whole message with its answer, reply and decline
 // controls; on a narrow panel From, Kind, Item, To, Sent and State fold into a detail row.
 let inboxTable = null;
-// The messages that wait on the person: unread, or an open question or offer (the More line of the Board, #5083).
+// The messages that wait on the person: unread, or an open question or offer (the line of the You row, #5102).
 export function inboxOpenCount() { return IB.filter(m => !inboxDone(m)).length; }
 function inboxDone(m) { return !(m.unread || (m.state === "open" && ["question", "offer"].includes(m.kind))); }
 function inboxCell(m) {

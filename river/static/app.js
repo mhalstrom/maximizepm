@@ -16,8 +16,9 @@ import { S, tab, setState, setTabName, nav, goalSel } from "./page.js";
 import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
 import * as board from "./views/board.js";
-import * as needsYou from "./views/board-needs-you.js";
-import * as inbox from "./views/board-inbox.js";
+import * as needsYou from "./views/you-needs.js";
+import * as inbox from "./views/you-inbox.js";
+import * as youView from "./views/you.js";
 import * as projects from "./views/projects.js";
 import { makeSessions } from "./views/sessions.js";
 import { makeArtifacts } from "./views/artifacts.js";
@@ -30,7 +31,9 @@ import * as settings from "./views/settings.js";
 import { makeMenu } from "./components/menu.js";
 hooks.refresh = refresh;
 Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady(),
-  openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); } });
+  openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); },
+  // The You view of Sessions (#5102): what waits on the person; takeovers opens the list of items an agent took over.
+  openYou: async (takeovers) => { await setTab("sessions"); sessionsTab.showYou(true); if (takeovers) youView.openTakeovers(); } });
 let openItem = null, drawerItem = null;  // drawerItem: the open item as /api/item gave it
 const drawer = makeDrawer($("#drawer"));
 const header = document.querySelector("header");  // the page's header: on a phone one bar of 48 px (#4903)
@@ -241,7 +244,7 @@ async function refresh() {
   setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   if (newCode(S.page_build, S.state_shape)) return;
-  renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); board.renderTakeovers(); projects.renderBlocked(); targets.renderTargets();
+  renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); youView.renderTakeovers(); projects.renderBlocked(); targets.renderTargets();
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
@@ -259,7 +262,7 @@ async function refresh() {
 document.addEventListener("click", async (e) => {
   const t = e.target;
   // A view's own controls first (#4656), then what every view shares: agents, the drawer, item links.
-  for (const v of [needsYou, board, inbox, projects, targets, settings]) if (v.onClick(t)) return;
+  for (const v of [needsYou, youView, board, inbox, projects, targets, settings]) if (v.onClick(t)) return;
   if (t.dataset.startManager) {
     const ch = await chooseLaunch(S, { title: "Start the manager", go: "Start manager",
       what: "Manager: plans with you, starts agents, fills their queues, and stops stuck ones (maxpm manage)" });
@@ -336,6 +339,7 @@ document.addEventListener("drop", async (e) => {
 const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings", "terminal"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (the Board)   /sessions   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
+//   /you (the You view of Sessions, #5102)
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
 //   /artifacts   /artifacts/<artifact id> (opens it beside its session)   /projects   /targets   /capacity
 //   /graph   /done   /settings
@@ -343,15 +347,15 @@ const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity
 // Terminal, then leaves the address). The artifact id is artId(target). The paths
 // are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here and on the relay's tunnel.
 const ROOT = new URL("./", document.baseURI).pathname;
-const view = { session: null, art: null };  // the session the Sessions tab shows, and the tab of its side panel
+const view = { session: null, art: null, you: false };  // the session the Sessions tab shows, the tab of its side panel, the You view
 let asParam = new URLSearchParams(location.search).get("as");
 let quiet = 0;  // while the page follows an address, its own changes do not write one
 function readUrl() {
   const rel = location.pathname.startsWith(ROOT) ? location.pathname.slice(ROOT.length) : "";
   const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const q = new URLSearchParams(location.search), it = q.get("item");
-  const r = { tab: TABS.includes(parts[0]) ? parts[0] : "board", session: null, art: null, as: q.get("as"), terminal: q.get("terminal"),
-              item: /^\d+$/.test(it || "") ? +it : null };
+  const r = { tab: TABS.includes(parts[0]) ? parts[0] : parts[0] === "you" ? "sessions" : "board", session: null, art: null,
+              you: parts[0] === "you", as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
   if (r.tab === "sessions") { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
     if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
   if (r.tab === "artifacts") r.art = parts[1] || null;
@@ -359,8 +363,8 @@ function readUrl() {
 }
 function urlItem() { return readUrl().item; }
 function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
-  let p = tabName === "board" ? "" : tabName;
-  if (tabName === "sessions" && view.session) {
+  let p = tabName === "board" ? "" : tabName === "sessions" && view.you ? "you" : tabName;
+  if (tabName === "sessions" && view.session && !view.you) {
     p += "/" + encodeURIComponent(view.session);
     if (view.art) p += view.art.startsWith("item:") ? "/items/" + view.art.slice(5) : "/artifacts/" + view.art;
   }
@@ -393,7 +397,8 @@ function setTab(name, push = true) {
 }
 // A session the person picks is a new entry; one the tab picks by itself replaces the address.
 const sessionsTab = makeSessions({ isShown: () => tab === "sessions",
-  onPick: (name, byPerson) => { view.session = name; view.art = null; if (tab === "sessions") syncUrl(byPerson); } });
+  onPick: (name, byPerson) => { view.session = name; view.art = null; view.you = false; if (tab === "sessions") syncUrl(byPerson); },
+  onYou: (byPerson) => { view.you = true; view.session = null; view.art = null; if (tab === "sessions") syncUrl(byPerson); } });
 // Another tab of the side panel, or none: the same entry, with the artifact's id.
 onPanel((session, target) => {
   if (session !== view.session) return;
@@ -699,6 +704,7 @@ async function openFromUrl() {
     if (r.terminal) openTerminal(r.terminal);
     if (r.tab === "artifacts" && r.art) return await openArtifact(null, r.art);
     if (r.tab !== tab) await setTab(r.tab, false);
+    if (r.you) sessionsTab.showYou(false);
     if (r.tab === "sessions" && r.session) {
       sessionsTab.pick(r.session);
       if (r.art && r.art !== view.art) await openArtifact(r.session, r.art);
@@ -881,7 +887,8 @@ setInterval(() => {
 {
   const r = readUrl();
   if (r.tab !== "board") {
-    try { setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false); } catch (e) { /* the state draws it */ }
+    try { setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
+      if (r.you) sessionsTab.showYou(false); } catch (e) { /* the state draws it */ }
   }
 }
 refresh().then(openFromUrl).then(maybeSetup).catch((e) => {

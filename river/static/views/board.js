@@ -1,27 +1,25 @@
-// The Board tab (#4656): the status strip, Next up, Work, the manager, agents and people, Recent, and taken over
-// items. Its Needs you and Inbox panels have files of their own (board-needs-you.js, board-inbox.js).
+// The Board tab (#4656): the status strip, Next up, Work, the manager, agents and people, and Recent. Needs you,
+// the inbox and the taken over items are in the You view of Sessions now (you.js, #5102).
 import { $, esc, store, actor, toast, act, ago, left, clip, hooks, shortTitle } from "../lib.js";
-import { chip, personChip, projectChip } from "../components/chip.js";
-import { nyCard } from "../components/card.js";
+import { chip, personChip } from "../components/chip.js";
 import { itemRow, itemOrder } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
 import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { managerHtml, queueHtml, agentButtons, hasSession } from "../components/agentActions.js";
 import { S, tab, nav, inGoal } from "../page.js";
-import { NY } from "./board-needs-you.js";
-import { inboxOpenCount } from "./board-inbox.js";
+import { NY } from "./you-needs.js";
 import { button } from "../components/button.js";
 
-// Less text on the Board (#5083, mark: 'there is excess text everywhere'): Needs you and Next up first; Inbox, Work,
-// Manager, Agents and Recent each show when the person chooses its name in the More line under Next up. The choice
-// is kept in this browser. With none of Manager, Agents and Recent shown, the right column takes no room.
-const MORE = [["inbox", "Inbox"], ["work", "Work"], ["manager", "Manager"], ["agents", "Agents"], ["recent", "Recent"]];
+// Less text on the Board (#5083, mark: 'there is excess text everywhere'): Next up first; Work, Manager, Agents and
+// Recent each show when the person chooses its name in the More line under Next up. The choice is kept in this
+// browser. With none of Manager, Agents and Recent shown, the right column takes no room.
+const MORE = [["work", "Work"], ["manager", "Manager"], ["agents", "Agents"], ["recent", "Recent"]];
 function moreShown() { try { return new Set(JSON.parse(store("river.board.more") || "[]")); } catch (e) { return new Set(); } }
 export function renderMore() {
-  const on = moreShown(), n = inboxOpenCount();
+  const on = moreShown();
   $("#boardMore").innerHTML = `<span class="muted">More:</span> ` + MORE.map(([k, name]) =>
-    button(esc(name) + (k === "inbox" && n ? ` ${n}` : ""), { cls: "more-pick", pressed: on.has(k), data: { more: k },
+    button(esc(name), { cls: "more-pick", pressed: on.has(k), data: { more: k },
       title: on.has(k) ? `Hide ${name}` : `Show ${name}` })).join(`<span class="muted">·</span>`);
   for (const el of document.querySelectorAll("#tab-board [data-more-area]")) el.classList.toggle("more-off", !on.has(el.dataset.moreArea));
   const side = ["manager", "agents", "recent"].some(k => on.has(k));
@@ -117,17 +115,6 @@ function agentSession(a) {
   return `${a.via ? `<span class="chip" title="a chat session that reaches MaximizePM over MCP (${esc(a.via)})">${esc(VIA_LABEL[a.via] || a.via)}</span> ` : ""}${a.model ? `<span class="chip c-p" title="the model this session runs (MAXPM_MODEL)">${esc(a.model)}</span> ` : ""}${a.session ? `<span title="Claude Code session">${esc(a.session)}${a.session_ref ? " [" + esc(a.session_ref) + "]" : ""}</span>` : ""}${a.session_url ? ` <a class="link" href="${esc(a.session_url)}" target="_blank" rel="noopener">open</a>` : ""}`;
 }
 
-let takeoversOpen = false;
-export function renderTakeovers() {
-  const T = S.takeovers || [];
-  $("#takeoverPanel").classList.toggle("hidden", !T.length);
-  const words = { "took over": "took over", "done": "marked done", "dropped": "dropped" };
-  const head = `<div class="nyl" data-takeovers-toggle="1"><span class="t">${takeoversOpen ? "▾" : "▸"} ${T.length} item${T.length === 1 ? "" : "s"} an agent took off your list: review or undo</span><span class="chips">${button("OK all", { data: { "takeovers-okall": 1 }, title: "Accept all of them" })}</span></div>`;
-  if (!takeoversOpen) { $("#takeovers").innerHTML = head; return; }
-  $("#takeovers").innerHTML = head + T.map(t => nyCard(`<b title="${esc(t.title)}">#${t.id} ${esc(shortTitle(t))}</b> ${projectChip(t.project)}<span class="muted t-s">${ago(t.takeover_at)}</span>`, `<div class="ny-c"><b>${esc(t.takeover_by)}</b> ${words[t.takeover_kind] || t.takeover_kind} it: ${esc(t.takeover_note || "")}</div>
-      <div class="actions">${button("Open", { data: { open: t.id } })}${button("Undo: give it back to me", { data: { "undo-takeover": t.id } })}${button("OK", { kind: "primary", data: { "takeover-ok": t.id } })}</div>`)).join("");
-}
-
 // The status strip: counts you click to go where they are.
 export function renderStrip() {
   if (!S) return;
@@ -144,9 +131,6 @@ export function renderStrip() {
     + (ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
         title: "Open a new terminal tab (a console window on Windows) in the folder of the most important ready item and start the chosen agent there" }) : "");
   if ($("#strip").dataset.sig !== html) { $("#strip").innerHTML = html; $("#strip").dataset.sig = html; }
-  // The other fixed places that start an agent: Needs you > Open agent, and Claim next with an agent.
-  const put = (el, h) => { if (el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };
-  put($("#agentAllSlot"), agentStart(S.launch_agents, { label: "Open agent", attrs: 'id="agentAll"', title: "Open an agent session that walks you through all of these, with the same prompt" }));
 }
 
 // Work column: one row per project; a click opens its open items (ready first).
@@ -173,8 +157,6 @@ export function renderEvents() {
 export function onClick(t) {
   const mp = t.closest("[data-more]"); if (mp) { const on = moreShown(), k = mp.dataset.more; on.has(k) ? on.delete(k) : on.add(k);
     store("river.board.more", JSON.stringify([...on])); renderMore(); return true; }
-  if (t.dataset.takeoversOkall) return run(async () => { for (const x of S.takeovers || []) await act("takeover_seen", { id: x.id }).catch(() => {}); });
-  if (t.closest("[data-takeovers-toggle]") && !t.closest("button")) return run(async () => { takeoversOpen = !takeoversOpen; return renderTakeovers(); });
   const wp = t.closest("[data-wp]"); if (wp) return run(async () => { const o = workOpen(), n = wp.dataset.wp; o.has(n) ? o.delete(n) : o.add(n); store("river.work.open", JSON.stringify([...o])); return renderWork(); });
   const gw = t.closest("[data-give]"); if (gw) return run(async () => {
     const to = gw.dataset.give, sel = document.querySelector(`[data-give-item="${CSS.escape(to)}"]`);
@@ -185,12 +167,10 @@ export function onClick(t) {
     if (go === "blocked") { await nav.setTab("projects"); return $("#blockedPanel").scrollIntoView({ block: "start" }); }
     if (go === "capacity") return nav.setTab("capacity");
     if (go === "ready") return nav.openReady();
+    if (go === "needs" || go === "takeovers") return nav.openYou(go === "takeovers");  // the You view of Sessions (#5102)
     await nav.setTab("board");
-    if (go === "takeovers") { takeoversOpen = true; renderTakeovers(); }
-    return $(go === "work" ? "#colWork" : "#colNeeds").scrollIntoView({ block: "start" });
+    return $("#colWork").scrollIntoView({ block: "start" });
   });
-  if (t.dataset.undoTakeover) return run(async () => { await act("undo_takeover", { id: +t.dataset.undoTakeover }).then(() => toast("Back on your list")).catch(() => {}); });
-  if (t.dataset.takeoverOk) return run(async () => { await act("takeover_seen", { id: +t.dataset.takeoverOk }).catch(() => {}); });
   if (t.dataset.unpush) return run(async () => { await act("push_cancel", { id: +t.dataset.unpush }).then(() => toast("Push cancelled")).catch(() => {}); });
   return false;
 }
