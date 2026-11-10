@@ -337,35 +337,37 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["board", "sessions", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings", "terminal"];
+const TABS = ["board", "sessions", "projects", "targets", "capacity", "graph", "done", "settings", "terminal"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (the Board)   /sessions   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
-//   /you (the You view of Sessions, #5102)
+//   /you (the You view of Sessions, #5102)   /artifacts (the Artifacts view of Sessions, #5102)
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
-//   /artifacts   /artifacts/<artifact id> (opens it beside its session)   /projects   /targets   /capacity
+//   /artifacts/<artifact id> (opens it beside its session)   /projects   /targets   /capacity
 //   /graph   /done   /settings
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
 // Terminal, then leaves the address). The artifact id is artId(target). The paths
 // are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here and on the relay's tunnel.
 const ROOT = new URL("./", document.baseURI).pathname;
-const view = { session: null, art: null, you: false };  // the session the Sessions tab shows, the tab of its side panel, the You view
+const view = { session: null, art: null, pane: null };  // the session the Sessions tab shows, the tab of its side panel, a pane ("you", "arts")
 let asParam = new URLSearchParams(location.search).get("as");
 let quiet = 0;  // while the page follows an address, its own changes do not write one
 function readUrl() {
   const rel = location.pathname.startsWith(ROOT) ? location.pathname.slice(ROOT.length) : "";
   const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const q = new URLSearchParams(location.search), it = q.get("item");
-  const r = { tab: TABS.includes(parts[0]) ? parts[0] : parts[0] === "you" ? "sessions" : "board", session: null, art: null,
-              you: parts[0] === "you", as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
-  if (r.tab === "sessions") { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
+  const pane = parts[0] === "you" ? "you" : parts[0] === "artifacts" ? "arts" : null;
+  const r = { tab: TABS.includes(parts[0]) ? parts[0] : pane ? "sessions" : "board", session: null, art: null,
+              pane, as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
+  if (r.tab === "sessions" && !pane) { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
     if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
-  if (r.tab === "artifacts") r.art = parts[1] || null;
+  if (pane === "arts") r.art = parts[1] || null;
   return r;
 }
 function urlItem() { return readUrl().item; }
 function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
-  let p = tabName === "board" ? "" : tabName === "sessions" && view.you ? "you" : tabName;
-  if (tabName === "sessions" && view.session && !view.you) {
+  const pane = tabName === "sessions" ? { you: "you", arts: "artifacts" }[view.pane] : null;
+  let p = tabName === "board" ? "" : pane || tabName;
+  if (tabName === "sessions" && view.session && !pane) {
     p += "/" + encodeURIComponent(view.session);
     if (view.art) p += view.art.startsWith("item:") ? "/items/" + view.art.slice(5) : "/artifacts/" + view.art;
   }
@@ -391,15 +393,15 @@ function setTab(name, push = true) {
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   renderLog(true);
   if (tab === "sessions") sessionsTab.refresh();
-  if (tab === "artifacts") artifactsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});  // this view shows done items, or no more
   return renderGraph(true);
 }
 // A session the person picks is a new entry; one the tab picks by itself replaces the address.
 const sessionsTab = makeSessions({ isShown: () => tab === "sessions",
-  onPick: (name, byPerson) => { view.session = name; view.art = null; view.you = false; if (tab === "sessions") syncUrl(byPerson); },
-  onYou: (byPerson) => { view.you = true; view.session = null; view.art = null; if (tab === "sessions") syncUrl(byPerson); } });
+  onPick: (name, byPerson) => { view.session = name; view.art = null; view.pane = null; if (tab === "sessions") syncUrl(byPerson); },
+  onPane: (kind, byPerson) => { view.pane = kind; view.session = null; view.art = null; if (kind === "arts") artifactsTab.refresh();
+    if (tab === "sessions") syncUrl(byPerson); } });
 // Another tab of the side panel, or none: the same entry, with the artifact's id.
 onPanel((session, target) => {
   if (session !== view.session) return;
@@ -408,7 +410,7 @@ onPanel((session, target) => {
 });
 wireItemPop();  // the pop-up of every item on the page (#4622)
 // Open in the Artifacts tab: the thing in the side panel, beside the chat of the session that made it.
-const artifactsTab = makeArtifacts({ isShown: () => tab === "artifacts",
+const artifactsTab = makeArtifacts({ isShown: () => tab === "sessions" && view.pane === "arts",
   openBeside: async (session, target) => {
     quiet++;
     try { await setTab("sessions", false); if (session) sessionsTab.pick(session); openInPanel(target, session); } finally { quiet--; }
@@ -703,9 +705,10 @@ async function openFromUrl() {
       $("#actor").value = r.as; store("river.actor", r.as); await inbox.actorChanged().catch(() => {});
     }
     if (r.terminal) openTerminal(r.terminal);
-    if (r.tab === "artifacts" && r.art) return await openArtifact(null, r.art);
+    if (r.pane === "arts" && r.art) return await openArtifact(null, r.art);
     if (r.tab !== tab) await setTab(r.tab, false);
-    if (r.you) sessionsTab.showYou(false);
+    if (r.pane === "you") sessionsTab.showYou(false);
+    if (r.pane === "arts") sessionsTab.showArts(false);
     if (r.tab === "sessions" && r.session) {
       sessionsTab.pick(r.session);
       if (r.art && r.art !== view.art) await openArtifact(r.session, r.art);
@@ -731,7 +734,7 @@ async function openArtifact(session, id) {
     const hit = ((r && r.ok ? await r.json() : {}).artifacts || []).find(a => artId(a.target) === id);
     if (hit) { target = hit.target; session = session || hit.session; }
   }
-  if (!target) { if (tab !== "sessions" && !session) await setTab("artifacts", false); return toast("That artifact is not in the list any more", true); }
+  if (!target) { if (!session) { await setTab("sessions", false); sessionsTab.showArts(false); } return toast("That artifact is not in the list any more", true); }
   if (tab !== "sessions") await setTab("sessions", false);
   if (session) sessionsTab.pick(session);
   openInPanel(target, session);
@@ -889,7 +892,7 @@ setInterval(() => {
   const r = readUrl();
   if (r.tab !== "board") {
     try { setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
-      if (r.you) sessionsTab.showYou(false); } catch (e) { /* the state draws it */ }
+      if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
   }
 }
 refresh().then(openFromUrl).then(maybeSetup).catch((e) => {

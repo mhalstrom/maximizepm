@@ -146,9 +146,12 @@ function renderList(el, list, picked, empty) {
   el.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === picked));
 }
 
-export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
+export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
   let list = [], busy = false, again = false, proposals = [];
-  let you = false;  // the You view shows (#5102): what waits on the person, in place of a session's chat
+  // A pane in place of a session's chat (#5102): "you" (what waits on the person) or "arts" (the artifacts of all
+  // sessions); null while a session shows.
+  let pane = null;
+  const PANES = { you: "#sessYou", arts: "#sessArts" };
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
@@ -161,7 +164,7 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
   // there as lists.
   $("#tab-sessions").addEventListener("click", (e) => {
     const l = e.target.closest("[data-sp-open]"); if (l) return openList(l.dataset.spOpen);
-    if (e.target.closest("#sessYou")) return;  // the You view opens an item in the drawer, as the Board did
+    if (e.target.closest("#sessYou, #sessArts")) return;  // these views open an item in the drawer, as their tabs did
     const o = e.target.closest("[data-open]");
     if (!o || !/^\d+$/.test(o.dataset.open) || e.metaKey || e.ctrlKey) return;
     e.preventDefault(); e.stopPropagation();
@@ -236,7 +239,7 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
   $("#sessLayout").addEventListener("focusout", fitAfter);
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
-  $("#youBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
+  for (const b of ["#youBack", "#artsBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   // The ⋯ of the session head on a phone (#4903): it shows the item line, Settings, Open session, Items and Artifacts
   // under the one line of the head; a tap on one of them closes it again.
   const more = makeMenu($("#sessMore"), $("#sessMain"), { cls: "head-more", onChange: () => fit(),
@@ -256,7 +259,7 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
       list = j.sessions;
       proposals = j.proposals || [];
       // At load: the session chosen last, else the first. A session that ended gives way to the first.
-      if (!you && (!agent || (!pinned && !list.some(s => s.name === agent)))) {
+      if (!pane && (!agent || (!pinned && !list.some(s => s.name === agent)))) {
         const want = store(PICKED);
         pick((list.find(s => s.name === want) || list.find(s => s.role === "manager") || list[0] || {}).name || null, false);
       }
@@ -312,20 +315,26 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
   }
 
-  // The You view (#5102): in place of a session's chat. The row of the list shows as chosen; no session polls.
-  function showYou(byPerson = true) {
-    if (!you) {
-      you = true; dict.stop(); agent = null; cursor = null; gen++; clearTimeout(timer); pinned = true;
-      main.classList.add("hidden"); $("#sessYou").classList.remove("hidden");
+  // The You view and the Artifacts view (#5102): in place of a session's chat. Their row of the list shows as chosen;
+  // no session polls.
+  function markPane() {
+    markYou(pane === "you");
+    $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
+  }
+  function showPane(kind, byPerson = true) {
+    if (pane !== kind) {
+      if (pane) $(PANES[pane]).classList.add("hidden");
+      pane = kind; dict.stop(); agent = null; cursor = null; gen++; clearTimeout(timer); pinned = true;
+      main.classList.add("hidden"); $(PANES[kind]).classList.remove("hidden");
       bar.querySelectorAll("[data-session]").forEach(r => r.classList.remove("on"));
       panelFor(null);
     }
-    markYou(true);
+    markPane();
     phoneChat(true);
-    onYou(byPerson);
+    onPane(kind, byPerson);
   }
   function pick(name, remember = true) {
-    if (you && name) { you = false; $("#sessYou").classList.add("hidden"); markYou(false); }
+    if (pane && name) { $(PANES[pane]).classList.add("hidden"); pane = null; markPane(); }
     if (remember && name) store(PICKED, name);
     if (remember || !name) phoneChat(!!name);  // a session the person picks shows its chat (on a phone, #4885)
     if (name === agent) return;
@@ -615,7 +624,8 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
   bar.addEventListener("click", async (e) => {
-    if (e.target.closest("[data-you]")) return showYou(true);
+    if (e.target.closest("[data-you]")) return showPane("you");
+    if (e.target.closest("[data-arts]")) return showPane("arts");
     const end = e.target.closest("[data-end]");
     if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
     const pin = e.target.closest("[data-pin]");
@@ -634,7 +644,9 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you]")) { e.preventDefault(); return showYou(true); }
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-arts]")) {
+      e.preventDefault(); return showPane(e.target.closest("[data-you]") ? "you" : "arts");
+    }
     const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");
     if (!r) return;
@@ -643,5 +655,6 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
     if (s && popsUp(s).length) showWaiting(s);
   });
   setInterval(refresh, 3000);
-  return { refresh: () => { refresh(); fit(); }, pick, showYou, isYou: () => you };
+  return { refresh: () => { refresh(); fit(); }, pick, showYou: (byPerson = true) => showPane("you", byPerson),
+           showArts: (byPerson = true) => showPane("arts", byPerson), pane: () => pane };
 }

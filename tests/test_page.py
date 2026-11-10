@@ -105,7 +105,7 @@ try {
   await until(() => q("#work .wp-items"), "a click opens a project of Work");
   check(q("#strip [data-strip]"), "the status strip");
   const seen = {};
-  for (const name of ["projects", "targets", "capacity", "graph", "done", "settings", "artifacts", "sessions", "board"]) {
+  for (const name of ["projects", "targets", "capacity", "graph", "done", "settings", "sessions", "board"]) {
     q(`nav button[data-tab="${name}"]`).click();
     await until(() => shown(name), "the tab " + name);
     await sleep(300);
@@ -304,9 +304,10 @@ try {
         self.assertLess(got["width"], 760)
 
     def test_the_you_row_opens_what_waits_on_you(self):
-        """#5102 step 1 (design #4657): the You row at the top of the Sessions list has a ! badge with what waits on
+        """#5102 steps 1 and 3 (design #4657): the You row at the top of the Sessions list has a ! badge with what waits on
         the person, and opens the You view (Needs you, the inbox) at /you in place of a session's chat; a session row
-        shows its chat again, Back returns to You, and the Board's 'need you' count goes there too."""
+        shows its chat again, Back returns to You, and the Board's 'need you' count goes there too. The Artifacts row
+        under it shows the artifacts of all sessions at /artifacts, in place of the Artifacts tab."""
         core.config_set(self.c, "setup_done", "on")
         core.item_add(self.c, "site", "Approve the logo", doer="human")
         core.send(self.c, "question", "Which color?", to="mark", actor="ag")
@@ -327,10 +328,16 @@ try {
   await until(() => q("#strip [data-strip=needs]"), "the Board's strip");
   q("#strip [data-strip=needs]").click();
   await until(() => location.pathname === "/you" && shown(q("#sessYou")), "need you goes to You");
+  q("#sessArtsRow .srow-main").click();
+  await until(() => location.pathname === "/artifacts" && shown(q("#sessArts")) && !shown(q("#sessYou")), "the Artifacts row: /artifacts");
+  out.arts = q("#sessArtsRow .srow").classList.contains("on") && !q("#sessYouRow .srow").classList.contains("on")
+    && !q('nav button[data-tab="artifacts"]');
+  history.back();
+  await until(() => location.pathname === "/you" && shown(q("#sessYou")) && !shown(q("#sessArts")), "Back from Artifacts to You");
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/sessions/ag")
-        self.assertEqual(got, {"badge": "! 2", "you": True, "chat": True})
+        self.assertEqual(got, {"badge": "! 2", "you": True, "chat": True, "arts": True})
 
     def test_the_work_controls_of_the_sessions_list(self):
         """#5102 step 2 (design #4657): Start an agent at the top of the list; Show ended at its foot, with the ended
@@ -464,7 +471,7 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/", size="390,844")
-        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Board", "sheet": 10, "scrim": True,
+        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Board", "sheet": 9, "scrim": True,
                                "picked": "Projects false false true", "menu": True, "closed": True, "search": True,
                                "down": True, "up": True, "menuKeeps": True, "head": True, "more": True,
                                "moreCloses": True})

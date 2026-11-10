@@ -1,5 +1,11 @@
 /* The Artifacts tab: a row for each artifact (also in a session's Artifacts view and the side panel). (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
-/* The Artifacts tab (#4620). */
+/* The Artifacts view of Sessions (#4620, #5102 step 3): in place of a session's chat; the list scrolls. */
+.sess-arts.hidden { display: none; }
+.sess-arts .arts-body { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-3) var(--sp-1); }
+#artItem { width: var(--w-input-s); }
+.arts-filter { display: flex; gap: var(--sp-2); margin: var(--sp-1) 0 var(--sp-3); }
+.arts-filter select { min-width: 0; flex: 0 1 auto; }
+.slist-arts { flex: none; margin-bottom: var(--sp-4); }
 .art-row { display: flex; gap: var(--sp-5); align-items: center; justify-content: space-between; border-top: var(--hair) solid var(--line); padding: var(--sp-3) var(--sp-0); }
 .art-row:first-child { border-top: 0; }
 .art-main { min-width: 0; }

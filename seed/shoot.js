@@ -241,7 +241,7 @@ while True:
   }
   await open("artifacts?as=alex");
   await until(`document.querySelectorAll("#artList .art-row").length >= 4`);
-  await shot("artifacts.png", "#tab-artifacts", 8);
+  await shot("artifacts.png", "#sessArts", 8);
   await open("done?as=alex"); await sleep(600); await shot("done.png", "#tab-done", 8);
   await open("settings?as=alex"); await sleep(600); await shot("settings.png");  // the window: the tab is taller
   await open("capacity?as=alex"); await shot("parallel-work.png", "#tab-capacity", 8);

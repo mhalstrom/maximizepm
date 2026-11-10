@@ -7,6 +7,10 @@
       <div id="sessStart" class="sess-start"></div>
       <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. -->
       <div id="sessYouRow" class="slist-mgr slist-you" aria-label="You"></div>
+      <!-- The Artifacts row (#5102 step 3): what all the sessions made; it opens the Artifacts view. -->
+      <div id="sessArtsRow" class="slist-arts" aria-label="Artifacts"><div class="srow srow-arts" data-arts="1">
+        <div class="srow-main" tabindex="0" role="button" title="The pages, files and artifact links all the sessions made or named, also the ended ones" aria-label="Artifacts of all sessions">
+          <div class="srow-h"><b class="srow-t">Artifacts</b></div><div class="sub">What the sessions made</div></div></div></div>
       <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
       <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
         <div class="slist-h">Experts</div>
@@ -40,6 +44,7 @@
       </div>
     </div>
     <!-- view: you -->
+    <!-- view: artifacts -->
     <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
       <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
       <div class="sp-tabs" id="spTabs"></div>

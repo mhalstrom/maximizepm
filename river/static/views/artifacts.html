@@ -1,9 +1,13 @@
-<!-- The artifacts tab of the page (#4656). maxpm serve puts it into index.html, at view: artifacts. -->
-<section id="tab-artifacts" class="hidden">
-  <div class="panel"><h2 title="What the sessions made or named, newest first: files they wrote or named that the side panel can show, local pages, and claude.ai artifact links. Open shows it beside its session's chat; Open full screen gives it a browser tab of its own."><span class="spacer"></span>
-      <select id="artSession" title="Session"><option value="">All sessions</option></select>
-      <input id="artItem" type="search" placeholder="Item #" title="Only the artifacts of this item" style="width:var(--w-input-s)">
-    </h2>
-    <div id="artList"></div>
+<!-- The Artifacts view of the Sessions tab (#4620; a row under You since #5102 step 3, design #4657): what all the
+     sessions made or named, also the ended ones. maxpm serve puts it into sessions.html, at view: artifacts. -->
+<div class="panel sess-main sess-arts hidden" id="sessArts">
+  <div class="sess-head">
+    <button class="btn" type="button" id="artsBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
+    <h2 class="sess-h2" title="What the sessions made or named, newest first: files they wrote or named that the side panel can show, local pages, and claude.ai artifact links. Open shows it beside its session's chat; Open full screen gives it a browser tab of its own.">Artifacts</h2>
   </div>
-</section>
+  <div class="arts-filter">
+    <select id="artSession" title="Session"><option value="">All sessions</option></select>
+    <input id="artItem" type="search" placeholder="Item #" title="Only the artifacts of this item">
+  </div>
+  <div class="arts-body"><div id="artList"></div></div>
+</div>
