@@ -10,6 +10,7 @@ import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { managerHtml, queueHtml, agentButtons, hasSession } from "../components/agentActions.js";
 import { S, tab, nav, inGoal } from "../page.js";
 import { NY } from "./board-needs-you.js";
+import { button } from "../components/button.js";
 
 export function renderNext() {
   const area = $("#area").value;
@@ -35,9 +36,9 @@ function giveWork(a) {
     && (!where.length || where.includes(i.project)));
   const since = a.waiting_since ? ` since ${ago(a.waiting_since)}` : "";
   if (!ready.length) return `<div class="st">${chip("c-ready", "waiting" + since)} no ready item in ${esc(where.join(", ") || "its projects")}</div>`;
-  return `<div class="st" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${chip("c-ready", "waiting" + since)}
-    <select data-give-item="${esc(a.name)}" style="max-width:220px">${ready.map(i => `<option value="${i.id}"${giveChoice[a.name] == i.id ? " selected" : ""}>#${i.id} ${esc(clip(i.title, 50))}</option>`).join("")}</select>
-    <button class="btn" data-give="${esc(a.name)}">Give work</button></div>`;
+  return `<div class="st give-row">${chip("c-ready", "waiting" + since)}
+    <select class="give-sel" data-give-item="${esc(a.name)}">${ready.map(i => `<option value="${i.id}"${giveChoice[a.name] == i.id ? " selected" : ""}>#${i.id} ${esc(clip(i.title, 50))}</option>`).join("")}</select>
+    ${button("Give work", { data: { give: a.name } })}</div>`;
 }
 
 const giveChoice = {};
@@ -103,10 +104,10 @@ export function renderTakeovers() {
   const T = S.takeovers || [];
   $("#takeoverPanel").classList.toggle("hidden", !T.length);
   const words = { "took over": "took over", "done": "marked done", "dropped": "dropped" };
-  const head = `<div class="nyl" data-takeovers-toggle="1"><span class="t">${takeoversOpen ? "▾" : "▸"} ${T.length} item${T.length === 1 ? "" : "s"} an agent took off your list: review or undo</span><span class="chips"><button class="btn" data-takeovers-okall="1" title="Accept all of them">OK all</button></span></div>`;
+  const head = `<div class="nyl" data-takeovers-toggle="1"><span class="t">${takeoversOpen ? "▾" : "▸"} ${T.length} item${T.length === 1 ? "" : "s"} an agent took off your list: review or undo</span><span class="chips">${button("OK all", { data: { "takeovers-okall": 1 }, title: "Accept all of them" })}</span></div>`;
   if (!takeoversOpen) { $("#takeovers").innerHTML = head; return; }
-  $("#takeovers").innerHTML = head + T.map(t => nyCard(`<b>#${t.id} ${esc(t.title)}</b> ${projectChip(t.project)}<span class="muted" style="font-size:12px">${ago(t.takeover_at)}</span>`, `<div class="ny-c"><b>${esc(t.takeover_by)}</b> ${words[t.takeover_kind] || t.takeover_kind} it: ${esc(t.takeover_note || "")}</div>
-      <div class="actions"><button class="btn" data-open="${t.id}">Open</button><button class="btn" data-undo-takeover="${t.id}">Undo: give it back to me</button><button class="btn primary" data-takeover-ok="${t.id}">OK</button></div>`)).join("");
+  $("#takeovers").innerHTML = head + T.map(t => nyCard(`<b>#${t.id} ${esc(t.title)}</b> ${projectChip(t.project)}<span class="muted t-s">${ago(t.takeover_at)}</span>`, `<div class="ny-c"><b>${esc(t.takeover_by)}</b> ${words[t.takeover_kind] || t.takeover_kind} it: ${esc(t.takeover_note || "")}</div>
+      <div class="actions">${button("Open", { data: { open: t.id } })}${button("Undo: give it back to me", { data: { "undo-takeover": t.id } })}${button("OK", { kind: "primary", data: { "takeover-ok": t.id } })}</div>`)).join("");
 }
 
 // The status strip: counts you click to go where they are.
@@ -118,7 +119,7 @@ export function renderStrip() {
   // Words (#4728): an agent is a worker with a name in the queue (a person is in the Agents list too); a session is
   // one running chat of an agent. So items are ready for agents, and the slots (max_sessions) are for sessions.
   const T = (S.takeovers || []).length, slots = S.capacity ? S.capacity.spare_slots : 0;
-  const b = (n, label, go, cls) => `<button data-strip="${go}" class="${n ? cls : ""}"><b>${n}</b>${label}</button>`;
+  const b = (n, label, go, cls) => button(`<b>${n}</b>${label}`, { cls: n ? cls : "", data: { strip: go } });
   const html = b(NY.length, "need you", "needs", "hum") + (T ? b(T, "taken off your list", "takeovers", "hum") : "")
     + b(ready, "ready for agents", "ready", "good") + b(running, "in progress", "work", "")
     + b(blocked, "blocked outside", "blocked", "bad") + b(slots, "open session slots", "capacity", "good")
@@ -142,7 +143,7 @@ export function renderWork() {
     const isOpen = open.has(p.name), shown = items.sort(itemOrder).slice(0, 8);
     return `<div class="wp"><div class="wp-h" data-wp="${esc(p.name)}"><span class="tw">${isOpen ? "▾" : "▸"}</span><b>${esc(p.name)}</b>
         <span class="counts">${items.length} open · ${ready} ready${run ? ` · ${run} running` : ""}${hum ? ` · ${hum} for you` : ""}</span></div>
-      ${isOpen ? `<div class="wp-items">${shown.map(i => itemRow(i)).join("")}${items.length > shown.length ? `<div class="muted" style="font-size:12px;padding:4px 6px">${items.length - shown.length} more: <span class="link" data-tab="projects">Projects tab</span></div>` : ""}</div>` : ""}</div>`;
+      ${isOpen ? `<div class="wp-items">${shown.map(i => itemRow(i)).join("")}${items.length > shown.length ? `<div class="muted wp-more">${items.length - shown.length} more: <span class="link" data-tab="projects">Projects tab</span></div>` : ""}</div>` : ""}</div>`;
   }).join("") || `<div class="muted">No open items.</div>`;
 }
 

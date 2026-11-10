@@ -6,6 +6,7 @@ import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { S, nav } from "../page.js";
 import { linkArtifacts } from "../components/artLinks.js";
 import { renderStrip } from "./board.js";
+import { button } from "../components/button.js";
 
 // ---- Needs you: decisions and steps waiting for a person, with browser notifications.
 export let NY = [], nySig = "";
@@ -36,19 +37,22 @@ export function renderNeedsYou() {
     const isItem = e.kind === "item";
     const detail = isItem ? (e.item_context || e.item_notes) : e.body;
     const buttons = isItem
-      ? `<button class="btn" data-open="${e.item_id}">Open</button><button class="btn" data-ny="claim" data-id="${e.item_id}">Claim</button><button class="btn" data-copy-prompt="${e.item_id}" title="A prompt for an agent that explains this and helps you do it">Copy prompt</button>${agentStart(S && S.launch_agents, { label: "Open agent", attrs: `data-agent-help="${e.item_id}"`, title: "Open an agent session with that prompt, in the project folder" })}<button class="btn primary" data-ny="done" data-id="${e.item_id}">Done</button>`
+      ? button("Open", { data: { open: e.item_id } }) + button("Claim", { data: { ny: "claim", id: e.item_id } })
+        + button("Copy prompt", { data: { "copy-prompt": e.item_id }, title: "A prompt for an agent that explains this and helps you do it" })
+        + agentStart(S && S.launch_agents, { label: "Open agent", attrs: `data-agent-help="${e.item_id}"`, title: "Open an agent session with that prompt, in the project folder" })
+        + button("Done", { kind: "primary", data: { ny: "done", id: e.item_id } })
       : (e.message_kind === "question"
-          ? `<button class="btn primary" data-ny="answer" data-msg="${e.message_id}">Answer</button>`
-          : (promptAlert(e) ? `<button class="btn primary" data-session-go="${esc(e.from_agent)}" title="${(e.body || "").startsWith("runs no watch") ? "Open the manager's session in the Sessions tab: tell it to start its watch again" : "Open the session in the Sessions tab: the ! dialog shows the prompt, and you answer it there"}">Open session</button>` : "")
-            + `<button class="btn" data-ny="read" data-msg="${e.message_id}">Mark read</button>`)
-        + (e.item_id ? `<button class="btn" data-open="${e.item_id}">Open #${e.item_id}</button>` : "");
+          ? button("Answer", { kind: "primary", data: { ny: "answer", msg: e.message_id } })
+          : (promptAlert(e) ? button("Open session", { kind: "primary", data: { "session-go": e.from_agent }, title: (e.body || "").startsWith("runs no watch") ? "Open the manager's session in the Sessions tab: tell it to start its watch again" : "Open the session in the Sessions tab: the ! dialog shows the prompt, and you answer it there" }) : "")
+            + button("Mark read", { data: { ny: "read", msg: e.message_id } }))
+        + (e.item_id ? button(`Open #${e.item_id}`, { data: { open: e.item_id } }) : "");
     // One line each; a click opens the details and the buttons (design: the Board fits one screen).
     const title = isItem ? `#${e.item_id} ${e.item_title}` : `${e.message_kind} from ${e.from_agent === "maxpm" ? "MaximizePM" : e.from_agent}: ${e.body || ""}`;
     const open = nyOpen.has(e.id);
     const from = !isItem && e.from_agent ? ` data-agent="${esc(e.from_agent)}"` : "";
     return `<div class="nyl" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
         <span class="chips">${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span></div>
-      ${open ? `<div class="nyx"${from}><div class="muted" style="font-size:12px">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}<div class="actions">${buttons}</div></div>` : ""}`;
+      ${open ? `<div class="nyx"${from}><div class="muted t-s">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}<div class="actions">${buttons}</div></div>` : ""}`;
   }).join("");
   // Files and local pages in the details open in the side panel of the session that sent them (#4689).
   document.querySelectorAll("#needsYou .nyx .ny-c").forEach(x => linkArtifacts(x, x.closest(".nyx").dataset.agent || null));

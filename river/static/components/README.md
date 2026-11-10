@@ -38,8 +38,13 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
   color in a view. `--scrim` (behind a dialog) and `--shadow-dlg` are the same in both.
 - Space: `--sp-0` 2 px, `--sp-1` 4, `--sp-2` 6, `--sp-3` 8, `--sp-4` 10, `--sp-5` 12, `--sp-6` 16,
   `--sp-7` 24.
-- Text: `--fs-xs` 11 px, `--fs-s` 12, `--fs-m` 13, `--fs-base` 14, `--fs-l` 17.
-- Corners: `--r-s` 6 px, `--r-m` 8, `--r-l` 10, `--r-xl` 12, `--r-pill`; a line: `--hair` (1 px).
+- Text: `--fs-xs` 11 px, `--fs-s` 12, `--fs-m` 13, `--fs-base` 14, `--fs-l` 17, `--fs-xl` 18. For a
+  line in a view: the classes `t-s` (12 px) and `t-m` (13 px), not a `style` attribute.
+- Corners: `--r-s` 6 px, `--r-m` 8, `--r-l` 10, `--r-xl` 12, `--r-pill`; a line: `--hair` (1 px),
+  `--hair-2` (2 px).
+- Widths of a field or a list: `--w-xs` 80 px, `--w-s` 120, `--w-m` 160, `--w-l` 220;
+  `--board-top` (150 px): the header and the strip above a Board column.
+- A size between two tokens: `calc()` of tokens, for example `calc(var(--sp-2) + var(--hair))` for 7 px.
 - `--tap`: 44 px, the least size of a control on a phone.
 
 A media query cannot read a token: write its width as a number. The page uses 600, 640, 800 and

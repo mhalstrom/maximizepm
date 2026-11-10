@@ -18,11 +18,6 @@ VIEWS = Path(__file__).resolve().parent.parent / "river" / "static" / "views"
 ALLOW = {
     "artifacts.css": {"px": 12},
     "artifacts.html": {"px": 3},
-    "board-inbox.js": {"button": 9, "px": 1},
-    "board-needs-you.js": {"button": 8, "px": 1},
-    "board.css": {"px": 44},
-    "board.html": {"px": 9},
-    "board.js": {"button": 6, "px": 6},
     "capacity.css": {"px": 26},
     "done.css": {"px": 3},
     "done.js": {"px": 2},

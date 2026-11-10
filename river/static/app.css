@@ -40,8 +40,10 @@
 /* Sizes and the dialog look (#5028): views and parts use these, not literal px. Space: 2 4 6 8 10 12 16 24. */
 :root {
   --sp-0: 2px; --sp-1: 4px; --sp-2: 6px; --sp-3: 8px; --sp-4: 10px; --sp-5: 12px; --sp-6: 16px; --sp-7: 24px;
-  --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-base: 14px; --fs-l: 17px;
-  --r-s: 6px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px;
+  --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-base: 14px; --fs-l: 17px; --fs-xl: 18px;
+  --r-s: 6px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px; --hair-2: 2px;
+  /* Widths of a field or a list: xs 80, s 120, m 160, l 220. --board-top: the header and strip above a Board column. */
+  --w-xs: 80px; --w-s: 120px; --w-m: 160px; --w-l: 220px; --board-top: 150px;
   --tap: 44px;  /* the least size of a control on a phone */
   --scrim: rgba(0,0,0,.45); --shadow-dlg: 0 12px 40px rgba(0,0,0,.25);
 }
@@ -176,6 +178,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 8px; display: none; z-index: 20; max-width: 90vw; }
 #toast.err { background: var(--warn); color: #fff; }
 .muted { color: var(--muted); }
+/* Text sizes for a line in a view (#5028): small (12 px), medium (13 px). */
+.t-s { font-size: var(--fs-s); } .t-m { font-size: var(--fs-m); }
 .bar { height: 8px; border-radius: 4px; background: var(--wait-bg); overflow: hidden; margin-top: 4px; }
 .bar > div { height: 100%; background: var(--ready); }
 .ny { padding: 8px 0; border-top: 1px solid var(--line); }

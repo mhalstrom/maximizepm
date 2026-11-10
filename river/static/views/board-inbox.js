@@ -5,6 +5,7 @@ import { chip } from "../components/chip.js";
 import { makeTable } from "../components/table.js";
 import { msgLine } from "../components/drawer.js";
 import { S } from "../page.js";
+import { button } from "../components/button.js";
 
 // ---- Inbox: messages for the person in "You are", with the answer each kind needs.
 // inboxGen goes up after an action or a change of person, so every inbox row redraws (clears sent text).
@@ -28,22 +29,23 @@ function inboxCell(m) {
   const open = m.state === "open", it = m.item_id ? S.items.find(i => i.id === m.item_id) : null;
   let acts = "";
   if (m.kind === "question" && open)
-    acts = `<input id="ans-${m.id}" placeholder="your answer"><button class="btn primary" data-ib="answer" data-msg="${m.id}">Answer</button>`;
+    acts = `<input id="ans-${m.id}" placeholder="your answer">` + button("Answer", { kind: "primary", data: { ib: "answer", msg: m.id } });
   else if (m.kind === "offer" && open) {
     const mine = it && it.assignee === me;
-    acts = (mine ? `<button class="btn primary" data-ib="give" data-msg="${m.id}" data-id="${m.item_id}" data-to="${esc(m.from_agent)}">Give #${m.item_id} to ${esc(m.from_agent)}</button>
-        <input id="split-${m.id}" placeholder="smaller pieces, separated by ;"><button class="btn" data-ib="split" data-msg="${m.id}" data-id="${m.item_id}">Split</button>` : "")
-      + `<input id="dec-${m.id}" placeholder="why not (optional)"><button class="btn" data-ib="decline" data-msg="${m.id}">Decline</button>`;
+    acts = (mine ? button(`Give #${m.item_id} to ${esc(m.from_agent)}`, { kind: "primary", data: { ib: "give", msg: m.id, id: m.item_id, to: m.from_agent } })
+        + `\n        <input id="split-${m.id}" placeholder="smaller pieces, separated by ;">` + button("Split", { data: { ib: "split", msg: m.id, id: m.item_id } }) : "")
+      + `<input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } });
   } else {
     const pushed = m.kind === "alert" && it && it.status === "open" && it.reserved_for === me && it.reserved_until;
-    if (pushed) acts += `<button class="btn primary" data-ib="accept" data-id="${it.id}">Accept #${it.id}</button><button class="btn" data-ib="decline-push" data-id="${it.id}">Decline #${it.id}</button>`;
-    else if (m.kind === "alert" && open) acts += `<input id="dec-${m.id}" placeholder="why not (optional)"><button class="btn" data-ib="decline" data-msg="${m.id}">Decline</button>`;
-    acts += `<input id="rep-${m.id}" placeholder="reply"><button class="btn" data-ib="reply" data-msg="${m.id}">Reply</button>`;
-    if (m.unread) acts += `<button class="btn" data-ib="read" data-msg="${m.id}">Mark read</button>`;
+    if (pushed) acts += button(`Accept #${it.id}`, { kind: "primary", data: { ib: "accept", id: it.id } })
+      + button(`Decline #${it.id}`, { data: { ib: "decline-push", id: it.id } });
+    else if (m.kind === "alert" && open) acts += `<input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } });
+    acts += `<input id="rep-${m.id}" placeholder="reply">` + button("Reply", { data: { ib: "reply", msg: m.id } });
+    if (m.unread) acts += button("Mark read", { data: { ib: "read", msg: m.id } });
   }
   return `<div class="ny-h">${chip(m.kind === "alert" ? "c-p0" : "c-p", esc(m.kind))}<b>${esc(m.from_agent)}</b>
       ${m.item_id ? `<span class="link" data-open="${m.item_id}">#${m.item_id} ${esc(clip(m.item_title || "", 60))}</span>` : ""}
-      <span class="muted" style="font-size:12px">${ago(m.created_at)} · #${m.id}${m.state !== "open" && m.state !== "read" ? " · " + esc(m.state) : ""}</span>
+      <span class="muted t-s">${ago(m.created_at)} · #${m.id}${m.state !== "open" && m.state !== "read" ? " · " + esc(m.state) : ""}</span>
       <span class="link" data-thread="${m.id}">thread</span></div>
     <div class="body">${esc(m.body)}</div>
     <div class="actions">${acts}</div>
