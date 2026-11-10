@@ -2,7 +2,7 @@ import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, 
 import { chip, prioNumChip, doerChip, projectChip, personChip } from "./components/chip.js";
 import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
-import { makeDialog } from "./components/dialog.js";
+import { makeDialog, ASK_AGAIN_MS } from "./components/dialog.js";
 import { agentStart } from "./components/agentStart.js";
 import { chooseLaunch, launchArgs } from "./components/launchDialog.js";
 import { chooseStop } from "./components/agentActions.js";
@@ -88,6 +88,33 @@ window.addEventListener("keydown", (e) => {
   if (document.querySelector('[role="dialog"]:not(.hidden), #itemPop:not(.hidden)')) return;
   closeDrawer();
 }, true);
+// A click outside the drawer on empty space closes it too (#5027), as a click outside a dialog does. Not a click on
+// a control or a link (it does its own thing, and a click on another item opens that one), not the end of a text
+// selection, not while a dialog is open, and not when it opened another item. A field of the item that the person
+// changed asks first: the first click says so, a second one within a few seconds closes it.
+let drawerDown = null, drawerWarned = 0;
+const drawerDraft = () => [...$("#drawer").querySelectorAll("input, textarea, select")].some(f =>
+  f.type === "checkbox" || f.type === "radio" ? f.checked !== f.defaultChecked
+    : f.tagName === "SELECT" ? f.selectedIndex !== Math.max(0, [...f.options].findIndex(o => o.defaultSelected))
+    : f.value !== f.defaultValue);
+document.addEventListener("pointerdown", (e) => {
+  drawerDown = drawer.isOpen() && !$("#drawer").contains(e.target) ? openItem : null;
+}, true);
+document.addEventListener("click", (e) => {
+  const was = drawerDown; drawerDown = null;
+  if (was === null || was !== openItem || !drawer.isOpen() || e.defaultPrevented) return;
+  const t = e.target;
+  if (!(t instanceof Element) || !t.isConnected || $("#drawer").contains(t)) return;
+  if (t.closest('a, button, input, select, textarea, label, summary, option, [data-open], [role="button"], [role="tab"], '
+               + '[role="dialog"], [contenteditable], [tabindex], #itemPop, #toast, iframe, .tabulator-row')) return;
+  if (String(getSelection() || "").trim() || document.querySelector('[role="dialog"]:not(.hidden)')) return;
+  if (drawerDraft() && Date.now() - drawerWarned > ASK_AGAIN_MS) {
+    drawerWarned = Date.now();
+    return toast("You changed a field of this item: click outside again to close it without the change", true);
+  }
+  drawerWarned = 0;
+  closeDrawer();
+});
 
 
 async function openDrawer(id, fresh = false) {
@@ -400,7 +427,7 @@ function renderReady() {
 }
 $("#readyClose").onclick = () => readyDialog.close();
 $("#readyDlg").addEventListener("click", async (e) => {
-  if (e.target === e.currentTarget) return readyDialog.close();
+  if (e.target === e.currentTarget) return;  // the overlay: makeDialog closes it (#5027)
   if (e.target.closest("[data-open]")) return readyDialog.close();  // the item opens in the drawer
   const b = e.target.closest("[data-dispatch]"); if (!b || b.disabled) return;
   const id = +b.dataset.dispatch, it = S.items.find(i => i.id === id);
@@ -416,7 +443,7 @@ $("#readyDlg").addEventListener("click", async (e) => {
 
 // Search: the header field opens a dialog that lists the items, open, done, and dropped, that hold every
 // word (core.search, as maxpm search), newest first; a click opens the item in the drawer (#2968).
-const searchDialog = makeDialog($("#searchDlg"));
+const searchDialog = makeDialog($("#searchDlg"), { draft: false });  // a search is not worth asking about
 let searchSeq = 0, searchTimer = null;
 function openSearch(text) {
   if (S) fillSelect("#searchProject", S.projects.map(p => p.name), true);
@@ -462,7 +489,7 @@ $("#searchText").addEventListener("input", () => runSearch(200));
 for (const id of ["#searchStatus", "#searchProject", "#searchSince"]) $(id).addEventListener("change", () => runSearch());
 $("#searchClose").onclick = () => searchDialog.close();
 $("#searchDlg").addEventListener("click", (e) => {
-  if (e.target === e.currentTarget) return searchDialog.close();
+  if (e.target === e.currentTarget) return;  // the overlay: makeDialog closes it (#5027)
   if (e.target.closest("[data-open]")) return searchDialog.close();  // the item opens in the drawer
 });
 // "/" anywhere outside a field opens the search, as on many sites.

@@ -97,4 +97,3 @@ $("#waitList").addEventListener("submit", async (e) => {
 $("#waitList").addEventListener("click", (e) => { if (e.target.closest("[data-open]")) dlg.close(); });
 $("#waitClose").onclick = () => dlg.close();
 $("#waitDismiss").onclick = () => dlg.close();
-$("#waitDlg").addEventListener("click", (e) => { if (e.target === e.currentTarget) dlg.close(); });

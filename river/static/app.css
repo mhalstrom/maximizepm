@@ -274,3 +274,6 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .md img:not([src]) { display: none; }  /* a picture from the network: the canvas loads nothing */
 .md .cv-diagram { margin: 12px 0; text-align: center; overflow-x: auto; }
 .md .cv-diagram img { max-width: 100%; border-radius: 0; }
+
+/* A dialog where the person typed text asks before Escape or an outside click closes it (#5027). */
+.dlg-draft { margin-top: 10px; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); font-size: 13px; }

@@ -57,7 +57,8 @@ function el() {
   dlg = makeDialog(d, { onClose: () => finish(null) });
   d.addEventListener("click", (e) => {
     const q = (s) => d.querySelector(s);
-    if (e.target === d || e.target.closest("[data-stop-cancel]")) return dlg.close();
+    if (e.target === d) return;  // the overlay: makeDialog closes it (#5027)
+    if (e.target.closest("[data-stop-cancel]")) return dlg.close();
     const reason = q("#stopReason").value.trim();
     if (e.target.closest("[data-stop-go]")) { finish({ reason, kill: false }); return dlg.close(); }
     if (e.target.closest("[data-kill-ask]")) { q("#killConfirm").classList.remove("hidden"); return; }

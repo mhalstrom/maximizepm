@@ -76,7 +76,8 @@ function el() {
   document.body.appendChild(d);
   dlg = makeDialog(d, { onClose: () => finish(null) });
   d.addEventListener("click", (e) => {
-    if (e.target === d || e.target.closest("[data-launch-cancel]")) return dlg.close();
+    if (e.target === d) return;  // the overlay: makeDialog closes it (#5027)
+    if (e.target.closest("[data-launch-cancel]")) return dlg.close();
     if (e.target.closest("[data-launch-go]")) {
       const v = values();
       store("river.launch.agent", v.agent);

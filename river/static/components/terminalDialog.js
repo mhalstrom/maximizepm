@@ -107,7 +107,8 @@ function el() {
   document.body.appendChild(d);
   dlg = makeDialog(d, { onClose: () => { agent = null; clearTimeout(timer); } });
   d.addEventListener("click", (e) => {
-    if (e.target === d || e.target.closest("[data-term-close]")) return dlg.close();
+    if (e.target === d) return;  // the overlay: makeDialog closes it (#5027)
+    if (e.target.closest("[data-term-close]")) return dlg.close();
     const k = e.target.closest("[data-term-key]");
     if (k) { send({ key: k.dataset.termKey }); $("#termScreen").focus(); }
   });

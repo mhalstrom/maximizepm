@@ -102,4 +102,6 @@ export function wireItemPop() {
   window.addEventListener("resize", place);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && popFor) hide(true); });
   pop.addEventListener("click", (e) => { if (e.target.closest("[data-open], [data-session-go]")) hide(true); });
+  // A tap outside the pop-up hides it (#5027): on a phone there is no mouse that leaves it.
+  document.addEventListener("click", (e) => { if (popFor && !pop.contains(e.target) && !itemOf(e.target)) hide(true); });
 }
