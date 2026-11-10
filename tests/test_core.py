@@ -3956,6 +3956,66 @@ class Wait(Base):
         self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='w'").fetchone())
         self.assertIsNone(core.goal_show(self.c, "g")["owner"])
 
+    def test_work_comes_from_a_queue_entry_a_message_and_a_stop(self):
+        # #4948: the background wait wakes the session on each of these, as the foreground wait did.
+        core.register(self.c, "mark", human=True)
+        core.queue_add(self.c, "w", message="look at the logs", actor="mark")
+        self.assertIn("your queue has an instruction", self.wait()["why"])
+        for e in core.queue_list(self.c, "w")["entries"]:
+            core.queue_remove(self.c, "w", f"e{e['entry']}", "w")
+        core.send(self.c, "note", "main moved", to="w", actor="mark")
+        self.assertEqual(self.wait()["why"], "you have messages (maxpm inbox)")
+        core.inbox(self.c, "w")
+        core.stop_agent(self.c, "w", "the day ends", "mark")
+        self.assertEqual(self.wait()["result"], "stop")
+
+    def test_an_older_background_wait_leaves_quietly(self):
+        # #4948: a Claude Code session waits in a background command. A person talks with it, and the session
+        # starts a new wait (or takes work) while the first one still runs: the first one ends with "left".
+        later = []
+
+        def newer(_s):
+            if not later:
+                later.append(core.wait(self.c, self.dir.name, "w", step="0s", sleep=lambda s: None))
+        res = core.wait(self.c, self.dir.name, "w", step="1h", sleep=newer)
+        self.assertEqual((later[0]["result"], res["result"], res["why"]),
+                         ("again", "left", "a newer maxpm wait of this session runs"))
+        i = self.add("b", "elsewhere")  # not in the folder's project: it wakes no wait
+        res = core.wait(self.c, self.dir.name, "w", step="1h", sleep=lambda s: core.claim(self.c, i, "w"))
+        self.assertEqual((res["result"], res["why"]), ("left", "this session took work since this wait started"))
+        self.assertIsNotNone(self.c.execute("SELECT 1 FROM agents WHERE name='w'").fetchone())
+
+    def test_a_persons_prompt_starts_the_wait_max_clock_again(self):
+        # #4948: wait ended (and unregistered) a session while a person talked with it.
+        from unittest import mock
+        sid = "0b5a3c1e-1111-4222-8333-944455550000"
+        core.record_claude_session(self.c, "w", sid)
+        clock = [core.now()]
+        p = mock.patch.object(core, "now", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        prompt = lambda text: core.activity_event(self.c, {"hook_event_name": "UserPromptSubmit", "session_id": sid,
+                                                           "prompt": text}, env={})
+        self.assertEqual(self.wait()["result"], "again")
+        clock[0] += core.timedelta(minutes=30)
+        prompt("why did the build fail?")
+        clock[0] += core.timedelta(minutes=16)  # 46m after the first wait, 16m after the talk
+        self.assertEqual(self.wait()["result"], "again")
+        # The harness's wake for a background task, and a message MaximizePM delivered, are no talk.
+        clock[0] += core.timedelta(minutes=20)
+        prompt("<task-notification>\n<task-id>b1</task-id>\n</task-notification>")
+        prompt("[maxpm note from mark] main moved")
+        clock[0] += core.timedelta(minutes=10)
+        self.assertEqual(self.wait()["result"], "end")
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='w'").fetchone())
+
+    def test_go_tells_a_claude_code_session_to_wait_in_the_background(self):
+        core.register(self.c, "x")
+        core.claim(self.c, self.add("a", "held by another"), "x")
+        b = core.go(self.c, self.dir.name, "w", agent_type="claude-code")
+        self.assertEqual((b["role"], b["wait_background"]), ("idle", True))
+        self.assertFalse(core.go(self.c, self.dir.name, "w", agent_type="codex")["wait_background"])
+
     def test_capacity_still_warns_about_idle_sessions_that_do_not_wait(self):
         core.register(self.c, "idle1")
         self.wait()

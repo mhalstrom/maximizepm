@@ -167,9 +167,10 @@ DEFAULT_SETTINGS = {
     # what tool, e.g. "github owner/shop via gh" or "jira PROJ via the Jira MCP server". Set it per
     # project (maxpm project tracker). River has no tracker API code: agents use their own tools.
     "tracker": "",
-    # A session with no work runs maxpm wait in the foreground (a blocking command costs no tokens), never idle at
-    # its prompt: it takes new work when it comes, and ends after wait_max without any (0: end at once). One
-    # maxpm wait call returns after wait_step, below a shell time limit.
+    # A session with no work runs maxpm wait (in Claude Code as a background command, so a typed message reaches it;
+    # elsewhere in the foreground; a blocking command costs no tokens), never idle at its prompt: it takes new work
+    # when it comes, and ends after wait_max without any (0: end at once); a person's prompt starts that clock again.
+    # One maxpm wait call returns after wait_step, below a shell time limit.
     "wait_max": "45m",
     "wait_step": "9m",
     # The manager (maxpm manage): an agent that waits for work longer than wait_too_long is a finding, and
@@ -1024,6 +1025,10 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN session_ref TEXT")
     if "waiting_since" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_since TEXT")
+    if "wait_token" not in acols:
+        conn.execute("ALTER TABLE agents ADD COLUMN wait_token TEXT")
+    if "wait_at" not in acols:
+        conn.execute("ALTER TABLE agents ADD COLUMN wait_at TEXT")
     if "waiting_in" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_in TEXT")
     if "watch_seen" not in acols:
@@ -7570,6 +7575,13 @@ def _activity_waits(payload):
     return out
 
 
+def _talk(prompt):
+    """True for a prompt that someone typed or sent: not the harness's own wake for a background task that ended
+    (a task notification), and not a message that MaximizePM delivered ([maxpm ...]; maxpm wait wakes on those)."""
+    text = prompt.strip() if isinstance(prompt, str) else ""
+    return bool(text) and not text.startswith(("<task-notification", "[maxpm "))
+
+
 def _activity_item(conn, agent):
     return conn.execute("SELECT id, title FROM items WHERE assignee=? AND status='in_progress' ORDER BY id",
                         (agent,)).fetchone()
@@ -7600,6 +7612,10 @@ def activity_event(conn, payload, env=None):
             prompt = json.dumps({"tool": str(payload.get("tool_name") or ""), "input": {k: v[:400] for k, v in inp.items()}})
         elif ev in ("PostToolUse", "UserPromptSubmit"):
             prompt = waits = None
+        if ev == "UserPromptSubmit" and _talk(payload.get("prompt")):
+            # A person (or another session) talks with a session that waits for work: wait_max counts from the
+            # talk, so maxpm wait does not end the session during it or soon after (#4948).
+            conn.execute("UPDATE agents SET waiting_since=? WHERE name=? AND waiting_since IS NOT NULL", (t, agent))
         if ev == "Stop":
             found = _activity_waits(payload)
             if found is None:  # an older Claude Code: a process below the session, not this hook (busy_now)
@@ -10340,6 +10356,10 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         # Counted after the claim: it accepts the push alert of the item this briefing gives, so the alert is
         # not unread any more. The count from before sent each started session to an empty inbox (#1605).
         brief["messages"] = unread(conn, brief["agent"])
+    if not it and brief.get("agent"):
+        # Claude Code holds a typed message (the terminal, the page's message box, SendMessage) while a foreground
+        # command runs: a session there waits in a background command, so a talk reaches it at once (#4948).
+        brief["wait_background"] = (agent_type or session_type(conn, brief["agent"])) == "claude-code"
     return brief
 
 
@@ -10840,7 +10860,10 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     so no push of project work (Dispatch, maxpm serve) goes to it.
 
     Returns result work (run go), again (run wait again), or end: no work came within wait_max since the
-    first wait, so river released the agent's goals and unregistered it, and the session should stop."""
+    first wait, so river released the agent's goals and unregistered it, and the session should stop; or left: this
+    wait has nothing more to do (the session took work, or a newer wait of it runs), and the session does nothing.
+    A Claude Code session runs it as a background command, so a typed message reaches the session at once (#4948)."""
+    import secrets
     import time
     sleep = sleep or time.sleep
     if not actor:
@@ -10866,14 +10889,34 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
                      "note=? WHERE name=?", (iso(now()), None if role else ",".join(names),
                                              f"waiting for {role} work (maxpm wait)" if role else "waiting for work (maxpm wait)",
                                              actor))
+        # The newest wait of an agent is its wait: one that runs in the background (Claude Code) is still there
+        # when the agent, after a talk with a person, starts another one (#4948).
+        token = secrets.token_hex(4)
+        conn.execute("UPDATE agents SET wait_token=?, wait_at=? WHERE name=?", (token, iso(now()), actor))
     since = parse_iso(_agent(conn, actor)["waiting_since"])
     limit = parse_duration(setting(conn, "wait_max", agent=actor))
     step = parse_duration(step or setting(conn, "wait_step", agent=actor))
     deadline = min(now() + step, since + limit)
+
+    def left():
+        """Why this wait has nothing more to do, or None: the agent ran go and took work (its wait ended), or a
+        newer maxpm wait of the agent runs. The session was talking with a person while this one ran in the
+        background, so this one ends quietly."""
+        a = conn.execute("SELECT waiting_since, wait_token FROM agents WHERE name=?", (actor,)).fetchone()
+        if not a:
+            return "it is not registered any more"
+        if a["wait_token"] != token:
+            return "a newer maxpm wait of this session runs"
+        if not a["waiting_since"] or conn.execute("SELECT 1 FROM items WHERE assignee=? AND status IN "
+                                                  "('in_progress','held')", (actor,)).fetchone():
+            return "this session took work since this wait started"
     while True:
         st = stopped()
         if st:
             return st
+        gone = left()
+        if gone:
+            return {"result": "left", "agent": actor, "why": gone}
         why = _work_for(conn, actor, names, role)
         if why:
             return {"result": "work", "why": why, "agent": actor}
@@ -10881,6 +10924,8 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
             break
         poll_activity(conn, actor)  # a waiting session is active: it takes work within seconds
         sleep(poll)
+    # A person's prompt during the wait moved waiting_since (activity_event): the clock counts from the talk.
+    since = parse_iso(_agent(conn, actor)["waiting_since"] or iso(now()))
     if now() < since + limit:
         return {"result": "again", "agent": actor, "left": _short(since + limit - now())}
     with tx(conn):

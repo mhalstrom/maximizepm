@@ -3043,13 +3043,20 @@ def render_go(b):
                        + ",".join(f"#{x}" for x in w["backlog"]) + "; a person or a planner decides: maxpm activate <id>)")
         if b.get("backlog"):
             out.append(f"  {b['backlog']} item(s) here are in the backlog: nobody takes them now (maxpm backlog).")
+        how = ([
+            "  Run it as a background command (Claude Code: run_in_background), then end your turn: a message that",
+            "  a person or a session types to you reaches you at once. The harness wakes you when the wait prints.",
+            "  After a talk, end your turn with the wait running again (start it only when the last one ended).",
+        ] if b.get("wait_background") else [
+            "  Run it in the foreground (give the shell command a 10-minute time limit), and never end your turn",
+            "  at your prompt: a blocking wait costs no tokens, and MaximizePM ends an agent idle at its prompt.",
+        ])
         out += [
             "",
             f"Wait for work: {r} wait",
-            "  Run it in the foreground, not as a background command, and never end your turn at your prompt: a",
-            "  blocking wait costs no tokens, and MaximizePM ends an agent that sits idle at its prompt.",
-            "  It returns when work is pushed to you, an item gets ready here, or a message comes (give the shell",
-            "  command a 10-minute time limit). Then do what it prints: WORK: run go. No work yet: run wait again.",
+            *how,
+            "  It returns when work is pushed to you, an item gets ready here, or a message comes. Then do what it",
+            "  prints: WORK: run go. No work yet: run wait again. This wait ended: do nothing for it.",
             "  END: no work came within wait_max; stop, tell the user this session has ended, and report",
             "  everything you finished in it.",
             f"  To work in another project instead: maxpm project list, then {r} go --project <name>.",
@@ -3110,6 +3117,8 @@ def render_wait(res):
         print(f"WORK: {res['why']}. Run now: {r} go")
     elif res["result"] == "again":
         print(f"No work yet. Run again at once: {r} wait   (this session ends by itself in {res['left']} without work)")
+    elif res["result"] == "left":
+        print(f"This wait ended: {res['why']}. Nothing to do for it; continue what you do now.")
     else:
         print(f"END: no work came in {res['waited']}. MaximizePM "
               + ("kept your registration: " + res["kept"] if res.get("kept") else "released your goals and unregistered you")

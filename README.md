@@ -608,11 +608,12 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   `maxpm add ... --no-goal-context` starts an item fresh.
 - `maxpm go` roles: owner, worker, unblocker, reviewer, deployer, monitor,
   planner, context, manager, idle. After `done`, an agent takes the next item at once
-  (`auto_continue`). With no item, it runs `maxpm wait` in the foreground (a
-  blocking command costs no tokens), which returns when work is pushed to it,
-  an item gets ready, or a message comes, else after `wait_step` (9m), and
-  the agent runs it again. The session ends after `wait_max` (45m) without
-  work.
+  (`auto_continue`). With no item, it runs `maxpm wait` (a blocking command
+  costs no tokens; in Claude Code a background command, so a message that a
+  person types reaches the session at once), which returns when work is pushed
+  to it, an item gets ready, or a message comes, else after `wait_step` (9m),
+  and the agent runs it again. The session ends after `wait_max` (45m) without
+  work or a person's prompt.
 - Fresh sessions: MaximizePM never types into an agent's terminal. When an agent
   sits idle at its prompt in tmux and work or an answer comes for it,
   `maxpm serve` gives the work to a new session (the item's notes carry the

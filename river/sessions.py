@@ -314,7 +314,9 @@ def state(conn, a, turn, waiting=None):
         return "prompt", STATES["prompt"]
     if a["name"] in (waiting if waiting is not None else core.waits_on_person(conn, [a["name"]])):
         return "answer", STATES["answer"]
-    if a.get("waiting_since"):
+    if a.get("waiting_since") and not (turn == "working" and a.get("activity_at") and a.get("wait_at")
+                                       and a["activity_at"] > a["wait_at"]):
+        # A turn after the last maxpm wait started: a person talks with it while its wait runs in the background.
         return "idle", "idle: waits for work"
     if turn == "idle" or (turn is None and (a.get("activity_event") == "Stop" or a.get("role") == "idle")):
         bg = core.background_work(conn, a["name"])  # its harness wakes it when this ends

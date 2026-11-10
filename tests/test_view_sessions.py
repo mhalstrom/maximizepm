@@ -184,6 +184,15 @@ class Sessions(Base):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET waiting_since=? WHERE name='ag'", (core.iso(core.now()),))
         self.assertEqual(self.cards()[0]["state_label"], "idle: waits for work")
+        # #4948: a person talks with it while its wait runs in the background: a turn after the wait started.
+        t = core.now()
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET wait_at=?, activity_at=? WHERE name='ag'",
+                           (core.iso(t), core.iso(t + core.timedelta(seconds=5))))
+        self.assertEqual(self.cards()[0]["state_label"], "working")
+        with core.tx(self.c):  # its turn ends with a new background wait
+            self.c.execute("UPDATE agents SET wait_at=? WHERE name='ag'", (core.iso(t + core.timedelta(seconds=9)),))
+        self.assertEqual(self.cards()[0]["state_label"], "idle: waits for work")
 
     def test_the_large_view_reads_the_tail_then_only_new_lines(self):
         v = sessions.view(self.c, "ag", None, self.root, self.croot)

@@ -1878,6 +1878,35 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(([list(x) for x in started], pane in self.tmux.panes), ([[item]], False))
         self.assertIn("main moved: rebase before you push", core.item_show(self.c, item)["notes"])
 
+    def test_a_session_at_its_prompt_with_a_background_wait_is_not_idle(self):
+        # #4948: a Claude Code session runs maxpm wait in the background and ends its turn, so a typed message
+        # reaches it. Its screen stays quiet at the prompt; serve neither hands it over nor ends it, and only
+        # wait_max (45m) ends it. Without the wait it ends after idle_end (15m).
+        core.config_set(self.c, "launch_in", "tmux")
+        first = core.item_add(self.c, "shop", "first")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.IDLE.clear)
+        p = mock.patch.object(core, "now", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        pane["screen"] = "⏺ No work: I wait in the background.\n\n╭────╮\n│ >  │\n╰────╯\n  ? for shortcuts"
+        clock[0] += core.timedelta(seconds=1)
+        core.activity(self.c, name)
+        core.claim(self.c, first, name)
+        core.done(self.c, first, "ok", actor=name)
+        passes = []
+
+        def serve_pass(_s):  # each poll of the wait is one pass of maxpm serve 30s later
+            clock[0] += core.timedelta(seconds=30)
+            passes.append(server.fresh_sessions(self.c))
+        results = []
+        while not results or results[-1]["result"] == "again":
+            results.append(core.wait(self.c, self.dir.name, name, "shop", sleep=serve_pass, poll=30))
+        self.assertEqual([r["result"] for r in results], ["again"] * 4 + ["end"])  # 9m each, 45m in all
+        self.assertEqual([x for x in passes if x != {"started": {}, "ended": {}, "failed": {}}], [])
+        self.assertTrue(len(passes) > 80 and pane in self.tmux.panes)
+
     def test_work_for_an_agent_idle_at_its_prompt_goes_to_a_fresh_session(self):
         import threading
         from unittest import mock

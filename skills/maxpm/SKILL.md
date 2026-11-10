@@ -19,12 +19,17 @@ name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents
 prints `This session is <name> [<ref>]`, and names can repeat, so keep the ref), so
 people and agents can message your session directly. After `maxpm done`, run `maxpm --as <your-name> go` again
 at once, in the same turn: do not stop to report between items. When go gives
-you no item (role IDLE), run `maxpm --as <your-name> wait` in the foreground
-(not as a background command; give the shell command a 10-minute limit). A
-blocking wait costs no tokens, and it keeps you available for new work. It
-prints WORK (run go), no work yet (run wait again), or END: no work came
-within `wait_max` (45m), MaximizePM unregistered you, and you stop. After each
-item, end in `maxpm wait`, never at your prompt. Stop also when you need the user (file a human item first; see
+you no item (role IDLE), run `maxpm --as <your-name> wait`. In Claude Code, run
+it as a background command (`run_in_background`) and end your turn: a message
+that a person or a session types to you then reaches you at once, and the
+harness wakes you when the wait prints. After such a talk, end your turn with
+the wait running again (start it only when the last one ended). In a CLI with
+no background commands (Codex), run it in the foreground with a 10-minute
+limit. A blocking wait costs no tokens, and it keeps you available for new
+work. It prints WORK (run go), no work yet (run wait again), "This wait
+ended" (do nothing for it), or END: no work came within `wait_max` (45m,
+counted again from a person's last prompt), MaximizePM unregistered you, and
+you stop. After each item, end in `maxpm wait`, never at your prompt. Stop also when you need the user (file a human item first; see
 below); then report everything you finished. A person turns this off with
 `maxpm config set auto_continue off`. MaximizePM never types into your terminal:
 when you sit idle at your prompt, `maxpm serve` gives new work or an answer for
