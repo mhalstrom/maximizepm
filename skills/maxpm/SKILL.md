@@ -224,6 +224,11 @@ like it that it is not linked to): read them before you start.
 - Needs to happen before your item: `maxpm add "<title>" --blocks <your-id> --keep|--release`
 - Found while working, not needed for your item: `maxpm add "<title>" --found-during <your-id>`
   (linked both ways in `maxpm show`; it does not block anything)
+- You do the work yourself, now (the user asked for it in your chat, while you
+  hold another item): add `--mine`. The item is reserved for you at once, so
+  no other session starts it; close it with `maxpm done <id>` when it is done.
+  Without `--mine`, `maxpm wait` or a Dispatch gives it to another session
+  within seconds.
 - Give the next agent a start: `--context "why, where"`, `--touches <files>`,
   `--check "<command>"`, and `--doer human` for steps only a person can do.
 - The work comes from an outside tracker issue: link it with

@@ -402,6 +402,9 @@ def _print_show(a):
         left = core._short(core.parse_iso(w["until"]) - core.now())
         print(f"  you wait for this person at most {w['max']} (human_wait_max; {left} left). Then MaximizePM releases "
               f"#{w['item']}, which still waits on this item, and you take other work: maxpm go")
+    if a.get("mine"):
+        print(f"  reserved for you: no other session takes it while your session lives. When it is done: "
+              f"maxpm done {a['id']} --output \"...\"   (to work on it alone first: maxpm claim {a['id']})")
     if a.get("output"):
         print("  output:", a["output"])
     if a.get("found_during"):
@@ -849,6 +852,9 @@ def build_parser():
                         "title first: maxpm add \"title\" --backlog \"why not now\")")
     x.add_argument("--new", metavar="HOW", help="add it although maxpm add found open or lately done items like it: "
                    "say how it differs (the history keeps it)")
+    x.add_argument("--mine", action="store_true",
+                   help="you do this work now (a request in your chat, a note you write while you hold another "
+                        "item): reserve it for you at once, so no other session starts it; claim or close it yourself")
 
     x = sub.add_parser("artifacts", help="what the sessions made or named: files they wrote, screenshots, canvases, local "
                        "pages, claude.ai artifact links (the Artifacts tab); 'maxpm artifacts show <n>' reads one")
@@ -2054,7 +2060,7 @@ def dispatch(conn, a, actor):
         res = core.item_add(conn, project, title, a.priority, a.notes, a.doer, a.after, actor,
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
-                            backlog=a.backlog, check_similar=True, new=a.new)
+                            backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine)
         if a.no_goal_context:
             core.item_goal_context(conn, res["id"], False, actor)
         return res

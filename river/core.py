@@ -3197,11 +3197,25 @@ def touches_list(text):
 
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
-             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None):
+             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False):
     """Add an item. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `backlog`: a note on why nobody takes it now; the item goes to the backlog at once.
     `check_similar` (maxpm add): refuse with SimilarWork when the same work is open or was done lately
-    (similar_items); `new` says how this item differs, and adds it anyway (the history keeps it)."""
+    (similar_items); `new` says how this item differs, and adds it anyway (the history keeps it).
+    `mine` (maxpm add --mine): the actor adds the item for work it does now, so it is reserved for the
+    actor at once, with no time limit, in the same tx. Then no other session gets it from go, next, or wait,
+    and Dispatch and the launches refuse it; it is free again when the actor's session stops or is gone
+    (_sweep). Without it, a session that adds an item for its own work while it holds another item saw a
+    second session start the same work within seconds (#4942)."""
+    if mine:
+        if not actor:
+            raise RiverError("--mine needs an agent name: set MAXPM_AGENT or pass --as <name>")
+        if doer == "human":
+            raise RiverError("--mine reserves the item for you, and a person's item is for the person: "
+                             "leave out --mine, or --doer human")
+        if backlog is not None:
+            raise RiverError("--mine is for work you do now, and the backlog is for work nobody does now: "
+                             "leave out one of them")
     if backlog is not None and blocks is not None:
         raise RiverError(f"refused: #{blocks} would wait on a backlog item. Add the item without --blocks, or "
                          f"without --backlog")
@@ -3261,7 +3275,14 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             why = backlog.strip() or "added to the backlog"
             conn.execute("UPDATE items SET backlog_at=?, backlog_note=? WHERE id=?", (iso(now()), why, iid))
             _event(conn, iid, actor, f"moved to the backlog: {why}")
+        if mine:
+            _agent(conn, actor)
+            conn.execute("UPDATE items SET reserved_for=?, reserved_until=NULL, reserved_by=? WHERE id=?",
+                         (actor, actor, iid))
+            _event(conn, iid, actor, f"reserved for {actor}: added for its own work (maxpm add --mine)")
     a = item_show(conn, iid)
+    if mine:
+        a["mine"] = True
     if blocks is not None and doer == "human":
         parent = _item(conn, blocks)
         if parent["status"] == "held" and parent["assignee"] == actor:

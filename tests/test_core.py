@@ -2489,6 +2489,69 @@ class Deployer(Base):
         self.assertIn("owned by dev", b["why"])
 
 
+class AddMine(Base):
+    """maxpm add --mine: an item that a session adds for the work it does now is reserved for it at once,
+    so no other session starts the same work (#4942)."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        for n in ("boss", "aa", "bb"):
+            core.register(self.c, n)
+        self.held = self.add("a", "what aa holds", p=0)
+        core.claim(self.c, self.held, "aa")
+
+    def test_mine_reserves_it_for_the_adder_and_nobody_else_gets_it(self):
+        a = core.item_add(self.c, "a", "research mark asked for in my chat", actor="aa", mine=True)
+        x = a["id"]
+        self.assertTrue(a["mine"])
+        it = core._item(self.c, x)
+        self.assertEqual((it["reserved_for"], it["reserved_until"], it["reserved_by"]), ("aa", None, "aa"))
+        self.assertIn("reserved for aa: added for its own work (maxpm add --mine)",
+                      [r["change"] for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (x,))])
+        self.assertEqual(core.next_item(self.c, actor="bb", limit=5), [])
+        self.assertIsNone(core.go(self.c, self.dir.name, "bb").get("item"))
+        with self.assertRaisesRegex(RiverError, "reserved for aa"):
+            core.launch_target(self.c, item=x, actor="boss")  # Dispatch and launch --item start with it
+        with self.assertRaisesRegex(RiverError, "already reserved for aa"):
+            core.push(self.c, x, "bb", None, "boss")
+        with self.assertRaises(RiverError):
+            core.claim(self.c, x, "bb")
+        core.done(self.c, x, "written, abc123", "aa")  # the adder closes it without a claim
+        self.assertEqual(core._item(self.c, x)["status"], "done")
+
+    def test_mine_ends_when_the_session_stops(self):
+        x = core.item_add(self.c, "a", "my own work", actor="aa", mine=True)["id"]
+        core.register(self.c, "mark", human=True)
+        core.stop_agent(self.c, "aa", "end of the day", "mark")
+        core.activity(self.c, "bb")
+        self.assertIsNone(core._item(self.c, x)["reserved_for"])
+        self.assertEqual([i["id"] for i in core.next_item(self.c, actor="bb", limit=5)], [x])
+
+    def test_mine_refusals(self):
+        before = self.c.execute("SELECT COUNT(*) n FROM items").fetchone()["n"]
+        with self.assertRaisesRegex(RiverError, "needs an agent name"):
+            core.item_add(self.c, "a", "t1", mine=True)
+        with self.assertRaisesRegex(RiverError, "a person's item"):
+            core.item_add(self.c, "a", "t2", doer="human", actor="aa", mine=True)
+        with self.assertRaisesRegex(RiverError, "backlog"):
+            core.item_add(self.c, "a", "t3", actor="aa", backlog="later", mine=True)
+        with self.assertRaisesRegex(RiverError, "not registered"):
+            core.item_add(self.c, "a", "t4", actor="nobody", mine=True)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM items").fetchone()["n"], before)
+
+    def test_cli_mine_says_what_to_do(self):
+        from river import cli
+        old_env = os.environ.get("MAXPM_DB")
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(lambda: os.environ.pop("MAXPM_DB") if old_env is None else os.environ.update(MAXPM_DB=old_env))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "aa", "-q", "add", "a", "a note I write now", "--mine"])
+        self.assertIn("reserved for you: no other session takes it", out.getvalue())
+        self.assertIn("reserved for aa", out.getvalue())
+
+
 class Push(Base):
     def setUp(self):
         super().setUp()
