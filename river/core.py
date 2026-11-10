@@ -8543,6 +8543,13 @@ def activity_watch(conn):
     return told
 
 
+def session_owner(conn, sid):
+    """The agent that MaximizePM recorded last for Claude Code session `sid` (it may be gone now), or None."""
+    r = sid and conn.execute("SELECT agent FROM agent_sessions WHERE session_id=? ORDER BY first_seen DESC, rowid DESC "
+                             "LIMIT 1", (sid,)).fetchone()
+    return r["agent"] if r else None
+
+
 def record_claude_session(conn, name, sid):
     """Remember that agent `name` ran a command in Claude Code session `sid` (once per pair)."""
     if not (name and sid) or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? AND session_id=?",

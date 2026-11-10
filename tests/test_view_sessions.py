@@ -1094,6 +1094,56 @@ const post = o => navigator.sendBeacon("/__result", JSON.stringify(o));
 '''
 
 
+class PersonTurns(Base):
+    """#5088, mark 2026-11-10: 'what happened to the user messages in chats? i can't see them currently'. A worker
+    that had unregistered ran 'maxpm --as manager-36ec who' in its own Claude Code session, with no MAXPM_AGENT in
+    that shell: its session became the manager's newest, and the manager's chat showed the worker's transcript,
+    which holds no turn of the person. Now such a command records nothing for the other agent, and the chat shows
+    the person's turn as a bubble that one can read, in light and in dark."""
+
+    def test_the_persons_turn_shows_in_the_chat_after_another_session_ran_as_this_agent(self):
+        import contextlib
+        import io
+        from unittest import mock
+        from river import cli
+        core.register(self.c, "w9")
+        core.record_claude_session(self.c, "w9", SID2)
+        other = self.root / "-proj" / f"{SID2}.jsonl"
+        other.write_text(claude_line("assistant", [{"type": "tool_use", "id": "t9", "name": "Bash",
+                                                    "input": {"command": "ls"}}], "tool_use",
+                                     at="2026-11-08T11:00:00Z"))
+        core.unregister(self.c, "w9")
+        env = {"MAXPM_DB": os.environ["MAXPM_DB"], "CLAUDE_CODE_SESSION_ID": SID2, "MAXPM_AGENT": ""}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.run(["--as", "ag", "who"]), 0)
+        self.assertEqual(sessions.transcript(self.c, "ag", self.root)[1], self.path)  # still ag's own
+        driver = DRIVE_HEAD + r"""
+const look = () => {
+  const b = q("#sessCol .msg-user .bubble"), cs = getComputedStyle(b), r = b.getBoundingClientRect();
+  return { text: b.textContent.trim(), w: r.width, h: r.height, color: cs.color, bg: cs.backgroundColor,
+           page: getComputedStyle(document.body).backgroundColor, right: r.right > q("#sessCol").getBoundingClientRect().left + q("#sessCol").clientWidth / 2 };
+};
+try {
+  await until(() => q("#sessCol .msg-user .bubble") && q("#sessCol").textContent.includes("I read the header first."), "the person's turn in the chat of ag");
+  const light = look();
+  document.documentElement.dataset.theme = "dark";
+  await sleep(50);
+  const dark = look();
+  post({ light, dark, users: document.querySelectorAll("#sessCol .msg-user").length });
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+        got = drive_page(self, driver)
+        self.assertEqual(got["users"], 1)
+        for mode in ("light", "dark"):
+            b = got[mode]
+            self.assertEqual(b["text"], "Fix the header, please", mode)
+            self.assertTrue(b["w"] > 20 and b["h"] > 10, (mode, b))
+            self.assertTrue(b["right"], (mode, "the person's bubble sits on the right"))
+            self.assertNotEqual(b["color"], b["bg"], mode)  # its text can be read on its fill
+            self.assertNotEqual(b["bg"], b["page"], mode)  # the bubble stands out from the page
+
+
 class PanelLists(Base):
     """#4685: the chat stays in sight; Items and Artifacts are lists in the side panel, and an item opens in a tab
     there (from the lists, from a #<id> in the chat), at /sessions/<session>/items/<id>; Edit in the drawer opens

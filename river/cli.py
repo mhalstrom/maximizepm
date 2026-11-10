@@ -1574,9 +1574,20 @@ def _for_other(conn, actor):
     Only the manager may (mark 2026-11-10, #5060: 'the manager should be allowed to run for other agents'); its
     command then records nothing of its session for that agent: no session id, no link, no process (with them,
     every hook of the manager's session counted as the other agent, and tmux_adopt took the manager for a session
-    outside tmux). Another session is refused. A person's terminal (no MAXPM_AGENT) may act as anyone."""
+    outside tmux). Another session is refused. A person's terminal (no MAXPM_AGENT) may act as anyone.
+    With no MAXPM_AGENT, the Claude Code session id names the caller: the agent that MaximizePM recorded last for
+    that session (#5088). A worker that exported MAXPM_AGENT in an earlier shell only, and had unregistered, ran
+    'maxpm --as manager-36ec who' at 09:06:43Z; its session became the manager's newest, and the manager's chat on
+    the Sessions tab showed the worker's transcript, with none of the person's turns. Such a command is refused
+    nothing (a person's own session or a script may act as several agents), but it records nothing for an actor
+    that has a session of its own already."""
     me = (os.environ.get("MAXPM_AGENT") or "").strip()
-    if not (me and actor and actor != me):
+    if not me:
+        owner = core.session_owner(conn, core.claude_session_from_env())
+        return bool(owner and actor and owner != actor
+                    and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone()
+                    and conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? LIMIT 1", (actor,)).fetchone())
+    if not (actor and actor != me):
         return False
     caller = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai'", (me,)).fetchone()
     if not caller or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone():

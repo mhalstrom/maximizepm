@@ -5214,6 +5214,16 @@ class Kill(Base):
         with mock.patch.dict(os.environ, {"MAXPM_AGENT": "w1"}):
             self.assertFalse(cli._for_other(self.c, "w1"))
             self.assertFalse(cli._for_other(self.c, "mark"))
+        # #5088: with no MAXPM_AGENT, a command in the Claude Code session of another agent records nothing for an
+        # actor that has a session of its own (w2 has); one with no session yet takes it; no session id: as before.
+        w1sid, w2sid = "99999999-2222-3333-4444-555555555555", "77777777-2222-3333-4444-555555555555"
+        core.record_claude_session(self.c, "w1", w1sid)
+        core.record_claude_session(self.c, "w2", w2sid)
+        core.register(self.c, "w3")
+        for env_sid, actor, other in ((w1sid, "w2", True), (w1sid, "w1", False), (w1sid, "w3", False),
+                                      ("88888888-2222-3333-4444-555555555555", "w2", False), ("", "w2", False)):
+            with mock.patch.dict(os.environ, {"MAXPM_AGENT": "", "CLAUDE_CODE_SESSION_ID": env_sid}):
+                self.assertEqual(cli._for_other(self.c, actor), other, (env_sid, actor))
 
     def test_refusals_and_a_dead_process_counts_as_gone(self):
         core.set_process(self.c, "ag", self.p.pid, "something else")
