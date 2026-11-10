@@ -18,7 +18,11 @@ every later command. When the briefing asks, record your Claude Code session
 name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents
 prints `This session is <name> [<ref>]`, and names can repeat, so keep the ref), so
 people and agents can message your session directly. After `maxpm done`, run `maxpm --as <your-name> go` again
-at once, in the same turn: do not stop to report between items. When go gives
+at once, in the same turn: do not stop to report between items. By default
+(`auto_continue tree`) go then gives you only the tasks of your own tree: the
+open tasks linked to what you held in this session (what they wait on and
+unblock, what was found during them, the same goal), so your context helps;
+other work goes to a new session. When go gives
 you no item (role IDLE), run `maxpm --as <your-name> wait`. In Claude Code, run
 it as a background command (`run_in_background`) and end your turn: a message
 that a person or a session types to you then reaches you at once, and the
@@ -31,7 +35,7 @@ ended" (do nothing for it), or END: no work came within `wait_max` (45m,
 counted again from a person's last prompt), MaximizePM unregistered you, and
 you stop. After each item, end in `maxpm wait`, never at your prompt. Stop also when you need the user (file a human item first; see
 below); then report everything you finished. A person turns this off with
-`maxpm config set auto_continue off`. MaximizePM never types into your terminal:
+`maxpm config set auto_continue off` (`on`: any ready work after each task). MaximizePM never types into your terminal:
 when you sit idle at your prompt, `maxpm serve` gives new work or an answer for
 you to a fresh session, and ends you after `idle_end` (15m) with nothing in hand.
 

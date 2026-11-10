@@ -242,6 +242,71 @@ class Areas(Base):
         self.assertEqual(p["working_now"], ["ag"])
 
 
+class ContinueTree(Base):
+    """auto_continue tree (#4994, mark: 'auto_continue should be on until its tree is done'): after done, go gives a
+    session only the tasks of its own tree; unrelated work goes to a new session."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "p", path=self.dir.name)
+        for n in ("w1", "w2", "w3"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core.goal_add(self.c, "p", "g", outcome="o", done_when="d", shared=True)
+        self.a = core.item_add(self.c, "p", "A", priority=1, goals=["g"])["id"]
+        self.b = core.item_add(self.c, "p", "B waits on A", priority=2, after=[self.a])["id"]
+        self.e = core.item_add(self.c, "p", "E unrelated and urgent", priority=0)["id"]
+        self.d = core.item_add(self.c, "p", "D of the same goal", priority=3, goals=["g"])["id"]
+
+    def test_the_default_is_tree_and_go_keeps_to_the_tree(self):
+        self.assertEqual(core.setting(self.c, "auto_continue"), "tree")
+        with self.assertRaisesRegex(RiverError, "auto_continue is tree, on, or off"):
+            core.config_set(self.c, "auto_continue", "yes")
+        core.claim(self.c, self.a, "w1")
+        c = core.item_add(self.c, "p", "C found during A", priority=2, found_during=self.a, goals=[])["id"]
+        core.done(self.c, self.a, "did A", "w1")
+        self.assertEqual(core.session_tree(self.c, "w1"), {self.b, c, self.d})
+        got = []
+        for _ in range(3):
+            b = core.go(self.c, self.dir.name, "w1")
+            got.append(b["item"]["id"])
+            self.assertTrue(b["auto_continue"])
+            core.done(self.c, b["item"]["id"], "done", "w1")
+        self.assertEqual(sorted(got), sorted([self.b, c, self.d]))  # never the urgent unrelated E
+        b = core.go(self.c, self.dir.name, "w1")
+        self.assertEqual((b["role"], b.get("tree_done")), ("idle", True))
+        self.assertIn("no task of your tree", b["why"])
+        # wait does not wake it for E, and Dispatch gives E to a fresh waiting session, not to w1.
+        self.assertIsNone(core._work_for(self.c, "w1", ["p"]))
+        core.wait(self.c, self.dir.name, "w1", step="0s", sleep=lambda s: None)
+        self.assertIsNone(core.waiting_agent_for(self.c, "p", self.e))
+        core.wait(self.c, self.dir.name, "w2", step="0s", sleep=lambda s: None)
+        self.assertEqual(core.waiting_agent_for(self.c, "p", self.e), "w2")
+        # A fresh session takes any work: E first.
+        self.assertEqual(core.go(self.c, self.dir.name, "w3")["item"]["id"], self.e)
+
+    def test_its_queue_comes_first_and_on_takes_any_work(self):
+        core.claim(self.c, self.a, "w1")
+        core.done(self.c, self.a, "did A", "w1")
+        x = core.item_add(self.c, "p", "X for w1", priority=4)["id"]
+        core.queue_add(self.c, "w1", x, actor="mark")
+        self.assertEqual(core.go(self.c, self.dir.name, "w1")["item"]["id"], x)  # its own queue, outside the tree
+        core.done(self.c, x, "done", "w1")
+        core.config_set(self.c, "auto_continue", "on", agent="w1")
+        b = core.go(self.c, self.dir.name, "w1")
+        self.assertEqual(b["item"]["id"], self.e)  # on: the most important ready work
+        self.assertEqual(b["continue_mode"], "on")
+
+    def test_a_goal_owners_tree_is_its_goal(self):
+        core.goal_add(self.c, "p", "own", outcome="o", done_when="d")
+        f = core.item_add(self.c, "p", "F of the owned goal", priority=3, goals=["own"])["id"]
+        core.goal_own(self.c, "own", "w1")
+        core.claim(self.c, self.a, "w1")
+        core.done(self.c, self.a, "did A", "w1")
+        self.assertIn(f, core.session_tree(self.c, "w1"))
+        self.assertNotIn(self.e, core.session_tree(self.c, "w1"))
+
+
 class Go(Base):
     def setUp(self):
         super().setUp()
@@ -278,6 +343,7 @@ class Go(Base):
         self.assertIn("Messages for you: inbox: 1 unread", text(b))
 
     def test_the_briefing_has_the_rules_for_a_machine_limit_a_refused_command_and_a_look(self):
+        core.config_set(self.c, "auto_continue", "on")  # it takes unrelated work after done (not tree, #4994)
         # #1599 (research #1597): workers stood at their prompts for a full disk, a refused command, and the
         # word "push"; maxpm wait refuses while an item is held, so the wait for a limit is maxpm inbox --wait.
         import re
@@ -318,6 +384,7 @@ class Go(Base):
                       f"--doer human --found-during {y}", later)
 
     def test_the_project_decides_the_look_at_a_finished_result(self):
+        core.config_set(self.c, "auto_continue", "on")  # it takes unrelated work after done (not tree, #4994)
         # #1668: one rule for all projects (push first, #1599) became a setting of each project.
         import re
         from river import cli
@@ -2107,6 +2174,7 @@ class KeepRelease(Base):
             core.keep(self.c, self.p, "ag")  # bo holds the prerequisite now
 
     def test_wait_on_a_person_ends_after_human_wait_max(self):
+        core.config_set(self.c, "auto_continue", "on")  # it takes unrelated work after done (not tree, #4994)
         core.register(self.c, "mark", human=True)
         other = self.add("a", "other work")
         h = core.item_add(self.c, "a", "decide", doer="human", actor="ag", blocks=self.p, mode="keep")
@@ -2510,6 +2578,7 @@ class Deployer(Base):
         self.assertEqual((again["role"], again.get("resumed")), ("deployer", True))
 
     def test_role_deployer_takes_a_free_target(self):
+        core.config_set(self.c, "auto_continue", "on")  # it takes unrelated work after done (not tree, #4994)
         b = core.go(self.c, self.dir.name, "ops", role="deployer")
         self.assertEqual((b["role"], b["item"]["id"]), ("deployer", self.deploy))
         self.assertEqual(core.target_show(self.c, "web")["owner"], "ops")

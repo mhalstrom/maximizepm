@@ -1851,7 +1851,8 @@ def _hint(a, res, actor):
     if c in ("go", "plan"):
         return None
     if actor and c == "done":
-        return f"next: maxpm --as {actor} go   (now: keep going while go gives you items, unless auto_continue is off)"
+        return (f"next: maxpm --as {actor} go   (now: keep going while go gives you items, unless auto_continue is off; "
+                f"with tree, go gives only the tasks of your own tree)")
     if actor and (c == "release" or c == "review"):
         return f"next: maxpm --as {actor} go"
     if actor and c == "goal" and a.gcmd == "done":
@@ -3311,7 +3312,11 @@ def render_go(b):
                 f"Then continue:  {r} go" + ("   at once, in the same turn: do not stop to report between items."
                                              if b.get("auto_continue") else ""),
             ]
-        if b.get("auto_continue"):
+        if b.get("continue_mode") == "tree":
+            out.append("Keep taking items until go gives you none or you need the user. go gives you only the tasks of "
+                       "your tree (linked to what you did in this session, or of your goal); when none is ready it says "
+                       "IDLE: then wait as it says, and other work goes to a new session.")
+        elif b.get("auto_continue"):
             out.append("Keep taking items until go gives you none or you need the user; then report what you finished.")
     elif b["role"] == "owner":
         if b.get("goal_action") == "judge":

@@ -105,7 +105,11 @@ DEFAULT_SETTINGS = {
     "ntfy_topic": "",
     "ntfy_token": "",
     "timezone": "",
-    "auto_continue": "on",
+    # After maxpm done, a session runs maxpm go again at once (#4994). tree (the default): go gives it the next ready
+    # task of its own tree (the open tasks linked to what it held in this session: waits-on and blocks links,
+    # found-during, the same goal), and none else; when the tree has none it waits, and other work goes to a new
+    # session. on: any ready work. off: it stops and reports after each task. Its own queue comes first in each.
+    "auto_continue": "tree",
     # The look of a person at a finished result (a page, a text, a design), for each project (#1668).
     # push_first: the worker pushes, closes the item, and adds a person's item for the look. ask_first: the worker
     # commits, asks in the queue (maxpm ask), and waits for the yes before the push. Under both, public text, a
@@ -1382,8 +1386,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("setup_done is on or off")
     elif key == "launch_in" and value not in ("auto", *LAUNCH_INS):
         raise RiverError("launch_in is auto, tab, window, or tmux")
-    elif key == "auto_continue" and value not in ("on", "off"):
-        raise RiverError("auto_continue is on or off")
+    elif key == "auto_continue" and value not in ("tree", "on", "off"):
+        raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
     elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "relay_keep_awake", "web_terminal",
@@ -5400,6 +5404,54 @@ def _prereq_closure(ann, root):
     return seen
 
 
+def session_tree(conn, actor, ann=None):
+    """The tree of a session (auto_continue tree, #4994): the open tasks linked to what it held since it registered,
+    over waits-on and blocks links and found-during links in both directions, and the tasks of the goals of those
+    tasks and of the goal it owns. None when the session held no task yet: it may take any work."""
+    if not actor:
+        return None
+    start = conn.execute("SELECT MAX(id) FROM events WHERE item_id IS NULL AND actor=? AND change LIKE 'registered as%'",
+                         (actor,)).fetchone()[0] or 0
+    held = {r["item_id"] for r in conn.execute(
+        "SELECT DISTINCT item_id FROM events WHERE actor=? AND id>? AND item_id IS NOT NULL AND change LIKE 'claimed%'",
+        (actor, start))}
+    held |= {r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held')",
+                                           (actor,))}
+    if not held:
+        return None
+    ann = ann if ann is not None else annotate(conn)
+    found = {}
+    for r in conn.execute("SELECT id, found_during FROM items WHERE found_during IS NOT NULL"):
+        found.setdefault(r["found_during"], set()).add(r["id"])
+        found.setdefault(r["id"], set()).add(r["found_during"])
+    goals = {g for i in held if i in ann for g in ann[i]["goals"]}
+    goals |= {r["name"] for r in conn.execute("SELECT name FROM goals WHERE owner=? AND status='open'", (actor,))}
+    tree, frontier = set(held), list(held)
+    while frontier:
+        nxt = []
+        for x in frontier:
+            near = (ann[x]["waits_on"] + ann[x]["unblocks"] if x in ann else []) + list(found.get(x, ()))
+            for y in near:
+                if y not in tree:
+                    tree.add(y)
+                    nxt.append(y)
+        frontier = nxt
+    tree |= {a["id"] for a in ann.values() if goals & set(a["goals"])}
+    return {i for i in tree if i in ann and ann[i]["status"] in OPEN_STATES}
+
+
+def _in_tree(item_id, tree):
+    """Whether a session may get this item: it has no tree (None: any work), or the item is in it."""
+    return tree is None or item_id in tree
+
+
+def tree_mode(conn, actor):
+    """The tree of this session when auto_continue is tree and it held a task already; else None (any work)."""
+    if not actor or setting(conn, "auto_continue", agent=actor) != "tree" or not _is_ai(conn, actor):
+        return None
+    return session_tree(conn, actor)
+
+
 def _graph_distances(ann, starts):
     """Distance from the start items over dependency links in both directions."""
     dist = {s: 0 for s in starts}
@@ -6936,7 +6988,7 @@ def _refuse_model_to(conn, it, to, verb):
 
 
 def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=1, near=None, mine=False,
-              model=None, skipped=None, folderless=False):
+              model=None, skipped=None, folderless=False, only=None):
     """Show, or claim, the first ready item from the area the agent chose.
 
     model: the session's model (default: the one the agent recorded). Items whose min/max limits exclude it
@@ -6969,6 +7021,8 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
         return out
 
     def takeable(pool):
+        if only is not None:  # auto_continue tree: the session's own tree (session_tree, #4994)
+            pool = [a for a in pool if a["id"] in only]
         if not actor:
             return fits(pool)
         owned = {r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=?", (actor,))}
@@ -10590,7 +10644,8 @@ def launch_migration_note(conn):
 def waiting_agent_for(conn, project, item_id=None):
     """An active session that waits for work in this project (maxpm wait), longest waiting first; with
     item_id, only one whose model the item's limits allow, and for a release review, none that worked on
-    the release (release_authors) or held a task before (used_session, #4968)."""
+    the release (release_authors) or held a task before (used_session, #4968); with auto_continue tree, only a
+    session whose tree holds the item, or one that held no task (#4994)."""
     it = _item(conn, item_id) if item_id is not None else None
     if it is not None and it["tier"] == "expert":
         return None  # a new session starts for an expert-tier task; a waiting worker does not get it (#4959)
@@ -10600,7 +10655,8 @@ def waiting_agent_for(conn, project, item_id=None):
         a = agent_status(conn, r["name"])
         if a["state"] == "active" and not a["holds"] and project in (r["waiting_in"] or "").split(","):
             if (r["name"] not in authors and (it is None or not _model_refusal(conn, it, r["name"]))
-                    and (it is None or it["kind"] not in FRESH_KINDS or used_session(conn, r["name"], it["id"]) is None)):
+                    and (it is None or it["kind"] not in FRESH_KINDS or used_session(conn, r["name"], it["id"]) is None)
+                    and (it is None or _in_tree(it["id"], tree_mode(conn, r["name"])))):
                 return r["name"]
     return None
 
@@ -11356,7 +11412,8 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                                            for d in a["unblocks"] if ann[d]["status"] in OPEN_STATES]}
                                for a in human_ready],
              "has_history": bool(history(conn, actor, limit=1)),
-             "auto_continue": setting(conn, "auto_continue", agent=actor) == "on",
+             "auto_continue": setting(conn, "auto_continue", agent=actor) in ("on", "tree"),
+             "continue_mode": setting(conn, "auto_continue", agent=actor),
              "session": _agent(conn, actor)["session"],
              "human_wait_max": setting(conn, "human_wait_max", agent=actor),
              "fresh_sessions": setting(conn, "fresh_sessions", agent=actor) == "on",
@@ -11438,9 +11495,11 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             return brief
         brief["queue_waiting"] = [e for e in queue_list(conn, actor)["entries"] if e.get("item")]
 
+    tree = None if focus else tree_mode(conn, actor)  # auto_continue tree: only the session's own tree (#4994)
+
     def try_claim(**kw):
         try:
-            got = next_item(conn, claim=True, actor=actor, skipped=skipped, folderless=chat, **kw)
+            got = next_item(conn, claim=True, actor=actor, skipped=skipped, folderless=chat, only=tree, **kw)
         except RiverError as e:
             brief["claim_refused"] = str(e)
             return None
@@ -11633,6 +11692,13 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                      why=f"the open items of your goal {brief['goal']['name']} wait on other sessions or people")
         _set_role_note(conn, actor, "owner", None)
         return brief
+    if tree is not None and role in (None, "worker", "unblocker"):
+        brief["tree_done"] = True
+        brief.update(role="idle", item=None, held_by_others=[],
+                     why="no task of your tree (what you worked on in this session) is ready; other work goes to a new "
+                         "session with a clean context (auto_continue tree)")
+        _set_role_note(conn, actor, "idle", None)
+        return brief
     outside = [a for a in open_in_area if a["status"] == "open" and a["blocked_reason"]]
     held_by_others = [a for a in open_in_area if a["status"] in ("in_progress", "held")]
     brief["backlog"] = sum(1 for a in in_area if a["backlog"])
@@ -11771,7 +11837,7 @@ def _work_for(conn, actor, names, role=None):
     if q:
         return f"#{q[0]['id']} in your queue is ready: {q[0]['title']}"
     try:
-        nxt = next_item(conn, ",".join(names) if names else None, None, False, actor, 1)
+        nxt = next_item(conn, ",".join(names) if names else None, None, False, actor, 1, only=tree_mode(conn, actor))
     except RiverError:
         nxt = []
     if nxt:
