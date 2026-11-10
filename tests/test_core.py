@@ -5181,7 +5181,8 @@ class Kill(Base):
 
         def run(me, *args):
             env = {"MAXPM_DB": self.path, "CLAUDE_CODE_SESSION_ID": sid, "MAXPM_AGENT": me}
-            with mock.patch.dict(os.environ, env), mock.patch.object(core, "agent_process", lambda: (500, "claude")), \
+            # A live pid (this test's own): with a dead one, mgr counts as gone and is no active manager (CI).
+            with mock.patch.dict(os.environ, env), mock.patch.object(core, "agent_process", lambda: (os.getpid(), "claude")), \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
                 try:
                     return cli.run(["--as", args[0], *args[1:]])
