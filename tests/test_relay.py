@@ -785,6 +785,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@unittest.skipIf(os.name == "nt", "launchd is macOS only, and Windows has no os.getuid for its gui/<uid> domain")
 class LoginAgent(Base):
     """#4754: maxpm serve --install-login and --remove-login (a launchd agent)."""
 

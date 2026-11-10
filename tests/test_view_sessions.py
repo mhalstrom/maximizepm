@@ -1593,18 +1593,24 @@ class SideFiles(Base):
         self.write(json.dumps({"type": "user", "cwd": str(self.proj / "site"), "timestamp": "2026-11-09T01:00:00Z",
                                "message": {"role": "user", "content": "go"}}) + "\n"
                    + claude_line("assistant", [{"type": "text", "text": f"Saved {board}"}], "end_turn"))
+        # The file URLs of this system: file:///tmp/x.png, or file:///C:/Users/x.png on Windows.
+        url = Path(shot).as_uri()
+        local = "file://localhost" + url[len("file://"):]
         with mock.patch.object(core, "transcripts_root", lambda: self.root):
-            got = server.file_check(self.c, [shot, "file://" + shot, "file://localhost" + shot, "img/board.png",
+            got = server.file_check(self.c, [shot, url, local, "img/board.png",
                                              "board.png", "./img/board.png", "nothing.png",
                                              str(Path(self.dir.name) / "t.db"), "file://other/x.png", "notes.py"], agent="ag")
         ok = {p: g["target"] for p, g in got.items() if g["ok"]}
-        self.assertEqual(ok, {shot: shot, "file://" + shot: shot, "file://localhost" + shot: shot,
+        self.assertEqual(ok, {shot: shot, url: shot, local: shot,
                               "img/board.png": str(self.proj / "site" / "img/board.png"), "board.png": board,
                               "./img/board.png": str(self.proj / "site" / "./img/board.png")})
         self.assertIn("no file of this session", got["nothing.png"]["why"])
         self.assertIn("only from the project folders", got[str(Path(self.dir.name) / "t.db")]["why"])
         self.assertIn("another computer", got["file://other/x.png"]["why"])
         self.assertIn("no file of this session", got["notes.py"]["why"])  # not in its folder, never named
+        with mock.patch.object(core, "PLATFORM", "win32"):  # the drive of a Windows file URL (#5073)
+            self.assertEqual(server._check_path(self.c, "file:///C:/Users/a%20b/x.png", None, [])["target"],
+                             str(Path("C:/Users/a b/x.png")))
         self.assertEqual(self.get("/api/file-check?path=a.png")["code"], 403)  # the page's token
         out = self.get(f"/api/file-check?path={shot}&token={server.PAGE_TOKEN}")
         self.assertEqual(out["body"]["paths"][shot]["ok"], True)

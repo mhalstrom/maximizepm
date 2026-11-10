@@ -3715,11 +3715,11 @@ class StaticFiles(unittest.TestCase):
         files = [p for p in server.STATIC.rglob("*.js") if "vendor" not in p.parts]
         exports = {}
         for p in files:
-            for n in re.findall(r"^export (?:async )?function (\w+)", p.read_text(), re.M):
+            for n in re.findall(r"^export (?:async )?function (\w+)", p.read_text(encoding="utf-8"), re.M):
                 exports.setdefault(n, set()).add(p)
         missing = []
         for p in files:
-            s = p.read_text()
+            s = p.read_text(encoding="utf-8")
             code = re.sub(r"//[^\n]*", "", s)
             imported = set()
             for m in re.finditer(r"import\s*\{([^}]*)\}\s*from", s):

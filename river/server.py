@@ -2433,6 +2433,9 @@ def _check_path(conn, p, cwd, named):
         if u.netloc not in ("", "localhost"):
             return {"target": None, "ok": False, "why": "the link names a file on another computer"}
         t = urllib.parse.unquote(u.path)
+        # A Windows file URL (file:///C:/Users/...) has its drive after the first "/": the path is C:\Users\...
+        if core.PLATFORM == "win32" and re.match(r"^/[a-zA-Z]:[/\\]", t):
+            t = str(Path(t[1:]))
     if not (t.startswith(("/", "~", "\\\\")) or re.match(r"^[a-zA-Z]:[/\\]", t)):
         found = None
         if cwd and Path(cwd, t).is_file():

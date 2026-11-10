@@ -2501,7 +2501,7 @@ class Mac(Base):
         cmd = self.run_mac("/opt/homebrew/bin/terminal-notifier")
         self.assertEqual(cmd[0], "/opt/homebrew/bin/terminal-notifier")
         self.assertEqual(cmd[cmd.index("-open") + 1], "http://127.0.0.1:8765/#item-3")
-        self.assertTrue(cmd[cmd.index("-contentImage") + 1].endswith("brand/apple-touch-icon.png"))  # #4705
+        self.assertTrue(cmd[cmd.index("-contentImage") + 1].replace(os.sep, "/").endswith("brand/apple-touch-icon.png"))  # #4705
 
     def test_terminal_notifier_escapes_a_leading_bracket(self):
         from river import notify
@@ -4603,9 +4603,12 @@ class Models(Base):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             cli.run(["--as", "s3", "go", "--project", "a"])
         self.assertEqual(core._item(self.c, fable)["assignee"], "s3")
-        # The launch command quotes a full id: [1m] is a glob in zsh.
-        self.assertIn("--model 'claude-opus-5-5[1m]' ", core.build_command("claude-code", {"prompt": "go"},
-                                                                          model="claude-opus-5-5[1m]"))
+        # The launch command quotes a full id: [1m] is a glob in zsh. A POSIX shell, on every system the tests
+        # run (cmd on Windows has no glob, so _shell_quote leaves the id bare there).
+        from unittest import mock
+        with mock.patch.object(core, "PLATFORM", "darwin"):
+            self.assertIn("--model 'claude-opus-5-5[1m]' ", core.build_command("claude-code", {"prompt": "go"},
+                                                                              model="claude-opus-5-5[1m]"))
         self.assertIn("--model opus ", core.build_command("claude-code", {"prompt": "go"}, model="opus"))
 
 
