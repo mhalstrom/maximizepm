@@ -27,6 +27,6 @@ export function hooksHtml(t, events) {
   const free = Object.keys(events || {}).filter(e => !hooks.some(h => h.event === e));
   const bad = hooks.filter((h, i) => runs[i].bad).map(h => esc(h.event));
   const head = hooks.length ? `Hooks: ${hooks.map(h => esc(h.event)).join(", ")}` : "Hooks: none";
-  return `<details data-fold="hooks-${name}" title="Commands that MaximizePM runs when a release event occurs; a hook that fails does not undo the event"><summary>${head}${bad.length ? ` · <span style="color:var(--warn)">${bad.join(", ")} failed</span>` : ""}</summary>
+  return `<details data-keep="hooks-${name}" title="Commands that MaximizePM runs when a release event occurs; a hook that fails does not undo the event"><summary>${head}${bad.length ? ` · <span style="color:var(--warn)">${bad.join(", ")} failed</span>` : ""}</summary>
       ${lines}${free.length ? `<div class="muted t-s hook-add">add: ${free.map(e => link(e, e)).join(" · ")}</div>` : ""}</details>`;
 }

@@ -10,7 +10,7 @@ export function nyCard(head, body, cls = "") {
       ${body}</div>`;
 }
 
-// A goal: owner, progress bar, counts, and its actions. selected: the goal filter picks it; me: who acts.
+// A goal: owner, progress bar, counts, and its actions; the outcome and the result are its hover (#5082). selected: the goal filter picks it; me: who acts.
 export function goalCard(g, { selected, me }) {
   const total = g.items_open.length + g.items_done.length, done = pct(g.items_done.length, total);
   const open = g.status === "open";
@@ -28,7 +28,7 @@ export function goalCard(g, { selected, me }) {
   return `<div class="goal${selected ? " on" : ""}${open ? "" : " complete"}" data-goal="${esc(g.name)}" title="${esc(tip)}">
     <div class="gh"><b>${esc(g.name)}</b>${open ? ownerChip(g.owner, g.shared) : chip("c-done", "complete", null, ' style="text-decoration:none"')}${open && g.owner && g.owner_expires_at ? `<span class="muted" style="font-size:12px" title="Its agent items are reserved for the owner until then; each maxpm command of the owner renews it">${left(g.owner_expires_at)} left</span>` : ""}</div>
     ${bar(done)}
-    <div class="go">${g.items_done.length}/${total} done${g.items_open.length ? " · " + g.items_open.length + " open" : ""} · ${esc(open ? (g.outcome || "no outcome") : (g.result || g.outcome))}</div>
+    <div class="go">${g.items_done.length}/${total} done${g.items_open.length ? " · " + g.items_open.length + " open" : ""}</div>
     <div class="ga">${acts}</div></div>`;
 }
 

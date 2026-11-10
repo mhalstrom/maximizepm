@@ -3,13 +3,13 @@
   <div class="grid">
     <div>
       <div class="panel">
-        <h2>Projects <span class="spacer"></span><select id="goalFilter" title="Show only the items of one goal"><option value="">All goals</option><option value="__none">No goal</option></select><label class="sub"><input type="checkbox" id="showDone"> show done</label><label class="sub" title="Items that nobody plans to take now: kept, but never offered"><input type="checkbox" id="showBacklog"> show backlog</label></h2>
+        <h2><span class="spacer"></span><select id="goalFilter" title="Show only the items of one goal"><option value="">All goals</option><option value="__none">No goal</option></select><label class="sub"><input type="checkbox" id="showDone"> done</label><label class="sub" title="Items that nobody plans to take now: kept, but never offered"><input type="checkbox" id="showBacklog"> backlog</label></h2>
         <div id="projects"></div>
       </div>
     </div>
     <div>
   <div class="panel hidden" id="blockedPanel">
-    <h2>Blocked outside the queue</h2>
+    <h2 title="Items that wait on something outside the queue (maxpm blocked)">Blocked</h2>
     <div id="blockedList"></div>
   </div>
       <div class="panel"><h2>Add item</h2>
@@ -20,28 +20,26 @@
             <label>Priority<select id="addPrio"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
           </div>
           <div class="two">
-            <label>Who can do it<select id="addDoer"><option value="any">anyone</option><option value="ai">agent</option><option value="human">human</option></select></label>
+            <label>Doer<select id="addDoer"><option value="any">anyone</option><option value="ai">agent</option><option value="human">human</option></select></label>
             <label title="Expert: a session started for it takes it, and you talk it through with that session for as long as you need; a worker never takes it">Tier<select id="addTier"><option value="">normal</option><option value="expert">expert</option></select></label>
           </div>
-          <label>Waits on (ids)<input id="addAfter" placeholder="e.g. 3, 7"></label>
-          <label>Reads the output of (ids; it also waits on them)<input id="addFeeds" placeholder="e.g. 4"></label>
-          <label>Goal (optional)<select id="addGoal"><option value="">no goal</option></select></label>
+          <label title="Ids of the items it waits on">Waits on<input id="addAfter" placeholder="3, 7"></label>
+          <label title="Ids of the items whose output it reads; it also waits on them">Reads<input id="addFeeds" placeholder="4"></label>
+          <label>Goal<select id="addGoal"><option value="">no goal</option></select></label>
           <textarea id="addNotes" rows="2" placeholder="Notes"></textarea>
           <button class="btn primary" id="addGo">Add</button>
         </div>
         <details style="margin-top:var(--sp-3)"><summary>Add a goal</summary>
           <div class="form" style="margin-top:var(--sp-3)">
-            <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="lower-case, e.g. launch-legal"></label></div>
+            <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="launch-legal"></label></div>
             <label>Outcome<textarea id="goalOutcome" rows="2" placeholder="What is true when this goal is reached"></textarea></label>
             <label>Done when<input id="goalDoneWhen" placeholder="The test the owner checks before declaring it done"></label>
             <button class="btn" id="goalGo">Add goal</button>
           </div>
         </details>
         <details style="margin-top:var(--sp-3)"><summary>Add a project</summary>
-          <div class="sub" style="margin-top:var(--sp-3)">A project is usually a folder you work in: MaximizePM links it, and agents started there use the queue.</div>
-          <div id="projFolderForm"></div>
-          <div class="sub" style="margin-top:var(--sp-3)">A project without a folder (for example tasks for people):</div>
-          <div class="form" style="margin-top:var(--sp-1)"><input id="projName" placeholder="name (lower-case)"><button class="btn" id="projGo">Add project</button></div>
+          <div id="projFolderForm" title="A project is usually a folder you work in: MaximizePM links it, and agents started there use the queue"></div>
+          <div class="form" style="margin-top:var(--sp-3)" title="A project without a folder, for example tasks for people"><input id="projName" placeholder="name, no folder"><button class="btn" id="projGo">Add project</button></div>
         </details>
       </div>
     </div>

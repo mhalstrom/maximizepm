@@ -38,7 +38,7 @@ function historyHtml(t) {
   const H = t.history || [];
   if (!H.length) return "";
   const rows = H.map(h => `<div class="st t-s"${h.output ? ` title="${esc(h.output)}"` : ""}><span class="link" data-open="${h.id}">#${h.id}</span> ${ago(h.closed_at)}${h.done_by ? " · " + esc(h.done_by) : ""}${h.ships.length ? ": " + h.ships.map(x => `<span class="link" data-open="${x.id}" title="${esc(x.title)}">#${x.id}</span>`).join(" ") : ""}</div>`).join("");
-  return `<details data-fold="deploys-${esc(t.name)}"><summary>Deploys · last ${ago(H[0].closed_at)}</summary>${rows}</details>`;
+  return `<details data-keep="deploys-${esc(t.name)}"><summary>Deploys · last ${ago(H[0].closed_at)}</summary>${rows}</details>`;
 }
 
 function actionsHtml(t) {
@@ -56,7 +56,7 @@ export function renderTargets() {
   const T = S.targets || [];
   const box = $("#targets");
   if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // do not wipe a reason they type
-  const open = new Set([...box.querySelectorAll("details[open]")].map(d => d.dataset.fold));  // a fold stays open over a refresh
+  const open = new Set([...box.querySelectorAll("details[open]")].map(d => d.dataset.keep));  // a fold stays open over a refresh
   box.innerHTML = T.map(t => nyCard(`<b${t.description ? ` title="${esc(t.description)}"` : ""}>${esc(t.name)}</b>
         ${ownerChip(t.owner)}${t.owner && t.owner_expires_at ? `<span class="muted t-s">${left(t.owner_expires_at)}</span>` : ""}
         ${projectsHtml(t.project_names)}`, `${releaseLine(t)}
@@ -64,7 +64,7 @@ export function renderTargets() {
       ${actionsHtml(t)}
       ${hooksHtml(t, S.hook_events)}
       ${historyHtml(t)}`)).join("") || `<div class="muted" title='maxpm target add &lt;name&gt; --description "how it deploys"'>No deploy targets.</div>`;
-  box.querySelectorAll("details[data-fold]").forEach(d => { if (open.has(d.dataset.fold)) d.open = true; });
+  box.querySelectorAll("details[data-keep]").forEach(d => { if (open.has(d.dataset.keep)) d.open = true; });
 }
 
 // A click on this view's controls; true when it was one (the frame then stops).

@@ -1,11 +1,11 @@
 // The Projects tab (#4656): a card for each project with its goals and items, blocked items, and the forms
 // that add an item, a goal or a project.
-import { $, esc, store, actor, toast, act, ago, left } from "../lib.js";
+import { $, esc, store, actor, toast, act, ago, left, clip } from "../lib.js";
 import { doerChip, projectChip, countChip } from "../components/chip.js";
 import { nyCard, goalCard, projCard } from "../components/card.js";
 import { itemTableRows, itemTableColumns } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
-import { clampHtml, fitClamps } from "../components/clamp.js";
+import { fitClamps } from "../components/clamp.js";
 import { S, tab, goalSel, inGoal, nav } from "../page.js";
 
 // Projects folded closed on the Projects tab, remembered in this browser.
@@ -26,17 +26,14 @@ export function renderProjects() {
     const closedSet = projClosed(), isClosed = closedSet.includes(p.name);
     const who = [...new Set(open.filter(i => i.assignee && ["in_progress", "held"].includes(i.status)).map(i => i.assignee))];
     const home = p.path ? p.path.replace(/^\/(Users|home)\/[^/]+/, "~") : "";
-    const meta = [home ? `folder <code>${esc(home)}</code>` : "no folder",
-      p.target ? `deploys to <b>${esc(p.target)}</b>` : "", p.tracker ? `tracker ${esc(p.tracker)}` : ""].filter(Boolean);
+    // The folder, the target and the tracker are a hover on the counts (#5082): nobody acts on them here.
+    const meta = [home ? "folder " + home : "no folder", p.target ? "deploys to " + p.target : "", p.tracker ? "tracker " + p.tracker : ""].filter(Boolean);
     const me = actor();
-    return projCard(p, isClosed, `<div class="pmeta">${meta.map(m => `<span>${m}</span>`).join("")}</div>
-      <div class="pcounts">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${countChip(open.length, "open", "c-p")}${closedN == null ? "" : countChip(closedN, "done", "c-p")}${backlog.length ? countChip(backlog.length, "in backlog", "c-p") : ""}${pg.length ? countChip(pg.length, pg.length === 1 ? "goal" : "goals", "c-p") : ""}</div>
+    return projCard(p, isClosed, `<div class="pcounts" title="${esc(meta.join(" · ") + (closedN ? ` · ${closedN} done` : "") + (backlog.length ? ` · ${backlog.length} in backlog` : ""))}">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${who.length ? `<span class="muted t-s">${who.map(esc).join(", ")}</span>` : ""}</div>
       <div class="pbody">
-        <div class="pdesc">${clampHtml("proj:" + p.name, p.notes ? esc(p.notes) : '<span class="muted">No description.</span>', ` <span class="link" data-describe="${esc(p.name)}">edit</span>`)}</div>
-        <div class="pwho">${who.length ? "Working here now: " + who.map(n => `<b>${esc(n)}</b>`).join(", ") : "Nobody works here now."}</div>
-        <div class="psec">Goals</div>
-        <div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<span class="link t-s" style="align-self:center" data-addgoal="${esc(p.name)}">${pg.length ? "+ goal" : "No goals yet. + Add a goal"}</span></div>
-        <div class="psec">Open items (${open.length})${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}</div>
+        <div class="pdesc t-s">${p.notes ? `<span class="muted" title="${esc(p.notes)}">${esc(clip(p.notes.split(/(?<=\.)\s|\n/)[0], 90))}</span> <span class="link" data-describe="${esc(p.name)}">edit</span>` : `<span class="link" data-describe="${esc(p.name)}">+ description</span>`}</div>
+        ${pg.length ? `<div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<span class="link t-s" style="align-self:center" data-addgoal="${esc(p.name)}">+ goal</span></div>` : ""}
+        <div class="psec">${open.length} open${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}${pg.length ? "" : ` <span class="link t-s" data-addgoal="${esc(p.name)}">+ goal</span>`}</div>
         <div class="ptable" data-ptable="${esc(p.name)}"></div>
       </div>`);
   }).join("");
@@ -64,8 +61,8 @@ const projTables = new Map();
 export function renderBlocked() {
   const B = S.items.filter(i => i.blocked_reason && !["done", "dropped"].includes(i.status));
   $("#blockedPanel").classList.toggle("hidden", !B.length);
-  $("#blockedList").innerHTML = B.map(i => nyCard(`<b class="link" data-open="${i.id}">#${i.id} ${esc(i.title)}</b> ${projectChip(i.project)}${doerChip(i)}`, `<div class="ny-c">${esc(i.blocked_reason)}</div>
-      <div class="muted t-s">${i.blocked_at ? "since " + ago(i.blocked_at) : "since: not recorded"} · ${i.blocked_until ? `until ${esc(i.blocked_until_text)} (${left(i.blocked_until)} left), then ready by itself` : "until someone clears it"}${i.blocked_set_by ? " · set by " + esc(i.blocked_set_by) : ""}</div>`)).join("");
+  $("#blockedList").innerHTML = B.map(i => nyCard(`<b class="link" data-open="${i.id}" title="${esc(i.title)}">#${i.id} ${esc(clip(i.title, 70))}</b> ${projectChip(i.project)}${i.doer === "human" ? doerChip(i) : ""}`, `<div class="ny-c t-s" title="${esc(i.blocked_reason)}">${esc(clip(i.blocked_reason, 90))}</div>
+      <div class="muted t-s"${i.blocked_set_by ? ` title="set by ${esc(i.blocked_set_by)}"` : ""}>${i.blocked_at ? ago(i.blocked_at) : ""}${i.blocked_until ? `${i.blocked_at ? " · " : ""}<span title="${esc(i.blocked_until_text)}; then ready by itself">${left(i.blocked_until)} left</span>` : ""}</div>`)).join("");
 }
 
 async function goalAction(what, name) {
