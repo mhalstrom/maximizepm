@@ -665,6 +665,32 @@ try {
         got = self.drive(driver, "/sessions/ag")
         self.assertEqual(got, {"badge": "! 2", "you": True, "chat": True, "arts": True})
 
+    def test_the_you_row_counts_all_that_needs_you_and_not_what_was_taken_off(self):
+        """#5114, mark 2026-11-10: the You row said '! 900' and '100 need you · 800 taken off your list'. 100 was the
+        cap of the Needs you list, not a count, and the badge added the items an agent took off the list, which need
+        nothing. Now the line has the true counts, the badge counts only what needs the person now, and the list says
+        that it shows the most important 100."""
+        core.config_set(self.c, "setup_done", "on")
+        ids = [core.item_add(self.c, "site", f"Sign form {i}", doer="human")["id"] for i in range(106)]  # 1 message: the takeover note
+        core.register(self.c, "helper")
+        core.takeover(self.c, ids[0], "I fill it in myself", actor="helper")
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessYouRow .wbadge"), "the You row with its badge");
+  const out = { badge: q("#sessYouRow .wbadge").textContent.trim(), line: q("#sessYouRow .sub").textContent.trim(),
+                // One line under the You row: its own, not also its group's (#5114: two lines with nothing between).
+                lines: [q("#sessYouRow").closest(".slist-mgr"), q("#sessYouRow .srow")].map(e => getComputedStyle(e).borderBottomWidth).join(" ") };
+  q("#sessYouRow .srow-main").click();
+  await until(() => q("#needsYou .ny-more"), "the note under the list");
+  out.list = document.querySelectorAll("#needsYou .nyl").length;
+  out.more = q("#needsYou .ny-more").textContent.replace(/\s+/g, " ").trim();
+  out.title = document.title;
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag")
+        self.assertTrue(got.pop("more").startswith("The 100 most important of 105."))
+        self.assertEqual(got, {"badge": "! 105", "line": "105 need you · 1 taken off your list · 1 message", "lines": "0px 1px",
+                               "list": 100, "title": "(105) MaximizePM"})
+
     def test_the_first_page_is_sessions_with_you_when_something_waits(self):
         """#5102 step 5 (design #4657, mark's answer 2A): / is Sessions; it shows the You view when something waits on
         the person, else the session chosen last. The Board and Capacity tabs are gone."""

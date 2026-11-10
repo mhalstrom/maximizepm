@@ -188,7 +188,12 @@ button.srow-it { cursor: pointer; }
 .msg-imgs { display: flex; gap: var(--sp-2); flex-wrap: wrap; justify-content: flex-end; margin-bottom: var(--sp-1); max-width: 80%; }
 .msg-imgs img { max-width: var(--w-l); max-height: var(--w-m); border-radius: var(--r-l); border: var(--hair) solid var(--line); object-fit: cover; }
 /* The manager's rows, first and apart (#4616). */
-.slist-mgr { display: flex; flex-direction: column; gap: var(--sp-2); padding-bottom: var(--sp-4); margin-bottom: var(--sp-4); border-bottom: var(--hair) solid var(--line); flex: none; }
+/* A group (You, the manager, the experts): each row has its own line under it; the group draws one only when it has no
+   row ('No manager running'). A line of the group under a row's line made two lines with nothing between (#5114). */
+.slist-mgr { display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-4); flex: none; }
+.slist-mgr:not(:has(.srow)) { padding-bottom: var(--sp-4); border-bottom: var(--hair) solid var(--line); }
+/* The manager's and an expert's title is a long sentence ('Manages the queue and ...'): two lines, then … (#5114). */
+.slist-mgr .srow-h b.srow-t { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .mgr-tag { flex: none; font-size: calc(var(--fs-xs) - var(--hair) / 2); font-weight: 700; text-transform: uppercase; letter-spacing: calc(var(--hair) / 2); color: var(--human); background: var(--human-bg); border-radius: var(--r-xs); padding: var(--hair) var(--sp-2); }
 .mgr-none .srow-main { cursor: default; }
 .slist-experts .slist-h { font-size: var(--fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: calc(var(--hair) / 2); color: var(--muted); }

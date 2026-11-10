@@ -1,6 +1,6 @@
 // The You view of the Sessions tab (#5102 step 1, design #4657): what waits on the person in "You are". The You row
-// at the top of the session list shows a ! badge with the count of what waits (Needs you and the items an agent took
-// off the list) and opens this view: the items an agent took over (Open, Undo, OK), Needs you (you-needs.js) and the
+// at the top of the session list shows a ! badge with the count of what needs the person now (Needs you and the
+// questions that wait on an answer, #5114) and opens this view: the items an agent took over (Open, Undo, OK), Needs you (you-needs.js) and the
 // inbox (you-inbox.js). These were the parts of the Board about the person; the plan's parts go to Plan.
 import { $, esc, act, toast, ago, shortTitle } from "../lib.js";
 import { projectChip } from "../components/chip.js";
@@ -8,24 +8,28 @@ import { nyCard } from "../components/card.js";
 import { agentStart } from "../components/agentStart.js";
 import { button } from "../components/button.js";
 import { S } from "../page.js";
-import { NY, myAssistant } from "./you-needs.js";
-import { inboxOpenCount } from "./you-inbox.js";
+import { NY, myAssistant, needsCount } from "./you-needs.js";
+import { inboxOpenCount, inboxQuestions } from "./you-inbox.js";
 
-// What waits on the person: the Needs you list (items for a person and messages that wait on an answer) and the items
-// an agent took off the list. The inbox's unread notes are not in it: they wait on nothing.
-export function youCount() { return NY.length + ((S && S.takeovers) || []).length; }
+// What needs the person now (#5114, mark: the badge said '! 900'): the true count of Needs you (items for a person,
+// questions and alerts) and the questions in the inbox that wait on an answer and are not in Needs you. The items an
+// agent took off the list and the unread notes wait on nothing: the line under it counts them, the badge does not.
+export function youCount() {
+  const inNy = new Set(NY.map(e => e.message_id).filter(Boolean));
+  return needsCount() + inboxQuestions().filter(m => !inNy.has(m.id)).length;
+}
 
 // The You row of the session list, and the head of the You view. It draws again on each state and each poll of Needs
 // you and the inbox, and replaces its HTML only when it changed, so a row keeps its hover and focus.
 export function renderYou() {
   const row = $("#sessYouRow"); if (!row) return;
-  const n = youCount(), msgs = inboxOpenCount(), T = ((S && S.takeovers) || []).length;
-  const line = [NY.length ? `${NY.length} need${NY.length === 1 ? "s" : ""} you` : "", T ? `${T} taken off your list` : "",
+  const n = youCount(), N = needsCount(), msgs = inboxOpenCount(), T = ((S && S.takeovers) || []).length;
+  const line = [N ? `${N} need${N === 1 ? "s" : ""} you` : "", T ? `${T} taken off your list` : "",
                 msgs ? `${msgs} message${msgs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ") || "Nothing waits on you";
   const on = row.dataset.on === "1";
   const html = `<div class="srow srow-you${n ? " needs" : ""}${on ? " on" : ""}" data-you="1">
     <div class="srow-main" tabindex="0" role="button" title="What waits on you: Needs you, items an agent took off your list, and your inbox" aria-label="You: what waits on you">
-      <div class="srow-h"><b class="srow-t">You</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} thing(s) wait on you">! ${n}</span>` : ""}</div>
+      <div class="srow-h"><b class="srow-t">You</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} thing(s) need you now: Needs you and the questions that wait on your answer">! ${n}</span>` : ""}</div>
       <div class="sub">${esc(line)}</div></div></div>`;
   if (row.dataset.sig !== html) { row.innerHTML = html; row.dataset.sig = html; }
   // The agent that goes through the list with the person (#5103): next to Copy prompt, in the head of the view.

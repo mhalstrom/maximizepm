@@ -26,6 +26,8 @@ export async function pollInbox() {
 let inboxTable = null;
 // The messages that wait on the person: unread, or an open question or offer (the line of the You row, #5102).
 export function inboxOpenCount() { return IB.filter(m => !inboxDone(m)).length; }
+// The questions to the person that wait on an answer (#5114): they count in the badge of the You row.
+export function inboxQuestions() { return IB.filter(m => m.kind === "question" && m.state === "open"); }
 function inboxDone(m) { return !(m.unread || (m.state === "open" && ["question", "offer"].includes(m.kind))); }
 function inboxCell(m) {
   const me = actor();

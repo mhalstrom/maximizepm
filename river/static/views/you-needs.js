@@ -25,13 +25,22 @@ export async function pollNeedsYou() {
 // runs no watch (core.WATCH_NOTE): its Terminal answers it.
 export const promptAlert = e => e.message_kind === "alert" && ["waits on a prompt in its terminal", "runs no watch"].some(w => (e.body || "").startsWith(w));
 
+// The true number of open Needs you events for the person (#5114): from the page's state, which holds every open one.
+// The list of api/needs-you holds at most 100 (the most important); before the state comes, its length.
+export function needsCount() {
+  const all = S && S.needs_you; if (!all) return NY.length;
+  const h = humanActor();
+  return all.filter(e => !h || !e.human || e.human === h).length;
+}
+
 export function renderNeedsYou() {
-  document.title = NY.length ? `(${NY.length}) MaximizePM` : "MaximizePM";
+  const total = needsCount();
+  document.title = total ? `(${total}) MaximizePM` : "MaximizePM";
   $("#notifyOn").classList.toggle("hidden", !("Notification" in window) || Notification.permission !== "default");
   $("#needsYouPanel").classList.toggle("hidden", !NY.length);
   $("#nothingForYou").classList.toggle("hidden", !!NY.length || !!(S && (S.takeovers || []).length));
   renderYou();
-  const sig = JSON.stringify([NY.map(e => [e.id, e.summary, e.item_status]), [...nyOpen]]);
+  const sig = JSON.stringify([NY.map(e => [e.id, e.summary, e.item_status]), [...nyOpen], total]);
   if (sig === nySig) return;
   nySig = sig;
   $("#needsYou").innerHTML = NY.map(e => {
@@ -54,7 +63,7 @@ export function renderNeedsYou() {
     return `<div class="nyl" data-nyt="${e.id}" title="${esc(clip(detail || title, 300))}"><span class="t">${esc(title)}</span>
         <span class="chips">${e.priority != null ? prioNumChip(e.priority, (e.priority_from ? `priority from #${e.priority_from}` : "own priority") + (e.unblocks_count ? `; unblocks ${e.unblocks_count}` : "")) : ""}${e.project ? projectChip(e.project) : ""}</span></div>
       ${open ? `<div class="nyx"${from}><div class="muted t-s">${ago(e.opened_at)}${e.project ? " · " + esc(e.project) : ""}</div>${detail ? `<div class="ny-c">${esc(clip(detail, 800))}</div>` : ""}<div class="actions">${buttons}</div></div>` : ""}`;
-  }).join("");
+  }).join("") + (total > NY.length ? `<div class="muted t-s ny-more">The ${NY.length} most important of ${total}. The rest come here as you finish these; <code>maxpm needs-you</code> lists them all.</div>` : "");
   // Files and local pages in the details open in the side panel of the session that sent them (#4689).
   document.querySelectorAll("#needsYou .nyx .ny-c").forEach(x => linkArtifacts(x, x.closest(".nyx").dataset.agent || null));
 }
