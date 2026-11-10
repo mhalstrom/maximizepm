@@ -390,7 +390,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     showWaiting(s);
   }
   // The composer (components/composer.js, #5078) grows with the text; Enter sends, Shift+Enter starts a new line.
-  $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message this session", label: "Message for the session's terminal",
+  $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message for the session's terminal",
     attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line." });
   const text = $("#sessText");
   const grow = () => { text.style.height = "auto"; text.style.height = Math.min(text.scrollHeight, window.innerHeight / 3) + "px"; };
