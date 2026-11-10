@@ -232,8 +232,14 @@ def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=Non
 def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effort=None, options=None):
     """You view, Go through with an agent (#261, #5103): a session that works through everything that waits on the
     person, with them, one item at a time (core.prompt_for_all), in the folder of the most important such item's
-    project. Its name is set before it starts (MAXPM_AGENT), so the page opens its chat on the Sessions tab at once."""
+    project. Its name is set before it starts (MAXPM_AGENT), so the page opens its chat on the Sessions tab at once.
+    It is the person's assistant (#5110): its own session type, named for its job (you-<id>), long-lived, with no
+    queue work. One per person: while it runs, this opens it again ("existing") and starts nothing."""
     import secrets
+    person = core._person(conn, person)
+    have = core.assistant_of(conn, person)
+    if have:
+        return {"session_name": have, "agent": have, "existing": True}
     ann = core.annotate(conn)
     items = sorted((a for a in ann.values() if a["ready"] and a["doer"] == "human" and not a["project_archived"]),
                    key=lambda a: a["sort_key"])
@@ -242,10 +248,15 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     p = next((x for x in projects if x["path"]), None)
     if p is None:
         raise RiverError("no project has a folder, so MaximizePM cannot start a session: maxpm project path <name> <folder>")
-    name = f"{p['name']}-{secrets.token_hex(2)}"
-    core.register(conn, name, note=f"started from the page to go through what waits on {person or 'the person'}")
-    t = _open_focused(conn, p, "needs:" + (f"@{person}" if person else ""), runner, agent, model, effort, options,
-                      agent_name=name)
+    name = f"you-{secrets.token_hex(2)}"
+    while conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+        name = f"you-{secrets.token_hex(2)}"
+    core.assistant_make(conn, name, person)
+    try:
+        t = _open_focused(conn, p, f"needs:@{person}", runner, agent, model, effort, options, agent_name=name)
+    except Exception:
+        core.unregister(conn, name)  # no session started: no assistant stands in the way of the next click
+        raise
     return {**t, "session_name": name}
 
 
@@ -1743,8 +1754,9 @@ def fresh_sessions(conn, runner=None):
     harness wakes it.
     An agent that ends is unregistered, and the tmux pane river started for it closes; that comes before the
     fresh sessions start, so two sessions never work on one item.
-    Managers, planners, and experts are left alone: they wait at their prompt for a person or a watch command
-    (an expert ends after expert_idle_end with no talk: core.end_quiet_experts).
+    Managers, planners, experts and assistants are left alone: they wait at their prompt for a person or a watch
+    command (an expert ends after expert_idle_end with no talk: core.end_quiet_experts; an assistant when its
+    person ends it, #5110).
     Returns {"started": {item: session}, "ended": {agent: why}, "failed": {item: why}}."""
     out = {"started": {}, "ended": {}, "failed": {}}
     fresh = core.setting(conn, "fresh_sessions") == "on"
@@ -1765,7 +1777,7 @@ def fresh_sessions(conn, runner=None):
         return out
     t, cands = core.now(), {}
     for a in conn.execute("SELECT name, last_seen, registered_at, role FROM agents WHERE kind='ai' AND stop_at IS NULL "
-                          "AND COALESCE(role, '') NOT IN ('manager', 'planner', 'expert')").fetchall():
+                          "AND COALESCE(role, '') NOT IN ('manager', 'planner', 'expert', 'assistant')").fetchall():
         idle = t - core.parse_iso(a["last_seen"])
         if a["last_seen"] == a["registered_at"] or idle < after:
             continue  # it never connected (the manager finds that), or it ran a river command just now

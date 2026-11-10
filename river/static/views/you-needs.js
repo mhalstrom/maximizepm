@@ -102,6 +102,7 @@ export function onClick(t) {
   if (t.dataset.ny) return run(() => needsYouAction(t));
   if (t.dataset.copyPrompt) return run(() => copyPrompt(`api/item/${t.dataset.copyPrompt}/prompt`));
   if (t.id === "copyAll") return run(() => copyPrompt("api/prompt-all"));
+  if (t.id === "agentAll" && myAssistant()) return run(() => nav.openSession(myAssistant().name));  // one per person (#5110)
   if (t.id === "agentAll" || t.dataset.agentHelp) return run(async () => {
     if (t.dataset.busy) return; t.dataset.busy = "1"; setTimeout(() => delete t.dataset.busy, 4000);
     const hid = +t.dataset.agentHelp, hit = hid ? S.items.find(i => i.id === hid) : null;
@@ -111,7 +112,8 @@ export function onClick(t) {
     const opts = { person: actor() || undefined, ...launchArgs(ch) };
     try {
       const r = t.id === "agentAll" ? await act("open_needs_you", opts) : await act("open_agent_on", { ...opts, id: +t.dataset.agentHelp });
-      toast(`Started ${r.agent} in ${r.project}` + (t.id === "agentAll" ? ", to go through what needs you" : `, to do #${t.dataset.agentHelp} with you`));
+      toast(r.existing ? `Your assistant ${r.agent} runs already: its chat opens` :
+        `Started ${r.agent} in ${r.project}` + (t.id === "agentAll" ? ", to go through what needs you" : `, to do #${t.dataset.agentHelp} with you`));
       if (r.session_name) nav.openSession(r.session_name);  // its chat opens on the Sessions tab at once (#5103)
     } catch (e) { /* toast shown */ }
     return;
@@ -120,3 +122,10 @@ export function onClick(t) {
   return false;
 }
 const run = (f) => { f(); return true; };
+// The person's assistant that runs now (#5110): the session that goes through this list with them. One per person, so
+// Go through with an agent opens it again in place of a second one.
+export function myAssistant() {
+  const me = actor();
+  return ((S && S.agents) || []).find(a => a.role === "assistant" && !["gone", "stopped"].includes(a.state)
+    && (!me || a.assistant_for === me)) || null;
+}

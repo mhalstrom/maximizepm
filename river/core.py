@@ -626,6 +626,7 @@ CREATE TABLE IF NOT EXISTS agents (
   expert_topic   TEXT,                       -- an expert session (role expert): what it knows and is for (#4955)
   expert_project TEXT,                       -- the project whose folder it starts in (maxpm expert start)
   talked_at      TEXT,                       -- the last prompt that someone typed or sent to it (its hooks)
+  assistant_for  TEXT,                       -- an assistant session (role assistant): the person whose list it goes through (#5110)
   registered_at  TEXT NOT NULL,
   last_seen      TEXT NOT NULL
 );
@@ -1113,7 +1114,7 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN model TEXT")
     if "agent_type" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN agent_type TEXT")
-    for col in ("expert_topic", "expert_project", "talked_at"):
+    for col in ("expert_topic", "expert_project", "talked_at", "assistant_for"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at"):
@@ -3514,8 +3515,9 @@ def target_handoff(conn, name, to, why):
 
 
 def live_sessions(conn):
-    """How many agent sessions are live now (not gone, not stopped), for max_sessions."""
-    return sum(1 for r in conn.execute("SELECT * FROM agents WHERE kind='ai'")
+    """How many agent sessions are live now (not gone, not stopped), for max_sessions. An assistant (#5110) takes no
+    queue work, so it uses no slot."""
+    return sum(1 for r in conn.execute("SELECT * FROM agents WHERE kind='ai' AND COALESCE(role, '')<>'assistant'")
                if _agent_state(conn, r) not in ("gone", "stopped"))
 
 
@@ -6297,10 +6299,12 @@ def _sweep(conn):
     expired = conn.execute(
         "SELECT id, assignee FROM items WHERE status='in_progress' AND lease_expires_at < ?", (t,)).fetchall()
     busy = busy_now(conn, {r["assignee"] for r in expired}) if expired else set()
-    experts = {x["name"] for x in conn.execute("SELECT name FROM agents WHERE role='expert'")} if expired else set()
+    experts = ({x["name"] for x in conn.execute("SELECT name FROM agents WHERE role IN ('expert', 'assistant')")}
+               if expired else set())
     for r in expired:
         if r["assignee"] in experts:
-            # An expert holds its task while the person talks with it, for days (#4959): no lease runs out.
+            # An expert holds its task while the person talks with it, for days (#4959): no lease runs out. The same
+            # for an item that an assistant took over with the person's yes (#5110).
             conn.execute("UPDATE items SET lease_expires_at=? WHERE id=?",
                          (iso(now() + _lease_for(conn, r["id"], r["assignee"])), r["id"]))
             continue
@@ -6871,8 +6875,10 @@ def _agent_state(conn, a):
     if "pid" in a.keys() and a["pid"] and a["host"] == this_host() and not pid_alive(a["pid"]):
         return "gone"
     # An expert talks with a person and runs few maxpm commands: it is not away or gone by time. It ends after
-    # expert_idle_end with no talk (end_quiet_experts), or when a person ends it (#4955).
-    if "role" in a.keys() and a["role"] == "expert":
+    # expert_idle_end with no talk (end_quiet_experts), or when a person ends it (#4955). An assistant (#5110) goes
+    # through the person's list with them, for as long as they talk: only the person ends it. Its process says when it
+    # ended; with no process known (it never ran maxpm go), time says it, so a session that never started is gone.
+    if "role" in a.keys() and (a["role"] == "expert" or (a["role"] == "assistant" and a["pid"])):
         return "active"
     age = now() - parse_iso(a["last_seen"])
     if age > parse_duration(setting(conn, "gone_after", agent=a["name"])):
@@ -7014,6 +7020,11 @@ def _claim_row(conn, item_id, actor):
     if ag["role"] == "context":
         raise RiverError(f"refused: {actor} is a context session: it reads a goal's handoff, items and files, "
                          f"runs maxpm goal base <goal> --ready, and ends. It claims no item and edits no file")
+    if ag["role"] == "assistant" and it0["takeover_by"] != actor:
+        raise RiverError(f"refused: {actor} is an assistant session: it goes through what waits on "
+                         f"{ag['assistant_for'] or 'the person'}, with them, and takes no queue work. Add the work "
+                         f"(maxpm add \"<title>\" --found-during <id>): a worker session takes it. A person's item that "
+                         f"you do yourself, with their yes: maxpm --as {actor} takeover <id> --note \"<how>\"")
     if ag["role"] in ("planner", "manager"):
         raise RiverError(f"refused: {actor} is a {ag['role']} session; it changes the plan and does not take work. "
                          f"To work instead, run: maxpm --as {actor} go" + (
@@ -8512,7 +8523,7 @@ def activity_watch(conn):
     bg = parse_duration(setting(conn, "busy_max"))
     rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, activity_waits, "
                                     "last_seen FROM agents WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
-                                    "AND waiting_since IS NULL AND COALESCE(role, '')<>'expert'").fetchall()
+                                    "AND waiting_since IS NULL AND COALESCE(role, '') NOT IN ('expert', 'assistant')").fetchall()
             if r["activity_told"] != r["activity_at"]
             and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit
             and not (r["activity_waits"] and t - parse_iso(r["activity_at"]) < bg)]
@@ -10131,7 +10142,7 @@ def capacity(conn, ann=None):
     agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents")]
     # Planner sessions change the plan and take no work, so they are not slots.
     ai_active = [a for a in agents if a["kind"] == "ai" and a["state"] == "active"
-                 and a.get("role") not in ("planner", "expert")]  # an expert takes no queue work (#4955)
+                 and a.get("role") not in ("planner", "expert", "assistant")]  # these take no queue work (#4955, #5110)
     ai_busy = [a for a in ai_active if a["holds"]]
     ai_idle = [a for a in ai_active if not a["holds"]]
     # Waiting sessions (maxpm wait) take new work by themselves within seconds, and end after wait_max.
@@ -11477,7 +11488,7 @@ def state(conn, closed=True):
 
 # ---------------------------------------------------------------- go
 
-ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "manager", "context", "expert", "idle")
+ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "manager", "context", "expert", "assistant", "idle")
 
 
 def _owned_goal(conn, actor, names):
@@ -11659,6 +11670,16 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                          "SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
                          (actor,))],
                      why="you are an expert session: you answer the person and take no queue work by yourself")
+        return brief
+    if me["role"] == "assistant":
+        # The assistant goes through what waits on its person, with them (#5110): each go gives the list again.
+        person = me["assistant_for"] or _person(conn)
+        brief.update(role="assistant", item=None, help_prompt=prompt_for_all(conn, person), assistant_for=person,
+                     holds=[item_show(conn, r["id"]) for r in conn.execute(
+                         "SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                         (actor,))],
+                     why=f"you are the assistant of {person}: you go through what waits on them, with them, and take "
+                         f"no queue work")
         return brief
     brief["model"] = agent_model(conn, actor)
     brief["model_skipped"] = skipped = []
@@ -11993,10 +12014,11 @@ def _set_role_note(conn, actor, role, item_id):
     with tx(conn):
         # A role with work ends a wait; idle keeps the wait clock, so wait_max counts from the first wait.
         keep = role in ("idle", "waiting")
-        # An expert stays an expert when a person has it claim an item (#4955); maxpm manage still makes a manager.
+        # An expert stays an expert when a person has it claim an item (#4955), and an assistant an assistant (#5110);
+        # maxpm manage still makes a manager.
         conn.execute("UPDATE agents SET note=?, role=?, waiting_since=CASE WHEN ? THEN waiting_since END, "
-                     "waiting_in=CASE WHEN ? THEN waiting_in END WHERE name=? AND (COALESCE(role, '')<>'expert' "
-                     "OR ?='manager')", (note, role, keep, keep, actor, role))
+                     "waiting_in=CASE WHEN ? THEN waiting_in END WHERE name=? AND (COALESCE(role, '') NOT IN "
+                     "('expert', 'assistant') OR ?='manager')", (note, role, keep, keep, actor, role))
 
 
 def focus_role(focus):
@@ -12297,6 +12319,27 @@ def _make_expert(conn, name, topic, project=None, actor=None):
                  "stop_by=NULL, stop_reason=NULL WHERE name=?", (f"{EXPERT_NOTE}{topic[:120]}", topic, project, t, name))
     if was["role"] != "expert" or was["expert_topic"] != topic:
         _event(conn, None, actor or name, f"{name} is an {EXPERT_NOTE}{topic}" + (f" (project {project})" if project else ""))
+
+
+def assistant_make(conn, name, person):
+    """Make a new agent the assistant of a person (#5110, mark 2026-11-10: 'when we start an agent from the You session
+    to clean up those items it needs to be a longer lived agent'): role assistant, the person whose list it goes
+    through. It takes no queue work and no lease, uses no worker slot (live_sessions, capacity), and MaximizePM never
+    ends it by the worker rules (idle_end, wait_max, hand-over): only a person ends it (End, maxpm stop)."""
+    register(conn, name, note=f"role: assistant: goes through what waits on {person}, with them")
+    with tx(conn):
+        conn.execute("UPDATE agents SET role='assistant', assistant_for=? WHERE name=?", (person, name))
+        _event(conn, None, name, f"assistant of {person}")
+    return agent_status(conn, name)
+
+
+def assistant_of(conn, person):
+    """The assistant of a person that runs now (not stopped, not gone), or None: one per person (#5110)."""
+    for r in conn.execute("SELECT * FROM agents WHERE role='assistant' AND kind='ai' AND assistant_for=? "
+                          "ORDER BY registered_at DESC", (person,)).fetchall():
+        if _agent_state(conn, r) not in ("stopped", "gone"):
+            return r["name"]
+    return None
 
 
 def expert_make(conn, name, topic, project=None, actor=None):

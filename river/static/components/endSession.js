@@ -18,7 +18,9 @@ export const END_SVG = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hid
 export function endButton(s, { icon = false, cls = "" } = {}) {
   const ending = s.state === "stopping";
   const title = ending ? `${s.name} is ending: it was asked to stop. End it now if it does not answer`
-    : s.role === "expert" ? `End the expert ${s.name}: its notes stay` : `End ${s.name}: it commits finished work, releases its task, and ends`;
+    : s.role === "expert" ? `End the expert ${s.name}: its notes stay`
+    : s.role === "assistant" ? `End your assistant ${s.name}: what you decided with it stays in the queue`
+    : `End ${s.name}: it commits finished work, releases its task, and ends`;
   return icon ? button(END_SVG, { kind: "icon", cls, title, label: `End ${s.name}`, data: { end: s.name } })
     : button(ending ? "Ending…" : "End", { cls, title, data: { end: s.name } });
 }

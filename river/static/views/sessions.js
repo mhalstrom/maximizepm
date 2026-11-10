@@ -93,7 +93,7 @@ export function isPinned(s) {
   return me ? by.includes(me) : by.length > 0;
 }
 function pinButton(s) {
-  if (s.role === "manager" || s.role === "expert") return "";
+  if (["manager", "expert", "assistant"].includes(s.role)) return "";
   const on = isPinned(s);
   return button(PIN_SVG, { kind: "icon", cls: "srow-pin", pressed: on, data: { pin: s.name },
     title: on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions", label: `${on ? "Unpin" : "Pin"} ${s.name}` });
@@ -120,8 +120,10 @@ function provIcon(p) {
   return p && p.id !== "claude-code" ? `<span class="prov prov-ic prov-${esc(p.id)}" title="Runs in ${esc(p.label)}" aria-label="${esc(p.label)}">${esc(p.label.slice(0, 1))}</span>` : "";
 }
 export function sessionRow(s) {
-  const role = s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : "";
-  const head = s.role === "expert" ? s.name : s.role === "manager" && s.title === "Manager" ? "" : s.title || s.name;
+  // The assistant (#5110) goes through what waits on the person: its tag names its job, as the manager's does.
+  const role = s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>`
+    : s.role === "assistant" ? `<span class="mgr-tag expert-tag">Needs you</span>` : "";
+  const head = s.role === "expert" ? s.name : s.role === "assistant" || (s.role === "manager" && s.title === "Manager") ? "" : s.title || s.name;
   const line2 = s.role === "expert" && s.topic ? s.topic : s.doing || s.state_label;
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
@@ -173,7 +175,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
-  const experts = $("#sessExpertRows"), expertGroup = $("#sessExperts");
+  const experts = $("#sessExpertRows"), expertGroup = $("#sessExperts"), assist = $("#sessAssist");
   const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
   wirePanel();
@@ -286,8 +288,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       const ex = list.filter(x => x.role === "expert");
       expertGroup.classList.toggle("hidden", !ex.length);
       renderList(experts, ex, agent, "");
+      // The person's assistant under the You row (#5110), not among the workers.
+      renderList(assist, list.filter(x => x.role === "assistant"), agent, "");
       // Pinned workers first, each group in today's order (#5007; sort is stable).
-      const workers = list.filter(x => x.role !== "manager" && x.role !== "expert");
+      const workers = list.filter(x => !["manager", "expert", "assistant"].includes(x.role));
       workers.sort((a, b) => isPinned(b) - isPinned(a));
       renderList(side, workers, agent,
         `<div class="muted">No other agent session runs now. Start one with Start an agent, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);

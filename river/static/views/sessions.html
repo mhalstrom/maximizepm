@@ -5,8 +5,12 @@
       <h2 title="Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the message box of a session that runs in a tmux pane.">Running sessions</h2>
       <!-- Start an agent and the open session slots (#5102 step 2): here, where the new session shows. -->
       <div id="sessStart" class="sess-start"></div>
-      <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. -->
-      <div id="sessYouRow" class="slist-mgr slist-you" aria-label="You"></div>
+      <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. Under it, the session
+           that goes through that list with you (#5110: your assistant, a session type of its own). -->
+      <div class="slist-mgr slist-you" aria-label="You">
+        <div id="sessYouRow"></div>
+        <div id="sessAssist" class="slist-rows" aria-label="Your assistant"></div>
+      </div>
       <!-- The Artifacts row (#5102 step 3): what all the sessions made; it opens the Artifacts view. -->
       <div id="sessArtsRow" class="slist-arts" aria-label="Artifacts"><div class="srow srow-arts" data-arts="1">
         <div class="srow-main" tabindex="0" role="button" title="The pages, files and artifact links all the sessions made or named, also the ended ones" aria-label="Artifacts of all sessions">

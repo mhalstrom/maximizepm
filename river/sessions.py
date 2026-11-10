@@ -388,8 +388,9 @@ def state(conn, a, turn, waiting=None):
         return "prompt", STATES["prompt"]
     if a["name"] in (waiting if waiting is not None else core.waits_on_person(conn, [a["name"]])):
         return "answer", STATES["answer"]
-    if a.get("role") == "expert" and turn != "working":
-        # An expert waits at its prompt for the person by design (#4955): not idle, and nothing waits on the person.
+    if a.get("role") in ("expert", "assistant") and turn != "working":
+        # An expert waits at its prompt for the person by design (#4955), and so does an assistant (#5110): not idle,
+        # and nothing waits on the person.
         return "expert", STATES["expert"]
     if a.get("waiting_since") and not (turn == "working" and a.get("activity_at") and a.get("wait_at")
                                        and a["activity_at"] > a["wait_at"]):
@@ -616,6 +617,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"])), said), "name": a["name"],
                 "title": work_name(conn, a, path, root, croot), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"), "topic": a.get("expert_topic"),
+                "assistant_for": a.get("assistant_for"),
                 "talked_at": a.get("talked_at"), "pinned_by": a.get("pinned_by") or [],
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,

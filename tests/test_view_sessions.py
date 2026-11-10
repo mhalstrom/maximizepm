@@ -245,7 +245,7 @@ class Sessions(Base):
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM session_pins").fetchone()[0], 0)
         # The page: a pin button on worker rows only, and pinned workers first in their group.
         js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text()
-        self.assertIn('if (s.role === "manager" || s.role === "expert") return "";', js)
+        self.assertIn('if (["manager", "expert", "assistant"].includes(s.role)) return "";', js)
         self.assertIn("workers.sort((a, b) => isPinned(b) - isPinned(a));", js)
 
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):

@@ -8,7 +8,7 @@ import { nyCard } from "../components/card.js";
 import { agentStart } from "../components/agentStart.js";
 import { button } from "../components/button.js";
 import { S } from "../page.js";
-import { NY } from "./you-needs.js";
+import { NY, myAssistant } from "./you-needs.js";
 import { inboxOpenCount } from "./you-inbox.js";
 
 // What waits on the person: the Needs you list (items for a person and messages that wait on an answer) and the items
@@ -29,8 +29,12 @@ export function renderYou() {
       <div class="sub">${esc(line)}</div></div></div>`;
   if (row.dataset.sig !== html) { row.innerHTML = html; row.dataset.sig = html; }
   // The agent that goes through the list with the person (#5103): next to Copy prompt, in the head of the view.
-  const slot = $("#agentAllSlot"), b = NY.length ? agentStart(S && S.launch_agents, { label: "Go through with an agent", cls: "primary",
-    attrs: 'id="agentAll"', title: "Start an agent session that goes through what waits on you, one at a time, with you; its chat opens here" }) : "";
+  // While your assistant runs (#5110), the same place opens its chat.
+  const mine = myAssistant(), slot = $("#agentAllSlot");
+  const b = mine ? agentStart(null, { label: "Open your assistant", cls: "primary", attrs: 'id="agentAll"',
+      title: `${mine.name} goes through what waits on you, with you: open its chat` })
+    : NY.length ? agentStart(S && S.launch_agents, { label: "Go through with an agent", cls: "primary",
+      attrs: 'id="agentAll"', title: "Start your assistant: an agent session that goes through what waits on you, one at a time, with you; its chat opens here" }) : "";
   if (slot.dataset.sig !== b) { slot.innerHTML = b; slot.dataset.sig = b; }
 }
 // The You row shows as chosen while the You view shows.

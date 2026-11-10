@@ -3003,8 +3003,15 @@ def render_go(b):
         out += [b["focus_note"], ""]
     if b.get("help_prompt"):
         out += [b["help_prompt"], "",
-                f"Your own agent name is {me}; take over a person's item only with their yes: {r} takeover <id> --note \"<how>\".",
-                f"Do not take other work in this session unless the person asks: then run {r} go --role worker."]
+                f"Your own agent name is {me}; take over a person's item only with their yes: {r} takeover <id> --note \"<how>\"."]
+        if b["role"] == "assistant":
+            who = b["assistant_for"]
+            out += [f"You are the assistant of {who} (#5110): this session takes no queue work. Work they want done goes "
+                    f"into the queue ({r} add \"<title>\" --found-during <id>), and a worker session takes it. MaximizePM "
+                    f"never ends you as it ends a worker (no lease, no idle_end, no wait): stay at your prompt between "
+                    f"answers, and run no maxpm wait. You end when {who} ends you. {r} go gives the list again."]
+        else:
+            out.append(f"Do not take other work in this session unless the person asks: then run {r} go --role worker.")
         print("\n".join(out).rstrip())
         return
     if b["role"] == "expert":
@@ -4225,10 +4232,12 @@ def render(a, res):
         if not res:
             print("(nobody)")
         # Experts last, apart from the workers: they take no queue work (#4955).
-        for ag in sorted(res, key=lambda g: g.get("role") == "expert"):
+        for ag in sorted(res, key=lambda g: g.get("role") in ("expert", "assistant")):
             holds = ", ".join(f"#{h['id']} {h['title']}" for h in ag["holds"]) or "nothing"
             note = f" — {ag['note']}" if ag["note"] else ""
-            kind = "expert, takes no queue work" if ag.get("role") == "expert" else ag["kind"]
+            kind = ("expert, takes no queue work" if ag.get("role") == "expert" else
+                    f"assistant of {ag.get('assistant_for')}, takes no queue work" if ag.get("role") == "assistant"
+                    else ag["kind"])
             print(f"{ag['name']} ({kind}, {ag['state']}){note}"
                   + (f"\n    session: {ag['session']}" + (f" [{ag['session_ref']}]" if ag.get("session_ref") else "")
                      if ag.get("session") else "")

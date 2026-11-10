@@ -754,13 +754,69 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn(f"MAXPM_FOCUS=needs:@mark MAXPM_AGENT={t['session_name']} claude --name 'needs you' go", sent[-1])
         self.assertTrue(self.c.execute("SELECT 1 FROM agents WHERE name=?", (t["session_name"],)).fetchone())
         b = core.go(self.c, self.dir.name, t["session_name"], focus=t["focus"])
-        self.assertEqual((b["role"], b["help_prompt"]), ("helper", core.prompt_for_all(self.c, "mark")))
+        # It is the person's assistant (#5110), named for its job.
+        self.assertTrue(t["session_name"].startswith("you-"))
+        self.assertEqual((b["role"], b["help_prompt"]), ("assistant", core.prompt_for_all(self.c, "mark")))
+        core.unregister(self.c, t["session_name"])
         t = server.open_agent_on(self.c, waits, runner=sent.append)
         self.assertIn(f"MAXPM_FOCUS=unblock:{waits}", sent[-1])
         b = core.go(self.c, self.dir.name, None, focus=t["focus"])
         self.assertEqual((b["role"], b["item"]["id"]), ("unblocker", blocker))
         with self.assertRaises(RiverError):
             server.open_agent_on(self.c, blocker, runner=sent.append)  # held now: message the holder
+
+    def test_the_needs_you_agent_is_the_persons_assistant(self):
+        """#5110: the session that goes through what waits on the person is its own type: one per person, long-lived,
+        no queue work, no worker slot; only the person ends it."""
+        from river import cli
+        import contextlib, io
+        core.project_add(self.c, "shop", path=self.dir.name)
+        h = core.item_add(self.c, "shop", "sign the contract", doer="human")["id"]
+        work = core.item_add(self.c, "shop", "build the cart")["id"]
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "max_sessions", "1")
+        sent = []
+        t = server.open_needs_you(self.c, runner=sent.append, person="mark")
+        name = t["session_name"]
+        self.assertEqual(core.assistant_of(self.c, "mark"), name)
+        b = core.go(self.c, self.dir.name, name, focus=t["focus"])
+        self.assertEqual((b["role"], b["item"], b["assistant_for"]), ("assistant", None, "mark"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn("You are the assistant of mark", out.getvalue())
+        self.assertNotIn("--role worker", out.getvalue())
+        # Every later go gives the list again, also with a role asked for: it takes no queue work.
+        self.assertEqual(core.go(self.c, self.dir.name, name, role="worker")["role"], "assistant")
+        self.assertEqual(core._agent(self.c, name)["role"], "assistant")
+        with self.assertRaisesRegex(RiverError, "assistant session"):
+            core.claim(self.c, work, name)
+        # A person's item that it does itself, with the person's yes: takeover works.
+        self.assertEqual(core.takeover(self.c, h, "I file the form myself", name)["assignee"], name)
+        # Its process lives: it is active however long it ran no maxpm command, and uses no worker slot.
+        self.c.execute("UPDATE agents SET pid=?, host=?, last_seen='2026-01-01T00:00:00Z' WHERE name=?",
+                       (os.getpid(), core.this_host(), name))
+        self.c.commit()
+        self.assertEqual(core.agent_status(self.c, name)["state"], "active")
+        self.assertEqual(core.live_sessions(self.c), 0)
+        self.assertEqual(core.capacity(self.c)["agents_active"], 0)
+        # A second click opens the one that runs: no second session starts.
+        n = len(sent)
+        again = server.open_needs_you(self.c, runner=sent.append, person="mark")
+        self.assertEqual((again["session_name"], again.get("existing"), len(sent)), (name, True, n))
+        # Its lease does not run out on the item it took over.
+        self.c.execute("UPDATE items SET lease_expires_at='2026-01-01T00:00:00Z' WHERE id=?", (h,))
+        self.c.commit()
+        core.activity(self.c, "mark")
+        self.assertEqual(core._item(self.c, h)["assignee"], name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["who"])
+        self.assertIn(f"{name} (assistant of mark, takes no queue work", out.getvalue())
+        # With its process gone it no longer runs: the next click starts a new one.
+        self.c.execute("UPDATE agents SET pid=999999 WHERE name=?", (name,))
+        self.c.commit()
+        self.assertIsNone(core.assistant_of(self.c, "mark"))
 
     def test_deploy_now_without_an_owner_opens_a_deployer(self):
         core.target_add(self.c, "web")
