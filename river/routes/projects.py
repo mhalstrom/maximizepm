@@ -1,5 +1,5 @@
-"""The Projects tab: projects, the Add item form, and goals. (#4656: each view has its routes here; server.py keeps the
-frame.)
+"""Plan's Items and Goals views (the Projects tab's until #5102): projects, the Add item form, goals and their handoffs.
+(#4656: each view has its routes here; server.py keeps the frame.)
 
 GET: (test, handler) pairs that Handler.do_GET tries in order; a handler answers with h._send. OPS: page actions,
 merged into server.OPS."""
@@ -10,7 +10,23 @@ import hmac  # noqa: F401
 
 
 
+def goal_handoff(h, path):
+    """GET /api/goal-handoff?name=<goal>[&version=<n>]: the text of a goal's handoff and its versions (Plan > Goals,
+    #5102 step 6). The page shows it; the owner writes it with maxpm goal handoff."""
+    from urllib.parse import parse_qs, urlsplit
+    q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
+    conn = core.connect()
+    try:
+        v = q.get("version")
+        return h._send(200, core.goal_handoff(conn, q.get("name", ""), version=int(v) if v and v.isdigit() else None))
+    except RiverError as e:
+        return h._send(404, {"error": str(e)})
+    finally:
+        conn.close()
+
+
 GET = [
+    (lambda path: path == "/api/goal-handoff", goal_handoff),
 ]
 
 OPS = {
@@ -25,7 +41,7 @@ OPS = {
                                                 [int(x) for x in a.get("feeds", [])], a.get("due"),
                                                 goals=a.get("goals"), models=a.get("models"), tier=a.get("tier")),
     "goal_add": lambda c, a, who: core.goal_add(c, a["project"], a["name"], a.get("outcome", ""), a.get("done_when", ""),
-                                                who, shared=bool(a.get("shared"))),
+                                                who, shared=bool(a.get("shared")), parent=a.get("parent") or None),
     "goal_edit": lambda c, a, who: core.goal_edit(c, a["name"], a.get("outcome"), a.get("done_when"), a.get("new_name"), who,
                                                   a.get("shared")),
     "goal_rank": lambda c, a, who: core.goal_rank(c, a["name"], a["rank"], who),

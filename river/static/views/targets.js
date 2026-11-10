@@ -1,5 +1,5 @@
-// The Targets tab (#4656): each deploy target, what it ships, Deploy now, its hooks and its deploys. Only what a person
-// acts on shows; the rest is a hover or folded (#5082).
+// The Releases view of Plan (the Targets tab's until #5102 step 6): each deploy target of the scope's projects, what it
+// ships, Deploy now, its hooks and its deploys. Only what a person acts on shows; the rest is a hover or folded (#5082).
 import { $, esc, toast, act, ago, left, clip, shortTitle } from "../lib.js";
 import { ownerChip } from "../components/chip.js";
 import { nyCard } from "../components/card.js";
@@ -7,7 +7,7 @@ import { button } from "../components/button.js";
 import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { hooksHtml } from "../components/targetHooks.js";
-import { S } from "../page.js";
+import { S, scope } from "../page.js";
 
 // One short line of how a target releases (#5003, #5082): the gate, the cadence, what the deploy session watches.
 // Each word carries its full text as a hover; only a gate that is not set shows how to set it.
@@ -53,7 +53,7 @@ function actionsHtml(t) {
 const projectsHtml = (P) => !P.length ? "" : `<span class="muted t-s" title="${esc(P.join(", "))}">${P.length > 3 ? P.length + " projects" : P.map(esc).join(", ")}</span>`;
 
 export function renderTargets() {
-  const T = S.targets || [];
+  const T = (S.targets || []).filter(t => !scope.project || (t.project_names || []).includes(scope.project));
   const box = $("#targets");
   if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // do not wipe a reason they type
   const open = new Set([...box.querySelectorAll("details[open]")].map(d => d.dataset.keep));  // a fold stays open over a refresh
@@ -63,7 +63,7 @@ export function renderTargets() {
       ${t.pending.map(pendingHtml).join("")}
       ${actionsHtml(t)}
       ${hooksHtml(t, S.hook_events)}
-      ${historyHtml(t)}`)).join("") || `<div class="muted" title='maxpm target add &lt;name&gt; --description "how it deploys"'>No deploy targets.</div>`;
+      ${historyHtml(t)}`)).join("") || `<div class="muted" title='maxpm target add &lt;name&gt; --description "how it deploys"'>No deploy targets${scope.project ? " for " + esc(scope.project) : ""}.</div>`;
   box.querySelectorAll("details[data-keep]").forEach(d => { if (open.has(d.dataset.keep)) d.open = true; });
 }
 

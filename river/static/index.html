@@ -14,6 +14,7 @@
 <!-- Each view's own styles (#4656), after the shared ones of app.css. -->
 <link rel="stylesheet" href="views/plan.css">
 <link rel="stylesheet" href="views/projects.css">
+<link rel="stylesheet" href="views/goals.css">
 <link rel="stylesheet" href="views/sessions.css">
 <link rel="stylesheet" href="views/you.css">
 <link rel="stylesheet" href="views/artifacts.css">
@@ -35,7 +36,6 @@
   <nav id="tabNav">
     <button data-tab="sessions" class="on" title="Every running agent session: its item, its state, and what it writes now; and what waits on you">Sessions</button>
     <button data-tab="plan" title="The plan of the work: projects, goals, items, the graph, releases and what is done">Plan</button>
-    <button data-tab="targets">Targets</button>
     <button data-tab="terminal" title="A plain shell on this computer, in the page">Terminal</button>
     <button data-tab="settings">Settings</button>
   </nav>
@@ -62,8 +62,6 @@
   <!-- view: plan -->
 
   <!-- view: sessions -->
-
-  <!-- view: targets -->
 
   <!-- view: terminal -->
   <!-- view: settings -->
@@ -141,6 +139,7 @@
             <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="launch-legal"></label></div>
             <label>Outcome<textarea id="goalOutcome" rows="2" placeholder="What is true when this goal is reached"></textarea></label>
             <label>Done when<input id="goalDoneWhen" placeholder="The test the owner checks before declaring it done"></label>
+            <label title="A sub-goal of that goal (one level, the same project): its sessions read the parent's handoff first">Parent<select id="goalParent"><option value="">none: a goal of its own</option></select></label>
             <button class="btn" id="goalGo">Add goal</button>
           </div>
         </details>

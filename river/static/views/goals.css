@@ -1,0 +1,19 @@
+/* The Goals view of Plan (#5102 step 6): a card for each goal, its sub-goals inside it, the handoff folded. */
+.goalcard { border-top: var(--hair) solid var(--line); padding: var(--sp-5) var(--sp-0); }
+.goalcard.sub { border-top: 0; border-left: var(--hair-2) solid var(--line); padding: var(--sp-3) 0 var(--sp-3) var(--sp-5); margin-top: var(--sp-3); }
+.goalcard.complete { opacity: .7; }
+.gc-h { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.gc-h b { font-size: var(--fs-l); overflow-wrap: anywhere; }
+.goalcard.sub .gc-h b { font-size: var(--fs-base); }
+.gc-h .spacer { flex: 1; }
+.gc-h .link { margin-left: var(--sp-1); }
+.gc-o { margin: var(--sp-2) 0 0; }
+.gc-dw { margin: var(--sp-1) 0 0; font-size: var(--fs-m); }
+.gc-meta { margin: var(--sp-3) 0 var(--sp-1); color: var(--muted); }
+.gc-handoff { margin-top: var(--sp-3); font-size: var(--fs-m); }
+.gc-handoff summary { cursor: pointer; color: var(--muted); }
+.gc-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: var(--h-pre); overflow-y: auto; background: var(--bg); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-3); }
+.gc-ht .link.on { font-weight: 600; }
+.warn-t { color: var(--warn); }
+.gc-subs { margin-top: var(--sp-2); }
+.gc-add { padding-top: var(--sp-3); }

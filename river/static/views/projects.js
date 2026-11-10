@@ -100,8 +100,8 @@ async function goalAction(what, name) {
 
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
-  if (t.dataset.addgoal) return run(async () => {
-    openAdd("goal"); $("#goalProject").value = t.dataset.addgoal;
+  if (t.dataset.addgoal !== undefined) return run(async () => {
+    openAdd("goal", { project: t.dataset.addgoal, parent: t.dataset.parent || "" });
   });
   if (t.dataset.goalAct) return run(() => goalAction(t.dataset.goalAct, t.dataset.g));
   if (t.dataset.describe) return run(async () => {
@@ -119,8 +119,9 @@ const run = (f) => { f(); return true; };
 
 $("#goalGo").addEventListener("click", async () => {
   const name = $("#goalName").value.trim(); if (!name) return toast("Give the goal a name", true);
-  const res = await act("goal_add", { project: $("#goalProject").value, name, outcome: $("#goalOutcome").value.trim(), done_when: $("#goalDoneWhen").value.trim() }).catch(() => null);
-  if (res) { $("#goalName").value = ""; $("#goalOutcome").value = ""; $("#goalDoneWhen").value = ""; toast(`Added goal ${res.name}`); }
+  const res = await act("goal_add", { project: $("#goalProject").value, name, outcome: $("#goalOutcome").value.trim(), done_when: $("#goalDoneWhen").value.trim(),
+    parent: $("#goalParent").value || undefined }).catch(() => null);
+  if (res) { $("#goalName").value = ""; $("#goalOutcome").value = ""; $("#goalDoneWhen").value = ""; $("#goalParent").value = ""; toast(`Added goal ${res.name}`); }
 });
 $("#showDone").addEventListener("change", renderProjects);
 $("#showBacklog").addEventListener("change", renderProjects);

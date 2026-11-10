@@ -3,7 +3,8 @@
 // graph), and under the chosen project its open goals in goal rank (owner and progress; a sub-goal under its parent).
 // A click on a project or a goal sets the scope of every view (page.js scope); the address names it
 // (/plan/<view>?project=<p>&goal=<g>). The views are buttons at the top; Add item opens a dialog whose project and
-// goal come from the scope. The views: Overview (overview.js), Items (projects.js), Graph (graph.js), Done (done.js).
+// goal come from the scope. The views: Overview (overview.js), Items (projects.js), Goals (goals.js), Graph (graph.js),
+// Releases (targets.js), Done (done.js).
 import { $, esc } from "../lib.js";
 import { button } from "../components/button.js";
 import { bar, pct } from "../components/bar.js";
@@ -11,8 +12,8 @@ import { makeDialog } from "../components/dialog.js";
 import { S, scope, planView } from "../page.js";
 import { miniGraph } from "./graph.js";
 
-// The views of Plan, in the order of their buttons. Goals and Releases come in the next step.
-export const PLAN_VIEWS = [["overview", "Overview"], ["items", "Items"], ["graph", "Graph"], ["done", "Done"]];
+// The views of Plan, in the order of their buttons.
+export const PLAN_VIEWS = [["overview", "Overview"], ["items", "Items"], ["goals", "Goals"], ["graph", "Graph"], ["releases", "Releases"], ["done", "Done"]];
 
 export function renderPlanViews() {
   const html = PLAN_VIEWS.map(([k, name]) => button(esc(name), { cls: "plan-vbtn", pressed: planView === k, data: { "plan-view": k },
@@ -58,15 +59,23 @@ export function renderPlanSide() {
 
 // Add item, Add a goal, Add a project: one dialog; the project and the goal come from the scope.
 const addDialog = makeDialog($("#addDlg"));
-export function openAdd(part) {
+export function openAdd(part, { project, parent } = {}) {
   if (scope.project && [...$("#addProject").options].some(o => o.value === scope.project)) {
     $("#addProject").value = scope.project; $("#addProject").dispatchEvent(new Event("change"));
   }
   if (scope.goal && [...$("#addGoal").options].some(o => o.value === scope.goal)) $("#addGoal").value = scope.goal;
-  if (scope.project) $("#goalProject").value = scope.project;
+  if (project || scope.project) $("#goalProject").value = project || scope.project;
+  fillParents(); $("#goalParent").value = parent || "";
   $("#addGoalPart").open = part === "goal"; $("#addProjPart").open = part === "project";
   addDialog.open();
   (part === "goal" ? $("#goalName") : part === "project" ? $("#addProjPart input") : $("#addTitle")).focus();
 }
+// The parent of a new goal: an open goal of the chosen project that is no sub-goal itself (one level).
+function fillParents() {
+  const proj = $("#goalProject").value, el = $("#goalParent");
+  const list = (S.goals || []).filter(g => g.status === "open" && g.project === proj && !g.parent);
+  el.innerHTML = `<option value="">none: a goal of its own</option>` + list.map(g => `<option value="${esc(g.name)}">${esc(g.name)}</option>`).join("");
+}
+$("#goalProject").addEventListener("change", fillParents);
 $("#addClose").onclick = () => addDialog.close();
 $("#planAdd").onclick = () => openAdd("item");

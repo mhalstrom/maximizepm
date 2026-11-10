@@ -48,3 +48,9 @@
   .plan-foot { flex: none; align-self: center; padding: 0; }
 }
 @media (max-width: 759px) { .plan-scope { display: none; } }  /* the left bar shows the scope */
+@media (max-width: 759px) {
+  .plan-bar { flex-wrap: nowrap; }
+  .plan-views { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .plan-bar .spacer { display: none; }
+}
+#planAdd { white-space: nowrap; flex: none; }

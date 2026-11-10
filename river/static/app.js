@@ -22,6 +22,7 @@ import * as youView from "./views/you.js";
 import * as sessWork from "./views/sessions-work.js";
 import * as projects from "./views/projects.js";
 import * as plan from "./views/plan.js";
+import * as goals from "./views/goals.js";
 import { makeSessions } from "./views/sessions.js";
 import { makeArtifacts } from "./views/artifacts.js";
 import { makeTerminalTab } from "./views/terminal.js";
@@ -242,7 +243,7 @@ async function refresh() {
   setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   if (newCode(S.page_build, S.state_shape)) return;
-  renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderReady(); renderLoop(); renderEvents(); settings.renderSettings(); settings.renderPeople(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); targets.renderTargets();
+  renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderReady(); renderLoop(); renderEvents(); settings.renderSettings(); settings.renderPeople(); goals.renderGoals(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); targets.renderTargets();
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
@@ -313,7 +314,8 @@ document.addEventListener("click", async (e) => {
 $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").value); inbox.actorChanged().catch(() => {}); });
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
-  plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderGraph(true); renderLog(true); renderEvents();
+  plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals(); targets.renderTargets();
+  renderGraph(true); renderLog(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {
@@ -357,13 +359,13 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["sessions", "plan", "targets", "settings", "terminal"];
+const TABS = ["sessions", "plan", "settings", "terminal"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (Sessions: the You view when something waits on you, else the session chosen last, #5102)   /sessions
 //   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
 //   /you (the You view of Sessions, #5102)   /artifacts (the Artifacts view of Sessions, #5102)
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
-//   /artifacts/<artifact id> (opens it beside its session)   /plan/<view>?project=&goal=   /targets   /settings
+//   /artifacts/<artifact id> (opens it beside its session)   /plan/<view>?project=&goal=   /settings
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
 // Terminal, then leaves the address). The artifact id is artId(target). The paths
 // are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here and on the relay's tunnel.
@@ -382,7 +384,7 @@ function readUrl() {
     if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
   if (pane === "arts") r.art = parts[1] || null;
   // Plan (#5102 step 4): /plan/<view>?project=<p>&goal=<g>; the old paths of its views open them (until step 7).
-  const old = { projects: "items", graph: "graph", done: "done", capacity: "overview" }[parts[0]];
+  const old = { projects: "items", graph: "graph", done: "done", capacity: "overview", targets: "releases" }[parts[0]];
   if (old) r.tab = "plan";
   if (r.tab === "plan") r.plan = { view: old || (plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview"),
                                    project: q.get("project") || "", goal: q.get("goal") || "" };
