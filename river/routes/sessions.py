@@ -116,7 +116,8 @@ def running(h, path):
             except RiverError:
                 ended = set()
             return h._send(200, {"sessions": sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals),
-                                                               ended_panes=ended)})
+                                                               ended_panes=ended),
+                                 "proposals": core.expert_proposals(conn)})
         cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
         return h._send(200, dict(sessions.view(conn, agent, int(cursor) if cursor.isdigit() else None),
                                     terminal=bool(terminals.get(agent))))
@@ -145,4 +146,7 @@ OPS = {
                                                                 bool(a.get("make_default")), who),
     "prompt_answer": lambda c, a, who: server.prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"),
                                                             a.get("other"), who),
+    # The card of an expert proposal in the manager's chat (#4990): Continue in an expert, or Dismiss.
+    "expert_accept": lambda c, a, who: server.accept_expert(c, a["id"], who),
+    "expert_dismiss": lambda c, a, who: core.expert_proposal_end(c, a["id"], "dismissed", who, a.get("why")),
 }

@@ -124,7 +124,7 @@ function renderList(el, list, picked, empty) {
 }
 
 export function makeSessions({ isShown, onPick = () => {} }) {
-  let list = [], busy = false;
+  let list = [], busy = false, proposals = [];
   let agent = null, cursor = null, timer = null, gen = 0;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
@@ -231,6 +231,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "failed");
       list = j.sessions;
+      proposals = j.proposals || [];
       // At load: the session chosen last, else the first. A session that ended gives way to the first.
       if (!agent || (!pinned && !list.some(s => s.name === agent))) {
         const want = store(PICKED);
@@ -246,6 +247,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       workers.sort((a, b) => isPinned(b) - isPinned(a));
       renderList(side, workers, agent,
         `<div class="muted">No other agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
+      proposeCard();
       fit();
       autoWait();
     } catch (e) {
@@ -304,11 +306,50 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     barFor(null);
     note("Reading the transcript…");
     waitLine({});
+    proposeCard();
     bar.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === name));
     poll();
   }
 
   document.addEventListener("maxpm-view", (e) => { if (e.detail.agent === agent) col.classList.toggle("hide-tools", !viewOf(agent).showTools); });
+
+  // The manager proposes an expert for a long talk (#4990): a card in its chat, above the message box. Continue in
+  // an expert starts the expert with the talk so far and opens its chat; Dismiss keeps the talk with the manager.
+  const proposeBox = $("#sessPropose");
+  function proposeCard() {
+    const p = proposals.find(x => x.manager === agent);
+    proposeBox.classList.toggle("hidden", !p);
+    if (!p) { proposeBox.innerHTML = ""; delete proposeBox.dataset.id; return; }
+    if (proposeBox.dataset.id === String(p.id)) return;  // a refresh keeps the card (and a click in progress)
+    proposeBox.dataset.id = String(p.id);
+    proposeBox.innerHTML = `<div class="muted">${esc(p.manager)} proposes to continue this talk in an expert</div>
+      <div class="sp-topic">${esc(p.topic)}</div>
+      <div class="sp-meta muted">Expert ${esc(p.name)} · ${esc(p.model)}${p.model_why ? ` (${esc(p.model_why)})` : ""}${p.effort ? " · effort " + esc(p.effort) : ""}</div>
+      <div class="sp-acts"><button class="btn primary" type="button" data-propose-go="${p.id}">Continue in an expert</button>
+      <button class="btn" type="button" data-propose-no="${p.id}">Dismiss</button></div>`;
+  }
+  proposeBox.addEventListener("click", async (e) => {
+    const go = e.target.closest("[data-propose-go]"), no = e.target.closest("[data-propose-no]");
+    if (!go && !no) return;
+    const btns = proposeBox.querySelectorAll("button");
+    btns.forEach(b => (b.disabled = true));
+    try {
+      if (no) {
+        await act("expert_dismiss", { id: no.dataset.proposeNo });
+        proposals = proposals.filter(x => String(x.id) !== no.dataset.proposeNo);
+        proposeCard();
+        return;
+      }
+      go.textContent = "Starting the expert…";
+      const res = await act("expert_accept", { id: go.dataset.proposeGo });
+      proposals = proposals.filter(x => String(x.id) !== go.dataset.proposeGo);
+      toast(`The expert ${res.session_name} starts on ${res.model}; its chat opens here.`);
+      if (res.session_name) pick(res.session_name);
+    } catch (err) {  // act showed the error; the card stays, so the person can try again
+      btns.forEach(b => (b.disabled = false));
+      if (go) go.textContent = "Continue in an expert";
+    }
+  });
 
   // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it.
   function waitLine(j) {

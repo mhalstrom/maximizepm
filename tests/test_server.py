@@ -1255,6 +1255,54 @@ class LaunchInTmux(unittest.TestCase):
         self.assertIsNone(server.start_expert(self.c, "px4", "a topic of mark's", "shop", model="opus",
                                               actor="mark")["handover"])
 
+    def test_the_manager_proposes_an_expert_and_the_person_starts_or_dismisses_it(self):
+        """#4990: the manager only proposes; the card in its chat starts the expert with the talk so far (Continue in
+        an expert) or keeps the talk with the manager (Dismiss), and a dismissed topic is not proposed again."""
+        from river.routes import sessions as routes
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mgr")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        self.c.commit()
+        core.register(self.c, "mark", human=True)
+        work = core.item_add(self.c, "shop", "the pricing work", models={"model": "opus", "max_model": "opus"})["id"]
+        with self.assertRaisesRegex(RiverError, "the expert gets the talk so far: add --summary"):
+            core.expert_propose(self.c, "px", "the pricing design", "shop", model="opus", actor="mgr")
+        with self.assertRaisesRegex(RiverError, "say which model the expert px runs"):
+            core.expert_propose(self.c, "px", "the pricing design", "shop", summary="s", actor="mgr")
+        p = core.expert_propose(self.c, "px", f"the pricing design (#{work})", "shop", summary="two plans; free open",
+                                canvases=[], sessions=["mgr"], actor="mgr")
+        self.assertEqual((p["state"], p["model"], p["manager"]), ("open", "opus", "mgr"))
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='px'").fetchone())  # nothing started
+        with self.assertRaisesRegex(RiverError, "an expert px is proposed already"):
+            core.expert_propose(self.c, "px", "other", "shop", model="opus", summary="s", actor="mgr")
+        self.assertEqual([x["id"] for x in core.expert_proposals(self.c)], [p["id"]])
+        # Continue in an expert: it starts with the talk so far, and the manager hears it.
+        res = routes.OPS["expert_accept"](self.c, {"id": f"p{p['id']}"}, "mark")
+        self.assertEqual((res["session_name"], res["model"], res["proposal"]), ("px", "opus", p["id"]))
+        self.assertIn("two plans; free open", core._item(self.c, res["task"])["context"])
+        self.assertEqual(core.expert_proposals(self.c), [])
+        self.assertEqual(core._proposal(self.c, p["id"])["state"], "started")
+        note = [m for m in core.inbox(self.c, "mgr") if f"proposal p{p['id']}" in m["body"]]
+        self.assertTrue(note and "the expert px started" in note[0]["body"])
+        with self.assertRaisesRegex(RiverError, "is started already"):
+            routes.OPS["expert_accept"](self.c, {"id": p["id"]}, "mark")
+        # Dismiss: the manager talks on, and the same topic is refused in this talk.
+        q = core.expert_propose(self.c, "rx", "the refund rules", "shop", model="opus", summary="30 days", actor="mgr")
+        routes.OPS["expert_dismiss"](self.c, {"id": q["id"], "why": "I keep it here"}, "mark")
+        self.assertEqual(core._proposal(self.c, q["id"])["state"], "dismissed")
+        self.assertTrue(any("continue the talk yourself" in m["body"] for m in core.inbox(self.c, "mgr")))
+        with self.assertRaisesRegex(RiverError, "the person dismissed the expert on this topic"):
+            core.expert_propose(self.c, "rx2", "The refund rules", "shop", model="opus", summary="s", actor="mgr")
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='rx'").fetchone())
+        # The Sessions tab reads the open proposals with the sessions.
+        r = core.expert_propose(self.c, "tx", "the tax rules", "shop", model="opus", summary="s", actor="mgr")
+        sent = {}
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/sessions"
+        h._send = lambda code, body, *a, **k: sent.update(code=code, body=body)
+        routes.running(h, "/api/sessions")
+        self.assertEqual([x["id"] for x in sent["body"]["proposals"]], [r["id"]])
+
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]
         y = core.item_add(self.c, "shop", "second")["id"]

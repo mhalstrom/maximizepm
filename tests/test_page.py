@@ -219,6 +219,38 @@ try {
         # and the list has no fixed height (#4885).
         self.assertEqual(self.drive(driver, "/sessions/ag", size="1280,900"), {"ok": True})
 
+    def test_the_managers_proposal_of_an_expert_is_a_card_in_its_chat(self):
+        """#4990: the manager proposes an expert; its chat shows a card with the topic and the model. Dismiss closes
+        it (on a phone, 390 px); Continue in an expert starts the expert and opens its chat (1280 px)."""
+        core.config_set(self.c, "launch_in", "tmux")
+        core.project_path(self.c, "site", self.dir.name)
+        p = core.expert_propose(self.c, "rx", "the refund rules", "site", model="opus", summary="30 days", actor="ag")
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  await until(() => q("#sessTitle").textContent === "ag" && !q("#sessPropose").classList.contains("hidden"), "the card");
+  const card = q("#sessPropose");
+  check(/^the (refund rules|pricing design)$/.test(card.querySelector(".sp-topic").textContent) && card.textContent.includes("opus"), "topic and model");
+  check(q("[data-propose-go]").textContent === "Continue in an expert", "the start button");
+  check(document.documentElement.scrollWidth <= innerWidth && card.scrollWidth <= card.clientWidth + 1, "no sideways scroll");
+  const want = new URL(location).searchParams.get("act") || location.hash.slice(1);
+  if (want === "go") {
+    q("[data-propose-go]").click();
+    try { await until(() => q("#sessTitle").textContent === "px", "the expert's chat opens"); }
+    catch (e) { throw new Error(e.message + "; the page says: " + q("#toast").textContent + "; title " + q("#sessTitle").textContent); }
+    check(q("#sessPropose").classList.contains("hidden"), "the expert's chat shows no card");
+  } else {
+    q("[data-propose-no]").click();
+    await until(() => q("#sessPropose").classList.contains("hidden"), "Dismiss closes the card");
+  }
+  post({ ok: true });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        self.assertEqual(self.drive(driver, "/sessions/ag#no", size="390,844"), {"ok": True})
+        self.assertEqual(core._proposal(self.c, p["id"])["state"], "dismissed")
+        p = core.expert_propose(self.c, "px", "the pricing design", "site", model="opus", summary="two plans", actor="ag")
+        self.assertEqual(self.drive(driver, "/sessions/ag#go", size="1280,900"), {"ok": True})
+        self.assertEqual(core._proposal(self.c, p["id"])["state"], "started")
+        self.assertEqual(core.expert_task(self.c, "px") is not None, True)
+
     def test_the_sessions_tab_on_a_phone(self):
         """#4885: at phone width the page is no wider than the screen, each field has 16 px text (Safari on iOS zooms
         into a smaller one), and the Sessions tab shows the chat of one session or the list: Sessions goes back to

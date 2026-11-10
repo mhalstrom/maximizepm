@@ -447,6 +447,20 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     return {**t, "session_name": name, "topic": topic, "model": model, "model_why": model_why, "handover": handed}
 
 
+def accept_expert(conn, pid, who=None, runner=None, launch_in=None):
+    """Continue in an expert (#4990): the person took the manager's proposal. Start the expert as maxpm expert start
+    does, with the talk so far the proposal holds (actor: the manager, which handed the talk over), then close the
+    proposal; the manager hears it. A start that fails keeps the proposal open, so the person can try again."""
+    p = core._proposal(conn, pid)
+    if p["state"] != "open":
+        raise RiverError(f"expert proposal p{p['id']} is {p['state']} already")
+    res = start_expert(conn, p["name"], p["topic"], p["project"], actor=p["manager"], model=p["model"],
+                       effort=p["effort"], item=p["item_id"], summary=p["summary"], sources=p["sources"],
+                       canvases=p["canvases"], sessions=p["sessions"], runner=runner, launch_in=launch_in)
+    core.expert_proposal_end(conn, p["id"], "started", who, expert=res["session_name"])
+    return {**res, "proposal": p["id"]}
+
+
 def _fit_task_model(conn, task, name, model, actor):
     """The person chose the expert's model: a min or max limit of its task that excludes it moves to that model."""
     ladder = core.parse_ladder(core.setting(conn, "model_ladder"))

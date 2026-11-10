@@ -86,6 +86,13 @@ button.srow-it { cursor: pointer; }
 .msg-event { text-align: center; font-size: 12px; color: var(--muted); margin: 0 0 10px; }
 .sess-wait { font-size: 13px; margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); }
 .sess-wait.hidden { display: none; }
+/* The manager's proposal of an expert (#4990): a card above the message box, Continue in an expert or Dismiss. */
+.sess-propose { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 13px; }
+.sess-propose.hidden { display: none; }
+.sess-propose .sp-topic { font-weight: 600; overflow-wrap: anywhere; }
+.sess-propose .sp-meta { margin-top: 2px; font-size: 12px; }
+.sess-propose .sp-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.sess-propose .sp-acts .btn { font-size: 13px; }
 .sess-head .btn, .sess-item .btn { font-size: 13px; }
 .sess-itembtn { text-align: left; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .sess-itembtn .chip { margin-left: 4px; }

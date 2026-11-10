@@ -1071,6 +1071,26 @@ def build_parser():
     g.add_argument("--tab", dest="launch_in", action="store_const", const="tab")
     g.add_argument("--window", dest="launch_in", action="store_const", const="window")
     g.add_argument("--tmux", dest="launch_in", action="store_const", const="tmux")
+    y = xs.add_parser("propose", help="the manager proposes an expert for a long talk: the person's chat with you shows "
+                      "a card, Continue in an expert or Dismiss; nothing starts until the person clicks")
+    y.add_argument("name", help="the expert's name (letters, digits, '.', '_', '-')")
+    y.add_argument("--topic", help="what the talk is about: the title of the expert-tier task (#<id> names the work "
+                   "it continues, and gives its model)")
+    y.add_argument("--item", type=int, help="the task it takes, instead of a new one")
+    y.add_argument("--summary", help="the talk so far: what was said, what is decided, what is open")
+    y.add_argument("--summary-file", help="the summary from a file ('-': stdin)")
+    y.add_argument("--source", action="append", default=[], help="a file, URL, or item the talk used (repeatable)")
+    y.add_argument("--canvas", action="append", default=[], help="a canvas the expert reads (repeatable)")
+    y.add_argument("--session", action="append", default=[], help="a session whose talk the expert reads (repeatable)")
+    y.add_argument("--project", help="the project whose folder it works in")
+    y.add_argument("--model", help="its model; else the model of the work it continues")
+    y.add_argument("--effort", help="its effort level")
+    xs.add_parser("proposals", help="the open expert proposals")
+    y = xs.add_parser("accept", help="start a proposed expert (the page's Continue in an expert)")
+    y.add_argument("id", help="the proposal (p<id>)")
+    y = xs.add_parser("dismiss", help="dismiss a proposed expert: the manager continues the talk itself")
+    y.add_argument("id", help="the proposal (p<id>)")
+    y.add_argument("--why", help="why (the manager hears it)")
     y = xs.add_parser("adopt", help="make this session an expert: the task it holds becomes expert-tier (run it in the "
                       "session, with --as <its name>)")
     y.add_argument("--topic", help="with no task in hand: add an expert-tier task with this title and take it")
@@ -2025,6 +2045,24 @@ def _expert_cmd(conn, a, actor):
             core.item_edit(conn, held["id"], actor=actor, tier="expert")
             core.expert_make(conn, actor, held["title"], core._project_name(conn, held["project_id"]), actor)
         return {"adopted": core.expert_view(conn, core._agent(conn, actor))}
+    if e in ("propose", "proposals", "accept", "dismiss"):
+        if e == "proposals":
+            return {"expert_proposals": core.expert_proposals(conn)}
+        if e == "dismiss":
+            return {"expert_proposal": core.expert_proposal_end(conn, a.id, "dismissed", actor, a.why)}
+        if e == "accept":
+            if in_sandbox():
+                return {"expert_started": {**ask_server(conn, "expert_accept", {"id": a.id}, actor, timeout=40),
+                                           "via_serve": True}}
+            from . import server
+            return {"expert_started": server.accept_expert(conn, a.id, actor)}
+        summary = a.summary
+        if a.summary_file:
+            if summary:
+                raise RiverError("give the summary once: --summary \"...\" or --summary-file <path>")
+            summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text()
+        return {"expert_proposal": core.expert_propose(conn, a.name, a.topic, a.project, a.item, a.model, a.effort,
+                                                       summary, a.source, a.canvas, a.session, actor)}
     if e == "end":
         if in_sandbox():
             core._expert(conn, a.name)
@@ -2913,6 +2951,20 @@ def render_expert(res):
             print(n["text"].rstrip())
         else:
             print(f"{n['name']} has no notes yet. Write them: maxpm --as {n['name']} expert notes {n['name']} --put <file>")
+    elif "expert_proposals" in res:
+        if not res["expert_proposals"]:
+            print("No open expert proposals.")
+        for x in res["expert_proposals"]:
+            print(f"p{x['id']} {x['name']} ({x['model']}) by {x['manager']}: {x['topic']}")
+    elif "expert_proposal" in res:
+        x = res["expert_proposal"]
+        if x["state"] == "open":
+            print(f"proposed p{x['id']}: the expert {x['name']} on {x['model']} ({x['model_why']}): {x['topic']}")
+            print(f"  nothing starts yet: your chat on the Sessions tab shows the card (Continue in an expert, Dismiss). "
+                  f"Tell the person in one line, and wait for the click. A terminal does it too: maxpm expert accept "
+                  f"p{x['id']}   or   maxpm expert dismiss p{x['id']}")
+        else:
+            print(f"proposal p{x['id']} ({x['name']}: {x['topic']}) is {x['state']}")
     elif "expert_started" in res:
         t = res["expert_started"]
         how = "a tmux pane" if t.get("launch_in") == "tmux" else f"a new Terminal {t.get('launch_in') or 'tab'}"

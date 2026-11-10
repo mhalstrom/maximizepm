@@ -676,6 +676,29 @@ CREATE TABLE IF NOT EXISTS close_checks (
 -- One row per (event, channel): each event notifies once per channel; a failed send retries.
 -- A project's release review, step by step: 'do' is a written instruction the reviewer confirms,
 -- 'run' a command that must exit 0 in the project folder. pos orders the steps (1 first).
+-- A proposal of the manager to hand a long talk to an expert (#4990): the person starts it with one click in the
+-- manager's chat (Continue in an expert), or dismisses it. It holds what maxpm expert start needs.
+CREATE TABLE IF NOT EXISTS expert_proposals (
+  id          INTEGER PRIMARY KEY,
+  manager     TEXT NOT NULL,             -- the session that proposed it: its chat shows the card
+  name        TEXT NOT NULL,             -- the expert's name
+  topic       TEXT,
+  project     TEXT,
+  item_id     INTEGER,                   -- the task it takes (--item), else a new expert-tier task with the topic
+  model       TEXT,
+  model_why   TEXT,
+  effort      TEXT,
+  summary     TEXT,
+  sources     TEXT,                      -- JSON lists
+  canvases    TEXT,
+  sessions    TEXT,
+  state       TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','started','dismissed')),
+  created_at  TEXT NOT NULL,
+  decided_at  TEXT,
+  decided_by  TEXT,
+  why         TEXT                       -- a start that failed, or why it was dismissed
+);
+
 CREATE TABLE IF NOT EXISTS review_steps (
   id          INTEGER PRIMARY KEY,
   project_id  INTEGER NOT NULL REFERENCES projects(id),
@@ -12046,6 +12069,100 @@ def expert_handover_check(conn, canvases=(), sessions=()):
     for name in sessions or ():
         if name and name.strip() and not conn.execute("SELECT 1 FROM agents WHERE name=?", (name.strip(),)).fetchone():
             raise RiverError(f"no session {name.strip()}; the sessions: maxpm who --all")
+
+
+def _proposal(conn, pid):
+    r = conn.execute("SELECT * FROM expert_proposals WHERE id=?", (int(str(pid).lstrip("pP")),)).fetchone()
+    if r is None:
+        raise RiverError(f"no expert proposal {pid}; the open ones: maxpm expert proposals")
+    out = dict(r)
+    for k in ("sources", "canvases", "sessions"):
+        out[k] = json.loads(out[k] or "[]")
+    return out
+
+
+def expert_proposals(conn, manager=None, state="open"):
+    """The expert proposals (#4990), newest first: the open ones (state None: all), of one manager or of all."""
+    q, args = "SELECT id FROM expert_proposals WHERE 1=1", []
+    if state:
+        q += " AND state=?"; args.append(state)
+    if manager:
+        q += " AND manager=?"; args.append(manager)
+    return [_proposal(conn, r["id"]) for r in conn.execute(q + " ORDER BY id DESC", args).fetchall()]
+
+
+def expert_propose(conn, name, topic=None, project=None, item=None, model=None, effort=None, summary=None,
+                   sources=(), canvases=(), sessions=(), actor=None):
+    """maxpm expert propose (#4990, mark: 'long talks the manager says lets continue in a expert. gives you a button
+    to click and it takes you to the expert with the context. (you can dismiss if you just want to talk to manager)').
+    The manager records what maxpm expert start needs and starts nothing: its chat on the Sessions tab shows a card
+    with the topic and the model, Continue in an expert and Dismiss. A topic or a name that the person dismissed
+    in this manager's talk is refused. Returns the proposal."""
+    if not actor:
+        raise RiverError("propose as the session the person talks with: maxpm --as <you> expert propose <name> ...")
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name or ""):
+        raise RiverError("an expert's name uses letters, digits, '.', '_', '-' (up to 64)")
+    expert_handover_check(conn, canvases, sessions)
+    old = conn.execute("SELECT role FROM agents WHERE name=?", (name,)).fetchone()
+    if old is not None and old["role"] != "expert":
+        raise RiverError(f"{name} is a session that runs now ({old['role'] or 'no role'}); pick another name")
+    task = _item(conn, item) if item is not None else None
+    topic = (topic or "").strip() or (task["title"] if task is not None else "")
+    if not topic:
+        raise RiverError("say what the talk is about: --topic \"...\" (or --item <id> of the task it takes)")
+    is_manager = conn.execute("SELECT 1 FROM agents WHERE name=? AND role='manager' AND kind='ai'", (actor,)).fetchone()
+    if is_manager and task is None and not (summary or "").strip():
+        raise RiverError(f"the expert gets the talk so far: add --summary \"<what was said, what is decided, what is "
+                         f"open>\" (or --summary-file <path>), and --canvas <name>, --source <file or url>, --session "
+                         f"{actor} for what it must read")
+    for r in conn.execute("SELECT id, name, topic FROM expert_proposals WHERE manager=? AND state='dismissed'",
+                          (actor,)).fetchall():
+        if r["name"] == name or (r["topic"] or "").strip().lower() == topic.lower():
+            raise RiverError(f"the person dismissed the expert on this topic (proposal p{r['id']}): continue the talk "
+                             f"yourself, and do not propose it again in this talk")
+    if conn.execute("SELECT 1 FROM expert_proposals WHERE name=? AND state='open'", (name,)).fetchone():
+        raise RiverError(f"an expert {name} is proposed already: maxpm expert proposals")
+    linked = task or next((_item(conn, int(m)) for m in re.findall(r"#(\d+)", topic)
+                           if conn.execute("SELECT 1 FROM items WHERE id=?", (int(m),)).fetchone()), None)
+    if model:
+        why = "the manager chose it" if is_manager else "chosen"
+    else:
+        model, why = session_model(conn, linked) if linked is not None else (None, None)
+        if not model:
+            raise RiverError(f"say which model the expert {name} runs: --model <name> (the card shows it, and the "
+                             f"person can change it); or name the item whose work it takes up (#<id>, or --item <id>)")
+    with tx(conn):
+        cur = conn.execute(
+            "INSERT INTO expert_proposals(manager,name,topic,project,item_id,model,model_why,effort,summary,sources,"
+            "canvases,sessions,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (actor, name, topic, project, task["id"] if task is not None else None, model, why, effort,
+             (summary or "").strip() or None, json.dumps(list(sources or ())), json.dumps(list(canvases or ())),
+             json.dumps(list(sessions or ())), iso(now())))
+        _event(conn, task["id"] if task is not None else None, actor,
+               f"proposed the expert {name} on {topic!r} ({model}): the person starts it or dismisses it")
+    return _proposal(conn, cur.lastrowid)
+
+
+def expert_proposal_end(conn, pid, state, actor=None, why=None, expert=None):
+    """Close an open proposal: started (the person clicked Continue in an expert) or dismissed. The manager hears
+    it: after a start, it points the next turn about the topic to the expert; after Dismiss, it talks on itself."""
+    if state not in ("started", "dismissed"):
+        raise RiverError("a proposal ends started or dismissed")
+    with tx(conn):
+        p = _proposal(conn, pid)
+        if p["state"] != "open":
+            raise RiverError(f"expert proposal p{p['id']} is {p['state']} already")
+        conn.execute("UPDATE expert_proposals SET state=?, decided_at=?, decided_by=?, why=? WHERE id=?",
+                     (state, iso(now()), actor, why, p["id"]))
+        who = actor or "the person"
+        text = (f"{who} took your proposal p{p['id']}: the expert {expert or p['name']} started on {p['topic']!r} "
+                f"({p['model']}). Answer the next turn about it with one line that points to the expert."
+                if state == "started" else
+                f"{who} dismissed your proposal p{p['id']} of the expert {p['name']} on {p['topic']!r}"
+                + (f" ({why})" if why else "") + ": continue the talk yourself, and do not propose it again in this talk.")
+        if conn.execute("SELECT 1 FROM agents WHERE name=?", (p["manager"],)).fetchone():
+            _send(conn, "note", actor or "maxpm", text, to=p["manager"], item_id=p["item_id"])
+    return _proposal(conn, p["id"])
 
 
 def expert_handover(conn, task_id, actor=None, summary=None, sources=(), canvases=(), sessions=()):

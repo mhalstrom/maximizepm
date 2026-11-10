@@ -275,24 +275,32 @@ one topic fills it, so an expert takes that talk.
   or write a long text for it; or the user says they want to talk it through.
   A short question, a decision in the decision form, or an order (launch, stop,
   move) is not a long talk: do it yourself.
-- **How:** one line to the user, then the expert. The line names the topic, the
-  expert, its model, and where it opens, for example: "This is a long talk
-  about the pricing design, so I hand it to the expert pricing (Opus); it opens
-  in a new tab with what we said." Do not ask first; the user can say no.
+- **How:** propose the expert; do not start it (mark: "gives you a button to
+  click and it takes you to the expert with the context. (you can dismiss if
+  you just want to talk to manager)"). Say one line, for example: "This is a
+  long talk about the pricing design: you can continue it in the expert pricing
+  (Opus), with what we said." Then:
+  `maxpm expert propose <name> --topic "<topic>" --summary-file <path> --source <file or url> --canvas <name> --session <you>`
+  Your chat on the Sessions tab shows a card with the topic and the model:
+  **Continue in an expert** starts the expert with the talk so far and opens
+  its chat; **Dismiss** keeps the talk with you. Nothing starts until the user
+  clicks (in a terminal: `maxpm expert accept p<id>` or `maxpm expert dismiss
+  p<id>`). You get a note either way. After Dismiss, talk on yourself, and do
+  not propose the same topic again in this talk (MaximizePM refuses it).
+  `maxpm expert start` (same options) starts one at once, when the user asks
+  for that.
 - The expert's task holds the talk so far, so the expert does not need your
   context. Write a summary of what the user said, what is decided, and what is
   open, in the user's words where they matter, and name what the expert must
-  read:
-  `maxpm expert start <name> --topic "<topic>" --summary-file <path> --source <file or url> --canvas <name> --session <you>`
-  (`--summary "..."` for a short one; each of `--source`, `--canvas`, and
+  read (`--summary "..."` for a short one; each of `--source`, `--canvas`, and
   `--session` repeats). The talk goes into the task's context, and the
   expert's `maxpm go` prints it. With `--session <you>`, the task names your
   transcript, so the expert can read the exact words. MaximizePM refuses an
   expert on a new topic from you without a summary. Name the item that the
   talk continues in the topic (`#<id>`), or use `--item <id>`: the expert then
   gets the model of that work (the rule below).
-- After the start, end your part of the topic: answer the next turn about it
-  with one line that points to the expert. Its decisions come back as items
+- After the user starts it, end your part of the topic: answer the next turn
+  about it with one line that points to the expert. Its decisions come back as items
   and notes; you act on those.
 
 ## Rules
