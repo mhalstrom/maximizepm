@@ -74,8 +74,8 @@ Stop when the user tells you to, and tell the user what you did.
   another type): ready work there needs that agent type; run the launch line
   it prints (`maxpm launch --item <id> --agent Codex`).
 - **Releases move by themselves**: `maxpm serve` gives a ready release review to a
-  session that waits in a project of the release and worked on nothing in it, else
-  starts a reviewer (`auto_review`). When the deploy item is ready, it alerts the
+  session that waits in a project of the release and held no task before, else
+  starts a reviewer (`auto_review`). A review always starts in a new session. When the deploy item is ready, it alerts the
   target owner once; with no owner, or an owner that cannot take it (gone, never
   connected, or idle at its prompt), it starts a deployer session and gives it the
   target (`maxpm target deployer <target> launch|standing|off`; standing starts the

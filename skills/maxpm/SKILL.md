@@ -114,7 +114,10 @@ your type from your CLI's environment.
    With the setting `review` on, the deploy item first waits on one review
    of the whole release. `maxpm go` gives a ready review before new work
    (role REVIEWER; `--role reviewer` takes any), but never to an agent that
-   claimed or finished an item the release ships. Follow the review process in
+   claimed or finished an item the release ships, and never to a session that
+   held a task before: a review starts in a new session, with a clean context
+   (`maxpm serve` starts one). After its review, a session takes any work.
+   Follow the review process in
    its context and the review steps the brief lists for each project, then
    `maxpm review pass <id> --confirm all --output "<what you checked>"`
    (confirms the written steps; runs the command steps and `review_cmd`, which

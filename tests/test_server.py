@@ -326,8 +326,9 @@ class LaunchAgent(unittest.TestCase):
         core.done(self.c, a, "commit", "dev", ship_it=True)
         rv2 = next(i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "review")
         dep2 = next(i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "deploy")
-        core.claim(self.c, rv2, "rev")
-        core.review_pass(self.c, rv2, "ok", "rev")
+        core.register(self.c, "rev2")  # a review starts in a new session (#4968)
+        core.claim(self.c, rv2, "rev2")
+        core.review_pass(self.c, rv2, "ok", "rev2")
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET role='idle' WHERE name='ops'")
         self._quiet("ops", 5)
@@ -401,7 +402,8 @@ class LaunchAgent(unittest.TestCase):
         core.register(self.c, "checker")
         self.assertEqual(core.wait(self.c, self.dir.name, "checker", focus="review:web", **nap)["why"],
                          f"#{rv2} is ready: {core._item(self.c, rv2)['title']}")
-        core.claim(self.c, rv2, "rev")
+        core.register(self.c, "rev2")  # a review starts in a new session (#4968)
+        core.claim(self.c, rv2, "rev2")
         self.assertEqual(core.wait(self.c, self.dir.name, "checker", focus="review:web", **nap)["result"], "again")
         z = core.item_add(self.c, "site", "about page")["id"]
         core.register(self.c, "plain")

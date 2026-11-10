@@ -283,7 +283,7 @@ DEFAULT_SETTINGS = {
     "release_commits": "",
     # Releases move with no manager (maxpm serve, every notify_interval). auto_review on: a ready release review
     # that nobody holds or has reserved goes to a session that waits for work in a project the release ships and
-    # worked on nothing in it (release_authors), else to a new session. What serve does for a deploy item is each
+    # held no task before (used_session, release_authors), else to a new session. What serve does for a deploy item is each
     # target's deployer mode (maxpm target deployer). max_sessions: serve starts no session by itself for a release
     # while this many agent sessions are live (0: no limit); a person's Start and maxpm launch do not count it.
     "auto_review": "on",
@@ -4010,9 +4010,10 @@ def push(conn, item_id, to, note=None, actor=None):
         if q and q["agent"] != to:  # a push would hold it against the queue, and nobody could claim it
             raise RiverError(f"#{item_id} is in the queue of {q['agent']}; remove it there first: "
                              f"maxpm queue remove {q['agent']} {item_id}")
-        if author_refusal(conn, it, to):
-            raise RiverError(f"refused: {to} worked on what release review #{item_id} covers; push it to an agent "
-                             f"that did not, or let maxpm serve start one")
+        why = reviewer_refusal(conn, it, to)
+        if why:
+            raise RiverError(f"refused: {to}: {why}. Push it to a session that held no task and did not work on the "
+                             f"release, or let maxpm serve start one")
         _refuse_model_to(conn, it, to, "push")
         ttl = parse_duration(setting(conn, "reserve_ttl", item_id=it["id"], agent=to))
         until = now() + ttl
@@ -5164,9 +5165,10 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
             raise RiverError(f"{agent} is a person; a queue is for an agent session")
         if it["doer"] == "human":
             raise RiverError(f"#{it['id']} is for a person")
-        if author_refusal(conn, it, agent):
-            raise RiverError(f"refused: {agent} worked on what release review #{it['id']} covers; queue it for an "
-                             f"agent that did not")
+        why = reviewer_refusal(conn, it, agent)
+        if why:
+            raise RiverError(f"refused: {agent}: {why}. Queue it for a session that held no task and did not work "
+                             f"on the release")
         _refuse_model_to(conn, it, agent, "queue")
         q = conn.execute("SELECT agent FROM queue_entries WHERE item_id=?", (it["id"],)).fetchone()
         if q:
@@ -6557,16 +6559,18 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
             if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
                 skipped.append({"id": a["id"], "title": a["title"], "why": f"{still[a['id']]} still works on it in its session"})
         pool = [a for a in pool if still.get(a["id"], actor) == actor]
-        for a in [a for a in pool if author_refusal(conn, a, actor)]:
+        for a in [a for a in pool if a["kind"] == "review" and reviewer_refusal(conn, a, actor)]:
             if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
-                skipped.append({"id": a["id"], "title": a["title"], "why": "you worked on the release it reviews"})
+                skipped.append({"id": a["id"], "title": a["title"],
+                                "why": "you worked on the release it reviews" if author_refusal(conn, a, actor)
+                                else "a review starts in a new session; this one held a task"})
             pool.remove(a)
         # The agent's own queue comes first, in its order and from any project; then items pushed to it.
         # The sort is stable, so graph order holds inside each group.
         qpos = {r["item_id"]: n for n, r in enumerate(conn.execute(
             "SELECT item_id FROM queue_entries WHERE agent=? AND item_id IS NOT NULL ORDER BY pos", (actor,)))}
         have = {a["id"] for a in pool}
-        pool = [a for a in _queue_ready(conn, actor) if a["id"] not in have and not author_refusal(conn, a, actor)] + pool
+        pool = [a for a in _queue_ready(conn, actor) if a["id"] not in have and not reviewer_refusal(conn, a, actor)] + pool
         pool = fits(pool)
         if folderless:
             for a in [a for a in pool if needs_folder(a)]:
@@ -6620,7 +6624,7 @@ def claim(conn, item_id, actor=None):
                         f"(both edit the same files)" if a["busy_conflicts"] and a["status"] == "open"
                    else f"status is {a['status']}" + (f" (held by {a['assignee']})" if a["assignee"] else ""))
             raise RiverError(f"item {item_id} is not ready: {why}. See: maxpm blockers {item_id}")
-        why = author_refusal(conn, a, actor)
+        why = reviewer_refusal(conn, a, actor)
         if why:
             raise RiverError(f"refused: {why}. Take other work: maxpm go")
         first = still_worked(conn).get(a["id"], actor)
@@ -7355,7 +7359,10 @@ def _review_claim(conn, actor, names, any_project=False, brief=None):
     for a in ann.values():
         if a["kind"] != "review" or not a["ready"] or a["reserved_for"] not in (None, actor):
             continue
-        if author_refusal(conn, a, actor):  # the author's go after maxpm ship: serve starts another reviewer
+        why = reviewer_refusal(conn, a, actor)  # an author, or a used session: serve starts another reviewer
+        if why:
+            if brief is not None:
+                brief.setdefault("review_refused", why)
             continue
         if any_project or any(ann[b]["project"] in names for b in a["waits_on"]):
             ready.append(a)
@@ -9948,7 +9955,7 @@ def launch_migration_note(conn):
 def waiting_agent_for(conn, project, item_id=None):
     """An active session that waits for work in this project (maxpm wait), longest waiting first; with
     item_id, only one whose model the item's limits allow, and for a release review, none that worked on
-    the release (release_authors)."""
+    the release (release_authors) or held a task before (used_session, #4968)."""
     it = _item(conn, item_id) if item_id is not None else None
     if it is not None and it["tier"] == "expert":
         return None  # a new session starts for an expert-tier task; a waiting worker does not get it (#4959)
@@ -9957,7 +9964,8 @@ def waiting_agent_for(conn, project, item_id=None):
                           "ORDER BY waiting_since").fetchall():
         a = agent_status(conn, r["name"])
         if a["state"] == "active" and not a["holds"] and project in (r["waiting_in"] or "").split(","):
-            if r["name"] not in authors and (it is None or not _model_refusal(conn, it, r["name"])):
+            if (r["name"] not in authors and (it is None or not _model_refusal(conn, it, r["name"]))
+                    and (it is None or it["kind"] != "review" or used_session(conn, r["name"], it["id"]) is None)):
                 return r["name"]
     return None
 
@@ -10077,6 +10085,34 @@ def author_refusal(conn, item, agent):
         return None
     return (f"you worked on what release review #{item['id']} covers; a review needs an agent that did not write the "
             f"release (maxpm serve starts one)")
+
+
+def used_session(conn, agent, item_id=None):
+    """The first task that this agent session held, other than item_id, or None: an item it claimed since it
+    last registered (a name used again is a new session), or one it holds now (a give moves a lease to it)."""
+    start = conn.execute("SELECT MAX(id) FROM events WHERE item_id IS NULL AND actor=? AND change LIKE 'registered as%'",
+                         (agent,)).fetchone()[0] or 0
+    r = conn.execute("SELECT item_id FROM events WHERE actor=? AND id>? AND item_id IS NOT NULL AND item_id IS NOT ? "
+                     "AND change LIKE 'claimed%' ORDER BY id LIMIT 1", (agent, start, item_id)).fetchone()
+    if r is None:
+        r = conn.execute("SELECT id item_id FROM items WHERE assignee=? AND id IS NOT ? AND status IN ('in_progress','held') "
+                         "ORDER BY id LIMIT 1", (agent, item_id)).fetchone()
+    return r["item_id"] if r else None
+
+
+def reviewer_refusal(conn, item, agent):
+    """Why this agent may not take this release review, or None: it worked on the release (author_refusal), or
+    its session held a task before (used_session). A review starts in a new session, with a clean context (#4968,
+    mark: 'all reviews should start with a clean context reviewer'); after its review a session may take any work.
+    A person may take any review."""
+    why = author_refusal(conn, item, agent)
+    if why or item["kind"] != "review" or not _is_ai(conn, agent):
+        return why
+    used = used_session(conn, agent, item["id"])
+    if used is None:
+        return None
+    return (f"this session held #{used} before; release review #{item['id']} starts in a new session with a clean "
+            f"context (maxpm serve starts one)")
 
 
 def _review_folder(conn, item):
@@ -10822,7 +10858,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             return brief
         if role == "reviewer":
             brief.update(role="idle", item=None, held_by_others=[],
-                         why=brief.get("claim_refused") or "no release review is ready")
+                         why=brief.get("claim_refused") or brief.get("review_refused") or "no release review is ready")
             _set_role_note(conn, actor, "idle", None)
             return brief
     if role in (None, "owner", "worker"):
@@ -11031,7 +11067,7 @@ def _work_for(conn, actor, names, role=None):
                         if a["kind"] == "deploy" and a["target"] in targets and a["ready"]), None)
         else:
             got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"]) if a["kind"] == "review"
-                        and a["ready"] and a["reserved_for"] in (None, actor) and not author_refusal(conn, a, actor)), None)
+                        and a["ready"] and a["reserved_for"] in (None, actor) and not reviewer_refusal(conn, a, actor)), None)
         if got:
             return f"#{got['id']} is ready: {got['title']}"
         u = unread(conn, actor)

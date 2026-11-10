@@ -3298,7 +3298,7 @@ class ReleaseCadence(Base):
         super().setUp()
         core.target_add(self.c, "web", "push, then smoke test")
         core.project_add(self.c, "site", target="web", path=self.dir.name)
-        for n in ("dev", "rev", "ops"):
+        for n in ("dev", "rev", "rev0", "ops"):  # rev0 reviews the first release; a review starts in a new session
             core.register(self.c, n)
         core.register(self.c, "mark", human=True)
         core.target_own(self.c, "web", "ops")
@@ -3323,8 +3323,8 @@ class ReleaseCadence(Base):
         a, dep = self.shipped("first")
         if review:
             rv = dep["release"]["start"]
-            core.claim(self.c, rv, "rev")
-            core.review_pass(self.c, rv, "fine", "rev", self.dir.name)
+            core.claim(self.c, rv, "rev0")
+            core.review_pass(self.c, rv, "fine", "rev0", self.dir.name)
         core.claim(self.c, dep["id"], "ops")
         core.done(self.c, dep["id"], "release v1", "ops")
         return dep["id"]
@@ -3725,6 +3725,60 @@ class ReleaseReview(Base):
         self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
         core.release(self.c, self.review, actor="rev")
         self.assertEqual(core.claim(self.c, self.review, "mark")["assignee"], "mark")
+
+    def test_a_review_starts_in_a_new_session(self):
+        # #4968, mark: 'all reviews should start with a clean context reviewer'. A session that held a task gets no
+        # review from go, next, wait, claim, a push, a queue, or Dispatch's waiting session; a fresh one does.
+        x = self.add("site", "other work")
+        core.claim(self.c, x, "rev")
+        core.done(self.c, x, "did it", "rev")
+        why = core.reviewer_refusal(self.c, core._item(self.c, self.review), "rev")
+        self.assertIn(f"this session held #{x} before", why)
+        self.assertNotEqual(core.go(self.c, self.dir.name, "rev")["role"], "reviewer")
+        b = core.go(self.c, self.dir.name, "rev", role="reviewer")
+        self.assertEqual(b["role"], "idle")
+        self.assertIn("starts in a new session", b["why"])
+        skipped = []
+        self.assertEqual(core.next_item(self.c, None, claim=True, actor="rev", limit=5, skipped=skipped), [])
+        self.assertIn((self.review, "a review starts in a new session; this one held a task"),
+                      [(i["id"], i["why"]) for i in skipped])
+        self.assertIsNone(core._work_for(self.c, "rev", ["site"], role="reviewer"))
+        core.register(self.c, "mark", human=True)
+        for f in (lambda: core.claim(self.c, self.review, "rev"),
+                  lambda: core.push(self.c, self.review, "rev", actor="ops"),
+                  lambda: core.queue_add(self.c, "rev", self.review, actor="mark")):
+            with self.assertRaisesRegex(RiverError, "starts in a new session"):
+                f()
+        core.wait(self.c, self.dir.name, "rev", step="0s", sleep=lambda s: None)
+        self.assertIsNone(core.waiting_agent_for(self.c, "site", self.review))
+        # A session that holds a task now (a give moved it there) is used too.
+        y = self.add("site", "given work")
+        core.register(self.c, "fresh")
+        core.claim(self.c, y, "ops")
+        core.give(self.c, y, "fresh", actor="ops")
+        self.assertIn(f"held #{y}", core.reviewer_refusal(self.c, core._item(self.c, self.review), "fresh"))
+        # A new session takes the review; after it, the session takes any work, and fixes.
+        core.register(self.c, "rev2")
+        core.wait(self.c, self.dir.name, "rev2", step="0s", sleep=lambda s: None)
+        self.assertEqual(core.waiting_agent_for(self.c, "site", self.review), "rev2")
+        b = core.go(self.c, self.dir.name, "rev2")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
+        fix = core.review_fail(self.c, self.review, ["escape the form input"], "XSS", actor="rev2")["fixes"][0]["id"]
+        b = core.go(self.c, self.dir.name, "rev2")
+        self.assertEqual((b["role"], b["item"]["id"]), ("worker", fix))
+        core.done(self.c, fix, "fixed", "rev2")
+        # The review comes back: the used session does not get it; the same name in a new session does.
+        self.assertTrue(core.annotate(self.c)[self.review]["ready"])
+        self.assertNotEqual((core.go(self.c, self.dir.name, "rev2").get("item") or {}).get("id"), self.review)
+        self.assertNotIn("rev2", [core._item(self.c, self.review)["assignee"]])
+        core.unregister(self.c, "rev")
+        core.register(self.c, "rev")
+        b = core.go(self.c, self.dir.name, "rev")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
+        # A person may take a review at any time.
+        core.release(self.c, self.review, actor="rev")
+        core.claim(self.c, self.add("site", "mark's task", doer="human"), "mark")
+        self.assertIsNone(core.reviewer_refusal(self.c, core._item(self.c, self.review), "mark"))
 
     def test_fail_adds_fixes_the_review_waits_on(self):
         core.claim(self.c, self.review, "rev")

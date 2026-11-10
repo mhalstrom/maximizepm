@@ -1738,7 +1738,8 @@ def start_deployer(conn, target, dep_id, why, runner=None):
 def auto_release(conn, runner=None):
     """One pass of the loop of maxpm serve (every notify_interval): releases move with no manager.
     - A ready release review that nobody holds or has reserved (auto_review on): a session that waits for work in
-      a project of the release and worked on nothing in it (release_authors) gets it pushed; else a new session.
+      a project of the release and held no task before (used_session, release_authors) gets it pushed; else a new
+      session. A review always starts in a session with a clean context (#4968).
     - A ready deploy item nobody holds, by its target's deployer mode (core.DEPLOYER_MODES): the target owner gets
       one alert when it can take it (core.owner_can_deploy); with no owner, or one that cannot, a new deployer
       session gets the target. With standing, that session starts while the release still waits on its review.
@@ -1781,7 +1782,7 @@ def auto_release(conn, runner=None):
         if waiting:
             try:
                 core.push(conn, a["id"], waiting, f"from maxpm serve: release {a['target']} waits on this review, "
-                          f"and you worked on nothing in it", "maxpm")
+                          f"and this session held no task before", "maxpm")
             except RiverError as e:  # taken or reserved since the look above
                 out["failed"][a["id"]] = str(e)
                 continue
