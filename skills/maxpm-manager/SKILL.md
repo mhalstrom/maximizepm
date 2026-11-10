@@ -82,6 +82,21 @@ Stop when the user tells you to, and tell the user what you did.
   deployer while the review runs). No session starts while `max_sessions` agent
   sessions are live (0: no limit). Each start or failure is a `release:` line in the
   item's history. Do not hand releases over yourself unless serve says it cannot.
+- **Each project sets its release gate and its cadence from its needs**, never
+  as one switch for all projects and never for one night. The gate is the setting
+  `release_approval` of the deploy project (`deploy-<target>`) or of a project of
+  the target: `review` (a release goes out when its review passes; this turns
+  review on for that project) or `person` (maxpm serve adds one item for a person
+  to each ready release, "Approve release <target>: ...", and the deploy waits on
+  that yes; after a failed deploy it asks again). `maxpm config set
+  release_approval review|person --project <name>`; there is no global value, and
+  `maxpm target show` says when a target has none. Ask the person which one fits
+  when you set up a target, with the project's needs: a service with users can
+  ship on review, and a release that only the person may approve takes `person`.
+  The cadence: `maxpm target cadence <target> <time>|off --reason "<the project's
+  needs>"` (a service with users: short, so a fix is live soon; a public tool
+  repository where a push is the release: off). `maxpm target show` and
+  `maxpm project show` print both, with the reason.
 - **Fewer, larger releases**: give the target a release cadence,
   `maxpm target cadence <target> 2h|6h|1d|1w|1mo|off`: the shortest time between two
   normal releases (2h is at most 12 a day, 6h is four). Ship requests then collect on

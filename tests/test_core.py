@@ -5993,6 +5993,103 @@ class DeployHook(Base):
         self.assertEqual(r[0]["deploy_end"], "failed")
 
 
+
+class ReleaseGate(DeployHook):
+    """#5003: the release gate (release_approval review|person) and the cadence of a target are set for each project
+    from its needs; with person, maxpm serve asks one yes for each ready release, and the deploy waits on it."""
+
+    def approvals(self):
+        return [r["id"] for r in core._approvals(self.c, self.deploy)]
+
+    def test_the_setting_is_per_project_only(self):
+        for bad in ({}, {"item": self.deploy}, {"agent": "ops"}):
+            with self.assertRaisesRegex(RiverError, "set for each project from its needs"):
+                core.config_set(self.c, "release_approval", "person", **bad)
+        with self.assertRaisesRegex(RiverError, "review .* or person"):
+            core.config_set(self.c, "release_approval", "always", project="site")
+        self.assertEqual(core.release_approval(self.c, "web"), {"approval": "", "project": None})
+        core.config_set(self.c, "release_approval", "person", project="site")
+        self.assertEqual(core.release_approval(self.c, "web"), {"approval": "person", "project": "site"})
+        r = core.config_set(self.c, "release_approval", "review", project="deploy-web")
+        self.assertEqual(r["also"], "review=on")
+        self.assertEqual(core.setting(self.c, "review", project_id=core._deploy_project_id(self.c, "web")), "on")
+        self.assertEqual(core.release_approval(self.c, "web"), {"approval": "review", "project": "deploy-web"},
+                         "the deploy project's value comes first")
+
+    def test_person_a_yes_for_each_release_then_the_hook_runs(self):
+        core.config_set(self.c, "release_approval", "person", project="site")
+        self.pass_review("rev")
+        self.assertIsNone(core.deploy_hook_start(self.c, self.deploy, "x"), "no release without the yes")
+        asked = core.release_yes_pass(self.c)
+        self.assertEqual(list(asked), [self.deploy])
+        yes = asked[self.deploy]
+        it = core.item_show(self.c, yes)
+        self.assertEqual((it["doer"], it["project"]), ("human", "deploy-web"))
+        self.assertTrue(it["title"].startswith("Approve release web: 1 item(s)"))
+        self.assertIn("It ships:", it["context"])
+        self.assertIn(f"Its review passed: #{self.review}", it["context"])
+        self.assertFalse(core.annotate(self.c)[self.deploy]["ready"])
+        self.assertEqual(core.release_yes_pass(self.c), {}, "it asks once")
+        self.assertIn(yes, [n["item_id"] for n in core.needs_you(self.c) if n.get("item_id")])
+        core.done(self.c, yes, "yes", "mark")
+        self.assertTrue(core.annotate(self.c)[self.deploy]["ready"])
+        self.assertIsNone(core.approval_refusal(self.c, core._item(self.c, self.deploy)))
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
+
+    def test_a_failed_deploy_asks_again(self):
+        core.config_set(self.c, "release_approval", "person", project="site")
+        open(self.flag, "w").close()
+        self.pass_review("rev")
+        yes = core.release_yes_pass(self.c)[self.deploy]
+        core.done(self.c, yes, "yes", "mark")
+        r = self.run_deploy()
+        self.assertEqual(r[0]["deploy_end"], "failed")
+        self.assertEqual(self.approvals(), [], "the changed release takes a new yes")
+        os.remove(self.flag)
+        core.claim(self.c, r[0]["fix"], "dev")
+        core.done(self.c, r[0]["fix"], "fixed", "dev")
+        core.register(self.c, "rev2")
+        core.claim(self.c, r[0]["review"], "rev2")
+        core.review_pass(self.c, r[0]["review"], None, "rev2")
+        again = core.release_yes_pass(self.c)
+        self.assertEqual(list(again), [self.deploy])
+        self.assertNotEqual(again[self.deploy], yes)
+
+    def test_person_without_a_hook_refuses_the_deployer_until_the_yes(self):
+        core.target_hook(self.c, "web", "deploy", clear=True, actor="mark")
+        core.config_set(self.c, "release_approval", "person", project="site")
+        self.pass_review("rev")
+        with self.assertRaisesRegex(RiverError, "takes a person's yes for each release"):
+            core.claim(self.c, self.deploy, "ops")
+        yes = core.release_yes_pass(self.c)[self.deploy]
+        core.done(self.c, yes, "yes", "mark")
+        self.assertEqual(core.claim(self.c, self.deploy, "ops")["assignee"], "ops")
+
+    def test_the_cadence_has_a_reason_and_show_prints_both(self):
+        import contextlib
+        import io
+        from river import cli
+        core.target_cadence(self.c, "web", "2h", "mark", reason="a service with users: a fix is live soon")
+        p = core.release_plan(self.c, "web")
+        self.assertEqual((p["cadence"], p["cadence_reason"]), ("2h", "a service with users: a fix is live soon"))
+        self.assertEqual(p["approval"]["approval"], "")
+        core.config_set(self.c, "release_approval", "review", project="site")
+        g = core.project_show(self.c, "site")["release_gate"]
+        self.assertEqual((g["approval"], g["project"], g["cadence"]), ("review", "site", "2h"))
+        from unittest import mock
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_DB": self.path}):
+            cli.run(["-q", "--as", "mark", "target", "show", "web"])
+            cli.run(["-q", "--as", "mark", "project", "show", "site"])
+            cli.run(["-q", "--as", "mark", "target", "cadence", "web", "off", "--reason", "each push is a release"])
+        text = out.getvalue()
+        self.assertIn("release gate: a release goes out when its review passes (release_approval review, project site)", text)
+        self.assertIn("(why: a service with users: a fix is live soon)", text)
+        self.assertIn("release gate: ships when its review passes (set on site); cadence: 2h (a service with users", text)
+        self.assertIn("release cadence: off (why: each push is a release)", text)
+        self.assertEqual(core.release_plan(self.c, "web")["cadence_reason"], "each push is a release")
+
 class Hooks(Base):
     """A hook is a command that MaximizePM runs when a release event of a target occurs (maxpm target hook)."""
 

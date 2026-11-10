@@ -232,11 +232,21 @@ def _cut(text, n=70):
 def _release_lines(p):
     """A target's release cadence, when its next release can start, and what waits for it (core.release_plan)."""
     name = p["target"]
-    if not p["cadence"]:
-        out = [f"release cadence: off (a release starts when the one before it is done; set one: "
-               f"maxpm target cadence {name} 2h|1d|1w|1mo)"] + ([p["text"]] if p["text"] else [])
+    gate = p.get("approval") or {}
+    if gate.get("approval") == "person":
+        out = [f"release gate: a person's yes for each release (release_approval person, project {gate['project']})"]
+    elif gate.get("approval") == "review":
+        out = [f"release gate: a release goes out when its review passes (release_approval review, project "
+               f"{gate['project']})"]
     else:
-        out = [f"{p['text']}; change it: maxpm target cadence {name} <time>|off"]
+        out = [f"release gate: not set; set it from the project's needs: maxpm config set release_approval "
+               f"review|person --project <deploy-{name}, or a project of the target>"]
+    why = f" (why: {p['cadence_reason']})" if p.get("cadence_reason") else ""
+    if not p["cadence"]:
+        out += [f"release cadence: off{why} (a release starts when the one before it is done; set one: "
+                f"maxpm target cadence {name} 2h|1d|1w|1mo --reason \"<the project's needs>\")"] + ([p["text"]] if p["text"] else [])
+    else:
+        out += [f"{p['text']}{why}; change it: maxpm target cadence {name} <time>|off --reason \"<the project's needs>\""]
     if p["last"]:
         out.append(f"  last release: {'cut' if p['last']['cut'] else 'ended'} {p['last']['text']} (deploy #{p['last']['id']})")
     ships = "; ".join(f"#{x['id']} {x['title']} ({x['status'].replace('_', ' ')})" for x in p["ships"])
@@ -816,6 +826,8 @@ def build_parser():
                        "deploy item, and its review (the deploy item when there is no review) is ready at the end of "
                        "the last release plus the cadence")
     x.add_argument("name"); x.add_argument("cadence", nargs="?", help="a number and m, h, d, w, or mo; off; none shows it")
+    x.add_argument("--reason", help="why this cadence fits the project's needs (a service with users: short, so a fix "
+                   "is live soon; a public tool repository: off, each push), shown in maxpm target show")
     x = tgs.add_parser("cut", help="fix the list of items of the collected release now (the target owner, the "
                        "manager, or a person): later ship requests join the next deploy item, which waits until this "
                        "release is done. The cut also comes by itself when a reviewer takes the review of the release")
@@ -2175,7 +2187,8 @@ def dispatch(conn, a, actor):
         if a.tcmd == "deployer":
             return core.target_show(conn, a.name) if a.mode is None else core.target_deployer(conn, a.name, a.mode, actor)
         if a.tcmd == "cadence":
-            return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor)
+            return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor,
+                                                                                                    a.reason)
         if a.tcmd == "hook":
             if not actor and (a.command is not None or a.clear) and core.agent_type_from_env(os.environ):
                 raise RiverError("name yourself: maxpm --as <name> target hook ... (only a person or the manager "
@@ -3800,6 +3813,15 @@ def render(a, res):
             print(f"{res['name']} (rank {res['rank']})")
             print("  " + (res["description"] or "(no description: maxpm project describe " + res["name"] + " \"...\")"))
             print("  target: " + (res.get("target") or "none (maxpm project target " + res["name"] + " <target>)"))
+            g = res.get("release_gate")
+            if g:
+                print("  release gate: " + ({"person": f"a person's yes for each release (set on {g['project']})",
+                                             "review": f"ships when its review passes (set on {g['project']})"}
+                                            .get(g["approval"]) or f"not set: maxpm config set release_approval "
+                                                                   f"review|person --project {res['name']}")
+                      + "; cadence: " + (g["cadence"] or "off")
+                      + (f" ({g['cadence_reason']})" if g["cadence_reason"] else
+                         f" (why: maxpm target cadence {res['target']} <time>|off --reason \"...\")"))
             print("  tracker: " + (res.get("tracker") or "none (maxpm project tracker " + res["name"] + " \"<tracker> <where> via <tool>\")"))
             if res.get("look"):
                 print("\n".join("  " + line for line in look_setup_lines(res["name"], res["look"])))
@@ -3942,6 +3964,9 @@ def render(a, res):
                 print(f"    ships #{x['id']} {x['title']} ({x['status'].replace('_', ' ')})")
             return
         print(res["name"])
+        if a.tcmd == "add":
+            print("  set its release gate and cadence from the needs of its projects (a service with users: a short "
+                  "cadence, so a fix is live soon; a public tool repository: each push); the commands are below")
         print("  " + (res["description"] or f"(no description: maxpm target describe {res['name']} \"how it deploys\")"))
         print("  monitor: " + (res.get("monitor") or f"none (a session follows each deploy when you set one: "
                                                       f"maxpm target monitor {res['name']} \"<what to watch, for how long>\")"))

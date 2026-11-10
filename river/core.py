@@ -293,6 +293,12 @@ DEFAULT_SETTINGS = {
     # while this many agent sessions are live (0: no limit); a person's Start and maxpm launch do not count it.
     "auto_review": "on",
     "max_sessions": "0",
+    # The release gate of a deploy project (#5003, mark: 'This should be a project setting'): review (a release
+    # goes out when its review passes; review is on for that project) or person (maxpm serve adds one item for a
+    # person to each ready release, and the deploy waits on that yes). Set it on the deploy project (deploy-<target>)
+    # or on a project of the target, from the project's needs: maxpm config set release_approval review|person
+    # --project <name>. There is no global value: a target where none is set says so in maxpm target show.
+    "release_approval": "",
     # Models, weakest to strongest, one list per family ("family: a, b, c", families separated by ";").
     # There is no order across families: a limit compares only models of the same family.
     "model_ladder": "claude: haiku, sonnet, opus, fable; openai: luna, terra, sol, astra",
@@ -377,6 +383,7 @@ CREATE TABLE IF NOT EXISTS targets (
   monitor           TEXT NOT NULL DEFAULT '',  -- what a session watches after each deploy (maxpm target monitor)
   deployer          TEXT NOT NULL DEFAULT 'launch',  -- what maxpm serve starts for its deploys (maxpm target deployer)
   cadence           TEXT NOT NULL DEFAULT '',  -- how often it releases: 2h, 1d, 1w, 1mo; '' is off (maxpm target cadence)
+  cadence_reason    TEXT NOT NULL DEFAULT '',  -- why that cadence fits the project's needs (#5003)
   owner             TEXT,
   owner_expires_at  TEXT,
   created_at        TEXT NOT NULL
@@ -1132,6 +1139,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE targets ADD COLUMN deployer TEXT NOT NULL DEFAULT 'launch'")
     if "cadence" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
         conn.execute("ALTER TABLE targets ADD COLUMN cadence TEXT NOT NULL DEFAULT ''")
+    if "cadence_reason" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
+        conn.execute("ALTER TABLE targets ADD COLUMN cadence_reason TEXT NOT NULL DEFAULT ''")
     if "owner_lease" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN owner_lease TEXT")
     if "shared" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -1332,6 +1341,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         _check_model_name(value)
     elif key in ("default_min_model", "default_max_model") and value:
         _limit_list(parse_ladder(setting(conn, "model_ladder")), value, key)
+    elif key == "release_approval" and value not in RELEASE_APPROVALS:
+        raise RiverError("release_approval is review (a release goes out when its review passes) or person (a "
+                         "person's yes for each release)")
     elif key in ("review", "auto_review") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "setup_done" and value not in ("on", "off"):
@@ -1364,11 +1376,22 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "notify_channels" and not all(re.match(r"^[a-z0-9_-]+$", c) for c in _channels(value)):
         raise RiverError("notify_channels is a comma list of channel names, for example: mac,ntfy (empty sends nothing)")
     sc = _scope(conn, project, item, agent, kind)
+    if key == "release_approval" and not sc.startswith("project:"):
+        raise RiverError("release_approval is set for each project from its needs, never for all of them: "
+                         "maxpm config set release_approval review|person --project <name> (the deploy project "
+                         "deploy-<target>, or a project of the target)")
+    also = None
     with tx(conn):
         conn.execute("INSERT INTO settings(scope,key,value) VALUES (?,?,?) "
                      "ON CONFLICT(scope,key) DO UPDATE SET value=excluded.value", (sc, key, value))
         _event(conn, None, actor, f"setting {sc} {key}={mask(key, value)}")
-    return {"scope": sc, "key": key, "value": mask(key, value)}
+        if key == "release_approval" and value == "review":
+            # The gate is the review: the project's releases get one (#5003).
+            conn.execute("INSERT INTO settings(scope,key,value) VALUES (?,'review','on') "
+                         "ON CONFLICT(scope,key) DO UPDATE SET value='on'", (sc,))
+            _event(conn, None, actor, f"setting {sc} review=on (release_approval review)")
+            also = "review=on"
+    return {"scope": sc, "key": key, "value": mask(key, value), **({"also": also} if also else {})}
 
 
 def config_unset(conn, key, project=None, item=None, agent=None, actor=None, kind=None):
@@ -1943,6 +1966,10 @@ def project_show(conn, name):
         result_look=setting(conn, "result_look", project_id=p["id"]),
         look=look_setup(conn, name),
     )
+    if p.get("target"):  # the release gate and cadence of its target, each set from the project's needs (#5003)
+        t = conn.execute("SELECT cadence, cadence_reason FROM targets WHERE name=?", (p["target"],)).fetchone()
+        p["release_gate"] = dict(release_approval(conn, p["target"]), cadence=t["cadence"] if t else "",
+                                 cadence_reason=t["cadence_reason"] if t else "")
     return p
 
 
@@ -2822,6 +2849,90 @@ def deploy_hook(conn, target):
     return r["command"] if r else None
 
 
+RELEASE_APPROVALS = ("review", "person")
+APPROVE_TITLE = "Approve release"
+
+
+def release_approval(conn, target):
+    """The release gate of a target (#5003): {"approval": review|person|"", "project": where it is set}. It is read
+    from the deploy project (deploy-<target>), else from the target's projects in rank order. "" when none sets it:
+    there is no global default."""
+    names = [f"deploy-{target}"] + [r["name"] for r in conn.execute(
+        "SELECT name FROM projects WHERE target=? AND archived=0 ORDER BY rank, id", (target,))]
+    for n in names:
+        r = conn.execute("SELECT value FROM settings WHERE scope=? AND key='release_approval'", (f"project:{n}",)).fetchone()
+        if r and r["value"]:
+            return {"approval": r["value"], "project": n}
+    return {"approval": "", "project": None}
+
+
+def _approvals(conn, dep_id):
+    """The person's approval items of a deploy item, newest first."""
+    return conn.execute("SELECT i.* FROM items i JOIN deps d ON d.blocked_by=i.id WHERE d.item_id=? AND i.doer='human' "
+                        "AND i.title LIKE ? ORDER BY i.id DESC", (dep_id, APPROVE_TITLE + " %")).fetchall()
+
+
+def approval_refusal(conn, item):
+    """Why a session may not take this deploy item yet, or None: its target takes a person's yes for each release
+    (release_approval person) and this release has none."""
+    if item["kind"] != "deploy" or release_approval(conn, item["target"])["approval"] != "person":
+        return None
+    if any(a["status"] == "done" for a in _approvals(conn, item["id"])):
+        return None
+    return (f"target {item['target']} takes a person's yes for each release (release_approval person): maxpm serve "
+            f"asks for it when deploy #{item['id']} is ready, and the deploy waits on it")
+
+
+def release_yes(conn, dep_id, actor="maxpm"):
+    """maxpm serve, for a ready deploy item whose target takes a person's yes (release_approval person) and that
+    has not asked for it: one item for a person, which the deploy item waits on. Returns its id, or None."""
+    with tx(conn):
+        dep = _item(conn, dep_id)
+        if dep["kind"] != "deploy" or dep["status"] != "open" or approval_refusal(conn, dep) is None:
+            return None
+        if any(a["status"] != "dropped" for a in _approvals(conn, dep_id)):
+            return None  # asked already: an open item waits for the person
+        rows = conn.execute("SELECT i.id, i.title, i.kind, i.status FROM deps d JOIN items i ON i.id=d.blocked_by "
+                            "WHERE d.item_id=? AND i.kind<>'deploy' ORDER BY i.id", (dep_id,)).fetchall()
+        ships = [r for r in rows if r["kind"] != "review" and r["status"] != "dropped"]
+        reviews = [r for r in rows if r["kind"] == "review" and r["status"] == "done"]
+        gate = release_approval(conn, dep["target"])
+        lines = "\n".join(f"  #{r['id']} {r['title']}" for r in ships) or "  (nothing listed)"
+        context = (f"Release of target {dep['target']} (deploy #{dep_id}) is ready and waits for your yes: the "
+                   f"project {gate['project']} says release_approval person.\nIt ships:\n{lines}\n"
+                   + (f"Its review passed: #{reviews[-1]['id']}.\n" if reviews else "")
+                   + f"Yes: maxpm done <this id>; the release then goes out (maxpm serve runs its deploy hook, or "
+                   f"the deployer takes deploy #{dep_id}). Not now: leave this item open, and say why on it.")
+        top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (dep["project_id"],)).fetchone()["m"]
+        cur = conn.execute("INSERT INTO items(project_id,title,priority,rank,doer,context,kind,target,created_at) "
+                           "VALUES (?,?,?,?,'human',?,'work',?,?)",
+                           (dep["project_id"], f"{APPROVE_TITLE} {dep['target']}: {len(ships)} item(s), deploy #{dep_id}",
+                            dep["priority"], top + 1, context, dep["target"], iso(now())))
+        yes = cur.lastrowid
+        _event(conn, yes, actor, f"added: a person's yes for the release of deploy #{dep_id} (release_approval person)")
+        _dep_add(conn, dep_id, yes, actor, alert=False)
+        _event(conn, dep_id, actor, f"waits on #{yes}: a person's yes for this release (release_approval person)")
+    sync_needs_you(conn)
+    return yes
+
+
+def release_yes_pass(conn):
+    """maxpm serve: each ready deploy item of a target that takes a person's yes asks for it once (release_yes).
+    Returns {deploy id: approval item id}."""
+    out, ann = {}, None
+    for d in conn.execute(f"SELECT * FROM items WHERE kind='deploy' AND status='open' ORDER BY id").fetchall():
+        if approval_refusal(conn, d) is None or any(a["status"] != "dropped" for a in _approvals(conn, d["id"])):
+            continue
+        ann = ann or annotate(conn)
+        a = ann.get(d["id"])
+        if a is None or not a["ready"] or a["project_archived"]:
+            continue
+        y = release_yes(conn, d["id"])
+        if y:
+            out[d["id"]], ann = y, None
+    return out
+
+
 def hooked_targets(conn):
     """The names of the targets that have a deploy hook."""
     return {r["name"] for r in conn.execute(
@@ -2845,7 +2956,7 @@ def deploy_hook_start(conn, dep_id, token=None):
         dep = _item(conn, dep_id)
         cmd = deploy_hook(conn, dep["target"])
         if (dep["kind"] != "deploy" or dep["status"] != "open" or dep["assignee"] or dep["blocked_reason"]
-                or not cmd):
+                or not cmd or approval_refusal(conn, dep)):
             return None
         t = iso(now())
         conn.execute("UPDATE items SET blocked_reason=?, blocked_at=?, blocked_until=NULL, blocked_set_by=? WHERE id=?",
@@ -2919,6 +3030,8 @@ def _deploy_hook_end(conn, run, ok, result, tail, folder):
         fix = cur.lastrowid
         _event(conn, fix, "maxpm", f"added: the deploy hook of #{dep_id} failed ({result})")
         _dep_add(conn, dep_id, fix, "maxpm", alert=False)
+        for a in _approvals(conn, dep_id):  # the release changes: it takes a new yes (release_approval person)
+            conn.execute("DELETE FROM deps WHERE item_id=? AND blocked_by=?", (dep_id, a["id"]))
         rv = _release_review(conn, dep, tg, "maxpm")
         _event(conn, dep_id, "maxpm", f"deploy hook failed ({result}); the release starts again: it is not cut, it "
                                       f"waits on fix #{fix}" + (f" and a new review #{rv['id']}" if rv else ""))
@@ -2972,14 +3085,16 @@ def parse_cadence(text):
     return f"{int(m.group(1))}{m.group(2)}", int(m.group(1)) * _CADENCE_UNITS[m.group(2)]
 
 
-def target_cadence(conn, name, value, actor=None):
+def target_cadence(conn, name, value, actor=None, reason=None):
     """How often the target releases (2h, 1d, 1w, 1mo; off: each release starts at once). It applies from now
-    on, also to the release that collects ship requests now, unless that one has started."""
+    on, also to the release that collects ship requests now, unless that one has started. reason: why it fits the
+    project's needs (#5003); a new cadence without one keeps no old reason."""
     text, _ = parse_cadence(value)
+    reason = " ".join((reason or "").split())
     with tx(conn):
         name = _target(conn, name)["name"]
-        conn.execute("UPDATE targets SET cadence=? WHERE name=?", (text, name))
-        _event(conn, None, actor, f"target {name} release cadence {text or 'off'}")
+        conn.execute("UPDATE targets SET cadence=?, cadence_reason=? WHERE name=?", (text, reason, name))
+        _event(conn, None, actor, f"target {name} release cadence {text or 'off'}" + (f" ({reason})" if reason else ""))
         _cadence_sync(conn)
     return target_show(conn, name)
 
@@ -3012,7 +3127,8 @@ def release_plan(conn, name):
     last = conn.execute("SELECT id, COALESCE(cut_at, closed_at) at, cut_at FROM items WHERE kind='deploy' AND target=? "
                         "AND (cut_at IS NOT NULL OR (status='done' AND closed_at IS NOT NULL)) "
                         "ORDER BY COALESCE(cut_at, closed_at) DESC, id DESC LIMIT 1", (name,)).fetchone()
-    out = {"target": name, "cadence": text, "deploy": dep["id"] if dep else None, "start": None, "early": None,
+    out = {"target": name, "cadence": text, "cadence_reason": t["cadence_reason"],
+           "approval": release_approval(conn, name), "deploy": dep["id"] if dep else None, "start": None, "early": None,
            "ships": [], "waits": False, "running": cur["id"] if cur else None,
            "current": {"id": cur["id"], "status": cur["status"], "cut_at": cur["cut_at"] or cur["claimed_at"],
                        "text": show_time(cur["cut_at"] or cur["claimed_at"], zone)} if cur else None,
@@ -6673,7 +6789,7 @@ def _claim_row(conn, item_id, actor):
         raise RiverError(f"refused: #{item_id} is an expert-tier task: a person talks it through with a session of its "
                          f"own, so a worker does not take it. A new session starts for it: maxpm launch --item {item_id}, "
                          f"or maxpm expert start <name> --item {item_id}")
-    why = deploy_hook_refusal(conn, it0, actor)
+    why = deploy_hook_refusal(conn, it0, actor) or (approval_refusal(conn, it0) if ag["kind"] == "ai" else None)
     if why:
         raise RiverError(f"refused: {why}. Take other work: maxpm go")
     if it0["doer"] == "human" and ag["kind"] == "ai":

@@ -12,6 +12,17 @@ function monitorLines(d) {
   return (d.monitors || []).map(m => `<div class="muted" style="font-size:12px">monitor <span class="link" data-open="${m.id}">#${m.id}</span> (${esc(m.status.replace("_", " "))}${m.assignee ? " · " + esc(m.assignee) : ""})${m.output ? ": " + esc(clip(m.output, 200)) : ""}</div>`).join("");
 }
 
+// The release gate and the cadence of a target, each with why (#5003): set per project from its needs.
+function releaseGate(t) {
+  const r = t.release || {}, a = r.approval || {}, n = esc(t.name);
+  const gate = a.approval === "person" ? `a person's yes for each release (set on ${esc(a.project)})`
+    : a.approval === "review" ? `ships when its review passes (set on ${esc(a.project)})`
+    : `<span style="color:var(--warn)">not set</span>: maxpm config set release_approval review|person --project &lt;a project of ${n}&gt;`;
+  const cad = r.cadence ? `every ${esc(r.cadence)} at most` + (r.cadence_reason ? `: ${esc(clip(r.cadence_reason, 160))}` : ` (no reason given: maxpm target cadence ${n} ${esc(r.cadence)} --reason "…")`)
+    : "off: each release starts when the one before it is done" + (r.cadence_reason ? `: ${esc(clip(r.cadence_reason, 160))}` : "");
+  return `<div class="muted" style="font-size:12px">release gate: ${gate}<br>cadence: ${cad}</div>`;
+}
+
 export function renderTargets() {
   const T = S.targets || [];
   const box = $("#targets");
@@ -21,6 +32,7 @@ export function renderTargets() {
         ${ownerChip(t.owner)}${t.owner ? `<span class="muted" style="font-size:12px">${t.owner_expires_at ? left(t.owner_expires_at) + " left" : ""}</span>` : ""}
         <span class="muted" style="font-size:12px">${t.project_names.length ? "projects: " + t.project_names.map(esc).join(", ") : "no projects"}</span>`, `${t.description ? `<div class="ny-c">${esc(clip(t.description, 300))}</div>` : ""}
       <div class="muted" style="font-size:12px">${t.monitor ? "monitor after each deploy: " + esc(clip(t.monitor, 200)) : `no monitor (a session follows each deploy when you set one: maxpm target monitor ${esc(t.name)} "&lt;what to watch, for how long&gt;")`}</div>
+      ${releaseGate(t)}
       ${hooksHtml(t, S.hook_events)}
       ${t.pending.map(d => `<div class="st" style="margin-top:4px"><span class="link" data-open="${d.id}">#${d.id}</span> ${d.ready ? "ready to deploy" : d.status === "open" ? (d.cut_at ? "cut " + ago(d.cut_at) : "collecting") : esc(d.status.replace("_", " ")) + (d.assignee ? " · " + esc(d.assignee) : "")}: ${shipList(d.ships)}${d.review ? `<div class="muted" style="font-size:12px">first a review: <span class="link" data-open="${d.review.id}">#${d.review.id}</span> (${esc(d.review.status.replace("_", " "))}${d.review.assignee ? " · " + esc(d.review.assignee) : ""})</div>` : ""}${monitorLines(d)}</div>`).join("") || '<div class="st muted">No pending ship requests.</div>'}
       ${t.release && t.release.text ? `<div class="muted" style="font-size:12px">${esc(t.release.text)}${t.release.last ? ` · last release ${ago(t.release.last.at)}` : ""}</div>` : ""}

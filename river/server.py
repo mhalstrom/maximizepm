@@ -1796,6 +1796,7 @@ def auto_release(conn, runner=None):
     ann = None
     cap = int(core.setting(conn, "max_sessions") or 0)
     out["lost"] = core.deploy_hook_lost(conn)  # a deploy hook that never ended: its release starts again
+    out["asked"] = core.release_yes_pass(conn)  # release_approval person: one yes for each ready release (#5003)
 
     def full(item_id):
         if cap and core.live_sessions(conn) >= cap:
