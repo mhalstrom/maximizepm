@@ -89,10 +89,9 @@
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js" integrity="sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2" crossorigin="anonymous"></script>
 <div id="setup" class="hidden" role="dialog" aria-modal="true" aria-labelledby="setupTitle"><div class="box">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-    <h2 id="setupTitle" style="margin:0">Set up MaximizePM</h2>
+    <h2 id="setupTitle" style="margin:0" title="A few steps to your first agent at work. Each step checks itself, so a ✓ means it's done. Settings opens this guide again.">Set up MaximizePM</h2>
     <button class="iconbtn" id="setupClose" title="Close for now">✕</button>
   </div>
-  <div class="muted" style="font-size:13px;margin:4px 0 8px">A few steps to your first agent at work. Each step checks itself, so a ✓ means it's done. Settings opens this guide again.</div>
   <div id="setupSteps"></div>
   <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
     <button class="btn" id="setupLater">Close for now</button>
@@ -101,10 +100,9 @@
 </div></div>
 <div id="readyDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="readyTitle"><div class="box">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-    <h2 id="readyTitle" style="margin:0">Ready for agents</h2>
+    <h2 id="readyTitle" style="margin:0" title="Most important first. Dispatch gives the item to a session that waits for work in its project; else it starts a new agent in the project folder, and that agent's first maxpm go takes this item.">Ready for agents</h2>
     <button class="iconbtn" id="readyClose" title="Close">✕</button>
   </div>
-  <div class="muted" style="font-size:13px;margin:4px 0 8px">Most important first. Dispatch gives the item to a session that waits for work in its project; else it starts a new agent in the project folder, and that agent's first <code>maxpm go</code> takes this item.</div>
   <div id="readyList"></div>
 </div></div>
 
@@ -141,7 +139,7 @@
     <select id="searchProject" title="Project"><option value="">All projects</option></select>
     <select id="searchSince" title="Added or closed in"><option value="">Any time</option><option value="1d">last day</option><option value="7d">last 7 days</option><option value="30d">last 30 days</option></select>
   </div>
-  <div class="muted" id="searchInfo" style="font-size:13px;margin:6px 0">Items that hold every word, newest first.</div>
+  <div class="muted" id="searchInfo" style="font-size:13px;margin:6px 0" title="Items that hold every word, newest first."></div>
   <div id="searchList"></div>
 </div></div>
 

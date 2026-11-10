@@ -466,7 +466,7 @@ function searchRow(m) {
 }
 async function doSearch() {
   const text = $("#searchText").value.trim(), seq = ++searchSeq;
-  if (!text) { $("#searchInfo").textContent = "Items that hold every word, newest first."; $("#searchList").innerHTML = ""; return; }
+  if (!text) { $("#searchInfo").textContent = ""; $("#searchList").innerHTML = ""; return; }
   const q = new URLSearchParams({ q: text, status: $("#searchStatus").value, n: 100 });
   if ($("#searchProject").value) q.set("project", $("#searchProject").value);
   if ($("#searchSince").value) q.set("since", $("#searchSince").value);
@@ -512,13 +512,19 @@ function renderSetup(st) {
   // The first run is a short path in order (you, river for agents, a folder, an agent, a first task, Start);
   // each step checks itself. The first step not done yet is marked as the next one. Extras come after, folded.
   let n = 0, next = true;
+  // A step that is done shows only its title: its line is the title's hover, unless the line holds a control (#5082).
+  const head = (ok, title, sub) => {
+    const tip = ok && sub && !/<(button|details|select|input|a)\b/.test(sub);
+    return [`<b${tip ? ` title="${esc(sub.replace(/<[^>]+>/g, ""))}"` : ""}>${title}</b>`, tip ? "" : sub];
+  };
   const step = (ok, title, sub, fix) => {
     n++; const here = !ok && next; if (here) next = false;
+    const [b, line] = head(ok, title, sub);
     return `<div class="step${here ? " next" : ""}"><div class="mark ${ok ? "ok" : "todo"}">${ok ? "✓" : n}</div>
-      <div><b>${title}</b>${sub ? `<div class="sub">${sub}</div>` : ""}${!ok && fix ? `<div class="fix">${fix}</div>` : ""}</div></div>`;
+      <div>${b}${line ? `<div class="sub">${line}</div>` : ""}${!ok && fix ? `<div class="fix">${fix}</div>` : ""}</div></div>`;
   };
-  const extra = (ok, title, sub, fix) => `<div class="step"><div class="mark ${ok ? "ok" : "opt"}">${ok ? "✓" : "·"}</div>
-    <div><b>${title}</b>${sub ? `<div class="sub">${sub}</div>` : ""}${!ok && fix ? `<div class="fix">${fix}</div>` : ""}</div></div>`;
+  const extra = (ok, title, sub, fix) => { const [b, line] = head(ok, title, sub); return `<div class="step"><div class="mark ${ok ? "ok" : "opt"}">${ok ? "✓" : "·"}</div>
+    <div>${b}${line ? `<div class="sub">${line}</div>` : ""}${!ok && fix ? `<div class="fix">${fix}</div>` : ""}</div></div>`; };
   const out = [];
   out.push(step(st.people.length > 0, "Tell MaximizePM your name",
     st.people.length ? "You're here as " + st.people.map(esc).join(", ") + ". Pick your name at the top right if it isn't chosen."
@@ -537,7 +543,7 @@ function renderSetup(st) {
   const layouts = { claude_only: "its CLAUDE.md has rules that Codex and other agents don't read",
     both: "CLAUDE.md and AGENTS.md have different rules; each agent reads only one" };
   out.push(step(st.folders.length > 0 && blocks.length === 0, "Add a project folder",
-    st.folders.length ? st.folders.map(f => `<div>${esc(f.path)} <span class="muted">(${f.projects.map(esc).join(", ")})</span>`
+    st.folders.length ? st.folders.map(f => `<div title="${esc(f.path)}">${esc(f.path.replace(/^\/(Users|home)\/[^/]+/, "~"))} <span class="muted">(${f.projects.map(esc).join(", ")})</span>`
       + (!f.exists ? " · folder not found" : layouts[f.layout] ? " · " + esc(layouts[f.layout]) : "")
       + (f.layout === "claude_only" ? ` <button class="btn" data-su="block" data-move="1" data-path="${esc(f.path)}"
           title="The text of CLAUDE.md goes to AGENTS.md; CLAUDE.md becomes the one line @AGENTS.md">Share them with every agent</button>` : "")
@@ -550,11 +556,11 @@ function renderSetup(st) {
   const addable = st.agent_clis.filter(a => a.found && !a.added);
   const none = !ready.length && !addable.length;
   const addBtns = addable.map(a => `<button class="btn${ready.length ? "" : " primary"}" data-su="agent" data-label="${esc(a.label)}" title="${esc(a.command)}">Add ${esc(a.label)}</button>`).join("");
-  out.push(step(ready.length > 0, "Choose an agent",
-    ready.length ? "The Start button opens " + ready.map(esc).join(" or ")
-        + (st.launch_in === "tmux" ? " in a tmux pane (<code>maxpm view</code> in a terminal shows every agent side by side)."
-          : st.launch_in === "tab" ? " in a Terminal tab (with tmux installed, in a tmux pane: one terminal shows every agent)." : ".")
-        + (addable.length ? ` Also on this Mac: <span class="fix" style="display:inline-flex">${addBtns}</span>` : "")
+  const opens = "The Start button opens " + ready.map(esc).join(" or ")
+    + (st.launch_in === "tmux" ? " in a tmux pane (maxpm view in a terminal shows every agent side by side)."
+      : st.launch_in === "tab" ? " in a Terminal tab (with tmux installed, in a tmux pane: one terminal shows every agent)." : ".");
+  out.push(step(ready.length > 0, ready.length ? `<span title="${opens}">Choose an agent</span>` : "Choose an agent",
+    ready.length ? (addable.length ? `<span class="fix" style="display:inline-flex">${addBtns}</span>` : "")
       : none ? `No AI coding agent is installed on this Mac yet. Install one, then check again:
           <a href="https://docs.claude.com/en/docs/claude-code/setup" target="_blank" rel="noopener">Claude Code</a> or
           <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>.`
@@ -562,7 +568,7 @@ function renderSetup(st) {
     (none ? `<button class="btn" data-su="recheck">Check again</button>` : "") + addBtns));
   // How river starts each profile agent (Claude Code, Codex): its options, as global settings.
   const profs = st.launch_profiles || [];
-  const howStart = profs.length && extra(true, "How agents start",
+  const howStart = profs.length && extra(true, `<span title="For every project; set one project apart in Settings (for example claude_remote_control with the project scope). The launch dialog can change the toggles for one start.">How agents start</span>`,
     profs.map(p => `<div style="margin:4px 0"><b>${esc(p.label)}</b> ${p.options.map(o => {
       const name = o.name.replace(/_/g, " ");
       return o.kind === "toggle"
@@ -571,7 +577,7 @@ function renderSetup(st) {
         ? `<label class="su-opt" title="${esc(o.text)}">${esc(name)}<select data-su-opt="${esc(o.setting)}"><option value="">the agent's own</option>${o.choices.map(c => `<option ${c === o.value ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>`
         : `<label class="su-opt" title="${esc(o.text)}">${esc(name)}<input data-su-opt="${esc(o.setting)}" value="${esc(o.value)}" class="su-w${o.name === "model_ids" ? "l" : o.name === "prompt" ? "m" : "s"}"></label>`;
     }).join("")}</div>`).join("")
-      + `<div class="muted" style="font-size:12px">For every project; set one project apart in Settings (for example claude_remote_control with the project scope). The launch dialog can change the toggles for one start.</div>`, "");
+, "");
   // A first item, then an agent that takes it. The page says "item" everywhere, not "task" (#4705).
   const tasks = (S && S.items || []).filter(i => !["deploy", "review", "monitor"].includes(i.kind));
   const closedN = closedTotal();

@@ -102,7 +102,7 @@ function el() {
     <div class="actions" style="margin-top:8px;align-items:center">
       ${[["Enter", "Enter"], ["Esc", "Escape"], ["↑", "Up"], ["↓", "Down"], ["Tab", "Tab"], ["Shift+Tab", "BTab"], ["Ctrl-C", "C-c"]]
         .map(([label, key]) => `<button class="btn" data-term-key="${key}">${label}</button>`).join("")}
-      <span class="muted" style="font-size:12px">Click the terminal, then type: your keys go to it, Esc too. Close with ✕.</span>
+      <span class="muted" style="font-size:12px">Your keys go to the terminal, Esc too; ✕ closes.</span>
     </div></div>`;
   document.body.appendChild(d);
   dlg = makeDialog(d, { onClose: () => { agent = null; clearTimeout(timer); } });

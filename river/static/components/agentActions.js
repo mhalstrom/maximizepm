@@ -73,9 +73,8 @@ function finish(v) { const r = done; done = null; if (r) r(v); }
 export function chooseStop(a) {
   el();
   $("#stopDlg .box").innerHTML = `
-    <h2 style="margin:0">Stop ${esc(a.name)}</h2>
-    <div class="muted" style="font-size:13px;margin:6px 0">A stop is a request: the agent commits finished work, releases its item, and ends. A waiting agent ends at once.</div>
-    <div class="form"><label>Why (optional; the agent sees it)<input id="stopReason" placeholder="the plan changed"></label></div>
+    <h2 style="margin:0" title="A stop is a request: the agent commits finished work, releases its item, and ends. A waiting agent ends at once.">Stop ${esc(a.name)}</h2>
+    <div class="form"><label title="Optional; the agent sees it">Why<input id="stopReason" placeholder="the plan changed"></label></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
       <button class="btn" data-stop-cancel="1">Cancel</button>
       ${a.can_kill ? `<button class="btn" data-kill-ask="1" title="Emergency only">Kill process…</button>` : ""}
