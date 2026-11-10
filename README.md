@@ -33,12 +33,13 @@ which, and link each project to its folder. Open an agent in that folder and
 say "go": it runs `maxpm go`, which names the session, picks a role (owner,
 worker, unblocker, reviewer, deployer, context, or idle), claims an
 item, and prints a briefing that ends
-with the command to run when the item is done. The web page shows who holds
-what and how many more sessions the ready work could use. Its Sessions tab
-shows each running agent session as a chat: you read it, type to it, and answer
-its permission prompts and questions there.
+with the command to run when the item is done. The web page has two areas.
+Sessions shows each running agent session as a chat: you read it, type to it,
+and answer its permission prompts and questions there; its You row holds what
+waits on you. Plan is the plan of the work: projects, goals, items, the graph,
+releases, what is done, and how many more sessions the ready work could use.
 
-![The board: parallel work, next up, projects, and agents](site/img/board-tour.gif)
+![A tour of the page: what waits on you, an agent's session, an item, and the views of Plan](site/img/board-tour.gif)
 
 ![A maxpm go briefing: role, item, context, rules, and the command to run when done](site/img/go-briefing.png)
 
@@ -51,7 +52,7 @@ cd ~/code/myproject
 maxpm init --description "what this project covers"
 maxpm add myproject "first item" --doer ai
 # open Claude Code (or another agent) in the folder and say: go
-maxpm serve --open    # the board at http://127.0.0.1:8765
+maxpm serve --open    # the page at http://127.0.0.1:8765
 ```
 
 [Install](#install) and [Set up a project](#set-up-a-project) have the details.
@@ -76,10 +77,11 @@ projects at the same time.
   prompt (`busy_max`, 4h after its last command; the tmux and prompt signs
   need `maxpm serve` running).
   And no second agent takes an item while the first one still works on it.
-- A local web page shows the board, the running agent sessions, what they
-  wrote, the graph, who is doing what, and how many more agent sessions the
-  ready work could use right now. The search field in its header (or `/`)
-  finds items, open, done, and dropped. [The page](#the-page) has the tabs.
+- A local web page shows the running agent sessions, what they wrote, and
+  what waits on you (Sessions), and the plan: the items, the goals, the graph,
+  the releases, and how many more agent sessions the ready work could use
+  right now (Plan). The search field in its header (or `/`)
+  finds items, open, done, and dropped. [The page](#the-page) has the areas.
 
 One SQLite file, one command (`maxpm`), one page. Python 3.10 or later, standard
 library only. The page ships one vendored JavaScript library,
@@ -88,21 +90,20 @@ Mermaid from a CDN.
 
 ## The page
 
-`maxpm serve --open` opens the page at http://127.0.0.1:8765. Each tab has an
-address of its own (`/sessions/<session>`, `/graph`, `?item=12` for an
+`maxpm serve --open` opens the page at http://127.0.0.1:8765. It has two areas,
+Sessions and Plan, and Settings. Each view has an address of its own
+(`/sessions/<session>`, `/you`, `/plan/graph?project=shop`, `?item=12` for an
 item), so a link, a reload, and Back show the same view.
 
-| Tab | What it shows |
+| Area | What it shows |
 |---|---|
-| Board | What needs you, your inbox, the next ready items, the work of each project, the agents |
-| Sessions | Each running agent session as a chat, with its item, a message box, and a side panel |
-| Artifacts | The files, local pages, and claude.ai artifacts that the sessions wrote or named |
-| Projects | A card for each project: its goals, its items, what blocks them |
-| Targets | Each deploy target: what the next release ships, its review, its hooks, its deploys |
-| Capacity | How many more agent sessions the ready work could use now |
-| Graph | The dependency graph, for all projects or one |
-| Done | What was finished, by day, and the progress of each project |
-| Settings | Every setting, its default, and its overrides |
+| Sessions | Each running agent session as a chat, with its item, a message box, and a side panel. Start an agent at the top of the list; Give work to a session that waits; its queue in its Items list |
+| Sessions > You | What waits on you: Needs you, the items an agent took off your list, your inbox. Go through with an agent starts a session that takes them with you, one at a time. The first page when something waits |
+| Sessions > Artifacts | The files, local pages, and claude.ai artifacts that the sessions wrote or named |
+| Plan | A left bar of projects and their goals sets the scope of every view: Overview (next up, the work of each project or goal, capacity, what is blocked outside), Items, Goals (done-when, handoff, sub-goals), Graph, Releases (each deploy target), Done |
+| Settings | Every setting, its default, and its overrides; the people of the queue |
+
+![Plan > Overview: the scope on the left, next up, the work of each project, and capacity](site/img/plan-light.png)
 
 ![The Sessions tab: an agent's chat, with a file it wrote open in the side panel](site/img/sessions-light.png)
 
@@ -114,7 +115,7 @@ files and pictures.
 
 ![The ! dialog: a permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
 
-![The Artifacts tab: what the sessions wrote or named, to open beside the chat or full screen](site/img/artifacts.png)
+![Sessions > Artifacts: what the sessions wrote or named, to open beside the chat or full screen](site/img/artifacts.png)
 
 ## Install
 
@@ -179,7 +180,7 @@ existing block as it is. Then add work and start agents:
 ```sh
 maxpm add <project> "first item" --doer ai
 # open Claude Code (or another agent) in the folder and say: go
-maxpm serve --open    # watch the board at http://127.0.0.1:8765
+maxpm serve --open    # watch the page at http://127.0.0.1:8765
 ```
 
 The first time you open the page, a setup guide shows what MaximizePM found,
@@ -795,10 +796,10 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   prints the last lines of the hook's output and its exit code, and the
   history of the deploy item gets one line. When a hook fails or runs longer
   than `hook_timeout` (10m; MaximizePM then stops it with every process it
-  started), the target owner gets an alert. The Targets tab of the page shows
+  started), the target owner gets an alert. Plan > Releases on the page shows
   each hook with the result of its last run, and changes, removes, or adds
   hooks.
-- Overviews: `maxpm status`, and `maxpm log` with a Done tab on the page.
+- Overviews: `maxpm status`, and `maxpm log` with Plan > Done on the page.
 - Token usage: when an item is done, MaximizePM reads the Claude Code
   transcripts of the sessions that held it and records the tokens they spent
   on it. `maxpm show <id>` prints a usage line, and `maxpm usage` lists the
@@ -814,7 +815,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   `maxpm add "<title>" --backlog "<why not now>"`, list them by project and
   priority with `maxpm backlog`, and take one up again with
   `maxpm activate <id>`. The counts show the backlog apart ("2 in backlog"),
-  and the Projects tab of the page has a "show backlog" box and an Activate
+  and Plan > Items on the page has a "show backlog" box and an Activate
   button. An item that waits on a backlog item is never ready, so
   `maxpm backlog` names such items and asks for `--force`, and `maxpm
   blockers` says "a backlog item". An agent's item must be released first,
