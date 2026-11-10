@@ -69,7 +69,43 @@ def all_counts():
     return out
 
 
+# A hover never moves the page (#5106, mark: 'this layout shift is really annoying ... ensure there are no layout shifts
+# possible'). A :hover rule (also :not(:hover)) shows or hides a control only with opacity or visibility, and changes
+# colors, never a property that sizes or places a box: the control keeps its place, and nothing beside it moves.
+STATIC = VIEWS.parent
+LAYOUT = re.compile(r"(?:^|;)\s*(display|width|height|(?:min|max)-(?:width|height)|margin[\w-]*|padding[\w-]*|font-size|"
+                    r"font-weight|font|letter-spacing|line-height|gap|(?:row|column)-gap|flex[\w-]*|grid[\w-]*|position|"
+                    r"inset|top|left|right|bottom|border(?:-(?:top|right|bottom|left))?(?:-width)?|outline-offset|"
+                    r"content)\s*:", re.I)
+
+
+def hover_shifts(path):
+    """[(selector, property)] of the :hover rules of one style sheet that size or place a box."""
+    text = strip_comments(path.read_text(), ".css")
+    out = []
+    for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", text):
+        sel, body = " ".join(m.group(1).split()), m.group(2)
+        if ":hover" in sel:
+            out += [(sel, x.group(1)) for x in LAYOUT.finditer(body)]
+    return out
+
+
 class UiParts(unittest.TestCase):
+    def test_a_hover_moves_nothing(self):
+        errors = [f"{p.relative_to(STATIC)}: {sel} sets {prop} on hover: show or hide with opacity or visibility, "
+                  f"and keep the box's size and place"
+                  for p in sorted(STATIC.rglob("*.css")) if "vendor" not in p.parts for sel, prop in hover_shifts(p)]
+        self.assertEqual(errors, [], "\n".join(errors))
+
+    def test_the_hover_guard_sees_a_shift(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            css = Path(d, "x.css")
+            css.write_text(".row:not(:hover) .pin { display: none; }\n.row:hover .end { opacity: 1; visibility: visible; }\n"
+                           "@media (hover: hover) { .b:hover { padding-left: var(--sp-1); color: red; } }\n"
+                           "/* .c:hover { width: 0 } */ .d:hover{border:1px solid}\n.e .f { display: none; }\n")
+            self.assertEqual([p for _, p in hover_shifts(css)], ["display", "padding-left", "border"])
+
     def test_views_use_the_parts_and_the_allow_list_only_shrinks(self):
         got = all_counts()
         what = {"button": "a raw button: use components/button.js (HTML: class btn or iconbtn)",

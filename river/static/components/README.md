@@ -33,6 +33,15 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Message box of a chat | `composer.js`: `composerHtml(prefix, {...})`, `composerState(form, hasText)` | round + to attach, one pill field, the mic while empty, a round send arrow with text; line icons `PLUS_SVG`, `MIC_SVG`, `SEND_SVG` (#5078) |
 | Chat | `chat.js` | |
 
+## A hover moves nothing
+
+A control that a hover shows (the pin and End of a session row, Copy on a code block) has its place in the row
+always: the hover changes only `opacity` or `visibility`, and colors. A `:hover` rule (also `:not(:hover)`) never
+sets `display`, a size, a margin or padding, a border width, a font size or weight, or a position: the box beside it
+would move (#5106). `tests/test_ui_parts.py` refuses such a rule in any style sheet of the page, and
+`PageBrowser.test_a_hover_moves_nothing_on_any_tab_*` (tests/test_page.py) hovers every row, button and chip of
+each tab at 1240 and 390 px and fails when another box moves.
+
 ## Tokens (app.css `:root`)
 
 - Colors: `--bg --panel --ink --muted --line --accent --accent-ink`, the states `--ready --prog --wait

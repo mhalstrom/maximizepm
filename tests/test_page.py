@@ -162,6 +162,101 @@ try {
         self.assertEqual(got["errors"], [])
         self.assertTrue(all(got["seen"].values()), got["seen"])
 
+    # The hover sweep (#5106): a script cannot hover, so the page's style sheets are copied with a class (.__hover) in
+    # place of :hover, the originals are turned off, and the class goes on an element and its ancestors, as a hover
+    # would. Each element's layout box (offset*, which a transform does not change) is compared before and after.
+    HOVER_SWEEP = r'''
+const done = new WeakSet();
+const sel = (t) => t.replace(/:hover\b/g, ".__hover");
+const ruleText = (r) => r instanceof CSSStyleRule ? `${sel(r.selectorText)} { ${r.style.cssText} }`
+  : r instanceof CSSMediaRule ? `@media ${r.conditionText} { ${[...r.cssRules].map(ruleText).join("\n")} }`
+  : r instanceof CSSSupportsRule ? `@supports ${r.conditionText} { ${[...r.cssRules].map(ruleText).join("\n")} }`
+  : r.cssText;
+const subjects = new Set(["button", ".chip", ".row", ".srow", "tr", "a", "summary"]);
+function hoverable() {  // copy each sheet not yet copied (a view loads its sheet when its tab opens)
+  for (const sh of [...document.styleSheets]) {
+    if (done.has(sh) || (sh.ownerNode && sh.ownerNode.dataset && sh.ownerNode.dataset.hoverCopy)) continue;
+    let rules; try { rules = [...sh.cssRules]; } catch (e) { done.add(sh); continue; }  // another site's sheet
+    const st = document.createElement("style"); st.dataset.hoverCopy = "1";
+    st.textContent = rules.map(ruleText).join("\n"); document.head.append(st);
+    sh.disabled = true; done.add(sh);
+    // What a hover rule hovers: the compound selector that holds :hover, without its pseudo-classes.
+    for (const t of rules.flatMap(function all(r) { return r.cssRules ? [...r.cssRules].flatMap(all) : [r]; }))
+      for (const part of (t.selectorText || "").split(","))
+        for (const comp of part.split(/[\s>+~]+/)) if (comp.includes(":hover")) {
+          const s = comp.replace(/:not\([^)]*\)/g, "").replace(/::?[\w-]+(\([^)]*\))?/g, "");
+          if (s) subjects.add(s);
+        }
+  }
+}
+const visible = (e) => e.offsetParent !== null || getComputedStyle(e).position === "fixed";
+const box = (e) => visible(e) ? [e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight].join(",") : "hidden";
+const name = (e) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (typeof e.className === "string" && e.className.trim()
+  ? "." + e.className.trim().split(/\s+/).filter(c => c !== "__hover").join(".") : "") + (e.textContent ? ` "${e.textContent.trim().slice(0, 30)}"` : "");
+function sweep(where) {  // one task: the page cannot draw again between the looks
+  hoverable();
+  const all = [...document.body.querySelectorAll("*")].filter(e => e instanceof HTMLElement);
+  const before = new Map(all.map(e => [e, box(e)]));
+  const targets = [...new Set([...subjects].flatMap(s => { try { return [...document.querySelectorAll(s)]; } catch (e) { return []; } }))]
+    .filter(e => e instanceof HTMLElement && before.get(e) !== "hidden").slice(0, 400);
+  const moved = [];
+  for (const t of targets) {
+    const chain = []; for (let e = t; e && e !== document.documentElement; e = e.parentElement) chain.push(e);
+    chain.forEach(e => e.classList.add("__hover"));
+    for (const e of all) if (before.get(e) !== "hidden" && box(e) !== before.get(e)) {
+      moved.push(`${where}: a hover on ${name(t)} moves ${name(e)} (${before.get(e)} to ${box(e)})`); break;
+    }
+    chain.forEach(e => e.classList.remove("__hover"));
+  }
+  return [targets.length, moved];
+}
+try {
+  const quiet = document.createElement("style"); quiet.dataset.hoverCopy = "1";
+  quiet.textContent = "*, *::before, *::after { transition: none !important; animation: none !important; }";
+  document.head.append(quiet);
+  await until(() => window.__appReady && q("#work .wp, #work .muted"), "the Board drew");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  const out = { moved: [], hovered: {} };
+  const look = async (where) => { await sleep(700); const [n, m] = sweep(where); out.hovered[where] = n; out.moved.push(...m); };
+  for (const tab of [...document.querySelectorAll("nav button[data-tab]")].map(b => b.dataset.tab)) {
+    q(`nav button[data-tab="${tab}"]`).click();
+    await until(() => !q("#tab-" + tab).classList.contains("hidden"), "the tab " + tab);
+    if (tab !== "plan") { await look(tab); continue; }
+    for (const v of ["items", "graph", "done"]) { q(`[data-plan-view="${v}"]`).click(); await look("plan/" + v); }
+  }
+  q('nav button[data-tab="sessions"]').click();
+  q("#sessYouRow .srow-main").click(); await look("sessions/you");
+  q("#sessArtsRow .srow-main").click(); await look("sessions/artifacts");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+
+    def sweep_hovers(self, size):
+        core.config_set(self.c, "setup_done", "on")
+        core.goal_add(self.c, "site", "launch", outcome="the site is live", done_when="it answers")
+        core.target_add(self.c, "prod", description="push to main")
+        core.project_target(self.c, "site", "prod")
+        later = core.item_add(self.c, "site", "footer", goals=["launch"])["id"]
+        core.block(self.c, later, reason="waits on the logo", actor="mark")
+        core.item_add(self.c, "site", "Approve the logo", doer="human")
+        first = core.item_add(self.c, "site", "logo", doer="human")["id"]
+        core.claim(self.c, first, "mark")
+        core.done(self.c, first, output="drawn", actor="mark")
+        core.item_add(self.c, "site", "the pricing page", goals=["launch"])
+        core.send(self.c, "question", "Which color?", to="mark", actor="ag")
+        got = self.drive(self.HOVER_SWEEP, "/sessions/ag", size=size)
+        self.assertGreater(got["hovered"]["sessions"], 5, got["hovered"])  # the sweep found the rows and the buttons
+        self.assertEqual(got["moved"], [], "\n".join(got["moved"]))
+
+    def test_a_hover_moves_nothing_on_any_tab_at_desktop_width(self):
+        """#5106 (mark: 'the pin button when you mouse over it changes to the turn off button. this layout shift is
+        really annoying'): on every tab at 1240 px, a hover on any row, button, chip or element with a :hover rule
+        moves no other element and hides none."""
+        self.sweep_hovers("1240,900")
+
+    def test_a_hover_moves_nothing_on_any_tab_at_phone_width(self):
+        """#5106: the same sweep at 390 px."""
+        self.sweep_hovers("390,844")
+
     def test_a_new_prompt_or_question_of_the_open_session_opens_the_dialog_once(self):
         """#4663: the ! dialog opens by itself when the open session comes to a prompt or asks a question; Dismiss
         keeps it closed until something new waits."""
