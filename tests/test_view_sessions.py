@@ -1349,6 +1349,39 @@ class EndSession(Base):
             self.c.execute("UPDATE agents SET host='elsewhere' WHERE name='ag'")
         self.assertFalse(sessions.views(self.c, {"ag": "%1"}, self.root, self.croot)[0]["can_kill"])
 
+    def test_the_head_is_one_row_with_one_menu(self):
+        """#5115, mark 2026-11-10: 'the grouping in the top corner of the session screen (Settings, End Items....) thats
+        not a good layout'. The head is one row: the name, the agent id, the state dot and the item at the left; Items |
+        Artifacts and one ⋯ at the right. The ⋯ opens a card with Open session, Settings, End and the links to Plan; a
+        click outside closes it. A session with no item shows no 'No item'."""
+        driver = DRIVE_HEAD + r"""
+try {
+  await until(() => q('#sessOpen [data-end="ag"]') && q("#sessItem [data-open]"), "the head of ag");
+  const box = (s) => q(s).getBoundingClientRect(), shown = (s) => box(s).height > 0;
+  const head = box(".sess-head"), mid = (s) => { const b = box(s); return b.top + b.height / 2; };
+  const parts = ["#sessName", "#sessTitle", "#sessState .dot", "#sessItem [data-open]", '[data-sp-open="items"]',
+                 '[data-sp-open="artifacts"]', "#sessMore"];
+  const oneRow = parts.every(s => shown(s) && Math.abs(mid(s) - mid("#sessMore")) < 6) && head.height < 48;
+  const closed = !shown("#sessMenu") && !shown("#sessOpen");
+  q("#sessMore").click();
+  const open = shown("#sessMenu") && [...q("#sessMenu").querySelectorAll(".sess-mi")].map(b => b.textContent.trim());
+  const sameHead = Math.round(box(".sess-head").height) === Math.round(head.height);
+  q("#sessBody").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+  await sleep(50);
+  const outside = !shown("#sessMenu") && q("#sessMore").getAttribute("aria-expanded") === "false";
+  q('[data-sp-open="items"]').click();
+  await until(() => q('.sess-lists [data-sp-open="items"]').getAttribute("aria-pressed") === "true", "Items is on");
+  const pair = q('.sess-lists [data-sp-open="artifacts"]').getAttribute("aria-pressed");
+  post({ oneRow, closed, open, sameHead, outside, pair, noItem: q(".sess-head").textContent.includes("No item") });
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+        r = drive_page(self, driver)
+        self.assertNotIn("error", r, r.get("error"))
+        menu = r.pop("open")
+        self.assertEqual(r, {"oneRow": True, "closed": True, "sameHead": True, "outside": True, "pair": "false",
+                             "noItem": False})
+        self.assertEqual(menu, ["Open on claude.ai", "Settings", "End", "Plan: site"])
+
     def test_end_on_the_row_asks_then_the_row_shows_ending(self):
         driver = DRIVE_HEAD + r"""
 try {

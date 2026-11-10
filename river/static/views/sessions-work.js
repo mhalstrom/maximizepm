@@ -1,6 +1,6 @@
 // The work controls of the Sessions tab (#5102 step 2, design #4657), moved from the Board's strip and Agents:
 // Start an agent and the open session slots at the top of the list (where the new session shows), Give work in the
-// head of a session that waits for work, and at the foot of the list the ended sessions (read only) and Close N
+// ⋯ menu of the head of a session that waits for work (#5115), and at the foot of the list the ended sessions (read only) and Close N
 // finished (the tmux panes of sessions that are done). Drawn from the page's state (S) on each refresh.
 import { $, esc, act, toast, ago, clip, shortTitle } from "../lib.js";
 import { chip } from "../components/chip.js";
@@ -49,7 +49,7 @@ export function renderFoot() {
   if (on) { const r = box.querySelector(`[data-session="${CSS.escape(on.dataset.session)}"]`); if (r) r.classList.add("on"); }
 }
 
-// Give work (#5102 step 2): a session that waits for work (maxpm wait) takes a pushed item within seconds. The ready
+// Give work (#5102 step 2; in the head's ⋯ menu since #5115): a session that waits for work (maxpm wait) takes a pushed item within seconds. The ready
 // items of its projects, in a menu; the menu is not drawn again while the person picks from it.
 const giveChoice = {};
 export function renderGive(name) {

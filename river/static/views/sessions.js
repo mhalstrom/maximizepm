@@ -25,58 +25,59 @@ import { markYou } from "./you.js";
 import { S } from "../page.js";
 import { renderGive } from "./sessions-work.js";
 
-const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
-                     starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
-const PICKED = "river.session";  // the session the person chose last
+const PICKED = "river.session";
+// Fill a part of the head only when its HTML changed: a poll (2 s) then replaces no control under the pointer.
+const putHtml = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };  // the session the person chose last
 
-function stateChip(s) {
-  return chip(STATE_CHIP[s.state] || "c-p", esc(s.state_label), s.state === "prompt"
-    ? "A permission prompt waits in its terminal or session: answer it there" : null);
-}
 
-// The header of the chosen session (#4608): Open session (its claude.ai/code page; else its tmux pane in the
-// terminal view; else off, with why), and the item it works on, which opens in the drawer. End (#5041) for a session
-// that runs; on a phone these are under the ⋯ of the head.
+// The head of the chosen session (#4608; one row and one ⋯ menu since #5115). The menu holds Open session (its
+// claude.ai/code page; else its tmux pane in the terminal view; else off, with why), Give work (sessions-work.js),
+// Settings, the links to Plan, and End (#5041) for a session that runs. Each entry is a plain row of the menu.
+const MI = "sess-mi";
 function headerOpen(s) {
-  const set = s.provider ? button("Settings", { data: { settings: s.name }, title: "The settings this session runs with, and what you can change" }) + " " : "";
-  return set + headerOpenBtn(s) + (s.running ? " " + endButton(s) : "");
+  const set = s.provider ? button("Settings", { cls: MI, data: { settings: s.name }, title: "The settings this session runs with, and what you can change" }) : "";
+  return headerOpenBtn(s) + set + (s.running ? endButton(s, { cls: MI + " sess-mi-end" }) : "");
 }
 function headerOpenBtn(s) {
-  if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code">Open session</a>`;
-  if (s.terminal) return button("Open session", { data: { term: s.name }, title: "Open its tmux pane in the terminal view" });
+  if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn ${MI}" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code">Open on claude.ai</a>`;
+  if (s.terminal) return button("Open in terminal", { cls: MI, data: { term: s.name }, title: "Open its tmux pane in the terminal view" });
   const why = s.agent_type === "codex" ? "A Codex session has no web link, and this one runs in no tmux pane here" : "This session has no Remote Control link and runs in no tmux pane here";
-  return button("Open session", { disabled: true, title: why }) + `<span class="muted sess-noopen">${esc(why)}</span>`;
+  return button(`Open session<span class="muted sess-noopen">${esc(why)}</span>`, { cls: MI, disabled: true, title: why });
 }
 // The targets a session owns: entries are {name, owner_expires_at} (or a name), shown by name (#4686).
 const ownNames = (s) => (s.owns || []).map(o => (o && o.name) || String(o));
-// Links to Plan (#5102 step 7, design #4657): the project and goals of the session's item, and a goal or target it owns.
+// Links to Plan (#5102 step 7, design #4657): the project and goals of the session's item, and a goal or target it
+// owns. Rows of the ⋯ menu (#5115).
 function planLinks(s) {
   const it = s.holds && s.holds[0] && ((S && S.items) || []).find(i => i.id === s.holds[0].id);
-  const link = (view, project, goal, text, title) => `<span class="link" data-plan-go="${view}" data-project="${esc(project)}"${goal ? ` data-goal="${esc(goal)}"` : ""} title="${esc(title)}">${esc(text)}</span>`;
+  const link = (view, project, goal, text, title) => button(esc(text), { cls: MI,
+    data: { "plan-go": view, project, ...(goal ? { goal } : {}) }, title });
   const out = [];
   if (it) {
-    out.push(link("items", it.project, "", it.project, `The items of ${it.project} in Plan`));
-    for (const g of it.goals || []) out.push(link("goals", it.project, g, "goal " + g, `The goal ${g} in Plan`));
+    out.push(link("items", it.project, "", "Plan: " + it.project, `The items of ${it.project} in Plan`));
+    for (const g of it.goals || []) out.push(link("goals", it.project, g, "Plan: goal " + g, `The goal ${g} in Plan`));
   }
   for (const g of ((S && S.goals) || []).filter(x => x.owner === s.name && x.status === "open"))
-    out.push(link("goals", g.project, g.name, "owns goal " + g.name, `The goal ${g.name} in Plan: this session owns it`));
-  for (const tg of ownNames(s)) out.push(link("releases", "", "", "owns target " + tg, `The releases in Plan: this session owns the target ${tg}`));
-  return out.length ? ` <span class="sess-plan t-s">${out.join(" · ")}</span>` : "";
+    out.push(link("goals", g.project, g.name, "Plan: owns goal " + g.name, `The goal ${g.name} in Plan: this session owns it`));
+  for (const tg of ownNames(s)) out.push(link("releases", "", "", "Plan: owns target " + tg, `The releases in Plan: this session owns the target ${tg}`));
+  return out.join("");
 }
+// The item in the head: a link to it in the side panel, only when the session holds one (#5115: no 'No item').
 function headerItem(s) {
-  return headerItemOnly(s) + planLinks(s);
+  return (s.holds || []).map(h => button(
+    `#${h.id}<span class="sess-it-t"> ${esc(shortTitle(h))}</span>${h.status && h.status !== "in_progress" ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}`,
+    { cls: "sess-itembtn", data: { open: h.id }, title: `#${h.id} ${h.title || ""}\nOpen it in the side panel: its notes, what it waits on, and what it unblocks` })).join("");
 }
-function headerItemOnly(s) {
-  if (s.holds && s.holds.length) return s.holds.map(h => button(
-    `#${h.id} ${esc(shortTitle(h))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}`,
-    { cls: "sess-itembtn", data: { open: h.id }, title: `Open #${h.id} in the side panel: its notes, what it waits on, and what it unblocks` })).join(" ");
-  if (s.owns && s.owns.length) return `<span class="muted">No item · owns target ${ownNames(s).map(esc).join(", ")}</span>`;
-  return `<span class="muted">No item</span>`;
+
+// The state of a session in its head: a dot and its word (#5115), the same dot as its row of the list.
+function stateDot(s) {
+  const tip = s.state === "prompt" ? "A permission prompt waits in its terminal or session: answer it there" : s.state_label;
+  return `<span class="sess-stw" title="${esc(tip || "")}"><span class="dot ${DOT[s.state] || "away"}"></span>${esc(s.state_label || "")}</span>`;
 }
 
 // The chat provider of a session (#4627): a small label from the server's provider table.
 function provTag(p) {
-  return p ? `<span class="prov prov-${esc(p.id)}" title="Runs in ${esc(p.label)}">${esc(p.label)}</span>` : "";
+  return p && p.id !== "claude-code" ? `<span class="prov prov-${esc(p.id)}" title="Runs in ${esc(p.label)}">${esc(p.label)}</span>` : "";
 }
 
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
@@ -260,10 +261,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   for (const b of ["#youBack", "#artsBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
-  // The ⋯ of the session head on a phone (#4903): it shows the item line, Settings, Open session, Items and Artifacts
-  // under the one line of the head; a tap on one of them closes it again.
-  const more = makeMenu($("#sessMore"), $("#sessMain"), { cls: "head-more", onChange: () => fit(),
-    closeOn: ["#sessOpen", ".sess-item"].map(sel => $("#sessMain").querySelector(sel)) });
+  // The ⋯ of the session head (#4903; at every width since #5115): a card under it at the right with Open session,
+  // Give work, Settings, the links to Plan and End (on a phone also the item). A choice, Esc, or a click outside closes it.
+  const more = makeMenu($("#sessMore"), main, { cls: "head-more", onChange: () => fit(),
+    closeOn: [$("#sessMenu")], outside: $("#sessMenu") });
   const headMore = (open) => more.set(open);
 
   async function refresh() {
@@ -324,15 +325,18 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       agePending(col);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
-      $("#sessState").innerHTML = provTag(j.provider) + stateChip(j);
+      $("#sessState").innerHTML = provTag(j.provider) + stateDot(j);
       waitLine(j);
       lastCache = j.cache || null;  // the expert's prompt cache (#5023): the header says it, and a send checks it
-      $("#sessItem").innerHTML = (s.name ? headerItem(s) : "") + cacheBadge(j.cache);
+      const itemHtml = s.name ? headerItem(s) : "";
+      putHtml($("#sessItem"), itemHtml + cacheBadge(j.cache));
+      putHtml($("#sessMenuItem"), itemHtml);
+      putHtml($("#sessPlan"), s.name ? planLinks(s) : "");
       $("#sessName").textContent = s.title || "";
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });
       dict.showFor(list.some(x => x.name === agent) && !!j.terminal);
-      $("#sessOpen").innerHTML = headerOpen({ ...s, running: list.some(x => x.name === agent), session_url: j.session_url,
-                                              terminal: j.terminal });
+      putHtml($("#sessOpen"), headerOpen({ ...s, running: list.some(x => x.name === agent), session_url: j.session_url,
+                                               terminal: j.terminal }));
       renderGive(agent);
       // The first read shows the end; later new lines are followed. With no new line the chat stays where it is, so
       // a poll while the person types moves nothing (#5111).
@@ -374,7 +378,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
-    $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
+    for (const id of ["#sessState", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
     renderGive(name);
     $("#sessText").value = "";
     loadPrompts(name);

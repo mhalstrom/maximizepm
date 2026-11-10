@@ -23,7 +23,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Sheet (phone) | the same dialog: under 760 px `.dlg` is the full width from the top (phone.css) | |
 | Drawer | `drawer.js` (the item drawer) | |
 | Side panel | `sidePanel.js` (Sessions tab), `itemView.js` for an item in it | |
-| Menu (⋯) | `menu.js`: `makeMenu(btn, host, {cls, group, onChange, closeOn})` | a class on the host while it is open, `aria-expanded`, Esc and a choice close it; one menu of a group at a time. The header ⋯ and the tab sheet (app.js, phone.css `.hdr-menu`), the session head ⋯ (sessions.js) |
+| Menu (⋯) | `menu.js`: `makeMenu(btn, host, {cls, group, onChange, closeOn, outside})` | a class on the host while it is open, `aria-expanded`, Esc and a choice close it, and a click outside `outside`; one menu of a group at a time. The header ⋯ and the tab sheet (app.js, phone.css `.hdr-menu`), the session head ⋯ (sessions.js; a card `.sess-menu` with rows `.sess-mi`) |
 | End a session | `endSession.js`: `endButton(s, {icon})`, `endSession(s)` | the confirm dialog: stop request, expert end, End now (#5041) |
 | Toast | `lib.js`: `toast(text, err)` | |
 | Form field | `form.js`; `folderForm.js` for a project folder | classes `.form`, `.two`, `label`, `.actions` |

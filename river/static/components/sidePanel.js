@@ -98,7 +98,16 @@ function renderTabs() {
     return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(tip)}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}" title="${esc(tip + (t.by ? `\nopened by ${t.by}` : ""))}"${t.by ? ` data-by="${esc(t.by)}"` : ""}><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
     + `<button type="button" class="sp-x" data-close="${t.id}" title="Close this tab" aria-label="Close ${esc(t.title || label(t.target))}">✕</button></span>`; }).join("");
+  markPair();
   save();
+}
+// Items and Artifacts in the session head (#5115): a tab pair; the one whose list the open panel shows is on.
+function markPair() {
+  const open = !panel().classList.contains("hidden");
+  for (const b of document.querySelectorAll(".sess-lists [data-sp-open]")) {
+    const yes = open && on === b.dataset.spOpen;
+    b.classList.toggle("on", yes); b.setAttribute("aria-pressed", String(yes));
+  }
 }
 
 async function show(t) {
@@ -772,6 +781,7 @@ function reveal(yes) {
   panel().classList.toggle("hidden", !yes);
   $("#sessLayout").classList.toggle("with-panel", yes);
   if (!yes) $("#spBody").replaceChildren();
+  markPair();
 }
 
 // by: the session (or person) that opened it; the tab's tooltip names the last one.

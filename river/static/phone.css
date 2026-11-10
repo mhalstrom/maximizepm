@@ -4,7 +4,7 @@
    Safari on iOS zooms into a text field whose font is under 16 px when a person taps it, and stays zoomed: the page
    then looks cut at the right edge. So each field on a phone or a tablet has 16 px text. */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-#sessBack, #sessMore, #tabBtn, #searchBtn, header h1.brand .mark, #hdrScrim { display: none; }
+#sessBack, #tabBtn, #searchBtn, header h1.brand .mark, #hdrScrim { display: none; }
 /* The ⋯ of the header at every width (#5083, the Quiet look: less text): theme, relay, update, You are and the time
    of the last update are in its menu, a card under the bar at the right. Until a name is chosen, You are shows there
    by itself. A tap outside it (the scrim: clear on a desktop, dark on a phone and a tablet) or Esc closes it. */
@@ -153,40 +153,30 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
      set there, so the message box sits right above the keyboard. */
   .sess-layout.phone-kb { position: fixed; left: 0; right: 0; z-index: 20; background: var(--panel); }
   .sess-layout.phone-kb > .sess-main { padding-bottom: 6px; }
-  /* While the person types (#4903, point 4): only the session's head line stays above the chat; its state line and
-     its item line with Items and Artifacts come back when the keyboard closes. */
-  .sess-layout.phone-kb .sess-item, .sess-layout.phone-kb .sess-head #sessState,
-  .sess-layout.phone-kb .sess-head #sessOpen { display: none !important; }
+  /* While the person types (#4903, point 4): the head line keeps the name, the tab pair and the ⋯; the state comes
+     back when the keyboard closes. */
+  .sess-layout.phone-kb .sess-head #sessState { display: none !important; }
   .sess-layout.phone-chat > .sess-main { height: auto; min-height: 0; padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
   #sessBack { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; padding: 0 6px;
     white-space: nowrap; flex: none; border: 0; background: none; font-size: 22px; line-height: 1; }
   #sessBack .sb-word { display: none; }
-  /* The head (#4903): one line of ‹, the name, the state as a dot with its word, and a ⋯. The ⋯ shows under it the
-     item line, Settings and Open session, and Items and Artifacts; the chat gets the rest of the screen. */
-  .sess-head { gap: 4px; flex-wrap: nowrap; min-width: 0; min-height: 44px; }
-  .sess-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 0; font-size: 16px; }
-  /* The state gives way to the name: at most 45 % of the line, its word cut with … (the dot stays). */
-  .sess-head #sessState { flex: 0 1 auto; min-width: 0; max-width: 45%; display: flex; }
-  .sess-head #sessState .chip { display: block; min-width: 0; padding: 0 2px; border: 0; background: none;
-    font-size: 12px; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sess-head #sessState .chip::before { content: ""; display: inline-block; vertical-align: 1px; width: 8px; height: 8px; margin-right: 5px;
-    border-radius: 50%; background: currentColor; }
-  .sess-head .sess-noopen { display: none; }
-  .sess-head #sessTitle, .sess-head .prov { display: none; }
-  .sess-head .spacer { display: none; }
+  /* The head (#4903, #5115): one line of ‹, the name, the state as a dot (its word is the tooltip), Items | Artifacts
+     and the ⋯. The agent id and the item are not in the line: the item is the first entry of the ⋯ menu. */
+  .sess-head { gap: 4px; min-height: 44px; padding-bottom: 4px; }
+  .sess-head h2 { flex: 1 1 0; min-width: 0; font-size: 16px; }
+  .sess-head #sessTitle, .sess-head .prov, .sess-head .sess-item, .sess-head .spacer { display: none; }
+  .sess-st { flex: none; }
+  .sess-stw { font-size: 0; }
+  .sess-stw .dot { margin: 0; width: 10px; height: 10px; vertical-align: middle; }
+  .sess-mitem:not(:empty) { display: flex; }
+  .sess-mitem:not(:empty) ~ .sess-mgrp:not(:empty) { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
   #sessMore { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; min-height: 44px;
     border: 0; background: none; color: var(--ink); font-size: 20px; }
-  .sess-main:not(.head-more) .sess-head #sessOpen, .sess-main:not(.head-more) .sess-item { display: none; }
-  .sess-main.head-more .sess-head { flex-wrap: wrap; }
-  .sess-main.head-more .sess-head #sessOpen { order: 10; flex: 1 1 100%; display: flex; gap: 6px; padding-top: 4px; }
-  .sess-main.head-more .sess-head #sessOpen > .btn { flex: 1 1 0; justify-content: center; }
-  .sess-head .btn, .sess-head a.btn { min-height: 40px; padding: 4px 8px; font-size: 13px; display: inline-flex; align-items: center; }
-  .sess-head, .sess-item, .chat-foot { flex: none; position: relative; z-index: 1; background: var(--panel); }
-  .sess-item { margin: 4px 0 6px; }
-  .sess-lists { flex: 1 1 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
-  .sess-lists .btn { border-radius: 0; }
-  .sess-lists .btn:first-child { border-radius: 8px 0 0 8px; }
-  .sess-lists .btn:last-child { border-radius: 0 8px 8px 0; border-left-width: 0; }
+  .sess-lists .sess-tab { min-height: 36px; padding: 0 10px; font-size: 14px; }
+  .sess-menu .sess-mi { min-height: 44px; justify-content: center; font-size: 15px; }
+  .sess-menu .give-sel { font-size: 16px; }
+  .sess-head, .chat-foot { flex: none; position: relative; z-index: 1; background: var(--panel); }
+  .sess-main.head-more .sess-head { z-index: 8; }
   .sess-main .sbody { padding: 10px 2px 4px; overscroll-behavior: contain; }
   .msg { font-size: 15px; }
   /* The message box (#5078): larger round buttons, and 16 px text so iOS does not zoom into the field. */
