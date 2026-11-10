@@ -54,7 +54,7 @@ def static_file(path, root=None):
 # The page's addresses (#4653): a path for each view, for example /sessions/<session>/artifacts/<artifact id>,
 # with ?as=<person> and ?item=<id>. Each one gets the page, with a <base> that points back to the page's root, so
 # its relative addresses (app.js, api/state) work at any depth, here and on the relay's tunnel.
-PAGE_VIEWS = ("board", "sessions", "you", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings",
+PAGE_VIEWS = ("board", "sessions", "you", "plan", "artifacts", "projects", "targets", "capacity", "graph", "done", "settings",
               "terminal")
 
 

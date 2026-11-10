@@ -100,7 +100,7 @@ class ManyDoneRows(unittest.TestCase):
         driver = self.tvs.DRIVE_HEAD + r'''
 const rows = () => document.querySelectorAll('#projects [data-ptable="site"] .tabulator-row').length;
 try {
-  q('nav button[data-tab="projects"]').click();
+  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="items"]').click();
   await until(() => rows() >= 1, "the open item of site");
   const out = { open: rows() };
   let t = performance.now();

@@ -1,0 +1,19 @@
+<!-- The Plan tab (#5102 step 4, design #4657, mark's answers in #4658): the project management area. A left bar of
+     projects and their goals sets the scope of every view; the views are buttons at the top. maxpm serve puts it into
+     index.html, at view: plan, and puts the views into it at their marks. -->
+<section id="tab-plan" class="hidden">
+  <div class="plan-layout">
+    <aside class="panel plan-side" id="planSide" aria-label="Scope: a project or a goal"></aside>
+    <div class="plan-main">
+      <div class="plan-bar">
+        <span class="plan-views" id="planViews" role="tablist" aria-label="Views of the plan"></span>
+        <span class="spacer"></span>
+        <span class="plan-scope muted t-s" id="planScope"></span>
+        <button class="btn primary" type="button" id="planAdd" title="Add an item: the project and the goal come from the scope">Add item</button>
+      </div>
+      <!-- view: projects -->
+      <!-- view: graph -->
+      <!-- view: done -->
+    </div>
+  </div>
+</section>

@@ -1,12 +1,12 @@
-// The Graph tab (#4656): the dependency graph (Mermaid, ELK) and a card for each project.
-import { $, esc, left } from "../lib.js";
-import { button } from "../components/button.js";
+// The Graph view of Plan (#4656; Plan since #5102 step 4): the dependency graph (Mermaid, ELK) of the scope. The
+// small graph of a project card in Plan's left bar is here too (miniGraph).
+import { $, esc } from "../lib.js";
 import { makePanZoom } from "../components/panZoom.js";
 import { graphItems, graphText, GRAPH_LIMITS, GRAPH_MAX } from "../components/graphText.js";
-import { S, tab, goalSel, inGoal } from "../page.js";
+import { S, scope, inGoal, planShown } from "../page.js";
 
 let graphSig = "";
-let graphDefaulted = false, elkReady = null, graphProj = "", sideSig = "", sideShown = null;
+let elkReady = null;
 // ELK routes edges around boxes; the default layout can run an edge behind an unrelated box, which
 // reads as a dependency that does not exist. If ELK does not load, edges are drawn above the boxes.
 function loadElk() {
@@ -16,7 +16,7 @@ function loadElk() {
 }
 // A small picture of one project's graph for its sidebar card: items in columns by step
 // (1 = nothing inside the project waits first), lines for waits-on, colors as in the full graph.
-function miniGraph(items) {
+export function miniGraph(items) {
   const byId = new Map(items.map(i => [i.id, i])), depth = new Map();
   const d = (i, seen = new Set()) => {
     if (depth.has(i.id)) return depth.get(i.id);
@@ -42,39 +42,13 @@ function miniGraph(items) {
   }
   return `<svg viewBox="0 0 ${Math.max(w, 150)} ${Math.max(h, 38)}" preserveAspectRatio="xMidYMid meet" aria-hidden="true"><g stroke="var(--muted)" stroke-width=".7" opacity=".6">${lines}</g>${boxes}</svg>`;
 }
-function renderGraphSide(withDone) {
-  const live = (i) => withDone || !["done", "dropped"].includes(i.status);
-  const per = S.projects.map(p => ({ p, items: S.items.filter(i => i.project === p.name && live(i) && inGoal(i)) }));
-  const sig = JSON.stringify([graphProj, withDone, per.map(x => [x.p.name, x.items.map(i => [i.id, i.status, i.ready, i.waits_on])])]);
-  if (sig === sideSig) return;
-  sideSig = sig;
-  const card = (name, label, items, extra) => {
-    const ready = items.filter(i => i.ready).length;
-    return button(`<b>${esc(label)}</b><span class="gc-n">${items.length} ${withDone ? "items" : "open"} · ${ready} ready</span>${extra}`,
-      { kind: "card", cls: "gcard" + (items.length ? "" : " empty"), data: { gproj: name }, pressed: graphProj === name });
-  };
-  $("#graphSide").innerHTML = `<h2>Projects</h2>` + card("", "All projects", per.flatMap(x => x.items), "")
-    + per.map(({ p, items }) => card(p.name, p.name, items, items.length ? miniGraph(items) : `<span class="gc-none">No ${withDone ? "" : "open "}items</span>`)).join("");
-  const on = $("#graphSide .gcard.on"), side = $("#graphSide");
-  if (on && sideShown !== graphProj) side.scrollTo({ left: on.offsetLeft - side.offsetLeft - 10, top: side.scrollHeight > side.clientHeight ? on.offsetTop - side.offsetTop - 40 : 0 });
-  sideShown = graphProj;
-}
 const graphView = makePanZoom($("#graph"));
 export async function renderGraph(force) {
-  if (tab !== "graph" || !window.mermaid || !S) return;  // no state yet (the page shows the tab before it, #4888)
-  // A big queue draws as an unreadable wall: the first time, show only the project of the top ready item.
-  if (!graphDefaulted) {
-    graphDefaulted = true;
-    const open = S.items.filter(i => !["done", "dropped"].includes(i.status));
-    const top = S.items.find(i => i.ready) || open[0];
-    if (open.length > 40 && top && !graphProj) graphProj = top.project;
-  }
-  if (graphProj && !S.projects.some(p => p.name === graphProj)) graphProj = "";
-  const proj = graphProj, withDone = $("#graphDone").checked;
-  renderGraphSide(withDone);
-  $("#graphTitle").textContent = proj || "All projects";
+  if (!planShown("graph") || !window.mermaid || !S) return;  // no state yet (the page shows the tab before it, #4888)
+  const proj = scope.project, withDone = $("#graphDone").checked;
+  $("#graphTitle").textContent = scope.goal ? `${proj} · goal ${scope.goal}` : proj || "All projects";
   const items = S.items.filter(i => (withDone || !["done", "dropped"].includes(i.status)));
-  const G = goalSel();
+  const G = scope.goal;
   const { show, total, hidden } = graphItems(items, proj || G ? items.filter(i => (!proj || i.project === proj) && inGoal(i)) : null);
   const sig = JSON.stringify([proj, G, withDone, items.filter(i => show.has(i.id)).map(i => [i.id, i.status, i.ready, i.waits_on])]);
   if (!force && sig === graphSig) return;
@@ -97,8 +71,4 @@ export async function renderGraph(force) {
     stage.querySelectorAll(".edgePaths").forEach(e => e.parentNode.appendChild(e));
   } catch (e) { graphView.show(`<div class="muted">Graph failed to draw: ${esc(e.message || e)}</div>`, null); }
 }
-$("#graphSide").addEventListener("click", (e) => {
-  const c = e.target.closest("[data-gproj]"); if (!c) return;
-  graphProj = c.dataset.gproj; renderGraph(true);
-});
 $("#graphDone").addEventListener("change", () => renderGraph(true));

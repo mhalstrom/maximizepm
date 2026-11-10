@@ -105,20 +105,29 @@ try {
   await until(() => q("#work .wp-items"), "a click opens a project of Work");
   check(q("#strip [data-strip]"), "the status strip");
   const seen = {};
-  for (const name of ["projects", "targets", "capacity", "graph", "done", "settings", "sessions", "board"]) {
+  for (const name of ["plan", "targets", "capacity", "settings", "sessions", "board"]) {
     q(`nav button[data-tab="${name}"]`).click();
     await until(() => shown(name), "the tab " + name);
     await sleep(300);
     seen[name] = q("#tab-" + name).textContent.length > 20;
   }
-  q('nav button[data-tab="projects"]').click();
+  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="items"]').click();
   await until(() => q("#projects [data-ptable]") || q("#projects .pcard, #projects [data-fold]"), "the project cards");
   const fold = q("#projects [data-fold]"); if (fold) { fold.click(); await sleep(100); }
   check(q("#blockedList").textContent.includes("waits on the logo"), "blocked items on Projects");
   q('nav button[data-tab="targets"]').click();
   await until(() => q("#targets").textContent.includes("prod"), "the target prod");
-  q('nav button[data-tab="done"]').click();
+  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="done"]').click();
   await until(() => q("#log").textContent.includes("logo"), "the done log");
+  q('[data-plan-view="graph"]').click();
+  await until(() => location.pathname === "/plan/graph" && !q("#plan-graph").classList.contains("hidden"), "Plan > Graph");
+  q('#planSide [data-scope-project="site"]').click();
+  await until(() => location.search.includes("project=site") && q("#graphTitle").textContent === "site", "the scope site");
+  await until(() => q('#planSide [data-scope-goal="launch"]'), "the goal launch under its project");
+  q('#planSide [data-scope-goal="launch"]').click();
+  await until(() => location.search.includes("goal=launch") && q("#planScope").textContent.includes("launch"), "the scope launch");
+  q('#planSide [data-scope-project=""]').click();
+  await until(() => !location.search.includes("project="), "All projects");
   q('nav button[data-tab="settings"]').click();
   await until(() => q("#settingsTable").textContent.includes("lease_ttl"), "the settings");
   q('nav button[data-tab="board"]').click();
@@ -207,7 +216,7 @@ try {
         dated = core.item_add(self.c, "site", "dated", doer="human", due="2030-01-01")["id"]
         driver = r'''try {
   await until(() => window.__appReady, "app.js loaded");
-  q('nav button[data-tab="projects"]').click();
+  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="items"]').click();
   await until(() => q("#projects [data-ptable], #projects [data-fold]"), "the project cards");
   if (!q("#projects .tabulator-row")) { const f = q("#projects [data-fold]"); if (f) f.click(); }
   await until(() => q("#projects .tabulator-responsive-collapse"), "a collapsed row");
@@ -437,8 +446,8 @@ try {
   q("#tabBtn").click();
   out.sheet = [...document.querySelectorAll("nav button")].filter(b => b.getBoundingClientRect().height >= 48).length;
   out.scrim = shown("#hdrScrim");
-  q('nav button[data-tab="projects"]').click();
-  out.picked = q("#tabName").textContent + " " + shown("nav") + " " + shown("#hdrScrim") + " " + !q("#tab-projects").classList.contains("hidden");
+  q('nav button[data-tab="plan"]').click();
+  out.picked = q("#tabName").textContent + " " + shown("nav") + " " + shown("#hdrScrim") + " " + !q("#tab-plan").classList.contains("hidden");
   q("#hdrMore").click();
   out.menu = shown("#hdrMenu") && shown("#updateBtn") && shown("#theme");
   q("#hdrScrim").click();
@@ -471,8 +480,8 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/", size="390,844")
-        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Board", "sheet": 9, "scrim": True,
-                               "picked": "Projects false false true", "menu": True, "closed": True, "search": True,
+        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Board", "sheet": 7, "scrim": True,
+                               "picked": "Plan false false true", "menu": True, "closed": True, "search": True,
                                "down": True, "up": True, "menuKeeps": True, "head": True, "more": True,
                                "moreCloses": True})
 
@@ -521,7 +530,7 @@ try {
   const { openInPanel } = await import("./components/sidePanel.js");
   const target = TARGET, id = artId(target);
   if (step === "graph") {
-    await until(() => !q("#tab-graph").classList.contains("hidden"), "the path /graph shows the Graph tab");
+    await until(() => !q("#tab-plan").classList.contains("hidden") && !q("#plan-graph").classList.contains("hidden"), "the path /plan/graph shows Plan > Graph");
     q('nav button[data-tab="sessions"]').click();
     await until(() => where() === "/sessions/ag", "Sessions with its session ag: " + where());
     openInPanel(target);
@@ -539,9 +548,9 @@ try {
     await until(() => where() === "/sessions/ag/artifacts/" + id + "?item=" + ITEM && q("#drawer").classList.contains("open"), "the drawer: " + where());
     history.back();
     await until(() => !q("#drawer").classList.contains("open") && where() === "/sessions/ag/artifacts/" + id, "Back closes the drawer: " + where());
-    history.back();  // to /sessions/ag (before the artifact? replaced) and then /graph
-    await until(() => !q("#tab-graph").classList.contains("hidden") && where() === "/graph", "Back to the Graph: " + where());
-    check(q('nav button[data-tab="graph"]').classList.contains("on"), "the Graph button is on");
+    history.back();  // to /sessions/ag (before the artifact? replaced) and then /plan/graph
+    await until(() => !q("#plan-graph").classList.contains("hidden") && where() === "/plan/graph", "Back to the Graph: " + where());
+    check(q('nav button[data-tab="plan"]').classList.contains("on") && q('[data-plan-view="graph"]').classList.contains("on"), "Plan and Graph are on");
     sessionStorage.setItem("step", "link");
     location.href = "/artifacts/" + id + "?as=mark";
   } else if (step === "link") {
@@ -551,7 +560,7 @@ try {
   }
 } catch (e) { post({ error: step + ": " + String(e.stack || e) }); }
 '''.replace("TARGET", json.dumps(target)).replace("ITEM", str(self.it))
-        self.assertEqual(self.drive(driver, "/graph"), {"ok": True})
+        self.assertEqual(self.drive(driver, "/plan/graph"), {"ok": True})
 
 
 class PageAddresses(unittest.TestCase):
@@ -561,7 +570,7 @@ class PageAddresses(unittest.TestCase):
         import re
         from urllib.parse import urljoin
         for path, base in [("/", "./"), ("/sessions", "./"), ("/sessions/", "../"), ("/sessions/ag", "../"),
-                           ("/sessions/ag/artifacts/k3x9", "../../../"), ("/graph", "./"), ("/artifacts/k3x9", "../"),
+                           ("/sessions/ag/artifacts/k3x9", "../../../"), ("/graph", "./"), ("/artifacts/k3x9", "../"), ("/plan/graph", "../"),
                            ("/you", "./")]:
             page = server.page_html(path)
             self.assertIsNotNone(page, path)

@@ -1,22 +1,24 @@
-// The Projects tab (#4656): a card for each project with its goals and items, blocked items, and the forms
-// that add an item, a goal or a project.
+// The Items view of Plan (#4656; Plan since #5102 step 4): a card for each project of the scope with its goals and
+// items, and the blocked items. The forms that add an item, a goal or a project are a dialog (plan.js openAdd).
 import { $, esc, store, actor, toast, act, ago, left, clip, shortTitle } from "../lib.js";
 import { doerChip, projectChip, countChip } from "../components/chip.js";
 import { nyCard, goalCard, projCard } from "../components/card.js";
 import { itemTableRows, itemTableColumns } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
 import { fitClamps } from "../components/clamp.js";
-import { S, tab, goalSel, inGoal, nav } from "../page.js";
+import { S, goalSel, inGoal, scope } from "../page.js";
+import { openAdd } from "./plan.js";
+import { nav } from "../page.js";
 
 // Projects folded closed on the Projects tab, remembered in this browser.
 function projClosed() { try { return JSON.parse(store("river.projClosed") || "[]"); } catch (e) { return []; } }
 export function renderProjects() {
   const showDone = $("#showDone").checked, showBacklog = $("#showBacklog").checked;
   const G = goalSel(), goals = S.goals || [];
-  const html = S.projects.map(p => {
+  const html = S.projects.filter(p => !scope.project || p.name === scope.project).map(p => {
     const pg = goals.filter(g => g.project === p.name && (g.status === "open" || showDone || g.name === G));
     const all = S.items.filter(i => i.project === p.name && inGoal(i));
-    if (G && G !== "__none" && !all.length && !pg.some(g => g.name === G)) return "";
+    if (G && !all.length && !pg.some(g => g.name === G)) return "";
     const open = all.filter(i => !["done", "dropped"].includes(i.status) && !i.backlog);
     const closed = all.filter(i => ["done", "dropped"].includes(i.status));
     const backlog = all.filter(i => i.backlog);
@@ -99,7 +101,7 @@ async function goalAction(what, name) {
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
   if (t.dataset.addgoal) return run(async () => {
-    await nav.setTab("projects"); const d = $("#goalName").closest("details"); d.open = true; $("#goalProject").value = t.dataset.addgoal; d.scrollIntoView({ block: "center" }); $("#goalName").focus();
+    openAdd("goal"); $("#goalProject").value = t.dataset.addgoal;
   });
   if (t.dataset.goalAct) return run(() => goalAction(t.dataset.goalAct, t.dataset.g));
   if (t.dataset.describe) return run(async () => {

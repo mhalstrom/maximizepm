@@ -1,0 +1,49 @@
+/* The Plan tab (#5102 step 4): the left bar of the scope (All projects, a card for each project with a small picture of
+   its graph, the goals of the chosen project) and the views on the right, with their buttons and Add item at the top. */
+#tab-plan .plan-view.hidden { display: none; }
+.plan-main { min-width: 0; }
+.plan-bar { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; margin: 0 0 var(--sp-4); }
+.plan-bar .spacer { flex: 1; }
+.plan-views { display: inline-flex; gap: var(--sp-1); flex-wrap: wrap; }
+.plan-vbtn.on { color: var(--ink); font-weight: 600; border-color: var(--accent); }
+.plan-scope { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: var(--w-l); }
+.gl { display: flex; flex-direction: column; gap: var(--sp-1); margin: calc(-1 * var(--sp-1)) 0 var(--sp-3) var(--sp-3); }
+.gl-goal { display: block; width: 100%; text-align: left; background: none; border: 0; border-left: var(--hair-2) solid var(--line); padding: var(--sp-1) var(--sp-3); }
+.gl-goal.sub { margin-left: var(--sp-5); }
+.gl-goal:hover { border-left-color: var(--muted); }
+.gl-goal.on { border-left-color: var(--accent); background: var(--bubble); }
+.gl-goal b { font-size: var(--fs-m); overflow-wrap: anywhere; }
+.gl-goal .gc-n { display: block; font-size: var(--fs-xs); color: var(--muted); }
+.gl-goal .bar { margin-top: var(--sp-1); }
+.plan-foot { padding-top: var(--sp-2); }
+#addDlg { --dlg-w: var(--w-dlg-m); }
+#addDlg .add-part { margin-top: var(--sp-3); }
+#addDlg .add-form { margin-top: var(--sp-3); }
+.plan-layout { display: grid; grid-template-columns: var(--w-side) minmax(0, 1fr); gap: var(--sp-6); align-items: start; }
+.plan-side { position: sticky; top: var(--sp-5); max-height: calc(100vh - var(--sp-7)); overflow-y: auto; padding: var(--sp-4); }
+.plan-side h2 { margin: var(--sp-0) var(--sp-1) var(--sp-3); }
+.gcard { background: var(--bg); border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-3); }
+.gcard:hover { border-color: var(--muted); }
+.gcard.on { border-color: var(--accent); box-shadow: 0 0 0 var(--hair) var(--accent); }
+.gcard.empty { opacity: .6; }
+.gcard b { font-size: var(--fs-m); overflow-wrap: anywhere; }
+.gcard .gc-n { display: block; font-size: var(--fs-xs); color: var(--muted); margin-top: var(--hair); font-variant-numeric: tabular-nums; }
+.gcard svg { display: block; width: 100%; height: var(--h-spark); margin-top: var(--sp-2); border-radius: calc(var(--r-s) - var(--hair)); background: var(--panel); }
+.gcard .gc-none { display: block; font-size: var(--fs-xs); color: var(--muted); margin-top: var(--sp-2); }
+@media (max-width: 800px) {
+  .plan-layout { grid-template-columns: minmax(0, 1fr); }
+  .plan-side { position: static; max-height: none; display: flex; gap: var(--sp-3); overflow-x: auto; }
+  .plan-side h2 { display: none; }
+  .gcard { flex: 0 0 var(--w-card); margin-bottom: 0; }
+}
+/* A phone (#4890): narrower cards, so part of the next one shows, and the row fades at its right edge: it scrolls.
+   The mask reads only the alpha of its color, so any opaque token does. */
+@media (max-width: 759px) {
+  .plan-side { -webkit-mask-image: linear-gradient(to right, var(--ink) 82%, transparent); mask-image: linear-gradient(to right, var(--ink) 82%, transparent); padding-right: var(--fade); }
+  .gcard { flex-basis: var(--w-card-phone); }
+}
+@media (max-width: 800px) {
+  .gl { flex: 0 0 auto; flex-direction: row; margin: 0; }
+  .gl-goal { flex: 0 0 var(--w-card-phone); }
+  .plan-foot { flex: none; align-self: center; padding: 0; }
+}

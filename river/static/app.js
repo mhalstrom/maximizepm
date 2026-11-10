@@ -12,7 +12,7 @@ import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
-import { S, tab, setState, setTabName, nav, goalSel } from "./page.js";
+import { S, tab, setState, setTabName, nav, goalSel, setPlan, planView, scope, planShown } from "./page.js";
 import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
 import * as board from "./views/board.js";
@@ -21,6 +21,7 @@ import * as inbox from "./views/you-inbox.js";
 import * as youView from "./views/you.js";
 import * as sessWork from "./views/sessions-work.js";
 import * as projects from "./views/projects.js";
+import * as plan from "./views/plan.js";
 import { makeSessions } from "./views/sessions.js";
 import { makeArtifacts } from "./views/artifacts.js";
 import { makeTerminalTab } from "./views/terminal.js";
@@ -32,6 +33,7 @@ import * as settings from "./views/settings.js";
 import { makeMenu } from "./components/menu.js";
 hooks.refresh = refresh;
 Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady(),
+  openPlan: (view) => showPlan(view),
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); },
   // The You view of Sessions (#5102): what waits on the person; takeovers opens the list of items an agent took over.
   openYou: async (takeovers) => { await setTab("sessions"); sessionsTab.showYou(true); if (takeovers) youView.openTakeovers(); } });
@@ -56,7 +58,7 @@ function renderLoop() {
 
 function renderSelects() {
   const names = S.projects.map(p => p.name);
-  { const el = $("#area"), cur = el.value; el.innerHTML = `<option value="">All projects</option><option value="__mine">Near my earlier work</option>` + names.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(""); if ([...el.options].some(o => o.value === cur)) el.value = cur; } fillSelect("#logProject", names, true); fillSelect("#addProject", names, false);
+  { const el = $("#area"), cur = el.value; el.innerHTML = `<option value="">All projects</option><option value="__mine">Near my earlier work</option>` + names.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(""); if ([...el.options].some(o => o.value === cur)) el.value = cur; } fillSelect("#addProject", names, false);
   const a = $("#actor"), cur = a.value || store("river.actor") || "";
   // Only people act from this page; agents act through the maxpm command.
   const people = S.agents.filter(x => x.kind === "human");
@@ -66,10 +68,6 @@ function renderSelects() {
   fillSelect("#setKey", Object.keys(S.settings.defaults), false);
   fillSelect("#goalProject", names, false);
   const openGoals = (S.goals || []).filter(g => g.status === "open");
-  { const el = $("#goalFilter"), cur = el.value || store("river.goal") || "";
-    const extra = cur && cur !== "__none" && !openGoals.some(g => g.name === cur) && (S.goals || []).some(g => g.name === cur) ? [cur] : [];
-    el.innerHTML = `<option value="">All goals</option><option value="__none">No goal</option>` + openGoals.map(g => g.name).concat(extra).map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
-    el.value = [...el.options].some(o => o.value === cur) ? cur : ""; }
   { const el = $("#addGoal"), cur = el.value, proj = $("#addProject").value;
     const list = openGoals.filter(g => g.project === proj).concat(openGoals.filter(g => g.project !== proj));
     el.innerHTML = `<option value="">no goal</option>` + list.map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.project !== proj ? " (" + esc(g.project) + ")" : ""}</option>`).join("");
@@ -235,7 +233,7 @@ function newCode(build, shape) {
 // a view shows them: the Projects tab with "done" on, or the Graph with its done box on.
 const stateClient = makeStateClient(async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(`state: ${r.status}`); return r.json(); });
 let stateClosed = false;
-function wantClosed() { return (tab === "projects" && $("#showDone").checked) || (tab === "graph" && $("#graphDone").checked); }
+function wantClosed() { return (planShown("items") && $("#showDone").checked) || (planShown("graph") && $("#graphDone").checked); }
 for (const box of ["#showDone", "#graphDone"]) $(box).addEventListener("change", () => refresh().catch(() => {}));
 // Done items are not always in the state: closed_counts says how many each project has.
 function closedTotal() { return Object.values((S && S.closed_counts) || {}).reduce((a, b) => a + b, 0); }
@@ -245,7 +243,7 @@ async function refresh() {
   setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   if (newCode(S.page_build, S.state_shape)) return;
-  renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); projects.renderBlocked(); targets.renderTargets();
+  renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); projects.renderBlocked(); targets.renderTargets();
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
@@ -291,7 +289,14 @@ document.addEventListener("click", async (e) => {
                         : `Started ${r.agent} in ${r.project}, for #${r.item.id} ${clip(r.item.title, 60)}` + (r.why ? ` (${r.why})` : "")); } catch (e) { /* toast shown */ }
     return; }
   if (t.dataset.untag) { await act("item_edit", { id: openItem, untag: [t.dataset.untag] }).catch(() => {}); return openDrawer(openItem, true); }
-  const card = t.closest("[data-goal]"); if (card) { const g = card.dataset.goal; setGoal(goalSel() === g ? "" : g); return; }
+  // Plan (#5102 step 4): a view button, a project or a goal of the left bar (the scope), + project.
+  const pv = t.closest("[data-plan-view]"); if (pv) return showPlan(pv.dataset.planView);
+  const sg = t.closest("[data-scope-goal]"); if (sg) return setScope(sg.dataset.scopeProject, scope.goal === sg.dataset.scopeGoal ? "" : sg.dataset.scopeGoal);
+  const sp = t.closest("[data-scope-project]"); if (sp) return setScope(sp.dataset.scopeProject, "");
+  if (t.closest("[data-plan-addproject]")) return plan.openAdd("project");
+  // A goal card of the Items view: that goal is the scope (a second click: its project).
+  const card = t.closest("[data-goal]"); if (card) { const g = (S.goals || []).find(x => x.name === card.dataset.goal);
+    if (g) setScope(g.project, scope.goal === g.name ? "" : g.name); return; }
   // A session link (the drawer's Open session, a name in its history, the Board's agents and manager card, #4687):
   // the Sessions tab on that session (#4615).
   const sgo = t.closest("[data-session-go]");
@@ -303,12 +308,29 @@ document.addEventListener("click", async (e) => {
   if (t.dataset.offer) { const n = +t.dataset.offer, body = $("#offer-" + n).value.trim(); if (!body) return toast("Say what you can take", true);
     return act("offer", { item: n, body }).then(() => toast(`Offer sent to the holder of #${n}`)).catch(() => {}); }
   if (t.dataset.undep) { await act("dep_remove", { id: openItem, on: [+t.dataset.undep] }).catch(() => {}); return openDrawer(openItem, true); }
+  if (t.dataset.tab === "projects") return showPlan("items");  // the Board's "all items" (until the Board goes, #5102)
   if (t.dataset.tab && TABS.includes(t.dataset.tab)) return setTab(t.dataset.tab);  // only a tab of the page (#4652)
 });
 
 $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").value); inbox.actorChanged().catch(() => {}); });
-function setGoal(g) { $("#goalFilter").value = g; store("river.goal", g); board.renderNext(); projects.renderProjects(); renderGraph(true); }
-$("#goalFilter").addEventListener("change", () => setGoal($("#goalFilter").value));
+// Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
+function planDraw() {
+  plan.renderPlanViews(); plan.renderPlanSide(); board.renderNext(); projects.renderProjects(); renderGraph(true); renderLog(true);
+  if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
+}
+function setScope(project, goal) {
+  setPlan(null, { project, goal });
+  store("river.scope", JSON.stringify(scope));
+  if (tab === "plan") syncUrl(true);
+  planDraw();
+}
+async function showPlan(view, push = true) {
+  setPlan(view);
+  if (tab !== "plan") await setTab("plan", push);
+  else if (push) syncUrl(true);
+  planDraw();
+}
+try { const sc = JSON.parse(store("river.scope") || "null"); if (sc) setPlan(null, sc); } catch (e) { /* none kept */ }
 $("#addProject").addEventListener("change", renderSelects);
 
 // Theme: System follows the computer's setting (also when it changes); Light and Dark set data-theme on
@@ -337,7 +359,7 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["board", "sessions", "projects", "targets", "capacity", "graph", "done", "settings", "terminal"];
+const TABS = ["board", "sessions", "plan", "targets", "capacity", "settings", "terminal"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
 //   /  (the Board)   /sessions   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
 //   /you (the You view of Sessions, #5102)   /artifacts (the Artifacts view of Sessions, #5102)
@@ -361,6 +383,11 @@ function readUrl() {
   if (r.tab === "sessions" && !pane) { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
     if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
   if (pane === "arts") r.art = parts[1] || null;
+  // Plan (#5102 step 4): /plan/<view>?project=<p>&goal=<g>; the old paths of its views open them (until step 7).
+  const old = { projects: "items", graph: "graph", done: "done" }[parts[0]];
+  if (old) r.tab = "plan";
+  if (r.tab === "plan") r.plan = { view: old || (plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "items"),
+                                   project: q.get("project") || "", goal: q.get("goal") || "" };
   return r;
 }
 function urlItem() { return readUrl().item; }
@@ -372,6 +399,7 @@ function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
     if (view.art) p += view.art.startsWith("item:") ? "/items/" + view.art.slice(5) : "/artifacts/" + view.art;
   }
   const q = new URLSearchParams();
+  if (tabName === "plan") { p += "/" + planView; if (scope.project) q.set("project", scope.project); if (scope.goal) q.set("goal", scope.goal); }
   if (asParam) q.set("as", asParam);
   if (item != null) q.set("item", item);
   return ROOT + p + (q.toString() ? "?" + q : "");
@@ -391,6 +419,7 @@ function setTab(name, push = true) {
   if (header.classList.contains("tabs-open")) headerOpen(null);
   const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
+  plan.renderPlanViews(); plan.renderPlanSide();
   renderLog(true);
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
@@ -706,6 +735,7 @@ async function openFromUrl() {
     }
     if (r.terminal) openTerminal(r.terminal);
     if (r.pane === "arts" && r.art) return await openArtifact(null, r.art);
+    if (r.plan) { setPlan(r.plan.view, r.plan); planDraw(); }
     if (r.tab !== tab) await setTab(r.tab, false);
     if (r.pane === "you") sessionsTab.showYou(false);
     if (r.pane === "arts") sessionsTab.showArts(false);
@@ -891,7 +921,7 @@ setInterval(() => {
 {
   const r = readUrl();
   if (r.tab !== "board") {
-    try { setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
+    try { if (r.plan) setPlan(r.plan.view, r.plan); setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
       if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
   }
 }

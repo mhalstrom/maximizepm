@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="app.css">
 <!-- Each view's own styles (#4656), after the shared ones of app.css. -->
 <link rel="stylesheet" href="views/board.css">
+<link rel="stylesheet" href="views/plan.css">
 <link rel="stylesheet" href="views/projects.css">
 <link rel="stylesheet" href="views/sessions.css">
 <link rel="stylesheet" href="views/you.css">
@@ -35,11 +36,9 @@
   <nav id="tabNav">
     <button data-tab="board" class="on">Board</button>
     <button data-tab="sessions" title="Every running agent session: its item, its state, and what it writes now">Sessions</button>
-    <button data-tab="projects">Projects</button>
+    <button data-tab="plan" title="The plan of the work: projects, goals, items, the graph, releases and what is done">Plan</button>
     <button data-tab="targets">Targets</button>
     <button data-tab="capacity">Capacity</button>
-    <button data-tab="graph">Graph</button>
-    <button data-tab="done">Done</button>
     <button data-tab="terminal" title="A plain shell on this computer, in the page">Terminal</button>
     <button data-tab="settings">Settings</button>
   </nav>
@@ -65,17 +64,13 @@
   <div id="bootNote" class="boot-note muted" role="status">Loading the queue…</div>
   <!-- view: board -->
 
-  <!-- view: projects -->
+  <!-- view: plan -->
 
   <!-- view: sessions -->
 
   <!-- view: targets -->
 
   <!-- view: capacity -->
-
-  <!-- view: graph -->
-
-  <!-- view: done -->
 
   <!-- view: terminal -->
   <!-- view: settings -->
@@ -124,6 +119,43 @@
     <span class="spacer"></span>
     <button class="btn primary" id="setRestart" type="button" disabled title="End the session when its turn has ended, and resume the same chat with these settings: the same name, items and context">Restart with these settings</button>
   </div>
+</div></div>
+
+<!-- Add item (Plan, #5102 step 4): the project and the goal come from Plan's scope; a goal and a project fold below. -->
+<div id="addDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="addTitleH"><div class="box">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+    <h2 id="addTitleH" style="margin:0">Add item</h2>
+    <button class="iconbtn" id="addClose" title="Close">✕</button>
+  </div>
+        <div class="form">
+          <input id="addTitle" placeholder="Title">
+          <div class="two">
+            <label>Project<select id="addProject"></select></label>
+            <label>Priority<select id="addPrio"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
+          </div>
+          <div class="two">
+            <label>Doer<select id="addDoer"><option value="any">anyone</option><option value="ai">agent</option><option value="human">human</option></select></label>
+            <label title="Expert: a session started for it takes it, and you talk it through with that session for as long as you need; a worker never takes it">Tier<select id="addTier"><option value="">normal</option><option value="expert">expert</option></select></label>
+          </div>
+          <label title="Ids of the items it waits on">Waits on<input id="addAfter" placeholder="3, 7"></label>
+          <label title="Ids of the items whose output it reads; it also waits on them">Reads<input id="addFeeds" placeholder="4"></label>
+          <label>Goal<select id="addGoal"><option value="">no goal</option></select></label>
+          <textarea id="addNotes" rows="2" placeholder="Notes"></textarea>
+          <button class="btn primary" id="addGo">Add</button>
+        </div>
+        <details id="addGoalPart" class="add-part"><summary>Add a goal</summary>
+          <div class="form add-form">
+            <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="launch-legal"></label></div>
+            <label>Outcome<textarea id="goalOutcome" rows="2" placeholder="What is true when this goal is reached"></textarea></label>
+            <label>Done when<input id="goalDoneWhen" placeholder="The test the owner checks before declaring it done"></label>
+            <button class="btn" id="goalGo">Add goal</button>
+          </div>
+        </details>
+        <details id="addProjPart" class="add-part"><summary>Add a project</summary>
+          <div id="projFolderForm" title="A project is usually a folder you work in: MaximizePM links it, and agents started there use the queue"></div>
+          <div class="form add-form" title="A project without a folder, for example tasks for people"><input id="projName" placeholder="name, no folder"><button class="btn" id="projGo">Add project</button></div>
+        </details>
+      
 </div></div>
 
 <div id="searchDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="searchTitle"><div class="box">

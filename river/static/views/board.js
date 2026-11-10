@@ -145,7 +145,7 @@ export function renderWork() {
     const isOpen = open.has(p.name), shown = items.sort(itemOrder).slice(0, 8);
     return `<div class="wp"><div class="wp-h" data-wp="${esc(p.name)}"><span class="tw">${isOpen ? "▾" : "▸"}</span><b>${esc(p.name)}</b>
         <span class="counts">${items.length} open · ${ready} ready${run ? ` · ${run} running` : ""}${hum ? ` · ${hum} for you` : ""}</span></div>
-      ${isOpen ? `<div class="wp-items">${shown.map(i => itemRow(i)).join("")}${items.length > shown.length ? `<div class="muted wp-more">${items.length - shown.length} more: <span class="link" data-tab="projects">Projects tab</span></div>` : ""}</div>` : ""}</div>`;
+      ${isOpen ? `<div class="wp-items">${shown.map(i => itemRow(i)).join("")}${items.length > shown.length ? `<div class="muted wp-more">${items.length - shown.length} more: <span class="link" data-tab="projects">Plan</span></div>` : ""}</div>` : ""}</div>`;
   }).join("") || `<div class="muted">No open items.</div>`;
 }
 
@@ -164,7 +164,7 @@ export function onClick(t) {
       .then(() => toast(`Gave #${sel.value} to ${to}`)).catch(() => {});
   });
   const sb = t.closest("[data-strip]"); if (sb) return run(async () => { const go = sb.dataset.strip;
-    if (go === "blocked") { await nav.setTab("projects"); return $("#blockedPanel").scrollIntoView({ block: "start" }); }
+    if (go === "blocked") { await nav.openPlan("items"); return $("#blockedPanel").scrollIntoView({ block: "start" }); }
     if (go === "capacity") return nav.setTab("capacity");
     if (go === "ready") return nav.openReady();
     if (go === "needs" || go === "takeovers") return nav.openYou(go === "takeovers");  // the You view of Sessions (#5102)

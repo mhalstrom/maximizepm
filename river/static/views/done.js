@@ -1,9 +1,10 @@
-// The Done tab (#4656): what was finished, grouped by day, and the progress of each project.
+// The Done view of Plan (#4656; Plan since #5102 step 4): what was finished in the scope's project, grouped by day,
+// and the progress of each project.
 import { $, esc, shortTitle } from "../lib.js";
 import { projectChip } from "../components/chip.js";
 import { bar, pct } from "../components/bar.js";
 import { makeTable } from "../components/table.js";
-import { tab, nav } from "../page.js";
+import { nav, scope, planShown } from "../page.js";
 
 let logSig = "", logTable = null;
 const logTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -25,9 +26,9 @@ function makeLogTable() {
   });
 }
 export async function renderLog(force) {
-  if (tab !== "done") return;
+  if (!planShown("done")) return;
   const q = new URLSearchParams({ since: $("#logSince").value });
-  if ($("#logProject").value) q.set("project", $("#logProject").value);
+  if (scope.project) q.set("project", scope.project);
   const r = await fetch("api/log?" + q); if (!r.ok) return;
   const L = await r.json(), sig = JSON.stringify(L);
   if (!force && sig === logSig) return;
@@ -42,5 +43,4 @@ export async function renderLog(force) {
       ${bar(done)}</div>`;
   }).join("") || `<div class="muted">No items.</div>`;
 }
-$("#logProject").addEventListener("change", () => renderLog(true));
 $("#logSince").addEventListener("change", () => renderLog(true));

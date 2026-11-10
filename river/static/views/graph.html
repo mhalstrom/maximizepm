@@ -1,13 +1,11 @@
-<!-- The graph tab of the page (#4656). maxpm serve puts it into index.html, at view: graph. -->
-<section id="tab-graph" class="hidden">
-  <div class="graph-layout">
-  <aside class="panel graph-side" id="graphSide" aria-label="Choose a project"></aside>
+<!-- The Graph view of Plan (#4656; Plan since #5102 step 4): the dependency graph of the scope. maxpm serve puts it
+     into plan.html, at view: graph. -->
+<div id="plan-graph" class="plan-view hidden">
   <div class="panel">
-    <h2 title="Arrows point from a prerequisite to the item that waits on it. Green: ready. Yellow: in progress. A border in the people color: a person does it. Click a box to open it. Scroll or drag to move; pinch, the wheel, or + and − to zoom; Fit shows it all."><span id="graphTitle">All projects</span> <span class="spacer"></span>
+    <h2 class="graph-h" title="Arrows point from a prerequisite to the item that waits on it. Green: ready. Yellow: in progress. A border in the people color: a person does it. Click a box to open it. Scroll or drag to move; pinch, the wheel, or + and − to zoom; Fit shows it all."><span id="graphTitle">All projects</span> <span class="spacer"></span>
       <label class="sub"><input type="checkbox" id="graphDone"> done</label>
     </h2>
-    <div class="muted hidden t-s" id="graphNote" style="margin-bottom:var(--sp-3)"></div>
+    <div class="muted hidden t-s" id="graphNote"></div>
     <div id="graph"></div>
   </div>
-  </div>
-</section>
+</div>
