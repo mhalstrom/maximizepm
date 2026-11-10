@@ -1392,7 +1392,8 @@ class EndSession(Base):
         click outside closes it. A session with no item shows no 'No item'."""
         driver = DRIVE_HEAD + r"""
 try {
-  await until(() => q('#sessOpen [data-end="ag"]') && q("#sessItem [data-open]"), "the head of ag");
+  // The links to Plan come with the page's state (S), after the first read of the session.
+  await until(() => q('#sessOpen [data-end="ag"]') && q("#sessItem [data-open]") && q("#sessPlan [data-plan-go]"), "the head of ag");
   const box = (s) => q(s).getBoundingClientRect(), shown = (s) => box(s).height > 0;
   const head = box(".sess-head"), mid = (s) => { const b = box(s); return b.top + b.height / 2; };
   const parts = ["#sessName", "#sessTitle", "#sessState .dot", "#sessItem [data-open]", '[data-sp-open="items"]',

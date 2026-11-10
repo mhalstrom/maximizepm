@@ -15,7 +15,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Toggle (pin, filter) | `button(..., {pressed})` | `aria-pressed` and the class `on` |
 | Chip, badge | `chip.js`: `chip`, `statusChip`, `prioChip`, `dueChip`, `doerChip`, ... | colors from `.c-*` classes |
 | Status of a session | `.dot.active|away|gone` (app.css); `cacheBadge.js` for an expert's cache | |
-| Page tabs | the header `nav` of `index.html` (app.js) | one per view |
+| Page tabs | the header `nav` of `index.html` (app.js) | one per area (Sessions, Plan, Terminal); Settings opens from the header ⋯ (`#settingsBtn`, #5116) |
 | List row of an item | `itemRow.js` | the one order of items too |
 | Card | `card.js`: `nyCard`, `goalCard`, project cards | |
 | Progress | `bar.js` | |

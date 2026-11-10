@@ -37,14 +37,15 @@
     <button data-tab="sessions" class="on" title="Every running agent session: its item, its state, and what it writes now; and what waits on you">Sessions</button>
     <button data-tab="plan" title="The plan of the work: projects, goals, items, the graph, releases and what is done">Plan</button>
     <button data-tab="terminal" title="A plain shell on this computer, in the page">Terminal</button>
-    <button data-tab="settings">Settings</button>
   </nav>
   <span class="spacer"></span>
   <input type="search" id="search" placeholder="Search items" title="Find items by their words: open, done, and dropped (Enter or /)" autocomplete="off">
   <button class="iconbtn" type="button" id="searchBtn" title="Search items" aria-label="Search items"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg></button>
-  <button class="iconbtn" type="button" id="hdrMore" aria-expanded="false" aria-controls="hdrMenu" title="More: theme, relay, update, You are">⋯</button>
-  <!-- The controls of the ⋯ (#4885, #4903; at every width since #5083): a card under the bar when it is open. -->
+  <button class="iconbtn" type="button" id="hdrMore" aria-expanded="false" aria-controls="hdrMenu" title="More: Settings, theme, relay, update, You are">⋯</button>
+  <!-- The controls of the ⋯ (#4885, #4903; at every width since #5083): a card under the bar when it is open.
+       Settings (with People) opens from here, not from a tab of the bar (#5116); its address stays /settings. -->
   <div class="hdr-menu" id="hdrMenu">
+  <button class="btn" type="button" id="settingsBtn" data-tab="settings" title="Every setting, its default and its overrides; the people of the queue">Settings</button>
   <select id="theme" title="Theme: System follows your computer's light or dark setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
   <button class="btn hidden" id="relayBtn">Connect relay</button>
   <button class="btn primary hidden" id="loopLate"></button>

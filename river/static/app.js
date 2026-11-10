@@ -419,8 +419,10 @@ function setTab(name, push = true) {
   if (name !== "sessions") firstPage = false;
   if (push && name !== tab) history.pushState(null, "", pageUrl(drawer.isOpen() ? openItem : null, name));
   setTabName(name); document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
-  $("#tabName").textContent = (document.querySelector("nav button.on") || {}).textContent || "";  // a phone's bar (#4903)
-  if (header.classList.contains("tabs-open")) headerOpen(null);
+  // A phone's bar (#4903): the name of the tab; Settings is no tab of the bar but opens from the ⋯ (#5116).
+  $("#tabName").textContent = (document.querySelector("nav button.on") || {}).textContent || (tab === "settings" ? "Settings" : "");
+  $("#settingsBtn").classList.toggle("on", tab === "settings");
+  if (header.classList.contains("tabs-open") || header.classList.contains("more")) headerOpen(null);
   const on = document.querySelector("nav button.on"); if (on && on.parentElement.scrollWidth > on.parentElement.clientWidth) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   for (const s of TABS) $("#tab-" + s).classList.toggle("hidden", s !== tab);
   plan.renderPlanViews(); plan.renderPlanSide();

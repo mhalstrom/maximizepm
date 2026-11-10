@@ -5,12 +5,12 @@
    then looks cut at the right edge. So each field on a phone or a tablet has 16 px text. */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 #sessBack, #tabBtn, #searchBtn, header h1.brand .mark, #hdrScrim { display: none; }
-/* The ⋯ of the header at every width (#5083, the Quiet look: less text): theme, relay, update, You are and the time
+/* The ⋯ of the header at every width (#5083, the Quiet look: less text): Settings (#5116), theme, relay, update, You are and the time
    of the last update are in its menu, a card under the bar at the right. Until a name is chosen, You are shows there
    by itself. A tap outside it (the scrim: clear on a desktop, dark on a phone and a tablet) or Esc closes it. */
 #hdrMore { display: inline-flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; }
 header.more, header.no-actor { z-index: 6; }
-header:not(.more) .hdr-menu > #theme, header:not(.more) .hdr-menu > #relayBtn, header:not(.more) .hdr-menu > #updateBtn,
+header:not(.more) .hdr-menu > #settingsBtn, header:not(.more) .hdr-menu > #theme, header:not(.more) .hdr-menu > #relayBtn, header:not(.more) .hdr-menu > #updateBtn,
 header:not(.more) .hdr-menu > #stamp, header:not(.more):not(.no-actor) .hdr-menu > label.sub { display: none; }
 header.more .hdr-menu > label.sub, header.no-actor .hdr-menu > label.sub { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
 .hdr-menu > label.sub select { flex: 1; min-width: 0; }

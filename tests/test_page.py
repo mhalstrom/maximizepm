@@ -108,7 +108,7 @@ try {
   check(q("#capacity .stats") && q("#next"), "Capacity and Next up");
   const seen = {};
   for (const name of ["plan", "settings", "sessions"]) {
-    q(`nav button[data-tab="${name}"]`).click();
+    q(name === "settings" ? "#settingsBtn" : `nav button[data-tab="${name}"]`).click();  // Settings: from the ⋯ (#5116)
     await until(() => shown(name), "the tab " + name);
     await sleep(300);
     seen[name] = q("#tab-" + name).textContent.length > 20;
@@ -132,8 +132,9 @@ try {
   await until(() => location.search.includes("goal=launch") && q("#planScope").textContent.includes("launch"), "the scope launch");
   q('#planSide [data-scope-project=""]').click();
   await until(() => !location.search.includes("project="), "All projects");
-  q('nav button[data-tab="settings"]').click();
-  await until(() => q("#settingsTable").textContent.includes("lease_ttl"), "the settings");
+  q("#hdrMore").click(); q("#settingsBtn").click();
+  await until(() => q("#settingsTable").textContent.includes("lease_ttl") && location.pathname === "/settings"
+    && !q("header").classList.contains("more"), "the settings from the ⋯, at /settings, the menu closed");
   check(q("#people").textContent.includes("mark"), "Settings > People");
   // The links both ways (#5102 step 7): the drawer's project opens Plan > Items with that scope.
   window.riverOpen(ITEM);
@@ -640,7 +641,7 @@ try {
   post({ path: location.pathname, tab: q("#tabName").textContent, tabs: [...document.querySelectorAll("nav button")].map(b => b.dataset.tab) });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/?as=mark"), {"path": "/you", "tab": "Sessions",
-                                                           "tabs": ["sessions", "plan", "terminal", "settings"]})
+                                                           "tabs": ["sessions", "plan", "terminal"]})
 
     def test_the_work_controls_of_the_sessions_list(self):
         """#5102 step 2 (design #4657): Start an agent at the top of the list; Show ended at its foot, with the ended
@@ -724,7 +725,7 @@ try {
 
     def test_the_header_of_a_phone_is_one_bar(self):
         """#4903: at phone width the header is one bar of 48 px: the mark, the tab's name, which opens the sheet of all
-        tabs, the magnifier, which opens the search, and the ⋯ menu. The bar hides while the page scrolls down and
+        tabs, the magnifier, which opens the search, and the ⋯ menu (Settings is there, #5116). The bar hides while the page scrolls down and
         comes back on a scroll up; the session head is one line with Items and Artifacts (#5115), and its ⋯ shows a card
         with Open session, Settings and End; a tap outside closes it."""
         for i in range(40):
@@ -743,9 +744,11 @@ try {
   q('nav button[data-tab="plan"]').click();
   out.picked = q("#tabName").textContent + " " + shown("nav") + " " + shown("#hdrScrim") + " " + !q("#tab-plan").classList.contains("hidden");
   q("#hdrMore").click();
-  out.menu = shown("#hdrMenu") && shown("#updateBtn") && shown("#theme");
+  out.menu = shown("#hdrMenu") && shown("#settingsBtn") && shown("#updateBtn") && shown("#theme");
   q("#hdrScrim").click();
   out.closed = !shown("#hdrMenu");
+  q("#hdrMore").click(); q("#settingsBtn").click();  // Settings opens from the ⋯ (#5116)
+  out.settings = q("#tabName").textContent + " " + !q("#tab-settings").classList.contains("hidden") + " " + shown("#hdrMenu");
   q("#searchBtn").click();
   out.search = !q("#searchDlg").classList.contains("hidden") && document.activeElement === q("#searchText");
   q("#searchClose").click();
@@ -779,8 +782,9 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/", size="390,844")
-        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Sessions", "sheet": 4, "scrim": True,
-                               "picked": "Plan false false true", "menu": True, "closed": True, "search": True,
+        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Sessions", "sheet": 3, "scrim": True,
+                               "picked": "Plan false false true", "menu": True, "closed": True,
+                               "settings": "Settings true false", "search": True,
                                "down": True, "up": True, "menuKeeps": True, "head": True, "more": True,
                                "moreCloses": True})
 
