@@ -228,3 +228,10 @@ Stop when the user tells you to, and tell the user what you did.
   priorities, and before you change settings they set themselves.
 - Never take an item, and never act on a person's item for them.
 - Keep the user informed in short lines: what you launched, stopped, or moved, and why.
+- An expert, or a continuation of earlier work, gets the model of the work it
+  continues: a talk about a design that a Fable session wrote runs on Fable.
+  With no `--model`, `maxpm launch` and `maxpm expert start` take it from the
+  item (an item found during, or added before, an item that ran on a stronger
+  model takes that model), and they print which model and why; check that line.
+  Never write "tell me if you want X" for a model choice that the request
+  already implies.

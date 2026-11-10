@@ -620,8 +620,10 @@ class LaunchAgent(unittest.TestCase):
         self.assertNotIn("keystroke", sent[-1])  # launch_in window, although the setting says tab
         x = core.item_add(self.c, "shop", "more work", models={"min_model": "opus"})["id"]  # Start reserved the first
         t = server.launch_agent(self.c, runner=sent.append)
-        self.assertEqual(t["command"], f"claude --name '#{x} more work' go --remote-control '#{x} more work'")  # no choice: the flags drop out
-        self.assertNotIn("MAXPM_MODEL", sent[-1])
+        # No choice: the item's own model wins, here its min limit (#4961), so the session declares it.
+        self.assertEqual(t["command"], f"claude --name '#{x} more work' --model opus go --remote-control '#{x} more work'")
+        self.assertIn("MAXPM_MODEL=opus", sent[-1])
+        self.assertEqual(t["model_why"], f"#{x} needs at least opus")
         x = core.item_add(self.c, "shop", "third", models={"min_model": "opus"})["id"]
         with self.assertRaisesRegex(RiverError, "needs at least opus"):
             server.dispatch_item(self.c, x, runner=sent.append, model="sonnet")
@@ -1110,6 +1112,42 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual((t2["task"], core._item(self.c, y)["tier"], core._item(self.c, y)["max_model"],
                           core._item(self.c, y)["assignee"]), (y, "expert", "fable", "fab2"))
 
+    def test_an_expert_gets_the_model_of_the_work_it_takes_up(self):
+        """#4961: expert start with no --model takes the task's model, or the model of the item that its topic names;
+        with neither it asks, never the bare default; launch and expert start say the model and why."""
+        from river import cli
+        core.config_set(self.c, "launch_in", "tmux")
+        core.config_set(self.c, "default_model", "opus")
+        core.config_set(self.c, "default_max_model", "opus")
+        design = core.item_add(self.c, "shop", "the PM design", models={"max_model": "fable"})["id"]
+        core.register(self.c, "w7005")
+        core.set_agent_model(self.c, "w7005", "fable")
+        core.claim(self.c, design, "w7005")
+        core.done(self.c, design, "written", "w7005")
+        with self.assertRaisesRegex(RiverError, "say which model the expert pm runs: --model <name>"):
+            server.start_expert(self.c, "pm", "a talk about something new")
+        t = server.start_expert(self.c, "pm", f"talk through the PM design (#{design})")
+        task = core._item(self.c, t["task"])
+        self.assertEqual((t["model"], task["model"], task["max_model"], task["found_during"]),
+                         ("fable", "fable", "fable", design))
+        self.assertTrue(any(f"it continues the work of #{design} (#{design}: its last session ran on fable)" in e["change"]
+                            for e in core.item_show(self.c, task["id"])["events"]))
+        self.assertIn("--model fable", self.tmux.panes[-1]["keys"][0])
+        self.assertEqual(core._agent(self.c, "pm")["model"], "fable")
+        # --item: the item's model.
+        y = core.item_add(self.c, "shop", "another talk", models={"model": "fable", "max_model": "fable"})["id"]
+        t2 = server.start_expert(self.c, "pm2", item=y)
+        self.assertEqual((t2["model"], t2["model_why"]), ("fable", f"#{y}: its model is fable"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_expert({"expert_started": {**t2, "launch_in": "tmux"}})
+        self.assertTrue(out.getvalue().startswith(f"started the expert pm2 on fable (#{y}: its model is fable)"))
+        # launch --item: the model of the work it continues, of the agent's family.
+        z = core.item_add(self.c, "shop", "fix what the design found", found_during=design)["id"]
+        r = server.dispatch_item(self.c, z)
+        self.assertEqual((r["model"], r["model_id"]), ("fable", "fable"))
+        self.assertIn("MAXPM_MODEL=fable", self.tmux.panes[-1]["keys"][0])
+
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]
         y = core.item_add(self.c, "shop", "second")["id"]
@@ -1198,7 +1236,7 @@ class LaunchInTmux(unittest.TestCase):
         self.addCleanup(outside.stop)
         self.assertIn("(in a new tmux pane)", river("launch", "--dry-run", "--tmux"))
         out = river("launch", "--tmux")
-        self.assertRegex(out, rf"started Claude Code as shop-\w+ in shop for #{x} work \(.*\); tmux pane %0: maxpm view shows it")
+        self.assertRegex(out, rf"started Claude Code as shop-\w+ in shop for #{x} work, model .*\(.*\); tmux pane %0: maxpm view shows it")
         # A command with no terminal (an agent, a test) prints the panes and attaches nothing.
         out = river("view")
         self.assertRegex(out, rf"%0  #{x} work  \[shop-\w+\]\n")

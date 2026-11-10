@@ -382,10 +382,19 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
         if not topic:
             raise RiverError(f"{name} needs a task: --topic \"...\" adds an expert-tier task with that title, or "
                              f"--item <id> takes one")
-        project = project or was_project or next((x["name"] for x in core.project_list(conn) if x.get("path")), None)
+        # The topic names the work it takes up (#4953): the new task continues it, and gets its model (#4961).
+        linked = next((int(m) for m in re.findall(r"#(\d+)", topic)
+                       if conn.execute("SELECT 1 FROM items WHERE id=?", (int(m),)).fetchone()), None)
+        if not model and linked is None:
+            raise RiverError(f"say which model the expert {name} runs: --model <name> (a person talks with it for days, "
+                             f"so it is your choice, not the default {core.setting(conn, 'default_model') or 'of the agent'}); "
+                             f"or name the item whose work it takes up in the topic (#<id>) or with --item <id>, and it "
+                             f"gets that work's model")
+        project = project or (core._project_name(conn, core._item(conn, linked)["project_id"]) if linked else None) \
+            or was_project or next((x["name"] for x in core.project_list(conn) if x.get("path")), None)
         if not project:
             raise RiverError("an expert starts in the folder of a project: maxpm project path <name> <folder>")
-        task = core._item(conn, core.item_add(conn, project, topic, actor=actor, tier="expert")["id"])
+        task = core._item(conn, core.item_add(conn, project, topic, actor=actor, tier="expert", found_during=linked)["id"])
     elif task["tier"] != "expert":
         core.item_edit(conn, task["id"], actor=actor, tier="expert")
     p = core._project(conn, core._project_name(conn, task["project_id"]))
@@ -395,6 +404,14 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     launch_in = core._launch_in(conn, p["id"], launch_in)
     _can_open_terminal(runner, f"cd {p['path']} && claude go", launch_in)
     topic = task["title"]
+    if model:
+        model_why = "you chose it"
+    elif old is not None and old["model"] and resume:
+        model, model_why = old["model"], "the model it ran before"
+    else:
+        model, model_why = core.session_model(conn, core._item(conn, task["id"]))
+        if not model:
+            raise RiverError(f"#{task['id']} names no model, so say which model the expert {name} runs: --model <name>")
     first = EXPERT_PROMPT.format(name=name, topic=topic)
     sid = core.last_claude_session(conn, name) if resume else None
     core.expert_make(conn, name, topic, p["name"], actor)
@@ -415,7 +432,7 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     with core.tx(conn):
         core._event(conn, task["id"], actor or "maxpm", f"expert {name} started" + (
             f" (resumes session {sid})" if sid else (" (fresh: no session to resume)" if resume else "")))
-    return {**t, "session_name": name, "topic": topic}
+    return {**t, "session_name": name, "topic": topic, "model": model, "model_why": model_why}
 
 
 def _fit_task_model(conn, task, name, model, actor):

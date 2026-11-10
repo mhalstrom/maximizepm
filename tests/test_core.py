@@ -4316,6 +4316,40 @@ class Models(Base):
         core.push(self.c, x, "strong", None, "mark")  # a session whose model fits
         core.accept(self.c, x, "strong")
 
+    def test_a_continuation_takes_the_model_of_the_work_it_continues(self):
+        """#4961: an expert for a design that a Fable session wrote started on the default Opus. An item found during,
+        or added before, an item whose work ran on a stronger model than the default gets that model."""
+        core.config_set(self.c, "default_model", "opus")
+        core.config_set(self.c, "default_max_model", "opus")
+        design = core.item_add(self.c, "a", "design", models={"max_model": "fable"})["id"]
+        core.register(self.c, "fab")
+        core.set_agent_model(self.c, "fab", "claude-fable-5-2")
+        core.claim(self.c, design, "fab")
+        self.assertEqual(core._item(self.c, design)["ran_model"], "fable")
+        talk = core.item_add(self.c, "a", "talk it through", found_during=design)
+        self.assertEqual((talk["model"], talk["max_model"]), ("fable", "fable"))
+        self.assertTrue(any("it continues the work of #%d" % design in e["change"] for e in talk["events"]))
+        pre = core.item_add(self.c, "a", "a step before", blocks=design, mode="keep", actor="fab")
+        self.assertEqual(pre["model"], "fable")
+        # The adder's own choice wins; work at the default passes nothing on.
+        own = core.item_add(self.c, "a", "small fix", found_during=design, models={"model": "sonnet"})
+        raw = core._item(self.c, own["id"])  # item_show gives the effective limits, with the defaults
+        self.assertEqual((raw["model"], raw["max_model"]), ("sonnet", None))
+        plain = core.item_add(self.c, "a", "plain")["id"]
+        self.assertEqual(core.work_model(self.c, core._item(self.c, plain)), (None, None))
+        follow = core.item_add(self.c, "a", "follow-up", found_during=plain)
+        raw = core._item(self.c, follow["id"])
+        self.assertEqual((raw["model"], raw["max_model"]), (None, None))
+        # An old item with no session model: a max raised above the default max says the work was meant for it.
+        old = core.item_add(self.c, "a", "old fable work", models={"max_model": "fable"})["id"]
+        self.assertEqual(core.work_model(self.c, core._item(self.c, old))[0], "fable")
+        # The model of a new session for an item, and why.
+        self.assertEqual(core.session_model(self.c, core._item(self.c, talk["id"]))[0], "fable")
+        self.assertEqual(core.session_model(self.c, core._item(self.c, plain)),
+                         ("opus", "the default model (global)"))
+        self.assertEqual(core.session_model(self.c, core._item(self.c, plain), defaults=False)[0], None)
+        self.assertEqual(core.session_model(self.c, core._item(self.c, talk["id"]), family="openai")[0], None)
+
     def test_a_full_model_id_has_the_limits_of_its_ladder_name(self):
         """#4950: go --model claude-opus-5-5 took an item with --min-model fable, because the full id was not
         in the ladder and an unknown model passed every limit."""

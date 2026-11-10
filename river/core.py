@@ -468,6 +468,7 @@ CREATE TABLE IF NOT EXISTS items (
   max_model         TEXT,
   agent             TEXT,                     -- the agent type that takes it: a launch platform (codex, claude-code)
   tier              TEXT,                     -- 'expert': a task that a person talks through with an expert session (#4959)
+  ran_model         TEXT,                     -- the model (ladder name) of the last session that claimed it (#4961)
   backlog_at        TEXT,                     -- in the backlog since then: kept, never offered (maxpm activate ends it)
   backlog_note      TEXT,                     -- why not now
   created_at        TEXT NOT NULL,
@@ -1098,6 +1099,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN needs_check INTEGER NOT NULL DEFAULT 0")
     if "tier" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN tier TEXT")
+    if "ran_model" not in icols:
+        conn.execute("ALTER TABLE items ADD COLUMN ran_model TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(queue_entries)")}:
         conn.execute("ALTER TABLE queue_entries ADD COLUMN native_status TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
@@ -1566,6 +1569,88 @@ def model_check(ladder, model, lo, hi):
         if label == "max" and pos > p:
             return False, f"allows at most {same[0]}; {model} is stronger ({fam}: {', '.join(ladder[fam])})"
     return True, "; ".join(notes)
+
+
+def ladder_short(ladder, model):
+    """The ladder name of a model (claude-fable-5-2 -> fable), or None when the ladder does not know it."""
+    fam, pos = _family(ladder, model)
+    return ladder[fam][pos] if fam else None
+
+
+def work_model(conn, it):
+    """(ladder name, why) of the model that the work of an item ran on or was meant for, when it is stronger than the
+    default model of its project; else (None, None). A continuation of that work (an item found during it or added
+    before it, an expert that takes it up) gets the same model (#4961: an expert for a design that a Fable session
+    wrote started on the default Opus). The sources: the model of the last session that claimed it (ran_model), its
+    own model, its own min model, and its own max model when that is above the default max (a raised ceiling: the
+    work was meant for that model)."""
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    pid = it["project_id"]
+    base = _levels(setting(conn, "default_model", project_id=pid) or setting(conn, "default_max_model", project_id=pid))
+    dmax = _levels(setting(conn, "default_max_model", project_id=pid))
+    keys = it.keys()
+
+    def pos_in(levels, fam):
+        return next((_family(ladder, m)[1] for m in levels if _family(ladder, m)[0] == fam), None)
+    best = None
+    for f, why in (("ran_model", "its last session ran on"), ("model", "its model is"), ("min_model", "it needs at least"),
+                   ("max_model", "it allows up to")):
+        v = it[f] if f in keys else None
+        for m in _levels(v):
+            fam, pos = _family(ladder, m)
+            if fam is None:
+                continue
+            ref = pos_in(base, fam)
+            if ref is None or pos <= ref:
+                continue
+            if f == "max_model" and (pos_in(dmax, fam) is None or pos <= pos_in(dmax, fam)):
+                continue
+            if best is None or pos > best[2]:
+                best = (ladder[fam][pos], f"#{it['id']}: {why} {ladder[fam][pos]}", pos)
+    return (best[0], best[1]) if best else (None, None)
+
+
+def _inherit_model(conn, iid, src_id, actor):
+    """Inside a tx: a new item that continues the work of src_id gets its model when that is stronger than the
+    default (work_model), and a max limit that allows it."""
+    src = _item(conn, src_id)
+    m, why = work_model(conn, src)
+    if not m:
+        return None
+    it = _item(conn, iid)
+    if it["model"] or it["min_model"] or it["max_model"]:
+        return None  # the adder chose the models
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    dmax = setting(conn, "default_max_model", project_id=it["project_id"])
+    raise_max = bool(dmax) and not model_check(ladder, m, None, dmax)[0]
+    conn.execute("UPDATE items SET model=?, max_model=CASE WHEN ? THEN ? ELSE max_model END WHERE id=?",
+                 (m, raise_max, m, iid))
+    _event(conn, iid, actor, f"model {m}" + (f", max model {m}" if raise_max else "") +
+           f": it continues the work of #{src_id} ({why})")
+    return m
+
+
+def session_model(conn, it, family=None, defaults=True):
+    """(model, why) for a new session that takes this item: the model of the work it continues (work_model), the model
+    its last session ran on, its own model, its recommended default (with defaults), else its min limit; each one only
+    when the item's limits allow it, and (family) only a model of the agent's family. (None, why) when none fits:
+    the agent CLI's own default runs."""
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    m = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn), setting(conn, "model_ladder"))
+    w, why = work_model(conn, it)
+    cands = [(w, why), (it["ran_model"], f"#{it['id']}: its last session ran on {it['ran_model']}"),
+             (it["model"], f"#{it['id']}'s own model")]
+    if defaults and m["model_from"] != "item":
+        cands.append((m["model"], f"the default model ({m['model_from']})"))
+    cands.append((it["min_model"], f"#{it['id']} needs at least {it['min_model']}"))
+    for cand, how in cands:
+        for c in _levels(cand):
+            fam, pos = _family(ladder, c)
+            if fam is None or (family and fam != family):
+                continue
+            if model_check(ladder, c, m["min_model"], m["max_model"])[0]:
+                return ladder[fam][pos], how
+    return None, f"#{it['id']} names no model: the agent's own default"
 
 
 def _model_defaults(conn):
@@ -3326,6 +3411,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             why = backlog.strip() or "added to the backlog"
             conn.execute("UPDATE items SET backlog_at=?, backlog_note=? WHERE id=?", (iso(now()), why, iid))
             _event(conn, iid, actor, f"moved to the backlog: {why}")
+        src = found_during if found_during is not None else blocks
+        if src is not None and not (models and any(models.get(f) for f in ("model", "min_model", "max_model"))):
+            _inherit_model(conn, iid, int(src), actor)
         if tier:
             conn.execute("UPDATE items SET tier=? WHERE id=?", (tier, iid))
             _event(conn, iid, actor, f"tier {tier}: an expert session takes it, and a person talks it through with it")
@@ -6384,6 +6472,9 @@ def _claim_row(conn, item_id, actor):
         conn.execute("UPDATE messages SET state='accepted', read_at=COALESCE(read_at, ?) "
                      "WHERE kind='alert' AND item_id=? AND to_agent=? AND state='open'", (iso(t), item_id, actor))
     _event(conn, item_id, actor, f"claimed (lease {_short(ttl)})")
+    if ag["model"]:  # the model the work runs on: a continuation of it takes the same (#4961)
+        conn.execute("UPDATE items SET ran_model=? WHERE id=?",
+                     (ladder_short(parse_ladder(setting(conn, "model_ladder")), ag["model"]) or ag["model"], item_id))
     if it0["kind"] in ("review", "deploy"):
         _cut_on_claim(conn, it0, actor)  # the release holds a fixed list of items from now on
     if conn.execute("DELETE FROM queue_entries WHERE item_id=?", (item_id,)).rowcount:
@@ -10093,6 +10184,13 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         ok, why = model_check(parse_ladder(setting(conn, "model_ladder")), model, top["min_model"], top["max_model"])
         if not ok:
             raise RiverError(f"#{top['id']} {why}; pick another model")
+        model_why = "chosen for this launch"
+    else:
+        # No model named: the item's own (#4961), of the agent's family, so the session declares it (MAXPM_MODEL)
+        # and its limits hold. A default model is not forced on the CLI.
+        plat = _launch_agent_cmd(conn, p["id"], agent, None, effort, options, None, prompt)["platform"]
+        model, model_why = session_model(conn, _item(conn, top["id"]), LAUNCH_PLATFORMS.get(plat, {}).get("family"),
+                                         defaults=False)
     name = session_title(top["goals"], top["id"], top["title"])
     cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt)
     base = fork_base(conn, top, p["path"], model, cmd["platform"])
@@ -10100,7 +10198,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt, fork_of=base["session_id"])
         cmd["env"] = {**cmd["env"], "MAXPM_FORK_OF": base["goal"]}  # its go briefing says what it is now
     return {"project": p["name"], "path": p["path"], "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
-            "ready": len(pool), "why": why, "session_title": name, **cmd, "fork_of": base,
+            "ready": len(pool), "why": why, "session_title": name, **cmd, "fork_of": base, "model_why": model_why,
             "launch_in": _launch_in(conn, p["id"], launch_in)}
 
 

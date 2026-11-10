@@ -2608,6 +2608,9 @@ def render_manage(b):
     out += ["",
             "Your job: plan with the user, and keep the other agents working together. You take no items.",
             f"  launch:  {r} launch [--project P | --item N] [--model M] [--effort E] [--dry-run]",
+            "  models:  an expert or a continuation gets the model of the work it continues (with no --model, launch and "
+            "expert start take it from the item, and say which and why). Do not ask the user about a model choice "
+            "that the request already implies.",
             f"  queues:  {r} queue add <agent> <id> [--first] | --message \"...\";  queue list|move|remove",
             f"  message: {r} note|alert|ask <agent> \"...\"",
             f"  stop:    {r} stop <agent> --reason \"...\"   (stuck, or waited longer than wait_too_long {b['wait_too_long']})",
@@ -2821,7 +2824,8 @@ def render_expert(res):
     elif "expert_started" in res:
         t = res["expert_started"]
         how = "a tmux pane" if t.get("launch_in") == "tmux" else f"a new Terminal {t.get('launch_in') or 'tab'}"
-        print(f"started the expert {t['session_name']} in {how} ({t['project']}) on #{t.get('task')}: {t['topic']}"
+        print(f"started the expert {t['session_name']} on {t.get('model')} ({t.get('model_why')}) in {how} "
+              f"({t['project']}) on #{t.get('task')}: {t['topic']}"
               + (f"; it resumes session {t['resumed']}" if t.get("resumed") else ""))
 
 
@@ -3718,7 +3722,8 @@ def render(a, res):
     if c == "launch":
         it = f"#{res['item']['id']} {res['item']['title']}"
         if res.get("dry_run"):
-            print(f"would start {res['agent']} in {res['project']} ({res['path']}) for {it}"
+            print(f"would start {res['agent']} in {res['project']} ({res['path']}) for {it}, model "
+                  f"{res.get('model') or 'its default'} ({res.get('model_why') or 'none named'})"
                   + (f": {res['why']}" if res.get("why") else ""))
             if res.get("would_push_to"):
                 print(f"  no terminal: {res['would_push_to']} waits for work in {res['project']} and would get it")
@@ -3728,7 +3733,8 @@ def render(a, res):
         elif res.get("pushed_to"):
             print(f"gave {it} to {res['pushed_to']}, which was waiting for work in {res['project']}")
         else:
-            print(f"started {res['agent']} as {res['session_name']} in {res['project']} for {it}"
+            print(f"started {res['agent']} as {res['session_name']} in {res['project']} for {it}, model "
+                  f"{res.get('model') or 'its default'} ({res.get('model_why') or 'none named'})"
                   + (f" ({res['why']})" if res.get("why") else "")
                   + (f"; tmux pane {res['tmux_pane']}: maxpm view shows it" if res.get("tmux_pane") else ""))
             if res.get("via_serve"):
