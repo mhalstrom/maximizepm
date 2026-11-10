@@ -17,6 +17,7 @@ import { viewOf } from "../components/viewSettings.js";
 import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
+import { buttonEl } from "../components/button.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
@@ -446,8 +447,8 @@ export function makeSessions({ isShown, onPick = () => {} }) {
         d.append(img);
       }
       const label = document.createElement("span"); label.textContent = f.name; label.title = f.name;
-      const x = document.createElement("button"); x.type = "button"; x.className = "iconbtn"; x.textContent = "✕";
-      x.title = `Remove ${f.name}`; x.setAttribute("aria-label", x.title); x.dataset.rm = i; x.disabled = sending;
+      const x = buttonEl("✕", { kind: "icon", label: `Remove ${f.name}`, title: `Remove ${f.name}`, data: { rm: i },
+                                disabled: sending });
       d.append(label, x); return d;
     }));
     box.classList.toggle("hidden", !files.length);

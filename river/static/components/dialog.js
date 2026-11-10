@@ -16,6 +16,7 @@ export function draftNote(box, text) {
 }
 
 export function makeDialog(el, { onClose, draft = true } = {}) {
+  el.classList.add("dlg");  // the one look of a dialog (app.css .dlg): overlay, box, width --dlg-w (#5028)
   let before = null, typed = new Set(), warned = 0, down = false;
   const isOpen = () => !el.classList.contains("hidden");
   const box = () => el.querySelector(".box") || el.firstElementChild;

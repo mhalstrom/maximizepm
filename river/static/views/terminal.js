@@ -4,6 +4,8 @@
 // Only a person uses it; through the relay only when the setting web_terminal_relay is on.
 import { $, esc, ago, toast, typeAction } from "../lib.js";
 import { openTerminal } from "../components/terminalDialog.js";
+import { button } from "../components/button.js";
+import { empty } from "../components/empty.js";
 
 export function makeTerminalTab({ isShown }) {
   let busy = false;
@@ -24,9 +26,9 @@ export function makeTerminalTab({ isShown }) {
       $("#shellNote").textContent = j.note || "";
       list.innerHTML = j.shells.map(s => `<div class="sh-row">
           <div class="sh-t"><b>${esc(s.name)}</b> <span class="muted">${esc(s.running)} in <code>${esc(s.path)}</code>${s.by ? ` · opened by ${esc(s.by)}` : ""}${s.started ? ` ${ago(new Date(s.started * 1000).toISOString())}` : ""}</span></div>
-          <button class="btn primary" type="button" data-shell-open="${esc(s.pane)}" data-shell-name="${esc(s.name)}">Open</button>
-          <button class="btn" type="button" data-shell-close="${esc(s.pane)}">Close</button></div>`).join("")
-        || `<div class="muted">No terminal is open.</div>`;
+          ${button("Open", { kind: "primary", data: { "shell-open": s.pane, "shell-name": s.name } })}
+          ${button("Close", { data: { "shell-close": s.pane } })}</div>`).join("")
+        || empty("No terminal is open.");
     } catch (e) {
       $("#shellState").textContent = "maxpm serve does not answer";
     } finally { busy = false; }

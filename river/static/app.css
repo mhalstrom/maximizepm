@@ -37,6 +37,14 @@
   --bubble: #252b33;
   --shadow: none;
 }
+/* Sizes and the dialog look (#5028): views and parts use these, not literal px. Space: 2 4 6 8 10 12 16 24. */
+:root {
+  --sp-0: 2px; --sp-1: 4px; --sp-2: 6px; --sp-3: 8px; --sp-4: 10px; --sp-5: 12px; --sp-6: 16px; --sp-7: 24px;
+  --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-base: 14px; --fs-l: 17px;
+  --r-s: 6px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px;
+  --tap: 44px;  /* the least size of a control on a phone */
+  --scrim: rgba(0,0,0,.45); --shadow-dlg: 0 12px 40px rgba(0,0,0,.25);
+}
 :root { color-scheme: light dark; }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
@@ -116,9 +124,12 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .tree { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 6px; padding: 8px; }
 .link { color: var(--accent); cursor: pointer; }
-#setup { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
-#setup.hidden { display: none; }
-#setup .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(680px, 100%); padding: 18px 20px; }
+/* Dialogs (#5028): components/dialog.js gives each dialog the class dlg (the overlay) and closes it the same
+   three ways (#5027). A dialog sets only what differs: --dlg-w (its width), --dlg-z (above another dialog). */
+.dlg { position: fixed; inset: 0; z-index: var(--dlg-z, 15); background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding: 6vh var(--sp-6); overflow-y: auto; }
+.dlg.hidden { display: none; }
+.dlg > .box { background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-dlg); width: min(var(--dlg-w, 640px), 100%); padding: 18px 20px; }
+#setup { --dlg-w: 680px; }
 #setup .step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
 #setup .mark { font-weight: 700; }
 #setup .mark.ok { color: #1a7f37; }
@@ -138,30 +149,21 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
   #setup .su-opt { display: flex; flex-wrap: wrap; margin: 4px 0 0; }
   #setup .su-opt > input:not([type=checkbox]), #setup .su-opt > select { flex: 1 1 100%; width: auto; }
 }
-#stopDlg { position: fixed; inset: 0; z-index: 16; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
-#stopDlg.hidden { display: none; }
-#stopDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(520px, 100%); padding: 18px 20px; }
-#launchDlg { position: fixed; inset: 0; z-index: 16; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
-#launchDlg.hidden { display: none; }
-#launchDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(620px, 100%); padding: 18px 20px; }
+#stopDlg { --dlg-z: 16; --dlg-w: 520px; }
+#launchDlg { --dlg-z: 16; --dlg-w: 620px; }
 #launchDlg select { max-width: 100%; }
 /* An agent's terminal (components/terminalDialog.js): the box has its size from the window, never from the
    tmux pane; the pane's text scrolls inside the screen, both ways. */
-#termDlg { position: fixed; inset: 0; z-index: 16; background: rgba(0,0,0,.45); display: flex; justify-content: center; padding: 3vh 12px; }
-#termDlg.hidden { display: none; }
-#termDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(1200px, 100%); height: 100%; display: flex; flex-direction: column; padding: 14px 16px; }
+#termDlg { --dlg-z: 16; --dlg-w: 1200px; align-items: stretch; padding: 3vh var(--sp-5); overflow-y: visible; }
+#termDlg > .box { height: 100%; display: flex; flex-direction: column; padding: 14px var(--sp-6); }
 #termDlg .term { flex: 1 1 0; min-width: 0; min-height: 0; margin: 0; padding: 8px 10px; background: #1e1e1e; color: #d4d4d4; border-radius: 8px; font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; overflow: auto; outline: none; }
 #termDlg .term:focus { box-shadow: 0 0 0 2px var(--accent, #3b82f6); }
-#readyDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
-#readyDlg.hidden { display: none; }
-#readyDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(760px, 100%); padding: 18px 20px; }
+#readyDlg { --dlg-w: 760px; }
 #readyDlg .rrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
 #readyDlg .rrow .t { overflow-wrap: anywhere; }
 #readyDlg .rrow .sub { font-size: 12px; color: var(--muted); margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
 #search { width: 180px; }
-#searchDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
-#searchDlg.hidden { display: none; }
-#searchDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(820px, 100%); padding: 18px 20px; }
+#searchDlg { --dlg-w: 820px; }
 #searchDlg .searchbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 #searchDlg .searchbar input { flex: 1 1 240px; min-width: 0; }
 /* A result of the search: .qrow, not .srow, which sessions.css gives the session rows (#4891). */

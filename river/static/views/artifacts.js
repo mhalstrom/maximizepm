@@ -5,6 +5,8 @@
 import { $, esc, ago, clip } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { openFullScreen } from "../components/sidePanel.js";
+import { button } from "../components/button.js";
+import { empty as emptyState } from "../components/empty.js";
 
 const KIND = { canvas: "canvas", file: "file", page: "local page", artifact: "claude.ai artifact" };
 let list = [];
@@ -26,9 +28,9 @@ export function showRows(el, rows, empty) {
           <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div></div>
       <div class="art-btns">${a.kind === "artifact"
         ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="claude.ai does not let another page show it in a frame">Open on claude.ai</a>`
-        : `<button class="btn" type="button" data-art-open="${i}">Open</button>`}
-        <button class="btn" type="button" data-art-full="${i}">Open full screen</button></div>
-    </div>`).join("") || `<div class="muted">${esc(empty)}</div>`;
+        : button("Open", { data: { "art-open": i } })}
+        ${button("Open full screen", { data: { "art-full": i } })}</div>
+    </div>`).join("") || emptyState(esc(empty));
   // #4844: the lists read again every 10 seconds; the same rows are not drawn again (a hover, a focus, and a
   // selection stay, and nothing flashes).
   if (el._html !== html) { el.innerHTML = html; el._html = html; }

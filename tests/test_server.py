@@ -3713,8 +3713,10 @@ try {
     def test_the_styles_take_no_size_from_the_text(self):
         css = (server.STATIC / "app.css").read_text()
         rule = lambda sel: re.search(re.escape(sel) + r" \{([^}]*)\}", css).group(1)
-        box, term = rule("#termDlg .box"), rule("#termDlg .term")
-        self.assertRegex(box, r"(?<![-\w])width: min\(\d+px, 100%\)")
+        # The dialog part (#5028): .dlg > .box takes its width from --dlg-w, which the terminal dialog sets in px.
+        box, term = rule("#termDlg > .box"), rule("#termDlg .term")
+        self.assertIn("width: min(var(--dlg-w, 640px), 100%)", rule(".dlg > .box"))
+        self.assertRegex(rule("#termDlg"), r"--dlg-w: \d+px")
         self.assertIn("height: 100%", box)
         for want in ("flex: 1 1 0", "min-width: 0", "min-height: 0", "overflow: auto", "white-space: pre;", "font: 12px/"):
             self.assertIn(want, term)

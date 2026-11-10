@@ -13,6 +13,9 @@ When the user says "plan", run `maxpm plan` and follow its briefing.
 - The repository is public. Keep names, paths, and plans from other projects
   out of it; local queue data lives in `data/` and `private/`, which git ignores.
 - When you finish a queue item, put the commit id in `maxpm done <id> --output`.
+- Before you change the page (`river/static`), read `river/static/components/README.md`: which
+  part for which element, and the tokens. `tests/test_ui_parts.py` refuses a raw button, a dialog
+  of its own, or a literal color or px size in a view.
 - After a commit that changes `river/*.py`, `maxpm serve` starts again by itself
   within a minute or two and runs the new code. To have it at once, run
   `maxpm serve --restart`: it waits until the page answers. Never add an item

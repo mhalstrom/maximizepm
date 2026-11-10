@@ -199,7 +199,7 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   .sp-bar #spClose { order: -1; min-width: 44px; min-height: 44px; font-size: 16px; }
   .sp-bar .btn { min-height: 40px; }
 
-  /* Dialogs: the whole width, from the top. */
-  #setup, #stopDlg, #waitDlg, #setDlg { padding: 12px 8px; }
-  #setup .box, #waitDlg .box, #setDlg .box { padding: 14px 12px; }
+  /* Dialogs: the whole width, from the top (the dialog part, .dlg: every dialog, #5028). */
+  .dlg { padding: var(--sp-5) var(--sp-3); }
+  .dlg > .box { padding: 14px var(--sp-5); }
 }
