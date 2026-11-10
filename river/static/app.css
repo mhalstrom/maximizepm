@@ -1,40 +1,40 @@
 :root {
-  --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #5f6b7a; --line: #dde2e8;
-  --accent: #1f6feb; --accent-ink: #ffffff;
-  --ready: #1a7f37; --ready-bg: #dcf5e3;
-  --prog: #9a6700; --prog-bg: #fff3c4;
-  --wait: #57606a; --wait-bg: #eceff2;
-  --done: #6e7781; --done-bg: #f0f1f3;
-  --warn: #b42318; --warn-bg: #fde7e6;
-  --human: #8250df; --human-bg: #efe6fd;
-  --bubble: #eef1f5;
+  --bg: #f7f6f3; --panel: #fdfdfc; --ink: #2b2a27; --muted: #6a6761; --line: #e4e1db;
+  --accent: #2a6b64; --accent-ink: #ffffff;
+  --ready: #3f7449; --ready-bg: #e6efe5;
+  --prog: #7f5f13; --prog-bg: #f3ead6;
+  --wait: #68655f; --wait-bg: #eeece8;
+  --done: #67645e; --done-bg: #f1f0ec;
+  --warn: #a33b2b; --warn-bg: #f6e4df;
+  --human: #2a6b64; --human-bg: #e3eeec;
+  --bubble: #efede9;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.04);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --muted: #9aa5b1; --line: #2a3139;
-    --accent: #4c8dff; --accent-ink: #0b0d10;
-    --ready: #4ac26b; --ready-bg: #12301c;
-    --prog: #e3b341; --prog-bg: #3a2e0a;
-    --wait: #9aa5b1; --wait-bg: #232a32;
-    --done: #7d8590; --done-bg: #1c2128;
-    --warn: #ff7b72; --warn-bg: #3d1614;
-    --human: #b38cff; --human-bg: #2a1f45;
-    --bubble: #252b33;
+    --bg: #1b1a18; --panel: #232220; --ink: #e8e5df; --muted: #a19d95; --line: #35332f;
+    --accent: #7ab5ab; --accent-ink: #12201e;
+    --ready: #93bf93; --ready-bg: #24301f;
+    --prog: #d6b26a; --prog-bg: #3a3020;
+    --wait: #a19d95; --wait-bg: #2c2b28;
+    --done: #9a968e; --done-bg: #262523;
+    --warn: #e08a78; --warn-bg: #3d2420;
+    --human: #7ab5ab; --human-bg: #1f3330;
+    --bubble: #2c2b28;
     --shadow: none;
   }
 }
 /* The header's theme switch: Dark sets data-theme="dark" (the same colors), Light sets "light". */
 :root[data-theme="dark"] {
-  --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --muted: #9aa5b1; --line: #2a3139;
-  --accent: #4c8dff; --accent-ink: #0b0d10;
-  --ready: #4ac26b; --ready-bg: #12301c;
-  --prog: #e3b341; --prog-bg: #3a2e0a;
-  --wait: #9aa5b1; --wait-bg: #232a32;
-  --done: #7d8590; --done-bg: #1c2128;
-  --warn: #ff7b72; --warn-bg: #3d1614;
-  --human: #b38cff; --human-bg: #2a1f45;
-  --bubble: #252b33;
+  --bg: #1b1a18; --panel: #232220; --ink: #e8e5df; --muted: #a19d95; --line: #35332f;
+  --accent: #7ab5ab; --accent-ink: #12201e;
+  --ready: #93bf93; --ready-bg: #24301f;
+  --prog: #d6b26a; --prog-bg: #3a3020;
+  --wait: #a19d95; --wait-bg: #2c2b28;
+  --done: #9a968e; --done-bg: #262523;
+  --warn: #e08a78; --warn-bg: #3d2420;
+  --human: #7ab5ab; --human-bg: #1f3330;
+  --bubble: #2c2b28;
   --shadow: none;
 }
 /* Sizes and the dialog look (#5028): views and parts use these, not literal px. Space: 2 4 6 8 10 12 16 24. */
