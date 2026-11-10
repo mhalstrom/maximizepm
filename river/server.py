@@ -1336,12 +1336,17 @@ PS_RUNNER = None  # tests: gets the pids, returns the lines "pid tty"
 
 
 def _pid_ttys(pids):
-    """{pid: its terminal device, /dev/ttysNNN} for these pids (strings) that run on a terminal; None when ps fails."""
+    """{pid: its terminal device, /dev/ttysNNN} for these pids (strings) that run on a terminal; None when ps fails.
+    No pids: {} with no ps (#5075: 'ps -p ""' on macOS writes bytes that are not UTF-8 to stderr, and the decode
+    error stopped the loop of maxpm serve at adopt_sessions)."""
     import subprocess
+    pids = list(pids)
+    if not pids:
+        return {}
     try:
         ps = (PS_RUNNER or (lambda p: subprocess.run(["ps", "-o", "pid=,tty=", "-p", ",".join(p)], capture_output=True,
-                                                     text=True, timeout=5).stdout))(list(pids))
-    except (OSError, subprocess.SubprocessError):
+                                                     text=True, errors="replace", timeout=5).stdout))(pids)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     out = {}
     for line in ps.splitlines():

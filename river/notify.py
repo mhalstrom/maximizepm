@@ -435,22 +435,40 @@ def loop(stop, interval_s=None):
             conn = core.connect()
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
             from . import server
-            server.watch_prompts(conn)  # an agent that waits on a prompt in its tmux pane: tell the person
-            core.activity_watch(conn)  # an agent whose hooks reported nothing for activity_silence: tell the manager
-            server.watch_busy(conn)  # an agent that is busy with no river command keeps its leases
-            core.tell_watch_late(conn)  # a manager that runs no watch while a message is due: tell the person
-            server.adopt_sessions(conn)  # tmux_adopt: a session outside tmux, quiet at its prompt, moves into a pane
-            server.revive_sessions(conn)  # a session whose process ended with no stop resumes in a pane (#5061)
-            server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session
-            core.end_quiet_experts(conn)  # an expert nobody talked with for expert_idle_end ends (#4955)
-            server.auto_release(conn)  # a ready review gets a reviewer, a ready deploy its deployer
-            server.auto_operational(conn)  # an operational task starts in a new session; old lists get a cleanup
-            server.auto_context(conn)  # goal_context on: a goal with ready work gets a context session (a base)
-            server.auto_tidy(conn)  # every tidy_every: close the tmux panes of sessions that are done
-            server.auto_end_orphans(conn)  # and end the tmux servers the tests left behind with no socket
-            server.hooks_soon(conn)  # a hook whose command ended before it ran it
-            if core._channels(core.setting(conn, "notify_channels")):
-                run(conn)
+            # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
+            # error in adopt_sessions stopped auto_release and every later step while one agent had no pid).
+            steps = (
+                server.watch_prompts,  # an agent that waits on a prompt in its tmux pane: tell the person
+                core.activity_watch,  # an agent whose hooks reported nothing for activity_silence: tell the manager
+                server.watch_busy,  # an agent that is busy with no river command keeps its leases
+                core.tell_watch_late,  # a manager that runs no watch while a message is due: tell the person
+                server.adopt_sessions,  # tmux_adopt: a session outside tmux, quiet at its prompt, moves into a pane
+                server.revive_sessions,  # a session whose process ended with no stop resumes in a pane (#5061)
+                server.fresh_sessions,  # work for an agent idle at its prompt goes to a fresh session
+                core.end_quiet_experts,  # an expert nobody talked with for expert_idle_end ends (#4955)
+                server.auto_release,  # a ready review gets a reviewer, a ready deploy its deployer
+                server.auto_operational,  # an operational task starts in a new session; old lists get a cleanup
+                server.auto_context,  # goal_context on: a goal with ready work gets a context session (a base)
+                server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done
+                server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
+                server.hooks_soon,  # a hook whose command ended before it ran it
+                lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
+            )
+            failed = []
+            for step in steps:
+                try:
+                    step(conn)
+                except Exception as e:
+                    name = getattr(step, "__name__", "step")
+                    name = "notify" if name == "<lambda>" else name
+                    failed.append(f"{name}: {type(e).__name__}: {e}")
+                    _say(f"maxpm notify: {name}: {e}")
+                    try:
+                        conn.rollback()  # a step that failed inside a tx leaves no open transaction for the next
+                    except Exception:
+                        pass
+            if failed:
+                error = "; ".join(failed)
             # maxpm serve only: run the new code, but not while one of its threads runs a hook
             if SERVE_PORT.get("port") and not server.HOOKS["running"] and server.reload_ready(conn):
                 conn.close()

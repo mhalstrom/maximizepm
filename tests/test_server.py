@@ -279,6 +279,41 @@ class LaunchAgent(unittest.TestCase):
             cli.run(["target", "show", "web"])
         self.assertIn("deployer: not used: the deploy hook releases", out.getvalue())
 
+    def test_pid_ttys_needs_no_ps_for_no_pids_and_never_raises(self):
+        # #5075: 'ps -p ""' wrote bytes that are not UTF-8, and the decode error stopped serve's loop.
+        calls = []
+        server.PS_RUNNER = lambda pids: calls.append(pids) or ""
+        self.addCleanup(setattr, server, "PS_RUNNER", None)
+        self.assertEqual((server._pid_ttys([]), calls), ({}, []))
+
+        def bad(pids):
+            raise UnicodeDecodeError("utf-8", b"\x88", 0, 1, "invalid start byte")
+        server.PS_RUNNER = bad
+        self.assertIsNone(server._pid_ttys(["123"]))
+
+    def test_one_failing_step_of_the_serve_loop_does_not_stop_the_others(self):
+        # #5075: an error in adopt_sessions skipped auto_release, auto_tidy and every later step of each pass.
+        import threading
+        from unittest import mock
+        from river import notify
+
+        stop, ran, beats, tries = threading.Event(), [], [], []
+
+        def adopt_sessions(c):  # the loop names a step by its function name
+            tries.append(1)
+            if len(tries) == 2:
+                stop.set()  # a loop that skips the later steps ends here, and the test fails, not hangs
+            raise ValueError("no pid")
+        with mock.patch.object(server, "watch_prompts", lambda c: None), \
+                mock.patch.object(notify.core, "serve_loop_beat", lambda c, beat: beats.append(beat)), \
+                mock.patch.object(server, "adopt_sessions", adopt_sessions), \
+                mock.patch.object(server, "auto_release", lambda c: ran.append("auto_release")), \
+                mock.patch.object(server, "auto_tidy", lambda c: (ran.append("auto_tidy"), stop.set())), \
+                mock.patch.object(notify, "_say", lambda *a: None):
+            notify.loop(stop, interval_s=1)
+        self.assertEqual(ran, ["auto_release", "auto_tidy"])
+        self.assertEqual(beats[-1]["error"], "adopt_sessions: ValueError: no pid")  # the page and manager see it
+
     def test_serve_starts_a_new_session_for_an_operational_task(self):
         # #4973: an operational task starts in a new session; a used session that waits does not get it.
         core.project_add(self.c, "site", path=self.dir.name)
