@@ -3105,6 +3105,9 @@ class Prompts(Base):
             self.assertIn(part, p)
         allp = core.prompt_for_all(self.c, "mark")
         self.assertIn("1. Item #", allp)
+        # The agent that goes through the list (#5103): one at a time, read first, record each answer.
+        for part in ("Never two in one message", "read it first", "SendUserFile", "My recommendation", "--found-during"):
+            self.assertIn(part, allp)
         self.assertIn(f"maxpm --as mark answer {q['id']}", allp)
         core.done(self.c, h, "approved", "mark")
         self.assertIn("Nothing", core.prompt_for_all(self.c, "nobody"))

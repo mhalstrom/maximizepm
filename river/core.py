@@ -10319,6 +10319,27 @@ PROMPT_STEPS = """How to help:
 If the maxpm command is not found, ask {person} where MaximizePM is installed."""
 
 
+# The steps of the agent that goes through the whole list with the person (#5103, mark 2026-11-10: 'when i go to the
+# needs you session i should be able to spawn an agent to work through the list with me').
+LIST_STEPS = """How to go through the list with {person}:
+1. Take the first one. Before you write to {person}, run its "read it first" command and read the files, links and
+   pictures it names.
+2. Write one short message about this one only: what it is, in a few plain lines; the options, each with what it
+   changes; your recommendation and why. A decision takes the form below. Show a picture or a page in the chat (in
+   Claude Code: SendUserFile). Use plain words, not the queue's own words (lease, claim, reserved, annotate), and
+   say what a thing is, not only its number.
+""" + "\n".join("   " + line if line else "" for line in DECISION_FORMAT.split("\n")) + """
+3. Wait for the answer. Then record it at once, in their words: the "record the result" command (done with the
+   answer as its note), or drop it with the reason. When the answer asks for a change, add the work
+   (maxpm add "<title>" --found-during <id> --context "<what they said>") and close this one.
+   If you can do the step yourself without them, say so; with their yes, take it over:
+   maxpm --as <your-agent-name> takeover <id> --note "<how>".
+4. Then the next one. Never two in one message. When they want to skip one, leave it open and go on; when they
+   want to stop, say in one line what is left.
+Ask before anything that uses their accounts, money, or sends something in their name.
+If the maxpm command is not found, ask {person} where MaximizePM is installed."""
+
+
 def prompt_for(conn, item_id, person=None):
     """A paste-ready prompt that lets a fresh agent explain one human item and close it with the person."""
     ann = annotate(conn)
@@ -10344,12 +10365,12 @@ def prompt_for_all(conn, person=None):
         return f"Nothing in the MaximizePM queue waits on {person} now."
     parts = [f"You are helping {person} work through everything that waits on them in their work queue "
              f"(MaximizePM, the `maxpm` command): {len(items)} item(s) and {len(qs)} question(s), most important "
-             f"first. Take them one at a time: finish or park one before you start the next."]
+             f"first. Take them one at a time: finish or park one before you start the next. The steps are at the end."]
     parts += [_item_prompt_section(conn, a, ann, person, n) for n, a in enumerate(items, 1)]
     for n, q in enumerate(qs, len(items) + 1):
         parts.append(f"{n}. Question #{q['id']} from {q['from_agent']}" + (f" about #{q['item_id']}" if q["item_id"] else "")
                      + f": {q['body']}\n   Answer it: maxpm --as {person} answer {q['id']} \"<answer>\"")
-    parts.append(PROMPT_STEPS.format(person=person))
+    parts.append(LIST_STEPS.format(person=person))
     return "\n\n".join(parts)
 
 

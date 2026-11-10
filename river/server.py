@@ -229,8 +229,10 @@ def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=Non
 
 
 def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effort=None, launch_in=None, options=None):
-    """Needs you, Open agent: a session that works through everything that waits on the person, with
-    them (the Copy prompt text), in the folder of the most important such item's project."""
+    """You view, Go through with an agent (#261, #5103): a session that works through everything that waits on the
+    person, with them, one item at a time (core.prompt_for_all), in the folder of the most important such item's
+    project. Its name is set before it starts (MAXPM_AGENT), so the page opens its chat on the Sessions tab at once."""
+    import secrets
     ann = core.annotate(conn)
     items = sorted((a for a in ann.values() if a["ready"] and a["doer"] == "human" and not a["project_archived"]),
                    key=lambda a: a["sort_key"])
@@ -239,8 +241,11 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     p = next((x for x in projects if x["path"]), None)
     if p is None:
         raise RiverError("no project has a folder, so MaximizePM cannot start a session: maxpm project path <name> <folder>")
-    return _open_focused(conn, p, "needs:" + (f"@{person}" if person else ""), runner, agent, model, effort, launch_in,
-                         options)
+    name = f"{p['name']}-{secrets.token_hex(2)}"
+    core.register(conn, name, note=f"started from the page to go through what waits on {person or 'the person'}")
+    t = _open_focused(conn, p, "needs:" + (f"@{person}" if person else ""), runner, agent, model, effort, launch_in,
+                      options, agent_name=name)
+    return {**t, "session_name": name}
 
 
 def deploy_now(conn, target, review=False, runner=None, agent=None, actor=None, model=None, effort=None,
@@ -281,15 +286,16 @@ def _agent_for(conn, model):
     return pick["label"], pick
 
 
-def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, launch_in=None, options=None):
-    """Open the chosen agent in a project folder with MAXPM_FOCUS set; its maxpm go reads it."""
+def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, launch_in=None, options=None, agent_name=None):
+    """Open the chosen agent in a project folder with MAXPM_FOCUS set; its maxpm go reads it. agent_name: the agent name
+    it registers as (MAXPM_AGENT), when the caller chose one."""
     launch_in = core._launch_in(conn, p["id"], launch_in)
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go", launch_in)
     name = core.focus_title(conn, focus)
     t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": name,
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name),
          "launch_in": launch_in}
-    _open_terminal(t, {"MAXPM_FOCUS": focus, **t["env"]}, runner)
+    _open_terminal(t, {"MAXPM_FOCUS": focus, **({"MAXPM_AGENT": agent_name} if agent_name else {}), **t["env"]}, runner)
     return t
 
 
