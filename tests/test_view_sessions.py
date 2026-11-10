@@ -56,7 +56,16 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.c.close()
         os.environ.pop("MAXPM_DB", None)
-        self.dir.cleanup()
+        # A killed headless Chrome leaves child processes that write its profile (browser/) for a moment after:
+        # the delete tries again for up to five seconds (#5087: 'Directory not empty: .../browser/Default' on CI).
+        for _ in range(50):
+            try:
+                self.dir.cleanup()
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            self.dir.cleanup()
 
     def write(self, text):
         with open(self.path, "a") as f:

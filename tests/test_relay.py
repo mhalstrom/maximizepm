@@ -722,6 +722,12 @@ class PageRelay(Base):
     def test_a_text_answer_goes_gzipped_when_the_welcome_and_the_browser_take_it(self):
         """#4895: the first state crosses the river-relay socket gzipped; the relay passes it as it is."""
         import gzip as gz
+        # One time for the whole test: /api/state carries the time, and each answer must equal the first one
+        # (#5087: the second ticked over between two answers on CI).
+        fixed = core.now()
+        clock = mock.patch.object(core, "now", lambda: fixed)
+        clock.start()
+        self.addCleanup(clock.stop)
         plain = self.page("GET", "/api/state")[2]
 
         def frames(path, gzip=True, accept="gzip, deflate, br", method="GET", part=4096):

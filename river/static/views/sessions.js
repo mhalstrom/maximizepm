@@ -130,7 +130,7 @@ function renderList(el, list, picked, empty) {
 }
 
 export function makeSessions({ isShown, onPick = () => {} }) {
-  let list = [], busy = false, proposals = [];
+  let list = [], busy = false, again = false, proposals = [];
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
@@ -230,8 +230,11 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   });
 
   async function refresh() {
-    if (busy || document.hidden || !isShown()) return;
-    busy = true;
+    if (document.hidden || !isShown()) return;
+    // A refresh asked for while one reads (an action's, after End) reads again after it: the read in flight
+    // began before the action, so it shows the old rows (#5087).
+    if (busy) { again = true; return; }
+    busy = true; again = false;
     try {
       const r = await fetch("api/sessions");
       const j = await r.json();
@@ -259,7 +262,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     } catch (e) {
       side.innerHTML = `<div class="muted">Could not read the sessions: ${esc(e.message)}</div>`;
       delete side.dataset.empty;
-    } finally { busy = false; }
+    } finally { busy = false; if (again) refresh(); }
   }
 
   async function poll() {
