@@ -2257,7 +2257,15 @@ def _handoff(conn, goal_id, version=None):
 
 def _handoff_due(conn, g):
     """The owner's last finished item of the goal when it is newer than the goal's handoff (or the goal has
-    none): {"id", "title", "closed_at"}; else None. Only an agent owner keeps a handoff."""
+    none): {"id", "title", "closed_at"}; else None. Only an agent owner keeps a handoff. A shared goal has no
+    owner: each worker that finishes a task of it brings the handoff up to date (#4974), so the last finished
+    item by anyone counts."""
+    if g["shared"] and g["status"] == "open":
+        h = _handoff(conn, g["id"])
+        r = conn.execute("SELECT i.id, i.title, i.closed_at FROM items i JOIN item_goals ig ON ig.item_id=i.id "
+                         "WHERE ig.goal_id=? AND i.status='done' AND i.closed_at IS NOT NULL "
+                         "ORDER BY i.closed_at DESC, i.id DESC LIMIT 1", (g["id"],)).fetchone()
+        return dict(r, shared=True) if r and (not h or r["closed_at"] > h["created_at"]) else None
     if not g["owner"] or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (g["owner"],)).fetchone():
         return None
     h = _handoff(conn, g["id"])
@@ -7168,6 +7176,11 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
     res["resumed"] = resumed
     res["close_check"] = unneeded
     res["goal_checks"] = goal_checks
+    if status == "done" and _is_ai(conn, actor):
+        # A shared goal has no owner who keeps its handoff: the worker that finished a task of it does (#4974).
+        res["shared_handoffs"] = [r["name"] for r in conn.execute(
+            "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "
+            "AND g.status='open' ORDER BY g.rank, g.id", (it["id"],))]
     return res
 
 
@@ -11319,7 +11332,8 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         brief["handoffs"] = []
         for r in conn.execute("SELECT g.* FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? "
                               "AND g.status='open' ORDER BY g.rank, g.id", (it["id"],)).fetchall():
-            for h in (parent_handoff(conn, r), _handoff(conn, r["id"]) and dict(_handoff(conn, r["id"]), goal=r["name"])):
+            for h in (parent_handoff(conn, r), _handoff(conn, r["id"]) and dict(
+                    _handoff(conn, r["id"]), goal=r["name"], due=_handoff_due(conn, r) if r["shared"] else None)):
                 if h and h["goal"] not in seen:
                     seen.add(h["goal"])
                     brief["handoffs"].append(h)

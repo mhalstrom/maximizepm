@@ -204,6 +204,10 @@ without a goal stay in the normal queue.
   `maxpm go` never makes you its owner, `maxpm goal own` refuses, and its
   items are normal work for every agent. Take them with `maxpm go`, and tag
   an item you add for it: `maxpm add "<title>" --goal <name>`.
+  A shared goal has no owner who keeps its handoff, so you do: when you
+  finish a task of it, bring the handoff up to date (`maxpm goal handoff
+  <name> --file <path>`: what your task changed, the decisions, what is left).
+  The next session on the goal reads it in its go briefing.
 
 ## Context sessions and forked workers
 

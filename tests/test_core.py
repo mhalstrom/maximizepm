@@ -4644,6 +4644,57 @@ class Monitor(Base):
         self.assertNotIn("monitors", core.targets_view(self.c)[0]["pending"][0])
 
 
+class SharedGoalHandoff(Base):
+    """A shared goal keeps a handoff (#4974): the worker that finishes a task of it brings the handoff up to date,
+    and each session that starts on the goal reads it, with a word when it is older than the last finished task."""
+
+    def test_the_finishing_worker_keeps_it_and_the_next_session_reads_it(self):
+        from river import cli
+        core.project_add(self.c, "p", path=self.dir.name)
+        for n in ("w1", "w2"):
+            core.register(self.c, n)
+        core.goal_add(self.c, "p", "lib", outcome="o", done_when="d", shared=True)
+        a = core.item_add(self.c, "p", "first walk", goals=["lib"])["id"]
+        b = core.item_add(self.c, "p", "second walk", goals=["lib"])["id"]
+        core.claim(self.c, a, "w1")
+        res = core.done(self.c, a, "walked", "w1")
+        self.assertEqual(res["shared_handoffs"], ["lib"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_show(res)
+        self.assertIn("goal lib is shared, so you keep its handoff now: maxpm goal handoff lib --file <path>", out.getvalue())
+        core.goal_handoff(self.c, "lib", "the walk procedure is in plan section 2", "w1")
+        self.assertIsNone(core._handoff_due(self.c, core._goal(self.c, "lib")))
+        # The next session on the goal reads it; the briefing says to keep it when it finishes.
+        g = core.go(self.c, self.dir.name, "w2")
+        self.assertEqual(g["item"]["id"], b)
+        self.assertEqual([h["goal"] for h in g["handoffs"]], ["lib"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            print(cli.render_go(g) or "")
+        self.assertIn("the walk procedure is in plan section 2", out.getvalue())
+        self.assertIn("When you finish, bring its handoff up to date: maxpm --as w2 goal handoff lib", out.getvalue())
+        # A task finished after the handoff: the next reader is told it is older.
+        c = core.item_add(self.c, "p", "third walk", goals=["lib"])["id"]
+        with core.tx(self.c):  # the handoff was written a minute before the next close
+            self.c.execute("UPDATE goal_handoffs SET created_at=?", (core.iso(core.now() - timedelta(minutes=1)),))
+        core.done(self.c, b, "walked too", "w2")
+        due = core._handoff_due(self.c, core._goal(self.c, "lib"))
+        self.assertEqual((due["id"], due["shared"]), (b, True))
+        core.register(self.c, "w3")
+        g = core.go(self.c, self.dir.name, "w3")
+        self.assertEqual(g["item"]["id"], c)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            print(cli.render_go(g) or "")
+        self.assertIn(f"The handoff is older than #{b} (second walk)", out.getvalue())
+        # A person's close asks nothing of them.
+        core.register(self.c, "mark", human=True)
+        core.release(self.c, c, actor="w3")
+        core.claim(self.c, c, "mark")
+        self.assertNotIn("shared_handoffs", core.done(self.c, c, "x", "mark"))
+
+
 class GoalLeases(Base):
     """Items of the agent's own goals and targets count against goal_max_leases, apart from max_leases (#414)."""
 

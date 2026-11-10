@@ -445,6 +445,9 @@ def _print_show(a):
         print("\n".join(_close_check_lines(a["close_check"], a["id"] if "merged" not in a else a["merged"]["id"])))
     if a.get("goal_checks"):
         print("\n".join(_goal_check_lines(a["goal_checks"])))
+    for g in a.get("shared_handoffs") or []:
+        print(f"  goal {g} is shared, so you keep its handoff now: maxpm goal handoff {g} --file <path> (what this "
+              f"item changed, the decisions, the files that matter, what is left). The next session on the goal reads it.")
     for e in a.get("events", [])[:8]:
         print(f"  {e['at']} {e['actor']}: {e['change']}")
 
@@ -553,7 +556,11 @@ def _handoff_lines(goal, h, due=None, indent="  "):
         out += [f"{indent}  {line}" if line else "" for line in (h.get("text") or "").splitlines()]
     else:
         out.append(f"{indent}handoff: none yet (maxpm goal handoff {goal} --file <path>)")
-    if due:
+    if due and due.get("shared"):
+        out.append(f"{indent}The handoff is older than #{due['id']} ({_cut(due['title'], 50)}), finished at "
+                   f"{due['closed_at']}: read its output too, and bring the handoff up to date (maxpm goal handoff "
+                   f"{goal} --file <path>).")
+    elif due:
         out.append(f"{indent}The handoff is older than #{due['id']}, which its owner finished at {due['closed_at']}: "
                    f"renew it (maxpm goal handoff {goal} --file <path>) before goal release or give.")
     return out
@@ -3095,11 +3102,12 @@ def render_go(b):
             out.append(f"  notes: {it['notes']}")
         out += _context_lines(it)
         for h in b.get("handoffs") or []:  # the context of the item's goals, from their owners
-            first, *rest = _handoff_lines(h["goal"], h)
+            first, *rest = _handoff_lines(h["goal"], h, h.get("due"))
             out += [f"  goal {h['goal']}: {first.strip()}"] + rest
         for name in b.get("shared_goals") or []:
             out.append(f"  goal {name} is shared: it has no owner, and other agents work on its other items at the "
-                       f"same time. Tag an item you add for it: {r} add \"<title>\" --goal {name}")
+                       f"same time. Tag an item you add for it: {r} add \"<title>\" --goal {name}. When you finish, "
+                       f"bring its handoff up to date: {r} goal handoff {name} --file <path>")
         if b.get("human_wait"):
             w = b["human_wait"]
             left = core._short(core.parse_iso(w["until"]) - core.now())
