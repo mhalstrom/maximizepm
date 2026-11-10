@@ -2552,6 +2552,109 @@ class AddMine(Base):
         self.assertIn("reserved for aa", out.getvalue())
 
 
+class Experts(Base):
+    """An expert session (#4955): the person talks with it for hours or days; it takes no queue work, and MaximizePM
+    never ends it as it ends a worker."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "fab")
+        self.ready = self.add("a", "ready work")
+
+    def test_adopt_keeps_the_name_and_go_gives_no_item(self):
+        x = core.expert_make(self.c, "fab", "the maxpm options paper", "a", "fab")
+        self.assertEqual((x["name"], x["topic"], x["project"], x["state"]), ("fab", "the maxpm options paper", "a", "active"))
+        b = core.go(self.c, self.dir.name, "fab")
+        self.assertEqual((b["role"], b["item"]), ("expert", None))
+        self.assertEqual(core._agent(self.c, "fab")["role"], "expert")
+        with self.assertRaisesRegex(RiverError, "expert session: it waits at its prompt"):
+            core.wait(self.c, self.dir.name, "fab", sleep=lambda s: None)
+        self.assertIsNone(core.waiting_agent_for(self.c, "a", self.ready))
+        self.assertEqual(core.capacity(self.c)["agents_active"], 0)
+        # The person tells it to take an item: it claims, and stays an expert with its topic.
+        core.claim(self.c, self.ready, "fab")
+        a = core._agent(self.c, "fab")
+        self.assertEqual((a["role"], a["expert_topic"]), ("expert", "the maxpm options paper"))
+        b = core.go(self.c, self.dir.name, "fab")
+        self.assertEqual((b["role"], [h["id"] for h in b["holds"]]), ("expert", [self.ready]))
+
+    def test_an_expert_is_not_away_or_gone_by_time_and_its_talk_counts(self):
+        core.expert_make(self.c, "fab", "topic", "a")
+        old = core.iso(core.now() - core.timedelta(days=3))
+        self.c.execute("UPDATE agents SET last_seen=?, talked_at=? WHERE name='fab'", (old, old))
+        self.assertEqual(core.agent_status(self.c, "fab")["state"], "active")
+        core.activity_event(self.c, {"hook_event_name": "UserPromptSubmit", "prompt": "and what about Paperclip?"},
+                            {"MAXPM_AGENT": "fab"})
+        self.assertNotEqual(core._agent(self.c, "fab")["talked_at"], old)
+        core.activity_event(self.c, {"hook_event_name": "Stop"}, {"MAXPM_AGENT": "fab"})
+        self.assertEqual(core.activity_watch(self.c), [])
+
+    def test_the_sessions_tab_shows_an_expert_as_talking_not_idle(self):
+        from river import sessions
+        core.expert_make(self.c, "fab", "the competitor research", "a")
+        a = core.agent_status(self.c, "fab")
+        self.assertEqual(sessions.state(self.c, a, "idle"), ("expert", "talks with you"))
+        self.assertEqual(sessions.state(self.c, a, None), ("expert", "talks with you"))
+        self.assertEqual(sessions.state(self.c, a, "working")[0], "working")
+
+    def test_expert_idle_end_ends_it_and_tells_the_senders(self):
+        core.expert_make(self.c, "fab", "topic", "a")
+        core.send(self.c, "question", "what did Beads do?", to="fab", actor="mark")
+        self.assertEqual(core.end_quiet_experts(self.c), {})
+        later = core.now() + core.timedelta(days=7, minutes=1)
+        with mock.patch.object(core, "now", lambda: later):
+            self.assertEqual(list(core.end_quiet_experts(self.c)), ["fab"])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='fab'").fetchone())
+        self.assertTrue(any("fab ended" in m["body"] for m in core.inbox(self.c, "mark")))
+        # Its topic and project stay in the history, for maxpm expert start fab --resume.
+        self.assertEqual(core.expert_topic_of(self.c, "fab"), ("topic", "a"))
+        core.config_set(self.c, "expert_idle_end", "0s")
+        core.expert_make(self.c, "fab", "topic", "a")
+        with mock.patch.object(core, "now", lambda: later + core.timedelta(days=90)):
+            self.assertEqual(core.end_quiet_experts(self.c), {})
+
+    def test_who_may_end_an_expert(self):
+        core.expert_make(self.c, "fab", "topic", "a")
+        core.register(self.c, "worker1")
+        with self.assertRaisesRegex(RiverError, "an agent may not end the expert fab"):
+            core.expert_end(self.c, "fab", "worker1")
+        core.claim(self.c, self.ready, "fab")
+        with self.assertRaisesRegex(RiverError, "fab holds #%d" % self.ready):
+            core.expert_end(self.c, "fab", "mark")
+        core.release(self.c, self.ready, "fab")
+        self.assertEqual(core.expert_end(self.c, "fab", "mark")["ended"], "fab")
+        with self.assertRaisesRegex(RiverError, "not registered"):
+            core.expert_end(self.c, "fab", "mark")
+        with self.assertRaisesRegex(RiverError, "needs a topic"):
+            core.expert_make(self.c, "fab", "  ", "a")
+
+    def test_cli_adopt_notes_list_and_end(self):
+        from river import cli
+        old_env = os.environ.get("MAXPM_DB")
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(lambda: os.environ.pop("MAXPM_DB") if old_env is None else os.environ.update(MAXPM_DB=old_env))
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                cli.run(list(words))
+            return out.getvalue()
+        self.assertIn("fab is now an expert on: research", run("--as", "fab", "-q", "expert", "adopt", "--topic",
+                                                               "research", "--project", "a"))
+        self.assertIn("EXPERT on: research", run("--as", "fab", "-q", "go", "--project", "a"))
+        self.assertIn("no notes yet", run("--as", "fab", "-q", "expert", "notes", "fab"))
+        f = os.path.join(self.dir.name, "notes.md")
+        with open(f, "w") as fh:
+            fh.write("# Notes\n\n- Beads sorts by its own priority\n")
+        self.assertIn("Beads sorts by its own priority", run("--as", "fab", "-q", "expert", "notes", "fab", "--put", f))
+        self.assertIn("research", run("-q", "expert", "list"))
+        self.assertIn("fab (expert, takes no queue work, active)", run("-q", "who"))
+        self.assertIn("ended the expert fab", run("--as", "mark", "-q", "expert", "end", "fab"))
+        self.assertIn("No experts", run("-q", "expert", "list"))
+
+
 class Push(Base):
     def setUp(self):
         super().setUp()

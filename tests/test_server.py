@@ -1055,6 +1055,51 @@ class LaunchInTmux(unittest.TestCase):
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
 
+    def test_an_expert_starts_in_a_pane_and_is_never_ended_as_an_idle_worker(self):
+        """#4955: an expert idle at its prompt for hours, with nothing in hand and a note to read, stays; serve gives
+        it no work; expert_idle_end ends it; --resume starts its last chat again with its topic from the history."""
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mark", human=True)
+        x = core.item_add(self.c, "shop", "ready work")["id"]
+        with self.assertRaisesRegex(RiverError, "needs a topic"):
+            server.start_expert(self.c, "fab")
+        t = server.start_expert(self.c, "fab", "the competitor research", "shop", model="fable")
+        pane = self.tmux.panes[0]
+        self.assertEqual((pane["agent"], t["session_name"], t["launch_in"]), ("fab", "fab", "tmux"))
+        self.assertIn("MAXPM_AGENT=fab ", pane["keys"][0])
+        self.assertIn("--model fable", pane["keys"][0])
+        self.assertIn("an expert session of MaximizePM on: the competitor research", pane["keys"][0])
+        a = core._agent(self.c, "fab")
+        self.assertEqual((a["role"], a["expert_topic"], a["expert_project"], a["model"]),
+                         ("expert", "the competitor research", "shop", "fable"))
+        with self.assertRaisesRegex(RiverError, "a session that runs now"):
+            core.register(self.c, "w1")
+            server.start_expert(self.c, "w1", "x", "shop")
+        clock = [core.now()]
+        patch = mock.patch.object(core, "now", lambda: clock[0])
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(server.IDLE.clear)
+        clock[0] += core.timedelta(seconds=5)
+        core.activity(self.c, "fab")  # it ran maxpm go
+        core.record_claude_session(self.c, "fab", "11111111-1111-4111-8111-111111111111")
+        core.send(self.c, "note", "read this when you can", to="fab", actor="mark")
+        pane["screen"] = "⏺ Here is my answer.\n\n╭────╮\n│ >  │\n╰────╯\n  ? for shortcuts"
+        nothing = {"started": {}, "ended": {}, "failed": {}}
+        for _ in range(24):  # two hours at its prompt
+            clock[0] += core.timedelta(minutes=5)
+            self.assertEqual(server.fresh_sessions(self.c), nothing)
+        self.assertEqual((core._agent(self.c, "fab")["role"], pane in self.tmux.panes), ("expert", True))
+        self.assertIsNone(core.item_show(self.c, x)["assignee"])
+        self.assertIsNone(core.item_show(self.c, x)["reserved_for"])
+        clock[0] += core.timedelta(days=7)
+        self.assertEqual(list(core.end_quiet_experts(self.c)), ["fab"])
+        t = server.start_expert(self.c, "fab", resume=True)
+        self.assertEqual((t["topic"], t["project"], t["resumed"]), ("the competitor research", "shop",
+                                                                    "11111111-1111-4111-8111-111111111111"))
+        self.assertIn("--resume 11111111-1111-4111-8111-111111111111", self.tmux.panes[-1]["keys"][0])
+        self.assertEqual(core._agent(self.c, "fab")["role"], "expert")
+
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]
         y = core.item_add(self.c, "shop", "second")["id"]

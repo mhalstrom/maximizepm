@@ -116,6 +116,11 @@ Stop when the user tells you to, and tell the user what you did.
 - **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
   `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
   folder of the release; a waiting session that worked on the release does not get it.
+- **Experts** (role expert, `maxpm expert list`): sessions that the user talks
+  with for hours or days. They take no queue work, wait at their prompt, and are
+  never stuck, idle, or waiting too long: leave them alone. When the user wants
+  one, `maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`;
+  only the user ends one (`maxpm expert end <name>`), or `expert_idle_end` does.
 - **NOT CONNECTED**: a session MaximizePM started ran no maxpm command. Tell the
   user (its terminal may wait on a prompt; for an agent in tmux the user reads
   and answers it with the agent's Terminal button on the page, and only a

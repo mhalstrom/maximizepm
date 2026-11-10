@@ -18,7 +18,7 @@ import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePa
 import { checkPaths } from "../components/artLinks.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
-                     starting: "c-waiting", ended: "c-blocked" };
+                     starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
 const PICKED = "river.session";  // the session the person chose last
 
 function stateChip(s) {
@@ -69,8 +69,10 @@ export function sessionRow(s) {
     : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + ownNames(s).join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(ownNames(s).join(", ")) : "No item"}</span></div>`;
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
     <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
-      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
-      ${s.role === "manager" ? "" : `<div class="sid" title="Its agent id: maxpm --as, messages and commands use it">${esc(s.name)}</div>`}
+      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}${s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" || s.role === "expert" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}</div>
+      ${s.role === "manager" ? "" : s.role === "expert"
+        ? `<div class="sid expert-topic" title="${esc(`Its topic${s.model ? "; model " + s.model : ""}${s.talked_at ? "; last talk " + ago(s.talked_at) : ""}`)}">${esc(clip(s.topic || "", 120))}${s.model ? ` · ${esc(s.model)}` : ""}</div>`
+        : `<div class="sid" title="Its agent id: maxpm --as, messages and commands use it">${esc(s.name)}</div>`}
       <div class="sub">${esc(clip(lastText, 90))}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
     </div>
     ${item}
@@ -113,6 +115,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   let agent = null, cursor = null, timer = null, gen = 0;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
+  const experts = $("#sessExpertRows"), expertGroup = $("#sessExperts");
   const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
   wirePanel();
@@ -221,7 +224,11 @@ export function makeSessions({ isShown, onPick = () => {} }) {
         pick((list.find(s => s.name === want) || list.find(s => s.role === "manager") || list[0] || {}).name || null, false);
       }
       renderList(mgr, list.filter(x => x.role === "manager"), agent, NO_MANAGER);
-      renderList(side, list.filter(x => x.role !== "manager"), agent,
+      // The experts in their own group under the manager (#4955): sessions the person talks with for days.
+      const ex = list.filter(x => x.role === "expert");
+      expertGroup.classList.toggle("hidden", !ex.length);
+      renderList(experts, ex, agent, "");
+      renderList(side, list.filter(x => x.role !== "manager" && x.role !== "expert"), agent,
         `<div class="muted">No other agent session runs now. Start one from the Board, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
       fit();
       autoWait();

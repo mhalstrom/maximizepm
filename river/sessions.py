@@ -78,6 +78,7 @@ def provider(agent_type, kind=None):
     return {"id": pid, "label": PROVIDERS.get(pid, {}).get("label") or pid, "voice": voice.get("page"),
             "voice_cli": voice.get("cli")}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
+          "expert": "talks with you",
           "stopping": "asked to stop", "starting": "not connected yet: it ran no maxpm command",
           "ended": "ended before its first maxpm command"}
 
@@ -314,6 +315,9 @@ def state(conn, a, turn, waiting=None):
         return "prompt", STATES["prompt"]
     if a["name"] in (waiting if waiting is not None else core.waits_on_person(conn, [a["name"]])):
         return "answer", STATES["answer"]
+    if a.get("role") == "expert" and turn != "working":
+        # An expert waits at its prompt for the person by design (#4955): not idle, and nothing waits on the person.
+        return "expert", STATES["expert"]
     if a.get("waiting_since") and not (turn == "working" and a.get("activity_at") and a.get("wait_at")
                                        and a["activity_at"] > a["wait_at"]):
         # A turn after the last maxpm wait started: a person talks with it while its wait runs in the background.
@@ -477,7 +481,8 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "provider": provider(a.get("agent_type"), kind),
                 "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"]))), "name": a["name"],
                 "title": work_name(conn, a, path, root, croot), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
-                "role": a.get("role"), "note": a.get("note"),
+                "role": a.get("role"), "note": a.get("note"), "topic": a.get("expert_topic"),
+                "talked_at": a.get("talked_at"),
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,
                 "session_url": a.get("session_url"), "terminal": bool((terminals or {}).get(a["name"])),
@@ -485,7 +490,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "at": tail["entries"][-1]["at"] if tail["entries"] else a.get("last_seen")}
         cards.append(card)
         seen.update((k, card) for k in keys)
-    order = {"prompt": 0, "answer": 1, "working": 2, "starting": 3, "stopping": 4, "idle": 5, "ended": 6}
+    order = {"prompt": 0, "answer": 1, "working": 2, "expert": 2, "starting": 3, "stopping": 4, "idle": 5, "ended": 6}
     return sorted(cards, key=lambda c: (order.get(c["state"], 5), c["name"]))
 
 

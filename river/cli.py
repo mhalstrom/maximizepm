@@ -995,6 +995,33 @@ def build_parser():
     g.add_argument("--tmux", dest="launch_in", action="store_const", const="tmux",
                    help="in a pane of the tmux session 'maxpm' (maxpm view shows them); no Terminal app needed")
     x.add_argument("--dry-run", action="store_true", help="say what it would start; open nothing")
+    x = sub.add_parser("expert", help="expert sessions: a session the person talks with for hours or days; it takes no "
+                       "queue work, and MaximizePM never ends it as it ends a worker")
+    xs = x.add_subparsers(dest="ecmd")
+    y = xs.add_parser("start", help="open an expert session on a topic in a new terminal tab, window, or tmux pane")
+    y.add_argument("name", help="its name (letters, digits, '.', '_', '-')")
+    y.add_argument("--topic", help="what it knows and what you ask it about (again from its history when it ran before)")
+    y.add_argument("--project", help="the project whose folder it works in (default: its last one, else the first "
+                                     "project with a folder)")
+    y.add_argument("--resume", action="store_true", help="resume its last Claude Code chat, with its context")
+    y.add_argument("--agent", help="a launch_agents label (default: the first)")
+    y.add_argument("--model", help="its model (your choice: fable too)")
+    y.add_argument("--effort", help="its effort level")
+    g = y.add_mutually_exclusive_group()
+    g.add_argument("--tab", dest="launch_in", action="store_const", const="tab")
+    g.add_argument("--window", dest="launch_in", action="store_const", const="window")
+    g.add_argument("--tmux", dest="launch_in", action="store_const", const="tmux")
+    y = xs.add_parser("adopt", help="make this session an expert (run it in the session, with --as <its name>)")
+    y.add_argument("--topic", required=True, help="what it knows and what the person asks it about")
+    y.add_argument("--project", help="its project (default: the project of this folder)")
+    y = xs.add_parser("end", help="end an expert (a person, the manager, or the expert itself)")
+    y.add_argument("name")
+    y.add_argument("--reason", help="why (its unread senders hear it)")
+    xs.add_parser("list", help="the experts: topic, model, last talk, when they end")
+    y = xs.add_parser("notes", help="an expert's notes (a canvas): read them, or --put a new version")
+    y.add_argument("name")
+    y.add_argument("--put", metavar="FILE", help="store a new version from a file ('-' reads stdin)")
+
     x = sub.add_parser("view", help="show every agent that runs in tmux (launch_in tmux) side by side in this terminal")
     g = x.add_mutually_exclusive_group()
     g.add_argument("--windows", dest="layout", action="store_const", const="windows", default="tile",
@@ -1898,6 +1925,49 @@ def init_folder(args):
     return 0
 
 
+def _expert_cmd(conn, a, actor):
+    """maxpm expert start|adopt|end|list|notes (#4955)."""
+    e = a.ecmd or "list"
+    if e == "list":
+        return {"experts": core.expert_list(conn)}
+    if e == "adopt":
+        if not actor:
+            raise RiverError("run it in the session that becomes the expert, with its name: maxpm --as <name> expert "
+                             "adopt --topic \"...\"")
+        project = a.project or next(iter(core.projects_for_dir(conn, os.getcwd())), None)
+        return {"adopted": core.expert_make(conn, actor, a.topic, project, actor)}
+    if e == "end":
+        if in_sandbox():
+            core._expert(conn, a.name)
+        return {"ended_expert": core.expert_end(conn, a.name, actor, a.reason)}
+    if e == "notes":
+        topic, project = core.expert_topic_of(conn, a.name)
+        if topic is None:
+            core._expert(conn, a.name)  # it was never an expert: the error says how to make one
+        canvas = core.expert_notes_name(a.name)
+        if a.put:
+            body = sys.stdin.read() if a.put == "-" else Path(a.put).expanduser().read_text()
+            if not project:
+                raise RiverError(f"{a.name} has no project for its notes; adopt it again with --project <name>")
+            core.canvas_put(conn, canvas, body, actor or a.name, kind="md", title=f"Notes of the expert {a.name}",
+                            project=project, note="the expert's notes")
+        try:
+            got = core.canvas_show(conn, canvas, project)
+        except RiverError:
+            got = None
+        return {"expert_notes": {"name": a.name, "canvas": canvas, "topic": topic,
+                                 "text": (got or {}).get("shown", {}).get("body"),
+                                 "version": (got or {}).get("shown", {}).get("version")}}
+    # start: it opens a terminal, so a sandboxed CLI asks the running maxpm serve, as maxpm launch does.
+    args = {"name": a.name, "topic": a.topic, "project": a.project, "resume": a.resume, "agent": a.agent,
+            "model": a.model, "effort": a.effort, "launch_in": a.launch_in}
+    if in_sandbox():
+        return {"expert_started": {**ask_server(conn, "start_expert", args, actor, timeout=40), "via_serve": True}}
+    from . import server
+    return {"expert_started": server.start_expert(conn, a.name, a.topic, a.project, a.resume, agent=a.agent, actor=actor,
+                                                  model=a.model, effort=a.effort, launch_in=a.launch_in)}
+
+
 def dispatch(conn, a, actor):
     c = a.cmd
     if c == "project":
@@ -1957,6 +2027,8 @@ def dispatch(conn, a, actor):
             return core.goal_done(conn, a.name, a.result, actor, a.drop_open)
         if g == "reopen":
             return core.goal_reopen(conn, a.name, actor)
+    if c == "expert":
+        return _expert_cmd(conn, a, actor)
     if c == "launch":
         from . import server
         opts = {}
@@ -2693,6 +2765,41 @@ def _tmux_line():
             "inside tmux: tmux new -A -s maxpm"]
 
 
+def render_expert(res):
+    def line(x):
+        when = core.show_time(x["talked_at"]) if x.get("talked_at") else "never"
+        return (f"  {x['name']}  ({x['state']}; {x.get('model') or 'model not recorded'}; last talk {when}; "
+                + (f"ends {core.show_time(x['ends_at'])} with no talk" if x.get("ends_at") else "never ends by itself")
+                + ")" + (f"\n    holds {', '.join('#' + str(i) for i in x['holds'])}" if x.get("holds") else "")
+                + f"\n    {x['topic']}")
+    if "experts" in res:
+        if not res["experts"]:
+            print("No experts. Start one: maxpm expert start <name> --topic \"...\" [--project <p>] [--model <m>], or make "
+                  "a session one in its chat: maxpm --as <name> expert adopt --topic \"...\"")
+        for x in res["experts"]:
+            print(line(x))
+    elif "adopted" in res:
+        x = res["adopted"]
+        print(f"{x['name']} is now an expert on: {x['topic']}")
+        print(f"  MaximizePM does not end it as a worker, and gives it no queue work. Keep its notes: "
+              f"maxpm --as {x['name']} expert notes {x['name']} --put <file>. Run maxpm --as {x['name']} go for the rules.")
+    elif "ended_expert" in res:
+        print(f"ended the expert {res['ended_expert']['ended']}. Start it again with its context: "
+              f"{res['ended_expert']['resume']}   (close its terminal or pane if it is still open)")
+    elif "expert_notes" in res:
+        n = res["expert_notes"]
+        if n["text"]:
+            print(f"Notes of {n['name']} (canvas {n['canvas']}, version {n['version']}):\n")
+            print(n["text"].rstrip())
+        else:
+            print(f"{n['name']} has no notes yet. Write them: maxpm --as {n['name']} expert notes {n['name']} --put <file>")
+    elif "expert_started" in res:
+        t = res["expert_started"]
+        how = "a tmux pane" if t.get("launch_in") == "tmux" else f"a new Terminal {t.get('launch_in') or 'tab'}"
+        print(f"started the expert {t['session_name']} in {how} ({t['project']}): {t['topic']}"
+              + (f"; it resumes session {t['resumed']}" if t.get("resumed") else ""))
+
+
 def render_go(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
@@ -2723,6 +2830,27 @@ def render_go(b):
         out += [b["help_prompt"], "",
                 f"Your own agent name is {me}; take over a person's item only with their yes: {r} takeover <id> --note \"<how>\".",
                 f"Do not take other work in this session unless the person asks: then run {r} go --role worker."]
+        print("\n".join(out).rstrip())
+        return
+    if b["role"] == "expert":
+        x = b["expert"]
+        out += [f"EXPERT on: {x['topic']}",
+                f"  A person talks with you about this, for hours or days. MaximizePM never ends you as it ends a worker "
+                f"(no wait END, no idle_end, no hand-over); you end when a person ends you, or after "
+                f"{core.show_time(x['ends_at']) if x['ends_at'] else 'never'} with no talk (expert_idle_end).",
+                f"  Your notes (read them now, and keep them current with your topic, what you learned, and the "
+                f"decisions of your talks): {r} expert notes {me}   new version: {r} expert notes {me} --put <file>",
+                "  Rules:",
+                "  - Answer the person. Take no queue work by yourself: no maxpm wait, no go --role worker. Claim an "
+                "item only when the person tells you to.",
+                f"  - Work that you find: {r} add \"<title>\" (--found-during <id> when it comes from an item). "
+                f"Work that should start now: ask the manager to launch it: {r} ask manager \"<what>\".",
+                "  - Show a long answer as a canvas: maxpm canvas put <file> --name <name>.",
+                f"  - Messages to you come into this session; read them with {r} inbox, and answer them.",
+                "  - Stand at your prompt after each answer."]
+        for h in b.get("holds") or ():
+            out.append(f"  You hold #{h['id']} {h['title']} (the person asked you to): finish it, "
+                       f"{r} done {h['id']} --output \"...\", or {r} release {h['id']}.")
         print("\n".join(out).rstrip())
         return
     notes = b.get("queue_instructions") or []
@@ -3555,6 +3683,8 @@ def render(a, res):
     if c == "queue":
         _print_queue(res)
         return
+    if c == "expert":
+        return render_expert(res)
     if c == "launch":
         it = f"#{res['item']['id']} {res['item']['title']}"
         if res.get("dry_run"):
@@ -3863,10 +3993,12 @@ def render(a, res):
     if c == "who":
         if not res:
             print("(nobody)")
-        for ag in res:
+        # Experts last, apart from the workers: they take no queue work (#4955).
+        for ag in sorted(res, key=lambda g: g.get("role") == "expert"):
             holds = ", ".join(f"#{h['id']} {h['title']}" for h in ag["holds"]) or "nothing"
             note = f" — {ag['note']}" if ag["note"] else ""
-            print(f"{ag['name']} ({ag['kind']}, {ag['state']}){note}"
+            kind = "expert, takes no queue work" if ag.get("role") == "expert" else ag["kind"]
+            print(f"{ag['name']} ({kind}, {ag['state']}){note}"
                   + (f"\n    session: {ag['session']}" + (f" [{ag['session_ref']}]" if ag.get("session_ref") else "")
                      if ag.get("session") else "")
                   + (f"\n    process: PID {ag['pid']} on {ag['host']}" if ag.get("pid") else "")

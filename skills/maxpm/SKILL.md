@@ -415,6 +415,24 @@ this computer, with each version, and that the user opens in the MaximizePM page
 - `maxpm canvas list` shows the canvases; `maxpm canvas show <name> [--version N] [--text]` reads one;
   `maxpm canvas save <name> <path>` writes a version as a file when it must go into git.
 
+## Expert sessions
+
+An expert is a session that the user talks with for hours or days about one
+topic (a research paper, a design). The user starts one
+(`maxpm expert start <name> --topic "..." [--project <p>] [--model <m>]`), or
+makes a session one in its own chat: `maxpm --as <you> expert adopt --topic "..."`.
+`maxpm go` then gives you role EXPERT and no item. As an expert:
+
+- Answer the user. Take no queue work by yourself, and run no `maxpm wait`;
+  stand at your prompt. MaximizePM does not end you for that. You end when a
+  person runs `maxpm expert end <you>`, or after `expert_idle_end` (7d) with no
+  talk. `maxpm expert start <you> --resume` starts your chat again.
+- Claim an item only when the user tells you to.
+- Add the work you find (`maxpm add ...`), and ask the manager to launch it.
+- Keep your notes current: your topic, what you learned, the decisions of your
+  talks: `maxpm --as <you> expert notes <you> --put <file>`. A session that
+  starts you again reads them.
+
 ## Blocked on another agent's item
 
 `maxpm blockers <id>` shows who holds what. Then:

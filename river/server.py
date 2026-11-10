@@ -351,6 +351,55 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     return {**t, "session_name": name}
 
 
+EXPERT_PROMPT = ("You are {name}, an expert session of MaximizePM on: {topic}. A person talks with you about it, for hours or "
+                 "days. Run maxpm --as {name} go once: it shows your news and notes. Then answer the person. You take "
+                 "no queue work by yourself; keep your notes current: maxpm --as {name} expert notes {name} --put <file>.")
+
+
+def start_expert(conn, name, topic=None, project=None, resume=False, runner=None, agent=None, actor=None, model=None,
+                 effort=None, launch_in=None, options=None):
+    """maxpm expert start (#4955): open an agent session that is an expert on a topic, in the folder of its project.
+    resume: claude --resume of the last Claude Code session the expert ran in, so the talk goes on with its context;
+    with none, a fresh session that reads its notes. The topic and project of an expert that ended come from its
+    history when not given again."""
+    old = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+    if old is not None and old["role"] != "expert":
+        raise RiverError(f"{name} is a session that runs now ({old['role'] or 'no role'}); pick another name, or make that "
+                         f"session an expert in its own chat: maxpm --as {name} expert adopt --topic \"...\"")
+    if old is not None and old["pid"] and old["host"] == core.this_host() and core.pid_alive(old["pid"]):
+        raise RiverError(f"the expert {name} runs now (process {old['pid']}); talk with it in its session, or end it "
+                         f"first: maxpm expert end {name}")
+    was_topic, was_project = core.expert_topic_of(conn, name)
+    topic, project = topic or was_topic, project or was_project
+    if not topic:
+        raise RiverError(f"{name} was never an expert, so it needs a topic: maxpm expert start {name} --topic \"...\"")
+    p = core._project(conn, project) if project else next(
+        (core._project(conn, x["name"]) for x in core.project_list(conn) if x.get("path")), None)
+    if p is None or not p["path"]:
+        raise RiverError("an expert starts in the folder of a project: name one that has a folder, --project <name> "
+                         "(maxpm project path <name> <folder>)")
+    launch_in = core._launch_in(conn, p["id"], launch_in)
+    _can_open_terminal(runner, f"cd {p['path']} && claude go", launch_in)
+    first = EXPERT_PROMPT.format(name=name, topic=topic)
+    sid = core.last_claude_session(conn, name) if resume else None
+    core.expert_make(conn, name, topic, p["name"], actor)
+    if model:
+        core.set_agent_model(conn, name, model)
+    if sid:
+        r = core.resume_command(conn, name, "claude-code", sid, p["id"], {"prompt": first, "model": model,
+                                                                          "effort": effort})
+        t = {"command": r["command"], "env": r["env"], "agent": r["agent"], "resumed": sid}
+    else:
+        t = core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt=first)
+        t = {**t, "env": {"MAXPM_AGENT": name, **t["env"]}}
+    t.update(project=p["name"], path=p["path"], launch_in=launch_in, session_title=name)
+    _open_terminal(t, t["env"], runner)
+    with core.tx(conn):
+        core._event(conn, None, actor or "maxpm", f"expert {name} started" + (f" (resumes session {sid})" if sid else
+                                                                          (" (fresh: no session to resume)" if resume else "")))
+    return {**t, "session_name": name, "topic": topic}
+
+
 def _open_terminal(t, env, runner=None):
     """Run the agent command (t["command"]) in the project folder (t["path"]) with env set: in a new
     Terminal tab or window on macOS (launch_in), in a new console window on Windows, or with launch_in
@@ -1520,7 +1569,8 @@ def fresh_sessions(conn, runner=None):
     harness wakes it.
     An agent that ends is unregistered, and the tmux pane river started for it closes; that comes before the
     fresh sessions start, so two sessions never work on one item.
-    Managers and planners are left alone: they wait at their prompt for a person or a watch command.
+    Managers, planners, and experts are left alone: they wait at their prompt for a person or a watch command
+    (an expert ends after expert_idle_end with no talk: core.end_quiet_experts).
     Returns {"started": {item: session}, "ended": {agent: why}, "failed": {item: why}}."""
     out = {"started": {}, "ended": {}, "failed": {}}
     fresh = core.setting(conn, "fresh_sessions") == "on"
@@ -1541,7 +1591,7 @@ def fresh_sessions(conn, runner=None):
         return out
     t, cands = core.now(), {}
     for a in conn.execute("SELECT name, last_seen, registered_at, role FROM agents WHERE kind='ai' AND stop_at IS NULL "
-                          "AND COALESCE(role, '') NOT IN ('manager', 'planner')").fetchall():
+                          "AND COALESCE(role, '') NOT IN ('manager', 'planner', 'expert')").fetchall():
         idle = t - core.parse_iso(a["last_seen"])
         if a["last_seen"] == a["registered_at"] or idle < after:
             continue  # it never connected (the manager finds that), or it ran a river command just now
@@ -2832,6 +2882,9 @@ OPS = {
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
     "kill_agent": lambda c, a, who: core.kill_agent(c, a["agent"], _page_reason(a, who), who),
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
+    "start_expert": lambda c, a, who: start_expert(c, a["name"], a.get("topic"), a.get("project"), bool(a.get("resume")),
+                                                   agent=a.get("agent"), actor=who, **_launch_args(a)),
+    "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason")),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},

@@ -215,6 +215,10 @@ DEFAULT_SETTINGS = {
     # resumes the same chat in a pane (claude --resume, codex resume) with the same name, item and context.
     "tmux_adopt": "on",
     "idle_end": "15m",
+    # An expert session (maxpm expert start|adopt, #4955) is one that a person talks with for hours or days: no wait END,
+    # no idle_end, no hand-over. maxpm serve ends it when nobody typed or sent it a prompt for expert_idle_end
+    # (0s: never), and tells the senders of what it did not read.
+    "expert_idle_end": "7d",
     # maxpm serve closes the tmux panes of sessions that are done every tidy_every, as maxpm view --tidy does; a pane
     # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. It also
     # ends the tmux servers the tests left behind with their socket gone (maxpm view --orphans). 0s: never.
@@ -592,6 +596,9 @@ CREATE TABLE IF NOT EXISTS agents (
   stop_at        TEXT,                       -- maxpm stop: when, who, and why; the session ends after it
   stop_by        TEXT,
   stop_reason    TEXT,
+  expert_topic   TEXT,                       -- an expert session (role expert): what it knows and is for (#4955)
+  expert_project TEXT,                       -- the project whose folder it starts in (maxpm expert start)
+  talked_at      TEXT,                       -- the last prompt that someone typed or sent to it (its hooks)
   registered_at  TEXT NOT NULL,
   last_seen      TEXT NOT NULL
 );
@@ -1044,6 +1051,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN model TEXT")
     if "agent_type" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN agent_type TEXT")
+    for col in ("expert_topic", "expert_project", "talked_at"):
+        if col not in acols:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
@@ -1267,7 +1277,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "similar_days"):
         parse_duration(value)
     elif key == "similar_min":
         try:
@@ -6149,6 +6159,10 @@ def _agent_state(conn, a):
     # Its process on this host has ended: gone at once, not after gone_after.
     if "pid" in a.keys() and a["pid"] and a["host"] == this_host() and not pid_alive(a["pid"]):
         return "gone"
+    # An expert talks with a person and runs few maxpm commands: it is not away or gone by time. It ends after
+    # expert_idle_end with no talk (end_quiet_experts), or when a person ends it (#4955).
+    if "role" in a.keys() and a["role"] == "expert":
+        return "active"
     age = now() - parse_iso(a["last_seen"])
     if age > parse_duration(setting(conn, "gone_after", agent=a["name"])):
         return "gone"
@@ -7630,7 +7644,7 @@ def activity_event(conn, payload, env=None):
     ntype = str(payload.get("notification_type") or "")
     t, alert = iso(now()), None
     with tx(conn):
-        a = conn.execute("SELECT activity_prompt, activity_waits, stop_at FROM agents WHERE name=?", (agent,)).fetchone()
+        a = conn.execute("SELECT activity_prompt, activity_waits, stop_at, role FROM agents WHERE name=?", (agent,)).fetchone()
         prompt, waits = a["activity_prompt"], a["activity_waits"]
         if ev == "PermissionRequest":
             inp = payload.get("tool_input")
@@ -7639,6 +7653,7 @@ def activity_event(conn, payload, env=None):
         elif ev in ("PostToolUse", "UserPromptSubmit"):
             prompt = waits = None
         if ev == "UserPromptSubmit" and _talk(payload.get("prompt")):
+            conn.execute("UPDATE agents SET talked_at=? WHERE name=? AND role='expert'", (t, agent))
             # A person (or another session) talks with a session that waits for work: wait_max counts from the
             # talk, so maxpm wait does not end the session during it or soon after (#4948).
             conn.execute("UPDATE agents SET waiting_since=? WHERE name=? AND waiting_since IS NOT NULL", (t, agent))
@@ -7649,7 +7664,8 @@ def activity_event(conn, payload, env=None):
             waits = json.dumps(found) if found else None
         conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=?, activity_waits=? WHERE name=?",
                      (t, ev + (f":{ntype}" if ntype else ""), prompt, waits, agent))
-        held = _activity_item(conn, agent)
+        # An expert sits at its prompt with the person: its turn ends and prompts are no news for the manager.
+        held = _activity_item(conn, agent) if a["role"] != "expert" else None
         if held and ev == "Notification" and ntype == "permission_prompt":
             call = _activity_call(prompt)
             alert = _activity_alert(conn, agent, held["id"],
@@ -7679,7 +7695,7 @@ def activity_watch(conn):
     bg = parse_duration(setting(conn, "busy_max"))
     rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, activity_waits, "
                                     "last_seen FROM agents WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
-                                    "AND waiting_since IS NULL").fetchall()
+                                    "AND waiting_since IS NULL AND COALESCE(role, '')<>'expert'").fetchall()
             if r["activity_told"] != r["activity_at"]
             and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit
             and not (r["activity_waits"] and t - parse_iso(r["activity_at"]) < bg)]
@@ -9100,7 +9116,8 @@ def capacity(conn, ann=None):
     ready_human = [a for a in ready if a["doer"] == "human"]
     agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents")]
     # Planner sessions change the plan and take no work, so they are not slots.
-    ai_active = [a for a in agents if a["kind"] == "ai" and a["state"] == "active" and a.get("role") != "planner"]
+    ai_active = [a for a in agents if a["kind"] == "ai" and a["state"] == "active"
+                 and a.get("role") not in ("planner", "expert")]  # an expert takes no queue work (#4955)
     ai_busy = [a for a in ai_active if a["holds"]]
     ai_idle = [a for a in ai_active if not a["holds"]]
     # Waiting sessions (maxpm wait) take new work by themselves within seconds, and end after wait_max.
@@ -10307,7 +10324,7 @@ def state(conn, closed=True):
 
 # ---------------------------------------------------------------- go
 
-ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "planner", "manager", "context", "idle")
+ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "planner", "manager", "context", "expert", "idle")
 
 
 def _owned_goal(conn, actor, names):
@@ -10484,6 +10501,15 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                      why=f"stop requested by {stop['stop_by']}: {stop['stop_reason']}")
         return brief
     brief["queue_instructions"] = queue_instructions(conn, actor)
+    me = _agent(conn, actor)
+    if me["role"] == "expert" and role in (None, "expert"):
+        # An expert takes no queue work by itself: it answers the person (#4955).
+        brief.update(role="expert", item=None, expert=expert_view(conn, me),
+                     holds=[item_show(conn, r["id"]) for r in conn.execute(
+                         "SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                         (actor,))],
+                     why="you are an expert session: you answer the person and take no queue work by yourself")
+        return brief
     brief["model"] = agent_model(conn, actor)
     brief["model_skipped"] = skipped = []
     mine_goal = _owned_goal(conn, actor, names)
@@ -10820,8 +10846,10 @@ def _set_role_note(conn, actor, role, item_id):
     with tx(conn):
         # A role with work ends a wait; idle keeps the wait clock, so wait_max counts from the first wait.
         keep = role in ("idle", "waiting")
+        # An expert stays an expert when a person has it claim an item (#4955); maxpm manage still makes a manager.
         conn.execute("UPDATE agents SET note=?, role=?, waiting_since=CASE WHEN ? THEN waiting_since END, "
-                     "waiting_in=CASE WHEN ? THEN waiting_in END WHERE name=?", (note, role, keep, keep, actor))
+                     "waiting_in=CASE WHEN ? THEN waiting_in END WHERE name=? AND (COALESCE(role, '')<>'expert' "
+                     "OR ?='manager')", (note, role, keep, keep, actor, role))
 
 
 def focus_role(focus):
@@ -10895,7 +10923,10 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     sleep = sleep or time.sleep
     if not actor:
         raise RiverError("waiting needs an agent name: pass --as <name>")
-    _agent(conn, actor)
+    if _agent(conn, actor)["role"] == "expert":
+        raise RiverError(f"{actor} is an expert session: it waits at its prompt for the person, not in maxpm wait, "
+                         f"and MaximizePM never ends it for that. Answer the person; maxpm --as {actor} go shows your "
+                         f"news")
     names = _names(conn, project) if project else projects_for_dir(conn, cwd)
     role = focus_role(focus)
 
@@ -11086,6 +11117,129 @@ def end_idle(conn, agent, why):
         _event(conn, None, "maxpm", f"{agent} ended: {why}")
     unregister(conn, agent, "maxpm")
     return {"ended": agent, "why": why}
+
+
+# ---------------------------------------------------------------- experts
+# An expert session (#4955) is one that a person talks with for hours or days, like the session that wrote a
+# research paper and that the person wants to keep asking. MaximizePM never ends it as it ends a worker (wait END,
+# idle_end, hand_over), sends it no queue work, and gives no alert about its prompt; it answers the person. It
+# ends when a person ends it (maxpm expert end) or after expert_idle_end with no talk (end_quiet_experts).
+
+EXPERT_NOTE = "expert: "  # the history line that records an expert's topic (its start again reads it)
+
+
+def _expert(conn, name):
+    a = _agent(conn, name)
+    if a["role"] != "expert":
+        raise RiverError(f"{name} is not an expert session; make one: maxpm expert start <name> --topic \"...\", or "
+                         f"in the session itself: maxpm --as <name> expert adopt --topic \"...\"")
+    return a
+
+
+def expert_notes_name(name):
+    """The canvas that holds an expert's notes: its topic, what it learned, and the decisions of its talks."""
+    return "expert-" + re.sub(r"[^a-z0-9._-]", "-", name.lower())[:57]
+
+
+def expert_make(conn, name, topic, project=None, actor=None):
+    """Make an agent an expert session: role expert, its topic, the project whose folder it works in. A name that is
+    not registered is registered (maxpm expert start names the new session). The agent keeps what it holds."""
+    topic = " ".join((topic or "").split())
+    if not topic:
+        raise RiverError("an expert needs a topic: what it knows and what the person asks it about, "
+                         "--topic \"...\"")
+    if project:
+        _project(conn, project)
+    r = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+    if r is None:
+        register(conn, name, note=f"{EXPERT_NOTE}{topic[:120]}")
+    elif r["kind"] == "human":
+        raise RiverError(f"{name} is a person; an expert is an agent session")
+    t = iso(now())
+    with tx(conn):
+        conn.execute("UPDATE agents SET role='expert', note=?, expert_topic=?, expert_project=COALESCE(?, expert_project), "
+                     "talked_at=?, waiting_since=NULL, waiting_in=NULL, wait_token=NULL, stop_at=NULL, stop_by=NULL, "
+                     "stop_reason=NULL WHERE name=?", (f"{EXPERT_NOTE}{topic[:120]}", topic, project, t, name))
+        _event(conn, None, actor or name, f"{name} is an {EXPERT_NOTE}{topic}" + (f" (project {project})" if project else ""))
+    return expert_view(conn, _agent(conn, name))
+
+
+def expert_topic_of(conn, name):
+    """(topic, project) of an expert from the queue, also after it ended: its row, else its last history line."""
+    r = conn.execute("SELECT expert_topic, expert_project FROM agents WHERE name=? AND role='expert'", (name,)).fetchone()
+    if r and r["expert_topic"]:
+        return r["expert_topic"], r["expert_project"]
+    e = conn.execute("SELECT change FROM events WHERE item_id IS NULL AND change LIKE ? ORDER BY id DESC LIMIT 1",
+                     (f"{name} is an {EXPERT_NOTE}%",)).fetchone()
+    if not e:
+        return None, None
+    m = re.match(rf"^{re.escape(name)} is an {re.escape(EXPERT_NOTE)}(.*?)(?: \(project ([^)]+)\))?$", e["change"])
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def last_claude_session(conn, name):
+    """The newest Claude Code session id that the agent ran a maxpm command in (agent_sessions), or None."""
+    r = conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC LIMIT 1",
+                     (name,)).fetchone()
+    return r["session_id"] if r else None
+
+
+def expert_view(conn, a):
+    t = a["talked_at"] or a["last_seen"]
+    limit = parse_duration(setting(conn, "expert_idle_end", agent=a["name"]))
+    return {"name": a["name"], "topic": a["expert_topic"], "project": a["expert_project"], "model": a["model"],
+            "talked_at": t, "state": _agent_state(conn, a), "session": a["session"], "session_url": a["session_url"],
+            "notes": expert_notes_name(a["name"]),
+            "ends_at": iso(parse_iso(t) + limit) if limit.total_seconds() else None,
+            "holds": [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN "
+                                                    "('in_progress','held') ORDER BY id", (a["name"],))],
+            "unread": unread(conn, a["name"])}
+
+
+def expert_list(conn):
+    return [expert_view(conn, a) for a in conn.execute("SELECT * FROM agents WHERE role='expert' AND kind='ai' "
+                                                       "ORDER BY COALESCE(talked_at, last_seen) DESC")]
+
+
+def _may_end_expert(conn, name, actor):
+    """A person, the active manager, or the expert itself ends an expert; another agent may not."""
+    if not actor or actor == name:
+        return
+    r = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone()
+    if not (r and (r["kind"] == "human" or r["role"] == "manager")):
+        raise RiverError(f"refused: an agent may not end the expert {name}; a person, the manager, or the expert "
+                         f"itself ends it")
+
+
+def expert_end(conn, name, actor=None, why=None):
+    """End an expert now (a person's word): the senders of what it did not read hear it, and it is unregistered.
+    Refused while it holds an item or owns a target."""
+    _expert(conn, name)
+    _may_end_expert(conn, name, actor)
+    held = [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held')",
+                                          (name,))]
+    if held:
+        raise RiverError(f"{name} holds {', '.join('#' + str(i) for i in held)}; it finishes or releases that first "
+                         f"(maxpm release <id>)")
+    out = end_idle(conn, name, why or f"ended by {actor or name}")
+    if out is None:
+        raise RiverError(f"{name} cannot end now: it owns a target or waits on a person's answer")
+    return {**out, "resume": f"maxpm expert start {name} --resume"}
+
+
+def end_quiet_experts(conn):
+    """One look of maxpm serve: end each expert that nobody typed or sent a prompt to for expert_idle_end (0s: never).
+    end_idle tells the senders of what it did not read. Returns {agent: why}."""
+    out, t = {}, now()
+    for a in conn.execute("SELECT * FROM agents WHERE role='expert' AND kind='ai'").fetchall():
+        limit = parse_duration(setting(conn, "expert_idle_end", agent=a["name"]))
+        quiet = t - parse_iso(a["talked_at"] or a["last_seen"])
+        if not limit.total_seconds() or quiet < limit:
+            continue
+        why = f"an expert with no talk for {setting(conn, 'expert_idle_end', agent=a['name'])} (expert_idle_end)"
+        if end_idle(conn, a["name"], why):
+            out[a["name"]] = why
+    return out
 
 
 def active_manager(conn, but=None):

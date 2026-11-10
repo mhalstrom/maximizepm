@@ -121,6 +121,10 @@ button.srow-it { cursor: pointer; }
 .slist-mgr { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--line); flex: none; }
 .mgr-tag { flex: none; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--human); background: var(--human-bg); border-radius: 4px; padding: 1px 6px; }
 .mgr-none .srow-main { cursor: default; }
+.slist-experts .slist-h { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.slist-experts .slist-rows { display: flex; flex-direction: column; gap: 6px; }
+.expert-tag { color: var(--accent); background: transparent; box-shadow: inset 0 0 0 1px var(--accent); }
+.sid.expert-topic { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .mgr-none .srow-it { justify-content: center; align-items: center; }
 .mgr-none .srow-it .btn { font-size: 12px; }
 /* The side panel of the Sessions tab (#4619): left bar | chat | panel. */

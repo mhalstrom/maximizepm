@@ -484,6 +484,7 @@ def loop(stop, interval_s=None):
             core.tell_watch_late(conn)  # a manager that runs no watch while a message is due: tell the person
             server.adopt_sessions(conn)  # tmux_adopt: a session outside tmux, quiet at its prompt, moves into a pane
             server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session
+            core.end_quiet_experts(conn)  # an expert nobody talked with for expert_idle_end ends (#4955)
             server.auto_release(conn)  # a ready review gets a reviewer, a ready deploy its deployer
             server.auto_context(conn)  # goal_context on: a goal with ready work gets a context session (a base)
             server.auto_tidy(conn)  # every tidy_every: close the tmux panes of sessions that are done
