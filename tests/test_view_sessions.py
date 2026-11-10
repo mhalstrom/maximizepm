@@ -415,6 +415,40 @@ class Adopt(Base):
         self.assertTrue(cmd.startswith(f"codex resume {TID} -m "), cmd)
         self.assertIn("model_reasoning_effort=low", cmd)
 
+    def test_a_resume_keeps_the_model_the_session_ran_on(self):
+        """#5064: the manager's row had no model, its resume had no --model, and Claude Code took its own default
+        (Fable). The resume takes the model of its command line, else of its transcript; with none it refuses."""
+        opus = core.model_id(self.c, "claude-code", "opus")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET model=NULL, pid_cmd='claude --name ag --model sonnet go' WHERE name='ag'")
+        r = core.resume_command(self.c, "ag", "claude-code", SID)
+        self.assertIn(f"--model {core.model_id(self.c, 'claude-code', 'sonnet')} ", r["command"])
+        self.assertEqual(r["env"]["MAXPM_MODEL"], "sonnet")
+        # No model on its command line: the last reply of its transcript names it.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid_cmd='claude --name ag manage' WHERE name='ag'")
+        self.write(claude_line("assistant", [{"type": "text", "text": "ok"}], "end_turn") .replace(
+            '"role": "assistant"', f'"role": "assistant", "model": "{opus}"'))
+        r = core.resume_command(self.c, "ag", "claude-code", SID)
+        self.assertIn(f"--model {opus} ", r["command"])
+        self.assertEqual(r["env"]["MAXPM_MODEL"], "opus")
+        # Nothing names it: no resume, and tmux_adopt ends nothing and tells the manager once.
+        self.path.write_text(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn", cwd=self.dir.name))
+        with self.assertRaisesRegex(core.RiverError, "does not know the model ag ran on"):
+            core.resume_command(self.c, "ag", "claude-code", SID)
+        core.register(self.c, "mgr")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+            self.c.execute("UPDATE agents SET pid_cmd=? WHERE name='ag'", (core.proc_info(self.proc.pid)[2],))
+        self.quiet()
+        self.assertEqual(server.adopt_sessions(self.c), {})
+        self.assertIsNone(self.proc.poll())  # still runs
+        server.ADOPT["failed"].clear()
+        self.assertEqual(server.adopt_sessions(self.c), {})
+        notes = [r[0] for r in self.c.execute("SELECT body FROM messages WHERE to_agent='mgr'")]
+        self.assertEqual(len(notes), 1, notes)
+        self.assertIn("tmux_adopt did not move ag into tmux", notes[0])
+
     def test_serve_moves_a_quiet_session_and_it_keeps_its_work(self):
         self.quiet()
         moved = server.adopt_sessions(self.c)

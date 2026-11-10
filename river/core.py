@@ -11102,12 +11102,33 @@ ADOPT_PROMPT = ("MaximizePM moved this session into a tmux pane, so the Sessions
                 "if you are not sure.")
 
 
-def resume_command(conn, agent, platform, session_id, project_id=None, overrides=None):
+def _ran_model(pid_cmd, platform, session_id, transcript=None):
+    """The model a session ran on, as its CLI named it, when the queue has none for it: the --model (-m) of its
+    recorded command line, else the model of the last reply in its transcript (a Claude Code transcript is found
+    by its session id). None when neither says."""
+    m = re.search(r"(?:^|\s)(?:--model|-m)[ =]([A-Za-z0-9._:/\[\]-]+)", pid_cmd or "")
+    if m:
+        return m.group(1)
+    path = transcript
+    if not path and platform == "claude-code" and session_id:
+        path = next(iter(sorted(transcripts_root().glob(f"*/{session_id}.jsonl"))), None)
+    if not path or not Path(path).exists():
+        return None
+    from . import sessions
+    try:
+        return sessions._transcript_settings("claude" if platform == "claude-code" else "codex", Path(path)).get("model")
+    except (OSError, ValueError):
+        return None
+
+
+def resume_command(conn, agent, platform, session_id, project_id=None, overrides=None, transcript=None):
     """The command that resumes an agent's chat in a new process (tmux_adopt, #4598): the first launch_agents
     profile of its platform, its model, `claude --resume <session id>` or `codex resume <thread id>`, and
     ADOPT_PROMPT as its first prompt. {command, env}. overrides (the Settings dialog, #4625): model (a model_ladder
     name or the CLI's own id), effort, opts (profile options such as permission_mode or sandbox), flags (added),
-    noflags (taken out of the profile's args), prompt."""
+    noflags (taken out of the profile's args), prompt. The chat resumes on the model it ran on: agents.model, else
+    the model its command line or its transcript names (transcript: the file, when the caller has it). With none,
+    it refuses: a command with no model gets the CLI's default (#5064: the manager came back on Fable)."""
     ov = overrides or {}
     a = _agent(conn, agent)
     agents = parse_launch_agents(setting(conn, "launch_agents", project_id=project_id))
@@ -11127,6 +11148,16 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     mid = model_id(conn, platform, model, project_id, prof[1])
     if ov.get("model") and not model:
         mid = ov["model"]  # the CLI's own id
+    if not mid:
+        seen = _ran_model(a["pid_cmd"], platform, session_id, transcript)
+        if seen:
+            model = model_name_of(platform_models(conn, platform, project_id, prof[1]), seen)
+            mid = model_id(conn, platform, model, project_id, prof[1]) if model else seen
+    if not mid:
+        raise RiverError(f"MaximizePM does not know the model {agent} ran on (not in the queue, its command line or "
+                         f"its transcript), and a resume with no model takes the CLI's default: nothing resumed. "
+                         f"The session records it with maxpm --as {agent} go --model <model>; or pick the model in "
+                         f"its Settings on the Sessions tab")
     opts = {**profile_options(conn, prof[0], prof[1], project_id, None),
             "prompt": ov.get("prompt") or ADOPT_PROMPT.format(agent=agent), **(ov.get("opts") or {})}
     args = " ".join(x for x in opts.get("args", "").split() if x not in (ov.get("noflags") or ()))

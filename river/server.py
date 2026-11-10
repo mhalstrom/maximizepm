@@ -1090,6 +1090,12 @@ def adopt_sessions(conn, runner=None, end=None):
         try:
             moved[a["name"]] = move_into_tmux(conn, a, kind, path, tail["cwd"], runner, end)
         except RiverError as e:
+            manager = core.active_manager(conn) if "model" in str(e) else None
+            body = f"tmux_adopt did not move {a['name']} into tmux: {e}"
+            if manager and manager != a["name"] and not conn.execute(  # once: the manager decides the model (#5064)
+                    "SELECT 1 FROM messages WHERE to_agent=? AND body=?", (manager, body)).fetchone():
+                with core.tx(conn):
+                    core._send(conn, "notice", "maxpm", body, to=manager)
             ADOPT["failed"][a["name"]] = t
             print(f"tmux_adopt: {a['name']}: {e}", flush=True)
     return moved
@@ -1132,7 +1138,7 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
                         "ORDER BY id LIMIT 1", (name,)).fetchone()
     names = core.projects_for_dir(conn, cwd)
     project_id = held["project_id"] if held else core._project(conn, names[0])["id"] if names else None
-    t = core.resume_command(conn, name, sessions.PLATFORMS[kind], sid, project_id, overrides)
+    t = core.resume_command(conn, name, sessions.PLATFORMS[kind], sid, project_id, overrides, transcript=path)
     info = core.proc_info(pid)
     if info is not None and info[2] != a["pid_cmd"]:
         raise RiverError(f"PID {pid} now runs another command ({info[2][:80]}); nothing moved")
