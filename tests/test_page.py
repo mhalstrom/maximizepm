@@ -200,6 +200,29 @@ try {
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
 
+    def test_a_collapsed_row_on_a_phone_lists_only_the_columns_with_a_value(self):
+        """#5085: at 390 px an item table puts the columns that do not fit under each row; a column with no value
+        (no due date, nothing it waits on, no goal, anyone may do it) is left out there."""
+        plain = core.item_add(self.c, "site", "plain")["id"]
+        dated = core.item_add(self.c, "site", "dated", doer="human", due="2030-01-01")["id"]
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  q('nav button[data-tab="projects"]').click();
+  await until(() => q("#projects [data-ptable], #projects [data-fold]"), "the project cards");
+  if (!q("#projects .tabulator-row")) { const f = q("#projects [data-fold]"); if (f) f.click(); }
+  await until(() => q("#projects .tabulator-responsive-collapse"), "a collapsed row");
+  const text = (id) => { const r = [...document.querySelectorAll("#projects .tabulator-row")].find(x => x.querySelector(".id, [tabulator-field=id]") && x.textContent.includes(id));
+    const c = r && r.querySelector(".tabulator-responsive-collapse"); return c ? c.textContent.replace(/\s+/g, " ") : null; };
+  post({ plain: text("plain"), dated: text("dated") });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/", size="390,844")
+        self.assertIsNotNone(r["plain"], r)
+        for label in ("Due", "Waits on", "Goals", "Who"):
+            self.assertNotIn(label, r["plain"], r)
+        self.assertIn("P2", r["plain"], r)
+        self.assertIn("Due", r["dated"], r)
+        self.assertIn("Who", r["dated"], r)
+
     def test_rows_of_a_long_session_list_keep_their_whole_height(self):
         """#4723: in the list (a flex column of fixed height) the rows shrank and cut off their last lines; now each
         row keeps its height and the list scrolls."""

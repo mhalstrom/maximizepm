@@ -22,6 +22,30 @@ function column({ filter = "text", html, ...c }) {
   return col;
 }
 
+// A cell value with no text, or only a muted placeholder ('anyone'), says nothing under a collapsed row.
+function hasValue(v) {
+  if (v instanceof Node) return !!v.textContent.trim();
+  if (v == null || v === false) return false;
+  const t = document.createElement("template");
+  t.innerHTML = String(v);
+  t.content.querySelectorAll(".muted").forEach((m) => m.remove());
+  return !!t.content.textContent.trim();
+}
+
+// The columns that do not fit on a phone, under their row: a label and its value, only for the columns with a value.
+function collapsed(cols) {
+  const rows = cols.filter((c) => hasValue(c.value));
+  if (!rows.length) return "";
+  const table = document.createElement("table");
+  for (const c of rows) {
+    const tr = table.insertRow(), th = tr.insertCell(), td = tr.insertCell(), b = document.createElement("strong");
+    b.textContent = c.title;
+    th.append(b);
+    if (c.value instanceof Node) td.append(c.value); else td.innerHTML = c.value;
+  }
+  return table;
+}
+
 // makeTable(el, { key, columns, index, sort, onRow, placeholder, height, ...options }) returns { set(rows), tabulator };
 // options go to Tabulator as they are (for example groupBy and groupHeader).
 //   key:    names the table for the remembered sort and filters;
@@ -35,7 +59,9 @@ export function makeTable(el, { key, columns, index = "id", sort = [], onRow, pl
   const t = new window.Tabulator(el, {
     index, height, placeholder, data: [], layout: "fitColumns",
     // A phone (#4885): the columns that do not fit go under their row, open, so the table is no wider than the screen.
-    ...(window.innerWidth < 760 ? { responsiveLayout: "collapse", responsiveLayoutCollapseStartOpen: true } : {}),
+    // Under the row it lists only the columns that have a value (#5085): no 'Due', 'Waits on' or 'Goals' with nothing.
+    ...(window.innerWidth < 760 ? { responsiveLayout: "collapse", responsiveLayoutCollapseStartOpen: true,
+                                    responsiveLayoutCollapseFormatter: collapsed } : {}),
     // Without a fixed height the table grows with its rows: draw them all (no virtual scrolling).
     renderVertical: height ? "virtual" : "basic", ...options,
     columns: columns.map(column),
