@@ -1465,17 +1465,26 @@ def _levels(value):
 
 
 def _family(ladder, model):
-    """(family, position) of a model in the ladder, or (None, None)."""
+    """(family, position) of a model in the ladder, or (None, None).
+
+    A full CLI id counts as the ladder name that is one of its parts: claude-opus-5-5, claude-opus-5-5[1m],
+    us.anthropic.claude-fable-5-2-v1:0, and gpt-6-astra are opus, opus, fable, and astra. Before this, a
+    session that ran go --model claude-opus-5-5 had a model with no order, so no min or max limit applied
+    to it, and it took an item for fable (#4950). An id with no ladder name in it, or with two, stays unknown."""
     m = (model or "").strip().lower()
     for fam, ms in ladder.items():
         if m in ms:
             return fam, ms.index(m)
-    return None, None
+    parts = set(re.split(r"[^a-z0-9]+", m))
+    hits = [(fam, i) for fam, ms in ladder.items() for i, x in enumerate(ms) if x in parts]
+    return hits[0] if len(hits) == 1 else (None, None)
 
 
 def _check_model_name(value):
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", value):
-        raise RiverError(f"model {value!r}: a model name uses letters, digits, '.', '_', '-'")
+    # Full CLI ids pass too: claude-opus-5-5[1m] (the context size) and us.anthropic.claude-opus-5-5-v1:0 (#4950).
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}(\[[A-Za-z0-9]{1,8}\])?$", value):
+        raise RiverError(f"model {value!r}: a model name uses letters, digits, '.', '_', '-', ':', and an end "
+                         f"such as [1m]")
     return value.lower()
 
 
@@ -1516,15 +1525,19 @@ def model_check(ladder, model, lo, hi):
     """Whether a session running `model` may take an item with limits lo/hi (comma lists).
 
     Returns (allowed, reason). A limit compares only models of the session's family; a limit that names
-    no model of that family, or a model the ladder does not know, does not apply, and the reason says so."""
+    no model of that family does not apply, and the reason says so. A model that the ladder does not know
+    (not a ladder name, and no full id that holds one) takes no item with a limit: nothing says that it is
+    weak or strong enough (#4950)."""
     if not (lo or hi):
         return True, ""
     if not model:
         return True, ""
     fam, pos = _family(ladder, model)
     if fam is None:
-        return True, (f"limits (min {lo or '-'}, max {hi or '-'}) not checked: model {model} is not in "
-                      f"model_ladder, so it has no order")
+        names = ", ".join(m for ms in ladder.values() for m in ms)
+        return False, (f"limits min {lo or '-'}, max {hi or '-'} need a model with an order, and model {model} is "
+                       f"not in model_ladder ({names}); name your model by its ladder name: "
+                       f"maxpm go --model <name>")
     notes = []
     for label, lim in (("min", lo), ("max", hi)):
         if not lim:
@@ -9578,14 +9591,15 @@ def build_command(platform, opts, model=None, effort=None, name=None):
     q = _shell_quote
     if platform == "claude-code":
         parts = ["claude"] + (["--name", q(name)] if name else [])
-        parts += (["--model", model] if model else []) + (["--effort", effort] if effort else [])
+        # Quoted: a full id can end in [1m], a glob in zsh (#4950).
+        parts += (["--model", q(model)] if model else []) + (["--effort", effort] if effort else [])
         parts += ["--permission-mode", opts["permission_mode"]] if opts.get("permission_mode") else []
         parts += [opts["args"].strip()] if opts.get("args", "").strip() else []
         # The prompt goes before --remote-control: that flag takes an optional session name after it.
         parts.append(q(opts["prompt"]))
         parts += ["--remote-control"] + ([q(name)] if name else []) if opts.get("remote_control") == "on" else []
     elif platform == "codex":
-        parts = ["codex"] + (["-m", model] if model else []) + (["-c", f"model_reasoning_effort={effort}"] if effort else [])
+        parts = ["codex"] + (["-m", q(model)] if model else []) + (["-c", f"model_reasoning_effort={effort}"] if effort else [])
         parts += ["--sandbox", opts["sandbox"]] if opts.get("sandbox") else []
         parts += ["--ask-for-approval", opts["approval"]] if opts.get("approval") else []
         parts += ["--add-dir", q(river_dir())]

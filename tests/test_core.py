@@ -4062,8 +4062,20 @@ class Models(Base):
         self.assertIn("another family", why)
         self.assertFalse(core.model_check(ladder, "terra", "opus, sol", None)[0])
         ok, why = core.model_check(ladder, "mystery", "opus", None)
-        self.assertTrue(ok)
+        self.assertFalse(ok)  # an unknown model takes no item with a limit (#4950)
         self.assertIn("not in model_ladder", why)
+        self.assertIn("maxpm go --model <name>", why)
+        self.assertEqual(core.model_check(ladder, "mystery", None, None), (True, ""))
+        # A full CLI id counts as the ladder name in it (#4950).
+        for full, name in (("claude-opus-5-5", "opus"), ("claude-opus-5-5[1m]", "opus"),
+                           ("us.anthropic.claude-fable-5-2-v1:0", "fable"), ("claude-sonnet-5-5", "sonnet"),
+                           ("gpt-6-astra", "astra"), ("gpt-5.4-luna", "luna"), ("Claude-Haiku-5-5", "haiku")):
+            self.assertEqual(core._family(ladder, full), core._family(ladder, name), full)
+        self.assertEqual(core._family(ladder, "opus-or-fable"), (None, None))  # two names: no guess
+        self.assertEqual(core._family(ladder, "gpt5"), (None, None))
+        self.assertEqual(core.model_check(ladder, "claude-opus-5-5", "fable", "fable")[0], False)
+        self.assertEqual(core.model_check(ladder, "claude-opus-5-5", None, "opus"), (True, ""))
+        self.assertEqual(core.model_check(ladder, "claude-fable-5-2", None, "opus")[0], False)
         with self.assertRaisesRegex(RiverError, "more than one place"):
             core.config_set(self.c, "model_ladder", "a: x, y; b: y")
 
@@ -4109,6 +4121,38 @@ class Models(Base):
         self.assertEqual(core.agent_model(self.c, "s1"), "sonnet")
         b2 = core.go(self.c, self.dir.name, "s2", model="opus")
         self.assertEqual(b2["item"]["id"], big)
+
+    def test_a_full_model_id_has_the_limits_of_its_ladder_name(self):
+        """#4950: go --model claude-opus-5-5 took an item with --min-model fable, because the full id was not
+        in the ladder and an unknown model passed every limit."""
+        from river import cli
+        fable = core.item_add(self.c, "a", "for fable", 0, models={"min_model": "fable", "max_model": "fable"})["id"]
+        opus = core.item_add(self.c, "a", "for opus", 1, models={"max_model": "opus"})["id"]
+        b = core.go(self.c, self.dir.name, "s1", model="claude-opus-5-5")
+        self.assertEqual(b["item"]["id"], opus)
+        self.assertEqual([x["id"] for x in b["model_skipped"]], [fable])
+        self.assertIn("needs at least fable", b["model_skipped"][0]["why"])
+        core.register(self.c, "s0")
+        core.set_agent_model(self.c, "s0", "claude-opus-5-5")
+        with self.assertRaisesRegex(RiverError, "needs at least fable"):
+            core.claim(self.c, fable, "s0")
+        # A model that the ladder does not know takes no item with a limit, and go says why.
+        b = core.go(self.c, self.dir.name, "s2", model="mystery-7")
+        self.assertIsNone(b.get("item"))
+        self.assertIn("not in model_ladder", b["model_skipped"][0]["why"])
+        # MAXPM_MODEL with a full id does the same as --model.
+        core.release(self.c, opus, "s1")
+        old = {k: os.environ.get(k) for k in ("MAXPM_DB", "MAXPM_MODEL")}
+        os.environ.update(MAXPM_DB=self.path, MAXPM_MODEL="claude-fable-5-2[1m]")
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+                                 for k, v in old.items()])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "s3", "go", "--project", "a"])
+        self.assertEqual(core._item(self.c, fable)["assignee"], "s3")
+        # The launch command quotes a full id: [1m] is a glob in zsh.
+        self.assertIn("--model 'claude-opus-5-5[1m]' ", core.build_command("claude-code", {"prompt": "go"},
+                                                                          model="claude-opus-5-5[1m]"))
+        self.assertIn("--model opus ", core.build_command("claude-code", {"prompt": "go"}, model="opus"))
 
 
 class Monitor(Base):
