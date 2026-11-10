@@ -15,7 +15,7 @@ import { wireItemPop } from "./components/itemPop.js";
 import { S, tab, setState, setTabName, nav, goalSel, setPlan, planView, scope, planShown } from "./page.js";
 import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
-import * as board from "./views/board.js";
+import * as overview from "./views/overview.js";
 import * as needsYou from "./views/you-needs.js";
 import * as inbox from "./views/you-inbox.js";
 import * as youView from "./views/you.js";
@@ -26,9 +26,8 @@ import { makeSessions } from "./views/sessions.js";
 import { makeArtifacts } from "./views/artifacts.js";
 import { makeTerminalTab } from "./views/terminal.js";
 import * as targets from "./views/targets.js";
-import { renderCapacity } from "./views/capacity.js";
 import { renderGraph } from "./views/graph.js";
-import { renderLog } from "./views/done.js";
+import { renderLog, renderEvents } from "./views/done.js";
 import * as settings from "./views/settings.js";
 import { makeMenu } from "./components/menu.js";
 hooks.refresh = refresh;
@@ -58,7 +57,7 @@ function renderLoop() {
 
 function renderSelects() {
   const names = S.projects.map(p => p.name);
-  { const el = $("#area"), cur = el.value; el.innerHTML = `<option value="">All projects</option><option value="__mine">Near my earlier work</option>` + names.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(""); if ([...el.options].some(o => o.value === cur)) el.value = cur; } fillSelect("#addProject", names, false);
+  fillSelect("#addProject", names, false);
   const a = $("#actor"), cur = a.value || store("river.actor") || "";
   // Only people act from this page; agents act through the maxpm command.
   const people = S.agents.filter(x => x.kind === "human");
@@ -243,11 +242,11 @@ async function refresh() {
   setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   if (newCode(S.page_build, S.state_shape)) return;
-  renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); projects.renderBlocked(); targets.renderTargets();
+  renderSelects(); plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderReady(); renderLoop(); renderEvents(); settings.renderSettings(); settings.renderPeople(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); targets.renderTargets();
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
-  renderGraph(false); renderLog(false); needsYou.pollNeedsYou().catch(() => {}); inbox.pollInbox().catch(() => {});
+  renderGraph(false); renderLog(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();
   header.classList.toggle("no-actor", !actor());  // a phone shows You are until it is chosen (#4885)
@@ -261,7 +260,7 @@ async function refresh() {
 document.addEventListener("click", async (e) => {
   const t = e.target;
   // A view's own controls first (#4656), then what every view shares: agents, the drawer, item links.
-  for (const v of [needsYou, youView, sessWork, board, inbox, projects, targets, settings]) if (v.onClick(t)) return;
+  for (const v of [needsYou, youView, sessWork, overview, inbox, projects, targets, settings]) if (v.onClick(t)) return;
   if (t.dataset.startManager) {
     const ch = await chooseLaunch(S, { title: "Start the manager", go: "Start manager",
       what: "Manager: plans with you, starts agents, fills their queues, and stops stuck ones (maxpm manage)" });
@@ -308,14 +307,13 @@ document.addEventListener("click", async (e) => {
   if (t.dataset.offer) { const n = +t.dataset.offer, body = $("#offer-" + n).value.trim(); if (!body) return toast("Say what you can take", true);
     return act("offer", { item: n, body }).then(() => toast(`Offer sent to the holder of #${n}`)).catch(() => {}); }
   if (t.dataset.undep) { await act("dep_remove", { id: openItem, on: [+t.dataset.undep] }).catch(() => {}); return openDrawer(openItem, true); }
-  if (t.dataset.tab === "projects") return showPlan("items");  // the Board's "all items" (until the Board goes, #5102)
   if (t.dataset.tab && TABS.includes(t.dataset.tab)) return setTab(t.dataset.tab);  // only a tab of the page (#4652)
 });
 
 $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").value); inbox.actorChanged().catch(() => {}); });
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
-  plan.renderPlanViews(); plan.renderPlanSide(); board.renderNext(); projects.renderProjects(); renderGraph(true); renderLog(true);
+  plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); renderGraph(true); renderLog(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {
@@ -359,13 +357,13 @@ document.addEventListener("drop", async (e) => {
   await act("queue_add", { agent: a.dataset.agent, id }).then(() => toast(`#${id} is in the queue of ${a.dataset.agent}`)).catch(() => {});
 });
 
-const TABS = ["board", "sessions", "plan", "targets", "capacity", "settings", "terminal"];
+const TABS = ["sessions", "plan", "targets", "settings", "terminal"];
 // The page's address (#4653), so each view can be linked, reloaded, and reached with Back:
-//   /  (the Board)   /sessions   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
+//   /  (Sessions: the You view when something waits on you, else the session chosen last, #5102)   /sessions
+//   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
 //   /you (the You view of Sessions, #5102)   /artifacts (the Artifacts view of Sessions, #5102)
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
-//   /artifacts/<artifact id> (opens it beside its session)   /projects   /targets   /capacity
-//   /graph   /done   /settings
+//   /artifacts/<artifact id> (opens it beside its session)   /plan/<view>?project=&goal=   /targets   /settings
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
 // Terminal, then leaves the address). The artifact id is artId(target). The paths
 // are relative to ROOT, the page's own folder (maxpm serve sends a <base>): / here and on the relay's tunnel.
@@ -378,22 +376,22 @@ function readUrl() {
   const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const q = new URLSearchParams(location.search), it = q.get("item");
   const pane = parts[0] === "you" ? "you" : parts[0] === "artifacts" ? "arts" : null;
-  const r = { tab: TABS.includes(parts[0]) ? parts[0] : pane ? "sessions" : "board", session: null, art: null,
+  const r = { tab: TABS.includes(parts[0]) ? parts[0] : "sessions", session: null, art: null, root: !parts.length || parts[0] === "board",
               pane, as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
   if (r.tab === "sessions" && !pane) { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
     if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
   if (pane === "arts") r.art = parts[1] || null;
   // Plan (#5102 step 4): /plan/<view>?project=<p>&goal=<g>; the old paths of its views open them (until step 7).
-  const old = { projects: "items", graph: "graph", done: "done" }[parts[0]];
+  const old = { projects: "items", graph: "graph", done: "done", capacity: "overview" }[parts[0]];
   if (old) r.tab = "plan";
-  if (r.tab === "plan") r.plan = { view: old || (plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "items"),
+  if (r.tab === "plan") r.plan = { view: old || (plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview"),
                                    project: q.get("project") || "", goal: q.get("goal") || "" };
   return r;
 }
 function urlItem() { return readUrl().item; }
 function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
   const pane = tabName === "sessions" ? { you: "you", arts: "artifacts" }[view.pane] : null;
-  let p = tabName === "board" ? "" : pane || tabName;
+  let p = pane || (tabName === "sessions" && !view.session ? "" : tabName);
   if (tabName === "sessions" && view.session && !pane) {
     p += "/" + encodeURIComponent(view.session);
     if (view.art) p += view.art.startsWith("item:") ? "/items/" + view.art.slice(5) : "/artifacts/" + view.art;
@@ -413,6 +411,7 @@ function syncUrl(push) {
   else history.replaceState(history.state, "", url);
 }
 function setTab(name, push = true) {
+  if (name !== "sessions") firstPage = false;
   if (push && name !== tab) history.pushState(null, "", pageUrl(drawer.isOpen() ? openItem : null, name));
   setTabName(name); document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   $("#tabName").textContent = (document.querySelector("nav button.on") || {}).textContent || "";  // a phone's bar (#4903)
@@ -428,7 +427,8 @@ function setTab(name, push = true) {
 }
 // A session the person picks is a new entry; one the tab picks by itself replaces the address.
 const sessionsTab = makeSessions({ isShown: () => tab === "sessions",
-  onPick: (name, byPerson) => { view.session = name; view.art = null; view.pane = null; if (tab === "sessions") syncUrl(byPerson); },
+  onPick: (name, byPerson) => { if (byPerson) firstPage = false;
+    view.session = name; view.art = null; view.pane = null; if (tab === "sessions") syncUrl(byPerson); },
   onPane: (kind, byPerson) => { view.pane = kind; view.session = null; view.art = null; if (kind === "arts") artifactsTab.refresh();
     if (tab === "sessions") syncUrl(byPerson); } });
 // Another tab of the side panel, or none: the same entry, with the artifact's id.
@@ -628,8 +628,8 @@ function renderSetup(st) {
       <button class="btn primary" data-su="task">Add item</button>` : `<span class="muted">Add a project folder first.</span>`));
   const started = (S && S.agents || []).some(a => a.kind !== "human") || closedN > 0 || tasks.some(i => ["in_progress", "held", "done"].includes(i.status));
   out.push(step(started, "Start an agent",
-    started ? "An agent has picked up work. Watch it on the Board; finished items show on Done."
-      : "An agent opens in a new Terminal window, takes your item, and gets to work. You'll see it on the Board.",
+    started ? "An agent has picked up work. Watch it on Sessions; finished items show in Plan > Done."
+      : "An agent opens in a new Terminal window, takes your item, and gets to work. You'll see it on Sessions.",
     tasks.length && ready.length ? agentStart(S.launch_agents, { label: "Start an agent", cls: "btn primary", attrs: 'data-launch="1"',
         title: "Open a new Terminal window in the project folder and start the chosen agent there" })
       : `<span class="muted">Needs an agent and an item first.</span>`));
@@ -724,6 +724,14 @@ function maybeSetup() {
   if (!done) openSetup();
 }
 
+// The first page shows the You view when something waits on the person (#5102): at load, and at a later read of
+// Needs you while the person has chosen nothing yet (the list can come a moment after the page).
+let firstPage = false;
+function firstYou() {
+  if (!firstPage || tab !== "sessions" || sessionsTab.pane()) return;
+  if (youView.youCount()) { firstPage = false; sessionsTab.showYou(false); }
+}
+
 // Show what the address names: at load, and after Back or Forward.
 async function openFromUrl() {
   const r = readUrl();
@@ -739,6 +747,8 @@ async function openFromUrl() {
     if (r.tab !== tab) await setTab(r.tab, false);
     if (r.pane === "you") sessionsTab.showYou(false);
     if (r.pane === "arts") sessionsTab.showArts(false);
+    // The first page (#5102 step 5, design #4657): the You view when something waits on the person.
+    if (r.root && !r.item) { firstPage = true; await needsYou.pollNeedsYou().catch(() => {}); firstYou(); }
     if (r.tab === "sessions" && r.session) {
       sessionsTab.pick(r.session);
       if (r.art && r.art !== view.art) await openArtifact(r.session, r.art);
@@ -920,7 +930,8 @@ setInterval(() => {
 // their own data, and the others draw when the state is there. A first state that fails says so in the loading line.
 {
   const r = readUrl();
-  if (r.tab !== "board") {
+  firstPage = r.root && r.item == null;  // before the session list writes the address of the session it shows
+  {
     try { if (r.plan) setPlan(r.plan.view, r.plan); setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
       if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
   }

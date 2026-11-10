@@ -1,10 +1,10 @@
 // The Done view of Plan (#4656; Plan since #5102 step 4): what was finished in the scope's project, grouped by day,
 // and the progress of each project.
-import { $, esc, shortTitle } from "../lib.js";
+import { $, esc, shortTitle, ago } from "../lib.js";
 import { projectChip } from "../components/chip.js";
 import { bar, pct } from "../components/bar.js";
 import { makeTable } from "../components/table.js";
-import { nav, scope, planShown } from "../page.js";
+import { S, nav, scope, planShown } from "../page.js";
 
 let logSig = "", logTable = null;
 const logTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -43,4 +43,13 @@ export async function renderLog(force) {
       ${bar(done)}</div>`;
   }).join("") || `<div class="muted">No items.</div>`;
 }
+// Recent (the Board's, #5102 step 5): the last changes to the queue, in the scope's project; folded closed.
+export function renderEvents() {
+  if (!S || !$("#events").closest("details").open) return;
+  const ev = S.events.filter(e => !scope.project || !e.item_id || (S.items.find(i => i.id === e.item_id) || {}).project === scope.project);
+  const html = ev.slice(0, 20).map(e => `<div class="ev">${ago(e.at)} · <b>${esc(e.actor)}</b> ${esc(e.change)}${e.item_id ? ` <span class="link" data-open="${e.item_id}">#${e.item_id}</span>` : ""}</div>`).join("")
+    || `<div class="muted">No changes.</div>`;
+  if ($("#events").dataset.sig !== html) { $("#events").innerHTML = html; $("#events").dataset.sig = html; }
+}
+$("#events").closest("details").addEventListener("toggle", renderEvents);
 $("#logSince").addEventListener("change", () => renderLog(true));

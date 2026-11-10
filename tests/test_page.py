@@ -98,14 +98,16 @@ window.addEventListener("error", e => { if (!/ResizeObserver loop/.test(e.messag
 window.addEventListener("unhandledrejection", e => errors.push(String(e.reason && (e.reason.stack || e.reason))));
 const shown = id => !q("#tab-" + id).classList.contains("hidden");
 try {
-  await until(() => window.__appReady && q("#work .wp, #work .muted"), "the Board drew");
+  await until(() => window.__appReady && q("#sessYouRow .srow"), "Sessions, the first page, with its You row");
   q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
   await until(() => q("#inbox .msg") || q("#inboxTitle").textContent.includes("mark"), "the inbox of mark");
+  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="overview"]').click();
+  await until(() => q("#work .wp"), "Plan > Overview: Work");
   q("#work [data-wp]").click();
   await until(() => q("#work .wp-items"), "a click opens a project of Work");
-  check(q("#strip [data-strip]"), "the status strip");
+  check(q("#capacity .stats") && q("#next"), "Capacity and Next up");
   const seen = {};
-  for (const name of ["plan", "targets", "capacity", "settings", "sessions", "board"]) {
+  for (const name of ["plan", "targets", "settings", "sessions"]) {
     q(`nav button[data-tab="${name}"]`).click();
     await until(() => shown(name), "the tab " + name);
     await sleep(300);
@@ -130,9 +132,7 @@ try {
   await until(() => !location.search.includes("project="), "All projects");
   q('nav button[data-tab="settings"]').click();
   await until(() => q("#settingsTable").textContent.includes("lease_ttl"), "the settings");
-  q('nav button[data-tab="board"]').click();
-  q("#strip [data-strip=capacity]").click();
-  await until(() => shown("capacity"), "the strip goes to Capacity");
+  check(q("#people").textContent.includes("mark"), "Settings > People");
   window.riverOpen(ITEM);
   await until(() => q("#drawer").classList.contains("open"), "the drawer");
   q("#dClose").click();
@@ -427,10 +427,6 @@ try {
   out.chat = !shown(q("#sessYou")) && !q("#sessYouRow .srow").classList.contains("on");
   history.back();
   await until(() => location.pathname === "/you" && shown(q("#sessYou")), "Back shows You again");
-  q('nav button[data-tab="board"]').click();
-  await until(() => q("#strip [data-strip=needs]"), "the Board's strip");
-  q("#strip [data-strip=needs]").click();
-  await until(() => location.pathname === "/you" && shown(q("#sessYou")), "need you goes to You");
   q("#sessArtsRow .srow-main").click();
   await until(() => location.pathname === "/artifacts" && shown(q("#sessArts")) && !shown(q("#sessYou")), "the Artifacts row: /artifacts");
   out.arts = q("#sessArtsRow .srow").classList.contains("on") && !q("#sessYouRow .srow").classList.contains("on")
@@ -441,6 +437,18 @@ try {
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/sessions/ag")
         self.assertEqual(got, {"badge": "! 2", "you": True, "chat": True, "arts": True})
+
+    def test_the_first_page_is_sessions_with_you_when_something_waits(self):
+        """#5102 step 5 (design #4657, mark's answer 2A): / is Sessions; it shows the You view when something waits on
+        the person, else the session chosen last. The Board and Capacity tabs are gone."""
+        core.config_set(self.c, "setup_done", "on")
+        core.send(self.c, "question", "Which color?", to="mark", actor="ag")
+        driver = r'''try {
+  await until(() => window.__appReady && !q("#sessYou").classList.contains("hidden"), "the You view on the first page");
+  post({ path: location.pathname, tab: q("#tabName").textContent, tabs: [...document.querySelectorAll("nav button")].map(b => b.dataset.tab) });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        self.assertEqual(self.drive(driver, "/?as=mark"), {"path": "/you", "tab": "Sessions",
+                                                           "tabs": ["sessions", "plan", "targets", "terminal", "settings"]})
 
     def test_the_work_controls_of_the_sessions_list(self):
         """#5102 step 2 (design #4657): Start an agent at the top of the list; Show ended at its foot, with the ended
@@ -524,13 +532,13 @@ try {
 
     def test_the_header_of_a_phone_is_one_bar(self):
         """#4903: at phone width the header is one bar of 48 px: the mark, the tab's name, which opens the sheet of all
-        ten tabs, the magnifier, which opens the search, and the ⋯ menu. The bar hides while the page scrolls down and
+        tabs, the magnifier, which opens the search, and the ⋯ menu. The bar hides while the page scrolls down and
         comes back on a scroll up; the session head is one line, and its ⋯ shows Settings, Open session, Items and
         Artifacts."""
         for i in range(40):
             core.item_add(self.c, "site", f"filler {i}")
         driver = r'''try {
-  await until(() => window.__appReady && q("#work .wp, #work .muted"), "the Board drew");
+  await until(() => window.__appReady && q("#sessYouRow .srow"), "Sessions, the first page");
   const box = (s) => q(s).getBoundingClientRect(), shown = (s) => box(s).height > 0;
   const header = q("header"), out = {};
   out.bar = Math.round(box("header").height);
@@ -549,8 +557,8 @@ try {
   q("#searchBtn").click();
   out.search = !q("#searchDlg").classList.contains("hidden") && document.activeElement === q("#searchText");
   q("#searchClose").click();
-  q('nav button[data-tab="board"]').click();
-  // Room to scroll whatever the Board shows (#5083: it shows Needs you and Next up only, a short page).
+  q('nav button[data-tab="plan"]').click();
+  // Room to scroll whatever Plan shows.
   document.body.style.minHeight = "3000px";
   await sleep(100);
   for (const y of [100, 200, 300, 400]) { scrollTo(0, y); await sleep(60); }
@@ -564,6 +572,9 @@ try {
   out.menuKeeps = !header.classList.contains("hdr-hide");
   q("#hdrMore").click(); scrollTo(0, 0);
   q('nav button[data-tab="sessions"]').click();
+  if (!q("#sessYou").classList.contains("hidden")) q("#youBack").click();  // the first page showed You (#5102)
+  await until(() => q('#sessions .srow[data-session="ag"] .srow-main'), "the row of ag");
+  q('#sessions .srow[data-session="ag"] .srow-main').click();
   await until(() => q("#sessTitle").textContent === "ag" && q("#sessLayout").classList.contains("phone-chat"), "the chat of ag");
   out.head = Math.round(box(".sess-head").height) <= 48 && !shown("#sessOpen") && !shown(".sess-item") && shown("#sessMore");
   q("#sessMore").click();
@@ -574,7 +585,7 @@ try {
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/", size="390,844")
-        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Board", "sheet": 7, "scrim": True,
+        self.assertEqual(got, {"bar": 48, "parts": True, "name": "Sessions", "sheet": 5, "scrim": True,
                                "picked": "Plan false false true", "menu": True, "closed": True, "search": True,
                                "down": True, "up": True, "menuKeeps": True, "head": True, "more": True,
                                "moreCloses": True})

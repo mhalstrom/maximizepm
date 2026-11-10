@@ -1,6 +1,6 @@
-"""The Board tab: Needs you, the inbox, threads, prompts to copy, and its actions (messages, pushes, takeovers, Claim
-next, Register, Close finished, a drop on an agent). (#4656: each view has its routes here; server.py keeps the
-frame.)
+"""The You view of Sessions (the Board's until #5102): Needs you, the inbox, threads, prompts to copy, and the
+actions of the page's work controls (messages, pushes, takeovers, Claim next, Register, Close finished, a drop on a
+session). (#4656: each view has its routes here; server.py keeps the frame.)
 
 GET: (test, handler) pairs that Handler.do_GET tries in order; a handler answers with h._send. OPS: page actions,
 merged into server.OPS."""

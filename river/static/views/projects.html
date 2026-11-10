@@ -1,10 +1,6 @@
 <!-- The Items view of Plan (#4656; Plan since #5102 step 4): the item tables of the projects in the scope. maxpm serve
      puts it into plan.html, at view: projects. -->
 <div id="plan-items" class="plan-view hidden">
-  <div class="panel hidden" id="blockedPanel">
-    <h2 title="Items that wait on something outside the queue (maxpm blocked)">Blocked</h2>
-    <div id="blockedList"></div>
-  </div>
   <div class="panel">
     <h2><span class="spacer"></span><label class="sub"><input type="checkbox" id="showDone"> done</label><label class="sub" title="Items that nobody plans to take now: kept, but never offered"><input type="checkbox" id="showBacklog"> backlog</label></h2>
     <div id="projects"></div>

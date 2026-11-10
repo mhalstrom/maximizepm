@@ -6,7 +6,6 @@ import { agentStart } from "../components/agentStart.js";
 import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { S, nav } from "../page.js";
 import { linkArtifacts } from "../components/artLinks.js";
-import { renderStrip } from "./board.js";
 import { renderYou } from "./you.js";
 import { button } from "../components/button.js";
 
@@ -31,7 +30,7 @@ export function renderNeedsYou() {
   $("#notifyOn").classList.toggle("hidden", !("Notification" in window) || Notification.permission !== "default");
   $("#needsYouPanel").classList.toggle("hidden", !NY.length);
   $("#nothingForYou").classList.toggle("hidden", !!NY.length || !!(S && (S.takeovers || []).length));
-  renderStrip(); renderYou();
+  renderYou();
   const sig = JSON.stringify([NY.map(e => [e.id, e.summary, e.item_status]), [...nyOpen]]);
   if (sig === nySig) return;
   nySig = sig;
@@ -48,7 +47,7 @@ export function renderNeedsYou() {
           : (promptAlert(e) ? button("Open session", { kind: "primary", data: { "session-go": e.from_agent }, title: (e.body || "").startsWith("runs no watch") ? "Open the manager's session in the Sessions tab: tell it to start its watch again" : "Open the session in the Sessions tab: the ! dialog shows the prompt, and you answer it there" }) : "")
             + button("Mark read", { data: { ny: "read", msg: e.message_id } }))
         + (e.item_id ? button(`Open #${e.item_id}`, { data: { open: e.item_id } }) : "");
-    // One line each; a click opens the details and the buttons (design: the Board fits one screen).
+    // One line each; a click opens the details and the buttons (design: the list fits one screen).
     const title = isItem ? `#${e.item_id} ${e.item_title}` : `${e.message_kind} from ${e.from_agent === "maxpm" ? "MaximizePM" : e.from_agent}: ${e.body || ""}`;
     const open = nyOpen.has(e.id);
     const from = !isItem && e.from_agent ? ` data-agent="${esc(e.from_agent)}"` : "";

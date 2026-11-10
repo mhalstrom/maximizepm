@@ -12,14 +12,13 @@
 <link rel="stylesheet" href="vendor/tabulator/tabulator.min.css">
 <link rel="stylesheet" href="app.css">
 <!-- Each view's own styles (#4656), after the shared ones of app.css. -->
-<link rel="stylesheet" href="views/board.css">
 <link rel="stylesheet" href="views/plan.css">
 <link rel="stylesheet" href="views/projects.css">
 <link rel="stylesheet" href="views/sessions.css">
 <link rel="stylesheet" href="views/you.css">
 <link rel="stylesheet" href="views/artifacts.css">
 <link rel="stylesheet" href="views/targets.css">
-<link rel="stylesheet" href="views/capacity.css">
+<link rel="stylesheet" href="views/overview.css">
 <link rel="stylesheet" href="views/terminal.css">
 <link rel="stylesheet" href="views/graph.css">
 <link rel="stylesheet" href="views/done.css">
@@ -32,13 +31,11 @@
 <header>
   <h1 class="brand"><img class="logo logo-light" src="brand/logo-light.svg" alt="MaximizePM" width="129" height="24"><img class="logo logo-dark" src="brand/logo-dark.svg" alt="MaximizePM" width="129" height="24"><img class="mark" src="brand/mark.svg" alt="MaximizePM" width="28" height="28"></h1>
   <!-- A phone (#4903): the name of the tab opens the list of all tabs (the nav below, as a sheet), and the magnifier opens the search. -->
-  <button class="tabbtn" type="button" id="tabBtn" aria-expanded="false" aria-controls="tabNav" title="Show all tabs"><span id="tabName">Board</span> <span class="caret" aria-hidden="true">▾</span></button>
+  <button class="tabbtn" type="button" id="tabBtn" aria-expanded="false" aria-controls="tabNav" title="Show all tabs"><span id="tabName">Sessions</span> <span class="caret" aria-hidden="true">▾</span></button>
   <nav id="tabNav">
-    <button data-tab="board" class="on">Board</button>
-    <button data-tab="sessions" title="Every running agent session: its item, its state, and what it writes now">Sessions</button>
+    <button data-tab="sessions" class="on" title="Every running agent session: its item, its state, and what it writes now; and what waits on you">Sessions</button>
     <button data-tab="plan" title="The plan of the work: projects, goals, items, the graph, releases and what is done">Plan</button>
     <button data-tab="targets">Targets</button>
-    <button data-tab="capacity">Capacity</button>
     <button data-tab="terminal" title="A plain shell on this computer, in the page">Terminal</button>
     <button data-tab="settings">Settings</button>
   </nav>
@@ -62,15 +59,11 @@
 
 <main>
   <div id="bootNote" class="boot-note muted" role="status">Loading the queue…</div>
-  <!-- view: board -->
-
   <!-- view: plan -->
 
   <!-- view: sessions -->
 
   <!-- view: targets -->
-
-  <!-- view: capacity -->
 
   <!-- view: terminal -->
   <!-- view: settings -->

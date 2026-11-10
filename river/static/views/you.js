@@ -51,7 +51,7 @@ export function renderTakeovers() {
   $("#takeovers").innerHTML = head + T.map(t => nyCard(`<b title="${esc(t.title)}">#${t.id} ${esc(shortTitle(t))}</b> ${projectChip(t.project)}<span class="muted t-s">${ago(t.takeover_at)}</span>`, `<div class="ny-c"><b>${esc(t.takeover_by)}</b> ${words[t.takeover_kind] || t.takeover_kind} it: ${esc(t.takeover_note || "")}</div>
       <div class="actions">${button("Open", { data: { open: t.id } })}${button("Undo: give it back to me", { data: { "undo-takeover": t.id } })}${button("OK", { kind: "primary", data: { "takeover-ok": t.id } })}</div>`)).join("");
 }
-// Open the list of taken over items (the Board's strip link, before the Board goes).
+// Open the list of taken over items.
 export function openTakeovers() { takeoversOpen = true; renderTakeovers(); }
 
 // A click on this view's controls; true when it was one (the frame then stops).

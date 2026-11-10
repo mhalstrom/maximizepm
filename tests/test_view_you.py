@@ -1,4 +1,5 @@
-"""The Board tab of the page (#4656: the tests of each view in a file of their own): its message routes."""
+"""The You view of Sessions (the Board's until #5102; #4656: the tests of each view in a file of their own): its
+message routes."""
 import contextlib
 import io
 import json

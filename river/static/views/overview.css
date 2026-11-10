@@ -1,5 +1,23 @@
-/* The Capacity tab: the counts, the advice, the open items by step. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
-.stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-4); }
+/* The Overview view of Plan (#5102 step 5): its two columns, the Work rows and Claim next (the Board's), and the
+   capacity numbers, advice and the step bars over the graph (the Capacity tab's). */
+.ov-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: var(--sp-6); align-items: start; }
+@media (max-width: 1000px) { .ov-grid { grid-template-columns: minmax(0, 1fr); } }
+.ov-idle { margin-top: var(--sp-3); }
+.sw-a { background: var(--accent); } .sw-h { background: var(--human); }
+.graph-steps { margin: 0 0 var(--sp-6); }
+.graph-steps .layers { margin-top: 0; }
+.recent > summary { cursor: pointer; font-weight: 600; }
+.recent .ev { font-size: var(--fs-s); padding: var(--sp-0) 0; }
+.wp { border-top: var(--hair) solid var(--line); }
+.wp:first-child { border-top: none; }
+.wp-h { display: flex; gap: var(--sp-3); align-items: baseline; padding: calc(var(--sp-2) + var(--hair)) var(--sp-1); cursor: pointer; }
+.wp-h:hover { background: var(--bg); }
+.wp-h .tw { color: var(--muted); width: var(--sp-5); }
+.wp-h .counts { color: var(--muted); font-size: var(--fs-s); margin-left: auto; white-space: nowrap; }
+.wp-items { padding: 0 0 var(--sp-2) var(--sp-6); }
+.wp-more { font-size: var(--fs-s); padding: var(--sp-1) var(--sp-2); }
+.panel h2 .claim-agent { font-size: var(--fs-s); font-weight: 400; text-transform: none; letter-spacing: normal; display: flex; align-items: center; gap: var(--sp-1); }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(calc(var(--w-xs) - var(--sp-5)), 1fr)); gap: var(--sp-4); }
 @media (max-width: 700px) { .stats { grid-template-columns: repeat(2, 1fr); } }
 .stat { border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); }
 .stat .n { font-size: var(--fs-2xl); font-weight: 650; font-variant-numeric: tabular-nums; }
