@@ -279,3 +279,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 
 /* A dialog where the person typed text asks before Escape or an outside click closes it (#5027). */
 .dlg-draft { margin-top: 10px; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); font-size: 13px; }
+/* End a session (#5041, components/endSession.js). */
+#endDlg { --dlg-w: 480px; }
+.end-box h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-l); }
+.end-box p { margin: var(--sp-2) 0; font-size: var(--fs-m); }
+.end-box > .actions { justify-content: flex-end; margin-top: var(--sp-5); }
+.end-check { display: flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-m); margin: var(--sp-3) 0; }
+.end-now { margin-top: var(--sp-4); padding: var(--sp-3); border: var(--hair) solid var(--warn); border-radius: var(--r-m); background: var(--warn-bg); font-size: var(--fs-m); }
+.end-now .actions { justify-content: flex-end; margin-top: var(--sp-2); }

@@ -79,7 +79,7 @@ def provider(agent_type, kind=None):
             "voice_cli": voice.get("cli")}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
           "expert": "talks with you",
-          "stopping": "asked to stop", "starting": "not connected yet: it ran no maxpm command",
+          "stopping": "ending: asked to stop", "starting": "not connected yet: it ran no maxpm command",
           "ended": "ended before its first maxpm command"}
 
 
@@ -357,16 +357,19 @@ def adopt_check(conn, a, kind, path, turn, cwd, waiting=None):
 
 def running(conn, terminals=None):
     """The agent_status of every AI agent whose session runs: its process on this computer lives, or it has a tmux
-    pane here, or it is active and recorded no process (a sandbox that cannot run ps)."""
+    pane here, or it is active (or asked to stop and still holds work) and recorded no process (a sandbox that
+    cannot run ps)."""
     out, here = [], core.this_host()
     for r in conn.execute("SELECT name FROM agents WHERE kind='ai' ORDER BY name"):
         a = core.agent_status(conn, r["name"])
-        if core.ended(a) or a["state"] in ("stopped", "gone") or a.get("via") == "http":
+        # A session asked to stop stays while it still holds its task or a target: its row shows 'ending' (#5041).
+        # When it has released them (core.ended), it leaves the list.
+        if core.ended(a) or a["state"] == "gone" or a.get("via") == "http":
             continue
         if a.get("pid") and a.get("host") == here:
             if not core.pid_alive(a["pid"]):
                 continue
-        elif not ((terminals or {}).get(a["name"]) or (not a.get("pid") and a["state"] == "active")):
+        elif not ((terminals or {}).get(a["name"]) or (not a.get("pid") and a["state"] in ("active", "stopped"))):
             continue
         out.append(a)
     return out
@@ -512,6 +515,9 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "talked_at": a.get("talked_at"), "pinned_by": a.get("pinned_by") or [],
                 "holds": [{"id": h["id"], "title": h["title"], "status": h["status"]} for h in a["holds"]],
                 "owns": a.get("owns") or [], "state": key, "state_label": label,
+                # End (#5041): who asked it to stop and why, and End now for a process on this computer.
+                "stop_by": a.get("stop_by"), "stop_reason": a.get("stop_reason"), "pid": a.get("pid"),
+                "can_kill": bool(a.get("can_kill")),
                 "session_url": a.get("session_url"), "terminal": bool((terminals or {}).get(a["name"])),
                 "transcript": kind if path else None, "last": tail["entries"],
                 "at": tail["entries"][-1]["at"] if tail["entries"] else a.get("last_seen")}

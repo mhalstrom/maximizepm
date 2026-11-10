@@ -17,6 +17,7 @@ import { viewOf } from "../components/viewSettings.js";
 import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
+import { endButton, endSession } from "../components/endSession.js";
 import { buttonEl } from "../components/button.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
@@ -29,10 +30,11 @@ function stateChip(s) {
 }
 
 // The header of the chosen session (#4608): Open session (its claude.ai/code page; else its tmux pane in the
-// terminal view; else off, with why), and the item it works on, which opens in the drawer.
+// terminal view; else off, with why), and the item it works on, which opens in the drawer. End (#5041) for a session
+// that runs; on a phone these are under the ⋯ of the head.
 function headerOpen(s) {
   const set = s.provider ? `<button class="btn" type="button" data-settings="${esc(s.name)}" title="The settings this session runs with, and what you can change">Settings</button> ` : "";
-  return set + headerOpenBtn(s);
+  return set + headerOpenBtn(s) + (s.running ? " " + endButton(s) : "");
 }
 function headerOpenBtn(s) {
   if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code">Open session</a>`;
@@ -82,9 +84,9 @@ export function sessionRow(s) {
   const h = s.holds && s.holds[0];
   const item = h ? `<button class="srow-it" type="button" data-open="${h.id}" title="${esc(`Open item #${h.id} ${h.title}`)}"><b>#${h.id}</b><span>${esc(clip(h.title, 48))}</span></button>`
     : `<div class="srow-it none" title="${s.owns.length ? esc("Owns target " + ownNames(s).join(", ")) : "No item"}"><span class="muted">${s.owns.length ? "No item · " + esc(ownNames(s).join(", ")) : "No item"}</span></div>`;
-  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}">
+  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}" data-session="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="Open session ${esc(s.name)}">
-      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}${s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" || s.role === "expert" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}${pinButton(s)}</div>
+      <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}${s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" || s.role === "expert" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</div>
       ${s.role === "manager" ? "" : s.role === "expert"
         ? `<div class="sid expert-topic" title="${esc(`Its topic${s.model ? "; model " + s.model : ""}${s.talked_at ? "; last talk " + ago(s.talked_at) : ""}`)}">${esc(clip(s.topic || "", 120))}${s.model ? ` · ${esc(s.model)}` : ""}</div>`
           + (s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : "")
@@ -284,7 +286,8 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       $("#sessName").textContent = s.title || "";
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });
       dict.showFor(list.some(x => x.name === agent) ? (s || {}).provider || j.provider : null, !!j.terminal);
-      $("#sessOpen").innerHTML = headerOpen({ ...s, session_url: j.session_url, terminal: j.terminal });
+      $("#sessOpen").innerHTML = headerOpen({ ...s, running: list.some(x => x.name === agent), session_url: j.session_url,
+                                              terminal: j.terminal });
       if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
     } catch (e) { /* the next poll tries again */ }
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
@@ -558,11 +561,26 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     } catch (err) { toast(err.message, true); ok = !/tmux pane/.test(err.message); }
     finally { sending = false; renderFiles(); if (!input.disabled) { sendState(); input.focus(); } if (!ok) barFor(false); }
   });
+  // End (#5041): the confirm dialog says what happens; then the row shows 'ending' until the session is gone.
+  async function endIt(name) {
+    const s = list.find(x => x.name === name);
+    if (!s) return toast(`${name} is not running`, true);
+    const c = await endSession(s);
+    if (!c) return;
+    toast(c.how === "kill" ? `${name} ended now` : c.how === "expert"
+      ? `${name} ended; ${(s.holds || []).length ? (c.done ? "its task closed" : "its task went back to the queue") : "its notes stay"}`
+      : `${name} is asked to stop: it ends after it commits and releases its task`);
+    await refresh();
+    if (name === agent) poll();
+  }
   $("#sessOpen").addEventListener("click", (e) => {
+    const end = e.target.closest("[data-end]"); if (end) return endIt(end.dataset.end);
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
   bar.addEventListener("click", async (e) => {
+    const end = e.target.closest("[data-end]");
+    if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
     const pin = e.target.closest("[data-pin]");
     if (pin) {  // the pin does not open the session
       e.preventDefault();
@@ -579,7 +597,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin]") && e.target.closest(".srow-main")
+    const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");
     if (!r) return;
     e.preventDefault(); pick(r.dataset.session);

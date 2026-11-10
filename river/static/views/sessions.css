@@ -273,6 +273,12 @@ button.srow-it { cursor: pointer; }
 .srow-pin:hover { background: var(--line); }
 .srow-pin.on { color: var(--accent); opacity: 1; }
 @media (hover: none) { .srow-pin { opacity: .8; } }
+/* End on a row (#5041): the power sign at the right; it opens the confirm dialog (components/endSession.js). */
+.srow-end.iconbtn { flex: none; display: inline-grid; place-items: center; width: var(--sp-7); height: var(--sp-7); padding: 0; border: 0; border-radius: var(--r-s); background: none; color: var(--muted); opacity: .45; }
+.srow:hover .srow-end, .srow-end:focus-visible { opacity: 1; }
+.srow-end:hover { background: var(--line); color: var(--warn); }
+.srow[data-state="stopping"] .srow-end { color: var(--warn); opacity: 1; }
+@media (hover: none) { .srow-end.iconbtn { opacity: .8; } }
 /* The prompt cache of an expert (#5023): warm with the minutes left, or cold, and the cost of the next message. */
 .cache-b { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
 .cache-b.warm { background: var(--ready-bg); color: var(--ready); }

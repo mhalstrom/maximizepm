@@ -23,6 +23,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Drawer | `drawer.js` (the item drawer) | |
 | Side panel | `sidePanel.js` (Sessions tab), `itemView.js` for an item in it | |
 | Menu | none yet: the phone header menu (phone.css `.hdr-menu`) and the session head ⋯ (`sessions.js` `headMore`) | add `menu.js` before a third menu |
+| End a session | `endSession.js`: `endButton(s, {icon})`, `endSession(s)` | the confirm dialog: stop request, expert end, End now (#5041) |
 | Toast | `lib.js`: `toast(text, err)` | |
 | Form field | `form.js`; `folderForm.js` for a project folder | classes `.form`, `.two`, `label`, `.actions` |
 | Long text on a phone | `clamp.js` | |
