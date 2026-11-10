@@ -18,8 +18,9 @@ import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePa
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
 import { endButton, endSession } from "../components/endSession.js";
-import { buttonEl } from "../components/button.js";
+import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
+import { makeMenu } from "../components/menu.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
@@ -34,20 +35,21 @@ function stateChip(s) {
 // terminal view; else off, with why), and the item it works on, which opens in the drawer. End (#5041) for a session
 // that runs; on a phone these are under the ⋯ of the head.
 function headerOpen(s) {
-  const set = s.provider ? `<button class="btn" type="button" data-settings="${esc(s.name)}" title="The settings this session runs with, and what you can change">Settings</button> ` : "";
+  const set = s.provider ? button("Settings", { data: { settings: s.name }, title: "The settings this session runs with, and what you can change" }) + " " : "";
   return set + headerOpenBtn(s) + (s.running ? " " + endButton(s) : "");
 }
 function headerOpenBtn(s) {
   if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code">Open session</a>`;
-  if (s.terminal) return `<button class="btn" type="button" data-term="${esc(s.name)}" title="Open its tmux pane in the terminal view">Open session</button>`;
+  if (s.terminal) return button("Open session", { data: { term: s.name }, title: "Open its tmux pane in the terminal view" });
   const why = s.agent_type === "codex" ? "A Codex session has no web link, and this one runs in no tmux pane here" : "This session has no Remote Control link and runs in no tmux pane here";
-  return `<button class="btn" type="button" disabled title="${esc(why)}">Open session</button><span class="muted sess-noopen">${esc(why)}</span>`;
+  return button("Open session", { disabled: true, title: why }) + `<span class="muted sess-noopen">${esc(why)}</span>`;
 }
 // The targets a session owns: entries are {name, owner_expires_at} (or a name), shown by name (#4686).
 const ownNames = (s) => (s.owns || []).map(o => (o && o.name) || String(o));
 function headerItem(s) {
-  if (s.holds && s.holds.length) return s.holds.map(h => `<button class="btn sess-itembtn" type="button" data-open="${h.id}" title="Open #${h.id} in the side panel: its notes, what it waits on, and what it unblocks">`
-    + `#${h.id} ${esc(shortTitle(h))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}</button>`).join(" ");
+  if (s.holds && s.holds.length) return s.holds.map(h => button(
+    `#${h.id} ${esc(shortTitle(h))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}`,
+    { cls: "sess-itembtn", data: { open: h.id }, title: `Open #${h.id} in the side panel: its notes, what it waits on, and what it unblocks` })).join(" ");
   if (s.owns && s.owns.length) return `<span class="muted">No item · owns target ${ownNames(s).map(esc).join(", ")}</span>`;
   return `<span class="muted">No item</span>`;
 }
@@ -73,7 +75,8 @@ export function isPinned(s) {
 function pinButton(s) {
   if (s.role === "manager" || s.role === "expert") return "";
   const on = isPinned(s);
-  return `<button class="srow-pin${on ? " on" : ""}" type="button" data-pin="${esc(s.name)}" aria-pressed="${on}" title="${on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions"}" aria-label="${on ? "Unpin" : "Pin"} ${esc(s.name)}">${PIN_SVG}</button>`;
+  return button(PIN_SVG, { kind: "icon", cls: "srow-pin", pressed: on, data: { pin: s.name },
+    title: on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions", label: `${on ? "Unpin" : "Pin"} ${s.name}` });
 }
 
 // One row of the left bar, two lines as in a Messages list (#5086): line 1 is a short name of the work (the session's
@@ -113,7 +116,7 @@ export function sessionRow(s) {
 // one (the page's Start manager: the launch dialog, then the op start_manager).
 const NO_MANAGER = `<div class="srow mgr-none"><div class="srow-main"><div class="srow-h"><span class="mgr-tag">Manager</span>
   <span class="muted">No manager running</span></div></div>
-  <div class="srow-it"><button class="btn primary" type="button" data-start-manager="1" title="Opens the launch dialog; the agent starts with maxpm manage">Start manager</button></div></div>`;
+  <div class="srow-it">${button("Start manager", { kind: "primary", data: { "start-manager": "1" }, title: "Opens the launch dialog; the agent starts with maxpm manage" })}</div></div>`;
 
 // Replace only the rows whose data changed, so a row keeps its hover and focus between reads.
 function renderList(el, list, picked, empty) {
@@ -217,7 +220,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   function kbDebug(lay, vv, kb) {
     if (store(KBDEBUG) !== "1") return;
     let el = $("#kbDebug");
-    if (!el) { el = document.createElement("div"); el.id = "kbDebug"; el.className = "muted"; el.style.cssText = "font: 11px ui-monospace, monospace; white-space: pre-wrap";
+    if (!el) { el = document.createElement("div"); el.id = "kbDebug"; el.className = "muted"; el.style.cssText = "font: var(--fs-xs) ui-monospace, monospace; white-space: pre-wrap";
       $("#sessMain .chat-foot").prepend(el); }
     const r = lay.getBoundingClientRect(), a = document.activeElement;
     el.textContent = `kb ${kb} focus ${a ? a.tagName + (a.id ? "#" + a.id : "") : "-"} inner ${innerWidth}x${innerHeight} client ${document.documentElement.clientHeight}`
@@ -230,15 +233,9 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   // The ⋯ of the session head on a phone (#4903): it shows the item line, Settings, Open session, Items and Artifacts
   // under the one line of the head; a tap on one of them closes it again.
-  function headMore(open) {
-    $("#sessMain").classList.toggle("head-more", open);
-    $("#sessMore").setAttribute("aria-expanded", String(open));
-    fit();
-  }
-  $("#sessMore").addEventListener("click", () => headMore(!$("#sessMain").classList.contains("head-more")));
-  for (const sel of ["#sessOpen", ".sess-item"]) $("#sessMain").querySelector(sel).addEventListener("click", (e) => {
-    if (e.target.closest("button, a")) setTimeout(() => headMore(false));
-  });
+  const more = makeMenu($("#sessMore"), $("#sessMain"), { cls: "head-more", onChange: () => fit(),
+    closeOn: ["#sessOpen", ".sess-item"].map(sel => $("#sessMain").querySelector(sel)) });
+  const headMore = (open) => more.set(open);
 
   async function refresh() {
     if (document.hidden || !isShown()) return;
@@ -347,8 +344,8 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     proposeBox.innerHTML = `<div class="muted">${esc(p.manager)} proposes to continue this talk in an expert</div>
       <div class="sp-topic">${esc(p.topic)}</div>
       <div class="sp-meta muted">Expert ${esc(p.name)} · ${esc(p.model)}${p.model_why ? ` (${esc(p.model_why)})` : ""}${p.effort ? " · effort " + esc(p.effort) : ""}</div>
-      <div class="sp-acts"><button class="btn primary" type="button" data-propose-go="${p.id}">Continue in an expert</button>
-      <button class="btn" type="button" data-propose-no="${p.id}">Dismiss</button></div>`;
+      <div class="sp-acts">${button("Continue in an expert", { kind: "primary", data: { "propose-go": p.id } })}
+      ${button("Dismiss", { data: { "propose-no": p.id } })}</div>`;
   }
   proposeBox.addEventListener("click", async (e) => {
     const go = e.target.closest("[data-propose-go]"), no = e.target.closest("[data-propose-no]");

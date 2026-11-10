@@ -59,6 +59,19 @@
   --h-box-min: 320px; --h-above-box: 210px;  /* the Graph box: the least height, and the page above it */
   --fade: 40px;        /* the faded right edge of a row that scrolls sideways */
   --scrim: rgba(0,0,0,.45); --shadow-dlg: 0 12px 40px rgba(0,0,0,.25);
+  --shadow-pop: 0 4px 16px rgba(0,0,0,.18);  /* a bar that floats over the page (a canvas a session opened) */
+  --w-dlg-s: 520px; --w-dlg-m: 620px;  /* a small and a middle dialog (--dlg-w) */
+  /* The Sessions tab (#5044) */
+  --w-sess-min: 280px; --w-sess-max: 360px;  /* the column of the session list */
+  --w-panel: 480px;    /* the side panel at its first width, and a bar over it */
+  --w-tab: 200px;      /* a tab of the side panel */
+  --w-file: 240px;     /* a file in the message box */
+  --w-label: 170px;    /* the name column of a settings row */
+  --w-field-s: 100px; --w-field-m: 140px;  /* the base width of a field in a bar before it grows */
+  --h-pre: 300px;      /* a tall box of text or a page: a tool's output, a frame, an editor */
+  --h-text-min: 60px;  /* a text field of a few lines */
+  /* The same in both themes: a page in a frame is white, and the marks of Find are the marks of a browser. */
+  --frame-bg: #fff; --find: #ffe066; --find-on: #ff9632; --find-ink: #000; --flash: #d29922;
 }
 :root { color-scheme: light dark; }
 :root[data-theme="light"] { color-scheme: light; }
@@ -173,8 +186,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
   #setup .su-opt { display: flex; flex-wrap: wrap; margin: 4px 0 0; }
   #setup .su-opt > input:not([type=checkbox]), #setup .su-opt > select { flex: 1 1 100%; width: auto; }
 }
-#stopDlg { --dlg-z: 16; --dlg-w: 520px; }
-#launchDlg { --dlg-z: 16; --dlg-w: 620px; }
+#stopDlg { --dlg-z: 16; --dlg-w: var(--w-dlg-s); }
+#launchDlg { --dlg-z: 16; --dlg-w: var(--w-dlg-m); }
 #launchDlg select { max-width: 100%; }
 /* An agent's terminal (components/terminalDialog.js): the box has its size from the window, never from the
    tmux pane; the pane's text scrolls inside the screen, both ways. */

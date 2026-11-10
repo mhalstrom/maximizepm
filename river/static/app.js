@@ -27,6 +27,7 @@ import { renderCapacity } from "./views/capacity.js";
 import { renderGraph } from "./views/graph.js";
 import { renderLog } from "./views/done.js";
 import * as settings from "./views/settings.js";
+import { makeMenu } from "./components/menu.js";
 hooks.refresh = refresh;
 Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady(),
   openSession: async (name) => { await setTab("sessions"); sessionsTab.pick(name); } });
@@ -843,19 +844,15 @@ $("#loopLate").onclick = () => {
 // The header on a phone and a tablet. The ⋯ (#4885) shows the controls that do not fit: on a phone (#4903) as a menu
 // under the bar of 48 px. On a phone the name of the tab opens the sheet of all tabs, and the magnifier opens the
 // search. One of the two is open at a time; a tap outside them (on the scrim), Esc, or a tab closes them.
-function headerOpen(which) {
-  const was = header.classList.contains(which);
-  header.classList.remove("more", "tabs-open");
-  if (which && !was) { header.classList.add(which); header.classList.remove("hdr-hide"); }
-  $("#hdrMore").setAttribute("aria-expanded", String(header.classList.contains("more")));
-  $("#tabBtn").setAttribute("aria-expanded", String(header.classList.contains("tabs-open")));
+const hdrChange = (open) => {
+  if (open) header.classList.remove("hdr-hide");
   $("#hdrScrim").classList.toggle("hidden", !header.classList.contains("more") && !header.classList.contains("tabs-open"));
-}
-$("#hdrMore").onclick = () => headerOpen("more");
-$("#tabBtn").onclick = () => headerOpen("tabs-open");
+};
+const hdrMenu = makeMenu($("#hdrMore"), header, { cls: "more", group: "header", onChange: hdrChange });
+const tabSheet = makeMenu($("#tabBtn"), header, { cls: "tabs-open", group: "header", onChange: hdrChange });
+function headerOpen(which) { hdrMenu.set(which === "more"); tabSheet.set(which === "tabs-open"); }
 $("#hdrScrim").onclick = () => headerOpen(null);
 $("#searchBtn").onclick = () => { headerOpen(null); openSearch(); };
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && (header.classList.contains("more") || header.classList.contains("tabs-open"))) headerOpen(null); });
 // The bar of a phone hides while the person scrolls down and comes back when they scroll up a little (24 px) or come
 // near the top: a transform, so nothing under it moves. Never while the sheet, the menu, or a field of it is open.
 {

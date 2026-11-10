@@ -23,7 +23,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Sheet (phone) | the same dialog: under 760 px `.dlg` is the full width from the top (phone.css) | |
 | Drawer | `drawer.js` (the item drawer) | |
 | Side panel | `sidePanel.js` (Sessions tab), `itemView.js` for an item in it | |
-| Menu | none yet: the phone header menu (phone.css `.hdr-menu`) and the session head ⋯ (`sessions.js` `headMore`) | add `menu.js` before a third menu |
+| Menu (⋯) | `menu.js`: `makeMenu(btn, host, {cls, group, onChange, closeOn})` | a class on the host while it is open, `aria-expanded`, Esc and a choice close it; one menu of a group at a time. The header ⋯ and the tab sheet (app.js, phone.css `.hdr-menu`), the session head ⋯ (sessions.js) |
 | End a session | `endSession.js`: `endButton(s, {icon})`, `endSession(s)` | the confirm dialog: stop request, expert end, End now (#5041) |
 | Toast | `lib.js`: `toast(text, err)` | |
 | Form field | `form.js`; `folderForm.js` for a project folder | classes `.form`, `.two`, `label`, `.actions` |
@@ -37,7 +37,8 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 
 - Colors: `--bg --panel --ink --muted --line --accent --accent-ink`, the states `--ready --prog --wait
   --done --warn --human` and their `-bg`, `--bubble`. Each has a dark value; never write a hex
-  color in a view. `--scrim` (behind a dialog) and `--shadow-dlg` are the same in both.
+  color in a view. `--scrim` (behind a dialog), `--shadow-dlg`, `--shadow-pop` (a bar over the page), `--frame-bg` (a
+  page in a frame), `--find`, `--find-on`, `--find-ink` (the marks of Find) and `--flash` are the same in both.
 - Space: `--sp-0` 2 px, `--sp-1` 4, `--sp-2` 6, `--sp-3` 8, `--sp-4` 10, `--sp-5` 12, `--sp-6` 16,
   `--sp-7` 24.
 - Text: `--fs-xs` 11 px, `--fs-s` 12, `--fs-m` 13, `--fs-base` 14, `--fs-l` 17, `--fs-xl` 18, `--fs-2xl` 24 (a big number). For a
@@ -50,7 +51,10 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 - `--tap`: 44 px, the least size of a control on a phone.
 - Widths and heights of view parts that no space token gives: `--w-input-s` 90 px, `--w-input-m` 180, `--w-form`
   640, `--w-col` 200, `--w-tool` 32, `--w-side` 260, `--w-card` 180, `--w-card-phone` 148, `--h-spark` 56, `--h-bars`
-  70, `--w-bar` 60, `--h-box-min` 320, `--h-above-box` 210, `--fade` 40. A value between two space tokens is a
+  70, `--w-bar` 60, `--h-box-min` 320, `--h-above-box` 210, `--fade` 40; dialogs `--w-dlg-s` 520 and `--w-dlg-m` 620
+  (for `--dlg-w`); the Sessions tab `--w-sess-min` 280 and `--w-sess-max` 360 (the list), `--w-panel` 480 (the side
+  panel), `--w-tab` 200, `--w-file` 240, `--w-label` 170, `--w-field-s` 100 and `--w-field-m` 140 (a field in a bar),
+  `--h-pre` 300 (a tall box of text or a page), `--h-text-min` 60. A value between two space tokens is a
   `calc()` of tokens (14 px: `calc(var(--sp-5) + var(--sp-0))`); add a named token only for a size of a part.
 
 A media query cannot read a token: write its width as a number. The page uses 600, 640, 800 and
