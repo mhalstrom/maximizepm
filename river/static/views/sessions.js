@@ -22,6 +22,7 @@ import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
 import { makeMenu } from "../components/menu.js";
 import { markYou } from "./you.js";
+import { S } from "../page.js";
 import { renderGive } from "./sessions-work.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
@@ -48,7 +49,24 @@ function headerOpenBtn(s) {
 }
 // The targets a session owns: entries are {name, owner_expires_at} (or a name), shown by name (#4686).
 const ownNames = (s) => (s.owns || []).map(o => (o && o.name) || String(o));
+// Links to Plan (#5102 step 7, design #4657): the project and goals of the session's item, and a goal or target it owns.
+function planLinks(s) {
+  const it = s.holds && s.holds[0] && ((S && S.items) || []).find(i => i.id === s.holds[0].id);
+  const link = (view, project, goal, text, title) => `<span class="link" data-plan-go="${view}" data-project="${esc(project)}"${goal ? ` data-goal="${esc(goal)}"` : ""} title="${esc(title)}">${esc(text)}</span>`;
+  const out = [];
+  if (it) {
+    out.push(link("items", it.project, "", it.project, `The items of ${it.project} in Plan`));
+    for (const g of it.goals || []) out.push(link("goals", it.project, g, "goal " + g, `The goal ${g} in Plan`));
+  }
+  for (const g of ((S && S.goals) || []).filter(x => x.owner === s.name && x.status === "open"))
+    out.push(link("goals", g.project, g.name, "owns goal " + g.name, `The goal ${g.name} in Plan: this session owns it`));
+  for (const tg of ownNames(s)) out.push(link("releases", "", "", "owns target " + tg, `The releases in Plan: this session owns the target ${tg}`));
+  return out.length ? ` <span class="sess-plan t-s">${out.join(" · ")}</span>` : "";
+}
 function headerItem(s) {
+  return headerItemOnly(s) + planLinks(s);
+}
+function headerItemOnly(s) {
   if (s.holds && s.holds.length) return s.holds.map(h => button(
     `#${h.id} ${esc(shortTitle(h))}${h.status ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}`,
     { cls: "sess-itembtn", data: { open: h.id }, title: `Open #${h.id} in the side panel: its notes, what it waits on, and what it unblocks` })).join(" ");

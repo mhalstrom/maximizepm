@@ -58,7 +58,7 @@ export function renderTargets() {
   if (box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // do not wipe a reason they type
   const open = new Set([...box.querySelectorAll("details[open]")].map(d => d.dataset.keep));  // a fold stays open over a refresh
   box.innerHTML = T.map(t => nyCard(`<b${t.description ? ` title="${esc(t.description)}"` : ""}>${esc(t.name)}</b>
-        ${ownerChip(t.owner)}${t.owner && t.owner_expires_at ? `<span class="muted t-s">${left(t.owner_expires_at)}</span>` : ""}
+        ${t.owner && (S.sessions || []).includes(t.owner) ? `<span class="link t-s" data-session-go="${esc(t.owner)}" title="Open the session of the owner, ${esc(t.owner)}">${ownerChip(t.owner)}</span>` : ownerChip(t.owner)}${t.owner && t.owner_expires_at ? `<span class="muted t-s">${left(t.owner_expires_at)}</span>` : ""}
         ${projectsHtml(t.project_names)}`, `${releaseLine(t)}
       ${t.pending.map(pendingHtml).join("")}
       ${actionsHtml(t)}

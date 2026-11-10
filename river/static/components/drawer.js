@@ -79,14 +79,14 @@ export function itemDrawerHtml(it, { S, me }) {
   const closed = ["done", "dropped"].includes(it.status);
   const holder = ["in_progress", "held"].includes(it.status) && it.assignee;
   return `
-    <div style="display:flex;align-items:center;gap:8px"><span class="muted">#${it.id} · ${esc(it.project)}</span><span class="spacer" style="flex:1"></span><button class="btn" id="dClose">Close</button></div>
+    <div style="display:flex;align-items:center;gap:8px"><span class="muted">#${it.id} · <span class="link" data-plan-go="items" data-project="${esc(it.project)}" title="The items of ${esc(it.project)} in Plan">${esc(it.project)}</span></span><span class="spacer" style="flex:1"></span><button class="btn" id="dClose">Close</button></div>
     <h3>${esc(it.title)}</h3>
     <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${statusChip(it)}</div>
     ${holder ? `<div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Held by</span> <b>${esc(holder)}</b>
       ${running(S, holder) ? `<button class="btn" data-session-go="${esc(holder)}" title="Open the session of ${esc(holder)} in the Sessions tab">Open session</button>`
         : `<span class="muted" style="font-size:12px">its session does not run now</span>`}</div>` : ""}
     <div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Goals:</span>
-      ${(it.goals || []).map(g => chip("c-goal", `${esc(g)} <span class="link" data-untag="${esc(g)}" title="remove this goal tag">×</span>`)).join("") || '<span class="muted" style="font-size:12px">none</span>'}
+      ${(it.goals || []).map(g => chip("c-goal", `<span class="link" data-plan-go="goals" data-project="${esc(((S.goals || []).find(x => x.name === g) || {}).project || it.project)}" data-goal="${esc(g)}" title="The goal ${esc(g)} in Plan">${esc(g)}</span> <span class="link" data-untag="${esc(g)}" title="remove this goal tag">×</span>`)).join("") || '<span class="muted" style="font-size:12px">none</span>'}
       ${(S.goals || []).some(g => g.status === "open" && !(it.goals || []).includes(g.name)) ? `<select id="dGoal">${(S.goals || []).filter(g => g.status === "open" && !(it.goals || []).includes(g.name)).sort((a, b) => (b.project === it.project) - (a.project === it.project)).map(g => `<option value="${esc(g.name)}">${esc(g.name)}${g.project !== it.project ? " (" + esc(g.project) + ")" : ""}</option>`).join("")}</select><button class="btn" data-do="tag">Add goal</button>` : ""}</div>
     ${(it.refs || []).length ? `<div class="actions" style="margin-top:6px;align-items:center"><span class="muted" style="font-size:12px">Tracker:</span>
       ${it.refs.map(r => /^https?:\/\//.test(r.url || "") ? `<a class="chip c-p" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.ref)} ↗</a>` : chip("c-p", esc(r.ref))).map((h, i) => h + (it.refs[i].synced_at ? '<span class="muted" style="font-size:12px">updated</span>' : ["done", "dropped"].includes(it.status) ? chip("c-human", "tracker not updated") : "")).join("")}</div>` : ""}

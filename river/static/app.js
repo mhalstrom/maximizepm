@@ -289,6 +289,10 @@ document.addEventListener("click", async (e) => {
                         : `Started ${r.agent} in ${r.project}, for #${r.item.id} ${clip(r.item.title, 60)}` + (r.why ? ` (${r.why})` : "")); } catch (e) { /* toast shown */ }
     return; }
   if (t.dataset.untag) { await act("item_edit", { id: openItem, untag: [t.dataset.untag] }).catch(() => {}); return openDrawer(openItem, true); }
+  // A link to Plan from Sessions or the drawer (#5102 step 7): that scope, that view.
+  const pg = t.closest("[data-plan-go]");
+  if (pg) { if (drawer.isOpen()) closeDrawer(); setPlan(null, { project: pg.dataset.project || "", goal: pg.dataset.goal || "" });
+    store("river.scope", JSON.stringify(scope)); return showPlan(pg.dataset.planGo); }
   // Plan (#5102 step 4): a view button, a project or a goal of the left bar (the scope), + project.
   const pv = t.closest("[data-plan-view]"); if (pv) return showPlan(pv.dataset.planView);
   const sg = t.closest("[data-scope-goal]"); if (sg) return setScope(sg.dataset.scopeProject, scope.goal === sg.dataset.scopeGoal ? "" : sg.dataset.scopeGoal);
@@ -378,15 +382,13 @@ function readUrl() {
   const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const q = new URLSearchParams(location.search), it = q.get("item");
   const pane = parts[0] === "you" ? "you" : parts[0] === "artifacts" ? "arts" : null;
-  const r = { tab: TABS.includes(parts[0]) ? parts[0] : "sessions", session: null, art: null, root: !parts.length || parts[0] === "board",
+  const r = { tab: TABS.includes(parts[0]) ? parts[0] : "sessions", session: null, art: null, root: !parts.length,
               pane, as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
   if (r.tab === "sessions" && !pane) { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
     if (parts[2] === "items" && /^\d+$/.test(parts[3] || "")) r.art = "item:" + parts[3]; }
   if (pane === "arts") r.art = parts[1] || null;
-  // Plan (#5102 step 4): /plan/<view>?project=<p>&goal=<g>; the old paths of its views open them (until step 7).
-  const old = { projects: "items", graph: "graph", done: "done", capacity: "overview", targets: "releases" }[parts[0]];
-  if (old) r.tab = "plan";
-  if (r.tab === "plan") r.plan = { view: old || (plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview"),
+  // Plan (#5102): /plan/<view>?project=<p>&goal=<g>. The old paths (/board, /projects, ...) answer "not found".
+  if (r.tab === "plan") r.plan = { view: plan.PLAN_VIEWS.some(([k]) => k === parts[1]) ? parts[1] : "overview",
                                    project: q.get("project") || "", goal: q.get("goal") || "" };
   return r;
 }

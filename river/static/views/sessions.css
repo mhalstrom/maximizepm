@@ -311,3 +311,4 @@ button.srow-it { cursor: pointer; }
 .sp-add { display: flex; gap: var(--sp-2); margin: var(--sp-3) 0; }
 .sp-add input { flex: 1; min-width: 0; }
 .srow.drop { outline: var(--hair-2) dashed var(--accent); outline-offset: calc(-1 * var(--hair-2)); }
+.sess-plan { color: var(--muted); }  /* links to Plan (#5102 step 7) */

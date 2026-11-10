@@ -135,6 +135,12 @@ try {
   q('nav button[data-tab="settings"]').click();
   await until(() => q("#settingsTable").textContent.includes("lease_ttl"), "the settings");
   check(q("#people").textContent.includes("mark"), "Settings > People");
+  // The links both ways (#5102 step 7): the drawer's project opens Plan > Items with that scope.
+  window.riverOpen(ITEM);
+  await until(() => q('#drawer [data-plan-go="items"]'), "the drawer's link to its project in Plan");
+  q('#drawer [data-plan-go="items"]').click();
+  await until(() => location.pathname === "/plan/items" && location.search.includes("project=site") && !q("#drawer").classList.contains("open"), "Plan > Items of site");
+  check([...document.querySelectorAll("#projects .tabulator-col-title")].some(c => c.textContent === "Session"), "the Session column");
   window.riverOpen(ITEM);
   await until(() => q("#drawer").classList.contains("open"), "the drawer");
   q("#dClose").click();
@@ -677,7 +683,7 @@ class PageAddresses(unittest.TestCase):
         import re
         from urllib.parse import urljoin
         for path, base in [("/", "./"), ("/sessions", "./"), ("/sessions/", "../"), ("/sessions/ag", "../"),
-                           ("/sessions/ag/artifacts/k3x9", "../../../"), ("/graph", "./"), ("/artifacts/k3x9", "../"), ("/plan/graph", "../"),
+                           ("/sessions/ag/artifacts/k3x9", "../../../"), ("/artifacts/k3x9", "../"), ("/plan/graph", "../"),
                            ("/you", "./")]:
             page = server.page_html(path)
             self.assertIsNotNone(page, path)
@@ -688,6 +694,15 @@ class PageAddresses(unittest.TestCase):
             self.assertLess(page.index(b"<base"), page.index(b"app.css"), "the base comes before the first address")
         for path in ("/api/state", "/app.js", "/components/chat.js", "/items/3", "/sessions//x", "/sessions/../api"):
             self.assertIsNone(server.page_html(path), path)
+        # The tabs before Sessions and Plan (#5102 step 7): nothing forwards; each answers "not found", with a link to /.
+        for path in ("/board", "/projects", "/targets", "/capacity", "/graph", "/done", "/graph/x"):
+            self.assertIsNone(server.page_html(path), path)
+            h, out = server.Handler.__new__(server.Handler), {}
+            h.path, h.client_address, h.headers = path, ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}
+            h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+            h.do_GET()
+            self.assertEqual(out["code"], 404, path)
+            self.assertIn(b"<a href='/'>Open MaximizePM</a>", out["body"], path)
 
     def test_links_of_notices_use_the_paths(self):
         from river import notify
