@@ -19,7 +19,7 @@ from river.core import RiverError
 
 class LaunchAgent(unittest.TestCase):
     def setUp(self):
-        self.platform, core.PLATFORM = core.PLATFORM, "darwin"  # the Terminal tests; Windows has its own
+        self.platform, core.PLATFORM = core.PLATFORM, "darwin"  # a tmux pane (the runner gets its line); Windows has its own
         self.dir = tempfile.TemporaryDirectory()
         os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
         self.c = core.connect()
@@ -102,11 +102,11 @@ class LaunchAgent(unittest.TestCase):
         t = server.dispatch_item(self.c, x, runner=sent.append)
         name = t["session_name"]
         self.assertEqual((t["item"]["id"], core._item(self.c, x)["reserved_for"]), (x, name))
-        # The session and its tab get the item's name (#558): claude --name, the Remote Control name, the title.
+        # The session and its pane get the item's name (#558): claude --name, the Remote Control name, the title.
         self.assertEqual(t["session_title"], f"#{x} second")
         self.assertIn(f"MAXPM_AGENT={name} MAXPM_FOCUS=item:{x} claude --name '#{x} second' go --remote-control "
                       f"'#{x} second'", sent[0])
-        self.assertIn(f"printf '\\\\033]0;%s\\\\007' '#{x} second'; cd ", sent[0])
+        self.assertTrue(sent[0].startswith(f"cd {shlex.quote(t['path'])} && "))
         b = core.go(self.c, self.dir.name, name, focus=f"item:{x}")  # its first go takes that item, not the top one
         self.assertEqual(b["item"]["id"], x)
         with self.assertRaises(RiverError):
@@ -793,10 +793,9 @@ class LaunchAgent(unittest.TestCase):
         core.project_add(self.c, "shop", path=self.dir.name)
         x = core.item_add(self.c, "shop", "work", models={"min_model": "opus"})["id"]
         sent = []
-        t = server.launch_agent(self.c, runner=sent.append, model="opus", effort="high", launch_in="window")
+        t = server.launch_agent(self.c, runner=sent.append, model="opus", effort="high")
         self.assertEqual(t["command"], f"claude --name '#{x} work' --model opus --effort high go --remote-control '#{x} work'")
         self.assertIn(f"MAXPM_MODEL=opus claude --name '#{x} work' --model opus --effort high go", sent[-1])
-        self.assertNotIn("keystroke", sent[-1])  # launch_in window, although the setting says tab
         x = core.item_add(self.c, "shop", "more work", models={"min_model": "opus"})["id"]  # Start reserved the first
         t = server.launch_agent(self.c, runner=sent.append)
         # No choice: the item's own model wins, here its min limit (#4961), so the session declares it.
@@ -866,22 +865,24 @@ class LaunchAgent(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.run(["-q", "--as", "mark", *args]), 0)
             return out.getvalue()
-        out = river("launch", "--dry-run", "--model", "opus", "--effort", "high", "--window")
+        out = river("launch", "--dry-run", "--model", "opus", "--effort", "high")
         self.assertRegex(out, rf"would start Claude Code in shop \(\S+\) for #{x} work")
         self.assertIn(f"MAXPM_MODEL=opus claude --name '#{x} work' --model opus --effort high go --remote-control "
-                      f"'#{x} work'   (in a new window)", out)
+                      f"'#{x} work'   (in a new tmux pane)", out)
         self.assertEqual(sent, [])
         with self.assertRaisesRegex(RiverError, "needs at least opus"):
             cli.dispatch(self.c, cli.build_parser().parse_args(["launch", "--model", "sonnet"]), "mark")
         out = river("launch", "--item", str(y), "--model", "sonnet")
         self.assertRegex(out, rf"started Claude Code as shop-\w+ in shop for #{y} more")
         self.assertIn(f"MAXPM_MODEL=sonnet claude --name '#{y} more' --model sonnet go", sent[-1])
-        out = river("launch", "--project", "shop", "--tab")
+        out = river("launch", "--project", "shop")
         self.assertIn(f"for #{x} work", out)
-        self.assertIn('keystroke "t"', sent[-1])
+        self.assertRegex(sent[-1], r"^cd \S+ && ")  # the line that goes into a new tmux pane
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):  # every agent starts in tmux (#5105)
+            cli.build_parser().parse_args(["launch", "--tab"])
 
     def test_river_launch_in_a_sandbox_asks_river_serve(self):
-        # A sandbox blocks Terminal and tmux for the command. maxpm serve runs outside it and opens the session.
+        # A sandbox blocks the tmux socket for the command. maxpm serve runs outside it and opens the session.
         import base64
         import contextlib
         import io
@@ -927,11 +928,10 @@ class LaunchAgent(unittest.TestCase):
         net = mock.patch.object(urllib.request.OpenerDirector, "open", fake_open)
         net.start()
         self.addCleanup(net.stop)
-        out = river("launch", "--item", str(y), "--model", "sonnet", "--window")
+        out = river("launch", "--item", str(y), "--model", "sonnet")
         self.assertRegex(out, rf"started Claude Code as shop-\w+ in shop for #{y} more")
         self.assertIn("maxpm serve opened it: this session runs in a sandbox", out)
         self.assertIn(f"MAXPM_MODEL=sonnet claude --name '#{y} more' --model sonnet go", sent[-1])
-        self.assertNotIn("keystroke", sent[-1])  # --window went to the server
         self.assertEqual(asked, [("127.0.0.1:8765", None),
                                  ("localhost:50401", "Basic " + base64.b64encode(b"us@er:pw").decode())])
         self.assertIn("boss: pushed to shop-", "\n".join(f"{e['actor']}: {e['change']}" for e in core.item_show(self.c, y)["events"]))
@@ -939,7 +939,7 @@ class LaunchAgent(unittest.TestCase):
         z = core.item_add(self.c, "shop", "third")["id"]
         river("launch", "--item", str(z), "--prompt", "Read 'notes.md';\nthen fix it")
         self.assertIn(f"""claude --name '#{z} third' 'go\n\nRead '"'"'notes.md'"'"';\nthen fix it' --remote-control""",
-                      sent[-1].replace('\\"', '"'))  # the AppleScript string, unescaped
+                      sent[-1])
         del asked[:]
         with self.assertRaisesRegex(RiverError, "--prompt is empty"):
             cli.dispatch(self.c, cli.build_parser().parse_args(["launch", "--prompt", " "]), "boss")
@@ -1041,10 +1041,12 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual(sent[0], {"args": f"cmd /k title #{x} work & {t['command']}", "cwd": t["path"],
                                    "env": {"MAXPM_DB": str(core.db_path()), "MAXPM_AGENT": t["session_name"],
                                            "MAXPM_FOCUS": f"item:{x}"}})
-        core.PLATFORM = "linux"
+        # Every other system starts agents in tmux (#5105): with no tmux, a start refuses and says how to install it.
         core.item_add(self.c, "shop", "more work")
-        with self.assertRaisesRegex(RiverError, "macOS and Windows"):
-            server.launch_agent(self.c)
+        for system, how in (("linux", "sudo apt install tmux"), ("darwin", "brew install tmux")):
+            core.PLATFORM = system
+            with self.assertRaisesRegex(RiverError, f"every agent starts in tmux, and tmux is not installed: {how}"):
+                server.launch_agent(self.c)
 
     def test_opens_terminal_in_the_folder_of_the_top_ready_item(self):
         folder = os.path.join(self.dir.name, 'my "shop" app')
@@ -1058,18 +1060,12 @@ class LaunchAgent(unittest.TestCase):
         sent = []
         t = server.launch_agent(self.c, runner=sent.append)
         self.assertEqual((t["project"], t["item"]["id"], t["command"]), ("shop", x, f"claude --name '#{x} agent step' go --remote-control '#{x} agent step'"))
-        self.assertIn('tell application "Terminal"', sent[0])
-        self.assertIn('keystroke "t" using command down', sent[0])  # a new tab by default
-        core.config_set(self.c, "launch_in", "window")
-        server.launch_agent(self.c, runner=sent.append)
-        self.assertNotIn("keystroke", sent[-1])
-        core.config_set(self.c, "launch_in", "tab")
         self.assertIn(t["command"], sent[0])
-        self.assertIn('my \\"shop\\" app', sent[0])  # quotes escaped inside the AppleScript string
+        self.assertTrue(sent[0].startswith(f"cd {shlex.quote(t['path'])} && "))  # the folder quoted for the pane's shell
         core.config_set(self.c, "launch_agents", 'Claude Code=claude go; Codex=codex "run maxpm go and follow it"')
         t = server.launch_agent(self.c, runner=sent.append, agent="Codex")
         self.assertEqual((t["agent"], t["command"]), ("Codex", 'codex "run maxpm go and follow it"'))
-        self.assertIn('codex \\"run maxpm go and follow it\\"', sent[-1])
+        self.assertIn('codex "run maxpm go and follow it"', sent[-1])
         self.assertEqual(server.launch_agent(self.c, runner=sent.append)["agent"], "Claude Code")  # first is default
         self.assertEqual(core.state(self.c)["launch_agents"], ["Claude Code", "Codex"])
         with self.assertRaises(RiverError):
@@ -1081,22 +1077,6 @@ class LaunchAgent(unittest.TestCase):
             server.launch_agent(self.c, "nofolder", runner=sent.append)  # no folder to start in
         with self.assertRaises(RiverError):
             server.launch_agent(self.c, "nosuch", runner=sent.append)
-
-    def test_new_tab_waits_for_terminal_in_front_and_for_the_new_tab(self):
-        core.project_add(self.c, "shop", path=self.dir.name)
-        core.item_add(self.c, "shop", "agent step")
-        sent = []
-        server.launch_agent(self.c, runner=sent.append)
-        s = sent[0]
-        # Command-T goes to the app in front: the script waits for Terminal first, not a fixed delay.
-        self.assertLess(s.index('frontmost of process "Terminal"'), s.index('keystroke "t"'))
-        self.assertNotIn("delay 0.5", s)
-        # The command runs only after the tab count grew; otherwise it falls back to a new window.
-        self.assertLess(s.index("set {windowsBefore, tabsBefore}"), s.index('keystroke "t"'))
-        # Terminal lists each tab of a tabbed window as its own window, so a new window counts as the new tab.
-        self.assertLess(s.index("(count of windows) > windowsBefore or"), s.index("in selected tab of front window"))
-        self.assertIn('error "Terminal opened no new tab"', s)
-        self.assertEqual(s.count("do script"), 3)  # the tab, the fallback window, and the no-window case
 
 
 class FakeTmux:
@@ -1183,10 +1163,10 @@ class FakeTmux:
 
 
 class LaunchInTmux(unittest.TestCase):
-    """launch_in tmux: each agent is a pane of the tmux session maxpm, and maxpm view shows them side by side."""
+    """Every agent is a pane of the tmux session maxpm (#5105), and maxpm view shows them side by side."""
 
     def setUp(self):
-        self.platform, core.PLATFORM = core.PLATFORM, "linux"  # no Terminal app: tmux needs none
+        self.platform, core.PLATFORM = core.PLATFORM, "linux"  # tmux needs no Terminal app
         self.dir = tempfile.TemporaryDirectory()
         os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
         self.c = core.connect()
@@ -1207,14 +1187,13 @@ class LaunchInTmux(unittest.TestCase):
     def test_an_expert_starts_in_a_pane_and_is_never_ended_as_an_idle_worker(self):
         """#4955: an expert idle at its prompt for hours, with nothing in hand and a note to read, stays; serve gives
         it no work; expert_idle_end ends it; --resume starts its last chat again with its topic from the history."""
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         x = core.item_add(self.c, "shop", "ready work")["id"]
         with self.assertRaisesRegex(RiverError, "needs a task"):
             server.start_expert(self.c, "fab")
         t = server.start_expert(self.c, "fab", "the competitor research", "shop", model="fable")
         pane = self.tmux.panes[0]
-        self.assertEqual((pane["agent"], t["session_name"], t["launch_in"]), ("fab", "fab", "tmux"))
+        self.assertEqual((pane["agent"], t["session_name"], t["tmux_pane"]), ("fab", "fab", pane["id"]))
         self.assertIn("MAXPM_AGENT=fab ", pane["keys"][0])
         self.assertIn("--model fable", pane["keys"][0])
         self.assertIn("an expert session of MaximizePM on: the competitor research", pane["keys"][0])
@@ -1263,7 +1242,6 @@ class LaunchInTmux(unittest.TestCase):
         """#5023: expert fresh ends the expert (its task goes back) and starts <name>-2 on the same model and task,
         whose task context says to read the old one's notes, and the canvas of the notes is in its handover."""
         from river import cli
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         t = server.start_expert(self.c, "fab", "the pricing talk", "shop", model="fable")
         core.canvas_put(self.c, core.expert_notes_name("fab"), "# Notes\nDecided: three tiers.", "fab", kind="md",
@@ -1288,7 +1266,6 @@ class LaunchInTmux(unittest.TestCase):
         """#4961: expert start with no --model takes the task's model, or the model of the item that its topic names;
         with neither it asks, never the bare default; launch and expert start say the model and why."""
         from river import cli
-        core.config_set(self.c, "launch_in", "tmux")
         core.config_set(self.c, "default_model", "opus")
         core.config_set(self.c, "default_max_model", "opus")
         design = core.item_add(self.c, "shop", "the PM design", models={"max_model": "fable"})["id"]
@@ -1312,7 +1289,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual((t2["model"], t2["model_why"]), ("fable", f"#{y}: its model is fable"))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            cli.render_expert({"expert_started": {**t2, "launch_in": "tmux"}})
+            cli.render_expert({"expert_started": {**t2}})
         self.assertTrue(out.getvalue().startswith(f"started the expert pm2 on fable (#{y}: its model is fable)"))
         # launch --item of a plain item found during the Fable work: the default model (#4979: only an expert inherits).
         z = core.item_add(self.c, "shop", "fix what the design found", found_during=design)["id"]
@@ -1332,7 +1309,6 @@ class LaunchInTmux(unittest.TestCase):
         may not start an expert on a new topic without it; a wrong canvas or session refuses before a task is added;
         the expert's go brief prints it."""
         from river import cli
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mgr")
         self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
         self.c.commit()
@@ -1363,7 +1339,7 @@ class LaunchInTmux(unittest.TestCase):
                             for e in core.item_show(self.c, t["task"])["events"]))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            cli.render_expert({"expert_started": {**t, "launch_in": "tmux"}})
+            cli.render_expert({"expert_started": {**t}})
         self.assertIn(f"the talk so far is in #{t['task']}'s context; the expert reads it first", out.getvalue())
         self.assertIn("your task with the talk so far", self.tmux.panes[-1]["keys"][0])
         # The expert's go brief prints the task's context.
@@ -1389,7 +1365,6 @@ class LaunchInTmux(unittest.TestCase):
         """#4990: the manager only proposes; the card in its chat starts the expert with the talk so far (Continue in
         an expert) or keeps the talk with the manager (Dismiss), and a dismissed topic is not proposed again."""
         from river.routes import sessions as routes
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mgr")
         self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
         self.c.commit()
@@ -1436,14 +1411,11 @@ class LaunchInTmux(unittest.TestCase):
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]
         y = core.item_add(self.c, "shop", "second")["id"]
-        with self.assertRaisesRegex(RiverError, "works on macOS and Windows only"):
-            server.launch_agent(self.c)  # the setting says tab, and Linux has no Terminal app
-        with self.assertRaisesRegex(RiverError, "launch_in is auto, tab, window, or tmux"):
-            core.config_set(self.c, "launch_in", "screen")
-        core.config_set(self.c, "launch_in", "tmux")
+        with self.assertRaisesRegex(RiverError, "unknown setting 'launch_in'"):  # no Terminal tab or window any more
+            core.config_set(self.c, "launch_in", "tab")
         t = server.launch_agent(self.c)
         first = self.tmux.panes[0]
-        self.assertEqual((t["launch_in"], t["tmux_pane"]), ("tmux", "%0"))
+        self.assertEqual(t["tmux_pane"], "%0")
         # The first agent makes the session; its window and its pane carry the session's name and the agent's.
         self.assertEqual(self.tmux.calls[1][:6], ["new-session", "-d", "-s", "maxpm", "-n", f"#{x} first: the work"])
         self.assertEqual((first["name"], first["agent"]), (f"#{x} first: the work", t["session_name"]))
@@ -1452,7 +1424,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertIn(f"MAXPM_AGENT={t['session_name']} MAXPM_FOCUS=item:{x} {t['command']}", first["keys"][0])
         self.assertTrue(first["keys"][0].startswith("cd "))
         # The next agent is a window of the same session, opened in the background (-d): no window takes the keyboard.
-        t = server.dispatch_item(self.c, y, launch_in="tmux")
+        t = server.dispatch_item(self.c, y)
         self.assertEqual([c for c in self.tmux.calls if c[0] == "new-window"][0][:6],
                          ["new-window", "-d", "-t", "=maxpm:", "-n", f"#{y} second"])
         self.assertEqual(self.tmux.panes[1]["window"], "@1")
@@ -1461,13 +1433,8 @@ class LaunchInTmux(unittest.TestCase):
         z = core.item_add(self.c, "shop", "sign the form", doer="human")["id"]
         t = server.open_agent_on(self.c, z, person="mark")
         self.assertEqual((self.tmux.panes[2]["name"], self.tmux.panes[2]["agent"]), (f"help #{z} sign the form", ""))
-        # One launch can still pick a Terminal tab, which this system does not have.
-        core.item_add(self.c, "shop", "third")
-        with self.assertRaisesRegex(RiverError, "works on macOS and Windows only"):
-            server.launch_agent(self.c, launch_in="tab")
 
     def test_maxpm_view_puts_the_agents_side_by_side_and_back(self):
-        core.config_set(self.c, "launch_in", "tmux")
         with self.assertRaisesRegex(RiverError, "no agent runs in tmux"):
             server.tmux_view("tile")
         for n in range(3):
@@ -1519,8 +1486,8 @@ class LaunchInTmux(unittest.TestCase):
         outside = mock.patch.object(cli, "in_sandbox", lambda: False)  # also when an agent runs the tests in one
         outside.start()
         self.addCleanup(outside.stop)
-        self.assertIn("(in a new tmux pane)", river("launch", "--dry-run", "--tmux"))
-        out = river("launch", "--tmux")
+        self.assertIn("(in a new tmux pane)", river("launch", "--dry-run"))
+        out = river("launch")
         self.assertRegex(out, rf"started Claude Code as shop-\w+ in shop for #{x} work, model .*\(.*\); tmux pane %0: maxpm view shows it")
         # A command with no terminal (an agent, a test) prints the panes and attaches nothing.
         out = river("view")
@@ -1547,7 +1514,6 @@ class LaunchInTmux(unittest.TestCase):
         import contextlib
         import io
         from river import cli
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         ids = [core.item_add(self.c, "shop", f"work {n}")["id"] for n in range(7)]
         works, left, asks, stopped, gone, again, other = [server.launch_agent(self.c, "shop")["session_name"] for _ in ids]
@@ -1623,7 +1589,6 @@ class LaunchInTmux(unittest.TestCase):
         not in its queue, so it closed their panes while they ran. A queue tags the panes it opens with its database
         and tidies only those; a pane with no tag belongs to the main queue only."""
         from unittest import mock
-        core.config_set(self.c, "launch_in", "tmux")
         clock = [core.now()]
         fake_now = mock.patch.object(core, "now", lambda: clock[0])
         fake_now.start()
@@ -1661,7 +1626,6 @@ class LaunchInTmux(unittest.TestCase):
         import threading
         from unittest import mock
         from river import notify
-        core.config_set(self.c, "launch_in", "tmux")
         clock = [core.now()]
         fake_now = mock.patch.object(core, "now", lambda: clock[0])
         fake_now.start()
@@ -1723,7 +1687,6 @@ class LaunchInTmux(unittest.TestCase):
 
     def test_a_busy_agent_keeps_its_lease_and_its_item(self):
         from unittest import mock
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         core.register(self.c, "other")
         x = core.item_add(self.c, "shop", "run every check")["id"]
@@ -1805,8 +1768,8 @@ class LaunchInTmux(unittest.TestCase):
         cmd, server.TMUX_CMD = server.TMUX_CMD, ["tmux-that-is-not-installed"]
         self.addCleanup(setattr, server, "TMUX_CMD", cmd)
         core.item_add(self.c, "shop", "work")
-        with self.assertRaisesRegex(RiverError, "tmux is not installed: brew install tmux .* maxpm config set launch_in tab"):
-            server.launch_agent(self.c, launch_in="tmux")
+        with self.assertRaisesRegex(RiverError, "every agent starts in tmux, and tmux is not installed: sudo apt install tmux"):
+            server.launch_agent(self.c)
         self.assertEqual(core.next_item(self.c, "shop")[0]["reserved_for"], None)  # nothing was reserved for a session that never opened
         self.assertIsNone(server._tmux_pane_of("/dev/ttys001"))
 
@@ -1820,7 +1783,6 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(env["PATH"], os.environ["PATH"])
 
     def test_the_page_shows_an_agents_terminal_and_types_into_it(self):
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         x = core.item_add(self.c, "shop", "work")["id"]
         t = server.launch_agent(self.c)
@@ -1879,7 +1841,6 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual(server.agent_terminals(self.c), {})
 
     def test_an_agents_terminal_answers_this_computer_only(self):
-        core.config_set(self.c, "launch_in", "tmux")
         core.item_add(self.c, "shop", "work")
         name = server.launch_agent(self.c)["session_name"]
 
@@ -1928,7 +1889,6 @@ class LaunchInTmux(unittest.TestCase):
         import threading
         from unittest import mock
         from river import notify
-        core.config_set(self.c, "launch_in", "tmux")
         core.config_set(self.c, "notify_channels", "log")
         core.register(self.c, "mark", human=True)
         core.item_add(self.c, "shop", "work")
@@ -2000,7 +1960,6 @@ class LaunchInTmux(unittest.TestCase):
 
     def test_a_prompt_alert_says_what_to_answer_and_who_reads_lines_with_no_question(self):
         from unittest import mock
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         core.item_add(self.c, "shop", "work")
         name = server.launch_agent(self.c)["session_name"]
@@ -2046,7 +2005,6 @@ class LaunchInTmux(unittest.TestCase):
     def test_a_real_claude_code_prompt_alerts_with_its_command_item_and_session(self):
         from unittest import mock
         from river import notify
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         core.config_set(self.c, "notify_channels", "log")
         core.item_add(self.c, "shop", "Fix the build")
@@ -2091,7 +2049,6 @@ class LaunchInTmux(unittest.TestCase):
         # #4943: the manager's reply ended in "Do you want to continue ...?", the person's messages were queued while a
         # Bash call ran, and the Sessions tab said it waited at a permission prompt, with the queued message (cut at
         # its line break) and the tool call lines as the options to pick.
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         core.item_add(self.c, "shop", "work")
         name = server.launch_agent(self.c)["session_name"]
@@ -2130,35 +2087,33 @@ class LaunchInTmux(unittest.TestCase):
                          ("Do you want to proceed?", "cd ~/Projects/shop && grep -n wait cli.py", 3))
         self.assertEqual(server.watch_prompts(self.c)["waiting"], {name: "Do you want to proceed?"})
 
-    def test_tmux_is_the_default_when_tmux_is_installed(self):
+    def test_every_start_opens_a_tmux_pane_and_the_page_says_when_tmux_is_missing(self):
         from unittest import mock
         core.register(self.c, "mark", human=True)
         core.item_add(self.c, "shop", "first")
-        core.item_add(self.c, "shop", "second")
-        self.assertEqual(core.setting(self.c, "launch_in"), "auto")
-        # No tmux on this computer: a Terminal tab, as before (and Linux has no Terminal app).
-        self.assertEqual((core.state(self.c)["launch_in"], server.setup_status(self.c)["launch_in"]), ("tab", "tab"))
-        with self.assertRaisesRegex(RiverError, "works on macOS and Windows only"):
-            server.launch_agent(self.c)
+        # No tmux on this computer: the page says so, with the command that installs it (#5105).
+        self.assertEqual((core.state(self.c)["tmux"], server.setup_status(self.c)["tmux"]), (False, False))
+        self.assertEqual(core.state(self.c)["tmux_install"], "sudo apt install tmux (Fedora: sudo dnf install tmux)")
+        core.PLATFORM = "win32"  # Windows has no tmux: a console window opens there
+        self.assertEqual(core.state(self.c)["tmux"], True)
+        core.PLATFORM = "linux"
         # tmux is installed: every start opens a tmux pane, also the fresh sessions of maxpm serve.
         with mock.patch.object(core, "tmux_path", lambda: "/opt/homebrew/bin/tmux"):
-            self.assertEqual((core.state(self.c)["launch_in"], server.setup_status(self.c)["launch_in"]), ("tmux", "tmux"))
+            self.assertEqual((core.state(self.c)["tmux"], server.setup_status(self.c)["tmux"]), (True, True))
             t = server.launch_agent(self.c)
-            self.assertEqual((t["launch_in"], t["tmux_pane"]), ("tmux", "%0"))
+            self.assertEqual(t["tmux_pane"], "%0")
             core.unregister(self.c, t["session_name"])
-            self.assertEqual(server.start_fresh(self.c, t["item"]["id"], "an answer came for it")["launch_in"], "tmux")
+            self.assertEqual(server.start_fresh(self.c, t["item"]["id"], "an answer came for it")["tmux_pane"], "%1")
             self.assertEqual(len(self.tmux.panes), 2)
-            # The setting of a person wins over auto, and auto can be set again.
-            core.config_set(self.c, "launch_in", "tab")
-            self.assertEqual(core.state(self.c)["launch_in"], "tab")
-            core.config_set(self.c, "launch_in", "auto")
-            self.assertEqual(core.state(self.c)["launch_in"], "tmux")
-            # One start can still choose.
-            self.assertEqual(core.launch_target(self.c, launch_in="window")["launch_in"], "window")
+        # A queue that chose a Terminal tab before: the setting goes at the next connect.
+        self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'launch_in', 'tab')")
+        self.c.commit()
+        self.c.close()
+        self.c = core.connect()
+        self.assertIsNone(self.c.execute("SELECT 1 FROM settings WHERE key='launch_in'").fetchone())
 
     def _deploy_ready(self):
         """Target web with project site; dev finished one item, so deploy item is ready. Returns its id."""
-        core.config_set(self.c, "launch_in", "tmux")
         core.target_add(self.c, "web", "push, then smoke test")
         core.project_add(self.c, "site", target="web", path=self.dir.name)
         core.register(self.c, "mark", human=True)
@@ -2246,7 +2201,6 @@ class LaunchInTmux(unittest.TestCase):
         # a fresh session and closed their pane.
         from tests.test_core import Transcript
         sid = "55555555-5555-4555-8555-555555555555"
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         item = core.item_add(self.c, "shop", "rename the field")["id"]
         name = server.launch_agent(self.c)["session_name"]
@@ -2299,7 +2253,6 @@ class LaunchInTmux(unittest.TestCase):
         # #4948: a Claude Code session runs maxpm wait in the background and ends its turn, so a typed message
         # reaches it. Its screen stays quiet at the prompt; serve neither hands it over nor ends it, and only
         # wait_max (45m) ends it. Without the wait it ends after idle_end (15m).
-        core.config_set(self.c, "launch_in", "tmux")
         first = core.item_add(self.c, "shop", "first")["id"]
         name = server.launch_agent(self.c)["session_name"]
         pane, clock = self.tmux.panes[0], [core.now()]
@@ -2328,7 +2281,6 @@ class LaunchInTmux(unittest.TestCase):
         import threading
         from unittest import mock
         from river import notify
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         first = core.item_add(self.c, "shop", "first")["id"]
         name = server.launch_agent(self.c)["session_name"]
@@ -2425,7 +2377,6 @@ class LaunchInTmux(unittest.TestCase):
 
     def test_an_answer_for_an_agent_that_ended_starts_a_fresh_session(self):
         from unittest import mock
-        core.config_set(self.c, "launch_in", "tmux")
         core.register(self.c, "mark", human=True)
         core.register(self.c, "ann")
         x = core.item_add(self.c, "shop", "export the report")["id"]
@@ -2492,12 +2443,11 @@ class LaunchInTmux(unittest.TestCase):
         self.addCleanup(end_server)  # before the start: a start that fails halfway may have started the server
         try:
             server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#1 first: a | b",
-                                   "command": "sleep 60", "launch_in": "tmux"}, {"MAXPM_AGENT": "shop-aaaa"})
+                                   "command": "sleep 60"}, {"MAXPM_AGENT": "shop-aaaa"})
         except RiverError as e:
             self.skipTest(f"tmux cannot run here: {e}")  # a sandbox blocks its socket
         for name, command in (("#2 second", "sleep 60"), ("needs you", "true")):
-            server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": name, "command": command,
-                                   "launch_in": "tmux"}, {"MAXPM_FOCUS": "needs:"})
+            server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": name, "command": command}, {"MAXPM_FOCUS": "needs:"})
 
         def panes(want):
             for _ in range(100):
@@ -2522,8 +2472,7 @@ class LaunchInTmux(unittest.TestCase):
                          ({got["#1 first: a | b"]["window"]}, {True}, []))
         self.assertEqual(server._tmux("display-message", "-p", "-t", v["panes"][0]["window"], "#{window_name} #{pane-border-status}"),
                          "agents top")
-        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#4 fourth", "command": "sleep 60",
-                               "launch_in": "tmux"}, {})
+        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#4 fourth", "command": "sleep 60"}, {})
         self.assertEqual(len({p["window"] for p in server.tmux_view(None)["panes"]}), 1)  # it joined the others
         v = server.tmux_view("windows", tidy=True)
         self.assertEqual(([c["name"] for c in v["closed"]], len(v["panes"]), len({p["window"] for p in v["panes"]})),
@@ -2551,9 +2500,7 @@ class LaunchInTmux(unittest.TestCase):
         # /bin/sh runs it: macOS scans a new executable file before its first start (Gatekeeper; it took 13 s on a busy
         # Mac, past the 10 s the panes get), and never a script that a system shell reads.
         core.config_set(self.c, "launch_agents", f"Fake=/bin/sh {fake}")
-        core.config_set(self.c, "launch_in", "tmux")
-        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#6 sixth", "command": f"/bin/sh {fake}",
-                               "launch_in": "tmux"}, {"MAXPM_AGENT": "shop-cccc"})
+        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#6 sixth", "command": f"/bin/sh {fake}"}, {"MAXPM_AGENT": "shop-cccc"})
         sixth = panes(lambda p: p["name"] != "#6 sixth" or p["running"] == "sleep")["#6 sixth"]["pane"]
         core.register(self.c, "shop-cccc")
         core.register(self.c, "mark", human=True)
@@ -2577,8 +2524,7 @@ class LaunchInTmux(unittest.TestCase):
         server._tmux("kill-pane", "-t", new["pane"])
         # A session that left the queue while its command still runs is done; not while its pane shows a prompt.
         # One tmux command reads the panes that may be done, and gives nothing when one of them closed meanwhile.
-        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#5 fifth", "command": "sleep 60",
-                               "launch_in": "tmux"}, {"MAXPM_AGENT": "shop-bbbb"})
+        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#5 fifth", "command": "sleep 60"}, {"MAXPM_AGENT": "shop-bbbb"})
         fifth = panes(lambda p: p["name"] != "#5 fifth" or p["running"] == "sleep")["#5 fifth"]["pane"]
         other = got["#2 second"]["pane"]
         texts = server._pane_texts([fifth, other])
@@ -2599,8 +2545,7 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual([c["name"] for c in server.tmux_tidy(self.c)["closed"]], ["#1 first: a | b"])
         self.assertEqual(sorted(p["name"] for p in server.tmux_view(None, conn=self.c)["panes"]), ["#2 second", "#4 fourth", "#5 fifth"])
         # maxpm serve tidies by itself: a shell closes at once, an open CLI after the same screen for idle_after, a prompt never.
-        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#8 eighth", "command": "sleep 60",
-                               "launch_in": "tmux"}, {"MAXPM_AGENT": "shop-dddd"})
+        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#8 eighth", "command": "sleep 60"}, {"MAXPM_AGENT": "shop-dddd"})
         panes(lambda p: p["name"] != "#8 eighth" or p["running"] == "sleep")
         server._tmux("send-keys", "-t", other, "C-c")
         panes(lambda p: p["name"] != "#2 second" or p["ended"])
@@ -3109,7 +3054,7 @@ class LaunchProfiles(unittest.TestCase):
         self.addCleanup(setattr, server, "TERMINAL_RUNNER", None)
         t = server.OPS["dispatch_item"](self.c, {"id": x, "model": "opus", "options": {"remote_control": "off"}}, "mark")
         self.assertEqual(t["command"], f"claude --name '#{x} work' --model opus go")
-        self.assertIn(f"MAXPM_AGENT={t['session_name']} MAXPM_FOCUS=item:{x} MAXPM_MODEL=opus {t['command']}\"", sent[-1])
+        self.assertIn(f"MAXPM_AGENT={t['session_name']} MAXPM_FOCUS=item:{x} MAXPM_MODEL=opus {t['command']}", sent[-1])
         y = core.item_add(self.c, "shop", "more")["id"]
         t = server.dispatch_item(self.c, y, runner=sent.append, options={"permission_mode": "acceptEdits"})
         self.assertIn(f"claude --name '#{y} more' --permission-mode acceptEdits go --remote-control '#{y} more'", sent[-1])
@@ -3160,7 +3105,7 @@ class LaunchProfiles(unittest.TestCase):
         sent, long = [], "Take over from w9: " + "step " * 60
         t = server.dispatch_item(self.c, x, runner=sent.append, actor="boss", prompt=long)
         self.assertNotIn("pushed_to", t)
-        self.assertIn(shlex.quote("go\n\n" + long.strip()).replace('"', '\\"'), sent[-1])
+        self.assertIn(shlex.quote("go\n\n" + long.strip()), sent[-1])
         ev = [e["change"] for e in core.item_show(self.c, x)["events"] if "custom prompt" in e["change"]]
         self.assertEqual(ev, [f"{t['session_name']} launched with a custom prompt: " + long.strip()[:200] + "..."])
         y = core.item_add(self.c, "shop", "more")["id"]
@@ -3168,7 +3113,7 @@ class LaunchProfiles(unittest.TestCase):
         z = core.item_add(self.c, "shop", "third")["id"]
         server.TERMINAL_RUNNER = sent.append
         self.addCleanup(setattr, server, "TERMINAL_RUNNER", None)
-        t = server.OPS["launch_agent"](self.c, {"project": "shop", "prompt": "short one", "launch_in": "window"}, "boss")
+        t = server.OPS["launch_agent"](self.c, {"project": "shop", "prompt": "short one"}, "boss")
         self.assertEqual(t["item"]["id"], z)
         self.assertIn(f"{t['session_name']} launched with a custom prompt: short one",
                       [e["change"] for e in core.item_show(self.c, z)["events"]])
@@ -3182,7 +3127,7 @@ class LaunchProfiles(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.run(["-q", "launch", "--dry-run", "--option", "remote_control=off",
                                       "--option", "permission_mode=plan"]), 0)
-        self.assertRegex(out.getvalue(), r"command: claude --name '#\d+ work' --permission-mode plan go   \(in a new tab\)")
+        self.assertRegex(out.getvalue(), r"command: claude --name '#\d+ work' --permission-mode plan go   \(in a new tmux pane\)")
         # --dry-run prints the whole command with the custom prompt; ';' is allowed in it.
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.run(["-q", "launch", "--dry-run", "--prompt", "fix a; then b\nand c"]), 0)

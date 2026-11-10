@@ -227,8 +227,8 @@ Stop when the user tells you to, and tell the user what you did.
 
 ## Your tools
 
-- `maxpm launch [--project P | --item N] [--agent A] [--model M] [--effort E] [--prompt TEXT] [--tab|--window|--tmux] [--dry-run]`
-  `--tmux` (or the setting `launch_in tmux`) starts the session as a pane of the tmux session `maxpm`. It needs
+- `maxpm launch [--project P | --item N] [--agent A] [--model M] [--effort E] [--prompt TEXT] [--dry-run]`
+  starts the session as a pane of the tmux session `maxpm` (every start does; Windows: a console window). It needs
   no Terminal app, so it works over SSH and on Linux. The user sees every such agent side by side with
   `maxpm view` in a terminal (`--windows`: one window each; `--tidy`: close the panes of sessions that are done);
   `maxpm view --list` prints the panes for you. `maxpm serve` closes the panes of finished sessions by itself

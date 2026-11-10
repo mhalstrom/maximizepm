@@ -124,58 +124,54 @@ def code_stale():
     """True when the river code on disk is newer than the code this server runs: it needs a restart."""
     return _code_id() != BOOT_CODE
 
-def _applescript_str(s):
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
 # Tests (and maxpm launch tests) set this to a fake that receives what would open a terminal.
 TERMINAL_RUNNER = None
 
 
-def _can_open_terminal(runner, hint, launch_in=None):
-    if launch_in == "tmux":  # no Terminal app needed: any system with tmux, over SSH too
-        if TMUX_RUNNER is None and not _tmux_cmd():
-            raise RiverError("launch_in is tmux, and tmux is not installed: brew install tmux (Linux: apt install tmux), "
-                             "or use a Terminal tab: maxpm config set launch_in tab")
+def _can_open_terminal(runner, hint):
+    """Refuse a start that cannot open: every agent starts in a pane of the tmux session maxpm (#5105), on any
+    system and over SSH, so one terminal (maxpm view) and the page's chats show them all. Windows, where tmux
+    does not run, opens a console window. A test's runner opens nothing."""
+    if (runner or TERMINAL_RUNNER) is not None or core.PLATFORM == "win32" or TMUX_RUNNER is not None:
         return
-    runner = runner or TERMINAL_RUNNER
-    if core.PLATFORM not in ("darwin", "win32") and runner is None:
-        raise RiverError(f"starting an agent from the page works on macOS and Windows only; start one yourself: {hint}")
+    if not _tmux_cmd():
+        raise RiverError(f"every agent starts in tmux, and tmux is not installed: {core.tmux_install()}; "
+                         f"or start one yourself: {hint}")
 
 
-def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=None, effort=None, launch_in=None,
-                 options=None, prompt=None):
-    """Open a Terminal window in the project folder of the most important ready agent item and run
+def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
+                 prompt=None):
+    """Open a tmux pane in the project folder of the most important ready agent item and run
     the command of the chosen launch_agents entry there (default: the Claude Code profile), so one click starts one
-    agent session. macOS and Windows. prompt (maxpm launch --prompt): the new session's first instruction,
+    agent session. prompt (maxpm launch --prompt): the new session's first instruction,
     after the profile's prompt."""
     # With no project named, Start spreads sessions: first a project with ready work and no agent yet.
     # A session that waits for work in that project (maxpm wait) gets the item: no new session needed.
     # Else the new session gets a name and the item is pushed to it, so the next Start sees the project covered.
     # A custom prompt always opens a new session: a waiting one would get it only second-hand, as a message.
-    t = core.launch_target(conn, project, agent, None, model, effort, launch_in, spread=project is None, options=options,
+    t = core.launch_target(conn, project, agent, None, model, effort, spread=project is None, options=options,
                            prompt=prompt)
     waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"])
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the Start button: you were waiting for work", actor)
         return {**t, "pushed_to": waiting}
-    _can_open_terminal(runner, "cd <project folder> && claude go", t["launch_in"])
+    _can_open_terminal(runner, "cd <project folder> && claude go")
     return _start_for_item(conn, t, runner, actor, "Start opened this session for it")
 
 
-def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None, effort=None, launch_in=None,
-                  options=None, prompt=None):
+def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
+                  prompt=None):
     """Start work on one ready item: a session that waits for work in its project gets it (push);
     else river names a new session, reserves the item for it (push), and opens the chosen agent in the
     project folder with MAXPM_AGENT set to that name and MAXPM_FOCUS=item:<id>, so its first maxpm go takes it.
     With a custom prompt (maxpm launch --prompt) it always opens a new session."""
-    t = core.launch_target(conn, agent=agent, item=item_id, model=model, effort=effort, launch_in=launch_in,
-                           options=options, actor=actor, prompt=prompt)
+    t = core.launch_target(conn, agent=agent, item=item_id, model=model, effort=effort, options=options, actor=actor,
+                           prompt=prompt)
     waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"])
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the page: Dispatch; you were waiting for work", actor)
         return {**t, "pushed_to": waiting}
-    _can_open_terminal(runner, f"cd <project folder> && MAXPM_FOCUS=item:{t['item']['id']} claude go", t["launch_in"])
+    _can_open_terminal(runner, f"cd <project folder> && MAXPM_FOCUS=item:{t['item']['id']} claude go")
     return _start_for_item(conn, t, runner, actor, "Dispatch started this session for it")
 
 
@@ -202,7 +198,7 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
 
 
 def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=None, model=None, effort=None,
-                  launch_in=None, options=None):
+                  options=None):
     """Open an agent session for one item from its drawer. A ready item: Dispatch. A person's item: a
     session that does it together with the person. An item that waits: a session that first takes what
     blocks it. The session learns which from MAXPM_FOCUS, which its maxpm go reads."""
@@ -217,18 +213,18 @@ def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=Non
     if it["doer"] == "human" or mine:
         focus = f"help:{it['id']}" + (f"@{person}" if person else "")
     elif it["ready"]:
-        return dispatch_item(conn, it["id"], runner, agent, actor, model, effort, launch_in, options)
+        return dispatch_item(conn, it["id"], runner, agent, actor, model, effort, options)
     else:
         focus = f"unblock:{it['id']}"
     p = core._project(conn, it["project"])
     if not p["path"]:
         raise RiverError(f"project {p['name']} has no folder, so MaximizePM cannot start a session there: "
                          f"maxpm project path {p['name']} <folder>")
-    return {**_open_focused(conn, p, focus, runner, agent, model, effort, launch_in, options),
+    return {**_open_focused(conn, p, focus, runner, agent, model, effort, options),
             "item": {"id": it["id"], "title": it["title"]}}
 
 
-def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effort=None, launch_in=None, options=None):
+def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effort=None, options=None):
     """You view, Go through with an agent (#261, #5103): a session that works through everything that waits on the
     person, with them, one item at a time (core.prompt_for_all), in the folder of the most important such item's
     project. Its name is set before it starts (MAXPM_AGENT), so the page opens its chat on the Sessions tab at once."""
@@ -243,13 +239,13 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
         raise RiverError("no project has a folder, so MaximizePM cannot start a session: maxpm project path <name> <folder>")
     name = f"{p['name']}-{secrets.token_hex(2)}"
     core.register(conn, name, note=f"started from the page to go through what waits on {person or 'the person'}")
-    t = _open_focused(conn, p, "needs:" + (f"@{person}" if person else ""), runner, agent, model, effort, launch_in,
-                      options, agent_name=name)
+    t = _open_focused(conn, p, "needs:" + (f"@{person}" if person else ""), runner, agent, model, effort, options,
+                      agent_name=name)
     return {**t, "session_name": name}
 
 
 def deploy_now(conn, target, review=False, runner=None, agent=None, actor=None, model=None, effort=None,
-               launch_in=None, options=None):
+               options=None):
     """Targets tab, Deploy now (or Review and deploy): when the deploy item (or its review) is ready and
     the target has no owner to alert, open an agent in a folder of the target's projects that takes it."""
     r = core.deploy_now(conn, target, review, actor)
@@ -257,7 +253,7 @@ def deploy_now(conn, target, review=False, runner=None, agent=None, actor=None, 
         return r
     p = _target_folder(conn, target)
     return {**r, **_open_focused(conn, p, f"{'review' if review else 'deploy'}:{target}", runner, agent,
-                                 model, effort, launch_in, options)}
+                                 model, effort, options)}
 
 
 def _target_folder(conn, target):
@@ -286,15 +282,13 @@ def _agent_for(conn, model):
     return pick["label"], pick
 
 
-def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, launch_in=None, options=None, agent_name=None):
+def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, options=None, agent_name=None):
     """Open the chosen agent in a project folder with MAXPM_FOCUS set; its maxpm go reads it. agent_name: the agent name
     it registers as (MAXPM_AGENT), when the caller chose one."""
-    launch_in = core._launch_in(conn, p["id"], launch_in)
-    _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go", launch_in)
+    _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
     name = core.focus_title(conn, focus)
     t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": name,
-         **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name),
-         "launch_in": launch_in}
+         **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name)}
     _open_terminal(t, {"MAXPM_FOCUS": focus, **({"MAXPM_AGENT": agent_name} if agent_name else {}), **t["env"]}, runner)
     return t
 
@@ -311,7 +305,7 @@ def manage_command(cmd):
     return out
 
 
-def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=None, launch_in=None, options=None):
+def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=None, options=None):
     """Start manager (the page's Manager section): the chosen agent with manage in place of go, in the folder
     of the first project that has one, compacted at manager_autocompact. Refuses while a manager is active."""
     import secrets
@@ -321,12 +315,10 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     p = next((core._project(conn, x["name"]) for x in core.project_list(conn) if x.get("path")), None)
     if p is None:
         raise RiverError("no project has a folder, so MaximizePM cannot start a session: maxpm project path <name> <folder>")
-    launch_in = core._launch_in(conn, p["id"], launch_in)
-    _can_open_terminal(runner, f"cd {p['path']} && claude manage", launch_in)
+    _can_open_terminal(runner, f"cd {p['path']} && claude manage")
     t = {"project": p["name"], "path": p["path"], "session_title": "maxpm manager",
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, "maxpm manager",
-                                  autocompact=core.autocompact_tokens(core.setting(conn, "manager_autocompact"))),
-         "launch_in": launch_in}
+                                  autocompact=core.autocompact_tokens(core.setting(conn, "manager_autocompact")))}
     t["command"] = manage_command(t["command"])
     name = f"manager-{secrets.token_hex(2)}"
     core.register(conn, name, note="started from the page as the manager")
@@ -342,7 +334,7 @@ EXPERT_PROMPT = ("You are {name}, an expert session of MaximizePM on: {topic}. A
 
 
 def start_expert(conn, name, topic=None, project=None, resume=False, runner=None, agent=None, actor=None, model=None,
-                 effort=None, launch_in=None, options=None, item=None, summary=None, sources=(), canvases=(),
+                 effort=None, options=None, item=None, summary=None, sources=(), canvases=(),
                  sessions=()):
     """maxpm expert start (#4955, #4959): open an agent session for an expert-tier task, in the folder of its project.
     The task: item (made expert-tier), else on resume the open expert-tier task it had before, else a new
@@ -396,8 +388,7 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     if not p["path"]:
         raise RiverError(f"project {p['name']} has no folder, so MaximizePM cannot start a session: "
                          f"maxpm project path {p['name']} <folder>")
-    launch_in = core._launch_in(conn, p["id"], launch_in)
-    _can_open_terminal(runner, f"cd {p['path']} && claude go", launch_in)
+    _can_open_terminal(runner, f"cd {p['path']} && claude go")
     topic = task["title"]
     if model:
         model_why = "you chose it"
@@ -423,7 +414,7 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     else:
         t = core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt=first)
         t = {**t, "env": {"MAXPM_AGENT": name, **t["env"]}}
-    t.update(project=p["name"], path=p["path"], launch_in=launch_in, session_title=name, task=task["id"])
+    t.update(project=p["name"], path=p["path"], session_title=name, task=task["id"])
     _open_terminal(t, t["env"], runner)
     with core.tx(conn):
         core._event(conn, task["id"], actor or "maxpm", f"expert {name} started" + (
@@ -431,7 +422,7 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     return {**t, "session_name": name, "topic": topic, "model": model, "model_why": model_why, "handover": handed}
 
 
-def accept_expert(conn, pid, who=None, runner=None, launch_in=None):
+def accept_expert(conn, pid, who=None, runner=None):
     """Continue in an expert (#4990): the person took the manager's proposal. Start the expert as maxpm expert start
     does, with the talk so far the proposal holds (actor: the manager, which handed the talk over), then close the
     proposal; the manager hears it. A start that fails keeps the proposal open, so the person can try again."""
@@ -440,7 +431,7 @@ def accept_expert(conn, pid, who=None, runner=None, launch_in=None):
         raise RiverError(f"expert proposal p{p['id']} is {p['state']} already")
     res = start_expert(conn, p["name"], p["topic"], p["project"], actor=p["manager"], model=p["model"],
                        effort=p["effort"], item=p["item_id"], summary=p["summary"], sources=p["sources"],
-                       canvases=p["canvases"], sessions=p["sessions"], runner=runner, launch_in=launch_in)
+                       canvases=p["canvases"], sessions=p["sessions"], runner=runner)
     core.expert_proposal_end(conn, p["id"], "started", who, expert=res["session_name"])
     return {**res, "proposal": p["id"]}
 
@@ -491,10 +482,10 @@ def _fit_task_model(conn, task, name, model, actor):
 
 
 def _open_terminal(t, env, runner=None):
-    """Run the agent command (t["command"]) in the project folder (t["path"]) with env set: in a new
-    Terminal tab or window on macOS (launch_in), in a new console window on Windows, or with launch_in
-    tmux in a pane of the maxpm tmux session on any system. runner (tests) gets the AppleScript on macOS,
-    and {"args", "cwd", "env"} on Windows; TMUX_RUNNER gets the tmux commands."""
+    """Run the agent command (t["command"]) in the project folder (t["path"]) with env set, in a new pane of the
+    maxpm tmux session (#5105); on Windows, where tmux does not run, in a new console window. runner (tests) gets
+    the command line that would go into the pane, and {"args", "cwd", "env"} on Windows; TMUX_RUNNER gets the
+    tmux commands."""
     import os
     import shlex
     import subprocess
@@ -502,10 +493,6 @@ def _open_terminal(t, env, runner=None):
     # The agent uses the same queue as this page: a page on a MAXPM_DB queue starts agents on it too.
     if os.environ.get("MAXPM_DB"):
         env = {"MAXPM_DB": str(core.db_path()), **env}
-    if t["launch_in"] == "tmux":
-        t["tmux_pane"] = _tmux_open(t, env, f"cd {shlex.quote(t['path'])} && "
-                                    + "".join(f"{k}={shlex.quote(v)} " for k, v in env.items()) + t["command"])
-        return
     if core.PLATFORM == "win32":
         # cmd /k keeps the window open when the agent ends; the command line goes to cmd as written.
         title = f"title {t['session_title']} & " if t.get("session_title") else ""
@@ -516,53 +503,15 @@ def _open_terminal(t, env, runner=None):
         except OSError as e:
             raise RiverError(f"could not open a console window in {t['path']}: {e}")
         return
-    # The tab or window gets the session's name as its title until the agent CLI sets its own (Claude Code
-    # shows the --name it got; other CLIs may keep this one).
-    title = f"printf '\\033]0;%s\\007' {shlex.quote(t['session_title'])}; " if t.get("session_title") else ""
-    shell = (title + f"cd {shlex.quote(t['path'])} && " + "".join(f"{k}={shlex.quote(v)} " for k, v in env.items())
-             + t["command"])
-    cmd = _applescript_str(shell)
-    if t["launch_in"] == "tab":
-        # Terminal has no "new tab" command: press Command-T in it, then run the command in that tab.
-        # A key press goes to the app in front, so wait until Terminal is in front (else Command-T opens a
-        # browser tab). Then wait until the new tab exists (else the command runs in the old tab, which
-        # can hold a busy agent). Terminal's AppleScript lists each tab of a tabbed window as a window of
-        # its own, so a new tab shows as one more window, or as one more tab of the front window. Pressing keys needs the Accessibility permission once. Without it, or
-        # when no new tab appears, fall back to a new window.
-        script = "\n".join([
-            'tell application "Terminal"', '  activate', '  set hasWindow to (count of windows) > 0', 'end tell',
-            'if hasWindow then', '  try',
-            '    tell application "System Events"',
-            '      repeat 40 times',
-            '        if frontmost of process "Terminal" then exit repeat',
-            '        delay 0.05',
-            '      end repeat',
-            '      if not (frontmost of process "Terminal") then error "Terminal is not in front"',
-            '    end tell',
-            '    tell application "Terminal" to set {windowsBefore, tabsBefore} to {count of windows, count of tabs of front window}',
-            '    tell application "System Events" to tell process "Terminal" to keystroke "t" using command down',
-            '    set gotTab to false',
-            '    repeat 60 times',
-            '      delay 0.05',
-            '      tell application "Terminal" to set gotTab to (count of windows) > windowsBefore or (count of tabs of front window) > tabsBefore',
-            '      if gotTab then exit repeat',
-            '    end repeat',
-            '    if not gotTab then error "Terminal opened no new tab"',
-            f'    tell application "Terminal" to do script {cmd} in selected tab of front window',
-            '  on error', f'    tell application "Terminal" to do script {cmd}', '  end try',
-            'else', f'  tell application "Terminal" to do script {cmd}', 'end if'])
-    else:
-        script = f'tell application "Terminal"\n  activate\n  do script {cmd}\nend tell'
-    try:
-        (runner or (lambda s: subprocess.run(["osascript", "-e", s], check=True, capture_output=True,
-                                             text=True, timeout=20)))(script)
-    except (OSError, subprocess.SubprocessError) as e:
-        why = (getattr(e, "stderr", "") or str(e)).strip()
-        raise RiverError(f"could not open Terminal: {why}. macOS may ask once to let MaximizePM control Terminal "
-                         f"(System Settings, Privacy & Security, Automation)")
+    line = (f"cd {shlex.quote(t['path'])} && " + "".join(f"{k}={shlex.quote(v)} " for k, v in env.items())
+            + t["command"])
+    if runner:
+        runner(line)
+        return
+    t["tmux_pane"] = _tmux_open(t, env, line)
 
 
-# launch_in tmux: each agent river starts is a pane of one tmux session, so one terminal shows them all
+# Each agent river starts is a pane of one tmux session, so one terminal shows them all
 # (maxpm view), over SSH too, and nothing needs AppleScript. TMUX_CMD (tests) is a tmux command line with a
 # server of its own; TMUX_RUNNER (tests) gets each argument list in its place and returns the output, or
 # None for a command that fails.
@@ -799,7 +748,7 @@ def tmux_done(conn, terminals=None):
 
 
 def tmux_view(layout=None, tidy=False, conn=None):
-    """The agents river started in tmux (launch_in tmux), for maxpm view. layout "tile" puts every agent
+    """The agents river started in tmux, for maxpm view. layout "tile" puts every agent
     pane side by side in one window, and new agents then join it; "windows" gives each agent a window of
     its own again; None changes nothing. tidy first closes the panes whose session is done (_done_panes:
     only a shell runs there, or, with conn, the agent takes no work any more). Panes that a person made are
@@ -808,8 +757,8 @@ def tmux_view(layout=None, tidy=False, conn=None):
     import os
     target = "=" + TMUX_SESSION
     if _tmux("has-session", "-t", target, check=False) is None:
-        raise RiverError(f"no agent runs in tmux (there is no tmux session {TMUX_SESSION!r}). Start agents there: "
-                         f"maxpm launch --tmux, or for every start: maxpm config set launch_in tmux")
+        raise RiverError(f"no agent runs in tmux (there is no tmux session {TMUX_SESSION!r}): start one with "
+                         f"maxpm launch, or from the page")
     mine = lambda: [p for p in _tmux_panes() if p["name"]]
     closed, left = [], []
     if tidy:
@@ -1221,7 +1170,7 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
         core._touch_agent(conn, name)
         core._event(conn, None, "maxpm", f"{name} {why}: its process {pid} ended, and the same chat resumes "
                                          f"({t['agent']})")
-    spec = {"command": t["command"], "path": cwd, "launch_in": "tmux", "project": name,
+    spec = {"command": t["command"], "path": cwd, "project": name,
             "session_title": a.get("session") or name}
     _open_terminal(spec, t["env"], runner)
     return spec.get("tmux_pane")
@@ -1372,7 +1321,8 @@ def terminal_screen(conn, agent):
     the size, and the cursor. One tmux command."""
     pane = agent_terminals(conn).get(agent)
     if not pane:
-        raise RiverError(f"{agent} does not run in a tmux pane on this computer (start agents there: maxpm config set launch_in tmux)")
+        raise RiverError(f"{agent} does not run in a tmux pane on this computer (a session that maxpm launch or the page "
+                         f"started runs in one)")
     return _pane_screen(agent, pane)
 
 
@@ -1764,7 +1714,7 @@ def auto_context(conn, runner=None):
 
 def start_fresh(conn, item_id, why, runner=None):
     """Start a new session for one ready item, with the item's model and effort: river names it, reserves the
-    item for it, and opens the agent in the project folder (launch_in). The item's notes are its context."""
+    item for it, and opens the agent in the project folder. The item's notes are its context."""
     it = core.annotate(conn)[item_id]
     p = core._project(conn, it["project"])
     label = core.agent_for_type(conn, it["agent"], p["id"]) if it["agent"] else _agent_for(conn, it["model"])[0]
@@ -1772,7 +1722,7 @@ def start_fresh(conn, item_id, why, runner=None):
     model = it["model"] if opt and any(x["name"] == it["model"] for x in opt["models"]) else None
     effort = it["effort"] if opt and it["effort"] in opt["efforts"] else None
     t = core.launch_target(conn, agent=label, item=item_id, model=model, effort=effort)
-    _can_open_terminal(runner, f"cd {t['path']} && MAXPM_FOCUS=item:{item_id} claude go", t["launch_in"])
+    _can_open_terminal(runner, f"cd {t['path']} && MAXPM_FOCUS=item:{item_id} claude go")
     return _start_for_item(conn, t, runner, "maxpm", why, by="maxpm serve")
 
 
@@ -1924,14 +1874,13 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     model = it["model"] if opt and any(x["name"] == it["model"] for x in opt["models"]) else None
     effort = it["effort"] if opt and it["effort"] in opt["efforts"] else None
     focus = f"deploy:{target}"
-    launch_in = core._launch_in(conn, p["id"])
-    _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go", launch_in)
+    _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
     # Each deployer gets a session name of its own (claude --name, --remote-control): the one it replaces may still
     # run, and #1010 saw both starts beside a live session of the same name end before they connected.
     tag = secrets.token_hex(2)
     title = f"{core._short_title(core.focus_title(conn, focus), 43)} {tag}"
     t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": title,
-         **core._launch_agent_cmd(conn, p["id"], label, model, effort, None, title), "launch_in": launch_in}
+         **core._launch_agent_cmd(conn, p["id"], label, model, effort, None, title)}
     name = f"deploy-{target}-{tag}"
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{dep_id}")
     with core.tx(conn):
@@ -2870,7 +2819,7 @@ def setup_status(conn):
     agents = core.parse_launch_agents(core.setting(conn, "launch_agents"))
     have = {label for label, _ in agents}
     # Agent programs as a new terminal finds them (the app itself has only Finder's short PATH).
-    # Agents start in a new Terminal window, so that is where their programs must be found (on Windows: PATH).
+    # Agents start in a new tmux pane, whose login shell must find their programs (on Windows: PATH).
     exes = sorted({exe for _, exe, _ in KNOWN_AGENTS} | {core.entry_exe(c) for _, c in agents})
     term = _login_shell_which(exes) if core.PLATFORM != "win32" else {e: shutil.which(e) for e in exes}
     return {
@@ -2884,7 +2833,8 @@ def setup_status(conn):
         "claude_home": Path("~/.claude").expanduser().is_dir(),
         "skills": {n: ("installed" if (skills / n / "SKILL.md").is_file() else "missing") for n in ("maxpm", "maxpm-manager")},
         "launch_agents": [label for label, _ in agents],
-        "launch_in": core._launch_in(conn, None),
+        "tmux": core.can_start_agents(),  # every agent starts in tmux (Windows: a console window)
+        "tmux_install": core.tmux_install(),
         # Each Start button agent, and whether its program is on this computer (the first word of its command).
         "start_agents": [{"label": label, "found": bool(term.get(core.entry_exe(cmd)))} for label, cmd in agents],
         "agent_clis": [{"label": label, "found": bool(term.get(exe)), "added": label in have,
@@ -3065,8 +3015,8 @@ def setup_ntfy(conn, actor=None, open_=None):
 
 # Operations the page may call. Each maps JSON args to one core function.
 def _launch_args(a):
-    """The launch dialog's choices: model, effort, tab, window, or tmux, and profile options (each optional)."""
-    return {**{k: a.get(k) or None for k in ("model", "effort", "launch_in")},
+    """The launch dialog's choices: model, effort, and profile options (each optional)."""
+    return {**{k: a.get(k) or None for k in ("model", "effort")},
             "options": {k: str(v) for k, v in (a.get("options") or {}).items()} or None}
 
 

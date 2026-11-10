@@ -138,11 +138,6 @@ DEFAULT_SETTINGS = {
     # Any other command is custom: {model} and {effort} take the launch dialog's choices, and with no
     # choice the flag before them drops out.
     "launch_agents": "Claude Code=@claude-code",
-    # Where a new session opens: a Terminal tab or window (macOS; Windows always opens a console window), or
-    # tmux: a pane of the tmux session "maxpm" on any system, and `maxpm view` shows them all side by side.
-    # auto (the default): tmux when tmux is installed, else tab. Every start uses it: maxpm launch, the page's
-    # Start and Dispatch, and the fresh sessions of maxpm serve.
-    "launch_in": "auto",
     # How river reaches a running session through its own platform, so a working agent sees a queue
     # instruction, a stop, or a message at once: "Label=ENV_VAR: command" entries separated by ";". maxpm go
     # records the platform whose ENV_VAR is set in the session's environment, and its value as the address;
@@ -344,9 +339,6 @@ DEFAULT_SETTINGS = {
     "agent_rules": "",
     "default_agent": "",
 }
-
-# Where a new session can open (the setting launch_in).
-LAUNCH_INS = ("tab", "window", "tmux")
 
 # Agent platforms river can start from a launch profile ("Label=@claude-code" in launch_agents). Each option
 # maps to the CLI's own flags, as `claude --help` and `codex --help` name them. Codex has no Remote Control
@@ -1068,6 +1060,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
 
 
 def _migrate(conn):
+    # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
+    conn.execute("DELETE FROM settings WHERE key='launch_in'")
     if "ready" not in {r["name"] for r in conn.execute("PRAGMA table_info(close_checks)")}:
         conn.execute("ALTER TABLE close_checks ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
     if "result" not in {r["name"] for r in conn.execute("PRAGMA table_info(hook_runs)")}:
@@ -1411,8 +1405,6 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"{key} is on or off")
     elif key == "setup_done" and value not in ("on", "off"):
         raise RiverError("setup_done is on or off")
-    elif key == "launch_in" and value not in ("auto", *LAUNCH_INS):
-        raise RiverError("launch_in is auto, tab, window, or tmux")
     elif key == "auto_continue" and value not in ("tree", "on", "off"):
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
@@ -10512,7 +10504,7 @@ def codex_models():
 
 
 # The system whose shell gets the commands river builds: its quoting, and how the page opens a session (a
-# Terminal tab on macOS, a console window on Windows). Tests set it.
+# tmux pane; a console window on Windows, where tmux does not run). Tests set it.
 PLATFORM = sys.platform
 
 
@@ -10521,6 +10513,16 @@ def tmux_path():
     (the desktop app starts maxpm serve from the Dock, with a short PATH)."""
     return shutil.which("tmux") or next((p for p in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux",
                                                      "/opt/local/bin/tmux") if os.access(p, os.X_OK)), None)
+
+
+def tmux_install():
+    """The command that installs tmux on this system: every agent starts in a tmux pane (#5105)."""
+    return "brew install tmux" if PLATFORM == "darwin" else "sudo apt install tmux (Fedora: sudo dnf install tmux)"
+
+
+def can_start_agents():
+    """Whether this computer can open an agent session: tmux is installed, or it is Windows (a console window)."""
+    return PLATFORM == "win32" or bool(tmux_path())
 
 
 def _shell_quote(s):
@@ -11100,7 +11102,7 @@ def project_sessions(conn, ann=None):
     return covered
 
 
-def launch_target(conn, project=None, agent=None, item=None, model=None, effort=None, launch_in=None, spread=False,
+def launch_target(conn, project=None, agent=None, item=None, model=None, effort=None, spread=False,
                   options=None, actor=None, prompt=None):
     """Where and how a new agent session should start: the folder of the project that holds the most
     important ready item an agent can take (or of the project named, or of the one item named), and the
@@ -11180,8 +11182,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt, fork_of=base["session_id"])
         cmd["env"] = {**cmd["env"], "MAXPM_FORK_OF": base["goal"]}  # its go briefing says what it is now
     return {"project": p["name"], "path": p["path"], "item": {"id": top["id"], "title": top["title"], "agent": top["agent"]},
-            "ready": len(pool), "why": why, "session_title": name, **cmd, "fork_of": base, "model_why": model_why,
-            "launch_in": _launch_in(conn, p["id"], launch_in)}
+            "ready": len(pool), "why": why, "session_title": name, **cmd, "fork_of": base, "model_why": model_why}
 
 
 def agent_for_type(conn, agent_type, project_id=None):
@@ -11200,15 +11201,6 @@ def _start_next(conn):
     except RiverError:
         return None
     return {**t["item"], "project": t["project"], "why": t["why"]}
-
-
-def _launch_in(conn, project_id, choice=None):
-    """Where a new session opens: the choice of one start, else the setting launch_in; auto is tmux when
-    tmux is installed, else tab."""
-    if choice not in (None, "", *LAUNCH_INS):
-        raise RiverError("launch_in is tab, window, or tmux")
-    where = choice or setting(conn, "launch_in", project_id=project_id)
-    return ("tmux" if tmux_path() else "tab") if where == "auto" else where
 
 
 def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=None, name=None, prompt=None,
@@ -11466,8 +11458,8 @@ def state(conn, closed=True):
         "model_ladder": parse_ladder(setting(conn, "model_ladder")),
         "model_ids": model_ids(conn),
         "launch_options": launch_options(conn),
-        "launch_in": _launch_in(conn, None),
-        "tmux": bool(tmux_path()),  # the launch dialog offers tmux only when it is installed
+        "tmux": can_start_agents(),  # every agent starts in tmux (Windows: a console window): the page says when it is missing
+        "tmux_install": tmux_install(),
         "start_next": _start_next(conn),
         "queues": {r["agent"]: queue_list(conn, r["agent"], ann)["entries"]
                    for r in conn.execute("SELECT DISTINCT agent FROM queue_entries ORDER BY agent")},

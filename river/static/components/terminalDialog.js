@@ -1,4 +1,4 @@
-// An agent's terminal on the page: what its tmux pane shows (agents started with launch_in tmux), read
+// An agent's terminal on the page: what its tmux pane shows (every agent that MaximizePM starts), read
 // again twice a second while the dialog is open, and the keys a person types there go to the pane. So a
 // prompt that waits in the agent's terminal can be read and answered from the page.
 // The dialog has its own size (app.css): the pane's columns and rows never change it. A pane wider or taller

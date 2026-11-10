@@ -108,8 +108,8 @@ item), so a link, a reload, and Back show the same view.
 
 When the open session comes to a permission prompt or asks you a question, the
 ! dialog opens by itself. You pick an answer, or tell the agent what to do
-instead. For a session that runs in a tmux pane (`launch_in tmux`), the answer
-goes into its terminal, and so does what you type in the message box, with
+instead. For a session that runs in a tmux pane (every session MaximizePM
+starts), the answer goes into its terminal, and so does what you type in the message box, with
 files and pictures.
 
 ![The ! dialog: a permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
@@ -241,7 +241,7 @@ maxpm status                                     # every project's counts, recen
 maxpm log --since 7d                             # done items by day, with output and progress per project
 maxpm who                                        # who holds what (--all: also stopped and gone agents that hold nothing)
 maxpm show 12 --brief                            # a few lines: the item, cut context and output, open links, no history
-maxpm view                                       # every agent that runs in tmux, side by side (launch_in tmux)
+maxpm view                                       # every agent that runs in tmux, side by side
 maxpm capacity                                   # open slots and idle sessions
 maxpm usage                                      # the token cost of each done item, from the Claude Code transcripts
 maxpm artifacts --item 12                        # what the sessions of item 12 made (files, screenshots, canvases, links); show <n> reads one
@@ -326,9 +326,8 @@ push an item to a session of another type.
 On the page, every button that starts an agent (Start, Dispatch, Open agent,
 Claim next with an agent, Deploy now, Review and deploy, Start manager) opens
 one dialog: the agent, the model (only the agent's family, inside the item's
-limits, the recommendation preselected), the effort, the agent's launch
-options, the work (for Start), and where it opens: a new tab, a new window,
-or tmux (offered when tmux is installed). The dialog keeps your last choices
+limits, the recommendation preselected), the effort, the work (for Start), and
+under More the agent's launch options. The dialog keeps your last choices
 in this browser. The session gets `MAXPM_MODEL`. When a session already waits
 for work in that project (`maxpm wait`), Start and Dispatch give the item to
 it and open no terminal. Else Start and Dispatch (and `maxpm launch`) name
@@ -382,7 +381,7 @@ placeholder drops out. MaximizePM turned an older Claude Code or Codex command
 that a profile builds exactly into a profile once; `maxpm config get
 launch_agents` says what changed.
 From the command line, `maxpm launch [--project P | --item N] [--agent A]
-[--model M] [--effort E] [--option NAME=VALUE] [--prompt TEXT] [--tab|--window|--tmux] [--dry-run]` does the same as the
+[--model M] [--effort E] [--option NAME=VALUE] [--prompt TEXT] [--dry-run]` does the same as the
 dialog (a manager session uses it); `--dry-run` prints the project, the item,
 and the command without opening a terminal. `--option` sets a toggle or a
 mode for one session (`remote_control=off`, `permission_mode=plan`,
@@ -396,12 +395,8 @@ agent yet whose top item is most important, and only when every such project
 has an agent, the top item. Start names the new session and reserves its item
 for it, so two quick clicks go to two projects.
 
-With tmux installed, every agent starts in tmux, so one terminal shows them
-all: the setting `launch_in` is `auto` by default, which is tmux when tmux is
-installed and a Terminal tab when it is not (`maxpm config set launch_in
-tab`, `window`, or `tmux` to choose; `--tab`, `--window`, or `--tmux` for
-one launch, or the choice in the dialog). Each session then starts as a pane
-of one tmux session named `maxpm`, in place of a Terminal tab. `maxpm view` shows the panes side by
+Every agent starts in tmux, so one terminal shows them all: each session
+starts as a pane of one tmux session named `maxpm`. `maxpm view` shows the panes side by
 side in the terminal where you run it, each with its session's name on its
 border, and a new agent joins them. `maxpm view --windows` gives each agent a
 tmux window of its own again, and `maxpm view --list` prints the panes.
@@ -416,10 +411,10 @@ the same for two minutes (`idle_after`), so a busy agent keeps its pane. A
 prompt of an agent shows in its pane: move to the pane (`Ctrl-b`, then an
 arrow) and answer it.
 `Ctrl-b z` makes one pane large and back, and `Ctrl-b d` leaves the view while
-the agents continue. tmux is optional (`brew install tmux`): without it,
-sessions open in a Terminal tab on macOS or a console window on Windows.
-tmux needs no Terminal app, so it also works over SSH; on Linux, MaximizePM
-starts agents only in tmux. `maxpm serve` also ends, every
+the agents continue. Install tmux first (`brew install tmux`; Linux:
+`apt install tmux`): without it, a start refuses and names that command.
+Windows has no tmux, so there a session opens in a console window. tmux needs
+no Terminal app, so it also works over SSH. `maxpm serve` also ends, every
 `tidy_every`, the tmux servers that the tests left behind;
 `maxpm view --orphans` lists them, and `--orphans --tidy` ends them now. A session inside a sandbox (Claude Code's, Codex's) cannot reach
 tmux itself: its `maxpm launch` asks the running `maxpm serve` to start the

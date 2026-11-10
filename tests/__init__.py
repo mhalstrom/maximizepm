@@ -1,7 +1,7 @@
-"""The tests never reach the tmux of the person who runs them. With no tmux found, launch_in auto is a
-Terminal tab, which each test fakes (server.TERMINAL_RUNNER); a tmux command needs the fake tmux
-(server.TMUX_RUNNER) or a tmux server of its own (server.TMUX_CMD). A test of the tmux default sets
-core.tmux_path itself.
+"""The tests never reach the tmux of the person who runs them. Every agent starts in a tmux pane: a test fakes
+the pane (a runner, or server.TERMINAL_RUNNER, gets the line that would go into it), the whole of tmux (the fake
+server.TMUX_RUNNER), or runs a tmux server of its own (server.TMUX_CMD). With no tmux found (core.tmux_path), a
+start refuses; a test of an installed tmux sets core.tmux_path itself.
 
 The tests also run as no session: a session that maxpm serve opened has its name, purpose, and model in
 the environment (MAXPM_FOCUS=deploy:<target> makes go look only for a deploy), and a test that runs go or

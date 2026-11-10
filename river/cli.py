@@ -77,9 +77,9 @@ SETUP = """Setting up agents to use MaximizePM
 
 5. Watch it:  maxpm serve --open
    Sessions that MaximizePM starts (maxpm launch, the page's Start, fresh sessions)
-   open in tmux when tmux is installed (maxpm view shows them all in one
-   terminal), else in a Terminal tab. To choose: maxpm config set launch_in
-   tmux|tab|window   (auto is the default).
+   open in panes of the tmux session maxpm (maxpm view shows them all in one
+   terminal). Install tmux first: brew install tmux (Linux: apt install tmux).
+   Windows has no tmux: there a session opens in a console window.
 
 6. For each project, choose with the person how a finished result (a page, a
    text, a design) gets the person's look. No project gets its value in
@@ -1040,7 +1040,7 @@ def build_parser():
     x.add_argument("--chat", action="store_true", default=os.environ.get("MAXPM_CHAT") == "1",
                    help="a chat app session with no folder (default $MAXPM_CHAT=1)")
 
-    x = sub.add_parser("launch", help="start an agent session in a new terminal tab, window, or tmux pane, like the page's Start")
+    x = sub.add_parser("launch", help="start an agent session in a new pane of the tmux session maxpm, like the page's Start")
     g = x.add_mutually_exclusive_group()
     g.add_argument("--project", help="its most important ready item, a release review too "
                                      "(default: first a project with no agent yet)")
@@ -1056,16 +1056,11 @@ def build_parser():
                    help="the session's first instruction, after the profile's prompt (go) and a blank line, so the "
                         "session still runs go and registers; at most %d characters. It always opens a new session "
                         "(a session that waits for work would get it only as a message)" % core.CUSTOM_PROMPT_MAX)
-    g = x.add_mutually_exclusive_group()
-    g.add_argument("--tab", dest="launch_in", action="store_const", const="tab")
-    g.add_argument("--window", dest="launch_in", action="store_const", const="window")
-    g.add_argument("--tmux", dest="launch_in", action="store_const", const="tmux",
-                   help="in a pane of the tmux session 'maxpm' (maxpm view shows them); no Terminal app needed")
     x.add_argument("--dry-run", action="store_true", help="say what it would start; open nothing")
     x = sub.add_parser("expert", help="expert sessions: a session the person talks with for hours or days; it takes no "
                        "queue work, and MaximizePM never ends it as it ends a worker")
     xs = x.add_subparsers(dest="ecmd")
-    y = xs.add_parser("start", help="open an expert session on a topic in a new terminal tab, window, or tmux pane")
+    y = xs.add_parser("start", help="open an expert session on a topic in a new pane of the tmux session maxpm")
     y.add_argument("name", help="its name (letters, digits, '.', '_', '-')")
     y.add_argument("--topic", help="what it knows and what you ask it about: the title of the expert-tier task it adds")
     y.add_argument("--item", type=int, help="take this task (it becomes expert-tier) instead of adding one")
@@ -1082,10 +1077,6 @@ def build_parser():
     y.add_argument("--agent", help="a launch_agents label (default: the first)")
     y.add_argument("--model", help="its model (your choice: fable too)")
     y.add_argument("--effort", help="its effort level")
-    g = y.add_mutually_exclusive_group()
-    g.add_argument("--tab", dest="launch_in", action="store_const", const="tab")
-    g.add_argument("--window", dest="launch_in", action="store_const", const="window")
-    g.add_argument("--tmux", dest="launch_in", action="store_const", const="tmux")
     y = xs.add_parser("propose", help="the manager proposes an expert for a long talk: the person's chat with you shows "
                       "a card, Continue in an expert or Dismiss; nothing starts until the person clicks")
     y.add_argument("name", help="the expert's name (letters, digits, '.', '_', '-')")
@@ -1135,7 +1126,7 @@ def build_parser():
     y.add_argument("name")
     y.add_argument("--put", metavar="FILE", help="store a new version from a file ('-' reads stdin)")
 
-    x = sub.add_parser("view", help="show every agent that runs in tmux (launch_in tmux) side by side in this terminal")
+    x = sub.add_parser("view", help="show every agent that runs in tmux side by side in this terminal")
     g = x.add_mutually_exclusive_group()
     g.add_argument("--windows", dest="layout", action="store_const", const="windows", default="tile",
                    help="one tmux window for each agent, not side by side")
@@ -2149,13 +2140,13 @@ def _expert_cmd(conn, a, actor):
             raise RiverError("give the summary once: --summary \"...\" or --summary-file <path>")
         summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text()
     args = {"name": a.name, "topic": a.topic, "project": a.project, "resume": a.resume, "agent": a.agent,
-            "model": a.model, "effort": a.effort, "launch_in": a.launch_in, "item": a.item, "summary": summary,
+            "model": a.model, "effort": a.effort, "item": a.item, "summary": summary,
             "sources": a.source, "canvases": a.canvas, "sessions": a.session}
     if in_sandbox():
         return {"expert_started": {**ask_server(conn, "start_expert", args, actor, timeout=40), "via_serve": True}}
     from . import server
     return {"expert_started": server.start_expert(conn, a.name, a.topic, a.project, a.resume, agent=a.agent, actor=actor,
-                                                  model=a.model, effort=a.effort, launch_in=a.launch_in, item=a.item,
+                                                  model=a.model, effort=a.effort, item=a.item,
                                                   summary=summary, sources=a.source, canvases=a.canvas,
                                                   sessions=a.session)}
 
@@ -2230,26 +2221,25 @@ def dispatch(conn, a, actor):
                 raise RiverError(f"--option {o!r} needs the form name=value, for example remote_control=off")
             opts[k.strip()] = v.strip()
         if a.dry_run:
-            t = core.launch_target(conn, a.project, a.agent, a.item, a.model, a.effort, a.launch_in,
+            t = core.launch_target(conn, a.project, a.agent, a.item, a.model, a.effort,
                                    spread=a.project is None and a.item is None, options=opts or None, actor=actor,
                                    prompt=a.prompt)
             return {**t, "dry_run": True, "would_push_to": None if t["custom_prompt"] else
                     core.waiting_agent_for(conn, t["project"], t["item"]["id"])}
         if in_sandbox():
-            # A sandbox blocks Terminal and tmux for this command. maxpm serve runs outside it and opens the
-            # session, as for the page's Start and Dispatch; a terminal tab can take a while to open.
+            # A sandbox blocks the tmux socket for this command. maxpm serve runs outside it and opens the
+            # session, as for the page's Start and Dispatch.
             if a.prompt is not None:
                 core.custom_prompt(a.prompt)  # refuse here, before the request
-            choice = {"agent": a.agent, "model": a.model, "effort": a.effort, "launch_in": a.launch_in, "options": opts,
-                      "prompt": a.prompt}
+            choice = {"agent": a.agent, "model": a.model, "effort": a.effort, "options": opts, "prompt": a.prompt}
             res = (ask_server(conn, "dispatch_item", {"id": a.item, **choice}, actor, timeout=40) if a.item is not None
                    else ask_server(conn, "launch_agent", {"project": a.project, **choice}, actor, timeout=40))
             return {**res, "via_serve": True}
         if a.item is not None:
             return server.dispatch_item(conn, a.item, agent=a.agent, actor=actor, model=a.model, effort=a.effort,
-                                        launch_in=a.launch_in, options=opts or None, prompt=a.prompt)
+                                        options=opts or None, prompt=a.prompt)
         return server.launch_agent(conn, a.project, agent=a.agent, actor=actor, model=a.model, effort=a.effort,
-                                   launch_in=a.launch_in, options=opts or None, prompt=a.prompt)
+                                   options=opts or None, prompt=a.prompt)
     if c == "view":
         from . import server
         if a.orphans:
@@ -2898,7 +2888,7 @@ def _tmux_line():
     if not core.outside_tmux(os.environ):
         return []
     return ["This session runs outside tmux, so the Sessions page of maxpm serve cannot type into it (Open on "
-            "claude.ai/code still works). Next time, start sessions from the page (launch_in tmux), or start the agent "
+            "claude.ai/code still works). Next time, start sessions from the page or with maxpm launch, or start the agent "
             "inside tmux: tmux new -A -s maxpm"]
 
 
@@ -2973,7 +2963,7 @@ def render_expert(res):
         if t.get("fresh_from"):
             print(f"ended the expert {t['fresh_from']}: its context left the prompt cache (close its terminal or pane "
                   f"if it is still open)")
-        how = "a tmux pane" if t.get("launch_in") == "tmux" else f"a new Terminal {t.get('launch_in') or 'tab'}"
+        how = "a console window" if core.PLATFORM == "win32" else "a tmux pane"
         print(f"started the expert {t['session_name']} on {t.get('model')} ({t.get('model_why')}) in {how} "
               f"({t['project']}) on #{t.get('task')}: {t['topic']}"
               + (f"; it resumes session {t['resumed']}" if t.get("resumed") else ""))
@@ -3908,7 +3898,7 @@ def render(a, res):
                 print(f"  no terminal: {res['would_push_to']} waits for work in {res['project']} and would get it")
             else:
                 print("  command: " + "".join(f"{k}={v} " for k, v in res["env"].items()) + res["command"]
-                      + f"   (in a new {'tmux pane' if res['launch_in'] == 'tmux' else res['launch_in']})")
+                      + f"   (in a new {'console window' if core.PLATFORM == 'win32' else 'tmux pane'})")
         elif res.get("pushed_to"):
             print(f"gave {it} to {res['pushed_to']}, which was waiting for work in {res['project']}")
         else:
@@ -4262,10 +4252,7 @@ def render(a, res):
     if c == "config":
         if "overrides" in res:
             for k, v in res["defaults"].items():
-                print(f"{k} = {v} (default)" + (
-                    (": tmux, because tmux is installed" if core.tmux_path() else
-                     ": tab, because tmux is not installed (brew install tmux; Linux: apt install tmux)")
-                    if (k, v) == ("launch_in", "auto") else ""))
+                print(f"{k} = {v} (default)")
             for o in res["overrides"]:
                 print(f"{o['key']} = {o['value']} ({o['scope']})")
         elif "migrated" in res:

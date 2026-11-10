@@ -595,8 +595,8 @@ function renderSetup(st) {
   const none = !ready.length && !addable.length;
   const addBtns = addable.map(a => `<button class="btn${ready.length ? "" : " primary"}" data-su="agent" data-label="${esc(a.label)}" title="${esc(a.command)}">Add ${esc(a.label)}</button>`).join("");
   const opens = "The Start button opens " + ready.map(esc).join(" or ")
-    + (st.launch_in === "tmux" ? " in a tmux pane (maxpm view in a terminal shows every agent side by side)."
-      : st.launch_in === "tab" ? " in a Terminal tab (with tmux installed, in a tmux pane: one terminal shows every agent)." : ".");
+    + (st.tmux ? " in a tmux pane (maxpm view in a terminal shows every agent side by side)."
+      : ` in a tmux pane, and tmux is not installed: ${esc(st.tmux_install || "brew install tmux")}.`);
   out.push(step(ready.length > 0, ready.length ? `<span title="${opens}">Choose an agent</span>` : "Choose an agent",
     ready.length ? (addable.length ? `<span class="fix" style="display:inline-flex">${addBtns}</span>` : "")
       : none ? `No AI coding agent is installed on this Mac yet. Install one, then check again:

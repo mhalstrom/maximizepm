@@ -259,7 +259,6 @@ try {
     def test_the_managers_proposal_of_an_expert_is_a_card_in_its_chat(self):
         """#4990: the manager proposes an expert; its chat shows a card with the topic and the model. Dismiss closes
         it (on a phone, 390 px); Continue in an expert starts the expert and opens its chat (1280 px)."""
-        core.config_set(self.c, "launch_in", "tmux")
         core.project_path(self.c, "site", self.dir.name)
         p = core.expert_propose(self.c, "rx", "the refund rules", "site", model="opus", summary="30 days", actor="ag")
         driver = r'''try {
