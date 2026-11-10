@@ -432,8 +432,31 @@ def _print_show(a):
         print("  back in progress for its holder:", ", ".join(f"#{i}" for i in a["resumed"]))
     if a.get("close_check"):
         print("\n".join(_close_check_lines(a["close_check"], a["id"] if "merged" not in a else a["merged"]["id"])))
+    if a.get("goal_checks"):
+        print("\n".join(_goal_check_lines(a["goal_checks"])))
     for e in a.get("events", [])[:8]:
         print(f"  {e['at']} {e['actor']}: {e['change']}")
+
+
+def _goal_check_lines(rows):
+    """The reply of done, drop, and goal done when a goal has no open item now (#4970): who decides whether
+    its done-when holds."""
+    out = []
+    for x in rows:
+        test = f" ({_cut(x['done_when'], 120)})" if x["done_when"] else ""
+        if x["asked"] == "you":
+            out.append(f"  GOAL {x['goal']} has no open item now: you own it. Does its done-when hold{test}? Yes: "
+                       f"maxpm goal done {x['goal']} --result \"<one line>\""
+                       + (" --drop-open (the backlog items " + ", ".join(f"#{i}" for i in x["backlog"]) + " stay)"
+                          if x["backlog"] else "")
+                       + f". No: add the items it still needs (maxpm add \"<title>\" --goal {x['goal']})")
+        elif x["asked"] == "manager":
+            out.append(f"  GOAL {x['goal']} has no open item now and no owner: the manager decides whether its "
+                       f"done-when holds{test} (maxpm manage lists it)")
+        else:
+            out.append(f"  GOAL {x['goal']} has no open item now: MaximizePM asked its owner {x['asked']} whether its "
+                       f"done-when holds")
+    return out
 
 
 def _close_check_lines(rows, closed, r="maxpm"):
@@ -2579,6 +2602,13 @@ def _findings_lines(f, r):
                    + (f" (and {len(x['closes']) - 1} more)" if len(x["closes"]) > 1 else "")
                    + f".  Close it ({r} done|drop {x['id']} --note \"<why>\"), merge it, or {r} keep {x['id']} "
                    f"--close {c['id']} --note \"<why>\"")
+    for x in f.get("goal_checks", []):
+        last = x["last"]
+        out.append(f"  GOAL DONE? {x['goal']} [{x['project']}] has no open item and "
+                   + ("is shared (no owner)" if x["shared"] else "no owner")
+                   + (f"; the last one closed was #{last['id']} {_cut(last['title'], 40)}" if last else "")
+                   + ". " + x["question"].replace("maxpm ", f"{r} ")
+                   + ". Ask the user when only they can tell")
     if f["human_ready"]:
         out.append("  WAITS ON THE USER: " + ", ".join(f"#{x['id']} {_cut(x['title'], 40)}" for x in f["human_ready"][:6]))
         looks = [x for x in f["human_ready"][:6] if x.get("found_during") and x["title"].lower().startswith("look at")]
@@ -3687,6 +3717,8 @@ def render(a, res):
                     print("  " + _fmt_item(it, show_reason=False))
                 if not g.get("items"):
                     print(f"  no items yet: maxpm add \"<title>\" --goal {g['name']}")
+        if isinstance(res, dict) and res.get("goal_checks"):
+            print("\n".join(_goal_check_lines(res["goal_checks"])))
         return
     if c == "review" and a.rcmd == "step":
         rows = [res] if isinstance(res, dict) else res

@@ -1540,6 +1540,90 @@ class Goals(Base):
         self.assertIn("goal g1 expired", core.inbox(self.c, "ag")[0]["body"].replace("ownership of ", ""))
 
 
+class GoalDoneWhen(Base):
+    """The close of a goal's last open item asks whether its done-when holds: the owner, else the manager (#4970)."""
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "shop")
+        for n in ("ag", "bo"):
+            core.register(self.c, n)
+
+    def finish(self, item_id, who):
+        core.claim(self.c, item_id, who)
+        return core.done(self.c, item_id, "ok", who)
+
+    def test_owner_is_asked_when_another_agent_closes_the_last_item(self):
+        core.goal_add(self.c, "shop", "checkout", "customers can pay", "a test order succeeds", "t")
+        a = core.item_add(self.c, "shop", "pay button", goals=["checkout"])["id"]
+        b = core.item_add(self.c, "shop", "receipt", goals=["checkout"])["id"]
+        core.goal_own(self.c, "checkout", "ag")
+        r = core.done(self.c, a, "ok", "bo")  # one item still open: nobody is asked
+        self.assertEqual(r["goal_checks"], [])
+        r = core.drop(self.c, b, "bo", note="not needed")  # a drop of the last one asks too
+        self.assertEqual([(x["goal"], x["asked"]) for x in r["goal_checks"]], [("checkout", "ag")])
+        body = [m["body"] for m in core.inbox(self.c, "ag") if "last open item" in m["body"]]
+        self.assertEqual(len(body), 1)  # in the notice that bo dropped it, not a second one
+        self.assertIn(f"bo dropped #{b} receipt (your goal checkout): not needed. It was the last open item", body[0])
+        self.assertIn("Does its done-when hold (a test order succeeds)?", body[0])
+        self.assertIn("maxpm goal done checkout", body[0])
+        self.assertEqual(core.manager_findings(self.c)["goal_checks"], [])  # the owner decides, not the manager
+
+    def test_owner_that_closes_the_last_item_reads_the_question_in_the_reply(self):
+        from river import cli
+        core.goal_add(self.c, "shop", "checkout", done_when="a test order succeeds", actor="t")
+        core.goal_own(self.c, "checkout", "ag")
+        a = core.item_add(self.c, "shop", "pay button", actor="ag")["id"]
+        core.item_add(self.c, "shop", "someday", actor="ag", backlog="later")
+        r = self.finish(a, "ag")
+        self.assertEqual([(x["asked"], len(x["backlog"])) for x in r["goal_checks"]], [("you", 1)])
+        self.assertFalse([m for m in core.inbox(self.c, "ag") if "last open item" in m["body"]])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli._print_show(r)  # the reply of done
+        self.assertIn("GOAL checkout has no open item now: you own it", out.getvalue())
+        self.assertIn("--drop-open", out.getvalue())
+
+    def test_goal_with_no_owner_is_a_manager_finding_until_completed_or_given_work(self):
+        from river import cli
+        core.goal_add(self.c, "shop", "speed", "fast pages", "p95 under 1s", "t", shared=True)
+        core.goal_add(self.c, "shop", "empty", "nothing planned yet", actor="t")  # no items: no question
+        a = core.item_add(self.c, "shop", "cache", goals=["speed"])["id"]
+        self.assertEqual(core.manager_findings(self.c)["goal_checks"], [])
+        r = self.finish(a, "ag")
+        self.assertEqual([(x["goal"], x["asked"]) for x in r["goal_checks"]], [("speed", "manager")])
+        f = core.manager_findings(self.c)
+        self.assertEqual([(x["goal"], x["shared"], x["last"]["id"]) for x in f["goal_checks"]], [("speed", True, a)])
+        self.assertIn("goal:speed", core._finding_keys(f))
+        text = "\n".join(cli._findings_lines(f, "maxpm --as m"))
+        self.assertIn("GOAL DONE? speed [shop] has no open item and is shared (no owner)", text)
+        self.assertIn("Does its done-when hold (p95 under 1s)? Yes: maxpm --as m goal done speed", text)
+        b = core.item_add(self.c, "shop", "cdn", goals=["speed"])["id"]  # the manager says no: more work
+        self.assertEqual(core.manager_findings(self.c)["goal_checks"], [])
+        self.finish(b, "ag")
+        core.goal_done(self.c, "speed", "p95 is 0.8s", "m")
+        self.assertEqual(core.manager_findings(self.c)["goal_checks"], [])
+
+    def test_expired_owner_counts_as_no_owner(self):
+        core.goal_add(self.c, "shop", "g1", actor="t")
+        core.goal_own(self.c, "g1", "ag")
+        a = core.item_add(self.c, "shop", "x", actor="ag")["id"]
+        core.claim(self.c, a, "ag")
+        self.c.execute("UPDATE goals SET owner_expires_at=?", (core.iso(core.now() - timedelta(minutes=1)),))
+        r = core.done(self.c, a, "ok", "ag")
+        self.assertEqual(r["goal_checks"][0]["asked"], "manager")
+        self.assertEqual([x["goal"] for x in core.manager_findings(self.c)["goal_checks"]], ["g1"])
+
+    def test_completed_sub_goal_asks_about_its_parent(self):
+        core.goal_add(self.c, "shop", "launch", done_when="the shop is live", actor="t", shared=True)
+        core.goal_add(self.c, "shop", "pay", actor="t", parent="launch")
+        a = core.item_add(self.c, "shop", "stripe", goals=["pay"])["id"]
+        r = self.finish(a, "ag")
+        self.assertEqual([x["goal"] for x in r["goal_checks"]], ["pay"])  # the parent has an open sub-goal still
+        g = core.goal_done(self.c, "pay", "stripe works", "ag")
+        self.assertEqual([(x["goal"], x["asked"]) for x in g["goal_checks"]], [("launch", "manager")])
+        self.assertEqual([x["goal"] for x in core.manager_findings(self.c)["goal_checks"]], ["launch"])
+
+
 class GoalOwners(Base):
     def setUp(self):
         super().setUp()

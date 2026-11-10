@@ -55,8 +55,8 @@ BLOCKED_SIGNS = ("sender", "waits", "item")
 BLOCKED_WINDOW = timedelta(minutes=3)
 # New findings of these kinds wait manage_wait_low: an agent that waits ends by itself after wait_max, and a
 # person gets a notification for an item that is ready for them, and the closer decides the items its close
-# check listed (unneeded, #3286).
-LOW_FINDINGS = ("waiting", "human", "unneeded")
+# check listed (unneeded, #3286). A goal with nothing open waits for nobody (goal, #4970).
+LOW_FINDINGS = ("waiting", "human", "unneeded", "goal")
 
 DEFAULT_SETTINGS = {
     "lease_ttl": "30m",
@@ -2052,15 +2052,75 @@ def _tag(conn, item_id, goal, actor):
                   to=g["owner"], item_id=item_id)
 
 
-def _goal_notice(conn, item_id, actor, verb, detail=None):
-    """Tell each goal's owner when someone else claims or finishes an item tagged with it."""
+def _goal_notice(conn, item_id, actor, verb, detail=None, ask=None):
+    """Tell each goal's owner when someone else claims or finishes an item tagged with it. ask: goal name ->
+    the done-when question for that goal's owner (the item was its last open one), in the same notice."""
+    ask = ask or {}
     for g in conn.execute("SELECT g.name, g.owner FROM item_goals ig JOIN goals g ON g.id=ig.goal_id "
                           "WHERE ig.item_id=? AND g.owner IS NOT NULL AND g.status='open'", (item_id,)).fetchall():
-        if actor and g["owner"] != actor:
+        if (actor and g["owner"] != actor) or g["name"] in ask:
             it = _item(conn, item_id)
-            _send(conn, "notice", "maxpm", f"{actor} {verb} #{item_id} {it['title']} (your goal {g['name']})"
-                  + (f": {detail}" if detail else ""),
+            _send(conn, "notice", "maxpm", f"{actor or 'someone'} {verb} #{item_id} {it['title']} (your goal {g['name']})"
+                  + (f": {detail}" if detail else "")
+                  + (f". It was the last open item of the goal. {ask[g['name']]}" if g["name"] in ask else ""),
                   to=g["owner"], item_id=item_id)
+
+
+def _goal_emptied(conn, g):
+    """True when an open goal has no open item that is offered (backlog items do not count) and no open
+    sub-goal, after some work: a closed item, or a complete sub-goal. Then its done-when test may hold."""
+    if g["status"] != "open":
+        return False
+    if conn.execute("SELECT 1 FROM item_goals ig JOIN items i ON i.id=ig.item_id WHERE ig.goal_id=? "
+                    f"AND i.status IN {OPEN_STATES} AND i.backlog_at IS NULL", (g["id"],)).fetchone():
+        return False
+    if conn.execute("SELECT 1 FROM goals WHERE parent_id=? AND status='open'", (g["id"],)).fetchone():
+        return False
+    return bool(conn.execute("SELECT 1 FROM item_goals ig JOIN items i ON i.id=ig.item_id WHERE ig.goal_id=? "
+                             f"AND i.status IN {CLOSED_STATES}", (g["id"],)).fetchone()
+                or conn.execute("SELECT 1 FROM goals WHERE parent_id=? AND status='complete'", (g["id"],)).fetchone())
+
+
+def _goal_owner_live(g):
+    """The goal's owner while its claim lasts, else None (an owner past goal_lease is no owner)."""
+    return g["owner"] if g["owner"] and (g["owner_expires_at"] or "") >= iso(now()) else None
+
+
+def _ask_done_when(conn, goals, actor, last, send=True):
+    """Inside a tx, after the close of a goal's item (or a sub-goal's completion): for each goal that has no
+    open item now, ask whether its done-when test holds (#4970). Nobody asked before, so 12 goals stayed open
+    with nothing left to do. The owner gets a notice (the closer, when it owns the goal, reads it in the reply);
+    a goal with no owner (shared, or its owner's claim ran out) is the manager's: manager_findings lists it
+    until someone completes it or adds work. last: what closed, '#12 <title>' or 'sub-goal <name>'.
+    send=False: the caller puts each owner's question (in 'question') into its own notice.
+    Returns one dict per goal for the reply: goal, done_when, backlog, asked ('you', the owner, or 'manager')."""
+    out = []
+    for g in goals:
+        if not _goal_emptied(conn, g):
+            continue
+        owner = _goal_owner_live(g)
+        backlog = [r["id"] for r in conn.execute(
+            "SELECT i.id FROM item_goals ig JOIN items i ON i.id=ig.item_id WHERE ig.goal_id=? AND i.status='open' "
+            "AND i.backlog_at IS NOT NULL ORDER BY i.id", (g["id"],))]
+        if owner and owner != actor and send:
+            _send(conn, "notice", "maxpm", f"{last} was the last open item of your goal {g['name']}. "
+                  + _done_when_question(g, backlog), to=owner)
+        _event(conn, None, actor, f"goal {g['name']}: no open item after {last}; asked "
+               + (f"{owner} if done-when holds" if owner else "the manager if done-when holds (no owner)"))
+        out.append({"goal": g["name"], "done_when": g["done_when"], "backlog": backlog,
+                    "asked": "you" if owner and owner == actor else owner or "manager",
+                    "question": _done_when_question(g, backlog)})
+    return out
+
+
+def _done_when_question(g, backlog=()):
+    """The question to whoever decides a goal with no open item: does done-when hold, and the two answers."""
+    test = f"Does its done-when hold ({g['done_when']})?" if g["done_when"] else \
+        f"Is its outcome reached ({g['outcome'] or 'no outcome written'})?"
+    return (test + f" Yes: maxpm goal done {g['name']} --result \"<one line>\""
+            + (" --drop-open (or activate the backlog items " + ", ".join(f"#{i}" for i in backlog) + ")"
+               if backlog else "")
+            + f". No: add the items it still needs: maxpm add \"<title>\" --goal {g['name']}")
 
 
 def _goal_view(conn, g, ann=None):
@@ -2393,7 +2453,11 @@ def goal_done(conn, name, result, actor=None, drop_open=False):
         conn.execute("UPDATE goals SET status='complete', result=?, completed_at=?, owner=NULL, owner_expires_at=NULL "
                      "WHERE id=?", (result.strip(), iso(now()), g["id"]))
         _event(conn, None, actor, f"goal {name} complete: {result.strip()}")
-    return goal_show(conn, name)
+        checks = _ask_done_when(conn, conn.execute("SELECT * FROM goals WHERE id=?", (g["parent_id"],)).fetchall(),
+                                actor, f"sub-goal {name}") if g["parent_id"] else []
+    res = goal_show(conn, name)
+    res["goal_checks"] = checks
+    return res
 
 
 def goal_reopen(conn, name, actor=None):
@@ -6674,7 +6738,11 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
             _hook(conn, "deployed", it["target"], it["id"], actor)
         elif status == "done" and it["kind"] == "review":
             _hook(conn, "review-passed", it["target"], it["id"], actor, _review_deploy(conn, it["id"]))
-        _goal_notice(conn, it["id"], actor, "finished" if status == "done" else status, output)
+        goal_checks = _ask_done_when(conn, conn.execute(
+            "SELECT g.* FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? ORDER BY g.rank, g.id",
+            (it["id"],)).fetchall(), actor, f"#{it['id']} {it['title']}", send=False)
+        _goal_notice(conn, it["id"], actor, "finished" if status == "done" else status, output or note,
+                     ask={x["goal"]: x["question"] for x in goal_checks if x["asked"] not in ("you", "manager")})
         newly, resumed = [], []
         if status in CLOSED_STATES:
             resumed = _resume_holds(conn, it["id"])
@@ -6707,6 +6775,7 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
     res["now_ready"] = newly
     res["resumed"] = resumed
     res["close_check"] = unneeded
+    res["goal_checks"] = goal_checks
     return res
 
 
@@ -11647,8 +11716,23 @@ def manager_findings(conn):
     unneeded = [{"id": e["id"], "title": e["title"], "doer": e["doer"], "project": e["project"],
                  "closes": [{"id": c["id"], "why": c["why"]} for c in e["closes"]]}
                 for e in close_open(conn) if not ann[e["id"]]["project_archived"]]
+    # A goal with no owner and no open item: nobody else asks whether its done-when holds (#4970).
+    goal_checks = []
+    for g in conn.execute("SELECT g.*, p.name project FROM goals g JOIN projects p ON p.id=g.project_id "
+                          "WHERE g.status='open' AND p.archived=0 ORDER BY p.rank, g.rank, g.id").fetchall():
+        if _goal_owner_live(g) or not _goal_emptied(conn, g):
+            continue
+        last = conn.execute("SELECT i.id, i.title, i.closed_at FROM item_goals ig JOIN items i ON i.id=ig.item_id "
+                            f"WHERE ig.goal_id=? AND i.status IN {CLOSED_STATES} ORDER BY i.closed_at DESC, i.id DESC "
+                            "LIMIT 1", (g["id"],)).fetchone()
+        backlog = [r["id"] for r in conn.execute(
+            "SELECT i.id FROM item_goals ig JOIN items i ON i.id=ig.item_id WHERE ig.goal_id=? AND i.status='open' "
+            "AND i.backlog_at IS NOT NULL ORDER BY i.id", (g["id"],))]
+        goal_checks.append({"goal": g["name"], "project": g["project"], "shared": bool(g["shared"]),
+                            "done_when": g["done_when"], "outcome": g["outcome"], "backlog": backlog,
+                            "last": dict(last) if last else None, "question": _done_when_question(g, backlog)})
     return {"stuck": stuck, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
-            "unneeded": unneeded,
+            "unneeded": unneeded, "goal_checks": goal_checks,
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "targets": targets, "questions": questions,
             "human_ready": [{"id": x["id"], "title": x["title"], "found_during": x["found_during"]} for x in sorted(
@@ -11663,6 +11747,7 @@ def _finding_keys(f):
                   | {f"target:{x['target']}" for x in f["targets"]} | {f"question:{x['id']}" for x in f["questions"]}
                   | {"serve_loop" for x in f.get("serve_loop", [])}
                   | {f"unneeded:{x['id']}" for x in f.get("unneeded", [])}
+                  | {f"goal:{x['goal']}" for x in f.get("goal_checks", [])}
                   | {f"human:{x['id']}" for x in f["human_ready"]})
 
 

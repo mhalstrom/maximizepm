@@ -158,6 +158,10 @@ without a goal stay in the normal queue.
   and `maxpm offer "<text>" --goal <name>` reach the owner of that goal.
   You get a notice when another agent adds, claims, or finishes an item of
   your goal.
+- When the last open item of a goal closes, MaximizePM asks whether done-when
+  holds: the reply of `done` or `drop` asks you when you own the goal, and a
+  notice asks the owner when another session closed it. A goal with no owner
+  (shared, or its owner's claim ran out) goes to the manager.
 - When done-when holds: `maxpm goal done <name> --result "<one line>"`.
   MaximizePM refuses while tagged items are open; finish them, untag them
   (`maxpm edit <id> --untag <name>`), or add `--drop-open`. Then run

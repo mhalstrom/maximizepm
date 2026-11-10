@@ -220,6 +220,9 @@ Stop when the user tells you to, and tell the user what you did.
 - MAY BE UNNECESSARY (also in `maxpm cleanup`): a close may have made the item unnecessary, and its closer
   did not decide. Close it with `--note` (a person gets one notice and can undo it), or keep it:
   `maxpm keep <id> --close <closed-id> --note "<why>"`.
+- GOAL DONE? (a goal with no owner, no open item, and finished work): decide whether its done-when holds.
+  Yes: `maxpm goal done <goal> --result "<one line>"`. No: add the items it still needs
+  (`maxpm add "<title>" --goal <goal>`). Ask the user only when only they can tell.
 - Planning: everything in `maxpm guide planner` (add, dep, prio, edit).
 
 ## Hand a long talk to an expert
