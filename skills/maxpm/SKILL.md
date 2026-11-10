@@ -9,11 +9,35 @@ The queue holds projects, items, and the dependencies between them. You pick
 the area where you already hold context; inside it, `maxpm next` returns the
 most important item that is ready (nothing it waits on is open).
 
+## Who does what
+
+- **The person**: decides what to build, unblocks, and corrects
+  misunderstandings.
+- **The manager**: keeps the work getting done. It directs the sessions and
+  unblocks them, and it hands a long talk to an expert. It takes no task.
+- **An expert**: a long talk with the person about one topic, for days. At its
+  end it writes the tasks and its notes. It takes no queue work by itself.
+- **A worker** (you, most of the time): takes a task and does it. The kind of
+  the task says how:
+  - work: build it, and add the tasks you find;
+  - review: judge a release; it always starts in a new session;
+  - fixes: repair what a review found (the reviewer may take them);
+  - deploy: release, then watch the release (a target with a deploy plan
+    releases by a hook that `maxpm serve` runs: no session types the command);
+  - operational: work on the system of work (a cleanup of a list, the order of
+    the graph); it starts in a new session.
+
+  A worker may hold a goal or a sub-goal, so that its tasks keep their context,
+  or a deploy target, so that one release runs at a time. A session continues
+  on linked tasks, where its context helps; a review or a cleanup, which must
+  judge, starts new. No session types a production command.
+
 ## Fastest start
 
 Run `maxpm go` in the project folder and follow the briefing. It names you,
-picks your role (owner, worker, unblocker, reviewer, deployer, context, idle), claims
-an item when there is one, and ends with the command to run next. Pass `--as <your-name>` on
+gives you a task when there is one, and ends with the command to run next. Its
+first line names what you do (WORKER; OWNER of a goal you hold; REVIEWER;
+DEPLOYER; EXPERT) or IDLE: nothing for you now, and why. Pass `--as <your-name>` on
 every later command. When the briefing asks, record your Claude Code session
 name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents
 prints `This session is <name> [<ref>]`, and names can repeat, so keep the ref), so
@@ -208,21 +232,6 @@ without a goal stay in the normal queue.
   finish a task of it, bring the handoff up to date (`maxpm goal handoff
   <name> --file <path>`: what your task changed, the decisions, what is left).
   The next session on the goal reads it in its go briefing.
-
-## Context sessions and forked workers
-
-With the setting `goal_context` on, `maxpm serve` starts a context session
-(role CONTEXT) for a goal with two or more ready agent items and no warm base.
-It reads the goal's handoff, the items' notes, and the files they touch, keeps
-the handoff current, runs `maxpm goal base <goal> --ready` as its last command,
-and ends. It edits no file and claims no item. A session that MaximizePM then
-starts for an item of the goal begins as a fork of that base
-(`claude --resume <base> --fork-session`) when the base has the same model and
-folder and a session used it less than `base_warm` (50m) ago: it reads the
-goal's context from the prompt cache. Its go briefing says so. An item that
-needs no goal context starts fresh: `maxpm add ... --no-goal-context` (or
-`maxpm edit <id> --no-goal-context`). `maxpm goal base <goal>` shows the base;
-`--clear` drops it.
 
 ## Adding work
 
@@ -606,3 +615,20 @@ your alert or question blocked when it sees that you stand still: you run
 
 Add `--json` to any command for machine-readable output. Errors name the rule
 and the next command to run.
+
+## Rarely used: context sessions and forked workers
+
+Off by default (`goal_context` off); a person turns it on.
+
+With the setting `goal_context` on, `maxpm serve` starts a context session
+(role CONTEXT) for a goal with two or more ready agent items and no warm base.
+It reads the goal's handoff, the items' notes, and the files they touch, keeps
+the handoff current, runs `maxpm goal base <goal> --ready` as its last command,
+and ends. It edits no file and claims no item. A session that MaximizePM then
+starts for an item of the goal begins as a fork of that base
+(`claude --resume <base> --fork-session`) when the base has the same model and
+folder and a session used it less than `base_warm` (50m) ago: it reads the
+goal's context from the prompt cache. Its go briefing says so. An item that
+needs no goal context starts fresh: `maxpm add ... --no-goal-context` (or
+`maxpm edit <id> --no-goal-context`). `maxpm goal base <goal>` shows the base;
+`--clear` drops it.

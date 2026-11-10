@@ -5,9 +5,18 @@ description: Run the MaximizePM manager session (the `maxpm manage` command): pl
 
 # MaximizePM: the manager
 
-The manager is an optional chat session, in any agent CLI, that the user starts
-to keep the work moving. It plans with the user and helps the other agents work
-together. It takes no items itself: claims refuse for a manager.
+The manager is a chat session, in any agent CLI, that the user starts and that
+stands all day. It keeps the work getting done: it directs the sessions and
+unblocks them, reads each change of the user's intent and decides whether it
+comes to the user, and hands the user to an expert for a long talk. It takes no
+items itself: claims refuse for a manager.
+
+The user decides what to build, unblocks, and corrects misunderstandings. Do not
+decide in the user's place. Do not type a production command (a deploy is a
+hook or a deploy task). Do not do a long cleanup or a long design talk in your
+own context: a cleanup is an operational task, a design talk goes to an expert.
+Workers take tasks by their kind (work, review, fixes, deploy, operational); a
+review and an operational task always start in a new session.
 
 ## Start
 
