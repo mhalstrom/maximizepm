@@ -22,6 +22,7 @@ import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
 import { makeMenu } from "../components/menu.js";
 import { markYou } from "./you.js";
+import { renderGive } from "./sessions-work.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
@@ -104,7 +105,8 @@ export function sessionRow(s) {
   const role = s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : "";
   const head = s.role === "expert" ? s.name : s.role === "manager" && s.title === "Manager" ? "" : s.title || s.name;
   const line2 = s.role === "expert" && s.topic ? s.topic : s.doing || s.state_label;
-  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-state="${esc(s.state)}">
+  // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
+  return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
       <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span>${s.at ? `<span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</div>
       <div class="sub">${esc(clip(line2, 120))}</div>
@@ -304,6 +306,7 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
       dict.showFor(list.some(x => x.name === agent) ? (s || {}).provider || j.provider : null, !!j.terminal);
       $("#sessOpen").innerHTML = headerOpen({ ...s, running: list.some(x => x.name === agent), session_url: j.session_url,
                                               terminal: j.terminal });
+      renderGive(agent);
       if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
     } catch (e) { /* the next poll tries again */ }
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
@@ -336,6 +339,7 @@ export function makeSessions({ isShown, onPick = () => {}, onYou = () => {} }) {
     $("#sessTitle").textContent = name || "";
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
     $("#sessState").innerHTML = ""; $("#sessItem").innerHTML = ""; $("#sessOpen").innerHTML = "";
+    renderGive(name);
     $("#sessText").value = "";
     loadPrompts(name);
     clearFiles();

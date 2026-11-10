@@ -296,3 +296,17 @@ button.srow-it { cursor: pointer; }
 #coldDlg { --dlg-w: var(--w-dlg-s); }
 #coldDlg h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-l); }
 #coldDlg .cold-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-3); margin-top: var(--sp-5); }
+/* The work controls of the list (#5102 step 2): Start an agent at the top, the ended sessions and Close N finished
+   at the foot; Give work in the head of a waiting session; the queue and + item in the Items list. */
+.sess-start { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin: 0 0 var(--sp-4); }
+.sess-foot { display: flex; gap: var(--sp-3); flex-wrap: wrap; padding-top: var(--sp-3); flex: none; }
+.sess-foot:empty { display: none; }
+.slist-ended { display: flex; flex-direction: column; gap: var(--sp-1); max-height: 30vh; overflow-y: auto; flex: none; padding-top: var(--sp-3); border-top: var(--hair) solid var(--line); }
+.slist-ended.hidden { display: none; }
+.srow.ended { opacity: .75; }
+.sess-item .give-row { display: inline-flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+.sess-item .give-sel { max-width: var(--w-l); }
+.sp-queue { padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); font-size: var(--fs-m); }
+.sp-add { display: flex; gap: var(--sp-2); margin: var(--sp-3) 0; }
+.sp-add input { flex: 1; min-width: 0; }
+.srow.drop { outline: var(--hair-2) dashed var(--accent); outline-offset: calc(-1 * var(--hair-2)); }

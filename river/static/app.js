@@ -19,6 +19,7 @@ import * as board from "./views/board.js";
 import * as needsYou from "./views/you-needs.js";
 import * as inbox from "./views/you-inbox.js";
 import * as youView from "./views/you.js";
+import * as sessWork from "./views/sessions-work.js";
 import * as projects from "./views/projects.js";
 import { makeSessions } from "./views/sessions.js";
 import { makeArtifacts } from "./views/artifacts.js";
@@ -244,7 +245,7 @@ async function refresh() {
   setState(await stateClient.load(stateClosed));
   if (S.dev_build) { if (window._build && window._build !== S.dev_build) return location.reload(); window._build = S.dev_build; }
   if (newCode(S.page_build, S.state_shape)) return;
-  renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); youView.renderTakeovers(); projects.renderBlocked(); targets.renderTargets();
+  renderSelects(); renderCapacity(); board.renderNext(); projects.renderProjects(); board.renderWork(); board.renderStrip(); renderReady(); renderLoop(); board.renderAgents(); board.renderManager(); board.renderEvents(); settings.renderSettings(); youView.renderTakeovers(); sessWork.renderStart(); sessWork.renderFoot(); sessWork.renderGive(view.session); projects.renderBlocked(); targets.renderTargets();
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
@@ -262,7 +263,7 @@ async function refresh() {
 document.addEventListener("click", async (e) => {
   const t = e.target;
   // A view's own controls first (#4656), then what every view shares: agents, the drawer, item links.
-  for (const v of [needsYou, youView, board, inbox, projects, targets, settings]) if (v.onClick(t)) return;
+  for (const v of [needsYou, youView, sessWork, board, inbox, projects, targets, settings]) if (v.onClick(t)) return;
   if (t.dataset.startManager) {
     const ch = await chooseLaunch(S, { title: "Start the manager", go: "Start manager",
       what: "Manager: plans with you, starts agents, fills their queues, and stops stuck ones (maxpm manage)" });

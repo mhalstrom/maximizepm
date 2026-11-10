@@ -332,6 +332,38 @@ try {
         got = self.drive(driver, "/sessions/ag")
         self.assertEqual(got, {"badge": "! 2", "you": True, "chat": True})
 
+    def test_the_work_controls_of_the_sessions_list(self):
+        """#5102 step 2 (design #4657): Start an agent at the top of the list; Show ended at its foot, with the ended
+        sessions; Give work in the head of a waiting session; the queue and + item in a session's Items list."""
+        core.config_set(self.c, "setup_done", "on")
+        footer = core.item_add(self.c, "site", "footer")["id"]
+        core.register(self.c, "old", note="built the logo")
+        core.register(self.c, "wt")
+        core.queue_add(self.c, "ag", footer, actor="mark")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET last_seen='2026-01-01T00:00:00Z' WHERE name='old'")
+            self.c.execute("UPDATE agents SET role='waiting', waiting_in='site' WHERE name='wt'")
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessStart [data-launch]") && q("#sessFoot [data-sess-ended]"), "Start an agent and Show ended");
+  q("#sessFoot [data-sess-ended]").click();
+  await until(() => q('#sessEnded .srow[data-session="old"]'), "the ended session");
+  check(q('#sessions .srow[data-session="ag"][data-agent="ag"]'), "a running row is a drop target");
+  q('[data-sp-open="items"]').click();
+  await until(() => q("#spBody .sp-queue") && q("#spBody .sp-queue").textContent.includes("#FOOTER"), "the queue in Items");
+  q("#spBody [data-sp-add] input").value = "found in passing";
+  q("#spBody [data-sp-add]").requestSubmit();
+  await until(() => q("#toast").textContent.includes("found during #ITEM"), "+ item adds it");
+  history.pushState(null, "", "/sessions/wt"); dispatchEvent(new PopStateEvent("popstate"));
+  await until(() => q("#sessGive [data-give]"), "Give work for the waiting session");
+  q("#sessGive [data-give]").click();
+  await until(() => q("#toast").textContent.includes("Gave #"), "Give work pushes the item");
+  post({ ok: true });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''.replace("FOOTER", str(footer)).replace("ITEM", str(self.it))
+        self.assertEqual(self.drive(driver, "/sessions/ag"), {"ok": True})
+        found = [i for i in core.item_list(self.c, "site") if i["title"] == "found in passing"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(core._item(self.c, found[0]["id"])["reserved_for"], "wt")  # footer is in the queue of ag
+
     def test_the_message_box_stays_above_the_phone_keyboard(self):
         """#4902: on an iPhone the keyboard makes the visible part of the page (visualViewport) smaller and scrolls the
         page; the Sessions tab then covers that visible part, so the message box sits right above the keyboard. A

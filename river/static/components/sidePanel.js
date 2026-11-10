@@ -24,6 +24,9 @@ import { showRows, wireRows } from "../views/artifacts.js";
 import { makeComments, pathIn } from "./canvasComments.js";
 import { decorateDoc, updateAnswers } from "./canvasDoc.js";
 import { findMark, findClear, findGo } from "./findText.js";
+import { queueHtml } from "./agentActions.js";
+import { button } from "./button.js";
+import { S } from "../page.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
 const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i;
@@ -710,8 +713,10 @@ async function showList(kind = "artifacts", quiet = false) {
   if (!quiet || !list) {
     box.innerHTML = `<div class="sp-note sp-list" data-list="${kind}"><b>${LISTS[kind]} of ${esc(name || "this session")}</b>
       <div class="muted">${kind === "items" ? "The items this session claimed, finished, released or gave away. Open one in a tab." : "The files, local pages and claude.ai artifacts this session wrote or named. Open one in a tab, or type an address above."}</div>
+      ${kind === "items" ? addForm() : ""}
       <div class="sp-rows${kind === "artifacts" ? " sp-arts" : ""}"><div class="muted sl-none">${kind === "items" ? "Reading the history…" : "Reading the transcript…"}</div></div></div>`;
     list = box.querySelector(".sp-rows");
+    if (kind === "items") wireAdd(box.querySelector("[data-sp-add]"), name);
     if (kind === "artifacts") wireRows(list, (s, target) => openInPanel(target, s));
   }
   let rows = [];
@@ -721,12 +726,40 @@ async function showList(kind = "artifacts", quiet = false) {
   } catch (e) { /* an empty list says so */ }
   if (on !== kind || name !== session || !box.contains(list)) return;  // a tab or another session came first
   if (kind === "artifacts") return showRows(list, rows, "This session wrote or named nothing the side panel can show.");
-  const html = rows.map(x => `<div class="si-row">
+  lastItems[name] = rows;
+  const html = sessionQueue(name) + rows.map(x => `<div class="si-row">
       <span class="link" data-open="${x.id}">#${x.id}</span>
       <span class="si-t link" data-open="${x.id}">${esc(x.title)}</span>
       <span class="si-m">${chip("c-" + esc(x.status), esc(x.status.replace("_", " ")))} <span class="muted">${esc((x.did || []).join(", "))} · ${ago(x.at)}</span></span>
     </div>`).join("") || `<div class="muted sl-none">This session took no item yet.</div>`;
   if (list._html !== html) { list.innerHTML = html; list._html = html; }  // the same rows are not drawn again (#4844)
+}
+// The session's own queue (#5102 step 2, from the Board's Agents): above its items, each entry with × to take it out.
+function sessionQueue(name) {
+  const q = ((S && S.queues) || {})[name];
+  return q && q.length ? `<div class="sp-queue">${queueHtml(q, name)}</div>` : "";
+}
+// + item (#5102 step 2): a new item in the session's project, found during the session's item, in that item's goals.
+// The session's item: the one it holds, else the last one in its list.
+const lastItems = {};
+function addForm() {
+  return `<form class="sp-add" data-sp-add autocomplete="off"><input placeholder="A new item, found during this session's item" aria-label="The title of a new item">${button("+ item", { type: "submit", title: "Add the item in this session's project, found during its item" })}</form>`;
+}
+function wireAdd(form, name) {
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = form.querySelector("input"), title = input.value.trim();
+    if (!title) return input.focus();
+    const a = ((S && S.agents) || []).find(x => x.name === name) || { holds: [] };
+    const id = (a.holds[0] || {}).id || ((lastItems[name] || [])[0] || {}).id;
+    const it = id ? S.items.find(i => i.id === id) : null;
+    const project = it ? it.project : (a.waiting_in || "").split(",").filter(Boolean)[0];
+    if (!project) return toast("This session has no item and no project yet: add the item on the Plan tab", true);
+    try {
+      const r = await act("item_add", { project, title, found_during: it ? it.id : undefined, goals: it && (it.goals || []).length ? it.goals : undefined });
+      input.value = ""; toast(`Added #${r.id}${it ? `, found during #${it.id}` : ""}`);
+    } catch (err) { /* act showed it */ }
+  });
 }
 // A list of the session, from the session's header (Items, Artifacts): the panel opens on it.
 export function openList(kind) {

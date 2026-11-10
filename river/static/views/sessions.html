@@ -3,6 +3,8 @@
   <div class="sess-layout" id="sessLayout">
     <aside class="panel sess-side" aria-label="Running sessions">
       <h2 title="Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the message box of a session that runs in a tmux pane.">Running sessions</h2>
+      <!-- Start an agent and the open session slots (#5102 step 2): here, where the new session shows. -->
+      <div id="sessStart" class="sess-start"></div>
       <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. -->
       <div id="sessYouRow" class="slist-mgr slist-you" aria-label="You"></div>
       <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
@@ -11,6 +13,9 @@
         <div id="sessExpertRows" class="slist-rows"></div>
       </div>
       <div id="sessions" class="slist"></div>
+      <!-- The foot of the list (#5102 step 2): the ended sessions (read only) and Close N finished (the tmux panes). -->
+      <div id="sessEnded" class="slist-ended hidden" aria-label="Ended sessions"></div>
+      <div id="sessFoot" class="sess-foot"></div>
     </aside>
     <div class="panel sess-main hidden" id="sessMain">
       <div class="sess-head">
@@ -19,7 +24,7 @@
         <span class="spacer"></span><span id="sessOpen"></span>
         <button class="iconbtn" type="button" id="sessMore" aria-expanded="false" title="Its item, Settings, Open session, End, Items and Artifacts" aria-label="More of this session">⋯</button>
       </div>
-      <div class="sess-item"><span id="sessItem"></span><span class="spacer"></span>
+      <div class="sess-item"><span id="sessItem"></span><span id="sessGive" class="give-row"></span><span class="spacer"></span>
         <span class="sess-lists" aria-label="Open in the side panel">
           <button class="btn" type="button" data-sp-open="items" title="The items this session claimed, finished, released or gave away, in the side panel">Items</button>
           <button class="btn" type="button" data-sp-open="artifacts" title="The files, local pages and claude.ai artifact links this session wrote or named, in the side panel">Artifacts</button>
