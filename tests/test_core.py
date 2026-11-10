@@ -4695,6 +4695,68 @@ class SharedGoalHandoff(Base):
         self.assertNotIn("shared_handoffs", core.done(self.c, c, "x", "mark"))
 
 
+class BrokenRules(Base):
+    """The manager's briefing shows each role rule that the queue shows broken (#4976)."""
+
+    def keys(self):
+        return sorted(x["key"] for x in core.manager_findings(self.c)["broken_rules"])
+
+    def test_each_broken_rule_shows(self):
+        from river import cli
+        core.target_add(self.c, "web", "push")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        for n in ("dev", "rev", "ops", "mgr"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "review", "on")
+        self.assertEqual(self.keys(), [])
+        # A review taken by a used session (a person's push before the rule, for example).
+        x = self.add("site", "other")
+        core.claim(self.c, x, "rev")
+        core.done(self.c, x, "done", "rev")
+        a = self.add("site", "page")
+        core.claim(self.c, a, "dev")
+        core.done(self.c, a, "commit", "dev", ship_it=True)
+        rv = next(i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "review")
+        dep = next(i for i in core.item_show(self.c, a)["unblocks"] if core._item(self.c, i)["kind"] == "deploy")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='in_progress', assignee='rev' WHERE id=?", (rv,))
+        self.assertEqual(self.keys(), [f"review:{rv}"])
+        core.review_pass(self.c, rv, "ok", "rev")
+        # A deploy that the manager closed.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='in_progress', assignee='mgr' WHERE id=?", (dep,))
+        core.done(self.c, dep, "released", "mgr")
+        self.assertEqual(self.keys(), [f"manager-deploy:{dep}"])
+        # A session that holds the deploy of a target with a deploy hook types the production command.
+        core.target_hook(self.c, "web", "deploy", "make release", actor="mark")
+        b = self.add("site", "form")
+        core.claim(self.c, b, "dev")
+        dep2 = core.done(self.c, b, "commit", "dev", ship_it=True)["shipped_in"]
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='in_progress', assignee='ops' WHERE id=?", (dep2,))
+        self.assertIn(f"typed:{dep2}", self.keys())
+        # A switch left on: an automation setting off its default.
+        core.config_set(self.c, "auto_continue", "off", actor="mgr")
+        f = core.manager_findings(self.c)
+        sw = next(x for x in f["broken_rules"] if x["key"] == "setting:auto_continue")
+        self.assertIn("auto_continue is off for the whole queue (default tree), set by mgr at", sw["text"])
+        self.assertIn("rule:setting:auto_continue", core._finding_keys(f))
+        lines = "\n".join(cli._findings_lines(f, "maxpm --as mgr"))
+        self.assertIn("BROKEN RULE (an automation runs as its default says): auto_continue is off", lines)
+        self.assertIn("maxpm --as mgr config unset auto_continue", lines)
+        # An expert on a model other than that of its work.
+        t = core.item_add(self.c, "site", "the design talk", tier="expert", models={"model": "fable", "max_model": "fable"})["id"]
+        core.expert_make(self.c, "ex", "the design talk", "site", "mark")
+        core.set_agent_model(self.c, "ex", "opus")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='in_progress', assignee='ex' WHERE id=?", (t,))
+        ex = next(x for x in core.manager_findings(self.c)["broken_rules"] if x["key"] == "expert:ex")
+        self.assertIn("the expert ex runs opus; its task", ex["text"])
+
+
 class GoalLeases(Base):
     """Items of the agent's own goals and targets count against goal_max_leases, apart from max_leases (#414)."""
 

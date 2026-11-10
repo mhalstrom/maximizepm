@@ -12494,6 +12494,66 @@ def serve_loop(conn):
             "error": d.get("error"), "pid": d["pid"], "age": _short(age), "late": late}
 
 
+RULE_WINDOW = timedelta(hours=24)  # a broken rule of a closed task shows this long after the close
+AUTOMATION_SETTINGS = ("auto_review", "fresh_sessions", "auto_continue")  # a global value off its default shows
+
+
+def broken_rules(conn):
+    """The role rules that the queue shows broken now (#4976; the role model mark accepted on 2026-11-10), each
+    {"key", "rule", "text", "fix"}: a review held by a session that held a task before it; a deploy of a target
+    with a deploy hook that a session holds or closed (a session typed the production command); a deploy that a
+    manager closed in the last RULE_WINDOW; an expert on a model other than that of its work; and an automation
+    setting whose global value is off its default, with who set it and when (a switch left on, the sweep)."""
+    out = []
+    since = iso(now() - RULE_WINDOW)
+    for r in conn.execute("SELECT id, title, assignee FROM items WHERE kind='review' AND status='in_progress' "
+                          "AND assignee IS NOT NULL ORDER BY id").fetchall():
+        used = used_session(conn, r["assignee"], r["id"]) if _is_ai(conn, r["assignee"]) else None
+        if used is not None:
+            out.append({"key": f"review:{r['id']}", "rule": "a review starts in a new session",
+                        "text": f"review #{r['id']} is held by {r['assignee']}, which held #{used} before",
+                        "fix": f"maxpm release {r['id']} --note \"a review starts in a new session\""})
+    hooked = hooked_targets(conn)
+    for r in conn.execute("SELECT id, target, status, assignee, closed_at FROM items WHERE kind='deploy' AND "
+                          "(status='in_progress' OR (status='done' AND closed_at > ?)) ORDER BY id", (since,)).fetchall():
+        by = r["assignee"] if r["status"] == "in_progress" else _done_by(conn, r["id"])
+        if r["target"] in hooked and by and _is_ai(conn, by):
+            out.append({"key": f"typed:{r['id']}", "rule": "no session types a production command",
+                        "text": f"deploy #{r['id']} of {r['target']} (it has a deploy hook) is "
+                                + ("held" if r["status"] == "in_progress" else "closed") + f" by the session {by}",
+                        "fix": "maxpm serve runs the hook; a session releases the deploy item: maxpm release "
+                               f"{r['id']}" if r["status"] == "in_progress" else "none now; see that it does not happen again"})
+        elif r["status"] == "done" and by and conn.execute(
+                "SELECT 1 FROM agents WHERE name=? AND role='manager' AND kind='ai'", (by,)).fetchone():
+            out.append({"key": f"manager-deploy:{r['id']}", "rule": "the manager does not deploy",
+                        "text": f"deploy #{r['id']} of {r['target']} was closed by the manager {by}",
+                        "fix": f"a deploy hook for {r['target']} (maxpm target hook {r['target']} deploy \"<release "
+                               f"command>\") or a deploy task for a worker"})
+    ladder = parse_ladder(setting(conn, "model_ladder"))
+    for a in conn.execute("SELECT name, model FROM agents WHERE role='expert' AND kind='ai' ORDER BY name").fetchall():
+        task = expert_task(conn, a["name"])
+        if task is None or not a["model"]:
+            continue
+        want, why = session_model(conn, task)
+        have = ladder_short(ladder, a["model"]) or a["model"]
+        if want and have != (ladder_short(ladder, want) or want):
+            out.append({"key": f"expert:{a['name']}", "rule": "an expert runs the model of its work",
+                        "text": f"the expert {a['name']} runs {have}; its task #{task['id']} calls for {want} ({why})",
+                        "fix": f"ask the user; to change it: maxpm expert end {a['name']}, then maxpm expert start "
+                               f"{a['name']} --resume --model {want}"})
+    for key in AUTOMATION_SETTINGS:
+        row = conn.execute("SELECT value FROM settings WHERE scope='global' AND key=?", (key,)).fetchone()
+        if row is None or row["value"] == DEFAULT_SETTINGS[key]:
+            continue
+        ev = conn.execute("SELECT actor, at FROM events WHERE item_id IS NULL AND change LIKE ? ORDER BY id DESC LIMIT 1",
+                          (f"setting global {key}=%",)).fetchone()
+        out.append({"key": f"setting:{key}", "rule": "an automation runs as its default says",
+                    "text": f"{key} is {row['value']} for the whole queue (default {DEFAULT_SETTINGS[key]})"
+                            + (f", set by {ev['actor'] or 'a person'} at {ev['at']}" if ev else ""),
+                    "fix": f"ask the user whether it is still wanted; else: maxpm config unset {key}"})
+    return out
+
+
 def manager_findings(conn):
     """What a manager acts on: stuck agents, agents that wait too long, projects with ready agent work and no
     agent, targets whose owner is away or gone, a loop of maxpm serve that is late, and what waits on the user."""
@@ -12570,7 +12630,7 @@ def manager_findings(conn):
     return {"stuck": stuck, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
             "unneeded": unneeded, "goal_checks": goal_checks,
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
-            "targets": targets, "questions": questions,
+            "targets": targets, "questions": questions, "broken_rules": broken_rules(conn),
             "human_ready": [{"id": x["id"], "title": x["title"], "found_during": x["found_during"]} for x in sorted(
                                (x for x in ann.values() if x["ready"] and x["doer"] == "human" and not x["project_archived"]),
                                key=lambda x: x["sort_key"])]}
@@ -12584,6 +12644,7 @@ def _finding_keys(f):
                   | {"serve_loop" for x in f.get("serve_loop", [])}
                   | {f"unneeded:{x['id']}" for x in f.get("unneeded", [])}
                   | {f"goal:{x['goal']}" for x in f.get("goal_checks", [])}
+                  | {f"rule:{x['key']}" for x in f.get("broken_rules", [])}
                   | {f"human:{x['id']}" for x in f["human_ready"]})
 
 

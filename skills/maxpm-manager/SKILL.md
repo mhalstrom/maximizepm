@@ -262,6 +262,12 @@ Stop when the user tells you to, and tell the user what you did.
 - MAY BE UNNECESSARY (also in `maxpm cleanup`): a close may have made the item unnecessary, and its closer
   did not decide. Close it with `--note` (a person gets one notice and can undo it), or keep it:
   `maxpm keep <id> --close <closed-id> --note "<why>"`.
+- BROKEN RULE (a role rule the queue shows broken): a review held by a session
+  that held a task before it, a session that holds or closed the deploy of a
+  target with a deploy hook, a deploy that you closed, an expert on a model
+  other than that of its work, or an automation setting (auto_review,
+  fresh_sessions, auto_continue) off its default for the whole queue. Do the
+  fix the line names; ask the user first for a setting or an expert's model.
 - GOAL DONE? (a goal with no owner, no open item, and finished work): decide whether its done-when holds.
   Yes: `maxpm goal done <goal> --result "<one line>"`. No: add the items it still needs
   (`maxpm add "<title>" --goal <goal>`). Ask the user only when only they can tell.

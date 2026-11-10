@@ -2691,6 +2691,8 @@ def _findings_lines(f, r):
                    + (f" (and {len(x['closes']) - 1} more)" if len(x["closes"]) > 1 else "")
                    + f".  Close it ({r} done|drop {x['id']} --note \"<why>\"), merge it, or {r} keep {x['id']} "
                    f"--close {c['id']} --note \"<why>\"")
+    for x in f.get("broken_rules", []):  # #4976: the role rules that the queue shows broken
+        out.append(f"  BROKEN RULE ({x['rule']}): {x['text']}.  " + x["fix"].replace("maxpm ", f"{r} "))
     for x in f.get("goal_checks", []):
         last = x["last"]
         out.append(f"  GOAL DONE? {x['goal']} [{x['project']}] has no open item and "
