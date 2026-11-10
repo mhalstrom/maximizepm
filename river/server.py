@@ -1743,11 +1743,15 @@ def auto_release(conn, runner=None):
     - A ready deploy item nobody holds, by its target's deployer mode (core.DEPLOYER_MODES): the target owner gets
       one alert when it can take it (core.owner_can_deploy); with no owner, or one that cannot, a new deployer
       session gets the target. With standing, that session starts while the release still waits on its review.
+    - A ready deploy item of a target with a deploy hook (maxpm target hook <t> deploy): serve runs the hook, its
+      release command, in a thread (core.deploy_hook_start); no session takes the item (#4971).
     No session starts while max_sessions agent sessions are live. Returns {"pushed": {item: agent},
-    "started": {item: session}, "alerted": {item: owner}, "failed": {item: why}}."""
-    out = {"pushed": {}, "started": {}, "alerted": {}, "failed": {}}
+    "started": {item: session}, "alerted": {item: owner}, "failed": {item: why}, "deploying": {item: hook run},
+    "lost": [deploy items whose hook run never ended]}."""
+    out = {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": []}
     ann = None
     cap = int(core.setting(conn, "max_sessions") or 0)
+    out["lost"] = core.deploy_hook_lost(conn)  # a deploy hook that never ended: its release starts again
 
     def full(item_id):
         if cap and core.live_sessions(conn) >= cap:
@@ -1804,10 +1808,29 @@ def auto_release(conn, runner=None):
                            f"WHERE i.kind='deploy' AND i.status IN {core.OPEN_STATES} AND t.deployer<>'off' "
                            "ORDER BY i.id").fetchall()
     seen = set()
+    hooked = core.hooked_targets(conn)
     for d in deploys:
         if d["target"] in seen:
             continue  # one deploy item at a time for each target: the first open one
         seen.add(d["target"])
+        if d["target"] in hooked:
+            # The target's deploy hook is its release command: serve runs it when the deploy item is ready, and
+            # starts no deployer session and alerts no owner (#4971). A failure starts the release again.
+            if d["status"] != "open" or not conn.execute(f"SELECT 1 FROM items i WHERE id=? AND {clear}",
+                                                         (d["id"],)).fetchone():
+                continue
+            ann = ann or core.annotate(conn)
+            a = ann.get(d["id"])
+            if a is None or a["project_archived"] or not a["ready"]:
+                continue
+            token = f"deploy:{d['id']}:{core.hook_token()}"
+            run = core.deploy_hook_start(conn, d["id"], token)
+            if run is None:
+                continue
+            hooks_soon(conn, token)
+            out["deploying"][d["id"]] = run
+            ann = None
+            continue
         if d["status"] != "open" or (d["deployer"] != "standing" and not conn.execute(
                 f"SELECT 1 FROM items i WHERE id=? AND {clear}", (d["id"],)).fetchone()):
             continue  # it runs already, or it waits on open work

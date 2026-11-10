@@ -160,6 +160,28 @@ class LaunchAgent(unittest.TestCase):
         b = core.go(self.c, self.dir.name, "other")
         self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", rv))
 
+    def test_serve_runs_the_deploy_hook_and_starts_no_deployer(self):
+        # #4971: a target with a deploy hook releases with no session that types its command.
+        rv, dep = self._release(owner="ops")
+        core.register(self.c, "mark", human=True)
+        core.target_hook(self.c, "web", "deploy", f'"{sys.executable}" -c "print(\'released\')"', actor="mark")
+        core.register(self.c, "rev")
+        core.claim(self.c, rv, "rev")
+        core.review_pass(self.c, rv, "ok", "rev")
+        sent = []
+        r = server.auto_release(self.c, runner=sent.append)
+        self.assertEqual((r["alerted"], r["started"], sent), ({}, {}, []))
+        self.assertIn(dep, r["deploying"])
+        import time
+        for _ in range(200):  # the hook runs in a thread of maxpm serve
+            if core._item(self.c, dep)["status"] == "done":
+                break
+            time.sleep(0.05)
+        it = core.item_show(self.c, dep)
+        self.assertEqual(it["status"], "done")
+        self.assertIn("deploy hook: exit 0", it["output"])
+        self.assertEqual(server.auto_release(self.c, runner=sent.append)["deploying"], {})
+
     def _release(self, owner="ops", review="on"):
         """A target web with one project, a release of one item by dev, and its review; returns (review, deploy)."""
         core.target_add(self.c, "web", "push, then smoke test")
@@ -215,7 +237,7 @@ class LaunchAgent(unittest.TestCase):
             self.c.execute("UPDATE items SET reserved_for=NULL, reserved_until=NULL WHERE id=?", (rv,))
             self.c.execute("DELETE FROM events WHERE item_id=? AND change LIKE 'release:%'", (rv,))
         core.config_set(self.c, "auto_review", "off")
-        self.assertEqual(server.auto_release(self.c, runner=sent.append), {"pushed": {}, "started": {}, "alerted": {}, "failed": {}})
+        self.assertEqual(server.auto_release(self.c, runner=sent.append), {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": []})
 
     def test_serve_keeps_the_review_from_authors_of_items_that_the_release_commits_name(self):
         # #1236: the covered list held only shipped items; the commits up to the release pin named more, and serve
@@ -287,7 +309,7 @@ class LaunchAgent(unittest.TestCase):
         core.ship(self.c, core.item_add(self.c, "site", "page")["id"])  # the release waits on open work
         with mock.patch.object(core, "annotate", side_effect=AssertionError("no graph")):
             self.assertEqual(server.auto_release(self.c, runner=[].append),
-                             {"pushed": {}, "started": {}, "alerted": {}, "failed": {}})
+                             {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": []})
 
     def test_serve_starts_no_release_session_past_max_sessions_and_does_not_repeat_a_failure(self):
         rv, dep = self._release()
@@ -453,7 +475,7 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual((nxt["ship_release"]["waits"], core._item(self.c, rv2)["kind"]), (True, "review"))
         sent = []
         self.assertEqual(server.auto_release(self.c, runner=sent.append),
-                         {"pushed": {}, "started": {}, "alerted": {}, "failed": {}})
+                         {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": []})
         self.assertEqual(sent, [])
         # Release now from the page, with a reason: the reviewer and the standing deployer start.
         core.register(self.c, "mark", human=True)

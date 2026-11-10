@@ -3888,6 +3888,17 @@ def render(a, res):
                 print(f"  each runs in {res['folder'] or 'the folder of the command that causes the event'}, for at "
                       f"most {res['timeout']} (hook_timeout), with MAXPM_EVENT, MAXPM_TARGET, MAXPM_REV, MAXPM_ITEM, "
                       f"and MAXPM_AGENT set")
+            if any(h["event"] == "deploy" for h in res["hooks"]):
+                t = res["target"]
+                print(f"  deploy: maxpm serve runs it when the deploy item is ready, for at most {res['deploy_timeout']} "
+                      f"(deploy_timeout); no session takes the deploy item. A failure keeps it open, adds a fix item, "
+                      f"and the release starts again")
+                if res.get("review") != "on":
+                    print(f"  the review is off for {t}: the hook runs with no review. Turn it on: "
+                          f"maxpm config set review on --project deploy-{t}")
+                if res.get("deployer") == "off":
+                    print(f"  the deployer mode of {t} is off: maxpm serve runs no deploy hook. Turn it on: "
+                          f"maxpm target deployer {t} launch")
             free = [e for e in res["events"] if e not in {h["event"] for h in res["hooks"]}]
             if free:
                 print(f"  set one: maxpm target hook {res['target']} <event> \"<command>\"   events with no hook:")

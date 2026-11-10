@@ -102,7 +102,7 @@ Stop when the user tells you to, and tell the user what you did.
   the cut release asks for still goes out with that release.
 - **A hook runs a project's command on a release event**:
   `maxpm target hook <target> <event> "<command>"` (events: release-cut,
-  review-passed, review-failed, deployed; `--clear` removes one; no event lists
+  review-passed, review-failed, deployed, deploy; `--clear` removes one; no event lists
   them; only a person or you set, change, or remove a hook). The maxpm command
   that causes the event runs the hook before it returns (when that command is
   in the sandbox of an agent session, maxpm serve runs it, outside the
@@ -113,6 +113,17 @@ Stop when the user tells you to, and tell the user what you did.
   by hand. A hook never undoes and never refuses its event: when it fails or
   runs longer than `hook_timeout` (10m), the target owner (you, with no owner)
   gets an alert with the exit code and the last lines of its output.
+- **A target with a deploy plan releases by a deploy hook** (mark: "the deploy
+  should be a hook"): `maxpm target hook <target> deploy "<release command>"`,
+  and `maxpm config set review on --project deploy-<target>`. No session types
+  the release command, and you do not run it: when the deploy item is ready
+  (its review passed), maxpm serve runs the hook (at most `deploy_timeout`, 2h),
+  and no session takes the deploy item. Exit 0 closes the deploy item. A failure
+  keeps it open, and the release starts again from its beginning: a fix item
+  with the output, a new review of the fix, then the hook again. Nobody runs the
+  command again by hand or repairs production by hand. A target where a push
+  to main is the release needs no deploy hook. `maxpm target deployer <t> off`
+  stops the hook too.
 - **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
   `maxpm launch --item <review id>`. The new session reviews (role REVIEWER) in a
   folder of the release; a waiting session that worked on the release does not get it.

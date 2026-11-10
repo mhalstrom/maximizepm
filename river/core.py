@@ -268,6 +268,9 @@ DEFAULT_SETTINGS = {
     # A hook (maxpm target hook) that runs longer than hook_timeout is stopped, with every process it started
     # (0s: no limit). Set it on the deploy project (deploy-<target>) when the hooks of one target are slow.
     "hook_timeout": "10m",
+    # The deploy hook of a target (maxpm target hook <target> deploy) is its release command: maxpm serve stops it
+    # at deploy_timeout instead of hook_timeout, and the release then starts again as after a failure (#4971).
+    "deploy_timeout": "2h",
     # A shell command, run in the release review's folder, that prints the messages of the commits a release ships,
     # for example git log --format=%B <last release>..<pinned commit>. Its environment has MAXPM_LAST_RELEASE (the
     # output of the target's last done deploy item), MAXPM_TARGET, and MAXPM_REVIEW. Every #<id> it prints is an
@@ -1277,7 +1280,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "similar_min":
         try:
@@ -2511,6 +2514,9 @@ HOOK_EVENTS = {
     "review-passed": "the review of the release is done (maxpm review pass)",
     "review-failed": "maxpm review fail sent the release back with fixes",
     "deployed": "the deploy item of the release is done",
+    "deploy": "the release command: maxpm serve runs it when the deploy item is ready (with review on: when the review "
+              "passed), and no session takes the deploy item. Exit 0 closes the deploy item; a failure keeps it open, "
+              "adds a fix item, and the release starts again: a new cut, a new review, then this hook again",
 }
 HOOK_ORPHAN_AFTER = 120  # seconds after which maxpm serve runs a queued hook whose command did not (it ended early)
 HOOK_TAIL = 15  # the lines of a hook's output that the command prints and the run keeps
@@ -2593,7 +2599,10 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
     folder = _hook_folder(conn, name)
     return {"target": name, "event": event, "changed": changed, "hooks": target_hooks(conn, name),
             "events": dict(HOOK_EVENTS), "folder": folder,
-            "timeout": setting(conn, "hook_timeout", project_id=_deploy_project_id(conn, name))}
+            "timeout": setting(conn, "hook_timeout", project_id=_deploy_project_id(conn, name)),
+            "deploy_timeout": setting(conn, "deploy_timeout", project_id=_deploy_project_id(conn, name)),
+            "review": setting(conn, "review", project_id=_deploy_project_id(conn, name)),
+            "deployer": _target(conn, name)["deployer"]}
 
 
 def _deploy_project_id(conn, target):
@@ -2617,7 +2626,7 @@ def _hook_folder(conn, target, deploy_id=None):
     return None
 
 
-def _hook(conn, event, target, item_id, actor, deploy_id=None):
+def _hook(conn, event, target, item_id, actor, deploy_id=None, token=None):
     """An event of a target occurred: when the target has a hook for it, queue one run. Inside the tx of the
     event, so an event that did not occur queues nothing. The command that caused the event runs the hook after
     that transaction (run_hooks): a hook can take minutes, and no command waits for the lock of the queue."""
@@ -2630,7 +2639,7 @@ def _hook(conn, event, target, item_id, actor, deploy_id=None):
     rev = conn.execute("SELECT cut_rev FROM items WHERE id=?", (deploy_id,)).fetchone()
     conn.execute("INSERT INTO hook_runs(target,event,command,item_id,deploy_id,rev,actor,queued_at,queued_by) "
                  "VALUES (?,?,?,?,?,?,?,?,?)", (target, event, h["command"], item_id, deploy_id,
-                                                rev["cut_rev"] if rev else None, actor, iso(now()), hook_token()))
+                                                rev["cut_rev"] if rev else None, actor, iso(now()), token or hook_token()))
 
 
 def _review_deploy(conn, review_id):
@@ -2721,7 +2730,8 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     the event stands."""
     import time
     target, event, cmd, actor = run["target"], run["event"], run["command"], run["actor"]
-    limit_text = setting(conn, "hook_timeout", item_id=run["deploy_id"])
+    limit_key = "deploy_timeout" if event == "deploy" else "hook_timeout"
+    limit_text = setting(conn, limit_key, item_id=run["deploy_id"])
     limit = parse_duration(limit_text).total_seconds()
     folder = _hook_folder(conn, target, run["deploy_id"])
     where = os.path.expanduser(folder) if folder else cwd
@@ -2748,7 +2758,7 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     tail = "\n".join(text.splitlines()[-HOOK_TAIL:])
     took = f"{secs:.0f}s" if secs < 90 else _short(timedelta(seconds=secs))
     ok = code == 0 and not timed_out
-    result = (f"stopped at hook_timeout ({limit_text}) after {took}" if timed_out
+    result = (f"stopped at {limit_key} ({limit_text}) after {took}" if timed_out
               else f"exit {code}, {took}" if code is not None else "not started")
     out = {"id": run["id"], "target": target, "event": event, "command": cmd, "item": run["item_id"],
            "deploy": run["deploy_id"], "rev": run["rev"], "folder": where, "exit_code": code, "timed_out": timed_out,
@@ -2760,7 +2770,7 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
         if run["deploy_id"] and conn.execute("SELECT 1 FROM items WHERE id=?", (run["deploy_id"],)).fetchone():
             _event(conn, run["deploy_id"], actor or "maxpm", f"hook {event}: {result}"
                    + (" (in the sandbox of an agent session)" if sandbox and not ok else "") + f": {cmd}")
-        if not ok:
+        if not ok and event != "deploy":  # a failed deploy has its own alert (_deploy_hook_end)
             tg = conn.execute("SELECT owner FROM targets WHERE name=?", (target,)).fetchone()
             to = (tg["owner"] if tg and tg["owner"] else None) or active_manager(conn)
             if to and to != actor:
@@ -2771,7 +2781,135 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
                       + (f" {HOOK_SANDBOX}." if sandbox else ""), to=to, item_id=run["deploy_id"])
                 out["alerted"] = to
         conn.execute("UPDATE hook_runs SET result=? WHERE id=?", (json.dumps(out), run["id"]))
+    if event == "deploy" and run["deploy_id"]:
+        out.update(_deploy_hook_end(conn, run, ok, result, tail, where))
+        with tx(conn):
+            conn.execute("UPDATE hook_runs SET result=? WHERE id=?", (json.dumps(out), run["id"]))
     return out
+
+
+# ---- the deploy hook (#4971, mark: 'the deploy should be a hook', 'if the target has a deploy plan', 'deploy should
+# be triggered. if it goes wrong we fix and start again from the beginning'). A target with a deploy hook releases
+# with no session that types its command: maxpm serve runs the hook when the deploy item is ready. While it runs the
+# deploy item waits on an outside blocker set by DEPLOY_HOOK_BY, so every reader of the queue sees that it runs.
+DEPLOY_HOOK_BY = "maxpm deploy hook"
+DEPLOY_HOOK_LOST = 600  # seconds after deploy_timeout when a run that never ended counts as failed
+
+
+def deploy_hook(conn, target):
+    """The deploy hook (the release command) of a target, or None."""
+    r = conn.execute("SELECT h.command FROM hooks h JOIN targets t ON t.id=h.target_id WHERE t.name=? "
+                     "AND h.event='deploy'", (target,)).fetchone() if target else None
+    return r["command"] if r else None
+
+
+def hooked_targets(conn):
+    """The names of the targets that have a deploy hook."""
+    return {r["name"] for r in conn.execute(
+        "SELECT t.name FROM hooks h JOIN targets t ON t.id=h.target_id WHERE h.event='deploy'")}
+
+
+def deploy_hook_refusal(conn, item, actor):
+    """Why this agent may not take this deploy item, or None: its target has a deploy hook, so maxpm serve runs
+    the release command and no session types it. A person may still take it."""
+    if item["kind"] != "deploy" or not _is_ai(conn, actor) or not deploy_hook(conn, item["target"]):
+        return None
+    return (f"target {item['target']} has a deploy hook: maxpm serve runs the release when deploy #{item['id']} is "
+            f"ready, and no session types its command (maxpm target hook {item['target']})")
+
+
+def deploy_hook_start(conn, dep_id, token=None):
+    """maxpm serve starts the deploy hook of a ready deploy item: the item waits on an outside blocker while it
+    runs, the release is cut when no reviewer cut it, and one run of the hook is queued for token. Returns the run
+    id, or None when the item is not open, nobody may start it now, or the target has no deploy hook."""
+    with tx(conn):
+        dep = _item(conn, dep_id)
+        cmd = deploy_hook(conn, dep["target"])
+        if (dep["kind"] != "deploy" or dep["status"] != "open" or dep["assignee"] or dep["blocked_reason"]
+                or not cmd):
+            return None
+        t = iso(now())
+        conn.execute("UPDATE items SET blocked_reason=?, blocked_at=?, blocked_until=NULL, blocked_set_by=? WHERE id=?",
+                     (f"the deploy hook of target {dep['target']} runs it (maxpm serve, since {t}); no session "
+                      f"takes it", t, DEPLOY_HOOK_BY, dep["id"]))
+        _release_cut(conn, dep["id"], "maxpm", "the deploy hook started")
+        if token:  # the release-cut hook of that cut runs first, in the same thread as the deploy
+            conn.execute("UPDATE hook_runs SET queued_by=? WHERE queued_by=? AND started_at IS NULL AND deploy_id=?",
+                         (token, hook_token(), dep["id"]))
+        _event(conn, dep["id"], "maxpm", f"deploy hook started by maxpm serve: {cmd}")
+        _hook(conn, "deploy", dep["target"], dep["id"], None, token=token)
+        run = conn.execute("SELECT MAX(id) FROM hook_runs WHERE deploy_id=? AND event='deploy'", (dep["id"],)).fetchone()[0]
+    return run
+
+
+def deploy_hook_lost(conn):
+    """Runs of a deploy hook that started and never ended, deploy_timeout and DEPLOY_HOOK_LOST ago (maxpm serve
+    stopped while one ran): each counts as a failed deploy, so the release starts again. Returns their deploy ids."""
+    out = []
+    for r in conn.execute("SELECT * FROM hook_runs WHERE event='deploy' AND started_at IS NOT NULL AND ended_at IS NULL "
+                          "ORDER BY id").fetchall():
+        limit = parse_duration(setting(conn, "deploy_timeout", item_id=r["deploy_id"])).total_seconds()
+        if (now() - parse_iso(r["started_at"])).total_seconds() < limit + DEPLOY_HOOK_LOST:
+            continue
+        with tx(conn):
+            if conn.execute("UPDATE hook_runs SET ended_at=? WHERE id=? AND ended_at IS NULL",
+                            (iso(now()), r["id"])).rowcount == 0:
+                continue
+        _deploy_hook_end(conn, dict(r), False, "the run did not end (maxpm serve stopped while it ran)", "", None)
+        out.append(r["deploy_id"])
+    return out
+
+
+def _deploy_hook_end(conn, run, ok, result, tail, folder):
+    """The deploy hook ended. Exit 0: the deploy item is done (its monitor item comes, the deployed hook runs).
+    Else the deploy item stays open, and the release starts again from its beginning: it is not cut, a fix item
+    that it waits on holds the failure, a new review covers the fix (with review on), and when that review passes
+    maxpm serve runs the hook again. Nobody runs the command again by hand or repairs production by hand."""
+    dep_id, target, cmd = run["deploy_id"], run["target"], run["command"]
+    with tx(conn):
+        dep = _item(conn, dep_id)
+        conn.execute("UPDATE items SET blocked_reason=NULL, blocked_at=NULL, blocked_until=NULL, blocked_set_by=NULL "
+                     "WHERE id=? AND blocked_set_by=?", (dep_id, DEPLOY_HOOK_BY))
+        if dep["status"] != "open":
+            return {"deploy_end": f"#{dep_id} is {dep['status']}: nothing to do"}
+        if ok:
+            _add_monitor(conn, dep, "maxpm")
+    last = (tail or "").strip().splitlines()[-1:] if tail else []
+    if ok:
+        done(conn, dep_id, f"deploy hook: {result}: {cmd}" + (f" ({last[0][:200]})" if last else ""), "maxpm")
+        run_hooks(conn, folder)  # the deployed hook of this close
+        return {"deploy_end": "done"}
+    with tx(conn):
+        dep = _item(conn, dep_id)
+        tg = _target(conn, target)
+        ships = conn.execute("SELECT i.project_id FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? "
+                             "AND i.kind NOT IN ('review','deploy') ORDER BY i.id LIMIT 1", (dep_id,)).fetchone()
+        project_id = ships["project_id"] if ships else dep["project_id"]
+        conn.execute("UPDATE items SET cut_at=NULL, cut_rev=NULL WHERE id=?", (dep_id,))
+        top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (project_id,)).fetchone()["m"]
+        context = (f"The deploy hook of target {target} failed ({result}) for deploy #{dep_id}: {cmd}"
+                   + (f" (in {folder})" if folder else "") + (f"\nThe last lines of its output:\n{tail[-2000:]}" if tail else "")
+                   + "\nFind the cause and fix it in the code or in the release script, and commit it. Do not run the "
+                   "release command again and do not repair production by hand: when this item is done, the release "
+                   "starts again from its beginning (a new review, then maxpm serve runs the deploy hook again).")
+        cur = conn.execute(
+            "INSERT INTO items(project_id,title,priority,rank,doer,context,kind,target,found_during,created_at) "
+            "VALUES (?,?,?,?,'ai',?,'work',?,?,?)",
+            (project_id, f"Fix the failed deploy of {target} (deploy #{dep_id}): {result}", dep["priority"], top + 1,
+             context, target, dep_id, iso(now())))
+        fix = cur.lastrowid
+        _event(conn, fix, "maxpm", f"added: the deploy hook of #{dep_id} failed ({result})")
+        _dep_add(conn, dep_id, fix, "maxpm", alert=False)
+        rv = _release_review(conn, dep, tg, "maxpm")
+        _event(conn, dep_id, "maxpm", f"deploy hook failed ({result}); the release starts again: it is not cut, it "
+                                      f"waits on fix #{fix}" + (f" and a new review #{rv['id']}" if rv else ""))
+        to = tg["owner"] or active_manager(conn)
+        if to:
+            _send(conn, "alert", "maxpm", f"the deploy hook of target {target} failed ({result}) for deploy #{dep_id}: "
+                  f"{cmd}" + (f"\n{tail[-1500:]}" if tail else "") + f"\nThe deploy item stays open, and the release "
+                  f"starts again: fix #{fix}" + (f", then a new review #{rv['id']}" if rv else "")
+                  + ", then maxpm serve runs the hook again. Do not run the command by hand.", to=to, item_id=dep_id)
+    return {"deploy_end": "failed", "fix": fix, "review": rv["id"] if rv else None, "alerted": to}
 
 
 # What maxpm serve starts for a target's deploys (maxpm target deployer):
@@ -4402,6 +4540,9 @@ def block(conn, item_id, reason=None, actor=None, until=None):
 def unblock(conn, item_id, actor=None):
     with tx(conn):
         it = _item(conn, item_id)
+        if it["blocked_set_by"] == DEPLOY_HOOK_BY:
+            raise RiverError(f"#{it['id']} waits while the deploy hook of target {it['target']} runs (maxpm serve); "
+                             f"the hook ends the wait")
         if it["blocked_set_by"] == CADENCE_BY:
             raise RiverError(f"#{it['id']} waits for the release cadence or the release order of target "
                              f"{it['target']}; a release sooner needs a reason: "
@@ -6484,6 +6625,9 @@ def _claim_row(conn, item_id, actor):
         raise RiverError(f"refused: #{item_id} is an expert-tier task: a person talks it through with a session of its "
                          f"own, so a worker does not take it. A new session starts for it: maxpm launch --item {item_id}, "
                          f"or maxpm expert start <name> --item {item_id}")
+    why = deploy_hook_refusal(conn, it0, actor)
+    if why:
+        raise RiverError(f"refused: {why}. Take other work: maxpm go")
     if it0["doer"] == "human" and ag["kind"] == "ai":
         raise RiverError(f"refused: #{item_id} is for a person. If you can do it or work around it, take it over "
                          f"(the user is told, and can undo it): maxpm takeover {item_id} --note \"<how you will do it>\"")
@@ -6613,6 +6757,8 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
         # not to a session that waits; with no maxpm serve, the next go takes it after FRESH_GRACE.
         fresh = {r["id"] for r in conn.execute("SELECT id FROM items WHERE fresh_start > ?",
                                                (iso(now() - FRESH_GRACE),))}
+        if _is_ai(conn, actor):
+            owned -= hooked_targets(conn)  # maxpm serve runs the release of a target with a deploy hook
         pool = [a for a in pool if (a["kind"] != "deploy" or a["target"] in owned)
                 and a["reserved_for"] in (None, actor) and a["id"] not in fresh]
         # An item whose lease ran out while its agent's session still works on it: no second agent takes it.
@@ -11216,8 +11362,9 @@ def _deploy_claim(conn, actor, names, take_free=False, brief=None, skip_released
     if not owned:
         return None
     ann = annotate(conn)
-    ready = sorted((a for a in ann.values() if a["kind"] == "deploy" and a["target"] in owned and a["ready"]),
-                   key=lambda a: a["sort_key"])
+    hooked = hooked_targets(conn) if _is_ai(conn, actor) else set()
+    ready = sorted((a for a in ann.values() if a["kind"] == "deploy" and a["target"] in owned and a["ready"]
+                    and a["target"] not in hooked), key=lambda a: a["sort_key"])
     for a in ready:
         try:
             return claim(conn, a["id"], actor)
@@ -11272,7 +11419,7 @@ def _work_for(conn, actor, names, role=None):
                     f"SELECT t.name FROM targets t JOIN projects p ON p.target=t.name WHERE t.owner IS NULL "
                     f"AND p.name IN ({','.join('?' * len(names))})", names) if not released_by(conn, r["name"], actor)}
             got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"])
-                        if a["kind"] == "deploy" and a["target"] in targets and a["ready"]), None)
+                        if a["kind"] == "deploy" and a["target"] in targets - hooked_targets(conn) and a["ready"]), None)
         else:
             got = next((a for a in sorted(ann.values(), key=lambda a: a["sort_key"]) if a["kind"] == "review"
                         and a["ready"] and a["reserved_for"] in (None, actor) and not reviewer_refusal(conn, a, actor)), None)

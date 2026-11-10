@@ -111,6 +111,11 @@ your type from your CLI's environment.
    sandbox). Do not run those commands by hand; a hook that fails does not
    undo your command, and the target owner gets an alert. Only a person or
    the manager sets or changes a hook: ask the manager when one is needed.
+   A target with a deploy hook releases by itself: `maxpm serve` runs the
+   release command when the deploy item is ready, and no session takes that
+   item. When the deploy fails, you get a fix item with the output: fix the
+   cause in the code and close it; do not run the release command and do not
+   repair production by hand. The release then starts again with a new review.
    With the setting `review` on, the deploy item first waits on one review
    of the whole release. `maxpm go` gives a ready review before new work
    (role REVIEWER; `--role reviewer` takes any), but never to an agent that

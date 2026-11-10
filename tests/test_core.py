@@ -5784,6 +5784,142 @@ class Locked(Base):
             self.assertEqual(ran, [False])
 
 
+class DeployHook(Base):
+    """A target with a deploy hook releases with no session that types its command: maxpm serve runs the hook when
+    the deploy item is ready; a failure keeps the deploy item open and starts the release again (#4971)."""
+
+    def setUp(self):
+        super().setUp()
+        core.target_add(self.c, "web", "push, then smoke test")
+        core.project_add(self.c, "site", target="web", path=self.dir.name)
+        for n in ("dev", "rev", "ops"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "review", "on")
+        core.target_own(self.c, "web", "ops")
+        a = self.add("site", "page")
+        core.claim(self.c, a, "dev")
+        core.done(self.c, a, "commit", "dev", ship_it=True)
+        ids = core.item_show(self.c, a)["unblocks"]
+        self.review = [i for i in ids if core.item_show(self.c, i)["kind"] == "review"][0]
+        self.deploy = [i for i in ids if i != self.review][0]
+        self.flag = os.path.join(self.dir.name, "fail")
+        path = os.path.join(self.dir.name, "release.py")
+        with open(path, "w") as f:  # fails while the file 'fail' exists; prints one line
+            f.write("import os, sys\n"
+                    f"if os.path.exists({self.flag!r}):\n    print('migration 7 failed'); sys.exit(4)\n"
+                    "print('released', os.environ['MAXPM_DEPLOY'])\n")
+        self.cmd = f'"{sys.executable}" "{path}"'
+        with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+            core.target_hook(self.c, "web", "deploy", self.cmd, actor="ops")
+        core.target_hook(self.c, "web", "deploy", self.cmd, actor="mark")
+
+    def run_deploy(self):
+        """What maxpm serve does in one pass for a ready deploy item: start the hook, then run it (here, not in a thread)."""
+        run = core.deploy_hook_start(self.c, self.deploy, "test-token")
+        self.assertIsNotNone(run)
+        a = core.annotate(self.c)[self.deploy]
+        self.assertFalse(a["ready"])  # it waits while the hook runs: nobody else takes it
+        self.assertIn("the deploy hook of target web runs it", a["blocked_text"])
+        with self.assertRaisesRegex(RiverError, "the hook ends the wait"):
+            core.unblock(self.c, self.deploy, "ops")
+        return core.run_hooks(self.c, token="test-token")
+
+    def pass_review(self, who):
+        core.register(self.c, who)
+        core.claim(self.c, self.review, who)
+        core.review_pass(self.c, self.review, None, who)
+
+    def test_no_session_takes_the_deploy_item_and_the_hook_closes_it(self):
+        self.pass_review("rev")
+        self.assertTrue(core.annotate(self.c)[self.deploy]["ready"])
+        # The owner's go, next, wait and claim give it to no session; a person may still take it.
+        b = core.go(self.c, self.dir.name, "ops", role="deployer")
+        self.assertEqual(b["role"], "idle")
+        self.assertNotIn(self.deploy, [x["id"] for x in core.next_item(self.c, None, actor="ops", limit=9)])
+        with self.assertRaisesRegex(RiverError, "target web has a deploy hook: maxpm serve runs the release"):
+            core.claim(self.c, self.deploy, "ops")
+        self.assertNotIn(f"#{self.deploy}", core._work_for(self.c, "ops", ["site"], role="deployer") or "")
+        self.assertIsNone(core.deploy_hook_refusal(self.c, core._item(self.c, self.deploy), "mark"))
+        r = self.run_deploy()
+        self.assertEqual([(h["event"], h["ok"], h["deploy_end"]) for h in r], [("deploy", True, "done")])
+        it = core.item_show(self.c, self.deploy)
+        self.assertEqual((it["status"], it["assignee"], it["blocked_reason"]), ("done", None, None))
+        self.assertIn(f"deploy hook: exit 0", it["output"])
+        self.assertIn(f"(released {self.deploy})", it["output"])
+        self.assertTrue(core._item(self.c, self.deploy)["cut_at"])  # the review cut it
+        self.assertIsNone(core.deploy_hook_start(self.c, self.deploy, "x"))  # once
+
+    def test_a_failure_keeps_the_deploy_open_and_starts_the_release_again(self):
+        open(self.flag, "w").close()
+        core.target_monitor(self.c, "web", "watch the error rate", "mark")
+        self.pass_review("rev")
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"], h["alerted"]) for h in r], [(False, "failed", "ops")])
+        fix, rv2 = r[0]["fix"], r[0]["review"]
+        dep = core.item_show(self.c, self.deploy)
+        self.assertEqual((dep["status"], dep["blocked_reason"]), ("open", None))
+        self.assertIsNone(core._item(self.c, self.deploy)["cut_at"])  # the release starts again from its beginning
+        self.assertIn(fix, dep["waits_on"])
+        self.assertIn(rv2, dep["waits_on"])
+        self.assertNotEqual(rv2, self.review)
+        f = core.item_show(self.c, fix)
+        self.assertEqual((f["project"], f["doer"], f["found_during"]), ("site", "ai", self.deploy))
+        self.assertIn("migration 7 failed", f["context"])
+        self.assertIn("Do not run the release command again", f["context"])
+        self.assertEqual(core.item_show(self.c, rv2)["waits_on"], [fix])  # the new review covers the fix
+        self.assertFalse([i for i in core.item_list(self.c) if i.get("kind") == "monitor"])  # no monitor for a failure
+        alert = [m for m in core.inbox(self.c, "ops") if "deploy hook of target web failed" in m["body"]]
+        self.assertTrue(alert and "Do not run the command by hand" in alert[0]["body"])
+        # The fix, a new review by a new session (it cuts the release again), then the hook runs again.
+        os.remove(self.flag)
+        core.claim(self.c, fix, "dev")
+        core.done(self.c, fix, "fixed the migration", "dev")
+        self.assertFalse(core.annotate(self.c)[self.deploy]["ready"])
+        self.review = rv2
+        self.pass_review("rev2")
+        self.assertTrue(core._item(self.c, self.deploy)["cut_at"])
+        r = self.run_deploy()
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
+        self.assertEqual(core._item(self.c, self.deploy)["status"], "done")
+        mon = [i for i in core.item_list(self.c) if i.get("kind") == "monitor"]
+        self.assertEqual(len(mon), 1)
+
+    def test_with_no_review_the_hook_cuts_the_release_and_its_cut_hook_runs_first(self):
+        core.drop(self.c, self.review, note="no review for this one", actor="mark")
+        core.target_hook(self.c, "web", "release-cut", f'"{sys.executable}" -c "print(1)"', actor="mark")
+        self.assertTrue(core.annotate(self.c)[self.deploy]["ready"])
+        r = self.run_deploy()
+        self.assertEqual([h["event"] for h in r], ["release-cut", "deploy"])
+        self.assertEqual(core._item(self.c, self.deploy)["status"], "done")
+
+    def test_a_run_that_never_ended_counts_as_failed(self):
+        self.pass_review("rev")
+        core.deploy_hook_start(self.c, self.deploy, "gone")
+        with core.tx(self.c):  # maxpm serve took it and stopped while it ran
+            self.c.execute("UPDATE hook_runs SET started_at=? WHERE event='deploy'",
+                           (core.iso(core.now() - timedelta(hours=3)),))
+        self.assertEqual(core.deploy_hook_lost(self.c), [self.deploy])
+        dep = core.item_show(self.c, self.deploy)
+        self.assertEqual((dep["status"], dep["blocked_reason"]), ("open", None))
+        self.assertTrue(any("did not end" in e["change"] for e in dep["events"]))
+        self.assertEqual(core.deploy_hook_lost(self.c), [])
+
+    def test_a_deploy_hook_is_stopped_at_deploy_timeout(self):
+        core.config_set(self.c, "deploy_timeout", "90m")
+        seen = []
+
+        def runner(cmd, folder, limit, renew, env):
+            seen.append(limit)
+            return mock.Mock(returncode=None, timed_out=True, stdout="", stderr="")
+        with mock.patch.object(core, "HOOK_RUNNER", runner):
+            self.pass_review("rev")
+            r = self.run_deploy()
+        self.assertEqual(seen, [5400])
+        self.assertIn("stopped at deploy_timeout (90m)", r[0]["result"])
+        self.assertEqual(r[0]["deploy_end"], "failed")
+
+
 class Hooks(Base):
     """A hook is a command that MaximizePM runs when a release event of a target occurs (maxpm target hook)."""
 
@@ -5828,7 +5964,8 @@ class Hooks(Base):
 
     def test_each_release_event_runs_its_hook_once_with_the_environment(self):
         cmd = self.recorder()
-        for event in core.HOOK_EVENTS:
+        events = [e for e in core.HOOK_EVENTS if e != "deploy"]  # a deploy hook releases with no session (DeployHook)
+        for event in events:
             core.target_hook(self.c, "web", event, cmd, actor="mark")
         here = os.path.realpath(self.dir.name)
         core.target_cut(self.c, "web", "abc1234", "ops")
@@ -5857,7 +5994,7 @@ class Hooks(Base):
         for x in self.runs():  # every event of the release: its target, its deploy item, the pinned revision, the folder
             self.assertEqual((x["target"], x["deploy"], x["rev"], x["cwd"]), ("web", d, "abc1234", here))
         history = [e["change"] for e in core.item_show(self.c, self.deploy)["events"]]
-        for event in core.HOOK_EVENTS:  # one line for each run, on the deploy item
+        for event in events:  # one line for each run, on the deploy item
             self.assertEqual(len([c for c in history if c.startswith(f"hook {event}: exit 0, ")]), 1, history)
         self.assertEqual([m for m in core.inbox(self.c, "ops") if "hook" in m["body"]], [])  # no alert: none failed
 
@@ -6077,7 +6214,7 @@ class Hooks(Base):
         with self.assertRaises(RiverError) as e:
             core.target_hook(self.c, "web", "item-done", "scripts/x.sh", actor="mark")
         self.assertEqual(str(e.exception), "no hook event 'item-done'; the events: release-cut, review-passed, "
-                                           "review-failed, deployed")
+                                           "review-failed, deployed, deploy")
         with self.assertRaisesRegex(RiverError, "no hook event 'cut'"):
             core.target_hook(self.c, "web", "cut", clear=True)
         self.assertEqual(core.target_hook(self.c, "web")["hooks"], [])
