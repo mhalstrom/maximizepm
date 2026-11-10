@@ -1,6 +1,6 @@
 /* The Projects tab: a card for each project. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
 /* Projects tab: one card per project, so where one project ends and the next begins is plain. */
-.proj { border: var(--hair) solid var(--line); border-radius: var(--r-l); padding: var(--sp-5) calc(var(--sp-5) + var(--sp-0)); margin-bottom: calc(var(--sp-5) + var(--sp-0)); background: var(--bg); }
+.proj { border: 0; border-top: var(--hair) solid var(--line); border-radius: 0; padding: var(--sp-5) var(--sp-0); margin-bottom: var(--sp-1); background: none; }  /* no box (#5043) */
 .proj-h { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
 .proj-h b { font-size: var(--fs-l); overflow-wrap: anywhere; }
 .proj-h .rk { display: inline-flex; align-items: center; justify-content: center; min-width: var(--sp-7); height: var(--sp-7); border-radius: var(--r-s); background: var(--wait-bg); color: var(--muted); font-size: var(--fs-s); font-weight: 600; font-variant-numeric: tabular-nums; }

@@ -12,15 +12,16 @@
 #agents .nm { font-weight: 600; }
 #agents .tabulator-responsive-collapse table { font-size: var(--fs-s); }
 #agents .tabulator-responsive-collapse td { padding: var(--sp-0) var(--sp-3) var(--sp-0) 0; }
-#needsYouPanel, #takeoverPanel { border-color: var(--human); }
-#takeoverPanel h2 { color: var(--human); }
-#needsYouPanel h2 { color: var(--human); }
-.strip { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-bottom: var(--sp-5); }
-.strip button { display: flex; gap: var(--sp-3); align-items: baseline; background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-2) var(--sp-5); cursor: pointer; color: var(--muted); font-size: var(--fs-s); }
+#needsYouPanel, #takeoverPanel { border-top: var(--hair-2) solid var(--human); }  /* a colored rule, no outline (#5043) */
+#takeoverPanel h2 { color: var(--ink); }
+#needsYouPanel h2 { color: var(--ink); }
+.strip { display: flex; gap: calc(var(--sp-7) + var(--sp-1)); flex-wrap: wrap; margin-bottom: var(--sp-5); }
+/* The counts are text: the label over the number, no box (#5043). */
+.strip button { display: flex; flex-direction: column-reverse; align-items: flex-start; gap: 0; background: none; border: 0; padding: var(--sp-1) 0; cursor: pointer; color: var(--muted); font-size: var(--fs-s); }
 .strip button b { font-size: var(--fs-xl); color: var(--ink); font-variant-numeric: tabular-nums; }
 .strip button.hum b { color: var(--human); } .strip button.good b { color: var(--ready); } .strip button.bad b { color: var(--warn); }
-.strip button:hover { border-color: var(--accent); }
-.strip button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.strip button:hover { color: var(--accent); }
+.strip button.primary { flex-direction: row; align-self: center; align-items: baseline; gap: var(--sp-3); background: var(--accent); color: var(--accent-ink); border-radius: var(--r-xs); padding: var(--sp-2) var(--sp-5); }
 .strip button.primary b { color: var(--accent-ink); }
 .strip select { align-self: stretch; }
 .strip .agentStart { align-items: stretch; }

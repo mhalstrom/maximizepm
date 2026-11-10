@@ -41,7 +41,7 @@
 :root {
   --sp-0: 2px; --sp-1: 4px; --sp-2: 6px; --sp-3: 8px; --sp-4: 10px; --sp-5: 12px; --sp-6: 16px; --sp-7: 24px;
   --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-base: 14px; --fs-l: 17px; --fs-xl: 18px; --fs-2xl: 24px;
-  --r-s: 6px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px; --hair-2: 2px;
+  --r-xs: 4px; --r-s: 6px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px; --hair-2: 2px;
   /* Widths of a field or a list: xs 80, s 120, m 160, l 220. --board-top: the header and strip above a Board column. */
   --w-xs: 80px; --w-s: 120px; --w-m: 160px; --w-l: 220px; --board-top: 150px;
   --tap: 44px;  /* the least size of a control on a phone */
@@ -65,7 +65,7 @@
 :root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
-header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 /* A narrow screen: the header holds two or three rows (284 px at 390), so it scrolls away with the page and does
    not cover a third of the screen (#4722). */
 @media (max-width: 800px) { header { position: static; } }
@@ -82,24 +82,28 @@ header h1.brand .logo-dark { display: none; }
 :root[data-theme="dark"] header h1.brand .logo-dark { display: block; }
 header .sub { color: var(--muted); font-size: 12px; }
 nav { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
-nav button { background: none; border: 1px solid transparent; color: var(--muted); padding: 5px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
-nav button.on { color: var(--ink); border-color: var(--line); background: var(--bg); }
+/* The Quiet look (#5043, mark: 'limit boxes and use thin lines'): the current tab is underlined, not boxed. */
+nav button { background: none; border: 0; border-bottom: var(--hair-2) solid transparent; color: var(--muted); padding: 5px 2px; margin: 0 6px; border-radius: 0; cursor: pointer; font: inherit; }
+nav button.on { color: var(--ink); border-bottom-color: var(--ink); }
 .spacer { flex: 1; }
 select, input, textarea, button { font: inherit; color: var(--ink); }
 select, input, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
-button.btn { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
-button.btn:hover { border-color: var(--accent); }
+/* Buttons are text in the accent color; one filled button (primary) does the main thing of an area (#5043). */
+button.btn { background: none; border: 1px solid transparent; border-radius: var(--r-xs); padding: 4px 6px; cursor: pointer; color: var(--accent); font-weight: 500; }
+button.btn:hover { background: var(--bubble); }
 /* A card that is one button (button.js kind "card", #5046): no button look; the card's class draws it. */
 button.cardbtn { display: block; width: 100%; text-align: left; font: inherit; color: var(--ink); cursor: pointer; }
-button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); padding: 4px 12px; }
+button.primary:hover { background: var(--accent); filter: brightness(1.08); }
 button.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }  /* a lapsed relay plan (#4759) */
 main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 /* Until the first state comes (#4888): through the relay on a phone it takes seconds. */
 .boot-note { font-size: 13px; padding: 4px 2px 12px; }
 .grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; }
 @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } }
-.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 12px 14px; margin-bottom: 16px; }
-.panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+/* An area is no box: it sits on the page, apart by space and one thin rule above it (#5043). */
+.panel { background: transparent; border: 0; border-top: 1px solid var(--line); border-radius: 0; box-shadow: none; padding: 14px 2px 6px; margin-bottom: 14px; }
+.panel h2 { font-size: 15px; font-weight: 600; color: var(--ink); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
 /* A narrow screen: the controls of a heading go to a second line, not off screen (#4717, #4718). */
 .panel h2 { flex-wrap: wrap; row-gap: 6px; }
 .panel h2 > .btn, .panel h2 > label { white-space: nowrap; }
@@ -113,16 +117,19 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .row .t .why { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .t .blk { color: var(--wait); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
-.chip { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; border: 1px solid transparent; }
-.c-ready { background: var(--ready-bg); color: var(--ready); }
-.c-in_progress, .c-held { background: var(--prog-bg); color: var(--prog); }
-.c-waiting, .c-blocked { background: var(--wait-bg); color: var(--wait); }
-.c-done, .c-dropped { background: var(--done-bg); color: var(--done); text-decoration: line-through; }
-.c-human { background: var(--human-bg); color: var(--human); }
-.c-ai { border-color: var(--line); color: var(--muted); }
-.c-p0 { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
-.c-p { border-color: var(--line); color: var(--muted); }
-.iconbtn { background: none; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; padding: 0 6px; color: var(--muted); }
+/* A status is colored text with a dot, not a filled pill (#5043); plain labels (agent, P2) have no dot. */
+.chip { font-size: 11px; font-weight: 500; padding: 0 6px 0 0; border-radius: 0; white-space: nowrap; border: 0; background: none; }
+.chip::before { content: "\25CF"; font-size: 8px; margin-right: 4px; vertical-align: 1px; }
+.c-ready { color: var(--ready); }
+.c-in_progress, .c-held { color: var(--prog); }
+.c-waiting, .c-blocked { color: var(--wait); }
+.c-done, .c-dropped { color: var(--done); text-decoration: line-through; }
+.c-human { color: var(--human); }
+.c-ai { color: var(--muted); }
+.c-p0 { color: var(--warn); font-weight: 600; }
+.c-p { color: var(--muted); }
+.c-ai::before, .c-p::before { content: none; }
+.iconbtn { background: none; border: 0; border-radius: var(--r-xs); cursor: pointer; padding: 0 6px; color: var(--muted); }
 details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 6px; }
 .row[draggable="true"] { cursor: grab; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
@@ -145,7 +152,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
    three ways (#5027). A dialog sets only what differs: --dlg-w (its width), --dlg-z (above another dialog). */
 .dlg { position: fixed; inset: 0; z-index: var(--dlg-z, 15); background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding: 6vh var(--sp-6); overflow-y: auto; }
 .dlg.hidden { display: none; }
-.dlg > .box { background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-dlg); width: min(var(--dlg-w, 640px), 100%); padding: 18px 20px; }
+.dlg > .box { background: var(--panel); border: 0; border-radius: var(--r-m); box-shadow: var(--shadow-dlg); width: min(var(--dlg-w, 640px), 100%); padding: 18px 20px; }
 #setup { --dlg-w: 680px; }
 #setup .step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
 #setup .mark { font-weight: 700; }
@@ -204,33 +211,34 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .ny-h > * { min-width: 0; overflow-wrap: break-word; }
 .ny-c { color: var(--muted); font-size: 12px; margin: 4px 0 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .goals { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px 22px; }
-.goal { border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; cursor: pointer; width: 230px; font-size: 12px; background: var(--panel); }
-.goal:hover { border-color: var(--accent); }
-.goal.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.goal { border: 0; border-left: var(--hair-2) solid var(--line); border-radius: 0; padding: 5px 8px; cursor: pointer; width: 230px; font-size: 12px; background: none; }
+.goal:hover { border-left-color: var(--accent); }
+.goal.on { border-left-color: var(--accent); background: var(--bubble); }
 .goal.complete { opacity: .7; }
 .goal .gh { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .goal .gh b { font-size: 13px; overflow-wrap: anywhere; }
 .goal .bar { height: 5px; margin: 4px 0 2px; }
 .goal .go { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .goal .ga { margin-top: 3px; display: flex; gap: 8px; }
-.c-goal { border-color: var(--accent); color: var(--accent); }
+.c-goal { color: var(--accent); }
 /* Start an agent (components/agentStart.js): the agent picker next to its button(s), everywhere. */
 .agentStart { display: inline-flex; gap: 4px; align-items: center; flex-wrap: nowrap; }
 .agentStart select.agentPick { font-size: 12px; font-weight: 400; text-transform: none; letter-spacing: normal; max-width: 12em; }
 .agentStart button { white-space: nowrap; }
 .hidden { display: none !important; }
 /* Tabulator tables (components/table.js) take the page's colors, in light and dark. */
-.tabulator { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; color: var(--ink); }
-.tabulator .tabulator-header { background: var(--bg); border-bottom: 1px solid var(--line); color: var(--muted); font-weight: 600; }
-.tabulator .tabulator-header .tabulator-col { background: var(--bg); border-right: 1px solid var(--line); }
+/* A table has row rules only: no frame, no filled header (#5043). */
+.tabulator { background: transparent; border: 0; border-radius: 0; font-size: 13px; color: var(--ink); }
+.tabulator .tabulator-header { background: transparent; border-bottom: 1px solid var(--line); color: var(--muted); font-weight: 600; }
+.tabulator .tabulator-header .tabulator-col { background: transparent; border-right: 0; }
 .tabulator .tabulator-header .tabulator-col .tabulator-col-content { padding: 6px 8px; }
 .tabulator .tabulator-header .tabulator-col .tabulator-header-filter input,
 .tabulator .tabulator-header .tabulator-col .tabulator-header-filter select { background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; font-weight: normal; }
 .tabulator .tabulator-header .tabulator-col.tabulator-sortable[aria-sort=none] .tabulator-col-content .tabulator-col-sorter .tabulator-arrow { border-bottom-color: var(--muted); opacity: .5; }
 .tabulator .tabulator-header .tabulator-col.tabulator-sortable[aria-sort=ascending] .tabulator-col-content .tabulator-col-sorter .tabulator-arrow { border-bottom-color: var(--accent); }
 .tabulator .tabulator-header .tabulator-col.tabulator-sortable[aria-sort=descending] .tabulator-col-content .tabulator-col-sorter .tabulator-arrow { border-top-color: var(--accent); }
-.tabulator .tabulator-tableholder, .tabulator .tabulator-tableholder .tabulator-table { background: var(--panel); color: var(--ink); }
-.tabulator .tabulator-row, .tabulator .tabulator-row.tabulator-row-even { background: var(--panel); border-bottom: 1px solid var(--line); }
+.tabulator .tabulator-tableholder, .tabulator .tabulator-tableholder .tabulator-table { background: transparent; color: var(--ink); }
+.tabulator .tabulator-row, .tabulator .tabulator-row.tabulator-row-even { background: transparent; border-bottom: 1px solid var(--line); }
 .tabulator .tabulator-row .tabulator-cell { border-right: 0; padding: 6px 8px; }
 .tabulator .tabulator-row .tabulator-cell.wrap { white-space: normal; overflow-wrap: anywhere; }
 .tabulator .tabulator-row .tabulator-cell.muted { color: var(--muted); font-size: 12px; }
