@@ -352,18 +352,29 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
 
 
 EXPERT_PROMPT = ("You are {name}, an expert session of MaximizePM on: {topic}. A person talks with you about it, for hours or "
-                 "days. Run maxpm --as {name} go once: it shows your news and notes. Then answer the person. You take "
+                 "days. Run maxpm --as {name} go once: it shows your news, your task with the talk so far, and your notes. "
+                 "Read what it names before your first answer. Then answer the person. You take "
                  "no queue work by yourself; keep your notes current: maxpm --as {name} expert notes {name} --put <file>.")
 
 
 def start_expert(conn, name, topic=None, project=None, resume=False, runner=None, agent=None, actor=None, model=None,
-                 effort=None, launch_in=None, options=None, item=None):
+                 effort=None, launch_in=None, options=None, item=None, summary=None, sources=(), canvases=(),
+                 sessions=()):
     """maxpm expert start (#4955, #4959): open an agent session for an expert-tier task, in the folder of its project.
     The task: item (made expert-tier), else on resume the open expert-tier task it had before, else a new
     expert-tier task with the topic as its title. The session claims it before it opens, so every expert has a task.
     resume: claude --resume of the last Claude Code session the expert ran in, so the talk goes on with its context;
     with none, a fresh session that reads its notes. The model is the person's choice: a limit of the task that
-    excludes it moves to it."""
+    excludes it moves to it.
+    summary, sources, canvases, sessions: the talk so far (#4969), which goes into the task's context, so the expert
+    reads it there. The manager hands a talk over with a summary: it may not start an expert on a new topic without
+    one, so a long talk never stays in the manager's context or is lost."""
+    core.expert_handover_check(conn, canvases, sessions)
+    if (actor and item is None and not resume and not (summary or "").strip()
+            and conn.execute("SELECT 1 FROM agents WHERE name=? AND role='manager' AND kind='ai'", (actor,)).fetchone()):
+        raise RiverError(f"the manager hands a talk to the expert with the talk so far: add --summary \"<what was said, "
+                         f"what is decided, what is open>\" (or --summary-file <path>), and --canvas <name>, --source "
+                         f"<file or url>, --session {actor} for what it must read")
     old = conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
     if old is not None and old["role"] != "expert":
         raise RiverError(f"{name} is a session that runs now ({old['role'] or 'no role'}); pick another name, or make that "
@@ -413,6 +424,7 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
         if not model:
             raise RiverError(f"#{task['id']} names no model, so say which model the expert {name} runs: --model <name>")
     first = EXPERT_PROMPT.format(name=name, topic=topic)
+    handed = core.expert_handover(conn, task["id"], actor, summary, sources, canvases, sessions)
     sid = core.last_claude_session(conn, name) if resume else None
     core.expert_make(conn, name, topic, p["name"], actor)
     if model:
@@ -432,7 +444,7 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     with core.tx(conn):
         core._event(conn, task["id"], actor or "maxpm", f"expert {name} started" + (
             f" (resumes session {sid})" if sid else (" (fresh: no session to resume)" if resume else "")))
-    return {**t, "session_name": name, "topic": topic, "model": model, "model_why": model_why}
+    return {**t, "session_name": name, "topic": topic, "model": model, "model_why": model_why, "handover": handed}
 
 
 def _fit_task_model(conn, task, name, model, actor):
@@ -2929,7 +2941,10 @@ OPS = {
     "kill_agent": lambda c, a, who: core.kill_agent(c, a["agent"], _page_reason(a, who), who),
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "start_expert": lambda c, a, who: start_expert(c, a["name"], a.get("topic"), a.get("project"), bool(a.get("resume")),
-                                                   agent=a.get("agent"), actor=who, item=a.get("item"), **_launch_args(a)),
+                                                   agent=a.get("agent"), actor=who, item=a.get("item"),
+                                                   summary=a.get("summary"), sources=a.get("sources") or (),
+                                                   canvases=a.get("canvases") or (), sessions=a.get("sessions") or (),
+                                                   **_launch_args(a)),
     "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason"), bool(a.get("done"))),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],

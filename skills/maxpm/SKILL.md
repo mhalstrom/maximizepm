@@ -427,6 +427,9 @@ adds the task and starts its session (`--item <id>` takes a task that exists).
 In a session that holds the task already: `maxpm --as <you> expert adopt`.
 `maxpm go` then gives you role EXPERT. As an expert:
 
+- Read your task first: when the manager handed a talk to you, its context
+  holds the talk so far (a summary, the sources, the canvases, and the sessions
+  to read), and `maxpm go` prints it. Read what it names before your first answer.
 - Answer the user. Take no other queue work by yourself, and run no
   `maxpm wait`; stand at your prompt. You keep your task while the user talks
   with you, and MaximizePM does not end you for that. You end when a person

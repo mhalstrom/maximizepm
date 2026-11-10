@@ -1148,6 +1148,64 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual((r["model"], r["model_id"]), ("fable", "fable"))
         self.assertIn("MAXPM_MODEL=fable", self.tmux.panes[-1]["keys"][0])
 
+    def test_the_manager_hands_a_talk_to_an_expert_with_the_talk_so_far(self):
+        """#4969: the expert's task holds the talk so far (summary, sources, canvases, sessions to read); the manager
+        may not start an expert on a new topic without it; a wrong canvas or session refuses before a task is added;
+        the expert's go brief prints it."""
+        from river import cli
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mgr")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        self.c.commit()
+        core.record_claude_session(self.c, "mgr", "22222222-2222-4222-8222-222222222222")
+        core.canvas_put(self.c, "pricing-plan", "# Pricing\n", "mgr", kind="md", title="Pricing plan", project="shop")
+        tasks = lambda: self.c.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        with self.assertRaisesRegex(RiverError, "the manager hands a talk to the expert with the talk so far: add "
+                                                "--summary"):
+            server.start_expert(self.c, "px", "the pricing design", "shop", model="opus", actor="mgr")
+        with self.assertRaisesRegex(RiverError, "no canvas nope"):
+            server.start_expert(self.c, "px", "the pricing design", "shop", model="opus", actor="mgr",
+                                summary="s", canvases=["nope"])
+        with self.assertRaisesRegex(RiverError, "no session ghost"):
+            server.start_expert(self.c, "px", "the pricing design", "shop", model="opus", actor="mgr",
+                                summary="s", sessions=["ghost"])
+        self.assertEqual(tasks(), 0)
+        t = server.start_expert(self.c, "px", "the pricing design", "shop", model="opus", actor="mgr",
+                                summary="mark wants two plans; the free plan is open.", sources=["docs/pricing.md"],
+                                canvases=["pricing-plan"], sessions=["mgr"])
+        ctx = core._item(self.c, t["task"])["context"]
+        self.assertTrue(ctx.startswith("THE TALK SO FAR (handed over by mgr, "))
+        self.assertIn("mark wants two plans; the free plan is open.\nSources: docs/pricing.md\n", ctx)
+        self.assertIn("Canvas pricing-plan (Pricing plan): maxpm canvas show pricing-plan --text", ctx)
+        self.assertIn("Session mgr (manager): ", ctx)
+        self.assertEqual(t["handover"], ctx)
+        self.assertTrue(any(e["change"].startswith("the talk so far handed over to the expert task (1 canvas(es), "
+                                                   "1 session(s), 1 source(s))")
+                            for e in core.item_show(self.c, t["task"])["events"]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_expert({"expert_started": {**t, "launch_in": "tmux"}})
+        self.assertIn(f"the talk so far is in #{t['task']}'s context; the expert reads it first", out.getvalue())
+        self.assertIn("your task with the talk so far", self.tmux.panes[-1]["keys"][0])
+        # The expert's go brief prints the task's context.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(core.go(self.c, self.dir.name, "px"))
+        self.assertIn("Role: EXPERT", out.getvalue())
+        self.assertIn("    mark wants two plans; the free plan is open.", out.getvalue())
+        self.assertIn("    Canvas pricing-plan (Pricing plan)", out.getvalue())
+        # --item with a context: the talk is added after it; a ready expert task needs no summary from the manager.
+        y = core.item_add(self.c, "shop", "the refund talk", context="the old context", tier="expert")["id"]
+        server.start_expert(self.c, "px2", item=y, model="opus", actor="mgr", summary="refunds within 30 days")
+        ctx = core._item(self.c, y)["context"]
+        self.assertTrue(ctx.startswith("the old context\n\nTHE TALK SO FAR (handed over by mgr, "))
+        self.assertTrue(ctx.endswith("refunds within 30 days"))
+        z = core.item_add(self.c, "shop", "a ready expert task", tier="expert")["id"]
+        self.assertIsNone(server.start_expert(self.c, "px3", item=z, model="opus", actor="mgr")["handover"])
+        # Another session or a person needs no summary.
+        self.assertIsNone(server.start_expert(self.c, "px4", "a topic of mark's", "shop", model="opus",
+                                              actor="mark")["handover"])
+
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]
         y = core.item_add(self.c, "shop", "second")["id"]

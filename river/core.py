@@ -11338,6 +11338,67 @@ def expert_task(conn, name):
                         (name,)).fetchone()
 
 
+def expert_handover_check(conn, canvases=(), sessions=()):
+    """Before an expert starts: each canvas and each session of its handover exists, so a typo refuses the start and
+    adds no task."""
+    for ref in canvases or ():
+        if ref and ref.strip() and not conn.execute(
+                "SELECT 1 FROM canvases WHERE (name=? OR 'c' || id=? OR CAST(id AS TEXT)=?) AND deleted_at IS NULL",
+                (ref.strip().lower(), ref.strip(), ref.strip())).fetchone():
+            raise RiverError(f"no canvas {ref.strip()}; the canvases: maxpm canvas list")
+    for name in sessions or ():
+        if name and name.strip() and not conn.execute("SELECT 1 FROM agents WHERE name=?", (name.strip(),)).fetchone():
+            raise RiverError(f"no session {name.strip()}; the sessions: maxpm who --all")
+
+
+def expert_handover(conn, task_id, actor=None, summary=None, sources=(), canvases=(), sessions=()):
+    """The talk so far goes into the expert's task (#4969): when a talk with the manager (or another session) becomes
+    a long talk about one topic, the expert that takes it over reads what was said, the sources, the canvases, and
+    the sessions to read, from its task, not from the manager's context. It is added at the end of the task's
+    context, so a task that had a context keeps it. Each canvas must exist; each session must be a known agent, and
+    its newest transcript on this computer is named. Returns the block, or None when nothing was given."""
+    summary = (summary or "").strip()
+    sources = [s.strip() for s in sources or () if s and s.strip()]
+    canvases = [c.strip() for c in canvases or () if c and c.strip()]
+    sessions = [s.strip() for s in sessions or () if s and s.strip()]
+    if not (summary or sources or canvases or sessions):
+        return None
+    task = _item(conn, task_id)
+    project = _project_name(conn, task["project_id"])
+    lines = [f"THE TALK SO FAR (handed over by {actor or 'a person'}, {iso(now())[:10]}):"]
+    if summary:
+        lines.append(summary)
+    if sources:
+        lines.append("Sources: " + "; ".join(sources))
+    for ref in canvases:
+        try:
+            c = _canvas_row(conn, ref, project)
+        except RiverError:
+            c = _canvas_row(conn, ref)
+        where = _project_name(conn, c["project_id"])
+        lines.append(f"Canvas {c['name']}" + (f" ({c['title']})" if c["title"] else "") + ": maxpm canvas show "
+                     f"{c['name']}" + (f" --project {where}" if where != project else "") + " --text")
+    from . import sessions as sess
+    for name in sessions:
+        a = conn.execute("SELECT name, role FROM agents WHERE name=?", (name,)).fetchone()
+        if a is None:
+            raise RiverError(f"no session {name}; the sessions: maxpm who --all")
+        kind, path = sess.transcript(conn, name)
+        sid = last_claude_session(conn, name)
+        lines.append(f"Session {name}" + (f" ({a['role']})" if a["role"] else "") + ": "
+                     + (f"its transcript {path}" if path else f"Claude Code session {sid}" if sid
+                        else "no transcript on this computer")
+                     + "; read the part about this topic")
+    block = "\n".join(lines)
+    old = (task["context"] or "").strip()
+    item_edit(conn, task["id"], actor=actor, context=(old + "\n\n" + block) if old else block)
+    with tx(conn):
+        _event(conn, task["id"], actor or "maxpm", "the talk so far handed over to the expert task"
+               + (f" ({len(canvases)} canvas(es), {len(sessions)} session(s), {len(sources)} source(s))"
+                  if canvases or sessions or sources else ""))
+    return block
+
+
 def expert_topic_of(conn, name):
     """(topic, project) of an expert from the queue, also after it ended: its row, else its last history line."""
     r = conn.execute("SELECT expert_topic, expert_project FROM agents WHERE name=? AND role='expert'", (name,)).fetchone()

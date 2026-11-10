@@ -1006,6 +1006,13 @@ def build_parser():
     y.add_argument("name", help="its name (letters, digits, '.', '_', '-')")
     y.add_argument("--topic", help="what it knows and what you ask it about: the title of the expert-tier task it adds")
     y.add_argument("--item", type=int, help="take this task (it becomes expert-tier) instead of adding one")
+    y.add_argument("--summary", help="the talk so far, when you hand a talk over to the expert: what was said, what "
+                   "is decided, what is open; it goes into the task's context (the manager must give it for a new topic)")
+    y.add_argument("--summary-file", help="the summary from a file ('-': stdin)")
+    y.add_argument("--source", action="append", default=[], help="a file, URL, or item the talk used (repeatable)")
+    y.add_argument("--canvas", action="append", default=[], help="a canvas the expert reads (repeatable)")
+    y.add_argument("--session", action="append", default=[], help="a session whose talk the expert reads, often your "
+                   "own name; its transcript is named in the task (repeatable)")
     y.add_argument("--project", help="the project whose folder it works in (default: its last one, else the first "
                                      "project with a folder)")
     y.add_argument("--resume", action="store_true", help="resume its last Claude Code chat, with its context")
@@ -1981,13 +1988,21 @@ def _expert_cmd(conn, a, actor):
                                  "text": (got or {}).get("shown", {}).get("body"),
                                  "version": (got or {}).get("shown", {}).get("version")}}
     # start: it opens a terminal, so a sandboxed CLI asks the running maxpm serve, as maxpm launch does.
+    summary = a.summary
+    if a.summary_file:
+        if summary:
+            raise RiverError("give the summary once: --summary \"...\" or --summary-file <path>")
+        summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text()
     args = {"name": a.name, "topic": a.topic, "project": a.project, "resume": a.resume, "agent": a.agent,
-            "model": a.model, "effort": a.effort, "launch_in": a.launch_in, "item": a.item}
+            "model": a.model, "effort": a.effort, "launch_in": a.launch_in, "item": a.item, "summary": summary,
+            "sources": a.source, "canvases": a.canvas, "sessions": a.session}
     if in_sandbox():
         return {"expert_started": {**ask_server(conn, "start_expert", args, actor, timeout=40), "via_serve": True}}
     from . import server
     return {"expert_started": server.start_expert(conn, a.name, a.topic, a.project, a.resume, agent=a.agent, actor=actor,
-                                                  model=a.model, effort=a.effort, launch_in=a.launch_in, item=a.item)}
+                                                  model=a.model, effort=a.effort, launch_in=a.launch_in, item=a.item,
+                                                  summary=summary, sources=a.source, canvases=a.canvas,
+                                                  sessions=a.session)}
 
 
 def dispatch(conn, a, actor):
@@ -2611,6 +2626,9 @@ def render_manage(b):
             "  models:  an expert or a continuation gets the model of the work it continues (with no --model, launch and "
             "expert start take it from the item, and say which and why). Do not ask the user about a model choice "
             "that the request already implies.",
+            f"  experts: a talk that becomes a long talk about one topic goes to an expert: one line to the user, then "
+            f"{r} expert start <name> --topic \"...\" --summary-file <path> [--canvas C] [--source S] --session {me}. "
+            "The task holds the talk so far; you do no long design talk in your own context.",
             f"  queues:  {r} queue add <agent> <id> [--first] | --message \"...\";  queue list|move|remove",
             f"  message: {r} note|alert|ask <agent> \"...\"",
             f"  stop:    {r} stop <agent> --reason \"...\"   (stuck, or waited longer than wait_too_long {b['wait_too_long']})",
@@ -2827,6 +2845,9 @@ def render_expert(res):
         print(f"started the expert {t['session_name']} on {t.get('model')} ({t.get('model_why')}) in {how} "
               f"({t['project']}) on #{t.get('task')}: {t['topic']}"
               + (f"; it resumes session {t['resumed']}" if t.get("resumed") else ""))
+        if t.get("handover"):
+            print(f"the talk so far is in #{t.get('task')}'s context; the expert reads it first. Tell the person in one "
+                  f"line, then leave the topic to {t['session_name']}.")
 
 
 def render_go(b):
@@ -2882,6 +2903,11 @@ def render_go(b):
                 out.append(f"  Your task: #{h['id']} {h['title']} (expert tier). You keep it while the person talks with "
                            f"you; no lease runs out. When the person says the talk is done: {r} done {h['id']} --output "
                            f"\"<what was decided, where it is written>\".")
+                if (h.get("context") or "").strip():
+                    # The talk so far (#4969): the expert reads it, and what it names, before its first answer.
+                    out.append("  Its context (the talk so far, when the manager handed it over: read it, and the "
+                               "canvases, sources, and sessions it names, before your first answer):")
+                    out += ["    " + ln for ln in h["context"].strip().splitlines()]
             else:
                 out.append(f"  You hold #{h['id']} {h['title']} (the person asked you to): finish it, "
                            f"{r} done {h['id']} --output \"...\", or {r} release {h['id']}.")
