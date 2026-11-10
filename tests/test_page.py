@@ -255,6 +255,69 @@ try {
         self.assertGreater(got["hovered"]["sessions"], 5, got["hovered"])  # the sweep found the rows and the buttons
         self.assertEqual(got["moved"], [], "\n".join(got["moved"]))
 
+    # Typing in the message box (#5111, mark: 'when typing into the input bar the chat above shifts a lot and flashes
+    # and a scroll bar appear a lot and it cuts and shifts a lot'): 200 characters and 5 new lines, a frame after each
+    # key. A chat element that moves on the screen, a chat node that is replaced, a scroll of the chat, or a scroll bar
+    # of the box below its height limit fails.
+    TYPING = r'''
+const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+try {
+  await until(() => window.__appReady && q("#sessCol .msg, #sessCol .bubble, #sessCol > *"), "the chat of ag");
+  await document.fonts.ready;
+  // The page settles first (its fonts, the first answers): the frame of the chat stays the same for longer than a poll.
+  for (let last = "", still = 0; still < 2500; ) {
+    const r = q("#sessBody").getBoundingClientRect(), now = `${r.top},${r.height},${q("#sessBody").scrollTop}`;
+    still = now === last ? still + 100 : 0; last = now; await sleep(100);
+  }
+  const body = q("#sessBody"), text = q("#sessText");
+  check(body.scrollHeight > body.clientHeight + 50, "the chat is long enough to scroll");
+  const out = { moved: [], replaced: 0, scrolled: 0, boxbar: 0, keys: 0 };
+  const els = () => [...q("#sessCol").querySelectorAll("*")];
+  const where = () => new Map(els().map(e => { const r = e.getBoundingClientRect(); return [e, `${r.left},${r.top},${r.width},${r.height}`]; }));
+  const seen = new MutationObserver(ms => { for (const m of ms) out.replaced += m.removedNodes.length; });
+  seen.observe(q("#sessCol"), { childList: true, subtree: true });
+  body.addEventListener("scroll", () => out.scrolled++);
+  const top = body.scrollTop, before = where();
+  text.focus();
+  const keys = [...("Please look at the header of the checkout page. ".repeat(5).slice(0, 200))];
+  for (let i = 0; i < 5; i++) keys.splice(40 * (i + 1), 0, "\n");
+  for (const k of keys) {
+    text.setRangeText(k, text.selectionStart, text.selectionEnd, "end");
+    text.dispatchEvent(new InputEvent("input", { bubbles: true, data: k, inputType: k === "\n" ? "insertLineBreak" : "insertText" }));
+    await frame();
+    out.keys++;
+    if (text.scrollHeight > text.clientHeight + 1 && text.offsetHeight < innerHeight / 3 - 2) out.boxbar++;
+    const now = where();
+    for (const [e, b] of before) if (e.isConnected && now.get(e) !== b) { out.moved.push(`key ${out.keys}: ${e.tagName}.${e.className} ${b} to ${now.get(e)}`); break; }
+    if (out.moved.length > 3) break;
+  }
+  out.top = body.scrollTop === top;
+  out.win = [scrollY, document.documentElement.scrollHeight, innerHeight, q("#sessLayout").getBoundingClientRect().top, q("#sessLayout").style.height];
+  out.grew = text.offsetHeight > 60;  // the box did grow with its lines
+  seen.disconnect();
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+
+    def type_in_the_box(self, size):
+        from tests.test_view_sessions import claude_line
+        self.pane["screen"] = "❯ \n"  # the session waits at its prompt: no permission prompt comes in while the test types
+        self.write("".join(claude_line("assistant", [{"type": "text", "text": f"Step {n}: I read the file and wrote a line "
+                                                       f"about it, so the chat is long."}], "end_turn")
+                           + claude_line("user", f"Next one, please ({n}).") for n in range(40)))
+        got = self.drive(self.TYPING, "/sessions/ag", size=size)
+        self.assertEqual(got["keys"], 205, got)
+        self.assertTrue(got["grew"], got)
+        self.assertEqual((got["moved"], got["replaced"], got["scrolled"], got["boxbar"], got["top"]), ([], 0, 0, 0, True),
+                         "\n".join(got["moved"]) or got)
+
+    def test_typing_in_the_message_box_moves_nothing_at_desktop_width(self):
+        """#5111: typing in the message box moves nothing in the chat above it, replaces nothing, scrolls nothing."""
+        self.type_in_the_box("1240,900")
+
+    def test_typing_in_the_message_box_moves_nothing_at_phone_width(self):
+        """#5111: the same at 390 px."""
+        self.type_in_the_box("390,844")
+
     def test_a_hover_moves_nothing_on_any_tab_at_desktop_width(self):
         """#5106 (mark: 'the pin button when you mouse over it changes to the turn off button. this layout shift is
         really annoying'): on every tab at 1240 px, a hover on any row, button, chip or element with a :hover rule

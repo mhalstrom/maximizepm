@@ -310,7 +310,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       const j = await r.json();
       if (mine !== gen) return;
       if (!r.ok) { note(j.error || "failed"); timer = setTimeout(poll, 10000); return; }
-      const first = cursor == null, atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+      // At the end: the last line shows. The room under a box with more lines (--cmp-over, #5111) does not count.
+      const over = parseFloat(getComputedStyle($("#sessMain")).getPropertyValue("--cmp-over")) || 0;
+      const first = cursor == null, atEnd = body.scrollHeight - over - body.scrollTop - body.clientHeight < 60;
       if (first) { if (j.entries.length) col.replaceChildren(); else note(j.note || "No lines yet."); }
       else if (j.entries.length) col.querySelector(".sl-none")?.remove();
       appendEntries(col, j.entries, j.refs);
@@ -328,7 +330,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       $("#sessOpen").innerHTML = headerOpen({ ...s, running: list.some(x => x.name === agent), session_url: j.session_url,
                                               terminal: j.terminal });
       renderGive(agent);
-      if (atEnd || first) body.scrollTop = body.scrollHeight;  // the first read shows the end; later, follow it
+      // The first read shows the end; later new lines are followed. With no new line the chat stays where it is, so
+      // a poll while the person types moves nothing (#5111).
+      if (first || (atEnd && j.entries.length)) body.scrollTop = body.scrollHeight;
     } catch (e) { /* the next poll tries again */ }
     if (mine === gen && agent) timer = setTimeout(poll, 2000);
   }
@@ -453,7 +457,30 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message for the session's terminal",
     attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line." });
   const text = $("#sessText");
-  const grow = () => { text.style.height = "auto"; text.style.height = Math.min(text.scrollHeight, window.innerHeight / 3) + "px"; };
+  // The box grows with its text, up to a third of the window, upward over the chat (#5111): the chat keeps its frame
+  // and its scroll, so nothing in it moves while the person types. A hidden copy of the box measures the text, so the
+  // box never shrinks to one line in place (that made the chat shorter for a moment, and the browser scrolled it).
+  // --cmp-over: how far the box reaches over the chat; the chat gets as much room at its end, to scroll to.
+  const measure = text.cloneNode(false);
+  measure.removeAttribute("id"); measure.tabIndex = -1; measure.setAttribute("aria-hidden", "true");
+  measure.classList.add("cmp-measure");
+  text.after(measure);
+  let oneLine = null;
+  // The pill around the box has a least height (a phone's is taller than one line of text): it grows only by what the
+  // box adds above that, and the box reaches over the chat by as much.
+  const pillHeight = (h) => {
+    const cs = getComputedStyle(text.parentElement);
+    const edge = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"].reduce((n, k) => n + (parseFloat(cs[k]) || 0), 0);
+    return Math.max(parseFloat(cs.minHeight) || 0, h + edge);
+  };
+  const grow = () => {
+    measure.style.width = text.clientWidth + "px";
+    measure.value = text.value || "x";
+    const h = Math.min(measure.scrollHeight, window.innerHeight / 3);
+    if (oneLine == null || !text.value) { measure.value = "x"; oneLine = measure.scrollHeight; }
+    text.style.height = h + "px";
+    $("#sessMain").style.setProperty("--cmp-over", Math.max(0, pillHeight(h) - pillHeight(oneLine)) + "px");
+  };
   // Empty messages send nothing. Files being read reserve a slot, and Send waits until they are ready.
   const FILE_MAX = 10 * 1024 * 1024, FILE_COUNT = 5;
   let files = [], sending = false;

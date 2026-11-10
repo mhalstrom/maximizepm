@@ -43,7 +43,8 @@ button.srow-it { cursor: pointer; }
 .sess-item { font-size: var(--fs-m); margin: var(--sp-1) 0 var(--sp-3); overflow-wrap: anywhere; display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .sess-item .spacer { flex: 1; }
 .sess-lists { display: inline-flex; gap: var(--sp-1); flex: none; }
-.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) var(--sp-1) var(--sp-1); }
+.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) var(--sp-1) var(--sp-1);
+  padding-bottom: calc(var(--sp-1) + var(--cmp-over, calc(0 * var(--hair)))); overflow-anchor: none; }
 .sess-main .sbar { margin-top: var(--sp-3); }
 .sess-main .sbar.hidden, .sess-main.hidden { display: none; }
 .sess-why { font-size: var(--fs-s); margin-top: var(--sp-3); }
@@ -57,7 +58,10 @@ button.srow-it { cursor: pointer; }
 }
 /* The chat view of a session (#4604): a middle column of readable width. */
 .chat-col { max-width: 48rem; margin: 0 auto; width: 100%; box-sizing: border-box; }
-.chat-foot { flex: none; }
+/* A message box with more lines reaches up over the chat (#5111): the foot's negative margin keeps the chat's frame, so
+   typing moves nothing in the chat; the foot has the panel's background, above the chat. */
+.chat-foot { flex: none; position: relative; z-index: 1; background: var(--panel);
+  margin-top: calc(-1 * var(--cmp-over, calc(0 * var(--hair)))); }
 .sl-none { padding: var(--sp-3) 0; }
 .msg { margin: 0 0 var(--sp-2); line-height: 1.5; font-size: calc(var(--fs-base) + var(--hair) / 2); }
 .msg-user { display: flex; flex-direction: column; align-items: flex-end; }

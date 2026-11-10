@@ -351,6 +351,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .cmp-pill:focus-within { border-color: var(--line); }
 .cmp-pill textarea { flex: 1; min-width: 0; border: 0; border-radius: 0; background: transparent; resize: none; outline: none;
   box-shadow: none; padding: var(--sp-1) 0; line-height: 1.45; max-height: 33vh; overflow-y: auto; font: inherit; color: var(--ink); }
+/* The hidden copy of a message box that measures its text (sessions.js grow): it takes no room and gets no click. */
+.cmp-pill textarea.cmp-measure { position: absolute; visibility: hidden; height: 0; min-height: 0; max-height: none; overflow: hidden;
+  pointer-events: none; flex: none; }
+.cmp-pill { position: relative; }
 .cmp-mic, .cmp-send { flex: none; width: var(--h-cmp-in); height: var(--h-cmp-in); border-radius: 50%; border: 0; padding: 0;
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .cmp-mic { background: none; color: var(--muted); }
