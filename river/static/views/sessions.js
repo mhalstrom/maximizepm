@@ -302,6 +302,9 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     w.innerHTML = what ? `${esc(what)} <span class="link" data-wait-open="1" tabindex="0" role="button">Answer it</span>` : "";
     w.classList.toggle("hidden", !what);
   }
+  // What may open the dialog without a click on 'Answer it': a prompt, or a question younger than question_popup_max
+  // (#5001: an old question stays on the card and behind 'Answer it', but does not pop up).
+  const popsUp = (s) => (s.waiting || []).filter(w => !w.old);
   const showWaiting = (s) => { for (const w of s.waiting || []) seenWait.add(s.name + "\x1f" + waitKey(w)); openWaiting(s, { onSent: sentTurn }); };
   $("#sessWait").addEventListener("click", (e) => {
     if (!e.target.closest("[data-wait-open]")) return;
@@ -317,7 +320,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
   function autoWait() {
     if (!agent || document.hidden || !isShown()) return;
     const s = list.find(x => x.name === agent);
-    if (!s || !(s.waiting || []).some(w => !seenWait.has(s.name + "\x1f" + waitKey(w)))) return;
+    if (!s || !popsUp(s).some(w => !seenWait.has(s.name + "\x1f" + waitKey(w)))) return;
     if (document.querySelector('#setup:not(.hidden), [id$="Dlg"]:not(.hidden)')) return;
     showWaiting(s);
   }
@@ -486,14 +489,14 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
     pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
-    if (s && (s.waiting || []).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
+    if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
     const r = (e.key === "Enter" || e.key === " ") && e.target.closest(".srow-main") && e.target.closest("[data-session]");
     if (!r) return;
     e.preventDefault(); pick(r.dataset.session);
     const s = list.find(x => x.name === r.dataset.session);
-    if (s && (s.waiting || []).length) showWaiting(s);
+    if (s && popsUp(s).length) showWaiting(s);
   });
   setInterval(refresh, 3000);
   return { refresh: () => { refresh(); fit(); }, pick };

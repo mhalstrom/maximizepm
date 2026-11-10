@@ -190,6 +190,24 @@ class Sessions(Base):
         (card,) = self.cards()
         self.assertEqual((card["state_label"], [w["id"] for w in card["waiting"]]), ("waits for an answer", [q]))
 
+    def test_an_old_question_is_marked_so_it_does_not_pop_up(self):
+        """#5001 (mark: 'maybe the questions should just not open by default if they are old'): a question older than
+        question_popup_max is marked old; the page opens the dialog by itself only for one that is not."""
+        q = core.send(self.c, "question", "Do you agree?", to="mark", item=self.it, actor="ag")["id"]
+        (card,) = self.cards()
+        self.assertEqual([(w["id"], w["old"]) for w in card["waiting"]], [(q, False)])
+        with core.tx(self.c):
+            self.c.execute("UPDATE messages SET created_at=? WHERE id=?",
+                           (core.iso(core.now() - core.timedelta(minutes=11)), q))
+        (card,) = self.cards()
+        self.assertEqual(([(w["id"], w["old"]) for w in card["waiting"]], card["state_label"]),
+                         ([(q, True)], "waits for an answer"))  # still on the card, behind 'Answer it'
+        core.config_set(self.c, "question_popup_max", "0s")
+        self.assertFalse(self.cards()[0]["waiting"][0]["old"])
+        js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text()
+        self.assertIn("const popsUp = (s) => (s.waiting || []).filter(w => !w.old);", js)
+        self.assertIn("if (!s || !popsUp(s).some(", js)
+
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET activity_prompt='{}' WHERE name='ag'")

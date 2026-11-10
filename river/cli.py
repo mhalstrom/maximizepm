@@ -623,6 +623,11 @@ def _footer(conn, actor):
     msg = _unread_text(core.unread(conn, actor), actor)
     if msg:
         bits.append(msg)
+    asked = core.asked_open(conn, actor)
+    if asked:  # #5001: the asker closes each question that is answered or moot
+        bits.append(f"{len(asked)} open question(s) you asked ({', '.join('#' + str(q['id']) for q in asked)}): close "
+                    f"each answered one: maxpm --as {actor} answer <id> --self \"...\", or a moot one: withdraw <id> "
+                    f"--note \"...\"")
     gap = core.watch_gap(conn, actor)
     if gap is not None:  # a manager whose watch ended: nothing wakes it at its prompt (#1898)
         bits.append(f"no watch runs for {core._short(gap)}: start maxpm --as {actor} manage --watch in the "
@@ -1218,6 +1223,11 @@ def build_parser():
     x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int); x.add_argument("text")
     x.add_argument("--in-chat", action="store_true", help="you asked it, and the person answered in your own chat: "
                    "record their words as the answer and close the question")
+    x.add_argument("--self", dest="self_answer", action="store_true", help="you asked it, and you have the answer "
+                   "from any channel (a message, a canvas card, your chat): record it and close the question")
+    x = sub.add_parser("withdraw", help="close a question you asked that is moot now (the work answered it)")
+    x.add_argument("id", type=int)
+    x.add_argument("--note", required=True, help="why it is moot")
     x = sub.add_parser("inbox", help="your unread messages and questions waiting for your answer")
     x.add_argument("--all", action="store_true", help="read messages too")
     x.add_argument("--peek", action="store_true", help="do not mark them read")
@@ -1458,8 +1468,8 @@ def install_skills(dest, copy=False, force=False):
 
 
 def activity_command(stdin=None):
-    """maxpm activity: a Claude Code hook (core.activity_hook_settings) passes its event as JSON on stdin. It prints nothing,
-    waits at most two seconds for the queue, and always exits 0: a failed record never stops the session (#4288)."""
+    """maxpm activity: a Claude Code hook (core.activity_hook_settings) passes its event as JSON on stdin. It prints nothing
+    (but the Stop hook's reminder to close answered questions, #5001), waits at most two seconds for the queue, and always exits 0: a failed record never stops the session (#4288)."""
     import json
     conn = None
     try:
@@ -1469,6 +1479,10 @@ def activity_command(stdin=None):
         res = core.activity_event(conn, payload if isinstance(payload, dict) else {})
         if res["event"] in ("UserPromptSubmit", "Stop"):
             _record_hook_process(conn, res["agent"])
+        if res.get("remind"):
+            # The Stop hook keeps the session for one more turn, to close its answered questions (#5001); Claude
+            # Code sets stop_hook_active on the next Stop, so it reminds once.
+            print(json.dumps({"decision": "block", "reason": res["remind"]}))
     except Exception:  # noqa: BLE001 - a hook must never fail the session
         pass
     finally:
@@ -2401,7 +2415,9 @@ def dispatch(conn, a, actor):
         return core.send(conn, a.kind, a.text, a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
                          a.item, a.reply, actor, a.level, a.blocked)
     if c == "answer":
-        return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat)
+        return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer)
+    if c == "withdraw":
+        return core.withdraw(conn, a.id, a.note, actor)
     if c == "inbox":
         if a.wait:
             return core.inbox_wait(conn, actor, a.timeout)
@@ -2909,6 +2925,9 @@ def render_go(b):
         if (b.get("trackers") or {}).get(n):
             out.append(f"  tracker: {b['trackers'][n]} (items link its issues with --ref)")
     out.append("")
+    if b.get("asked_open"):
+        out.append("OPEN QUESTIONS YOU ASKED: " + core.asked_line(me, b["asked_open"]) + ".")
+        out += [f"  #{q['id']} to {q['to_agent']}: {' '.join(q['body'].split())[:160]}" for q in b["asked_open"]] + [""]
     if b.get("focus_note"):
         out += [b["focus_note"], ""]
     if b.get("help_prompt"):
@@ -4097,9 +4116,12 @@ def render(a, res):
               + "; the sender is told")
         return
     if c == "answer":
-        if res.get("native_status") == "in the chat":
-            print(f"question #{res['reply_to']} is closed: {res['from_agent']} answered it in your chat")
+        if res.get("native_status") in ("in the chat", "by the asker"):
+            print(f"question #{res['reply_to']} is closed with the answer of {res['from_agent']} that you have")
             return
+    if c == "withdraw":
+        print(f"question #{res['withdrawn']} is withdrawn: {res['note']}")
+        return
         print(f"answered: sent #{res['id']} to {res['to_agent']}; question #{res['reply_to']} is closed")
         return
     if c == "inbox":

@@ -213,6 +213,10 @@ DEFAULT_SETTINGS = {
     # no idle_end, no hand-over. maxpm serve ends it when nobody typed or sent it a prompt for expert_idle_end
     # (0s: never), and tells the senders of what it did not read.
     "expert_idle_end": "7d",
+    # The Sessions tab opens 'Waits for you' by itself for a question of the open session (and when a person picks
+    # its row) only while the question is younger than question_popup_max (#5001); an older open question stays in
+    # the card's count, its 'Answer it' link, and maxpm needs-you, but does not pop up. 0s: every question pops up.
+    "question_popup_max": "10m",
     # maxpm serve closes the tmux panes of sessions that are done every tidy_every, as maxpm view --tidy does; a pane
     # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. It also
     # ends the tmux servers the tests left behind with their socket gone (maxpm view --orphans). 0s: never.
@@ -627,7 +631,8 @@ CREATE TABLE IF NOT EXISTS messages (
   nudged_at   TEXT,
   native_status TEXT,
   level       TEXT,  -- low when the sender or MaximizePM said so; NULL: high (DEFAULT_LEVEL)
-  blocked     TEXT   -- who said that its item stands still until the answer (BLOCKED_SIGNS); NULL: nobody
+  blocked     TEXT,  -- who said that its item stands still until the answer (BLOCKED_SIGNS); NULL: nobody
+  asker_reminded TEXT  -- a question: when the Stop hook reminded its asker to close it (#5001)
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -1102,6 +1107,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE queue_entries ADD COLUMN native_status TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN native_status TEXT")
+    if "asker_reminded" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
+        conn.execute("ALTER TABLE messages ADD COLUMN asker_reminded TEXT")
     if "level" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN level TEXT")
     if "blocked" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
@@ -1280,7 +1287,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "question_popup_max", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "similar_min":
         try:
@@ -7998,10 +8005,10 @@ def activity_event(conn, payload, env=None):
     ev = str(payload.get("hook_event_name") or "")
     agent = activity_agent(conn, payload.get("session_id"), env)
     if not agent or ev not in ACTIVITY_EVENTS:
-        return {"agent": agent, "event": ev, "alert": None, "answered": []}
+        return {"agent": agent, "event": ev, "alert": None, "answered": [], "remind": None}
     record_session_url(conn, agent, session_url_from_env(env))
     ntype = str(payload.get("notification_type") or "")
-    t, alert, answered = iso(now()), None, []
+    t, alert, answered, remind = iso(now()), None, [], None
     with tx(conn):
         a = conn.execute("SELECT activity_prompt, activity_waits, stop_at, role FROM agents WHERE name=?", (agent,)).fetchone()
         prompt, waits = a["activity_prompt"], a["activity_waits"]
@@ -8040,9 +8047,17 @@ def activity_event(conn, payload, env=None):
                                 f"prompt and runs no maxpm wait. Look at its terminal or session.")
         if alert:
             conn.execute("UPDATE agents SET activity_told=? WHERE name=?", (t, agent))
+        if ev == "Stop" and not payload.get("stop_hook_active"):
+            # The asker closes its own questions (#5001): once for each question, at a turn end after it.
+            due = [q for q in asked_open(conn, agent) if not q["asker_reminded"]
+                   and now() - parse_iso(q["created_at"]) >= ASKER_REMIND_AFTER]
+            if due:
+                conn.execute(f"UPDATE messages SET asker_reminded=? WHERE id IN ({','.join('?' * len(due))})",
+                             (t, *[q["id"] for q in due]))
+                remind = "MaximizePM: " + asked_line(agent, due) + ". If it still waits for the person, end your turn again."
     if answered:
         sync_needs_you(conn)  # the person's 'waits for you' of those questions closes now
-    return {"agent": agent, "event": ev, "alert": alert, "answered": answered}
+    return {"agent": agent, "event": ev, "alert": alert, "answered": answered, "remind": remind}
 
 
 def activity_watch(conn):
@@ -8720,11 +8735,11 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
     return res
 
 
-def answer(conn, msg_id, body, actor=None, in_chat=False):
-    """Answer a question: the answer goes to the asker and the question closes. in_chat (#4995): the asker records
-    that the person answered in its own chat; the answer is in the name of the person asked, and is not delivered
-    again (the asker has it)."""
-    if in_chat:
+def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
+    """Answer a question: the answer goes to the asker and the question closes. in_chat (#4995) or self_answer
+    (#5001): the asker records the answer that it has from its own chat or from any other channel; the answer is in
+    the name of the person asked, and is not delivered again (the asker has it)."""
+    if in_chat or self_answer:
         if not actor:
             raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
         if not body or not body.strip():
@@ -8734,9 +8749,9 @@ def answer(conn, msg_id, body, actor=None, in_chat=False):
             if q["kind"] != "question" or q["state"] != "open":
                 raise RiverError(f"message {msg_id} is no open question; see: maxpm thread {msg_id}")
             if q["from_agent"] != actor:
-                raise RiverError(f"--in-chat is for the asker ({q['from_agent']}): the person answered in its chat; "
-                                 f"answer it yourself without --in-chat")
-            mid = _close_in_chat(conn, q, body.strip(), iso(now()))
+                raise RiverError(f"--self and --in-chat are for the asker ({q['from_agent']}), who has the answer; "
+                                 f"answer it yourself without them")
+            mid = _close_in_chat(conn, q, body.strip(), iso(now()), "in the chat" if in_chat else "by the asker")
         return message_show(conn, mid)
     if not actor:
         raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
@@ -8764,18 +8779,71 @@ def answer(conn, msg_id, body, actor=None, in_chat=False):
     return message_show(conn, mid)
 
 
-def _close_in_chat(conn, q, body, t):
-    """Inside a tx: the person asked (q's to_agent) answered question q in the asker's own chat (#4995). The question
-    closes with that text as its answer, in the person's name; the answer is read at once and not delivered, since
-    the asker has it in its chat. Returns the answer's id."""
+def _close_in_chat(conn, q, body, t, how="in the chat"):
+    """Inside a tx: the person asked (q's to_agent) answered question q in the asker's own chat (#4995), or the asker
+    has the answer from another channel (how 'by the asker', #5001). The question closes with that text as its
+    answer, in the person's name; the answer is read at once and not delivered, since the asker has it. Returns the
+    answer's id."""
     who = q["to_agent"] or "a person"
     mid = _send(conn, "answer", who, body[:4000], to=q["from_agent"], item_id=q["item_id"], reply_to=q["id"])
-    conn.execute("UPDATE messages SET state='read', read_at=?, native_status='in the chat' WHERE id=?", (t, mid))
+    conn.execute("UPDATE messages SET state='read', read_at=?, native_status=? WHERE id=?", (t, how, mid))
     conn.execute("UPDATE messages SET state='answered', closed_at=?, read_at=COALESCE(read_at, ?) WHERE id=?",
                  (t, t, q["id"]))
     if q["item_id"] is not None:
-        _event(conn, q["item_id"], who, f"answered question #{q['id']} in the chat of {q['from_agent']}")
+        _event(conn, q["item_id"], who if how == "in the chat" else q["from_agent"],
+               f"answered question #{q['id']} in the chat of {q['from_agent']}" if how == "in the chat"
+               else f"question #{q['id']} answered: {q['from_agent']} has the answer of {who}")
     return mid
+
+
+def withdraw(conn, msg_id, note, actor=None):
+    """The asker closes its open question without an answer: the work made it moot (#5001). The person's 'waits for
+    you' of it closes; a note in its thread says why."""
+    if not actor:
+        raise RiverError("withdraw needs an agent name: set MAXPM_AGENT or pass --as <name>")
+    if not note or not note.strip():
+        raise RiverError("say why the question is moot: maxpm withdraw <id> --note \"<why>\"")
+    with tx(conn):
+        q = _message(conn, msg_id)
+        if q["kind"] != "question" or q["state"] != "open":
+            raise RiverError(f"message {msg_id} is no open question; see: maxpm thread {msg_id}")
+        if q["from_agent"] != actor:
+            raise RiverError(f"only the asker ({q['from_agent']}) withdraws question {msg_id}; to answer it: "
+                             f"maxpm answer {msg_id} \"...\"")
+        t = iso(now())
+        mid = _send(conn, "note", actor, f"withdrawn: {note.strip()}", to=q["to_agent"], item_id=q["item_id"],
+                    reply_to=q["id"])
+        conn.execute("UPDATE messages SET state='read', read_at=? WHERE id=?", (t, mid))
+        conn.execute("UPDATE messages SET state='read', closed_at=?, read_at=COALESCE(read_at, ?) WHERE id=?",
+                     (t, t, q["id"]))
+        if q["item_id"] is not None:
+            _event(conn, q["item_id"], actor, f"withdrew question #{q['id']}: {note.strip()}")
+    sync_needs_you(conn)
+    return {"withdrawn": q["id"], "note": note.strip(), "to": q["to_agent"]}
+
+
+def asked_open(conn, agent):
+    """The open questions that the agent asked a person (maxpm ask), oldest first (#5001)."""
+    return [dict(r) for r in conn.execute(
+        "SELECT m.id, m.to_agent, m.body, m.item_id, m.created_at, m.asker_reminded FROM messages m JOIN agents p ON "
+        "p.name=m.to_agent AND p.kind='human' WHERE m.kind='question' AND m.state='open' AND m.from_agent=? "
+        "ORDER BY m.id", (agent,))] if agent else []
+
+
+def asked_line(agent, qs):
+    """The reminder to an asker with open questions (#5001): close each one that is answered or moot."""
+    if not qs:
+        return ""
+    who = ", ".join(sorted({q["to_agent"] for q in qs}))
+    ids = ", ".join(f"#{q['id']}" for q in qs)
+    return (f"you have {len(qs)} open question(s) to {who} ({ids}): close each that is answered, from any channel: "
+            f"maxpm --as {agent} answer <id> --self \"<the answer>\"; or that is moot: maxpm --as {agent} withdraw <id> "
+            f"--note \"<why>\"")
+
+
+# The Stop hook reminds an asker once for each question older than this (#5001): a turn that ends at once after
+# the question waits for the answer, and is not reminded.
+ASKER_REMIND_AFTER = timedelta(minutes=2)
 
 
 def answered_in_chat(conn, agent, prompt, at=None):
@@ -10905,6 +10973,7 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
     """One call for a fresh agent session; see _go. A session that gets a monitor item has role monitor,
     and its brief says which deploy it follows and whom to alert."""
     brief = _go(conn, cwd, actor, project, role, session, focus, model, chat, agent_type)
+    brief["asked_open"] = asked_open(conn, brief.get("agent"))  # #5001: the asker closes what is answered or moot
     it = brief.get("item")
     if it and it.get("tier") == "expert" and _agent(conn, brief["agent"])["role"] == "expert":
         # It took an expert-tier task (launched for it): from now on it is an expert session (#4959).

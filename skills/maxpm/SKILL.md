@@ -355,10 +355,13 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   takes nothing back, starts no other session for your work, and alerts the
   manager. The person answers in your terminal or with `maxpm answer`. A wait
   that you only say in chat looks idle: `maxpm serve` gives your work to others.
-  When the person answers in your chat, the question must close, or the page
-  keeps it in 'Waits for you'. A session that `maxpm serve` started closes it
-  by itself (its hooks); in any other session close it at once with their
-  words: `maxpm answer <question-id> --in-chat "<what they said>"`.
+  Close each question you asked as soon as you have its answer, from any
+  channel (your chat, a message, a canvas card), or the person keeps seeing it
+  in 'Waits for you': `maxpm answer <question-id> --self "<the answer>"`. When
+  the work made it moot: `maxpm withdraw <question-id> --note "<why>"`. A
+  prompt that the person types in a session that `maxpm serve` started closes
+  its questions by itself (its hooks). `maxpm go`, the line after each command,
+  and the end of your turn remind you of your open questions.
 - The user should look at a finished result (a page, a text, a design): the
   project's setting `result_look` decides, and the go briefing states the rule
   of your item's project.

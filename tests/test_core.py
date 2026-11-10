@@ -6975,11 +6975,60 @@ class Activity(Base):
         q3 = core.send(self.c, "question", "Push?", to="mark", item=self.item, actor="w")["id"]
         self.assertEqual(core.message_show(self.c, q3)["state"], "open")
         # The asker records an answer that came in its chat itself: answer --in-chat (only the asker).
-        with self.assertRaisesRegex(core.RiverError, "--in-chat is for the asker"):
+        with self.assertRaisesRegex(core.RiverError, "--self and --in-chat are for the asker"):
             core.answer(self.c, q3, "yes", "boss", in_chat=True)
         m = core.answer(self.c, q3, "yes, push", "w", in_chat=True)
         self.assertEqual((m["from_agent"], m["native_status"], core.message_show(self.c, q3)["state"]),
                          ("mark", "in the chat", "answered"))
+
+    def test_the_asker_is_reminded_to_close_its_open_questions_until_it_does(self):
+        """#5001 (mark: 'the session should try to close them'): go, the line after each command, and the Stop hook
+        (once for each question, not at the turn end right after the question) remind the asker; answer --self and
+        withdraw close a question; the reminders stop."""
+        from river import cli
+        q1 = core.send(self.c, "question", "Which plan?", to="mark", item=self.item, actor="w")["id"]
+        self.assertIsNone(self.event("Stop")["remind"])  # it waits for the answer now
+        self.clock[0] += core.timedelta(minutes=3)
+        self.assertIsNone(self.event("Stop", stop_hook_active=True)["remind"])
+        got = self.event("Stop")["remind"]
+        self.assertIn(f"you have 1 open question(s) to mark (#{q1}): close each that is answered", got)
+        self.assertIn("maxpm --as w answer <id> --self", got)
+        self.assertIsNone(self.event("Stop")["remind"])  # once for each question
+        # The hook command prints the block decision for Claude Code.
+        q2 = core.send(self.c, "question", "Push?", to="mark", item=self.item, actor="w")["id"]
+        self.clock[0] += core.timedelta(minutes=3)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), mock.patch.object(core, "now", lambda: self.clock[0]), \
+                contextlib.redirect_stdout(out):
+            cli.activity_command(io.StringIO(json.dumps({"hook_event_name": "Stop", "session_id": self.SID})))
+        hook = json.loads(out.getvalue())
+        self.assertEqual(hook["decision"], "block")
+        self.assertIn(f"(#{q2})", hook["reason"])
+        # go and the footer name both.
+        brief = core.go(self.c, self.dir.name, "w", project="shop")
+        self.assertEqual([q["id"] for q in brief["asked_open"]], [q1, q2])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(brief)
+        self.assertIn(f"OPEN QUESTIONS YOU ASKED: you have 2 open question(s) to mark (#{q1}, #{q2})", out.getvalue())
+        with contextlib.redirect_stderr(err):
+            cli._footer(self.c, "w")
+        self.assertIn(f"2 open question(s) you asked (#{q1}, #{q2})", err.getvalue())
+        # The asker closes them: one answered elsewhere, one moot. Only the asker may.
+        with self.assertRaisesRegex(core.RiverError, "only the asker"):
+            core.withdraw(self.c, q2, "moot", "boss")
+        m = core.answer(self.c, q1, "the small plan (canvas card)", "w", self_answer=True)
+        self.assertEqual((m["from_agent"], m["native_status"], core.message_show(self.c, q1)["state"]),
+                         ("mark", "by the asker", "answered"))
+        self.assertEqual(core.withdraw(self.c, q2, "the release went out without it", "w")["withdrawn"], q2)
+        self.assertEqual(core.message_show(self.c, q2)["state"], "read")
+        self.assertEqual(core.waits_on_person(self.c, ["w"]), {})
+        self.assertFalse(any(n.get("message_id") in (q1, q2) for n in core.needs_you(self.c)))
+        self.assertEqual(core.go(self.c, self.dir.name, "w", project="shop")["asked_open"], [])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cli._footer(self.c, "w")
+        self.assertNotIn("open question", err.getvalue())
 
     def test_silence_with_an_item_in_hand_alerts_the_manager_once(self):
         self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "make deploy"})
