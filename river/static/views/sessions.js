@@ -670,7 +670,14 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   $("#sessBar").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = $("#sessText"), btn = $("#sessSend"), to = agent;
-    if (!to || btn.disabled || empty()) return;
+    if (!to || sending || btn.disabled || empty()) return;
+    // Enter or the send arrow while the microphone listens (#5118): it stops first, the final text comes in (at
+    // most 1.5 s), and then the box goes once; text after it never comes back into the box to be sent again.
+    if (dict.listening()) {
+      sending = true; renderFiles();
+      try { await dict.finish(1500); } finally { sending = false; renderFiles(); }
+      if (to !== agent || empty()) return;
+    }
     // A cold expert with a large context (#5023): the message would read all of it again at the write price.
     const ex = list.find(x => x.name === to) || {}, cold = ex.role === "expert" ? lastCache || ex.cache : null;
     if (cold && cold.fresh) {

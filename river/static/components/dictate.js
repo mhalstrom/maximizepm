@@ -108,15 +108,18 @@ function browserSession(lang, update) {
 
 // Dictate into one box: the spoken text goes in at the cursor (in place of a selection), the words not final yet
 // after it, and the final text replaces them. say(text): a line for the person (listening, an error, a download).
+// stop(): the microphone stops, and the final text still comes into the box. finish(limit): the box is sent now
+// (#5118): the microphone stops, the final text comes in for at most limit ms, and after that nothing more does,
+// so a box that the send emptied stays empty.
 export function dictateInto(input, { changed = () => {}, say = () => {}, onEnd = () => {} } = {}) {
   const how = engine();
   if (!how) return null;
   const v = input.value, a = input.selectionStart ?? v.length, b = input.selectionEnd ?? v.length;
   const before = v.slice(0, a), after = v.slice(b);
   const join = (x, y) => !x || !y ? x + y : /\s$/.test(x) || /^\s/.test(y) ? x + y : x + " " + y;
-  let last = { text: "", partial: "" }, ended = false;
+  let last = { text: "", partial: "" }, ended = false, dropped = false;
   const show = (r) => {
-    if (!r) return;
+    if (!r || dropped) return;
     last = { text: r.text ?? last.text, partial: r.done ? "" : (r.partial ?? last.partial) };
     const spoken = [last.text, last.partial].filter(Boolean).join(" ");
     input.value = join(join(before, spoken), after);
@@ -136,7 +139,18 @@ export function dictateInto(input, { changed = () => {}, say = () => {}, onEnd =
       : `Dictation did not start: ${e.message}`);
     ended = true; onEnd();
   });
-  return { async stop() { const s = await run.catch(() => null); if (s) await s.stop(); else if (!ended) { ended = true; onEnd(); } } };
+  // A recording that starts after a stop (the microphone's permission came late) stops when it starts.
+  const stop = async () => { const s = await run.catch(() => null); if (s) await s.stop(); else if (!ended) { ended = true; onEnd(); } };
+  return {
+    stop,
+    async finish(limit = 1500) {
+      if (!(limit > 0)) dropped = true;  // the box goes now: not one more word comes into it
+      await Promise.race([stop().catch(() => {}), new Promise(r => setTimeout(r, limit))]);
+      dropped = true;
+      if (!ended) { ended = true; onEnd(); }
+      say("");
+    },
+  };
 }
 
 // The microphone of the message box of a chat (composer.js).
@@ -145,6 +159,8 @@ export function makeDictation({ button, input, status, changed }) {
   const say = (t) => { status.textContent = t; status.classList.toggle("hidden", !t); };
   const off = () => { cur = null; button.classList.remove("on"); button.setAttribute("aria-pressed", "false"); };
   function stop() { if (cur) { const c = cur; off(); c.stop(); } }
+  // Enter or the send arrow while it listens (#5118): one send of the final text, and nothing comes back after it.
+  async function finish(limit) { if (cur) { const c = cur; off(); await c.finish(limit); } }
   button.addEventListener("click", () => {
     if (cur) return stop();
     if (input.disabled) return;
@@ -152,7 +168,8 @@ export function makeDictation({ button, input, status, changed }) {
     if (cur) { button.classList.add("on"); button.setAttribute("aria-pressed", "true"); }
   });
   return {
-    stop,
+    stop, finish,
+    listening: () => !!cur,
     // Whether the box takes text now; the microphone shows wherever this page can dictate.
     showFor(enabled) {
       const how = engine();
@@ -210,6 +227,16 @@ export function installMics(state) {
     if (e.target !== field) return;
     setTimeout(() => { if (document.activeElement !== field && document.activeElement !== btn) hide(); }, 0);
   });
+  // The box is sent while it listens (#5118): its form submits, or Enter in a line box, or Cmd/Ctrl+Enter. What is in
+  // the box goes; the microphone stops, and no text comes into the box after it (it would send the same words again).
+  const sent = (e) => {
+    if (!cur || !field || (e.type === "submit" ? !e.target.contains(field) : e.target !== field)) return;
+    if (e.type === "keydown" && !(e.key === "Enter" && !e.shiftKey && !e.isComposing
+        && (field.tagName === "INPUT" || e.metaKey || e.ctrlKey))) return;
+    const c = cur; off(); c.finish(0);
+  };
+  document.addEventListener("submit", sent, true);
+  document.addEventListener("keydown", sent, true);
   btn.addEventListener("pointerdown", (e) => e.preventDefault());  // the box keeps the focus and its cursor
   btn.addEventListener("click", () => {
     if (!field) return;

@@ -365,6 +365,39 @@ try {
         got = self.drive(driver, "/", flags=("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"))
         self.assertEqual(got, {"left": True, "focus": True, "final": True, "own": True})
 
+    def test_enter_while_dictating_sends_once_and_the_box_stays_empty(self):
+        """#5118 (mark: 'when dicating when we press enter it needs to send the text and stop listening'; one dictated
+        message went out three times): Enter while the microphone listens stops it, takes the final text, sends it
+        once and empties the box. Audio that comes after it puts nothing back, so the next Enter sends nothing."""
+        from river import dictation
+        from tests.test_dictation import FAKE
+        fake = Path(self.dir.name, "fake.py")
+        fake.write_text(FAKE)
+        old, dictation.HELPER = dictation.HELPER, [__import__("sys").executable, str(fake)]
+        self.addCleanup(setattr, dictation, "HELPER", old)
+        self.pane["screen"] = "❯ \n"  # the session waits at its prompt: the box sends
+        driver = r'''try {
+  const box = () => q("#sessText"), mic = () => q("#sessMic");
+  const enter = () => box().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await until(() => window.__appReady && mic() && !mic().classList.contains("hidden") && !mic().disabled && !box().disabled,
+              "the message box has its microphone");
+  box().focus();
+  mic().click();
+  await until(() => /heard \d+ bytes/.test(box().value), "words not final yet show in the box");
+  enter();
+  await until(() => box().value === "" && !mic().classList.contains("on"), "Enter sent the text and stopped the microphone");
+  await sleep(2000);  // the fake microphone goes on; eight flushes of audio would have come
+  const out = { empty: box().value === "", off: !mic().classList.contains("on") };
+  enter();  // an empty box sends nothing
+  await sleep(500);
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/", flags=("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"))
+        self.assertEqual(got, {"empty": True, "off": True})
+        typed = [c for c in self.tmux.calls if any("bytes" in str(x) for x in c)]
+        self.assertEqual(len(typed), 1, typed)
+        self.assertRegex(next(str(x) for x in typed[0] if "bytes" in str(x)), r"^\d+ bytes in [a-z]{2}(-[A-Z]{2})?\.$")
+
     def test_a_new_prompt_or_question_of_the_open_session_opens_the_dialog_once(self):
         """#4663: the ! dialog opens by itself when the open session comes to a prompt or asks a question; Dismiss
         keeps it closed until something new waits."""
