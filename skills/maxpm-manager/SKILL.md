@@ -236,6 +236,20 @@ Stop when the user tells you to, and tell the user what you did.
   (`maxpm add "<title>" --goal <goal>`). Ask the user only when only they can tell.
 - Planning: everything in `maxpm guide planner` (add, dep, prio, edit).
 
+## Operational work goes into a task
+
+Work on the operation of the system is a task of its own, not something you do
+in your context: a cleanup of the user's list, a change of the order of the
+graph, reading production logs to write a task with the right context. Add an
+operational task: `maxpm add "<title>" --kind operational --context "<what and
+why>"`. It has its own default model (sonnet, medium effort; change it with
+`maxpm config set default_model <m> --kind operational`), and it starts in a
+new session: `maxpm serve` starts one, or gives it to a waiting session that
+held no task. It closes an item of the user's only with a reason (`maxpm
+done|drop <id> --note "<why>"`), and the user gets one notice with an undo.
+`maxpm serve` also adds a cleanup task by itself when a person's list holds
+`list_cleanup_min` (10) open items older than `list_cleanup_after` (7d).
+
 ## Hand a long talk to an expert
 
 Your context stays small: you direct the team. A long talk with the user about

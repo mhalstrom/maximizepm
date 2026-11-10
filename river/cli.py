@@ -884,6 +884,9 @@ def build_parser():
                    "say how it differs (the history keeps it)")
     x.add_argument("--tier", choices=core.TIERS, help="expert: a task that a person talks through with an expert "
                    "session (a session started for it takes it; a worker never does); normal: any worker")
+    x.add_argument("--kind", choices=core.TASK_KINDS, help="operational: work on the operation of the system (a "
+                   "cleanup, a change of the order, reading production logs to write a task); it has its own default "
+                   "model and starts in a new session. work: any other task")
     x.add_argument("--mine", action="store_true",
                    help="you do this work now (a request in your chat, a note you write while you hold another "
                         "item): reserve it for you at once, so no other session starts it; claim or close it yourself")
@@ -916,6 +919,9 @@ def build_parser():
     x = sub.add_parser("edit", help="change title, notes, doer, or project")
     x.add_argument("--tier", choices=core.TIERS, help="expert: a task that a person talks through with an expert "
                    "session (a session started for it takes it; a worker never does); normal: any worker")
+    x.add_argument("--kind", choices=core.TASK_KINDS, help="operational: work on the operation of the system (a "
+                   "cleanup, a change of the order, reading production logs to write a task); it has its own default "
+                   "model and starts in a new session. work: any other task")
     x.add_argument("id", type=int); x.add_argument("--title"); x.add_argument("--notes")
     x.add_argument("--no-goal-context", dest="goal_context", action="store_false", default=None,
                    help="its session starts fresh, not as a fork of its goal's base")
@@ -2210,7 +2216,8 @@ def dispatch(conn, a, actor):
         res = core.item_add(conn, project, title, a.priority, a.notes, a.doer, a.after, actor,
                             a.context, a.touches, a.check, a.blocks, a.mode, a.found_during, a.feeds, a.due,
                             [] if a.no_goal else a.goal, core.parse_refs(a.ref, a.ref_url), _models(a),
-                            backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier)
+                            backlog=a.backlog, check_similar=True, new=a.new, mine=a.mine, tier=a.tier,
+                            kind=a.kind)
         if a.no_goal_context:
             core.item_goal_context(conn, res["id"], False, actor)
         return res
@@ -2221,7 +2228,7 @@ def dispatch(conn, a, actor):
             core.item_goal_context(conn, a.id, a.goal_context, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
                               a.due, a.goal, a.untag, core.parse_refs(a.ref, a.ref_url), a.unref, _models(a),
-                              tier=a.tier)
+                              tier=a.tier, kind=a.kind)
     if c == "list":
         return core.item_list(conn, a.project, a.status, a.all, a.goal, a.ref)
     if c == "show":

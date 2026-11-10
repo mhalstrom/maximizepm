@@ -5784,6 +5784,79 @@ class Locked(Base):
             self.assertEqual(ran, [False])
 
 
+class Operational(Base):
+    """An operational task (#4973): work on the operation of the system, with its own default model, that starts
+    in a new session; a trigger adds a cleanup of a person's old list."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        for n in ("w1", "w2"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+
+    def test_its_default_model_comes_before_the_global_default(self):
+        core.config_set(self.c, "default_model", "opus")
+        core.config_set(self.c, "default_model", "fable", project="a")
+        op = core.item_add(self.c, "a", "Reorder the graph of the a project", kind="operational", actor="mark")["id"]
+        w = self.add("a", "build the page")
+        ann = core.annotate(self.c)
+        self.assertEqual((ann[op]["kind"], ann[op]["model"], ann[op]["effort"]), ("operational", "sonnet", "medium"))
+        self.assertEqual(ann[w]["model"], "fable")
+        core.config_set(self.c, "default_model", "opus", kind="operational")  # a setting of the kind still wins
+        self.assertEqual(core.annotate(self.c)[op]["model"], "opus")
+        with self.assertRaisesRegex(RiverError, "an operational task is for an agent session"):
+            core.item_add(self.c, "a", "x", doer="human", kind="operational")
+        with self.assertRaisesRegex(RiverError, "the kind of a task is work or operational"):
+            core.item_add(self.c, "a", "x", kind="deploy")
+        core.item_edit(self.c, w, kind="operational", actor="mark")
+        self.assertEqual(core._item(self.c, w)["kind"], "operational")
+        core.item_edit(self.c, w, kind="work", actor="mark")
+        self.assertEqual(core._item(self.c, w)["kind"], "work")
+
+    def test_it_starts_in_a_new_session(self):
+        op = core.item_add(self.c, "a", "Read the production logs for the failed login", kind="operational")["id"]
+        x = self.add("a", "other work")
+        core.claim(self.c, x, "w1")
+        core.done(self.c, x, "done", "w1")
+        skipped = []
+        self.assertEqual(core.next_item(self.c, None, claim=True, actor="w1", limit=5, skipped=skipped), [])
+        self.assertIn((op, "an operational task starts in a new session; this one held a task"),
+                      [(i["id"], i["why"]) for i in skipped])
+        with self.assertRaisesRegex(RiverError, f"operational task #{op} starts in a new session"):
+            core.claim(self.c, op, "w1")
+        core.wait(self.c, self.dir.name, "w1", step="0s", sleep=lambda s: None)
+        self.assertIsNone(core.waiting_agent_for(self.c, "a", op))
+        b = core.go(self.c, self.dir.name, "w2")
+        self.assertEqual(b["item"]["id"], op)
+
+    def old_items(self, n, days=10):
+        ids = [self.add("a", f"decide thing {i}", doer="human") for i in range(n)]
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET created_at=? WHERE doer='human'", (core.iso(core.now() - timedelta(days=days)),))
+        return ids
+
+    def test_a_long_old_list_gets_one_cleanup_task(self):
+        ids = self.old_items(9)
+        core.needs_you(self.c, "mark")
+        self.assertEqual(core.cleanup_trigger(self.c), [])  # 9 < list_cleanup_min (10)
+        ids += self.old_items(1)
+        core.needs_you(self.c, "mark")
+        added = core.cleanup_trigger(self.c)
+        self.assertEqual(len(added), 1)
+        it = core.item_show(self.c, added[0])
+        self.assertEqual((it["kind"], it["project"], it["doer"]), ("operational", "a", "ai"))
+        self.assertTrue(it["title"].startswith("Clean up the list of mark: 10 items older than 7d"))
+        self.assertIn(f"#{ids[0]}", it["context"])
+        self.assertIn("maxpm done|drop <id> --note", it["context"])
+        self.assertEqual(core.cleanup_trigger(self.c), [])  # one at a time
+        core.claim(self.c, added[0], "w2")
+        core.done(self.c, added[0], "closed 4, kept 6", "w2")
+        self.assertEqual(core.cleanup_trigger(self.c), [])  # and at most one in each list_cleanup_after
+        core.config_set(self.c, "list_cleanup_after", "0s")
+        self.assertEqual(core.cleanup_trigger(self.c), [])
+
+
 class DeployHook(Base):
     """A target with a deploy hook releases with no session that types its command: maxpm serve runs the hook when
     the deploy item is ready; a failure keeps the deploy item open and starts the release again (#4971)."""

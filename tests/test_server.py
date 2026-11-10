@@ -182,6 +182,24 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn("deploy hook: exit 0", it["output"])
         self.assertEqual(server.auto_release(self.c, runner=sent.append)["deploying"], {})
 
+    def test_serve_starts_a_new_session_for_an_operational_task(self):
+        # #4973: an operational task starts in a new session; a used session that waits does not get it.
+        core.project_add(self.c, "site", path=self.dir.name)
+        core.register(self.c, "dev")
+        x = core.item_add(self.c, "site", "page")["id"]
+        core.claim(self.c, x, "dev")
+        core.done(self.c, x, "commit", "dev")
+        self._wait("dev")
+        op = core.item_add(self.c, "site", "Read the production logs for the failed login", kind="operational")["id"]
+        sent = []
+        r = server.auto_operational(self.c, runner=sent.append)
+        self.assertEqual((r["added"], r["pushed"], list(r["started"])), ([], {}, [op]))
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(core._item(self.c, op)["reserved_for"], r["started"][op])
+        self.assertEqual(server.auto_operational(self.c, runner=sent.append)["started"], {})  # once
+        b = core.go(self.c, self.dir.name, r["started"][op], focus=f"item:{op}")
+        self.assertEqual(b["item"]["id"], op)
+
     def _release(self, owner="ops", review="on"):
         """A target web with one project, a release of one item by dev, and its review; returns (review, deploy)."""
         core.target_add(self.c, "web", "push, then smoke test")

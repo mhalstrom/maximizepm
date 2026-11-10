@@ -246,6 +246,9 @@ like it that it is not linked to): read them before you start.
   no other session starts it; close it with `maxpm done <id>` when it is done.
   Without `--mine`, `maxpm wait` or a Dispatch gives it to another session
   within seconds.
+- Work on the operation of the system (a cleanup of a list, a new order of the
+  graph, reading production logs to write a task): `--kind operational`. It
+  starts in a new session with its own default model.
 - Give the next agent a start: `--context "why, where"`, `--touches <files>`,
   `--check "<command>"`, and `--doer human` for steps only a person can do.
 - The work comes from an outside tracker issue: link it with

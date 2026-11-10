@@ -275,6 +275,10 @@ DEFAULT_SETTINGS = {
     # The deploy hook of a target (maxpm target hook <target> deploy) is its release command: maxpm serve stops it
     # at deploy_timeout instead of hook_timeout, and the release then starts again as after a failure (#4971).
     "deploy_timeout": "2h",
+    # A person's list gets an operational cleanup task (maxpm serve, #4973) when it holds list_cleanup_min open items
+    # older than list_cleanup_after; at most one such task for a person in each list_cleanup_after. 0s: never.
+    "list_cleanup_after": "7d",
+    "list_cleanup_min": "10",
     # A shell command, run in the release review's folder, that prints the messages of the commits a release ships,
     # for example git log --format=%B <last release>..<pinned commit>. Its environment has MAXPM_LAST_RELEASE (the
     # output of the target's last done deploy item), MAXPM_TARGET, and MAXPM_REVIEW. Every #<id> it prints is an
@@ -1301,7 +1305,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             re.compile(value)
         except re.error as e:
             raise RiverError(f"prompt_pattern is a regular expression, and this one has an error: {e}")
-    elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port",
+    elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
                  "max_sessions", "canvas_max", "canvas_versions"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
@@ -1671,7 +1675,12 @@ def _model_defaults(conn):
 
 
 # Built-in defaults per item kind, below every setting: a monitor watches, so a weak model is enough.
-KIND_MODELS = {"monitor": {"model": "sonnet", "effort": "low", "max_model": "sonnet"}}
+KIND_MODELS = {"monitor": {"model": "sonnet", "effort": "low", "max_model": "sonnet"},
+               "operational": {"model": "sonnet", "effort": "medium"}}
+# Kinds whose built-in default comes before the project and global default_* settings (a setting of the kind,
+# default_model --kind <kind>, still comes first): an operational task reads lists and logs, and the default
+# model of the queue (often the strongest) is more than it needs (#4973).
+KIND_FIRST = ("operational",)
 
 
 def _item_models(it, project, defaults, ladder_text=DEFAULT_SETTINGS["model_ladder"]):
@@ -1691,6 +1700,9 @@ def _item_models(it, project, defaults, ladder_text=DEFAULT_SETTINGS["model_ladd
                 out[f], out[f + "_from"] = got, "agent_rules"
                 continue
         for sc in scopes:
+            if sc == f"project:{project}" and it["kind"] in KIND_FIRST and KIND_MODELS[it["kind"]].get(f):
+                out[f], out[f + "_from"] = KIND_MODELS[it["kind"]][f], f"kind:{it['kind']}"
+                break
             v = defaults.get(sc, {}).get("default_" + f)
             if v is not None:
                 if v:
@@ -3517,6 +3529,19 @@ def touches_list(text):
 
 
 TIERS = ("normal", "expert")
+# The kinds of a task that maxpm add and maxpm edit set (#4973). operational: work on the operation of the system
+# itself (mark: 'cleaning tasks, changing graph orderings, reading prod logs to understand what a task needs to be
+# created with the right context'). It has its own default model (KIND_MODELS), and it starts in a new session.
+TASK_KINDS = ("work", "operational")
+
+
+def _check_kind(kind):
+    if kind is None:
+        return None
+    k = str(kind).strip().lower()
+    if k not in TASK_KINDS:
+        raise RiverError(f"the kind of a task is {' or '.join(TASK_KINDS)}")
+    return k
 
 
 def _check_tier(tier):
@@ -3532,7 +3557,8 @@ def _check_tier(tier):
 
 def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), actor=None,
              context="", touches=None, check="", blocks=None, mode=None, found_during=None, feeds=(), due=None,
-             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None):
+             goals=None, refs=None, models=None, backlog=None, check_similar=False, new=None, mine=False, tier=None,
+             kind=None):
     """Add an item. `after`: items it waits on. `feeds`: items it waits on and whose output it reads.
     `backlog`: a note on why nobody takes it now; the item goes to the backlog at once.
     `check_similar` (maxpm add): refuse with SimilarWork when the same work is open or was done lately
@@ -3543,6 +3569,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     (_sweep). Without it, a session that adds an item for its own work while it holds another item saw a
     second session start the same work within seconds (#4942)."""
     tier = _check_tier(tier)
+    kind = _check_kind(kind)
+    if kind == "operational" and doer == "human":
+        raise RiverError("an operational task is for an agent session; leave out --kind, or --doer human")
     if tier and doer == "human":
         raise RiverError("an expert-tier task is for an agent session that a person talks with; a person's item has "
                          "no tier: leave out --tier, or --doer human")
@@ -3621,6 +3650,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
         if src is not None and tier == "expert" and not (models and any(models.get(f) for f in
                                                                         ("model", "min_model", "max_model"))):
             _inherit_model(conn, iid, int(src), actor)
+        if kind and kind != "work":
+            conn.execute("UPDATE items SET kind=? WHERE id=?", (kind, iid))
+            _event(conn, iid, actor, f"kind {kind}: work on the operation of the system; it starts in a new session")
         if tier:
             conn.execute("UPDATE items SET tier=? WHERE id=?", (tier, iid))
             _event(conn, iid, actor, f"tier {tier}: an expert session takes it, and a person talks it through with it")
@@ -3797,10 +3829,19 @@ def add_plan(conn, project, text, actor=None, priority=2, doer="any", dry_run=Fa
 
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
               context=None, touches=None, check=None, due=None, goals=None, untag=None, refs=None, unref=None,
-              models=None, tier=None):
+              models=None, tier=None, kind=None):
     tier = _check_tier(tier)
+    kind = _check_kind(kind)
     with tx(conn):
         it = _item(conn, item_id)
+        if kind is not None and it["kind"] != kind:
+            if it["kind"] not in TASK_KINDS:
+                raise RiverError(f"#{it['id']} is a {it['kind']} item; only a task of kind {' or '.join(TASK_KINDS)} "
+                                 f"changes its kind")
+            if kind == "operational" and it["doer"] == "human":
+                raise RiverError(f"#{it['id']} is a person's item; an operational task is for an agent session")
+            conn.execute("UPDATE items SET kind=? WHERE id=?", (kind, it["id"]))
+            _event(conn, it["id"], actor, f"kind {kind}")
         if tier is not None and (it["tier"] or "") != tier:
             if tier and it["doer"] == "human":
                 raise RiverError(f"#{it['id']} is a person's item; an expert-tier task is for an agent session")
@@ -6774,11 +6815,12 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
             if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
                 skipped.append({"id": a["id"], "title": a["title"], "why": f"{still[a['id']]} still works on it in its session"})
         pool = [a for a in pool if still.get(a["id"], actor) == actor]
-        for a in [a for a in pool if a["kind"] == "review" and reviewer_refusal(conn, a, actor)]:
+        for a in [a for a in pool if a["kind"] in FRESH_KINDS and reviewer_refusal(conn, a, actor)]:
             if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
                 skipped.append({"id": a["id"], "title": a["title"],
                                 "why": "you worked on the release it reviews" if author_refusal(conn, a, actor)
-                                else "a review starts in a new session; this one held a task"})
+                                else f"{'a review' if a['kind'] == 'review' else 'an operational task'} starts in "
+                                     f"a new session; this one held a task"})
             pool.remove(a)
         # The agent's own queue comes first, in its order and from any project; then items pushed to it.
         # The sort is stable, so graph order holds inside each group.
@@ -10387,7 +10429,7 @@ def waiting_agent_for(conn, project, item_id=None):
         a = agent_status(conn, r["name"])
         if a["state"] == "active" and not a["holds"] and project in (r["waiting_in"] or "").split(","):
             if (r["name"] not in authors and (it is None or not _model_refusal(conn, it, r["name"]))
-                    and (it is None or it["kind"] != "review" or used_session(conn, r["name"], it["id"]) is None)):
+                    and (it is None or it["kind"] not in FRESH_KINDS or used_session(conn, r["name"], it["id"]) is None)):
                 return r["name"]
     return None
 
@@ -10522,18 +10564,65 @@ def used_session(conn, agent, item_id=None):
     return r["item_id"] if r else None
 
 
+FRESH_KINDS = ("review", "operational")  # a task of these kinds starts in a new session (#4968, #4973)
+
+
+CLEANUP_TITLE = "Clean up the list of {person}"
+
+
+def cleanup_trigger(conn):
+    """One pass of maxpm serve (#4973): for each person whose list holds list_cleanup_min open items older than
+    list_cleanup_after, add one operational task that cleans it up, unless one was added for that person in the
+    last list_cleanup_after. The task sits in the project that holds most of those items. Returns the new ids."""
+    after = parse_duration(setting(conn, "list_cleanup_after"))
+    if not after.total_seconds():
+        return []
+    least = int(setting(conn, "list_cleanup_min") or 0)
+    cut = iso(now() - after)
+    added = []
+    for h in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name").fetchall():
+        person = h["name"]
+        title = CLEANUP_TITLE.format(person=person)
+        if conn.execute("SELECT 1 FROM items WHERE kind='operational' AND title LIKE ? AND (status IN ('open',"
+                        "'in_progress','held') OR created_at > ?)", (title + "%", cut)).fetchone():
+            continue
+        old = conn.execute("SELECT DISTINCT i.id, i.title, i.project_id, i.created_at FROM needs_you n JOIN items i "
+                           "ON i.id=n.item_id WHERE n.kind='item' AND n.closed_at IS NULL AND (n.human=? OR n.human IS "
+                           "NULL) AND i.status='open' AND i.created_at < ? ORDER BY i.created_at", (person, cut)).fetchall()
+        if len(old) < max(least, 1):
+            continue
+        counts = {}
+        for r in old:
+            counts[r["project_id"]] = counts.get(r["project_id"], 0) + 1
+        pid = max(counts, key=lambda k: (counts[k], -k))
+        project = conn.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()["name"]
+        ids = " ".join(f"#{r['id']}" for r in old[:150]) + (f" and {len(old) - 150} more" if len(old) > 150 else "")
+        context = (f"{person}'s list (maxpm needs-you, as {person}) holds {len(old)} open items older than "
+                   f"{setting(conn, 'list_cleanup_after')}: {ids}. For each one, find out whether it is still needed: "
+                   f"read maxpm show <id>, its related and linked items, and git log --grep '#<id>' in its project. "
+                   f"Done or no longer needed: close it with the reason, maxpm done|drop <id> --note \"<why>\" "
+                   f"({person} gets one notice and can undo it). The same work as another item: merge them. Still "
+                   f"needed: keep it. Add one item for {person} (--doer human) with the ones you cannot judge, each "
+                   f"with your question. Edit no code, and do not ask {person} about each item in chat.")
+        res = item_add(conn, project, f"{title}: {len(old)} items older than {setting(conn, 'list_cleanup_after')}",
+                       priority=2, doer="ai", actor="maxpm", context=context, goals=[], kind="operational")
+        added.append(res["id"])
+    return added
+
+
 def reviewer_refusal(conn, item, agent):
-    """Why this agent may not take this release review, or None: it worked on the release (author_refusal), or
-    its session held a task before (used_session). A review starts in a new session, with a clean context (#4968,
-    mark: 'all reviews should start with a clean context reviewer'); after its review a session may take any work.
-    A person may take any review."""
+    """Why this agent may not take this release review or operational task, or None: it worked on the release
+    (author_refusal), or its session held a task before (used_session). A review and an operational task start in
+    a new session, with a clean context (#4968, mark: 'all reviews should start with a clean context reviewer';
+    #4973); after it a session may take any work. A person may take any of them."""
     why = author_refusal(conn, item, agent)
-    if why or item["kind"] != "review" or not _is_ai(conn, agent):
+    if why or item["kind"] not in FRESH_KINDS or not _is_ai(conn, agent):
         return why
     used = used_session(conn, agent, item["id"])
     if used is None:
         return None
-    return (f"this session held #{used} before; release review #{item['id']} starts in a new session with a clean "
+    what = "release review" if item["kind"] == "review" else "operational task"
+    return (f"this session held #{used} before; {what} #{item['id']} starts in a new session with a clean "
             f"context (maxpm serve starts one)")
 
 

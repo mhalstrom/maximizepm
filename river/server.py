@@ -1707,6 +1707,50 @@ def _release_event(conn, item_id, text):
         core._event(conn, item_id, "maxpm", f"{RELEASE_NOTE} {text}")
 
 
+def auto_operational(conn, runner=None):
+    """One pass of the loop of maxpm serve (#4973): first the cleanup trigger (core.cleanup_trigger) adds an
+    operational task for a person whose list holds old items. Then each ready operational task that nobody holds
+    or has reserved goes to a session that waits for work in its project and held no task before, else to a new
+    session (start_fresh): an operational task starts in a new session. No session starts while max_sessions agent
+    sessions are live. Returns {"added": [ids], "pushed": {item: agent}, "started": {item: session}, "failed": {}}."""
+    out = {"added": core.cleanup_trigger(conn), "pushed": {}, "started": {}, "failed": {}}
+    rows = conn.execute("SELECT id FROM items WHERE kind='operational' AND status='open' AND assignee IS NULL "
+                        "AND (reserved_for IS NULL OR reserved_until < ?) ORDER BY id", (core.iso(core.now()),)).fetchall()
+    if not rows:
+        return out
+    cap = int(core.setting(conn, "max_sessions") or 0)
+    ann = core.annotate(conn)
+    for r in rows:
+        a = ann.get(r["id"])
+        if (a is None or not a["ready"] or a["reserved_for"] or a["project_archived"] or a["backlog"]
+                or a["doer"] == "human" or _release_recent(conn, a["id"])):
+            continue
+        waiting = core.waiting_agent_for(conn, a["project"], a["id"])
+        if waiting:
+            try:
+                core.push(conn, a["id"], waiting, "from maxpm serve: an operational task, and this session held no "
+                          "task before", "maxpm")
+            except RiverError as e:
+                out["failed"][a["id"]] = str(e)
+                continue
+            _release_event(conn, a["id"], f"pushed to {waiting}, who waits for work")
+            out["pushed"][a["id"]] = waiting
+            continue
+        if cap and core.live_sessions(conn) >= cap:
+            out["failed"][a["id"]] = f"max_sessions {cap}"
+            continue
+        try:
+            name = start_fresh(conn, a["id"], "operational task ready", runner)["session_name"]
+        except (RiverError, StopIteration) as e:
+            _release_event(conn, a["id"], f"no session for the operational task: {e}")
+            out["failed"][a["id"]] = str(e)
+            continue
+        _release_event(conn, a["id"], f"started session {name} for the operational task")
+        out["started"][a["id"]] = name
+        ann = core.annotate(conn)
+    return out
+
+
 def start_deployer(conn, target, dep_id, why, runner=None):
     """Start a deployer session for a target: river names it, gives it the target (the old owner is told), and
     opens the agent in a folder of the target's projects with MAXPM_FOCUS=deploy:<target>, with the deploy

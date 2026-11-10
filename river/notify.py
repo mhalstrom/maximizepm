@@ -436,6 +436,7 @@ def loop(stop, interval_s=None):
             server.fresh_sessions(conn)  # work for an agent idle at its prompt goes to a fresh session
             core.end_quiet_experts(conn)  # an expert nobody talked with for expert_idle_end ends (#4955)
             server.auto_release(conn)  # a ready review gets a reviewer, a ready deploy its deployer
+            server.auto_operational(conn)  # an operational task starts in a new session; old lists get a cleanup
             server.auto_context(conn)  # goal_context on: a goal with ready work gets a context session (a base)
             server.auto_tidy(conn)  # every tidy_every: close the tmux panes of sessions that are done
             server.auto_end_orphans(conn)  # and end the tmux servers the tests left behind with no socket
