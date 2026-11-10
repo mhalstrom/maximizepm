@@ -3938,6 +3938,10 @@ def render(a, res):
             return
         if a.tcmd == "cut":
             d, ships = res["cut"], res["items"]
+            if res.get("moved"):
+                print(f"release #{d['id']} of {res['name']} is cut already: it builds from {res['moved']} now, and the "
+                      f"release-cut hook runs again with that revision")
+                return
             print(f"release #{d['id']} of {res['name']} is cut with {len(ships)} item{'' if len(ships) == 1 else 's'}: "
                   f"a later ship request joins the next deploy item, which starts after this release is done")
             for x in ships:

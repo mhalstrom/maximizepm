@@ -182,6 +182,78 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn("deploy hook: exit 0", it["output"])
         self.assertEqual(server.auto_release(self.c, runner=sent.append)["deploying"], {})
 
+    def test_a_failed_deploy_takes_in_the_later_release_and_runs_again_with_no_manager_step(self):
+        """#5074: the deploy hook of release #4912 failed; a later deploy item #5017 had collected the ship requests,
+        its reviewer cut it seconds later, and the new review of #4912 waited on the release order of #5017 and on
+        the cadence from that cut. The failed release takes in the later one, and after the fix it runs again."""
+        import time
+        rv, dep = self._release(owner="ops")
+        core.register(self.c, "mark", human=True)
+        broken = os.path.join(self.dir.name, "broken")
+        open(broken, "w").close()  # the deploy fails while this file exists
+        code = f"import os, sys; sys.exit(2 if os.path.exists({broken!r}) else 0)"
+        core.target_hook(self.c, "web", "deploy", f'"{sys.executable}" -c "{code}"', actor="mark")
+        core.target_cadence(self.c, "web", "2h", "mark", reason="a release every two hours at most")
+        core.register(self.c, "rev")
+        core.claim(self.c, rv, "rev")  # the cut of the release
+        # A later ship request collects in the next deploy item, with its own review.
+        b = core.item_add(self.c, "site", "footer")["id"]
+        core.claim(self.c, b, "dev")
+        dep2 = core.done(self.c, b, "commit", "dev", ship_it=True)["shipped_in"]
+        rv2 = next(i for i in core.item_show(self.c, b)["unblocks"] if core._item(self.c, i)["kind"] == "review")
+        self.assertNotEqual(dep2, dep)
+        core.review_pass(self.c, rv, "ok", "rev")
+        # An earlier release went out 30 minutes ago: the cadence counts from it.
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO items(project_id,title,rank,kind,target,status,closed_at,created_at) VALUES "
+                           "(?, 'Deploy web', 0, 'deploy', 'web', 'done', ?, ?)",
+                           (core._item(self.c, dep)["project_id"], core.iso(core.now() - core.timedelta(minutes=30)),
+                            core.iso(core.now())))
+
+        def deploy():
+            n = self.c.execute("SELECT COUNT(*) FROM events WHERE item_id=? AND change LIKE 'hook deploy:%'",
+                               (dep,)).fetchone()[0]
+            self.assertIn(dep, server.auto_release(self.c, runner=[].append)["deploying"])
+            for _ in range(200):  # the hook runs in a thread of maxpm serve
+                if self.c.execute("SELECT COUNT(*) FROM events WHERE item_id=? AND change LIKE 'hook deploy:%'",
+                                  (dep,)).fetchone()[0] > n and core._item(self.c, dep)["status"] != "in_progress":
+                    break
+                time.sleep(0.05)
+        deploy()
+        # The deploy failed: one release of web is open, with both items, a fix, and a new review of all of them.
+        self.assertEqual([core._item(self.c, i)["status"] for i in (dep, dep2, rv2)], ["open", "dropped", "dropped"])
+        ships = core.release_plan(self.c, "web")
+        self.assertEqual((ships["deploy"], ships["running"], ships["waits"]), (dep, None, False))
+        waits = core.item_show(self.c, dep)["waits_on"]
+        fix = next(i for i in waits if core._item(self.c, i)["title"].startswith("Fix the failed deploy"))
+        rv3 = next(i for i in waits if core._item(self.c, i)["kind"] == "review" and core._item(self.c, i)["status"] == "open")
+        self.assertTrue({b, fix} <= set(core.item_show(self.c, rv3)["waits_on"]))
+        self.assertIn(f"takes in the later deploy item(s) #{dep2}",
+                      " ".join(r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (dep,))))
+        # The fix goes in; the new review passes; serve deploys again: no manager step, no wait for the cadence.
+        core.claim(self.c, fix, "dev")
+        os.remove(broken)
+        core.done(self.c, fix, "the release script is fixed", "dev")
+        self.assertIsNone(core._item(self.c, rv3)["blocked_reason"])
+        core.register(self.c, "rev2")
+        core.claim(self.c, rv3, "rev2")
+        core.review_pass(self.c, rv3, "ok", "rev2")
+        deploy()
+        self.assertEqual(core._item(self.c, dep)["status"], "done")
+
+    def test_target_cut_moves_the_revision_of_a_cut_release(self):
+        # #5074: a cut release kept the pin of its failed deploy; target cut --rev refused ('cut already').
+        rv, dep = self._release(owner="ops")
+        core.register(self.c, "mark", human=True)
+        core.target_cut(self.c, "web", rev="aaa111", actor="mark")
+        self.assertEqual(core._item(self.c, dep)["cut_rev"], "aaa111")
+        res = core.target_cut(self.c, "web", rev="bbb222", actor="mark")
+        self.assertEqual((res["moved"], core._item(self.c, dep)["cut_rev"]), ("bbb222", "bbb222"))
+        self.assertIn("release revision moved to bbb222 by mark (was aaa111)",
+                      " ".join(r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (dep,))))
+        with self.assertRaisesRegex(RiverError, "is cut already .* to move the revision it builds from: maxpm target cut web --rev"):
+            core.target_cut(self.c, "web", actor="mark")
+
     def test_a_deploy_hook_runs_while_the_deployer_is_off(self):
         # #5066: release #4912 waited 7 minutes: the deploy loop took only targets with deployer<>off.
         rv, dep = self._release(owner="ops")

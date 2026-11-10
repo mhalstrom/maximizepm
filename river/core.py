@@ -3093,9 +3093,12 @@ def _deploy_hook_end(conn, run, ok, result, tail, folder):
         _dep_add(conn, dep_id, fix, "maxpm", alert=False)
         for a in _approvals(conn, dep_id):  # the release changes: it takes a new yes (release_approval person)
             conn.execute("DELETE FROM deps WHERE item_id=? AND blocked_by=?", (dep_id, a["id"]))
+        merged = _merge_later_deploys(conn, dep_id, target)
         rv = _release_review(conn, dep, tg, "maxpm")
         _event(conn, dep_id, "maxpm", f"deploy hook failed ({result}); the release starts again: it is not cut, it "
-                                      f"waits on fix #{fix}" + (f" and a new review #{rv['id']}" if rv else ""))
+                                      f"waits on fix #{fix}" + (f" and a new review #{rv['id']}" if rv else "")
+                                      + (f"; it takes in the later deploy item(s) {', '.join(f'#{m}' for m in merged)}"
+                                         if merged else ""))
         to = tg["owner"] or active_manager(conn)
         if to:
             _send(conn, "alert", "maxpm", f"the deploy hook of target {target} failed ({result}) for deploy #{dep_id}: "
@@ -3166,6 +3169,46 @@ def _span(td):
     return f"{h // 24}d{h % 24:02d}h" if h >= 48 else _short(td)
 
 
+def _merge_later_deploys(conn, dep_id, target):
+    """The deploy hook of a cut release failed, and the release starts again uncut (_deploy_hook_end). A later deploy
+    item of the target collected the ship requests meanwhile: two open releases of one target then waited on each
+    other (#5074, 2026-11-10: #4912 failed, its new review waited on the release order of #5017, cut by its own
+    reviewer a few seconds later, and on the cadence from that cut). One release of a target is open: the failed
+    one takes in each later open deploy item that no session deploys now. Their ship requests move to it, their
+    open reviews are dropped (the new review covers their items; a reviewer that held one gets a notice), and they
+    are dropped as merged. Inside a tx. Returns the ids merged."""
+    merged = []
+    for o in conn.execute("SELECT * FROM items WHERE kind='deploy' AND target=? AND status='open' AND id<>? ORDER BY id",
+                          (target, dep_id)).fetchall():
+        for r in conn.execute("SELECT i.* FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=?",
+                              (o["id"],)).fetchall():
+            if r["kind"] == "review":
+                if r["status"] in OPEN_STATES:
+                    conn.execute("UPDATE items SET status='dropped', closed_at=?, assignee=NULL, lease_expires_at=NULL, "
+                                 "reserved_for=NULL, reserved_until=NULL WHERE id=?", (iso(now()), r["id"]))
+                    _event(conn, r["id"], "maxpm", f"dropped: its release #{o['id']} joins release #{dep_id}, whose "
+                                                   f"deploy failed; the new review of #{dep_id} covers its items")
+                    if r["assignee"]:
+                        _send(conn, "notice", "maxpm", f"review #{r['id']} is dropped: its release #{o['id']} joins "
+                              f"release #{dep_id} of {target}, whose deploy hook failed. Stop the review; the new "
+                              f"review of #{dep_id} covers its items.", to=r["assignee"], item_id=r["id"])
+            elif r["kind"] != "deploy" and not conn.execute("SELECT 1 FROM deps WHERE item_id=? AND blocked_by=?",
+                                                            (dep_id, r["id"])).fetchone():
+                _dep_add(conn, dep_id, r["id"], "maxpm", alert=False)
+        conn.execute("UPDATE items SET status='dropped', closed_at=?, cut_at=NULL, blocked_reason=NULL, blocked_at=NULL, "
+                     "blocked_until=NULL, blocked_set_by=NULL WHERE id=?", (iso(now()), o["id"]))
+        _event(conn, o["id"], "maxpm", f"dropped: merged into release #{dep_id} of {target}, whose deploy hook failed "
+                                       f"(one open release per target)")
+        merged.append(o["id"])
+    return merged
+
+
+def _deploy_failed(conn, dep_id):
+    """Whether the deploy hook of this deploy item failed before: the release runs again after a fix."""
+    return conn.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'deploy hook failed%'",
+                        (dep_id,)).fetchone() is not None
+
+
 def release_plan(conn, name):
     """When the next release of a target can start and what waits for it: for maxpm ship, maxpm target show, the
     deployer briefing, and the page.
@@ -3197,6 +3240,8 @@ def release_plan(conn, name):
                     "cut": bool(last["cut_at"])} if last else None,
            "next_at": iso(parse_iso(last["at"]) + cad) if cad and last else None}
     later = out["next_at"] is not None and out["next_at"] > iso(now())  # the cadence does not permit it yet
+    if later and dep and _deploy_failed(conn, dep["id"]):
+        later = False  # it was released in its time already: its run after a fix waits for no cadence (#5074)
     out["until"] = out["next_at"] if later else None
     if dep:
         revs = conn.execute("SELECT i.id, i.status FROM items i JOIN deps d ON d.blocked_by=i.id WHERE d.item_id=? "
@@ -3276,15 +3321,27 @@ def target_cut(conn, name, rev=None, actor=None):
         if actor and actor != tg["owner"] and not (who and (who["kind"] == "human" or who["role"] == "manager")):
             raise RiverError(f"refused: the target owner ({tg['owner'] or 'nobody'}), the manager, or a person cuts a "
                              f"release of {name}" + ("" if tg["owner"] else f"; take the target first: maxpm target own {name}"))
+        rev = (rev or "").strip() or None
+        cut = _item(conn, plan["running"]) if plan["running"] and (plan["deploy"] is None or not plan["ships"]) else None
+        if rev and cut and cut["status"] == "open" and cut["cut_at"]:
+            # The release is cut and does not deploy yet: a new revision moves its pin (#5074; the pin of a failed
+            # deploy stayed, and the manager rewrote the pin file by hand). The release-cut hook runs again with it.
+            conn.execute("UPDATE items SET cut_rev=? WHERE id=?", (rev, cut["id"]))
+            _event(conn, cut["id"], actor, f"release revision moved to {rev} by {actor or 'a person'} "
+                                           f"(was {cut['cut_rev'] or 'none'})")
+            _add_note(conn, cut["id"], f"[maxpm] release revision moved at {iso(now())}: {rev}")
+            _hook(conn, "release-cut", name, cut["id"], actor)
+            return dict(target_show(conn, name), cut=item_show(conn, cut["id"]), items=[], moved=rev)
         if plan["deploy"] is None or not plan["ships"]:
             raise RiverError(f"nothing is collected for {name}: ask for items to go out first "
                              f"(maxpm ship <id>, or done --ship)"
-                             + (f". Release #{plan['running']} is cut already (maxpm show {plan['running']})"
+                             + (f". Release #{plan['running']} is cut already (maxpm show {plan['running']}); to move "
+                                f"the revision it builds from: maxpm target cut {name} --rev <commit>"
                                 if plan["running"] else ""))
         if plan["waits"]:
             raise RiverError(f"{plan['text']}. To cut it sooner, give the reason first: "
                              f"maxpm target release-now {name} --reason \"<why>\"")
-        _release_cut(conn, plan["deploy"], actor, f"maxpm target cut by {actor or 'a person'}", (rev or "").strip() or None)
+        _release_cut(conn, plan["deploy"], actor, f"maxpm target cut by {actor or 'a person'}", rev)
         _cadence_sync(conn)
     return dict(target_show(conn, name), cut=item_show(conn, plan["deploy"]), items=plan["ships"])
 
