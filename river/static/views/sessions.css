@@ -47,13 +47,18 @@ button.srow-it { cursor: pointer; }
 .chat-col { max-width: 48rem; margin: 0 auto; width: 100%; box-sizing: border-box; }
 .chat-foot { flex: none; }
 .sl-none { padding: 8px 0; }
-.msg { margin: 0 0 14px; line-height: 1.6; font-size: 14.5px; }
+.msg { margin: 0 0 var(--sp-2); line-height: 1.5; font-size: 14.5px; }
 .msg-user { display: flex; flex-direction: column; align-items: flex-end; }
-.msg-user .bubble { background: var(--bubble); border-radius: 18px; padding: 8px 14px; max-width: 80%; overflow-wrap: anywhere; }
+/* The chat in the form of iMessage (#5043, mark: 'for the chat more along the lines of imessage'): the person's turns on the
+   right in an accent bubble, the agent's on the left in a gray one; no border; close together. */
+.msg-user .bubble { background: var(--accent); color: var(--accent-ink); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); max-width: 80%; overflow-wrap: anywhere; }
+.msg-user .bubble a { color: inherit; text-decoration: underline; }
+.msg-user .bubble code { background: var(--panel); color: var(--ink); }
 .msg-user .bubble.md pre { background: var(--panel); }
 .msg-user.sent .bubble { opacity: .8; }
 .msg-note { font-size: 11px; color: var(--muted); margin-top: 2px; }
-.msg-agent { overflow-wrap: anywhere; }
+.msg-agent { overflow-wrap: anywhere; background: var(--bubble); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); width: fit-content; max-width: 85%; }
+.msg-agent code { background: var(--panel); }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
 .md p, .md ul, .md ol, .md blockquote, .md table, .md pre { margin: 0 0 10px; }

@@ -41,7 +41,7 @@
 :root {
   --sp-0: 2px; --sp-1: 4px; --sp-2: 6px; --sp-3: 8px; --sp-4: 10px; --sp-5: 12px; --sp-6: 16px; --sp-7: 24px;
   --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-base: 14px; --fs-l: 17px; --fs-xl: 18px; --fs-2xl: 24px;
-  --r-xs: 4px; --r-s: 6px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px; --hair-2: 2px;
+  --r-xs: 4px; --r-s: 6px; --r-bubble: 18px; --r-m: 8px; --r-l: 10px; --r-xl: 12px; --r-pill: 999px; --hair: 1px; --hair-2: 2px;
   /* Widths of a field or a list: xs 80, s 120, m 160, l 220. --board-top: the header and strip above a Board column. */
   --w-xs: 80px; --w-s: 120px; --w-m: 160px; --w-l: 220px; --board-top: 150px;
   --tap: 44px;  /* the least size of a control on a phone */
