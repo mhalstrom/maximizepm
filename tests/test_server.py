@@ -1154,6 +1154,31 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual((t2["task"], core._item(self.c, y)["tier"], core._item(self.c, y)["max_model"],
                           core._item(self.c, y)["assignee"]), (y, "expert", "fable", "fab2"))
 
+    def test_a_cold_expert_hands_its_task_to_a_fresh_expert_that_reads_its_notes(self):
+        """#5023: expert fresh ends the expert (its task goes back) and starts <name>-2 on the same model and task,
+        whose task context says to read the old one's notes, and the canvas of the notes is in its handover."""
+        from river import cli
+        core.config_set(self.c, "launch_in", "tmux")
+        core.register(self.c, "mark", human=True)
+        t = server.start_expert(self.c, "fab", "the pricing talk", "shop", model="fable")
+        core.canvas_put(self.c, core.expert_notes_name("fab"), "# Notes\nDecided: three tiers.", "fab", kind="md",
+                        project="shop")
+        got = server.OPS["expert_fresh"](self.c, {"name": "fab"}, "mark")
+        self.assertEqual((got["fresh_from"], got["session_name"], got["model"], got["task"]),
+                         ("fab", "fab-2", "fable", t["task"]))
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name='fab' AND role='expert'").fetchone())
+        task = core._item(self.c, t["task"])
+        self.assertEqual(task["assignee"], "fab-2")
+        self.assertIn("maxpm canvas show expert-fab", task["context"])
+        self.assertIn("--model fable", self.tmux.panes[-1]["keys"][0])
+        with self.assertRaisesRegex(RiverError, "not registered"):
+            server.fresh_expert(self.c, "fab")  # it ended
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_expert({"expert_started": got})
+        self.assertIn("ended the expert fab: its context left the prompt cache", out.getvalue())
+        self.assertEqual(server.fresh_expert(self.c, "fab-2")["session_name"], "fab-3")
+
     def test_an_expert_gets_the_model_of_the_work_it_takes_up(self):
         """#4961: expert start with no --model takes the task's model, or the model of the item that its topic names;
         with neither it asks, never the bare default; launch and expert start say the model and why."""

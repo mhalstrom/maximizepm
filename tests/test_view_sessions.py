@@ -1004,6 +1004,122 @@ try {
         self.assertTrue(result["fits"])
 
 
+class ExpertCache(Base):
+    """#5023: an expert's prompt cache from its transcript: warm with the minutes left, or cold, and what the next
+    message costs at the read or the write price of the lifetime in force."""
+
+    def usage(self, inp, read, w1=0, w5=0, out=100):
+        return {"input_tokens": inp, "cache_read_input_tokens": read, "cache_creation_input_tokens": w1 + w5,
+                "cache_creation": {"ephemeral_1h_input_tokens": w1, "ephemeral_5m_input_tokens": w5}, "output_tokens": out}
+
+    def call(self, mid, usage, at, model="claude-opus-5-5"):
+        return json.dumps({"type": "assistant", "timestamp": at, "message": {
+            "id": mid, "model": model, "role": "assistant", "usage": usage,
+            "content": [{"type": "text", "text": "ok"}]}}) + "\n"
+
+    def state(self, minutes, **k):
+        at = core.parse_iso("2026-11-08T12:00:00Z") + core.timedelta(minutes=minutes)
+        return sessions.cache_state(self.c, "ag", self.root, self.croot, at=at, **k)
+
+    def test_warm_then_cold_with_the_cost_of_the_next_message(self):
+        core.expert_make(self.c, "ag", "the pricing talk", "site", "mark")
+        # The call starts when the person's prompt is sent (11:59:30), not when its answer is written.
+        self.write(claude_line("user", "What about tiers?", at="2026-11-08T11:59:30Z")
+                   + self.call("m1", self.usage(10, 150_000, w1=50_000), "2026-11-08T12:00:00Z")
+                   + self.call("m1", self.usage(10, 150_000, w1=50_000, out=890), "2026-11-08T12:00:01Z"))
+        c = self.state(30)
+        ctx = 10 + 150_000 + 50_000 + 890
+        self.assertEqual((c["state"], c["ttl"], c["ttl_from"], c["context"], c["model"]),
+                         ("warm", "1h", "transcript", ctx, "claude-opus-5-5"))
+        self.assertEqual(c["left"], 29 * 60 + 30)
+        self.assertEqual(c["next_usd"], round(ctx * 0.2 / 1e6, 4))  # Opus 5.5 cache read: $0.20 per million
+        self.assertFalse(c["fresh"])
+        c = self.state(61)
+        self.assertEqual((c["state"], c["left"], c["next_usd"], c["next_eq"]), ("cold", 0, round(ctx * 8 / 1e6, 4), ctx * 2))
+        self.assertTrue(c["fresh"])  # cold, and 200k tokens is above expert_fresh_min (150k)
+        core.config_set(self.c, "expert_fresh_min", "300k")
+        self.assertFalse(self.state(61)["fresh"])
+        # A later call that only reads keeps the lifetime of the entry it read; a 5-minute write (usage overage)
+        # makes it 5m.
+        self.write(claude_line("user", "And the free tier?", at="2026-11-08T12:10:00Z")
+                   + self.call("m2", self.usage(5, 200_900, out=10), "2026-11-08T12:10:05Z"))
+        self.assertEqual((self.state(69)["state"], self.state(71)["state"]), ("warm", "cold"))
+        self.write(claude_line("user", "ok", at="2026-11-08T12:20:00Z")
+                   + self.call("m3", self.usage(5, 200_000, w5=900, out=10), "2026-11-08T12:20:05Z"))
+        c = self.state(24)
+        self.assertEqual((c["ttl"], c["state"]), ("5m", "warm"))
+        c = self.state(26)
+        self.assertEqual((c["state"], c["next_usd"]), ("cold", round(c["context"] * 5 / 1e6, 4)))
+        # The Sessions tab: the expert's card and its chat view carry it; a worker's do not.
+        card = next(x for x in sessions.views(self.c, {}, self.root, self.croot) if x["name"] == "ag")
+        self.assertEqual(card["cache"]["ttl"], "5m")
+        self.assertEqual(sessions.view(self.c, "ag", root=self.root, croot=self.croot)["cache"]["ttl"], "5m")
+
+    def test_a_model_of_no_price_family_and_a_codex_log(self):
+        core.config_set(self.c, "model_prices", "gpt=1.25")
+        self.write(claude_line("user", "hi", at="2026-11-08T11:59:30Z")
+                   + self.call("m1", self.usage(10, 0, w1=1000), "2026-11-08T12:00:00Z", model="mystery-1"))
+        c = self.state(70)
+        self.assertEqual((c["next_usd"], c["next_eq"]), (None, round(c["context"] * 2)))
+        tid = "01a14170-419d-7241-afac-300125038d9d"
+        p = self.croot / "2026" / "11" / "08" / f"rollout-2026-11-08T12-00-00-{tid}.jsonl"
+        p.parent.mkdir(parents=True)
+        p.write_text(codex_line("turn_context", {"model": "gpt-6-astra", "cwd": "/x"}, at="2026-11-08T12:00:00Z")
+                     + codex_line("event_msg", {"type": "token_count", "info": {"last_token_usage": {
+                         "input_tokens": 40_000, "cached_input_tokens": 30_000, "output_tokens": 500}}},
+                         at="2026-11-08T12:00:10Z"))
+        c = sessions.cache_state(self.c, "cx", at=core.parse_iso("2026-11-08T12:03:00Z"), found=("codex", p))
+        self.assertEqual((c["state"], c["ttl"], c["ttl_from"], c["context"], c["model"]),
+                         ("warm", "5m", "setting", 40_500, "gpt-6-astra"))
+        self.assertEqual(c["next_usd"], round(40_500 * 0.125 / 1e6, 4))
+        c = sessions.cache_state(self.c, "cx", at=core.parse_iso("2026-11-08T12:06:00Z"), found=("codex", p))
+        self.assertEqual((c["state"], c["next_usd"]), ("cold", round(40_500 * 1.25 / 1e6, 4)))
+        self.assertIsNone(sessions.cache_state(self.c, "nobody", self.root, self.croot))
+
+    def test_the_cli_line(self):
+        from river import cli
+        c = {"state": "cold", "until": "2026-11-08T13:00:00Z", "left": 0, "ttl": "1h", "context": 210_000,
+             "next_usd": 1.68, "next_eq": 420_000, "fresh": True}
+        self.assertIn("next message ~$1.68; a fresh expert from its handoff costs less: maxpm expert fresh ag",
+                      cli.cache_text(c, "ag"))
+        self.assertIn("cache: warm, 12m left (1h cache)", cli.cache_text(dict(c, state="warm", left=720, fresh=False)))
+
+
+class ExpertCachePage(Base):
+    """#5023 in Chrome: a cold expert with a large context shows 'cache cold' with the cost on its row and in its
+    chat header, and a message to it first asks: a fresh expert from the handoff, Send anyway, or Cancel."""
+
+    def test_the_badge_and_the_question_before_a_send(self):
+        core.expert_make(self.c, "ag", "the pricing talk", "site", "mark")
+        usage = {"input_tokens": 10, "cache_read_input_tokens": 150_000, "cache_creation_input_tokens": 50_000,
+                 "cache_creation": {"ephemeral_1h_input_tokens": 50_000, "ephemeral_5m_input_tokens": 0}, "output_tokens": 90}
+        self.write(json.dumps({"type": "assistant", "timestamp": "2026-11-08T12:00:00Z", "message": {
+            "id": "m1", "model": "claude-opus-5-5", "role": "assistant", "usage": usage,
+            "content": [{"type": "text", "text": "Three tiers it is."}]}}) + "\n")
+        driver = DRIVE_HEAD + r'''
+try {
+  await until(() => q('#sessExpertRows .cache-b') && q("#sessItem .cache-b"), "the cache badges");
+  const row = q('#sessExpertRows .cache-b'), head = q("#sessItem .cache-b");
+  const box = q("#sessText"), btn = q("#sessSend");
+  box.disabled = false; box.value = "And the free tier?"; btn.disabled = false;
+  q("#sessBar").requestSubmit();
+  await until(() => q("#coldDlg") && !q("#coldDlg").classList.contains("hidden"), "the question before the send");
+  const why = q("#coldDlg .cold-why").textContent;
+  q('#coldDlg [data-cold="cancel"]').click();
+  await until(() => q("#coldDlg").classList.contains("hidden"), "Cancel closes it");
+  post({ row: row.textContent, rowClass: row.className, head: head.textContent, title: head.title, why,
+         kept: box.value });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        result = drive_page(self, driver)
+        self.assertEqual(result["row"], "cache cold · $1.60 next")  # 200,100 tokens at the 1-hour write price, $8
+        self.assertEqual(result["rowClass"], "cache-b cold big")
+        self.assertEqual(result["head"], result["row"])
+        self.assertIn("Context 200k tokens on claude-opus-5-5", result["title"])
+        self.assertIn("ag holds 200k tokens of context", result["why"])
+        self.assertEqual(result["kept"], "And the free tier?")
+
+
 class WorkNames(Base):
     """#4695: a session shows what it works on; its agent id stays its address."""
 

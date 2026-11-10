@@ -16,6 +16,7 @@ import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
 import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
 import { checkPaths } from "../components/artLinks.js";
+import { cacheBadge, askCold } from "../components/cacheBadge.js";
 
 const STATE_CHIP = { working: "c-in_progress", prompt: "c-p0", answer: "c-human", idle: "c-waiting", stopping: "c-p",
                      starting: "c-waiting", ended: "c-blocked", expert: "c-p" };
@@ -85,6 +86,7 @@ export function sessionRow(s) {
       <div class="srow-h">${s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : ""}${s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>` : ""}<b title="${esc(s.title || s.name)}">${esc(s.role === "manager" || s.role === "expert" ? s.name : s.title || s.name)}</b>${provTag(s.provider)}<span class="spacer"></span>${waitBadge(s)}${stateChip(s)}${pinButton(s)}</div>
       ${s.role === "manager" ? "" : s.role === "expert"
         ? `<div class="sid expert-topic" title="${esc(`Its topic${s.model ? "; model " + s.model : ""}${s.talked_at ? "; last talk " + ago(s.talked_at) : ""}`)}">${esc(clip(s.topic || "", 120))}${s.model ? ` · ${esc(s.model)}` : ""}</div>`
+          + (s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : "")
         : `<div class="sid" title="Its agent id: maxpm --as, messages and commands use it">${esc(s.name)}</div>`}
       <div class="sub">${esc(clip(lastText, 90))}${s.at ? ` · <span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}</div>
     </div>
@@ -125,7 +127,7 @@ function renderList(el, list, picked, empty) {
 
 export function makeSessions({ isShown, onPick = () => {} }) {
   let list = [], busy = false, proposals = [];
-  let agent = null, cursor = null, timer = null, gen = 0;
+  let agent = null, cursor = null, timer = null, gen = 0, lastCache = null;
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
   const experts = $("#sessExpertRows"), expertGroup = $("#sessExperts");
@@ -276,7 +278,8 @@ export function makeSessions({ isShown, onPick = () => {} }) {
       const s = list.find(x => x.name === agent) || {};
       $("#sessState").innerHTML = provTag(j.provider) + stateChip(j);
       waitLine(j);
-      $("#sessItem").innerHTML = s.name ? headerItem(s) : "";
+      lastCache = j.cache || null;  // the expert's prompt cache (#5023): the header says it, and a send checks it
+      $("#sessItem").innerHTML = (s.name ? headerItem(s) : "") + cacheBadge(j.cache);
       $("#sessName").textContent = s.title || "";
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });
       dict.showFor(list.some(x => x.name === agent) ? (s || {}).provider || j.provider : null, !!j.terminal);
@@ -293,7 +296,7 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     if (!agent && name) phoneChat(true);  // the first one at load
     if (name !== agent) dict.stop();
     col.classList.toggle("hide-tools", !viewOf(name).showTools);  // #4635
-    agent = name; cursor = null; gen++; pinned = remember;
+    agent = name; cursor = null; gen++; pinned = remember; lastCache = null;
     onPick(name, remember);  // the page's address (#4653); the panel then names its tab
     panelFor(name);  // its own side panel tabs (#4632)
     main.classList.toggle("hidden", !name);
@@ -516,6 +519,23 @@ export function makeSessions({ isShown, onPick = () => {} }) {
     e.preventDefault();
     const input = $("#sessText"), btn = $("#sessSend"), to = agent;
     if (!to || btn.disabled || empty()) return;
+    // A cold expert with a large context (#5023): the message would read all of it again at the write price.
+    const ex = list.find(x => x.name === to) || {}, cold = ex.role === "expert" ? lastCache || ex.cache : null;
+    if (cold && cold.fresh) {
+      const how = await askCold(to, cold);
+      if (!how) return input.focus();
+      if (how === "fresh") {
+        try {
+          const r = await act("expert_fresh", { name: to });
+          toast(`${to} ended; the fresh expert ${r.session_name} starts on ${r.model} and reads the handoff. Your text stays here: send it to ${r.session_name} when it is up.`);
+          const typed = input.value;
+          await refresh();
+          pick(r.session_name);
+          input.value = typed;  // pick empties the box; the person sends the text to the new expert
+        } catch (_) { /* act shows the error */ }
+        return;
+      }
+    }
     sending = true; renderFiles();
     let ok = true;
     try {

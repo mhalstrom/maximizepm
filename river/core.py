@@ -217,6 +217,17 @@ DEFAULT_SETTINGS = {
     # no idle_end, no hand-over. maxpm serve ends it when nobody typed or sent it a prompt for expert_idle_end
     # (0s: never), and tells the senders of what it did not read.
     "expert_idle_end": "7d",
+    # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
+    # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
+    # (warm, with the minutes left, or cold) and what the next message costs. When it is cold and its context holds
+    # expert_fresh_min tokens or more, the page offers a fresh expert that reads only the old one's handoff.
+    # cache_ttl: how long a cache entry lives when the transcript does not say (Claude Code's says: 1h, or 5m in usage
+    # overage; a Codex log does not). model_prices: dollars per million tokens of each model family, as
+    # input/cache read/5-minute cache write/1-hour cache write (Anthropic's prices of 2026-11; a model of no family
+    # here shows tokens only).
+    "expert_fresh_min": "150k",
+    "cache_ttl": "5m",
+    "model_prices": "fable=8/0.2/10/16, opus=4/0.2/5/8, sonnet=2/0.1/2.5/4, haiku=0.1/0.01/0.125/0.2",
     # The Sessions tab opens 'Waits for you' by itself for a question of the open session (and when a person picks
     # its row) only while the question is younger than question_popup_max (#5001); an older open question stays in
     # the card's count, its 'Answer it' link, and maxpm needs-you, but does not pop up. 0s: every question pops up.
@@ -1338,6 +1349,10 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
             "prompt_wait", "idle_end", "expert_idle_end", "question_popup_max", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
+    elif key == "expert_fresh_min":
+        _k_tokens(value)
+    elif key == "model_prices":
+        parse_prices(value)
     elif key == "similar_min":
         try:
             ok = value == "off" or 0 < float(value) <= 1
@@ -8141,6 +8156,42 @@ EQ_READ, EQ_WRITE_1H, EQ_WRITE_5M = 0.1, 2.0, 1.25
 # A line this much older than the first line of a transcript was copied from the session a fork started from.
 FORK_SLACK = 30
 _SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def parse_prices(text):
+    """model_prices: {family: (input, cache read, 5-minute write, 1-hour write)} in dollars per million tokens, from
+    'opus=4/0.2/5/8, sonnet=2/0.1/2.5/4'. With fewer prices: a read at 0.1 of the input price, and writes at the
+    input price (gpt=1.25), or at the one write price given."""
+    out = {}
+    for part in re.split(r"[,\s]+", (text or "").strip()):
+        if not part:
+            continue
+        m = re.match(r"^([\w.-]+)=([0-9.]+(?:/[0-9.]+){0,3})$", part)
+        if not m:
+            raise RiverError(f"model_prices: {part!r} is not <family>=<input>/<cache read>/<5m write>/<1h write> "
+                             f"(dollars per million tokens), for example opus=4/0.2/5/8")
+        nums = [float(x) for x in m.group(2).split("/")]
+        if len(nums) == 1:  # no cache prices given: a read at 0.1 of the input price, a write at the input price
+            nums += [nums[0] * 0.1, nums[0], nums[0]]
+        elif len(nums) == 2:
+            nums += [nums[0], nums[0]]
+        elif len(nums) == 3:  # one write price for both lifetimes
+            nums += [nums[2]]
+        out[m.group(1).lower()] = tuple(nums)
+    return out
+
+
+def model_price(conn, model):
+    """(input, cache read, 5m write, 1h write) in dollars per million tokens for a model name or id (claude-opus-5-5,
+    opus): the model_prices family whose name is in it, the longest first; None for a model of no family there."""
+    if not model:
+        return None
+    prices = parse_prices(setting(conn, "model_prices"))
+    m = model.lower()
+    for fam in sorted(prices, key=len, reverse=True):
+        if fam in m:
+            return prices[fam]
+    return None
 
 
 def claude_session_from_env(env=None):

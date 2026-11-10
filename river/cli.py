@@ -1100,7 +1100,11 @@ def build_parser():
     y.add_argument("--reason", help="why (its unread senders hear it)")
     y.add_argument("--done", action="store_true", help="the talk is over: its expert-tier task is done (else it goes "
                    "back to the queue, and expert start --resume takes it again)")
-    xs.add_parser("list", help="the experts: topic, model, last talk, when they end")
+    xs.add_parser("list", help="the experts: topic, model, last talk, when they end, their prompt cache")
+    y = xs.add_parser("fresh", help="the expert's context left the prompt cache: end it, and start a fresh expert on "
+                      "its task and model that reads only its handoff (#5023)")
+    y.add_argument("name")
+    y.add_argument("--new", metavar="NAME", help="the fresh expert's name (default: <name>-2, or the next number)")
     y = xs.add_parser("notes", help="an expert's notes (a canvas): read them, or --put a new version")
     y.add_argument("name")
     y.add_argument("--put", metavar="FILE", help="store a new version from a file ('-' reads stdin)")
@@ -2025,7 +2029,15 @@ def _expert_cmd(conn, a, actor):
     """maxpm expert start|adopt|end|list|notes (#4955)."""
     e = a.ecmd or "list"
     if e == "list":
-        return {"experts": core.expert_list(conn)}
+        from . import sessions
+        return {"experts": [dict(x, cache=sessions.cache_state(conn, x["name"])) for x in core.expert_list(conn)]}
+    if e == "fresh":
+        if in_sandbox():
+            core._expert(conn, a.name)
+            return {"expert_started": {**ask_server(conn, "expert_fresh", {"name": a.name, "new": a.new}, actor,
+                                                    timeout=40), "via_serve": True}}
+        from . import server
+        return {"expert_started": server.fresh_expert(conn, a.name, actor, new=a.new)}
     if e == "adopt":
         if not actor:
             raise RiverError("run it in the session that becomes the expert, with its name: maxpm --as <name> expert "
@@ -2506,7 +2518,9 @@ def dispatch(conn, a, actor):
             raise RiverError("set MAXPM_AGENT or pass --as <name>")
         return core.agent_note(conn, actor, " ".join(a.words))
     if c == "who":
-        res = core.who(conn, a.item, a.project, a.file, os.getcwd(), everyone=a.all)
+        from . import sessions
+        res = [dict(g, cache=sessions.cache_state(conn, g["name"])) if g.get("role") == "expert" else g
+               for g in core.who(conn, a.item, a.project, a.file, os.getcwd(), everyone=a.all)]
         if not a.all and a.item is None and a.project is None and a.file is None and not a.json:
             ended = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0] - len(res)
             if ended:
@@ -2922,13 +2936,27 @@ def _tmux_line():
             "inside tmux: tmux new -A -s maxpm"]
 
 
+def cache_text(c, name=None):
+    """One line on an expert's prompt cache (#5023): warm with the minutes left, or cold; the context; and what the
+    next message costs."""
+    if not c:
+        return "cache: not known (no model call in a transcript on this computer)"
+    cost = (f"~${c['next_usd']:.2f}" if c.get("next_usd") is not None else f"~{_k(c['next_eq'])} input-token equivalents")
+    if c["state"] == "warm":
+        head = f"cache: warm, {max(1, c['left'] // 60)}m left ({c['ttl']} cache)"
+    else:
+        head = f"cache: cold since {core.show_time(c['until'])}"
+    return (f"{head}; context {_k(c['context'])} tokens; next message {cost}"
+            + (f"; a fresh expert from its handoff costs less: maxpm expert fresh {name}" if c.get("fresh") and name else ""))
+
+
 def render_expert(res):
     def line(x):
         when = core.show_time(x["talked_at"]) if x.get("talked_at") else "never"
         return (f"  {x['name']}  ({x['state']}; {x.get('model') or 'model not recorded'}; last talk {when}; "
                 + (f"ends {core.show_time(x['ends_at'])} with no talk" if x.get("ends_at") else "never ends by itself")
                 + ")" + (f"\n    holds {', '.join('#' + str(i) for i in x['holds'])}" if x.get("holds") else "")
-                + f"\n    {x['topic']}")
+                + f"\n    {x['topic']}" + (f"\n    {cache_text(x['cache'], x['name'])}" if "cache" in x else ""))
     if "experts" in res:
         if not res["experts"]:
             print("No experts. Start one: maxpm expert start <name> --topic \"...\" [--project <p>] [--model <m>], or make "
@@ -2968,6 +2996,9 @@ def render_expert(res):
             print(f"proposal p{x['id']} ({x['name']}: {x['topic']}) is {x['state']}")
     elif "expert_started" in res:
         t = res["expert_started"]
+        if t.get("fresh_from"):
+            print(f"ended the expert {t['fresh_from']}: its context left the prompt cache (close its terminal or pane "
+                  f"if it is still open)")
         how = "a tmux pane" if t.get("launch_in") == "tmux" else f"a new Terminal {t.get('launch_in') or 'tab'}"
         print(f"started the expert {t['session_name']} on {t.get('model')} ({t.get('model_why')}) in {how} "
               f"({t['project']}) on #{t.get('task')}: {t['topic']}"
@@ -3018,8 +3049,14 @@ def render_go(b):
                 f"  A person talks with you about this, for hours or days. MaximizePM never ends you as it ends a worker "
                 f"(no wait END, no idle_end, no hand-over); you end when a person ends you, or after "
                 f"{core.show_time(x['ends_at']) if x['ends_at'] else 'never'} with no talk (expert_idle_end).",
-                f"  Your notes (read them now, and keep them current with your topic, what you learned, and the "
-                f"decisions of your talks): {r} expert notes {me}   new version: {r} expert notes {me} --put <file>",
+                f"  Your notes (read them now, and keep them current with your topic, what you learned, the "
+                f"decisions of your talks, what is open, and the files and canvases that matter; write them after each "
+                f"decision): {r} expert notes {me}   new version: {r} expert notes {me} --put <file>",
+                f"  Your prompt cache (#5023): after a pause, the person's next message reads your whole context again "
+                f"at the cache write price. {r} expert list shows warm (minutes left) or cold, and the cost. When the "
+                f"person is in the middle of a question and your cache goes cold within a few minutes, say so in one "
+                f"line. A cold expert with a large context gets replaced by a fresh one that reads only your notes "
+                f"(maxpm expert fresh {me}).",
                 "  Rules:",
                 "  - Answer the person. Take no queue work by yourself: no maxpm wait, no go --role worker. Claim an "
                 "item only when the person tells you to.",
@@ -4251,7 +4288,8 @@ def render(a, res):
                   + (f"\n    process: PID {ag['pid']} on {ag['host']}" if ag.get("pid") else "")
                   + (f"\n    chat over MCP: {ag['via']}" if ag.get("via") else "") + f"\n    holds: {holds}"
                   + (f"\n    owns: {', '.join(o['name'] for o in ag['owns'])}" if ag.get("owns") else "")
-                  + (f"\n    pinned by: {', '.join(ag['pinned_by'])} (top of the Sessions tab)" if ag.get("pinned_by") else ""))
+                  + (f"\n    pinned by: {', '.join(ag['pinned_by'])} (top of the Sessions tab)" if ag.get("pinned_by") else "")
+                  + (f"\n    {cache_text(ag['cache'], ag['name'])}" if "cache" in ag else ""))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")
         return

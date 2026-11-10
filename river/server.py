@@ -461,6 +461,40 @@ def accept_expert(conn, pid, who=None, runner=None, launch_in=None):
     return {**res, "proposal": p["id"]}
 
 
+def fresh_expert(conn, name, actor=None, runner=None, new=None):
+    """maxpm expert fresh (#5023): the expert's context left the prompt cache, so its next message reads all of it
+    again at the write price. A fresh expert on the same model and task reads only the old one's handoff (its notes
+    canvas) and the task's context: the old one ends (its task goes back to the queue), and the new one, <name>-2
+    (or the next free number, or new), takes the task. Refused while the old one has no task."""
+    old = core._expert(conn, name)
+    task = core.expert_task(conn, name)
+    if task is None:
+        raise RiverError(f"the expert {name} has no task to hand on; start a new one: maxpm expert start <name> --topic \"...\"")
+    notes = core.expert_notes_name(name)
+    has_notes = conn.execute("SELECT 1 FROM canvases WHERE name=? AND deleted_at IS NULL", (notes,)).fetchone()
+    if not new:
+        m = re.match(r"^(.*?)-(\d+)$", name)
+        base, n = (m.group(1), int(m.group(2))) if m else (name, 1)
+        new = next(f"{base}-{i}" for i in range(n + 1, n + 100)
+                   if not conn.execute("SELECT 1 FROM agents WHERE name=?", (f"{base}-{i}",)).fetchone())
+    model = old["model"]
+    if not model:
+        raise RiverError(f"the model of {name} is not recorded; start the fresh expert yourself: maxpm expert start "
+                         f"<name> --item {task['id']} --model <model>")
+    ended = core.expert_end(conn, name, actor, f"its context left the prompt cache; the fresh expert {new} goes on "
+                                               f"from its handoff")
+    summary = (f"You go on with the talk of the expert {name}: its context left the prompt cache, so a fresh session "
+               f"that reads only its handoff costs less than its next message. "
+               + (f"Read its handoff first: maxpm canvas show {notes}. " if has_notes else
+                  f"It wrote no handoff (maxpm canvas show {notes} has nothing): read this task's context, and ask the "
+                  f"person what was decided. ")
+               + f"Then tell the person in one line that you continue {name}'s talk, and keep the handoff current: "
+               f"maxpm --as {new} expert notes {new} --put <file>.")
+    started = start_expert(conn, new, item=task["id"], model=model, actor=actor, runner=runner, summary=summary,
+                           canvases=[notes] if has_notes else ())
+    return {"fresh_from": name, "ended": ended, **started}
+
+
 def _fit_task_model(conn, task, name, model, actor):
     """The person chose the expert's model: a min or max limit of its task that excludes it moves to that model."""
     ladder = core.parse_ladder(core.setting(conn, "model_ladder"))
@@ -3033,6 +3067,7 @@ OPS = {
                                                    **_launch_args(a)),
     "session_pin": lambda c, a, who: core.session_pin(c, a["agent"], who, a.get("on", True) is not False),
     "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason"), bool(a.get("done"))),
+    "expert_fresh": lambda c, a, who: fresh_expert(c, a["name"], who, new=a.get("new")),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},

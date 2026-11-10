@@ -515,6 +515,8 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "session_url": a.get("session_url"), "terminal": bool((terminals or {}).get(a["name"])),
                 "transcript": kind if path else None, "last": tail["entries"],
                 "at": tail["entries"][-1]["at"] if tail["entries"] else a.get("last_seen")}
+        if a.get("role") == "expert":  # its prompt cache: what the next message costs (#5023)
+            card["cache"] = cache_state(conn, a["name"], found=(kind, path)) if path else None
         cards.append(card)
         seen.update((k, card) for k in keys)
     order = {"prompt": 0, "answer": 1, "working": 2, "expert": 2, "starting": 3, "stopping": 4, "idle": 5, "ended": 6}
@@ -557,7 +559,8 @@ def view(conn, agent, cursor=None, root=None, croot=None):
     return {"agent": agent, "transcript": kind, "provider": provider(a.get("agent_type"), kind),
             "entries": got["entries"], "cursor": got["cursor"],
             "refs": item_refs(conn, got["entries"]),
-            "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url")}
+            "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url"),
+            "cache": cache_state(conn, agent, found=(kind, path)) if a.get("role") == "expert" else None}
 
 
 def last_cwd(path, tail=1024 * 1024):
@@ -575,6 +578,133 @@ def last_cwd(path, tail=1024 * 1024):
         if isinstance(p, dict) and isinstance(p.get("cwd"), str):
             return p["cwd"]
     return None
+
+
+# The prompt cache of a session (#5023). A person talks with an expert for hours; after a pause the model reads the
+# whole context again at the cache write price (Claude Code: 2x the input price for its 1-hour cache, 1.25x for the
+# 5-minute one) instead of the read price (0.025x to 0.1x). From the transcript: the start of the last model call
+# (the line before its answer: the person's prompt or a tool result), the context it read and wrote, and the cache
+# lifetime in force (the writes of the last call that wrote: 1h or 5m; a read keeps the lifetime of the entry it
+# read). A cache entry lives that long from the start of the call that wrote or read it. A Codex log says how much
+# of the input was cached, not for how long: cache_ttl then.
+_CACHE_SCAN = {}  # path -> (size, mtime, end: the byte after the last complete line read, state)
+
+
+def _cache_new():
+    return {"sent": None, "mid": None, "last": None, "ttl": None, "model": None}
+
+
+def _cache_line(kind, raw, st):
+    """Fold one transcript line (bytes) into the cache state st."""
+    if kind == "claude":  # a quick test before the line is decoded (the type decides after it)
+        if b'"user"' not in raw and b'"assistant"' not in raw:
+            return
+    elif b'"token_count"' not in raw and b'"turn_context"' not in raw:
+        return
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(d, dict) or not isinstance(d.get("timestamp"), str) or d.get("isSidechain"):
+        return
+    at = d["timestamp"]
+    if kind == "claude":
+        m = d.get("message") if isinstance(d.get("message"), dict) else {}
+        if d.get("type") == "user":
+            st["sent"] = at
+            return
+        u = m.get("usage")
+        if d.get("type") != "assistant" or not isinstance(u, dict) or m.get("model") == "<synthetic>":
+            return
+        if m.get("id") != st["mid"]:  # a new model call; its lines after the first repeat its usage
+            st["mid"] = m.get("id")
+            st["last"] = {"start": st["sent"] or at, "at": at, "usage": u}
+        else:
+            st["last"] = dict(st["last"], at=at, usage=u)
+        cc = u.get("cache_creation") or {}
+        if (cc.get("ephemeral_1h_input_tokens") or 0) > 0:
+            st["ttl"] = "1h"
+        elif (cc.get("ephemeral_5m_input_tokens") or 0) > 0:
+            st["ttl"] = "5m"
+        st["model"] = m.get("model") or st["model"]
+        return
+    p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+    if d.get("type") == "turn_context":
+        st["model"] = p.get("model") or st["model"]
+    elif p.get("type") == "token_count" and isinstance((p.get("info") or {}).get("last_token_usage"), dict):
+        st["last"] = {"start": at, "at": at, "usage": p["info"]["last_token_usage"]}
+
+
+def _cache_scan(kind, path):
+    """The cache state of a transcript: read whole the first time, then only what it added since."""
+    s = Path(path).stat()
+    got = _CACHE_SCAN.get(str(path))
+    if got and got[:2] == (s.st_size, s.st_mtime_ns):
+        return got[3]
+    if str(path).endswith(".zst"):  # compressed: read as a whole (Codex logs, small)
+        st = _cache_new()
+        text, _s, end = _read(path, 0)
+        for line in text.splitlines():
+            _cache_line(kind, line.encode(), st)
+    else:
+        start, st = (got[2], dict(got[3])) if got and s.st_size >= got[2] else (0, _cache_new())
+        end = start
+        with open(path, "rb") as f:
+            f.seek(start)
+            for raw in f:
+                if not raw.endswith(b"\n"):
+                    break
+                end += len(raw)
+                _cache_line(kind, raw, st)
+    _CACHE_SCAN[str(path)] = (s.st_size, s.st_mtime_ns, end, st)
+    return st
+
+
+def cache_state(conn, name, root=None, croot=None, at=None, found=None):
+    """The prompt cache of a session, from its transcript (found: (kind, path) when the caller has it), or None with
+    no transcript or no model call yet: state (warm or cold), until and left (seconds) while warm, ttl and where it
+    comes from (transcript or setting), context (tokens the next call reads), last_call, model, next_usd and
+    next_eq (the cost of the next message's context: at the read price while warm, else at the write price of the
+    lifetime in force, in dollars and in input-token equivalents; no dollars for a model of no model_prices family),
+    and fresh: cold with a context of expert_fresh_min or more, so a fresh expert from the handoff costs less."""
+    kind, path = found or transcript(conn, name, root, croot)
+    if not path:
+        return None
+    try:
+        st = _cache_scan(kind, path)
+    except (OSError, ValueError, EOFError):
+        return None
+    last = st["last"]
+    start = core._ts(last["start"]) if last else None
+    if start is None:
+        return None
+    u = last["usage"]
+    if kind == "claude":
+        context = sum(u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                                               "output_tokens"))
+    else:  # Codex: input_tokens holds the cached part
+        context = (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)
+    ttl = st["ttl"] if kind == "claude" else None
+    ttl_from = "transcript" if ttl else "setting"
+    ttl = ttl or core.setting(conn, "cache_ttl", agent=name)
+    life = core.parse_duration(ttl)
+    until = start + life
+    t = at or core.now()
+    warm = t < until
+    model = st["model"] or (conn.execute("SELECT model FROM agents WHERE name=?", (name,)).fetchone() or {"model": None})["model"]
+    price = core.model_price(conn, model)
+    if price:
+        inp, read, w5, w1 = price
+        per_m = read if warm else (w1 if life >= core.timedelta(hours=1) else w5) if kind == "claude" else inp
+        usd, eq = context * per_m / 1e6, context * per_m / inp
+    else:
+        usd, eq = None, context * (core.EQ_READ if warm else core.EQ_WRITE_1H if life >= core.timedelta(hours=1)
+                                    else core.EQ_WRITE_5M if kind == "claude" else 1)
+    fresh_min = core._k_tokens(core.setting(conn, "expert_fresh_min", agent=name))
+    return {"state": "warm" if warm else "cold", "until": core.iso(until),
+            "left": max(0, int((until - t).total_seconds())), "ttl": ttl, "ttl_from": ttl_from, "context": context,
+            "last_call": last["at"], "model": model, "next_usd": round(usd, 4) if usd is not None else None,
+            "next_eq": round(eq), "fresh": not warm and context >= fresh_min, "fresh_min": fresh_min}
 
 
 # The Artifacts tab (#4620): what the sessions made or named that the side panel can show. Files a session wrote

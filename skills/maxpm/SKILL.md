@@ -466,8 +466,18 @@ In a session that holds the task already: `maxpm --as <you> expert adopt`.
 - Claim another item only when the user tells you to.
 - Add the work you find (`maxpm add ...`), and ask the manager to launch it.
 - Keep your notes current: your topic, what you learned, the decisions of your
-  talks: `maxpm --as <you> expert notes <you> --put <file>`. A session that
-  starts you again reads them.
+  talks, what is open, and the files and canvases that matter:
+  `maxpm --as <you> expert notes <you> --put <file>`. Write them after each
+  decision. A session that starts you again reads them.
+- Your context stays in the prompt cache for a time after each model call (1h
+  in Claude Code). After that, the user's next message reads all of it again
+  at the cache write price. `maxpm expert list` shows your cache: warm with the
+  minutes left, or cold, and what the next message costs. When the user is in
+  the middle of a question and your cache goes cold within a few minutes, tell
+  the user in one line. When a cold expert has a large context
+  (`expert_fresh_min`, 150k tokens), the page offers a fresh expert on the same
+  model and task that reads only your notes (`maxpm expert fresh <you>`): your
+  notes are then all that it knows.
 
 ## Blocked on another agent's item
 

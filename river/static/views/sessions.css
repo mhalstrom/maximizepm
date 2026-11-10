@@ -276,3 +276,15 @@ button.srow-it { cursor: pointer; }
 .srow-pin:hover { background: var(--line); }
 .srow-pin.on { color: var(--accent); opacity: 1; }
 @media (hover: none) { .srow-pin { opacity: .8; } }
+/* The prompt cache of an expert (#5023): warm with the minutes left, or cold, and the cost of the next message. */
+.cache-b { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.cache-b.warm { background: var(--ready-bg); color: var(--ready); }
+.cache-b.cold { background: var(--wait-bg); color: var(--wait); }
+.cache-b.cold.big { background: var(--warn-bg); color: var(--warn); }
+.sid.cache-line { margin-top: 2px; }
+#sessItem .cache-b { margin-left: 6px; }
+#coldDlg { position: fixed; inset: 0; z-index: 15; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; }
+#coldDlg.hidden { display: none; }
+#coldDlg .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.25); width: min(520px, 100%); padding: 18px 20px; }
+#coldDlg h2 { margin: 0 0 8px; font-size: 17px; }
+#coldDlg .cold-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
