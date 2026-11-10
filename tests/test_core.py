@@ -4820,6 +4820,24 @@ class AgentQueue(Base):
             core.register(self.c, n)
         core.register(self.c, "mark", human=True)
 
+    def test_a_queued_item_of_a_goal_another_agent_owns_is_the_queues(self):
+        """#5089: the manager queued an item of a goal that another agent owns. wait said WORK, go said IDLE, and claim
+        refused ('reserved for <owner>, who owns goal ...'). The queue wins, as annotate says: wait, go and claim agree."""
+        core.goal_add(self.c, "a", "look", "o", "d")
+        core.goal_own(self.c, "look", "s2")
+        it = core.item_add(self.c, "a", "the shorter board", actor="s2")["id"]  # tagged with the goal s2 owns
+        self.assertEqual(core.annotate(self.c)[it]["reserved_for"], "s2")
+        core.queue_add(self.c, "s1", it, actor="mark")
+        self.assertEqual(core.annotate(self.c)[it]["reserved_for"], "s1")
+        self.assertIn(f"#{it} in your queue is ready", core._work_for(self.c, "s1", ["a"]))  # what wait says
+        b = core.go(self.c, self.dir.name, "s1")
+        self.assertEqual((b["item"]["id"], b["why"]), (it, f"#{it} is the first ready item in your queue"))
+        # Another agent still may not take an item of the goal that is in nobody's queue.
+        other = core.item_add(self.c, "a", "the header", actor="s2")["id"]
+        core.register(self.c, "s3")
+        with self.assertRaisesRegex(RiverError, "reserved for s2, who owns goal look"):
+            core.claim(self.c, other, "s3")
+
     def test_queue_comes_first_and_is_kept_from_others(self):
         top = self.add("a", "top", 0)
         other = self.add("b", "in another project", 4)

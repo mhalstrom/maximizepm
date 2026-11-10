@@ -7047,8 +7047,9 @@ def _claim_row(conn, item_id, actor):
     q = conn.execute("SELECT agent FROM queue_entries WHERE item_id=?", (item_id,)).fetchone()
     if q and q["agent"] != actor and ag["kind"] == "ai":
         raise RiverError(f"refused: #{item_id} is in the queue of {q['agent']} (maxpm queue list {q['agent']})")
-    # A goal's items are its owner's, unless one was pushed or given to this agent.
-    if ag["kind"] == "ai" and it0["doer"] != "human" and it0["reserved_for"] != actor:
+    # A goal's items are its owner's, unless one was pushed or given to this agent, or a person or the manager put it
+    # in this agent's own queue: the queue wins, as annotate says (wait said WORK while claim refused, #5089).
+    if ag["kind"] == "ai" and it0["doer"] != "human" and it0["reserved_for"] != actor and not (q and q["agent"] == actor):
         g = conn.execute("SELECT g.name, g.owner FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? "
                          "AND g.status='open' AND g.owner IS NOT NULL AND g.owner<>? AND g.owner_expires_at >= ? "
                          "ORDER BY g.rank LIMIT 1", (item_id, actor, iso(now()))).fetchone()
