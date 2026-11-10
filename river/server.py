@@ -2454,6 +2454,8 @@ KNOWN_AGENTS = [
     ("Grok", "grok", 'grok "run maxpm go in this folder and follow the briefing"'),
     ("OpenCode", "opencode", 'opencode --prompt "run maxpm go in this folder and follow the briefing"'),
     ("Gemini", "gemini", 'gemini -i "run maxpm go in this folder and follow the briefing"'),
+    # pi opens its terminal UI with a message argument as the first prompt; it reads AGENTS.md (#4924).
+    ("pi", "pi", 'pi "run maxpm go in this folder and follow the briefing"'),
 ]
 
 

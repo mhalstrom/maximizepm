@@ -2364,6 +2364,9 @@ class SetupGuide(unittest.TestCase):
         shown = {a["label"]: a["command"] for a in server.setup_status(self.c)["agent_clis"]}
         self.assertEqual(shown["Codex"], codex)
         self.assertEqual(shown["Claude Code"], "claude go --remote-control")
+        # pi takes its first prompt as a plain argument (#4924).
+        self.assertEqual(shown["pi"], 'pi "run maxpm go in this folder and follow the briefing"')
+        self.assertEqual(server.setup_agent_add(self.c, "pi"), ["Claude Code", "Codex", "pi"])
         with self.assertRaises(RiverError):
             server.setup_agent_add(self.c, "nope")
 
