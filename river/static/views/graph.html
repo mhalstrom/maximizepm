@@ -3,10 +3,9 @@
   <div class="graph-layout">
   <aside class="panel graph-side" id="graphSide" aria-label="Choose a project"></aside>
   <div class="panel">
-    <h2><span id="graphTitle">Dependency graph</span> <span class="spacer"></span>
-      <label class="sub"><input type="checkbox" id="graphDone"> include done</label>
+    <h2 title="Arrows point from a prerequisite to the item that waits on it. Green: ready. Yellow: in progress. A border in the people color: a person does it. Click a box to open it. Scroll or drag to move; pinch, the wheel, or + and − to zoom; Fit shows it all."><span id="graphTitle">All projects</span> <span class="spacer"></span>
+      <label class="sub"><input type="checkbox" id="graphDone"> done</label>
     </h2>
-    <div class="muted t-s" style="margin-bottom:var(--sp-3)">Arrows point from a prerequisite to the item that waits on it. Green: ready. Yellow: in progress. Purple border: a human does it. Click a box to open it. Scroll or drag to move; pinch, the wheel, or + and − to zoom; Fit shows it all.</div>
     <div class="muted hidden t-s" id="graphNote" style="margin-bottom:var(--sp-3)"></div>
     <div id="graph"></div>
   </div>

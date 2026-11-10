@@ -8,7 +8,8 @@ import { tab, nav } from "../page.js";
 let logSig = "", logTable = null;
 const logTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const logDay = (d) => new Date(d + "T12:00:00Z").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-// The Done log: one row per finished item, grouped by day; every column sorts and filters.
+// The Done log: one row per finished item, grouped by day; every column sorts and filters. The output of an item is
+// the hover of its title, and the drawer shows it (#5082).
 function makeLogTable() {
   return makeTable($("#log"), {
     key: "done", sort: [{ column: "closed_at", dir: "desc" }], placeholder: "Nothing done in this period.",
@@ -16,9 +17,8 @@ function makeLogTable() {
     groupBy: "day", groupHeader: (day, count) => `<b>${esc(logDay(day))}</b> <span class="muted">${count} done</span>`,
     columns: [
       { title: "#", field: "id", width: 64, filter: false },
-      { title: "Title", field: "title", minWidth: 180, cssClass: "wrap" },
+      { title: "Title", field: "title", minWidth: 180, cssClass: "wrap", html: (r) => `<span title="${esc(r.output)}">${esc(r.title)}</span>` },
       { title: "Project", field: "project", width: 150, filter: "select", html: (r) => projectChip(r.project) },
-      { title: "Output", field: "output", minWidth: 180, cssClass: "wrap muted", html: (r) => `<div class="clamp" title="${esc(r.output)}">${esc(r.output)}</div>` },
       { title: "By", field: "by", width: 130, filter: "select" },
       { title: "Finished", field: "closed_at", width: 96, filter: false, html: (r) => logTime(r.closed_at) },
     ],
@@ -38,9 +38,8 @@ export async function renderLog(force) {
   const win = L.since ? $("#logSince").selectedOptions[0].textContent : null;
   $("#progress").innerHTML = L.progress.map(p => {
     const done = pct(p.done, p.total);
-    return `<div class="prog"><div class="prog-h"><b>${esc(p.project)}</b><span class="muted">${p.done}/${p.total} · ${done}%</span></div>
-      ${bar(done)}
-      ${win ? `<div class="muted t-s" style="margin-top:var(--sp-0)">+${p.done_in_window} in the ${esc(win)}</div>` : ""}</div>`;
+    return `<div class="prog"><div class="prog-h"><b>${esc(p.project)}</b><span class="muted"${win ? ` title="${p.done_in_window} done in the ${esc(win)}"` : ""}>${win && p.done_in_window ? `+${p.done_in_window} · ` : ""}${p.done}/${p.total}</span></div>
+      ${bar(done)}</div>`;
   }).join("") || `<div class="muted">No items.</div>`;
 }
 $("#logProject").addEventListener("change", () => renderLog(true));

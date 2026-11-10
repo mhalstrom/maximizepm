@@ -1,22 +1,21 @@
 <!-- The settings tab of the page (#4656). maxpm serve puts it into index.html, at view: settings. -->
 <section id="tab-settings" class="hidden">
   <div class="panel">
-    <h2>Settings</h2>
-    <div class="muted t-s" style="margin-bottom:var(--sp-3)"><span class="clamp" data-clamp="settings-help"><span class="clamp-text">The most specific value wins: item, then agent, then project, then global, then the built-in default.<br>
+    <details class="muted t-s" style="margin-bottom:var(--sp-3)"><summary>Help</summary>The most specific value wins: item, then agent, then project, then global, then the built-in default.<br>
       <b>launch_agents</b> lists the agents the Start button offers, as <code>Label=command</code> entries separated by <code>;</code>. The first is the default.
       <code>@claude-code</code> and <code>@codex</code> are launch profiles: MaximizePM builds the command from their options, the <b>claude_*</b> and <b>codex_*</b> settings (Remote Control, permission or sandbox mode, more arguments, the first prompt; the setup guide has toggles for them). <code>@codex sandbox=read-only</code> sets an option for that entry alone. For example:
       <code>Claude Code=@claude-code; Plan first=@claude-code permission_mode=plan; Codex=@codex; Grok=grok "run maxpm go in this folder and follow the briefing"</code>.
-      Any other command is custom: <code>{model}</code> and <code>{effort}</code> take the launch dialog's choice, and with no choice the flag before them drops out.</span></span></div>
+      Any other command is custom: <code>{model}</code> and <code>{effort}</code> take the launch dialog's choice, and with no choice the flag before them drops out.</details>
     <div style="margin-bottom:var(--sp-3)"><button class="btn" id="openSetup">Open setup guide</button></div>
     <div id="settingsTable"></div>
     <div class="form" style="margin-top:var(--sp-5);max-width:var(--w-form)">
       <div class="two">
         <label>Key<select id="setKey"></select></label>
-        <label>Value<input id="setValue" placeholder="e.g. 45m, 7d, 2"></label>
+        <label>Value<input id="setValue" placeholder="45m, 7d, 2"></label>
       </div>
       <div class="two">
         <label>Scope<select id="setScope"><option value="global">global</option><option value="project">project</option><option value="agent">agent</option><option value="item">item</option></select></label>
-        <label>Scope name or id<input id="setScopeName" placeholder="website / alex / 42"></label>
+        <label>Name or id<input id="setScopeName" placeholder="website / alex / 42"></label>
       </div>
       <button class="btn primary" id="setGo">Save setting</button>
     </div>

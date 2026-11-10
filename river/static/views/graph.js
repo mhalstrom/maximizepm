@@ -72,7 +72,7 @@ export async function renderGraph(force) {
   if (graphProj && !S.projects.some(p => p.name === graphProj)) graphProj = "";
   const proj = graphProj, withDone = $("#graphDone").checked;
   renderGraphSide(withDone);
-  $("#graphTitle").textContent = proj ? "Dependency graph: " + proj : "Dependency graph: all projects";
+  $("#graphTitle").textContent = proj || "All projects";
   const items = S.items.filter(i => (withDone || !["done", "dropped"].includes(i.status)));
   const G = goalSel();
   const { show, total, hidden } = graphItems(items, proj || G ? items.filter(i => (!proj || i.project === proj) && inGoal(i)) : null);
@@ -80,7 +80,7 @@ export async function renderGraph(force) {
   if (!force && sig === graphSig) return;
   graphSig = sig;
   const note = $("#graphNote");
-  note.textContent = hidden ? `The graph has ${total} items, more than the ${GRAPH_MAX} it draws at one time: ${hidden} finished items that are not next to an open item are left out.` : "";
+  note.textContent = hidden ? `${hidden} of ${total} items left out: finished, and next to no open item.` : "";
   note.classList.toggle("hidden", !hidden);
   const { text, nodes, edges } = graphText(S.projects, items, show);
   // Above its limits Mermaid draws its own error picture and reports no error: say it here, with the counts.

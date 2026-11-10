@@ -22,10 +22,10 @@ export function makeTerminalTab({ isShown }) {
           : (j.error || "The Terminal tab is off") + ". To allow it: maxpm config set web_terminal on";
         list.innerHTML = ""; return;
       }
-      state.textContent = j.tmux ? (j.via_relay ? "You use this page through the relay." : "") : "A terminal needs tmux on this computer: brew install tmux";
+      state.textContent = j.tmux ? "" : "A terminal needs tmux on this computer: brew install tmux";
       $("#shellNote").textContent = j.note || "";
       list.innerHTML = j.shells.map(s => `<div class="sh-row">
-          <div class="sh-t"><b>${esc(s.name)}</b> <span class="muted">${esc(s.running)} in <code>${esc(s.path)}</code>${s.by ? ` · opened by ${esc(s.by)}` : ""}${s.started ? ` ${ago(new Date(s.started * 1000).toISOString())}` : ""}</span></div>
+          <div class="sh-t"><b>${esc(s.name)}</b> <span class="muted" title="${esc(s.running)} in ${esc(s.path)}${s.by ? ", opened by " + esc(s.by) : ""}">${esc(s.running)}${s.started ? ` · ${ago(new Date(s.started * 1000).toISOString())}` : ""}</span></div>
           ${button("Open", { kind: "primary", data: { "shell-open": s.pane, "shell-name": s.name } })}
           ${button("Close", { data: { "shell-close": s.pane } })}</div>`).join("")
         || empty("No terminal is open.");
