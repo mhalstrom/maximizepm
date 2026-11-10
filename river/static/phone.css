@@ -4,10 +4,23 @@
    Safari on iOS zooms into a text field whose font is under 16 px when a person taps it, and stays zoomed: the page
    then looks cut at the right edge. So each field on a phone or a tablet has 16 px text. */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-#hdrMore, #sessBack, #sessMore, #tabBtn, #searchBtn, header h1.brand .mark, #hdrScrim { display: none; }
-/* The box of the ⋯ controls (#4903) takes no room of its own outside a phone and a tablet: its controls sit in the
-   header's row, as before. */
-.hdr-menu { display: contents; }
+#sessBack, #sessMore, #tabBtn, #searchBtn, header h1.brand .mark, #hdrScrim { display: none; }
+/* The ⋯ of the header at every width (#5083, the Quiet look: less text): theme, relay, update, You are and the time
+   of the last update are in its menu, a card under the bar at the right. Until a name is chosen, You are shows there
+   by itself. A tap outside it (the scrim: clear on a desktop, dark on a phone and a tablet) or Esc closes it. */
+#hdrMore { display: inline-flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; }
+header.more, header.no-actor { z-index: 6; }
+header:not(.more) .hdr-menu > #theme, header:not(.more) .hdr-menu > #relayBtn, header:not(.more) .hdr-menu > #updateBtn,
+header:not(.more) .hdr-menu > #stamp, header:not(.more):not(.no-actor) .hdr-menu > label.sub { display: none; }
+header.more .hdr-menu > label.sub, header.no-actor .hdr-menu > label.sub { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
+.hdr-menu > label.sub select { flex: 1; min-width: 0; }
+.hdr-menu { display: none; }
+header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+  position: absolute; top: 100%; right: 6px; width: min(320px, calc(100vw - 12px)); box-sizing: border-box; padding: 10px 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 24px rgba(0,0,0,.25); }
+.hdr-menu > select, .hdr-menu > .btn { width: 100%; }
+.hdr-menu > #stamp { text-align: center; }
+#hdrScrim:not(.hidden) { display: block; position: fixed; inset: 0; z-index: 5; }
 
 @media (max-width: 1023px) {
   /* A tablet: the side panel of the Sessions tab covers the chat as a drawer from the right, with its own X. */
@@ -30,11 +43,7 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   nav button { flex: none; padding: 8px 10px; min-height: 40px; }
   header > .spacer { display: none; }
   #search { flex: 1 1 200px; width: auto; min-width: 0; min-height: 40px; }
-  #hdrMore { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 40px; font-size: 18px; line-height: 1; }
-  header:not(.more) .hdr-menu > #theme, header:not(.more) .hdr-menu > #relayBtn, header:not(.more) .hdr-menu > #updateBtn,
-  header:not(.more) .hdr-menu > #stamp, header:not(.more):not(.no-actor) .hdr-menu > label.sub { display: none; }
-  header.more .hdr-menu > label.sub, header.no-actor .hdr-menu > label.sub { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
-  .hdr-menu > label.sub select { flex: 1; min-width: 0; }
+  #hdrMore { min-width: 44px; min-height: 40px; }
 
   /* Tap targets of 44 px. A select draws its own box (WebKit keeps a native select at its own small height), with
      an arrow on the right. */
@@ -79,14 +88,7 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   header.tabs-open nav button { min-height: 48px; padding: 0 20px; text-align: left; font-size: 16px; color: var(--ink);
     border: 0; border-radius: 0; background: none; box-shadow: inset 4px 0 0 transparent; }
   header.tabs-open nav button.on { font-weight: 600; background: var(--bg); box-shadow: inset 4px 0 0 var(--ink); }
-  /* The menu of the ⋯: a card under the bar, at the right. Until a name is chosen, You are shows there by itself. */
-  .hdr-menu { display: none; }
-  header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
-    position: absolute; top: 100%; right: 6px; width: min(320px, calc(100vw - 12px)); box-sizing: border-box; padding: 10px 12px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 24px rgba(0,0,0,.25); }
-  .hdr-menu > select, .hdr-menu > .btn { width: 100%; }
-  .hdr-menu > #stamp { text-align: center; }
-  #hdrScrim:not(.hidden) { display: block; position: fixed; inset: 0; z-index: 5; background: rgba(0,0,0,.35); }
+  #hdrScrim:not(.hidden) { background: rgba(0,0,0,.35); }
   /* The search dialog covers the whole screen from the top, its field and its close button where the bar is. */
   #searchDlg { padding: 0; }
   #searchDlg .box { min-height: 100%; box-sizing: border-box; border: 0; border-radius: 0; box-shadow: none;
