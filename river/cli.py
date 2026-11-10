@@ -21,7 +21,7 @@ Items live in projects and can wait on other items. `maxpm next` gives the
 most important ready item in the area you choose; `--claim` takes it.
 
 Agent sessions: run `maxpm go` in the project folder. It names the session,
-picks a role (owner, worker, unblocker, reviewer, deployer, monitor, planner,
+picks a role (owner, worker, unblocker, reviewer, deployer, planner,
 or idle), claims an item, and prints a briefing. Run it again after each item. To plan work with the user instead,
 run `maxpm plan`: an overview, the open questions, and the planner's rules.
 
@@ -813,7 +813,8 @@ def build_parser():
     x = tgs.add_parser("add"); x.add_argument("name")
     x.add_argument("--description", default="", help="how and where it deploys")
     x = tgs.add_parser("describe", help="set how a target deploys"); x.add_argument("name"); x.add_argument("text")
-    x = tgs.add_parser("monitor", help="what a session watches after each deploy (health links, logs, for how long)")
+    x = tgs.add_parser("monitor", help="what the deploy session watches after each deploy (health links, logs, for "
+                       "how long); it is part of the deploy task")
     x.add_argument("name"); x.add_argument("text", nargs="?", help="the monitor text; \"\" removes it; none shows it")
     x = tgs.add_parser("deployer", help="what maxpm serve starts for the target's deploys: launch (the default) "
                        "alerts the owner when a deploy is ready, and starts a deployer session when there is no owner "
@@ -919,7 +920,7 @@ def build_parser():
     x.add_argument("--since", help="created or closed since: 30d, 2h, or a date (2026-10-01)")
     x.add_argument("-n", "--limit", type=int, default=20, help="at most this many (default 20)")
     x.add_argument("--all-kinds", dest="kinds", action="store_true",
-                   help="also deploy, review, monitor, and fixes items (default: work items only)")
+                   help="also deploy, review, and fixes items (default: work items only)")
     x = sub.add_parser("duplicates", help="groups of open items that look like the same work (the score of the "
                        "maxpm add check); merge them with maxpm merge")
     x.add_argument("--project", help="only this project (a name or a comma list)")
@@ -1653,11 +1654,6 @@ def _run(args, conn):
     hooks = run_hooks(conn, actor)
     if hooks and isinstance(res, dict):
         res["hooks_run"] = hooks
-    monitors = None
-    if args.cmd in ("go", "claim", "next") and core.pending_monitors(conn):
-        monitors = ask_server_for_monitors(conn)
-        if isinstance(res, dict) and args.cmd == "go":
-            res["monitors_opened"] = monitors
     me = res.get("agent") if args.cmd in ("go", "plan", "manage") and isinstance(res, dict) else actor
     core.record_session_url(conn, me, core.session_url_from_env())
     core.record_claude_session(conn, me, core.claude_session_from_env())
@@ -1681,9 +1677,6 @@ def _run(args, conn):
         render(args, res)
         for line in _hook_result_lines(hooks):
             print(line)
-    if monitors is not None and args.cmd != "go" and not args.json:
-        for line in _monitor_lines(monitors):
-            print(line, file=sys.stderr)
     sys.stdout.flush()
     if not (args.cmd in ("wait", "unregister") and conn.execute("SELECT 1 FROM agents WHERE name=?", (actor,)).fetchone() is None):
         _footer(conn, res["agent"] if args.cmd in ("go", "plan") else actor)
@@ -1701,15 +1694,6 @@ def _record_process(conn, name):
     pid, cmd = core.agent_process()
     if pid:
         core.set_process(conn, name, pid, cmd)
-
-
-def ask_server_for_monitors(conn, timeout=5):
-    """A deploy item was just claimed and its target has a monitor text: ask the maxpm serve of this queue
-    to open a session for the monitor item. Returns what it opened, or {"error": ...} when no server runs."""
-    try:
-        return ask_server(conn, "open_monitors", {}, timeout=timeout)
-    except RiverError as e:
-        return {"error": str(e), "pending": core.pending_monitors(conn)}
 
 
 def run_hooks(conn, actor=None):
@@ -1817,17 +1801,6 @@ def serve_restart(conn, wait=60, sleep=None):
         if st["boot"] != old:
             return {"restarted": True, "stale": st["stale"]}
     return {"restarted": False, "stale": True}
-
-
-def _monitor_lines(m):
-    """What happened to the monitor of a deploy that just started."""
-    if isinstance(m, dict):
-        return [f"monitor #{p['id']}: no session opened ({m['error']}). Start one in a folder of target "
-                f"{p['target']}: MAXPM_FOCUS=monitor:{p['id']} claude go   (or another agent: maxpm go reads MAXPM_FOCUS)"
-                for p in m.get("pending", [])]
-    return [f"monitor #{x['id']}: " + (f"no session opened: {x['error']}" if x.get("error") else
-            f"maxpm serve opened {x['agent']} in {x['project']}" + (f" ({x['model']})" if x.get("model") else "")
-            + " to follow the deploy") for x in m]
 
 
 def _stop_banner(me, st):
@@ -3173,7 +3146,7 @@ def render_go(b):
         out += _chat_lines(r, bool(it)) + [""]
     if it:
         out.append(f"YOUR ITEM #{it['id']}: {it['title']}")
-        if it.get("found_during") and it.get("kind") != "monitor":
+        if it.get("found_during"):
             out.append(f"  (found during #{it['found_during']}; now it is the most important ready item)")
         if it["notes"]:
             out.append(f"  notes: {it['notes']}")
@@ -3218,14 +3191,8 @@ def render_go(b):
             out.append("  ships:")
             for d in b["ships"]:
                 out.append(f"    #{d['id']} {d['title']} ({d['status']})")
-            if b.get("monitor_item"):
-                mi = b["monitor_item"]
-                out.append(f"  monitor #{mi['id']} follows this deploy ({mi['status'].replace('_', ' ')}"
-                           + (f" by {mi['assignee']}" if mi["assignee"] else "") + "); it alerts you if something fails.")
-                out += ["  " + x for x in _monitor_lines(b.get("monitors_opened") or [])]
-            elif not t.get("monitor"):
-                out.append(f"  no monitor: to have a session follow each deploy: {r} target monitor {t['name']} "
-                           f"\"<what to watch, for how long>\"")
+            if t.get("monitor"):
+                out.append(f"  after the deploy, watch the release (part of this task): {t['monitor']}")
             if b.get("hooks"):
                 out.append("  " + _hooks_brief(t["name"], b["hooks"]))
             for n in b.get("next_deploy", []):
@@ -3238,27 +3205,19 @@ def render_go(b):
                            + f". You decide a release sooner, with a reason: {r} target release-now {t['name']} "
                              f"--reason \"<why>\"")
             out += ["",
-                    "Deploy as the target description says, run its checks, then put the release id or",
-                    f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\"",
+                    "Deploy as the target description says, run its checks"
+                    + (", and watch the release as the line 'after the deploy' says" if t.get("monitor") else "")
+                    + ", then put the release id or",
+                    f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\""]
+            if t.get("monitor"):
+                out += ["Something fails while you watch: alert the manager with the evidence, and add a person's item",
+                        f"with the rollback you propose ({r} add \"Roll back {t['name']}?\" --doer human --found-during "
+                        f"{it['id']} --context \"<evidence; the exact commands>\"). Do not roll back yourself."]
+            out += [
                     "A step needs a person's go (an approval, a command the auto mode classifier refuses): ask in the",
                     f"queue before you stop at your prompt: {r} ask <person> \"<what to approve>\" --item {it['id']}",
                     "While that question is open, maxpm serve keeps your lease and the target and starts no other",
                     "deployer. The person answers in your terminal or with maxpm answer."]
-        if b["role"] == "monitor":
-            m = b["monitor"]
-            d = m["deploy"]
-            who = m["deployer"] or "the target owner"
-            out += ["",
-                    f"You follow deploy #{d['id']} of target {m['target']} ({d['status'].replace('_', ' ')}"
-                    + (f", by {m['deployer']}" if m["deployer"] else "") + "). The context above says what to watch and for how long.",
-                    f"Watch that long. Your lease lasts 30 minutes: run {r} heartbeat at least every 20 minutes.",
-                    f"All is well: {r} done {it['id']} --output \"<what you checked, for how long, what you saw>\"",
-                    "Something fails:",
-                    f"  1. {r} alert {m['deployer'] or '<deployer>'} \"<what fails, since when>\" --item {d['id']}",
-                    f"  2. {r} add \"Roll back {m['target']} (deploy #{d['id']})?\" --doer human --found-during {it['id']} \\",
-                    f"       --context \"<the evidence: links, log lines, numbers; the rollback you propose: the exact commands>\"",
-                    f"  3. {r} done {it['id']} --output \"problem: <what>; alerted {who}; rollback proposed in #<new id>\"",
-                    f"  Do not roll back yourself: {m['person']} decides."]
         if b["role"] == "reviewer":
             out.append(f"  release {it.get('target')}: the deploy waits on this review. It covers:")
             for d in it["waits_on_detail"]:
@@ -4012,8 +3971,8 @@ def render(a, res):
                     print(f"    {t['description']}")
             return
         if a.tcmd == "rename":
-            print(f"target {res['was']} is now {res['name']}: {res['projects']} projects and {res['items']} deploy, "
-                  f"review and monitor items follow"
+            print(f"target {res['was']} is now {res['name']}: {res['projects']} projects and {res['items']} deploy "
+                  f"and review items follow"
                   + (f"; its deploy project is now {res['deploy_project']}" if res["deploy_project"] else ""))
             print(f"  the old name {res['was']} does not work from now on; agents keep their names, and a new agent "
                   "gets the new name")
@@ -4065,8 +4024,9 @@ def render(a, res):
             print("  set its release gate and cadence from the needs of its projects (a service with users: a short "
                   "cadence, so a fix is live soon; a public tool repository: each push); the commands are below")
         print("  " + (res["description"] or f"(no description: maxpm target describe {res['name']} \"how it deploys\")"))
-        print("  monitor: " + (res.get("monitor") or f"none (a session follows each deploy when you set one: "
-                                                      f"maxpm target monitor {res['name']} \"<what to watch, for how long>\")"))
+        print("  monitor: " + (res.get("monitor") or f"none (the deploy session watches the release as it says, when "
+                                                      f"you set one: maxpm target monitor {res['name']} \"<what to watch, for "
+                                                      f"how long>\")"))
         print("  deployer: " + {"launch": "launch (maxpm serve alerts the owner when a deploy is ready, and starts a "
                                           "deployer session when the owner cannot take it)",
                                 "standing": "standing (maxpm serve keeps a deployer session that owns the target while "

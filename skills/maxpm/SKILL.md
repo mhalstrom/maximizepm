@@ -12,7 +12,7 @@ most important item that is ready (nothing it waits on is open).
 ## Fastest start
 
 Run `maxpm go` in the project folder and follow the briefing. It names you,
-picks your role (owner, worker, unblocker, reviewer, deployer, monitor, planner, context, idle), claims
+picks your role (owner, worker, unblocker, reviewer, deployer, planner, context, idle), claims
 an item when there is one, and ends with the command to run next. Pass `--as <your-name>` on
 every later command. When the briefing asks, record your Claude Code session
 name once (`maxpm --as <your-name> session "<name>" --ref <ref>`; ListAgents
@@ -104,10 +104,10 @@ your type from your CLI's environment.
    `maxpm target release-now <target> --reason "<why>"`. The owner's `maxpm go`
    gives it the ready deploy item first (role DEPLOYER), with what it ships;
    `maxpm go --role deployer` also takes a free target of the folder's projects.
-   When the target has a monitor text (`maxpm target monitor`), claiming the
-   deploy adds a monitor item, and `maxpm serve` opens a session for it
-   (role MONITOR): it watches, then finishes, or alerts the deployer and adds
-   a person's item with a proposed rollback. It never rolls back by itself.
+   When the target has a monitor text (`maxpm target monitor`), watching the
+   release is part of the deploy task: after the deploy, the deployer watches
+   as the text says, then finishes, or alerts the manager and adds a person's
+   item with a proposed rollback. It never rolls back by itself.
    A target can have hooks (`maxpm target hook <target>` lists them): commands
    that MaximizePM runs by itself when a release is cut, when its review passes
    or fails, and when its deploy item is done. The reply of your command shows

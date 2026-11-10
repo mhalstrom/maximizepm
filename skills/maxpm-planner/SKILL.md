@@ -80,7 +80,7 @@ maxpm project target <name> <target>                   # each project has at mos
 maxpm target show <target>                             # its projects and owner
 maxpm target rename <target> <new>                     # with its deploy project deploy-<target>
 maxpm target own <target>                              # one owner per target runs its deploys
-maxpm target monitor <target> "<what to watch, for how long>"   # a session follows each deploy
+maxpm target monitor <target> "<what to watch, for how long>"   # the deploy session watches the release
 maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect
 maxpm target cut <target> --rev <commit>               # fix the release's items now; later ships join the next one
 maxpm target hook <target> <event> "<command>"         # MaximizePM runs it on release-cut, review-passed, review-failed, or deployed (a person or the manager sets it)
@@ -221,7 +221,7 @@ something: that is `maxpm blocked` (an outside reason) or `maxpm dep` (another
 item).
 
 - Only an open item goes there: an agent that holds it releases it first.
-  Release items (deploy, review, monitor) never do.
+  Release items (deploy, review) never do.
 - Items that wait on it cannot be ready while it is in the backlog, so
   `maxpm backlog` names them and asks for `--force "<why>"`. Better: move them
   to the backlog first, or remove the link. `maxpm blockers` and the go
@@ -276,7 +276,7 @@ recommendation says which agent to start; it never keeps a session off the item.
 Pick the weakest model that does the item well:
 
 - A weaker model (sonnet, luna) and low effort: routine, well specified work.
-  Monitors, checks, renames, text changes, a fix whose cause is known.
+  Checks, renames, text changes, a fix whose cause is known.
 - A middle model (opus, terra or sol) and medium or high effort: normal
   feature work that follows code already there.
 - The strongest model (fable, astra) and high effort or more: design with

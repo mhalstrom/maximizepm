@@ -319,7 +319,7 @@ DEFAULT_SETTINGS = {
     "model_ladder": "claude: haiku, sonnet, opus, fable; openai: luna, terra, sol, astra",
     "effort_levels": "low, medium, high, xhigh, max",
     # What an item gets when it names none itself. Set them per project (--project) or per item kind
-    # (--kind deploy); for example monitors: default_model sonnet, default_effort low, default_max_model sonnet.
+    # (--kind deploy); for example: default_model sonnet, default_effort low, default_max_model sonnet --kind deploy.
     # A recommendation never blocks; min/max limits keep a session whose model is outside them off the item.
     # Goal context sessions (#1104): goal_context on lets maxpm serve start a context session for a goal with
     # two or more ready agent items and no warm base; a worker of the goal starts as a fork of a base that a
@@ -395,7 +395,7 @@ CREATE TABLE IF NOT EXISTS targets (
   id                INTEGER PRIMARY KEY,
   name              TEXT NOT NULL UNIQUE,
   description       TEXT NOT NULL DEFAULT '',
-  monitor           TEXT NOT NULL DEFAULT '',  -- what a session watches after each deploy (maxpm target monitor)
+  monitor           TEXT NOT NULL DEFAULT '',  -- what the deploy session watches after each deploy (maxpm target monitor)
   deployer          TEXT NOT NULL DEFAULT 'launch',  -- what maxpm serve starts for its deploys (maxpm target deployer)
   cadence           TEXT NOT NULL DEFAULT '',  -- how often it releases: 2h, 1d, 1w, 1mo; '' is off (maxpm target cadence)
   cadence_reason    TEXT NOT NULL DEFAULT '',  -- why that cadence fits the project's needs (#5003)
@@ -1748,9 +1748,8 @@ def _model_defaults(conn):
     return rows
 
 
-# Built-in defaults per item kind, below every setting: a monitor watches, so a weak model is enough.
-KIND_MODELS = {"monitor": {"model": "sonnet", "effort": "low", "max_model": "sonnet"},
-               "operational": {"model": "sonnet", "effort": "medium"}}
+# Built-in defaults per item kind, below every setting.
+KIND_MODELS = {"operational": {"model": "sonnet", "effort": "medium"}}
 # Kinds whose built-in default comes before the project and global default_* settings (a setting of the kind,
 # default_model --kind <kind>, still comes first): an operational task reads lists and logs, and the default
 # model of the queue (often the strongest) is more than it needs (#4973).
@@ -2092,7 +2091,7 @@ def project_rename(conn, old, new, actor=None):
 
 
 def target_rename(conn, old, new, actor=None):
-    """Give a deploy target a new name, in one transaction: its projects, its deploy, review and monitor
+    """Give a deploy target a new name, in one transaction: its projects, its deploy and review
     items (open ones also get the new name in their title), and its deploy project (deploy-<target>)
     follow. Refused when the new name is in use. The old names stop at once."""
     with tx(conn):
@@ -2110,9 +2109,6 @@ def target_rename(conn, old, new, actor=None):
                                 ("review", f"Review release {old}", f"Review release {new}")):
             conn.execute(f"UPDATE items SET title=? WHERE kind=? AND target=? AND title=? AND status IN {OPEN_STATES}",
                          (now_, kind, new, was))
-        conn.execute("UPDATE items SET title=? || found_during WHERE kind='monitor' AND target=? "
-                     f"AND title=? || found_during AND status IN {OPEN_STATES}",
-                     (f"Monitor the {new} deploy #", new, f"Monitor the {old} deploy #"))
         res = {"name": new, "was": old, "projects": projects, "items": items,
                "deploy_project": None}
         if dp is not None:
@@ -2596,7 +2592,9 @@ def target_describe(conn, name, text, actor=None):
 
 def target_monitor(conn, name, text, actor=None):
     """What to watch after each deploy of the target: health links, logs, error rates, and for how long.
-    With it set, claiming a deploy item adds a monitor item, and maxpm serve opens a session for it."""
+    The deploy session reads it in its deploy task: after the deploy it watches the release as the text says
+    (#4972: no separate monitor task or session). A target with a deploy hook has no session: its release command
+    does the checks, and a failure (exit not 0) starts the release again."""
     with tx(conn):
         name = _target(conn, name)["name"]
         conn.execute("UPDATE targets SET monitor=? WHERE name=?", (text.strip(), name))
@@ -3042,7 +3040,7 @@ def deploy_hook_lost(conn):
 
 
 def _deploy_hook_end(conn, run, ok, result, tail, folder):
-    """The deploy hook ended. Exit 0: the deploy item is done (its monitor item comes, the deployed hook runs).
+    """The deploy hook ended. Exit 0: the deploy item is done (the deployed hook runs).
     Else the deploy item stays open, and the release starts again from its beginning: it is not cut, a fix item
     that it waits on holds the failure, a new review covers the fix (with review on), and when that review passes
     maxpm serve runs the hook again. Nobody runs the command again by hand or repairs production by hand."""
@@ -3053,8 +3051,6 @@ def _deploy_hook_end(conn, run, ok, result, tail, folder):
                      "WHERE id=? AND blocked_set_by=?", (dep_id, DEPLOY_HOOK_BY))
         if dep["status"] != "open":
             return {"deploy_end": f"#{dep_id} is {dep['status']}: nothing to do"}
-        if ok:
-            _add_monitor(conn, dep, "maxpm")
     last = (tail or "").strip().splitlines()[-1:] if tail else []
     if ok:
         done(conn, dep_id, f"deploy hook: {result}: {cmd}" + (f" ({last[0][:200]})" if last else ""), "maxpm")
@@ -3454,36 +3450,6 @@ def live_sessions(conn):
                if _agent_state(conn, r) not in ("gone", "stopped"))
 
 
-def _add_monitor(conn, dep, actor):
-    """When a deploy starts: a monitor item for this release, if the target has a monitor text and none exists."""
-    tg = conn.execute("SELECT * FROM targets WHERE name=?", (dep["target"],)).fetchone()
-    if not tg or not tg["monitor"] or conn.execute(
-            "SELECT 1 FROM items WHERE kind='monitor' AND found_during=?", (dep["id"],)).fetchone():
-        return None
-    ships = conn.execute("SELECT i.id, i.title FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? "
-                         "AND i.kind NOT IN ('review') ORDER BY i.id", (dep["id"],)).fetchall()
-    context = (tg["monitor"] + "\nRelease: deploy #" + str(dep["id"]) + " of " + tg["name"]
-               + (" ships " + "; ".join(f"#{r['id']} {r['title']}" for r in ships) if ships else ""))
-    top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM items WHERE project_id=?", (dep["project_id"],)).fetchone()["m"]
-    cur = conn.execute(
-        "INSERT INTO items(project_id,title,notes,priority,rank,doer,context,kind,target,found_during,created_at) "
-        "VALUES (?,?,?,?,?,'ai',?,'monitor',?,?,?)",
-        (dep["project_id"], f"Monitor the {tg['name']} deploy #{dep['id']}",
-         "Follow the deploy as the target's monitor text says; done when all is well, else alert and propose a rollback.",
-         dep["priority"], top + 1, context, tg["name"], dep["id"], iso(now())))
-    _event(conn, cur.lastrowid, actor, f"monitor for deploy #{dep['id']} ({tg['name']}) added")
-    _event(conn, dep["id"], actor, f"found work: #{cur.lastrowid} monitor")
-    return cur.lastrowid
-
-
-def pending_monitors(conn):
-    """Monitor items that no session holds and for which river opened no session yet."""
-    return [dict(r) for r in conn.execute(
-        "SELECT i.id, i.target, i.found_during FROM items i WHERE i.kind='monitor' AND i.status='open' "
-        "AND i.assignee IS NULL AND i.reserved_for IS NULL AND NOT EXISTS (SELECT 1 FROM events e "
-        "WHERE e.item_id=i.id AND e.change LIKE 'monitor session opened%') ORDER BY i.id")]
-
-
 def target_own(conn, name, actor=None, takeover=None):
     """Become the one owner of a target. Refused while another agent owns it, unless that owner is
     away or gone and `takeover` says why: then the target moves now and the old owner is told."""
@@ -3596,11 +3562,6 @@ def targets_view(conn, ann=None):
     review = lambda a: next(({"id": b, "status": ann[b]["status"], "assignee": ann[b]["assignee"]}
                              for b in a["waits_on"] if b in ann and ann[b]["kind"] == "review"
                              and ann[b]["status"] in OPEN_STATES), None)
-    monitors = {}
-    for a in ann.values():
-        if a["kind"] == "monitor" and a["found_during"]:
-            monitors.setdefault(a["found_during"], []).append(
-                {"id": a["id"], "status": a["status"], "assignee": a["assignee"], "output": a["output"]})
     out = []
     for t in target_list(conn):
         deploys = [a for a in ann.values() if a["kind"] == "deploy" and a["target"] == t["name"]]
@@ -3612,13 +3573,13 @@ def targets_view(conn, ann=None):
                 "SELECT name FROM projects WHERE target=? AND archived=0 AND name<>? ORDER BY rank, id",
                 (t["name"], f"deploy-{t['name']}"))],
             pending=[{"id": a["id"], "title": a["title"], "status": a["status"], "assignee": a["assignee"],
-                      "ready": a["ready"], "ships": ships(a), "review": review(a), "cut_at": a["cut_at"],
-                      "monitors": monitors.get(a["id"], [])} for a in pending],
+                      "ready": a["ready"], "ships": ships(a), "review": review(a), "cut_at": a["cut_at"]}
+                     for a in pending],
             release=release_plan(conn, t["name"]), hooks=target_hooks(conn, t["name"]),
             last_deploy=({"id": last["id"], "title": last["title"], "closed_at": last["closed_at"],
                           "output": last["output"], "ships": ships(last)} if last else None),
             history=[{"id": a["id"], "title": a["title"], "closed_at": a["closed_at"], "output": a["output"],
-                      "ships": ships(a), "done_by": _done_by(conn, a["id"]), "monitors": monitors.get(a["id"], [])}
+                      "ships": ships(a), "done_by": _done_by(conn, a["id"])}
                      for a in reversed(done[-10:])]))
     return out
 
@@ -6974,8 +6935,6 @@ def _claim_row(conn, item_id, actor):
     if conn.execute("DELETE FROM queue_entries WHERE item_id=?", (item_id,)).rowcount:
         _event(conn, item_id, actor, "left the queue (claimed)")
     _goal_notice(conn, item_id, actor, "claimed")
-    if it["kind"] == "deploy":
-        _add_monitor(conn, it, actor)
     return ag
 
 
@@ -11178,7 +11137,7 @@ PLATFORM_EFFORTS = {"claude": ["low", "medium", "high", "xhigh", "max"],
 # One line per model in the launch dialog: when it fits.
 MODEL_NOTES = {
     "haiku": "quick, simple work: lookups, formatting, trivial edits",
-    "sonnet": "routine, well specified work: monitors, checks, small fixes",
+    "sonnet": "routine, well specified work: checks, small fixes, operational tasks",
     "opus": "normal feature work that follows the code already there",
     "fable": "hard design, hard bugs, security, data that is costly to lose",
     "luna": "quick routine edits and checks",
@@ -11337,8 +11296,7 @@ def _goal_brief(conn, name, actor):
 
 def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
        agent_type=None):
-    """One call for a fresh agent session; see _go. A session that gets a monitor item has role monitor,
-    and its brief says which deploy it follows and whom to alert."""
+    """One call for a fresh agent session; see _go."""
     brief = _go(conn, cwd, actor, project, role, session, focus, model, chat, agent_type)
     brief["asked_open"] = asked_open(conn, brief.get("agent"))  # #5001: the asker closes what is answered or moot
     it = brief.get("item")
@@ -11348,10 +11306,6 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
                      why=f"you took the expert-tier task #{it['id']}: you are an expert session, and the person "
                          f"talks it through with you")
         return brief
-    if it and it["kind"] == "monitor":
-        brief["role"] = "monitor"
-        brief["monitor"] = _monitor_brief(conn, it)
-        _set_role_note(conn, brief["agent"], "monitor", it["id"])
     if it and it["kind"] == "work":
         # Work like this item, open or done before, so the worker looks before it repeats it (#2257).
         brief["related"] = related(conn, it["id"])
@@ -11385,13 +11339,6 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         # command runs: a session there waits in a background command, so a talk reaches it at once (#4948).
         brief["wait_background"] = (agent_type or session_type(conn, brief["agent"])) == "claude-code"
     return brief
-
-
-def _monitor_brief(conn, it):
-    dep = _item(conn, it["found_during"]) if it["found_during"] else None
-    deployer = dep and (dep["assignee"] or _done_by(conn, dep["id"]))
-    return {"deploy": {"id": dep["id"], "title": dep["title"], "status": dep["status"]} if dep else None,
-            "deployer": deployer, "target": it["target"], "person": _person(conn)}
 
 
 def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
@@ -11583,15 +11530,6 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                          why=f"the page opened this session to do #{f['id']} together with {person}")
             _set_role_note(conn, actor, "helper", f["id"])
             return brief
-        if f["status"] == "open" and kind == "monitor" and f["kind"] == "monitor":
-            try:
-                item = claim(conn, f["id"], actor)
-            except RiverError as e:
-                brief["focus_note"] = f"The page opened this session to monitor #{f['id']}, but: {e}"
-            else:
-                brief.update(role="monitor", item=item, why=f"MaximizePM opened this session to follow deploy "
-                                                            f"#{f['found_during']} of {f['target']}")
-                return brief
         # Start or Dispatch opened this session for one item: claim it, or say why not.
         if kind == "item" and f["status"] in OPEN_STATES and f["assignee"] != actor:
             try:
@@ -11824,10 +11762,8 @@ def _deploy_brief(conn, item):
     t = dict(_target(conn, item["target"]))
     nxt = conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open' AND id<>? ORDER BY id",
                        (t["name"], item["id"])).fetchall()
-    mon = conn.execute("SELECT id, title, status, assignee FROM items WHERE kind='monitor' AND found_during=?",
-                       (item["id"],)).fetchone()
     return {"target": {"name": t["name"], "description": t["description"], "owner": t["owner"], "monitor": t["monitor"]},
-            "monitor_item": dict(mon) if mon else None, "hooks": target_hooks(conn, t["name"]),
+            "hooks": target_hooks(conn, t["name"]),
             "ships": item["waits_on_detail"], "release": release_plan(conn, t["name"]),
             "next_deploy": [item_show(conn, r["id"]) for r in nxt]}
 

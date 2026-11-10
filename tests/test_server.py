@@ -685,40 +685,6 @@ class LaunchAgent(unittest.TestCase):
         b = core.go(self.c, self.dir.name, t["session_name"], model=sent[-1]["env"]["MAXPM_MODEL"])
         self.assertEqual((b["item"]["id"], core.agent_model(self.c, t["session_name"])), (x, "fable"))
 
-    def test_a_deploy_opens_a_monitor_session(self):
-        core.register(self.c, "ag")
-        core.target_add(self.c, "web", "push")
-        core.target_monitor(self.c, "web", "watch /health for 10 minutes")
-        core.project_add(self.c, "site", target="web", path=self.dir.name)
-        w = core.item_add(self.c, "site", "page")["id"]
-        core.claim(self.c, w, "ag")
-        core.done(self.c, w, "abc", "ag", ship_it=True)
-        dep = core.item_show(self.c, w)["unblocks"][0]
-        core.target_own(self.c, "web", "ag")
-        core.claim(self.c, dep, "ag")
-        (m,) = core.pending_monitors(self.c)
-        with self.assertRaisesRegex(RiverError, "another queue"):
-            server.open_monitors(self.c, runner=[].append, db=os.path.join(self.dir.name, "other.db"))
-        sent = []
-        (r,) = server.open_monitors(self.c, runner=sent.append, db=str(core.db_path()))
-        self.assertEqual((r["id"], r["project"], r["model"]), (m["id"], "site", "sonnet"))
-        self.assertRegex(sent[-1], rf"MAXPM_FOCUS=monitor:{m['id']} MAXPM_MODEL=sonnet claude --name 'monitor #{m['id']} [^']+' "
-                                   rf"--model sonnet --effort low go")
-        self.assertEqual(server.open_monitors(self.c, runner=sent.append), [])  # opened once
-        self.assertEqual(len(sent), 1)
-        # No server answers: the command says how to start the session by hand.
-        from river import cli
-        self.c.execute("DELETE FROM events WHERE change LIKE 'monitor session opened%'")
-        import urllib.error
-        import urllib.request
-        from unittest import mock
-        core.config_set(self.c, "serve_port", "1")
-        with mock.patch.object(urllib.request.OpenerDirector, "open",
-                               side_effect=urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))):
-            got = cli.ask_server_for_monitors(self.c, timeout=1)
-        self.assertIn("no maxpm serve answers on port 1", got["error"])
-        self.assertIn(f"MAXPM_FOCUS=monitor:{m['id']} claude go", cli._monitor_lines(got)[0])
-
     def test_start_spreads_sessions_across_projects(self):
         os.makedirs(os.path.join(self.dir.name, "b"))
         core.project_add(self.c, "a", path=self.dir.name)

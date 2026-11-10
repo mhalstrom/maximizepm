@@ -4552,13 +4552,14 @@ class Models(Base):
 
 
 class Monitor(Base):
-    """A target's monitor text: claiming a deploy adds a monitor item; its session follows the deploy (#321)."""
+    """A target's monitor text is part of the deploy task (#4972): the deploy session watches the release as it says;
+    no separate monitor item, role, or session."""
 
     def setUp(self):
         super().setUp()
         core.target_add(self.c, "web", "push, then smoke test")
         core.project_add(self.c, "site", target="web", path=self.dir.name)
-        for n in ("dev", "ops", "mon", "big"):
+        for n in ("dev", "ops"):
             core.register(self.c, n)
         core.register(self.c, "mark", human=True)
         w = self.add("site", "page")
@@ -4566,49 +4567,23 @@ class Monitor(Base):
         core.done(self.c, w, "abc", "dev", ship_it=True)
         self.deploy = core.item_show(self.c, w)["unblocks"][0]
 
-    def monitors(self):
-        return [r["id"] for r in self.c.execute("SELECT id FROM items WHERE kind='monitor'")]
-
-    def test_no_monitor_text_no_monitor_item(self):
-        core.target_own(self.c, "web", "ops")
-        b = core.go(self.c, self.dir.name, "ops")
-        self.assertEqual((b["role"], b["monitor_item"]), ("deployer", None))
-        self.assertEqual(self.monitors(), [])
-
-    def test_claiming_a_deploy_adds_one_monitor_with_a_weak_model(self):
+    def test_the_deploy_task_carries_the_monitor_text(self):
+        from river import cli
         core.target_monitor(self.c, "web", "check https://example.test/health for 15 minutes")
         self.assertEqual(core.target_show(self.c, "web")["monitor"], "check https://example.test/health for 15 minutes")
         core.target_own(self.c, "web", "ops")
         b = core.go(self.c, self.dir.name, "ops")
-        (m,) = self.monitors()
-        self.assertEqual(b["monitor_item"]["id"], m)
-        a = core.annotate(self.c)[m]
-        self.assertEqual((a["found_during"], a["target"], a["doer"], a["ready"]), (self.deploy, "web", "ai", True))
-        self.assertIn("example.test/health", a["context"])
-        self.assertIn("ships #", a["context"])
-        self.assertEqual((a["model"], a["effort"], a["max_model"], a["max_model_from"]), ("sonnet", "low", "sonnet", "kind:monitor"))
-        self.assertEqual([p["id"] for p in core.pending_monitors(self.c)], [m])
-        view = core.targets_view(self.c)[0]
-        self.assertEqual(view["pending"][0]["monitors"][0]["id"], m)
-        # A person's own setting for monitors wins over the built-in default.
-        core.config_set(self.c, "default_max_model", "opus", kind="monitor")
-        self.assertEqual(core.annotate(self.c)[m]["max_model"], "opus")
-
-    def test_the_monitor_session_gets_its_briefing(self):
-        core.target_monitor(self.c, "web", "watch the error rate for 10 minutes")
-        core.target_own(self.c, "web", "ops")
-        core.go(self.c, self.dir.name, "ops")
-        (m,) = self.monitors()
-        refused = core.go(self.c, self.dir.name, "big", focus=f"monitor:{m}", model="fable")
-        self.assertIn("allows at most sonnet", refused["focus_note"])
-        core.set_agent_model(self.c, "big", None)
-        b = core.go(self.c, self.dir.name, "mon", focus=f"monitor:{m}", model="sonnet")
-        self.assertEqual((b["role"], b["item"]["id"]), ("monitor", m))
-        self.assertEqual(b["monitor"]["deploy"]["id"], self.deploy)
-        self.assertEqual((b["monitor"]["deployer"], b["monitor"]["person"]), ("ops", "mark"))
-        self.assertEqual(core.pending_monitors(self.c), [])
-        again = core.go(self.c, self.dir.name, "mon")
-        self.assertEqual((again["role"], again.get("resumed")), ("monitor", True))
+        self.assertEqual((b["role"], b["item"]["id"]), ("deployer", self.deploy))
+        self.assertNotIn("monitor_item", b)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind='monitor'").fetchone()[0], 0)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        text = out.getvalue()
+        self.assertIn("after the deploy, watch the release (part of this task): check https://example.test/health", text)
+        self.assertIn("Do not roll back yourself.", text)
+        self.assertNotIn("monitor #", text)
+        self.assertNotIn("monitors", core.targets_view(self.c)[0]["pending"][0])
 
 
 class GoalLeases(Base):
@@ -5674,7 +5649,7 @@ class Rename(Base):
             self.assertNotIn("old name", err)
             self.assertIn("new  (1 open)  [target site]\n", run("project", "list")[0])
             out, err = run("target", "rename", "site", "web")
-            self.assertIn("target site is now web: 1 projects and 0 deploy, review and monitor items follow", out)
+            self.assertIn("target site is now web: 1 projects and 0 deploy and review items follow", out)
             self.assertIn("the old name site does not work from now on", out)
             self.assertTrue(run("target", "show", "web")[0].startswith("web\n"))
             with self.assertRaises(SystemExit):
@@ -6010,7 +5985,7 @@ class DeployHook(Base):
         self.assertIn("migration 7 failed", f["context"])
         self.assertIn("Do not run the release command again", f["context"])
         self.assertEqual(core.item_show(self.c, rv2)["waits_on"], [fix])  # the new review covers the fix
-        self.assertFalse([i for i in core.item_list(self.c) if i.get("kind") == "monitor"])  # no monitor for a failure
+        self.assertFalse([i for i in core.item_list(self.c) if i.get("kind") == "monitor"])
         alert = [m for m in core.inbox(self.c, "ops") if "deploy hook of target web failed" in m["body"]]
         self.assertTrue(alert and "Do not run the command by hand" in alert[0]["body"])
         # The fix, a new review by a new session (it cuts the release again), then the hook runs again.
@@ -6024,8 +5999,7 @@ class DeployHook(Base):
         r = self.run_deploy()
         self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
         self.assertEqual(core._item(self.c, self.deploy)["status"], "done")
-        mon = [i for i in core.item_list(self.c) if i.get("kind") == "monitor"]
-        self.assertEqual(len(mon), 1)
+        self.assertFalse([i for i in core.item_list(self.c) if i.get("kind") == "monitor"])  # no monitor task (#4972)
 
     def test_with_no_review_the_hook_cuts_the_release_and_its_cut_hook_runs_first(self):
         core.drop(self.c, self.review, note="no review for this one", actor="mark")

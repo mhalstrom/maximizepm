@@ -262,7 +262,7 @@ def _target_folder(conn, target):
 
 
 def _same_queue(db):
-    """A river command that asks the server to act (open a monitor, or start a session for a command in a
+    """A river command that asks the server to act (start a session for a command in a
     sandbox) names its queue file. Refuse another one, so a test queue never opens sessions from the real one."""
     if db is not None and str(Path(db).expanduser().resolve()) != str(core.db_path().expanduser().resolve()):
         raise RiverError(f"this maxpm serve uses another queue ({core.db_path()})")
@@ -275,32 +275,6 @@ def _agent_for(conn, model):
     pick = (next((o for o in opts if fam and o["family"] == fam), None)
             or next((o for o in opts if o["family"] is None), None) or opts[0])
     return pick["label"], pick
-
-
-def open_monitors(conn, runner=None, db=None):
-    """Open a session for each monitor item nobody holds yet (a deploy just started): in a folder of the
-    target's projects, with MAXPM_FOCUS=monitor:<id>, the item's model and effort (a monitor defaults to
-    sonnet, low). The command asks the running server for this after it claims a deploy item; db must name
-    this server's queue (_same_queue)."""
-    _same_queue(db)
-    out = []
-    ann = None
-    for m in core.pending_monitors(conn):
-        ann = ann or core.annotate(conn)
-        it = ann[m["id"]]
-        try:
-            p = _target_folder(conn, m["target"])
-            agent, opt = _agent_for(conn, it["model"])
-            model = it["model"] if any(x["name"] == it["model"] for x in opt["models"]) else None
-            effort = it["effort"] if it["effort"] in opt["efforts"] else None
-            t = _open_focused(conn, p, f"monitor:{m['id']}", runner, agent, model, effort)
-        except RiverError as e:
-            out.append({"id": m["id"], "error": str(e)})
-            continue
-        with core.tx(conn):
-            core._event(conn, m["id"], "maxpm", f"monitor session opened ({t['agent']} in {p['name']})")
-        out.append({"id": m["id"], "agent": t["agent"], "project": p["name"], "model": model})
-    return out
 
 
 def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, launch_in=None, options=None):
@@ -3054,7 +3028,6 @@ OPS = {
                                                      **_launch_args(a)),
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
-    "open_monitors": lambda c, a, who: open_monitors(c, db=a.get("db")),
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops from the page without a reason; the agent then reads who stopped it.
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
@@ -3311,11 +3284,6 @@ class Handler(BaseHTTPRequestHandler):
                     hooks_soon(conn, core.hook_token())  # a release event of this action: its hook runs after the answer
                 with core.tx(conn):
                     core.sync_needs_you(conn)
-                if body.get("op") in ("claim", "next_claim") and core.pending_monitors(conn):
-                    try:  # a person claimed a deploy item on the page: its monitor starts too
-                        open_monitors(conn)
-                    except RiverError as e:
-                        print(f"monitor: {e}", flush=True)
                 return self._send(200, {"ok": True, "result": result})
             finally:
                 core.EVENT_VIA.reset(via)
