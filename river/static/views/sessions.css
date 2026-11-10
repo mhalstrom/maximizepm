@@ -7,7 +7,6 @@ main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
 .sess-layout > .sess-side { border-right-width: var(--hair); padding: var(--sp-5); }
 .sess-layout > .sess-main { padding: var(--sp-5) calc(var(--sp-6) + var(--sp-1)) calc(var(--sp-5) + var(--sp-0)); }
 .sess-side .slist { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sp-2); }
-.sess-note { font-size: var(--fs-s); margin-top: var(--sp-3); }
 /* flex: none: in the list (a flex column of fixed height) a row keeps its whole height and the list scrolls (#4723). */
 .srow { flex: none; border: 0; border-bottom: var(--hair) solid var(--line); border-left: var(--hair-2) solid transparent; border-radius: 0; background: none; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; overflow: hidden; }
 .srow-main { padding: calc(var(--sp-2) + var(--hair)) calc(var(--sp-3) + var(--hair)); cursor: pointer; display: flex; flex-direction: column; gap: var(--sp-0); min-width: 0; }
