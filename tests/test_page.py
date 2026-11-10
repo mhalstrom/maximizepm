@@ -207,11 +207,16 @@ try {
   await until(() => window.__appReady, "app.js loaded");
   q('nav button[data-tab="sessions"]').click();
   await until(() => q("#tab-sessions .slist .srow"), "a session row");
-  const list = q("#tab-sessions .slist"), row = list.querySelector(".srow");
-  for (let i = 0; i < 15; i++) list.appendChild(row.cloneNode(true));
-  await sleep(50);
-  check(list.scrollHeight > list.clientHeight, "the list is longer than its box");
-  const cut = [...list.querySelectorAll(".srow")].filter(r => r.scrollHeight > r.clientHeight + 1);
+  // A refresh of the list (every few seconds, and again when one comes during a read: #5087) draws the rows anew
+  // and drops the clones (#5090): add them again until the list is long, and measure in the same turn.
+  let list, cut;
+  await until(() => {
+    list = q("#tab-sessions .slist");
+    const rows = list.querySelectorAll(".srow");
+    if (rows.length < 16) for (let i = rows.length; i < 16; i++) list.appendChild(rows[0].cloneNode(true));
+    cut = [...list.querySelectorAll(".srow")].filter(r => r.scrollHeight > r.clientHeight + 1);
+    return list.scrollHeight > list.clientHeight;
+  }, "the list is longer than its box");
   check(!cut.length, cut.length + " rows cut off their content: " + (cut[0] && cut[0].clientHeight + " < " + cut[0].scrollHeight));
   post({ ok: true });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
