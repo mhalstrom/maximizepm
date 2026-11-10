@@ -372,10 +372,26 @@ def running(conn, terminals=None):
     return out
 
 
-def waiting_for(conn, a, prompt=None, pane=False):
+def _open_questions(conn, name):
+    return conn.execute("SELECT m.id, m.body, m.item_id, m.to_agent, m.created_at FROM messages m JOIN agents p ON "
+                        "p.name=m.to_agent AND p.kind='human' WHERE m.kind='question' AND m.state='open' AND "
+                        "m.from_agent=? ORDER BY m.id", (name,)).fetchall()
+
+
+def _last_talk(entries):
+    """The time (datetime) of the last turn that a person typed in a session's chat, from its transcript lines: not a
+    message that MaximizePM delivered ([maxpm ...]); tags and task notifications are no user turn already."""
+    for e in reversed(entries or ()):
+        if e.get("role") == "user" and e.get("at") and core._talk(e.get("text") or ""):
+            return core._ts(e["at"])
+    return None
+
+
+def waiting_for(conn, a, prompt=None, pane=False, said=None):
     """What waits for a person in one session (#4607): the prompt its tmux pane shows (server.pane_prompts); with no
     pane, the permission prompt its hooks reported, which a person answers in the session itself; and each open
-    maxpm question from it to a person."""
+    maxpm question from it to a person, except one asked before the person's last prompt in its chat (said, #4995):
+    the person answered that one there."""
     out = []
     if prompt:
         out.append({"kind": "prompt", **prompt})
@@ -383,9 +399,9 @@ def waiting_for(conn, a, prompt=None, pane=False):
         call = core._activity_call(a["activity_prompt"])
         out.append({"kind": "prompt", "elsewhere": True, "question": f"A permission prompt for {call}" if call
                     else "A permission prompt", "options": []})
-    for r in conn.execute("SELECT m.id, m.body, m.item_id, m.to_agent FROM messages m JOIN agents p ON p.name=m.to_agent "
-                          "AND p.kind='human' WHERE m.kind='question' AND m.state='open' AND m.from_agent=? ORDER BY m.id",
-                          (a["name"],)):
+    for r in _open_questions(conn, a["name"]):
+        if said and (core._ts(r["created_at"]) or said) <= said:
+            continue
         out.append({"kind": "question", "id": r["id"], "body": r["body"], "item_id": r["item_id"], "to": r["to_agent"]})
     return out
 
@@ -465,9 +481,16 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         if path:
             try:
                 tail = entries(kind, path, None, LIMIT, CARD_BYTES)
-                tail = dict(tail, entries=[e for e in tail["entries"] if e["role"] != "result"][-PREVIEW:])
+                tail = dict(tail, entries=[e for e in tail["entries"] if e["role"] != "result"][-PREVIEW:],
+                            said=_last_talk(tail["entries"]))
             except (OSError, ValueError, EOFError):
                 path = None
+        # The person's last prompt in the chat (#4995): a question asked before it was answered there, also when no
+        # hook closed it (a session with no MaximizePM hooks), so the card does not show it as waiting.
+        said = tail.get("said")
+        if said and a["name"] in waiting and not any(
+                (core._ts(q["created_at"]) or said) > said for q in _open_questions(conn, a["name"])):
+            waiting = {k: v for k, v in waiting.items() if k != a["name"]}
         key, label = state(conn, a, tail["turn"], waiting)
         prompt = (prompts or {}).get(a["name"])
         if prompt and key != "stopping":
@@ -479,7 +502,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
             conn, a, kind, path, tail["turn"], tail.get("cwd"), waiting)
         card = {"adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "provider": provider(a.get("agent_type"), kind),
-                "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"]))), "name": a["name"],
+                "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"])), said), "name": a["name"],
                 "title": work_name(conn, a, path, root, croot), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"), "topic": a.get("expert_topic"),
                 "talked_at": a.get("talked_at"),

@@ -1216,6 +1216,8 @@ def build_parser():
     x.add_argument("--level", metavar="|".join(core.MESSAGE_LEVELS), help=LEVEL_HELP)
     x.add_argument("--blocked", action="store_true", help=BLOCKED_HELP)
     x = sub.add_parser("answer", help="answer a question"); x.add_argument("id", type=int); x.add_argument("text")
+    x.add_argument("--in-chat", action="store_true", help="you asked it, and the person answered in your own chat: "
+                   "record their words as the answer and close the question")
     x = sub.add_parser("inbox", help="your unread messages and questions waiting for your answer")
     x.add_argument("--all", action="store_true", help="read messages too")
     x.add_argument("--peek", action="store_true", help="do not mark them read")
@@ -2399,7 +2401,7 @@ def dispatch(conn, a, actor):
         return core.send(conn, a.kind, a.text, a.to or (core.goal_owner(conn, a.goal) if a.goal else None),
                          a.item, a.reply, actor, a.level, a.blocked)
     if c == "answer":
-        return core.answer(conn, a.id, a.text, actor)
+        return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat)
     if c == "inbox":
         if a.wait:
             return core.inbox_wait(conn, actor, a.timeout)
@@ -4084,6 +4086,9 @@ def render(a, res):
               + "; the sender is told")
         return
     if c == "answer":
+        if res.get("native_status") == "in the chat":
+            print(f"question #{res['reply_to']} is closed: {res['from_agent']} answered it in your chat")
+            return
         print(f"answered: sent #{res['id']} to {res['to_agent']}; question #{res['reply_to']} is closed")
         return
     if c == "inbox":

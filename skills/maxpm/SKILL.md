@@ -350,6 +350,10 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   takes nothing back, starts no other session for your work, and alerts the
   manager. The person answers in your terminal or with `maxpm answer`. A wait
   that you only say in chat looks idle: `maxpm serve` gives your work to others.
+  When the person answers in your chat, the question must close, or the page
+  keeps it in 'Waits for you'. A session that `maxpm serve` started closes it
+  by itself (its hooks); in any other session close it at once with their
+  words: `maxpm answer <question-id> --in-chat "<what they said>"`.
 - The user should look at a finished result (a page, a text, a design): the
   project's setting `result_look` decides, and the go briefing states the rule
   of your item's project.

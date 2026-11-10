@@ -172,6 +172,24 @@ class Sessions(Base):
                          [(other, ["claimed", "released"], "open"), (self.it, ["claimed", "finished"], "done")])
         self.assertEqual(sessions.session_items(self.c, "nobody"), [])
 
+    def test_a_question_asked_before_the_persons_last_prompt_does_not_wait(self):
+        """#4995: a session with no hooks: the person answered its question in its chat, so the card neither shows the
+        question in 'Waits for you' nor says 'waits for an answer'; a question asked after that prompt still waits."""
+        q = core.send(self.c, "question", "Do you agree?", to="mark", item=self.it, actor="ag")["id"]
+        (card,) = self.cards()
+        self.assertEqual((card["state_label"], [w["id"] for w in card["waiting"]]), ("waits for an answer", [q]))
+        later = (core.now() + core.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S.123Z")
+        self.write(claude_line("user", "[maxpm note from boss] x", at=later))
+        self.assertEqual(self.cards()[0]["state_label"], "waits for an answer")  # MaximizePM's message: no answer
+        self.write(claude_line("user", "ok I agree", at=later))
+        (card,) = self.cards()
+        self.assertEqual((card["state_label"], card["waiting"]), ("working", []))
+        with core.tx(self.c):
+            self.c.execute("UPDATE messages SET created_at=? WHERE id=?",
+                           (core.iso(core.now() + core.timedelta(minutes=2)), q))
+        (card,) = self.cards()
+        self.assertEqual((card["state_label"], [w["id"] for w in card["waiting"]]), ("waits for an answer", [q]))
+
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET activity_prompt='{}' WHERE name='ag'")

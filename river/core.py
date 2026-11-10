@@ -7852,10 +7852,10 @@ def activity_event(conn, payload, env=None):
     ev = str(payload.get("hook_event_name") or "")
     agent = activity_agent(conn, payload.get("session_id"), env)
     if not agent or ev not in ACTIVITY_EVENTS:
-        return {"agent": agent, "event": ev, "alert": None}
+        return {"agent": agent, "event": ev, "alert": None, "answered": []}
     record_session_url(conn, agent, session_url_from_env(env))
     ntype = str(payload.get("notification_type") or "")
-    t, alert = iso(now()), None
+    t, alert, answered = iso(now()), None, []
     with tx(conn):
         a = conn.execute("SELECT activity_prompt, activity_waits, stop_at, role FROM agents WHERE name=?", (agent,)).fetchone()
         prompt, waits = a["activity_prompt"], a["activity_waits"]
@@ -7867,6 +7867,8 @@ def activity_event(conn, payload, env=None):
             prompt = waits = None
         if ev == "UserPromptSubmit" and _talk(payload.get("prompt")):
             conn.execute("UPDATE agents SET talked_at=? WHERE name=? AND role='expert'", (t, agent))
+            if not payload["prompt"].strip().startswith("<"):  # tags: a message of another session, not a person
+                answered = answered_in_chat(conn, agent, payload["prompt"].strip(), t)
             # A person (or another session) talks with a session that waits for work: wait_max counts from the
             # talk, so maxpm wait does not end the session during it or soon after (#4948).
             conn.execute("UPDATE agents SET waiting_since=? WHERE name=? AND waiting_since IS NOT NULL", (t, agent))
@@ -7892,7 +7894,9 @@ def activity_event(conn, payload, env=None):
                                 f"prompt and runs no maxpm wait. Look at its terminal or session.")
         if alert:
             conn.execute("UPDATE agents SET activity_told=? WHERE name=?", (t, agent))
-    return {"agent": agent, "event": ev, "alert": alert}
+    if answered:
+        sync_needs_you(conn)  # the person's 'waits for you' of those questions closes now
+    return {"agent": agent, "event": ev, "alert": alert, "answered": answered}
 
 
 def activity_watch(conn):
@@ -8570,8 +8574,24 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
     return res
 
 
-def answer(conn, msg_id, body, actor=None):
-    """Answer a question: the answer goes to the asker and the question closes."""
+def answer(conn, msg_id, body, actor=None, in_chat=False):
+    """Answer a question: the answer goes to the asker and the question closes. in_chat (#4995): the asker records
+    that the person answered in its own chat; the answer is in the name of the person asked, and is not delivered
+    again (the asker has it)."""
+    if in_chat:
+        if not actor:
+            raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
+        if not body or not body.strip():
+            raise RiverError("say what the person answered in your chat: maxpm answer <id> --in-chat \"<their words>\"")
+        with tx(conn):
+            q = _message(conn, msg_id)
+            if q["kind"] != "question" or q["state"] != "open":
+                raise RiverError(f"message {msg_id} is no open question; see: maxpm thread {msg_id}")
+            if q["from_agent"] != actor:
+                raise RiverError(f"--in-chat is for the asker ({q['from_agent']}): the person answered in its chat; "
+                                 f"answer it yourself without --in-chat")
+            mid = _close_in_chat(conn, q, body.strip(), iso(now()))
+        return message_show(conn, mid)
     if not actor:
         raise RiverError("answering needs an agent name: set MAXPM_AGENT or pass --as <name>")
     if not body or not body.strip():
@@ -8596,6 +8616,33 @@ def answer(conn, msg_id, body, actor=None):
                 _want_fresh(conn, q["item_id"], f"[question #{q['id']} from {q['from_agent']}] {q['body']}\n"
                             f"[answer from {actor}] {body.strip()}")
     return message_show(conn, mid)
+
+
+def _close_in_chat(conn, q, body, t):
+    """Inside a tx: the person asked (q's to_agent) answered question q in the asker's own chat (#4995). The question
+    closes with that text as its answer, in the person's name; the answer is read at once and not delivered, since
+    the asker has it in its chat. Returns the answer's id."""
+    who = q["to_agent"] or "a person"
+    mid = _send(conn, "answer", who, body[:4000], to=q["from_agent"], item_id=q["item_id"], reply_to=q["id"])
+    conn.execute("UPDATE messages SET state='read', read_at=?, native_status='in the chat' WHERE id=?", (t, mid))
+    conn.execute("UPDATE messages SET state='answered', closed_at=?, read_at=COALESCE(read_at, ?) WHERE id=?",
+                 (t, t, q["id"]))
+    if q["item_id"] is not None:
+        _event(conn, q["item_id"], who, f"answered question #{q['id']} in the chat of {q['from_agent']}")
+    return mid
+
+
+def answered_in_chat(conn, agent, prompt, at=None):
+    """Inside a tx: a person typed a prompt in the agent's own chat (its UserPromptSubmit hook), so each open question
+    from the agent to a person, asked before it, is answered by it (#4995): the person read the question in the
+    chat and answered there, not with maxpm answer. Returns the closed question ids."""
+    t = at or iso(now())
+    rows = conn.execute("SELECT m.* FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
+                        "WHERE m.kind='question' AND m.state='open' AND m.from_agent=? AND m.created_at<=? ORDER BY m.id",
+                        (agent, t)).fetchall()
+    for q in rows:
+        _close_in_chat(conn, q, prompt, t)
+    return [q["id"] for q in rows]
 
 
 def _mark_read(conn, ids):

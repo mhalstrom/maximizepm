@@ -6810,6 +6810,40 @@ class Activity(Base):
         self.assertIsNone(core.activity_event(self.c, {"hook_event_name": "Stop", "session_id": "other"}, env={})["agent"])
         self.assertEqual(core.activity_event(self.c, {"hook_event_name": "Stop"}, env={"MAXPM_AGENT": "w"})["agent"], "w")
 
+    def test_a_persons_prompt_in_the_askers_chat_answers_its_open_questions(self):
+        """#4995: mark answered two maxpm questions by typing in the asking session's chat; they stayed open, and the
+        page kept 'Waits for you' and 'waits for an answer'. Now the prompt closes them, with its text as the answer."""
+        q1 = core.send(self.c, "question", "Do you agree?", to="mark", item=self.item, actor="w")["id"]
+        q2 = core.send(self.c, "question", "Which of the changes 1-3?", to="mark", item=self.item, actor="w")["id"]
+        self.assertEqual(core.waits_on_person(self.c, ["w"]), {"w": q1})
+        self.assertTrue(any(n.get("message_id") in (q1, q2) for n in core.needs_you(self.c)))
+        # A message of MaximizePM or of another session (a tag) is no answer of the person.
+        self.event("UserPromptSubmit", prompt="[maxpm alert from boss] look at #12")
+        self.event("UserPromptSubmit", prompt="<cross-session-message from='x'>hi</cross-session-message>")
+        self.assertEqual(core.message_show(self.c, q1)["state"], "open")
+        self.clock[0] += core.timedelta(seconds=30)
+        got = self.event("UserPromptSubmit", prompt="ok I agree, and do 1-3")
+        self.assertEqual(sorted(got["answered"]), [q1, q2])
+        for q in (q1, q2):
+            self.assertEqual(core.message_show(self.c, q)["state"], "answered")
+        ans = self.c.execute("SELECT * FROM messages WHERE kind='answer' AND reply_to=?", (q1,)).fetchone()
+        self.assertEqual((ans["from_agent"], ans["to_agent"], ans["body"], ans["state"], ans["native_status"]),
+                         ("mark", "w", "ok I agree, and do 1-3", "read", "in the chat"))
+        self.assertEqual(core.inbox(self.c, "w"), [])  # the asker has the answer in its chat already
+        self.assertEqual(core.waits_on_person(self.c, ["w"]), {})
+        self.assertFalse(any(n.get("message_id") in (q1, q2) for n in core.needs_you(self.c)))
+        self.assertTrue(any(f"answered question #{q1} in the chat of w" in e["change"]
+                            for e in core.item_show(self.c, self.item)["events"]))
+        # A question asked after the prompt stays open until the next one.
+        q3 = core.send(self.c, "question", "Push?", to="mark", item=self.item, actor="w")["id"]
+        self.assertEqual(core.message_show(self.c, q3)["state"], "open")
+        # The asker records an answer that came in its chat itself: answer --in-chat (only the asker).
+        with self.assertRaisesRegex(core.RiverError, "--in-chat is for the asker"):
+            core.answer(self.c, q3, "yes", "boss", in_chat=True)
+        m = core.answer(self.c, q3, "yes, push", "w", in_chat=True)
+        self.assertEqual((m["from_agent"], m["native_status"], core.message_show(self.c, q3)["state"]),
+                         ("mark", "in the chat", "answered"))
+
     def test_silence_with_an_item_in_hand_alerts_the_manager_once(self):
         self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "make deploy"})
         self.assertEqual(core.activity_watch(self.c), [])
