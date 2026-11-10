@@ -10,13 +10,31 @@ import { chooseLaunch, launchArgs } from "../components/launchDialog.js";
 import { managerHtml, queueHtml, agentButtons, hasSession } from "../components/agentActions.js";
 import { S, tab, nav, inGoal } from "../page.js";
 import { NY } from "./board-needs-you.js";
+import { inboxOpenCount } from "./board-inbox.js";
 import { button } from "../components/button.js";
 
+// Less text on the Board (#5083, mark: 'there is excess text everywhere'): Needs you and Next up first; Inbox, Work,
+// Manager, Agents and Recent each show when the person chooses its name in the More line under Next up. The choice
+// is kept in this browser. With none of Manager, Agents and Recent shown, the right column takes no room.
+const MORE = [["inbox", "Inbox"], ["work", "Work"], ["manager", "Manager"], ["agents", "Agents"], ["recent", "Recent"]];
+function moreShown() { try { return new Set(JSON.parse(store("river.board.more") || "[]")); } catch (e) { return new Set(); } }
+export function renderMore() {
+  const on = moreShown(), n = inboxOpenCount();
+  $("#boardMore").innerHTML = `<span class="muted">More:</span> ` + MORE.map(([k, name]) =>
+    button(esc(name) + (k === "inbox" && n ? ` ${n}` : ""), { cls: "more-pick", pressed: on.has(k), data: { more: k },
+      title: on.has(k) ? `Hide ${name}` : `Show ${name}` })).join(`<span class="muted">·</span>`);
+  for (const el of document.querySelectorAll("#tab-board [data-more-area]")) el.classList.toggle("more-off", !on.has(el.dataset.moreArea));
+  const side = ["manager", "agents", "recent"].some(k => on.has(k));
+  $("#colAgents").classList.toggle("more-off", !side);
+  $("#tab-board .dash").classList.toggle("no-side", !side);
+}
+
 export function renderNext() {
+  renderMore();
   const area = $("#area").value;
   if (area === "__mine") { $("#next").innerHTML = `<div class="muted">Use <b>Claim next</b>: the server picks the ready item closest to what "${esc(actor() || "(choose your name in You are)")}" claimed or finished before.</div>`; return; }
   const ready = S.items.filter(i => i.ready && (!area || i.project === area) && inGoal(i));
-  $("#next").innerHTML = ready.slice(0, 5).map(i => itemRow(i, i.reason)).join("") || `<div class="muted">Nothing is ready${area ? " in " + esc(area) : ""}.</div>`;
+  $("#next").innerHTML = ready.slice(0, 5).map(i => itemRow(i, i.reason, { hover: true })).join("") || `<div class="muted">Nothing is ready${area ? " in " + esc(area) : ""}.</div>`;
 }
 
 // An agent session not seen for away_after, holding and owning nothing, has most likely stopped: hide it.
@@ -153,6 +171,8 @@ export function renderEvents() {
 
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
+  const mp = t.closest("[data-more]"); if (mp) { const on = moreShown(), k = mp.dataset.more; on.has(k) ? on.delete(k) : on.add(k);
+    store("river.board.more", JSON.stringify([...on])); renderMore(); return true; }
   if (t.dataset.takeoversOkall) return run(async () => { for (const x of S.takeovers || []) await act("takeover_seen", { id: x.id }).catch(() => {}); });
   if (t.closest("[data-takeovers-toggle]") && !t.closest("button")) return run(async () => { takeoversOpen = !takeoversOpen; return renderTakeovers(); });
   const wp = t.closest("[data-wp]"); if (wp) return run(async () => { const o = workOpen(), n = wp.dataset.wp; o.has(n) ? o.delete(n) : o.add(n); store("river.work.open", JSON.stringify([...o])); return renderWork(); });

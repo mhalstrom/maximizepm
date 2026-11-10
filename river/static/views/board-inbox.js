@@ -23,6 +23,8 @@ export async function pollInbox() {
 // The inbox as a table. The Message column holds the whole message with its answer, reply and decline
 // controls; on a narrow panel From, Kind, Item, To, Sent and State fold into a detail row.
 let inboxTable = null;
+// The messages that wait on the person: unread, or an open question or offer (the More line of the Board, #5083).
+export function inboxOpenCount() { return IB.filter(m => !inboxDone(m)).length; }
 function inboxDone(m) { return !(m.unread || (m.state === "open" && ["question", "offer"].includes(m.kind))); }
 function inboxCell(m) {
   const me = actor();

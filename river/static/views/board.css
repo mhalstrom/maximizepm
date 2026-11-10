@@ -30,6 +30,20 @@
 .dash .col .panel:last-child { margin-bottom: 0; }
 @media (max-width: 1100px) { .dash { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); } #colAgents { grid-column: 1 / -1; max-height: none; overflow: visible; } }
 @media (max-width: 800px) { .dash { grid-template-columns: minmax(0, 1fr); } .dash .col { max-height: none; overflow: visible; } }
+/* Less text (#5083): Needs you and Next up first; the More line under Next up shows the other areas one by one. With
+   no area of the right column shown, the Board has two columns. On a phone the columns open up, so the panels stack
+   as Needs you, Next up, the More line, then the areas shown. */
+.board-more { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1); margin: 0 0 var(--sp-6); padding: 0 var(--sp-0); font-size: var(--fs-m); }
+@media (max-width: 759px) { .board-more { padding: 0 var(--sp-5); } }  /* the side padding of a panel on a phone */
+.board-more .more-pick.on { color: var(--ink); font-weight: 600; }
+.more-off { display: none !important; }
+.dash.no-side { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); }
+@media (max-width: 800px) {
+  .dash, .dash.no-side { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .dash > .col { display: contents; }
+  #colWork > .panel:first-child { order: 1; } #boardMore { order: 2; } #inboxPanel { order: 3; } #workPanel { order: 4; }
+  #managerPanel { order: 5; } #agentsPanel { order: 6; } #recentPanel { order: 7; }
+}
 .nyl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-3); align-items: center; padding: var(--sp-2) var(--sp-1); border-top: var(--hair) solid var(--line); cursor: pointer; }
 .nyl:first-child { border-top: none; }
 .nyl:hover { background: var(--bg); }

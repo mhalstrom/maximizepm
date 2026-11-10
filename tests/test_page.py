@@ -379,6 +379,8 @@ try {
   out.search = !q("#searchDlg").classList.contains("hidden") && document.activeElement === q("#searchText");
   q("#searchClose").click();
   q('nav button[data-tab="board"]').click();
+  // Room to scroll whatever the Board shows (#5083: it shows Needs you and Next up only, a short page).
+  document.body.style.minHeight = "3000px";
   await sleep(100);
   for (const y of [100, 200, 300, 400]) { scrollTo(0, y); await sleep(60); }
   await sleep(100);

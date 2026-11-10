@@ -11,7 +11,7 @@
     <div id="needsYou"></div>
   </div>
       <div class="panel muted hidden t-m" id="nothingForYou">Nothing waits on you now.</div>
-  <div class="panel hidden" id="inboxPanel">
+  <div class="panel hidden" id="inboxPanel" data-more-area="inbox">
     <h2><span id="inboxTitle">Inbox</span> <span class="spacer"></span><label class="sub"><input type="checkbox" id="inboxAll"> show read</label></h2>
     <div id="inbox"></div>
     <div class="actions send-row">
@@ -33,14 +33,16 @@
         </h2>
         <div id="next"></div>
       </div>
-      <div class="panel">
+      <!-- Less text (#5083): Needs you and Next up first; each other area shows when its name here is chosen. -->
+      <div class="board-more" id="boardMore"></div>
+      <div class="panel" id="workPanel" data-more-area="work">
         <h2>Work <span class="spacer"></span><span class="link" data-tab="projects" style="text-transform:none;letter-spacing:0">all items</span></h2>
         <div id="work"></div>
       </div>
     </div>
     <div class="col" id="colAgents">
-      <div class="panel" id="managerPanel"><h2>Manager</h2><div id="manager"></div></div>
-      <div class="panel"><h2>Agents <span class="spacer"></span><button class="btn hidden" id="tidyPanes" style="text-transform:none;letter-spacing:0"></button><label class="sub hidden" id="showIdleWrap"><input type="checkbox" id="showIdle"> <span id="showIdleText"></span></label></h2><div id="agents"></div>
+      <div class="panel" id="managerPanel" data-more-area="manager"><h2>Manager</h2><div id="manager"></div></div>
+      <div class="panel" id="agentsPanel" data-more-area="agents"><h2>Agents <span class="spacer"></span><button class="btn hidden" id="tidyPanes" style="text-transform:none;letter-spacing:0"></button><label class="sub hidden" id="showIdleWrap"><input type="checkbox" id="showIdle"> <span id="showIdleText"></span></label></h2><div id="agents"></div>
         <details class="reg-details"><summary>Register an agent or person</summary>
           <div class="form">
             <div class="two"><input id="regName" placeholder="name"><label class="reg-human"><input type="checkbox" id="regHuman"> human</label></div>
@@ -49,7 +51,7 @@
           </div>
         </details>
       </div>
-      <div class="panel"><h2>Recent</h2><div id="events"></div></div>
+      <div class="panel" id="recentPanel" data-more-area="recent"><h2>Recent</h2><div id="events"></div></div>
     </div>
   </div>
 </section>

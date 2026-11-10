@@ -9,8 +9,8 @@ import { makeDialog } from "./dialog.js";
 export function managerHtml(S) {
   const m = S.manager;
   if (!m) {
-    return `<div class="st">No manager is running. A manager plans with you, starts agents, fills their queues, and stops stuck ones.</div>
-      <div class="actions" style="margin-top:6px"><button class="btn primary" data-start-manager="1" title="Opens the launch dialog; the agent starts with maxpm manage">▶ Start manager</button></div>`;
+    return `<div class="st">No manager is running.</div>
+      <div class="actions" style="margin-top:6px"><button class="btn primary" data-start-manager="1" title="A manager plans with you, starts agents, fills their queues, and stops stuck ones. Opens the launch dialog; the agent starts with maxpm manage">▶ Start manager</button></div>`;
   }
   return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="dot ${esc(m.state)}"></span><b>${esc(m.name)}</b>
       ${m.platform ? chip("c-p", esc(m.platform)) : ""}${m.model ? chip("c-p", esc(m.model)) : ""}${chip(m.state === "active" ? "c-ready" : "c-waiting", esc(m.state))}
