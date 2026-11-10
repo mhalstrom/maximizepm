@@ -1063,6 +1063,16 @@ def adopt_sessions(conn, runner=None, end=None):
         return {}
     terminals = agent_terminals(conn)
     agents = [a for a in sessions.running(conn, terminals) if not terminals.get(a["name"])]
+    # Never end a process that runs in a tmux pane, whatever name the queue gives it: look at its terminal device
+    # itself. When ps gives no answer, nothing moves (#5060).
+    ttys = _pid_ttys(sorted({str(a["pid"]) for a in agents if a.get("pid")})) if agents and core.PLATFORM != "win32" else {}
+    if ttys is None:
+        return {}
+    try:
+        in_tmux = {p["tty"] for p in _tmux_panes(everywhere=True)} if ttys else set()
+    except RiverError:
+        return {}
+    agents = [a for a in agents if ttys.get(str(a.get("pid"))) not in in_tmux]
     waiting = core.waits_on_person(conn, [a["name"] for a in agents]) if agents else {}
     moved, t = {}, time.time()
     for a in agents:
@@ -1235,20 +1245,19 @@ def agent_terminals(conn):
         return {}
     agents = [dict(r) for r in conn.execute("SELECT name, pid, host FROM agents WHERE kind='ai'")]
     out = {}
-    pids = {str(a["pid"]): a["name"] for a in agents if a["pid"] and a["host"] == core.this_host()}
+    # Several agents can have one pid (a command with --as for another agent wrote it there before #5060): each of
+    # them maps to the pane. With one name per pid, the other agent counted as outside tmux, and tmux_adopt ended
+    # the manager's process while it ran in its pane (2026-11-10).
+    pids = {}
+    for a in agents:
+        if a["pid"] and a["host"] == core.this_host():
+            pids.setdefault(str(a["pid"]), []).append(a["name"])
     if pids and core.PLATFORM != "win32":
-        try:
-            ps = (PS_RUNNER or (lambda p: subprocess.run(["ps", "-o", "pid=,tty=", "-p", ",".join(p)], capture_output=True,
-                                                         text=True, timeout=5).stdout))(sorted(pids))
-        except (OSError, subprocess.SubprocessError):
-            ps = ""
         by_tty = {p["tty"]: p["pane"] for p in panes}
-        for line in ps.splitlines():
-            pid, _, tty = line.strip().partition(" ")
-            tty = tty.strip()
-            pane = by_tty.get(tty if tty.startswith("/dev/") else "/dev/" + tty)
-            if pane and pid in pids:
-                out[pids[pid]] = pane
+        for pid, tty in (_pid_ttys(sorted(pids)) or {}).items():
+            pane = by_tty.get(tty)
+            for name in (pids.get(pid, ()) if pane else ()):
+                out[name] = pane
     for p in panes:
         if p["agent"] and p["pane"] not in out.values() and any(a["name"] == p["agent"] for a in agents):
             out.setdefault(p["agent"], p["pane"])
@@ -1256,6 +1265,23 @@ def agent_terminals(conn):
 
 
 PS_RUNNER = None  # tests: gets the pids, returns the lines "pid tty"
+
+
+def _pid_ttys(pids):
+    """{pid: its terminal device, /dev/ttysNNN} for these pids (strings) that run on a terminal; None when ps fails."""
+    import subprocess
+    try:
+        ps = (PS_RUNNER or (lambda p: subprocess.run(["ps", "-o", "pid=,tty=", "-p", ",".join(p)], capture_output=True,
+                                                     text=True, timeout=5).stdout))(list(pids))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = {}
+    for line in ps.splitlines():
+        pid, _, tty = line.strip().partition(" ")
+        tty = tty.strip()
+        if tty and tty not in ("?", "??"):
+            out[pid] = tty if tty.startswith("/dev/") else "/dev/" + tty
+    return out
 
 
 def terminal_screen(conn, agent):

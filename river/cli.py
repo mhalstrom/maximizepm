@@ -1558,6 +1558,26 @@ def activity_command(stdin=None):
     return 0
 
 
+def _for_other(conn, actor):
+    """Whether this command runs, in the session of one AI agent (its MAXPM_AGENT), as another AI agent (--as).
+    Only the manager may (mark 2026-11-10, #5060: 'the manager should be allowed to run for other agents'); its
+    command then records nothing of its session for that agent: no session id, no link, no process (with them,
+    every hook of the manager's session counted as the other agent, and tmux_adopt took the manager for a session
+    outside tmux). Another session is refused. A person's terminal (no MAXPM_AGENT) may act as anyone."""
+    me = (os.environ.get("MAXPM_AGENT") or "").strip()
+    if not (me and actor and actor != me):
+        return False
+    caller = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai'", (me,)).fetchone()
+    if not caller or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone():
+        return False
+    if caller["role"] != "manager":
+        manager = core.active_manager(conn)
+        raise RiverError(f"refused: this session is {me}, and only the manager runs a command as another agent "
+                         f"(--as {actor}). Run it as yourself, or ask the manager: maxpm --as {me} alert "
+                         f"{manager or '<manager>'} \"<what {actor} needs>\"")
+    return True
+
+
 def _record_hook_process(conn, name):
     """A hook runs outside the agent's sandbox, where ps works: record the agent CLI process when the agent's own
     commands could not (a sandbox blocks ps, so agents.pid stays empty, #4293). maxpm serve then sees the commands
@@ -1660,12 +1680,14 @@ def _run(args, conn):
         server.serve(port, open_browser=args.open, dev=args.dev)
         return 0
     actor = args.actor
+    for_other = _for_other(conn, actor)
     if args.cmd not in ("go", "plan"):
         core.activity(conn, actor)
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
     if st and not args.json:
         print(_stop_banner(actor, st), file=sys.stderr)
-    core.record_claude_session(conn, actor, core.claude_session_from_env())  # before done measures the item
+    if not for_other:  # the manager's session stays the manager's (#5060)
+        core.record_claude_session(conn, actor, core.claude_session_from_env())  # before done measures the item
     try:
         res = dispatch(conn, args, actor)
     except RiverError:
@@ -1678,8 +1700,9 @@ def _run(args, conn):
     if hooks and isinstance(res, dict):
         res["hooks_run"] = hooks
     me = res.get("agent") if args.cmd in ("go", "plan", "manage") and isinstance(res, dict) else actor
-    core.record_session_url(conn, me, core.session_url_from_env())
-    core.record_claude_session(conn, me, core.claude_session_from_env())
+    if not for_other:
+        core.record_session_url(conn, me, core.session_url_from_env())
+        core.record_claude_session(conn, me, core.claude_session_from_env())
     with core.tx(conn):
         core.sync_needs_you(conn)  # the command may have made a human item ready, or sent a question to a person
     if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json

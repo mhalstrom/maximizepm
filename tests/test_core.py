@@ -5134,6 +5134,83 @@ class Kill(Base):
         self.assertFalse(core.pid_alive(self.p.pid))
         self.assertIsNone(core.proc_info(self.p.pid))
 
+    def test_a_process_is_one_agents_only(self):
+        """#5060: the manager ran maxpm --as <agent> ... in its session, and the manager's pid went into that agent's
+        row: who showed a dead expert as active, its resume refused, and tmux_adopt ended the manager."""
+        from unittest import mock
+        from river import cli
+        for n in ("mgr", "ex", "old"):
+            core.register(self.c, n)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        pid = lambda n: self.c.execute("SELECT pid FROM agents WHERE name=?", (n,)).fetchone()[0]
+        self.assertTrue(core.set_process(self.c, "mgr", 500, "claude manage", env={"MAXPM_AGENT": "mgr"}))
+        self.assertTrue(core.set_process(self.c, "ex", 600, "claude ex", env={}))
+        # In the manager's session (MAXPM_AGENT=mgr), a command for ex records nothing for ex.
+        self.assertFalse(core.set_process(self.c, "ex", 500, "claude manage", env={"MAXPM_AGENT": "mgr"}))
+        with mock.patch.dict(os.environ, {"MAXPM_AGENT": "mgr", "MAXPM_DB": self.path}), mock.patch.object(core, "agent_process",
+                                                                                  lambda: (500, "claude manage")):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.run(["--as", "ex", "heartbeat"]), 0)
+        self.assertEqual((pid("mgr"), pid("ex")), (500, 600))
+        # With no MAXPM_AGENT (a person's own terminal), the same process stays with the agent that has it.
+        self.assertFalse(core.set_process(self.c, "ex", 500, "claude manage", env={}))
+        self.assertEqual(pid("ex"), 600)
+        # An old row whose pid came again for another command loses it.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=700, pid_cmd='zsh', host=? WHERE name='old'", (core.this_host(),))
+        self.assertTrue(core.set_process(self.c, "ex", 700, "claude ex", env={}))
+        self.assertEqual((pid("old"), pid("ex")), (None, 700))
+        # The session that MAXPM_AGENT names takes its pid back from a row that took it before.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=500, pid_cmd='claude manage' WHERE name='old'")
+        self.assertTrue(core.set_process(self.c, "mgr", 500, "claude manage", env={"MAXPM_AGENT": "mgr"}))
+        self.assertEqual((pid("mgr"), pid("old")), (500, None))
+
+    def test_only_the_manager_runs_a_command_as_another_agent(self):
+        """#5060, mark 2026-11-10: 'the manager should be allowed to run for other agents'. A worker session is
+        refused; the manager's command records nothing of its session for the other agent, so the hooks of the
+        manager's session stay the manager's. A person's terminal (no MAXPM_AGENT) may act as anyone."""
+        from unittest import mock
+        from river import cli
+        for n in ("mgr", "w1", "w2"):
+            core.register(self.c, n)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        sid = "11111111-2222-3333-4444-555555555555"
+
+        def run(me, *args):
+            env = {"MAXPM_DB": self.path, "CLAUDE_CODE_SESSION_ID": sid, "MAXPM_AGENT": me}
+            with mock.patch.dict(os.environ, env), mock.patch.object(core, "agent_process", lambda: (500, "claude")), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                try:
+                    return cli.run(["--as", args[0], *args[1:]])
+                except RiverError as e:
+                    return (2, str(e))
+        sessions = lambda: [r[0] for r in self.c.execute("SELECT agent FROM agent_sessions WHERE session_id=? ORDER BY agent",
+                                                         (sid,))]
+        self.assertEqual(run("mgr", "mgr", "heartbeat"), 0)
+        self.assertEqual(run("mgr", "w1", "note", "the manager acts for w1"), 0)
+        self.assertEqual(sessions(), ["mgr"])  # the manager's session is not w1's
+        self.assertEqual(core.agent_status(self.c, "w1")["note"], "the manager acts for w1")
+        self.assertEqual(core.activity_agent(self.c, sid, {"MAXPM_AGENT": "mgr"}), "mgr")
+        # An old row of another agent in the map of the session does not take the hooks of the session.
+        core.record_claude_session(self.c, "w1", sid)
+        self.assertEqual(core.activity_agent(self.c, sid, {"MAXPM_AGENT": "mgr"}), "mgr")
+        # A worker is refused, and the refusal says what to do.
+        with self.assertRaisesRegex(RiverError, "only the manager runs a command as another agent .--as w2.*alert mgr"):
+            with mock.patch.dict(os.environ, {"MAXPM_AGENT": "w1"}):
+                cli._for_other(self.c, "w2")
+        self.assertEqual(run("w1", "w2", "note", "w1 acts for w2")[0], 2)
+        self.assertNotEqual(core.agent_status(self.c, "w2")["note"], "w1 acts for w2")
+        # A person's terminal, and a session that acts as itself or as a person, are no command for another agent.
+        core.register(self.c, "mark", human=True)
+        with mock.patch.dict(os.environ, {"MAXPM_AGENT": ""}):
+            self.assertFalse(cli._for_other(self.c, "w2"))
+        with mock.patch.dict(os.environ, {"MAXPM_AGENT": "w1"}):
+            self.assertFalse(cli._for_other(self.c, "w1"))
+            self.assertFalse(cli._for_other(self.c, "mark"))
+
     def test_refusals_and_a_dead_process_counts_as_gone(self):
         core.set_process(self.c, "ag", self.p.pid, "something else")
         with self.assertRaisesRegex(RiverError, "now runs another command"):

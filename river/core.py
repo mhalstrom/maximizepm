@@ -5901,9 +5901,25 @@ def agent_process(start=None):
     return None, None
 
 
-def set_process(conn, name, pid, cmd, host=None):
+def set_process(conn, name, pid, cmd, host=None, env=None):
+    """Record the agent CLI process of this agent. A process is one agent's only (#5060): a command with --as for
+    another agent, run in the session of the manager (its MAXPM_AGENT names the manager), wrote the manager's pid
+    into that agent. who then showed a dead expert as active, a resume refused, and tmux_adopt ended the manager.
+    So the session that MAXPM_AGENT names records only its own name, and takes its pid back from rows that hold it.
+    With no MAXPM_AGENT, a process (the same pid and command) that another agent of this host holds stays that
+    agent's; a row with the pid and another command is an old process whose pid came again, and loses it. Returns
+    whether it recorded."""
+    me = (os.environ if env is None else env).get("MAXPM_AGENT")
+    if me and me != name:
+        return False
+    host = host or this_host()
     with tx(conn):
-        conn.execute("UPDATE agents SET pid=?, pid_cmd=?, host=? WHERE name=?", (pid, cmd, host or this_host(), name))
+        if not me and conn.execute("SELECT 1 FROM agents WHERE pid=? AND host=? AND name!=? AND pid_cmd IS ?",
+                                   (pid, host, name, cmd)).fetchone():
+            return False
+        conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL WHERE pid=? AND host=? AND name!=?", (pid, host, name))
+        conn.execute("UPDATE agents SET pid=?, pid_cmd=?, host=? WHERE name=?", (pid, cmd, host, name))
+    return True
 
 
 def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None):
@@ -8206,17 +8222,19 @@ def activity_hook_file():
 
 
 def activity_agent(conn, sid=None, env=None):
-    """The agent of a hook: the one that ran a maxpm command in Claude Code session sid (agent_sessions, the
-    newest), else MAXPM_AGENT of the hook's environment when that agent is registered; else None."""
+    """The agent of a hook: MAXPM_AGENT of the hook's environment when that agent is registered; else the one that
+    ran a maxpm command in Claude Code session sid (agent_sessions, the newest); else None. The environment comes
+    first: the manager's command for another agent (--as) put that agent into the map of the manager's session,
+    and every hook of the manager then counted as that agent (#5060)."""
     env = env if env is not None else os.environ
+    name = (env.get("MAXPM_AGENT") or "").strip()
+    if name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone():
+        return name
     if sid:
         r = conn.execute("SELECT s.agent FROM agent_sessions s JOIN agents a ON a.name=s.agent AND a.kind='ai' "
                          "WHERE s.session_id=? ORDER BY s.first_seen DESC LIMIT 1", (sid,)).fetchone()
         if r:
             return r["agent"]
-    name = (env.get("MAXPM_AGENT") or "").strip()
-    if name and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone():
-        return name
     return None
 
 

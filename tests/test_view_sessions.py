@@ -449,6 +449,30 @@ class Adopt(Base):
         server.session_setting_live(self.c, "ag", "model", "sonnet")
         self.assertIn("/model sonnet", " ".join(str(k) for k in self.tmux.panes[0]["keys"]))
 
+    def test_a_process_in_a_tmux_pane_is_never_ended(self):
+        """#5060: two agents had one pid (a command with --as for another agent wrote it), the map from pids to names
+        kept one of them, and tmux_adopt took the other for a session outside tmux: it ended the manager in its pane.
+        Each name of a pid maps to the pane, and the terminal device of the process decides before an end."""
+        from unittest import mock
+        self.quiet()
+        self.tmux.session = True
+        self.tmux._pane(name="manager")  # pane %0, on /dev/ttys000
+        core.register(self.c, "mgr")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, host=? WHERE name IN ('ag', 'mgr')", (self.proc.pid, core.this_host()))
+        server.PS_RUNNER = lambda pids: f" {self.proc.pid} ttys000\n"
+        self.addCleanup(setattr, server, "PS_RUNNER", None)
+        self.assertEqual(server.agent_terminals(self.c), {"ag": "%0", "mgr": "%0"})
+        with mock.patch.object(server, "agent_terminals", lambda c: {}):  # the map loses it: the tty still decides
+            self.assertEqual(server.adopt_sessions(self.c), {})
+        self.assertIsNone(self.proc.poll())  # still runs
+
+        def no_ps(pids):
+            raise OSError("ps: not permitted")
+        server.PS_RUNNER = no_ps  # no answer from ps: nothing moves
+        self.assertEqual(server.adopt_sessions(self.c), {})
+        self.assertIsNone(self.proc.poll())
+
     def test_a_reused_pid_is_not_ended(self):
         self.quiet()
         with core.tx(self.c):
