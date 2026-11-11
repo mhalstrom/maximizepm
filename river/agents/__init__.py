@@ -268,6 +268,10 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "frame":        the characters of the frame some CLIs draw around a prompt,
 #      "rule":         a regex of a dashed rule (the input box's edge),
 #      "hint":         a regex of the line that names keys ("Enter to confirm · Esc to cancel"),
+#      "row":          a regex of a menu on one line, whose group 1 holds the options, two or more spaces apart
+#                      (OpenCode: "Allow once   Always allow   Reject      ⇆ select  enter confirm"); Left and Right
+#                      move in it. Its selected option shows by colour only, so the page takes the first one as
+#                      selected (OpenCode selects it at each new request). "": no such menu (#5281),
 #    }
 # The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
 # alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
@@ -279,7 +283,7 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool}
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
-               "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str}
+               "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str}
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -290,6 +294,7 @@ DETECT_LAYOUT = {
     # Claude Code's /model menu ("◐ Medium effort (default) ←/→ to adjust", #5220).
     "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]"
             r"|^\s*enter \w+ ·.*\besc \w+|←/→ to adjust",
+    "row": "",
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in

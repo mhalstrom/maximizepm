@@ -1562,7 +1562,7 @@ def _layout(detect=None):
                                "mark": item(d["menu"]),
                                "other": d["other"] and item(d["other"]),
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
-                               "tell": re.compile(tell)}
+                               "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell)}
     return got
 
 
@@ -1729,8 +1729,21 @@ def _prompt_parts(tail, layout=None):
     # The last marked line: the lines above a prompt can show what the person typed before ("❯ run the tests"),
     # and with the first one river found no question in a real Claude Code prompt (#4280).
     at = next((n for n in range(len(lines) - 1, -1, -1) if mark.match(lines[n])), None)
-    options, top = [], len(lines)
-    if at is not None:
+    options, top, row = [], len(lines), None
+    if at is None and lay.get("row"):
+        # A menu on one line (DETECT['row'], OpenCode, #5281): the options two or more spaces apart; the first one is
+        # selected, as its colour alone shows which one is.
+        row = next((n for n in range(len(lines) - 1, -1, -1) if lay["row"].match(lines[n])), None)
+    if row is not None:
+        at = top = row
+        texts = [x for x in re.split(r"\s{2,}", lay["row"].match(lines[row]).group(1).strip()) if x]
+        options, end = [(x, n == 0) for n, x in enumerate(texts)], row + 1
+        framed = re.compile(f"^\\s*[{lay['box']}]")
+        frame_end = end
+        if framed.match(tail[row]):
+            while frame_end < len(tail) and framed.match(tail[frame_end]):
+                frame_end += 1
+    elif at is not None:
         m = mark.match(lines[at])
         col, mcol, other = len(lines[at]) - len(m.group(3)), len(m.group(1)), lay["other"]
 
@@ -1760,19 +1773,39 @@ def _prompt_parts(tail, layout=None):
                 frame_end += 1
     question, qat = None, None
     near = [n for n in range(top - 1, max(top - 4, -1), -1) if "?" in lines[n]]
-    title = _menu_title(lines, top, col) if options and numbered and not near else None
-    if title is not None:
+    title = _menu_title(lines, top, col) if options and row is None and numbered and not near else None
+    if row is not None:  # its box says what it asks; a '?' above it is the chat's (OpenCode, #5281)
+        question, qat = _row_question(tail, lines, row, framed)
+    elif title is not None:
         question, qat = lines[title].strip(), title  # a menu with a title asks no question: its title says what
     else:
         for n in range(top - 1, -1, -1):
             if "?" in lines[n]:
                 question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
                 break
-    if question is None and options and framed.match(tail[at]):
+    if question is None and row is None and options and framed.match(tail[at]):
         question = _frame_title(tail, lines, at, framed)  # a dialog with a title, not a question (Amp, #5226)
     return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
+            "row": row is not None,
             "top": top, "end": end if options else None, "frame_end": frame_end if options else None, "lines": lines,
             **_prompt_command(lines[:qat] if qat is not None else [], lay)}
+
+
+def _row_question(tail, lines, row, framed):
+    """The question of a one-line menu (DETECT['row']) and the line it starts at: the text lines of its box above it,
+    each without its leading symbol, joined with ' · ' ('Permission required · Read .env · Path: .env'); with no box,
+    the text line above the menu. (None, None) when there is none."""
+    n = row
+    if framed.match(tail[row]):
+        while n > 0 and framed.match(tail[n - 1]):
+            n -= 1
+    else:
+        n = next((k for k in range(row - 1, -1, -1) if lines[k].strip()), row)
+    texts = [(k, re.sub(r"^[^\w(\[\"'./~]+", "", lines[k].strip())) for k in range(n, row)]
+    texts = [(k, x) for k, x in texts if x]
+    if not texts:
+        return None, None
+    return " · ".join(x for _, x in texts)[:240], texts[0][0]
 
 
 _CORNER = re.compile(r"^\s*[╭┌┏╔]")
@@ -2860,13 +2893,15 @@ def pane_prompts(conn, terminals):
         out[agent] = {"question": parts["question"], "options": options,
                       "selected": next((n for n, o in enumerate(parts["options"]) if o[1]), 0),
                       "tool": parts["tool"], "command": parts["command"], "why": parts["why"],
-                      "lines": tail[parts["start"]:], "sig": sig, "tell": tell}
+                      "lines": tail[parts["start"]:], "sig": sig, "tell": tell, "row": parts["row"]}
     return out
 
 
-def _menu_keys(at, n):
-    """The keys that choose option n of a menu when option at is selected."""
-    return [{"key": "Down" if n > at else "Up"}] * abs(n - at) + [{"key": "Enter"}]
+def _menu_keys(at, n, row=False):
+    """The keys that choose option n of a menu when option at is selected; row: a menu on one line (DETECT['row']),
+    where Right and Left move."""
+    more, less = ("Right", "Left") if row else ("Down", "Up")
+    return [{"key": more if n > at else less}] * abs(n - at) + [{"key": "Enter"}]
 
 
 def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
@@ -2884,14 +2919,14 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
         if len(text) > 4000:
             raise RiverError("text is at most 4000 characters")
         n = p["tell"]  # read with the pane's adapter, as the card was (#5271)
-        terminal_keys(conn, agent, _menu_keys(at, n) if n is not None else [{"key": "Escape"}], who)
+        terminal_keys(conn, agent, _menu_keys(at, n, p.get("row")) if n is not None else [{"key": "Escape"}], who)
         time.sleep(PROMPT_PAUSE)
         terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
         core.typed_to(conn, agent)  # a foreground maxpm wait ends, so the agent reads the text now (#5256)
         return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
     if not isinstance(pick, int) or not 0 <= pick < len(opts):
         raise RiverError("pick one of the prompt's options, or write what to do instead")
-    terminal_keys(conn, agent, _menu_keys(at, pick), who)
+    terminal_keys(conn, agent, _menu_keys(at, pick, p.get("row")), who)
     return {"agent": agent, "pane": pane, "picked": opts[pick], "text": ""}
 
 

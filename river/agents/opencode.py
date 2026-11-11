@@ -111,8 +111,13 @@ DETECT = {
     # While a turn runs, the footer starts with a moving bar and 'esc interrupt'.
     "working": r"(?m)^\s*[⬝■]{4,}\s+esc (?:again to )?interrupt",
     "blocked": [r"△ Permission required", r"⇆ select\s+enter confirm"],
+    # Reject opens a text box ("Tell OpenCode what to do differently"): the person's answer goes there.
     "tell_instead": "Reject",
     "image_paste": None,
+    # The permission menu is one line: '   Allow once   Always allow   Reject      ctrl+f fullscreen  ⇆ select  enter
+    # confirm' (with mono output 'left/right select'). Left, Right and Tab move the selection, which wraps; each new
+    # request starts at 'Allow once' (OpenCode 2.2.7, #5281). Always allow asks again: Confirm   Cancel.
+    "row": r"^\s*(\S.*?)\s{3,}(?:ctrl\+f fullscreen\s+)?(?:⇆|left/right) select\s+enter confirm",
 }
 
 INPUT = {"native": None}

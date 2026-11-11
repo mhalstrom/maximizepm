@@ -274,6 +274,49 @@ class Detect(Env):
         self.assertIn("Allow once", screen("blocked"))
 
 
+class Card(Env):
+    """#5281: the answer card of the Sessions tab reads OpenCode's one-line permission menu (DETECT['row']), and an
+    answer moves in it with Right and Left."""
+
+    def card(self):
+        from river import server
+        from tests.test_server import FakeTmux
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "oc-1")
+        tmux = FakeTmux()
+        tmux.session = True
+        tmux._pane(name="oc-1")
+        tmux.panes[0].update(agent="oc-1", running="opencode", screen=screen("blocked"))
+        old = server.TMUX_RUNNER, core.PLATFORM, server.PROMPT_PAUSE
+        server.TMUX_RUNNER, core.PLATFORM, server.PROMPT_PAUSE = tmux, "linux", 0
+        self.addCleanup(lambda: (setattr(server, "TMUX_RUNNER", old[0]), setattr(core, "PLATFORM", old[1]),
+                                 setattr(server, "PROMPT_PAUSE", old[2])))
+        pane = tmux.panes[0]
+        return server, conn, pane, server.pane_prompts(conn, {"oc-1": pane["id"]})["oc-1"]
+
+    def test_the_card_has_the_question_and_the_options_of_the_one_line_menu(self):
+        _, _, _, card = self.card()
+        self.assertEqual(card["question"], "Permission required · Read .env · Path: .env")
+        self.assertEqual(card["options"], ["Allow once", "Always allow", "Reject"])
+        self.assertEqual((card["selected"], card["tell"], card["row"]), (0, 2, True))
+
+    def test_an_answer_moves_with_right_and_the_text_goes_by_reject(self):
+        server, conn, pane, card = self.card()
+        with mock.patch.object(server, "agent_terminals", lambda c: {"oc-1": pane["id"]}):
+            got = server.prompt_answer(conn, "oc-1", card["sig"], pick=1, who="mark")
+            self.assertEqual((got["picked"], pane["keys"][-2:]), ("Always allow", ["Right", "Enter"]))
+            got = server.prompt_answer(conn, "oc-1", card["sig"], other="read .env.example instead", who="mark")
+        self.assertEqual(got["picked"], "Reject")
+        self.assertEqual(pane["keys"][-5:], ["Right", "Right", "Enter", "read .env.example instead", "Enter"])
+
+    def test_no_card_on_the_other_screens(self):
+        from river import server
+        lay, rx = server._layout(opencode.DETECT), re.compile("|".join(opencode.DETECT["blocked"]))
+        for name in ("idle", "idle-after-turn", "working", "compacting"):
+            self.assertIsNone(server._prompt_found(server._prompt_tail(screen(name)), rx, lay), name)
+
+
 class Commands(Env):
     def test_the_built_in_list_is_the_recorded_slash_list(self):
         self.assertEqual([c["name"] for c in opencode.COMMANDS], [w.lstrip("/") for w in (FIX / "commands.txt").read_text().split()])
