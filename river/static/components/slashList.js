@@ -19,8 +19,9 @@ const RUNS = {
   menu: ["menu", "Opens a menu: the page shows it and you choose there"],
   terminal: ["terminal", "Shows its view only in the terminal: after you send it, open the terminal"],
   settings: ["opens Settings", "With no argument it opens the session's Settings at this setting; nothing goes to the terminal"],
+  usage: ["opens Usage", "With no argument it opens the session's Usage panel: its context, tokens and plan limits; nothing goes to the terminal"],
 };
-const runOf = (c) => c.setting ? "settings" : c.run;
+const runOf = (c) => c.setting ? "settings" : c.page === "usage" ? "usage" : c.run;
 let seq = 0;
 
 export function makeSlashList(input, host, { load, key = () => "", onChange = () => {} }) {

@@ -364,6 +364,14 @@ button.srow-it { cursor: pointer; }
 .cache-b.cold.big { background: var(--warn-bg); color: var(--warn); }
 .sid.cache-line { margin-top: var(--sp-0); }
 #sessItem .cache-b { margin-left: var(--sp-2); }
+/* The context meter of a session's header and its Usage panel (#5224, components/usagePanel.js). */
+.btn.ctx-b { font-size: var(--fs-xs); padding: var(--hair) calc(var(--sp-2) + var(--hair)); border-radius: var(--r-pill);
+  min-height: 0; margin-left: var(--sp-2); vertical-align: middle; }
+.btn.ctx-b.full { background: var(--warn-bg); color: var(--warn); }
+#usageDlg { --dlg-w: var(--w-dlg-s); }
+#usageDlg h3 { font-size: var(--fs-m); margin: var(--sp-6) 0 var(--sp-2); }
+.usage-row { display: flex; justify-content: space-between; gap: var(--sp-5); font-size: var(--fs-m); padding: var(--sp-0) 0; }
+.usage-ctx .bar, .usage-limit .bar { margin: var(--sp-1) 0 var(--sp-3); }
 #coldDlg { --dlg-w: var(--w-dlg-s); }
 #coldDlg h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-l); }
 #coldDlg .cold-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-3); margin-top: var(--sp-5); }

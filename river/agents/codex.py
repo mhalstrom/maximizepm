@@ -354,9 +354,83 @@ _RUNS = {
 for _c in COMMANDS:
     _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
 # The commands that the Settings dialog does (#5220, mark 2026-11-11): with no argument the page opens it at that row.
+# /permissions chooses when Codex asks (#5224): the Approval row.
 for _c in COMMANDS:
-    if _c["name"] in {'model': 'model'}:
-        _c["setting"] = {'model': 'model'}[_c["name"]]
+    if _c["name"] in {'model': 'model', 'permissions': 'approval'}:
+        _c["setting"] = {'model': 'model', 'permissions': 'approval'}[_c["name"]]
+# The commands whose view the page's Usage panel gives (#5224): /status (the context left and the limits) and /usage
+# (the plan's limits), from Codex's own log (chat_limits).
+for _c in COMMANDS:
+    if _c["name"] in ("status", "usage"):
+        _c["page"] = "usage"
+
+
+def context_window(model):
+    """The tokens of a model's context window as Codex counts it for its 'context left' (#5224): context_window
+    times effective_context_window_percent of the model cache (~/.codex/models_cache.json), or None."""
+    import json
+    from pathlib import Path
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
+    try:
+        models = json.loads(path.read_text()).get("models") or []
+    except (OSError, ValueError, AttributeError):
+        return None
+    m = next((x for x in models if isinstance(x, dict) and x.get("slug") == model), None)
+    if not m or not m.get("context_window"):
+        return None
+    return int(m["context_window"] * (m.get("effective_context_window_percent") or 100) / 100)
+
+
+def chat_usage(lines):
+    """The session's tokens (#5224): the total_token_usage of its last token_count event, a running total that
+    Codex keeps for the session. input is the part that was not read from the cache."""
+    import json
+    for line in reversed(list(lines)):
+        if '"total_token_usage"' not in line:
+            continue
+        try:
+            u = json.loads(line)["payload"]["info"]["total_token_usage"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        cached = int(u.get("cached_input_tokens") or 0)
+        return {"input": max(0, int(u.get("input_tokens") or 0) - cached), "output": int(u.get("output_tokens") or 0),
+                "cache_read": cached, "cache_write": int(u.get("cache_write_input_tokens") or 0)}
+    return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+
+
+def chat_limits(lines):
+    """The plan limits of the last token_count event of the log that has them (#5224): its rate_limits, the
+    5-hour window (primary) and the weekly one (secondary), and the credits. None when no line has them."""
+    import json
+    from datetime import datetime, timezone
+    for line in reversed(list(lines)):
+        if '"rate_limits"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        p = d.get("payload") if isinstance(d, dict) else None
+        rl = p.get("rate_limits") if isinstance(p, dict) else None
+        if not isinstance(rl, dict):
+            continue
+        out = []
+        for key, name in (("primary", "5-hour window"), ("secondary", "weekly window")):
+            w = rl.get(key)
+            if isinstance(w, dict) and w.get("used_percent") is not None:
+                at = w.get("resets_at")
+                out.append({"name": name, "used_percent": float(w["used_percent"]),
+                            "window_minutes": w.get("window_minutes"),
+                            "resets_at": datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            if isinstance(at, (int, float)) else None})
+        cr = rl.get("credits")
+        if isinstance(cr, dict) and (cr.get("unlimited") or cr.get("balance") is not None):
+            out.append({"name": "credits", "text": "unlimited" if cr.get("unlimited") else
+                        f"{float(cr['balance']):g} left"})
+        if rl.get("plan_type"):
+            out.append({"name": "plan", "text": str(rl["plan_type"])})
+        return out
+    return None
 
 
 def read_commands(folder):

@@ -17,6 +17,7 @@ import { viewOf } from "../components/viewSettings.js";
 import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
+import { contextMeter, openUsage } from "../components/usagePanel.js";
 import { endButton, endSession } from "../components/endSession.js";
 import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
@@ -202,6 +203,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     openInPanel("item:" + o.dataset.open);
   });
   // A link or a file path in the chat opens in the side panel; Cmd or Ctrl+click keeps a new browser tab (#4619).
+  $("#sessItem").addEventListener("click", (e) => {  // the context meter of the header (#5224)
+    if (e.target.closest("[data-usage]") && agent) { e.preventDefault(); openUsage(agent); }
+  });
   col.addEventListener("click", (e) => {
     const t = e.target.closest("[data-term]");  // a slash command that shows its view in the terminal (#5220)
     if (t) { e.preventDefault(); openTerminal(t.dataset.term); return; }
@@ -346,7 +350,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       waitLine(j);
       lastCache = j.cache || null;  // the expert's prompt cache (#5023): the header says it, and a send checks it
       const itemHtml = s.name ? headerItem(s) : "";
-      putHtml($("#sessItem"), itemHtml + cacheBadge(j.cache));
+      putHtml($("#sessItem"), itemHtml + cacheBadge(j.cache) + contextMeter(j.context));
       putHtml($("#sessMenuItem"), itemHtml);
       putHtml($("#sessPlan"), s.name ? planLinks(s) : "");
       $("#sessName").textContent = s.title || "";
@@ -731,6 +735,16 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   $("#sessBar").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = $("#sessText"), btn = $("#sessSend"), to = agent;
+    // A command whose view the Usage panel gives (#5224: /usage, /context, /cost, /status, /stats with no argument):
+    // the panel only reads, so it opens also for a session that the page cannot type into; nothing goes to it.
+    if (to && !sending && !files.length && /^\/\S+\s*$/.test(input.value)) {
+      const c = await slash.lookup(input.value);
+      if (c && c.page === "usage" && !c.args && to === agent) {
+        openUsage(to);
+        input.value = ""; slash.close(); grow(); sendState(); saveDraft();
+        return;
+      }
+    }
     if (!to || sending || btn.disabled || empty()) return;
     // Enter or the send arrow while the microphone listens (#5118): it stops first, the final text comes in (at
     // most 1.5 s), and then the box goes once; text after it never comes back into the box to be sent again.

@@ -327,7 +327,8 @@ class CommandRuns(unittest.TestCase):
         self.assertNotIn("approvals", runs)  # Codex 0.159.1: "Unrecognized command '/approvals'"; it is /permissions
         self.assertEqual({c["name"]: c["setting"] for c in claude.COMMANDS if c.get("setting")},
                          {"model": "model", "effort": "effort"})
-        self.assertEqual({c["name"]: c["setting"] for c in codex.COMMANDS if c.get("setting")}, {"model": "model"})
+        self.assertEqual({c["name"]: c["setting"] for c in codex.COMMANDS if c.get("setting")},
+                         {"model": "model", "permissions": "approval"})  # /permissions: the Approval row (#5224)
 
     def test_a_wrong_run_is_a_problem_of_the_adapter(self):
         import types

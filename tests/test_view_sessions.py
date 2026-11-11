@@ -2359,3 +2359,128 @@ class AdapterFolder(Base):
         self.assertIn("MAXPM_AGENT=cop copilot --plugin-dir ", line)  # the hook plugin loads again
         self.assertIn(f" --resume {self.CSID} ", line)  # the id of its folder, not the log's file name (events)
         self.assertIn("--model qwen3:1.7b --reasoning-effort low", line)  # the model the chat ran on
+
+
+class SessionUsage(Base):
+    """#5224 (mark 2026-11-11: 'about usage, context etc'): the Usage panel and the context meter of a session, for
+    every agent, from data its adapter reads: the last call's context against the model's window, the session's
+    tokens and model calls, and the plan limits where the agent writes them to its log (Codex)."""
+
+    def call(self, mid, inp, read, w1, out, at, model="claude-opus-5-5"):
+        u = {"input_tokens": inp, "cache_read_input_tokens": read, "cache_creation_input_tokens": w1,
+             "cache_creation": {"ephemeral_1h_input_tokens": w1, "ephemeral_5m_input_tokens": 0}, "output_tokens": out}
+        return json.dumps({"type": "assistant", "timestamp": at, "message": {
+            "id": mid, "model": model, "role": "assistant", "usage": u,
+            "content": [{"type": "text", "text": "ok"}]}}) + "\n"
+
+    def test_the_panel_counts_the_session_and_reads_its_context(self):
+        self.write(self.call("m1", 10, 100_000, 20_000, 300, "2026-11-08T10:00:05Z")
+                   + self.call("m2", 5, 120_000, 1_000, 200, "2026-11-08T10:01:05Z"))
+        u = sessions.session_usage(self.c, "ag", self.root, self.croot)
+        self.assertEqual((u["label"], u["model"], u["context"], u["window"], u["percent"]),
+                         ("Claude Code", "claude-opus-5-5", 5 + 120_000 + 1_000 + 200, 1_000_000, 12.1))
+        self.assertEqual((u["calls"], u["input"], u["cache_read"], u["cache_write"], u["output"]),
+                         (2, 15, 220_000, 21_000, 500))
+        self.assertEqual(u["eq"], round(15 + 0.1 * 220_000 + 2 * 21_000))
+        self.assertIsNone(u["limits"])
+        self.assertIn("Claude Code writes no plan limit to its log", u["limits_note"])
+        # The session's header gets the meter with every read of its chat.
+        meter = sessions.context_meter(self.c, "ag", "claude", self.path)
+        self.assertEqual(meter, {"used": 121_205, "window": 1_000_000, "model": "claude-opus-5-5"})
+
+    def test_an_agent_with_no_log_yet_and_an_unknown_one(self):
+        core.register(self.c, "new")
+        u = sessions.session_usage(self.c, "new", self.root, self.croot)
+        self.assertEqual((u["context"], u["window"], u["measured"], u["calls"]), (None, None, False, None))
+        with self.assertRaisesRegex(core.RiverError, "ghost is not a registered agent"):
+            sessions.session_usage(self.c, "ghost")
+
+    def test_the_route_gives_the_panel(self):
+        self.write(self.call("m1", 10, 100_000, 20_000, 300, "2026-11-08T10:00:05Z"))
+        conf = Path(self.dir.name) / "config"
+        os.environ["CLAUDE_CONFIG_DIR"] = str(conf)
+        self.addCleanup(os.environ.pop, "CLAUDE_CONFIG_DIR", None)
+        (conf / "projects" / "-proj").mkdir(parents=True)
+        (conf / "projects" / "-proj" / f"{SID}.jsonl").write_text(self.path.read_text())
+        h = server.Handler.__new__(server.Handler)
+        out = {}
+        h.path, h.client_address, h.headers = "/api/session-usage?agent=ag", ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        h.do_GET()
+        self.assertEqual((out["code"], out["body"]["calls"], out["body"]["window"]), (200, 1, 1_000_000))
+        h.path = "/api/session-usage?agent=ghost"
+        h.do_GET()
+        self.assertEqual(out["code"], 409)
+
+    def test_codex_gives_its_window_tokens_and_plan_limits_from_its_own_files(self):
+        home = Path(self.dir.name) / "codexhome"
+        home.mkdir()
+        (home / "models_cache.json").write_text(json.dumps({"models": [
+            {"slug": "gpt-6.1-sol", "context_window": 500000, "effective_context_window_percent": 95}]}))
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            self.assertEqual(codex_agent.context_window("gpt-6.1-sol"), 475000)
+            self.assertIsNone(codex_agent.context_window("gpt-9"))
+        # The token_count event of Codex 0.159 (its rollout log), as recorded on this Mac on 2026-11-11.
+        ev = {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": 133060, "cached_input_tokens": 102400, "cache_write_input_tokens": 0,
+                                  "output_tokens": 402, "reasoning_output_tokens": 29, "total_tokens": 133462},
+            "model_context_window": 475000},
+            "rate_limits": {"limit_id": "codex", "primary": {"used_percent": 3.0, "window_minutes": 300,
+                                                             "resets_at": 1794401059},
+                            "secondary": {"used_percent": 6.0, "window_minutes": 10080, "resets_at": 1794421224},
+                            "credits": {"has_credits": True, "unlimited": False, "balance": "75000.0000000000"},
+                            "plan_type": "plus"}}}
+        lines = ['{"type": "session_meta", "payload": {}}', json.dumps(ev)]
+        self.assertEqual(codex_agent.chat_usage(lines),
+                         {"input": 30660, "output": 402, "cache_read": 102400, "cache_write": 0})
+        self.assertEqual(codex_agent.chat_limits(lines), [
+            {"name": "5-hour window", "used_percent": 3.0, "window_minutes": 300, "resets_at": "2026-11-11T12:44:19Z"},
+            {"name": "weekly window", "used_percent": 6.0, "window_minutes": 10080, "resets_at": "2026-11-11T18:20:24Z"},
+            {"name": "credits", "text": "75000 left"}, {"name": "plan", "text": "plus"}])
+        self.assertIsNone(codex_agent.chat_limits(lines[:1]))
+
+    def test_the_commands_that_open_the_usage_panel_or_a_settings_row(self):
+        from river import agents
+        claude, codex = agents.get("claude"), agents.get("codex")
+        pages = lambda a: sorted(c["name"] for c in a.commands if c.get("page") == "usage")
+        self.assertEqual(pages(claude), ["context", "cost", "status", "usage"])
+        self.assertEqual(pages(codex), ["status", "usage"])
+        self.assertEqual(next(c["setting"] for c in codex.commands if c["name"] == "permissions"), "approval")
+        self.assertEqual((claude.context_window("claude-sonnet-5-5"), claude.context_window("claude-haiku-5-5"),
+                          claude.context_window("opus[1m]"), claude.context_window("gpt-6")),
+                         (1_000_000, 200_000, 1_000_000, None))
+        bad = types.SimpleNamespace(DESCRIBE={"id": "toy", "label": "Toy", "exe": "toy", "family": "multi"},
+                                    COMMANDS=[{"name": "x", "page": "nowhere"}])
+        self.assertIn("COMMANDS[0]['page'] is 'nowhere', not one of usage", agents.check(bad, "toy"))
+
+    def test_the_page_shows_the_meter_and_opens_the_panel_from_it_and_from_slash_usage(self):
+        self.write(self.call("m1", 10, 100_000, 20_000, 300, "2026-11-08T10:00:05Z"))
+        with core.tx(self.c):  # a Claude Code session: its commands come from the claude adapter
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        driver = DRIVE_HEAD + r'''
+const dlg = () => q("#usageDlg");
+const shown = () => dlg() && !dlg().classList.contains("hidden") && /Model calls/.test(dlg().textContent);
+try {
+  await until(() => q("#sessItem .ctx-b"), "the context meter in the header");
+  const meter = q("#sessItem .ctx-b").textContent.trim();
+  q("#sessItem .ctx-b").click();
+  await until(shown, "the Usage panel opens from the meter");
+  const body = dlg().textContent;
+  const fits = dlg().querySelector(".box").scrollWidth <= dlg().querySelector(".box").clientWidth + 1;
+  dlg().querySelector("[data-usage-close]").click();
+  await until(() => dlg().classList.contains("hidden"), "Close closes it");
+  q("#sessText").value = "/usage"; q("#sessText").dispatchEvent(new Event("input", { bubbles: true }));
+  q("#sessBar").requestSubmit();
+  await until(shown, "/usage with no argument opens the panel");
+  post({ meter, body, fits, left: q("#sessText").value });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        sent = []
+        with mock.patch.object(server, "session_send", lambda *a, **k: sent.append(a)):
+            result = drive_page(self, driver)
+        self.assertEqual(result["meter"], "ctx 12%")
+        for part in ("Context120k of 1.0M · 12%", "Model calls1", "Input10", "Cache reads100k", "Cache writes20k",
+                     "Output300", "Claude Code writes no plan limit to its log", "Open its terminal"):
+            self.assertIn(part, result["body"])
+        self.assertTrue(result["fits"])
+        self.assertEqual((result["left"], sent), ("", []))  # nothing went to the terminal

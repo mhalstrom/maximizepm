@@ -69,6 +69,8 @@ FAMILIES = ("claude", "openai", "multi")
 #    }
 # read_models() -> [model name or CLI id] | None: an optional reader of the models the CLI knows now (Codex:
 # ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands.
+# context_window(model) -> int | None: the tokens of that model's context window, for the context meter of a session
+# (#5224); None when the adapter does not know it.
 DESCRIBE_KEYS = {"id": str, "label": str, "exe": str, "aliases": (list, tuple), "family": str,
                  "models": (list, tuple), "default_model": str, "model_ids": dict, "prefix": str,
                  "model_live": (str, type(None)), "model_read": (str, type(None)), "platform": str,
@@ -221,6 +223,9 @@ SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 #     st["ttl"] the cache lifetime the log shows ("1h", "5m"; None: the cache_ttl setting), st["model"];
 #   chat_texts(raw) -> [(text, time, how)]: the texts of one log line (bytes) where the Artifacts tab looks for files
 #     and links; how is "wrote" for the path of a CHAT["file_tools"] call, else "named". Tool results are left out.
+#   chat_limits(lines) -> [{"name", "used_percent", "window_minutes", "resets_at"}, ..., {"name": "credits",
+#     "text"}] | None: the plan limits that the log says last (Codex: the rate_limits of its token_count events), for
+#     the Usage panel (#5224); None when the agent writes none to its log (they show only on its screen).
 # An entry is a dict with "at" (ISO time or None), "role" (one of ENTRY_ROLES) and "text", and by role:
 #   user: "images" (a list of paths or data URLs) when it has some; tool: "id" (the call id), "name", "detail";
 #   result: "for" (the call id), "error" (bool); divider: "kind" ("compacted", "resumed").
@@ -324,8 +329,12 @@ INPUT_KEYS = {"native": (list, tuple, type(None))}
 # "setting" (mark 2026-11-11, #5220): the key of the Settings dialog's row that does what the command does with no
 # argument ("model", "effort"). Typed with no argument, the page opens that dialog at the row, and nothing goes to the
 # terminal ("Change now" types the command with its argument); with an argument it goes as typed.
-COMMAND_KEYS = {"name": str, "description": str, "hint": str, "run": str, "setting": str}
+# "page" (#5224, mark 2026-11-11: 'about usage, context etc'): a page form that does what the command shows, typed
+# with no argument; nothing goes to the terminal. "usage": the session's Usage panel (its context against the
+# model's window, its tokens, its calls, and the plan limits where the adapter reads them: chat_limits).
+COMMAND_KEYS = {"name": str, "description": str, "hint": str, "run": str, "setting": str, "page": str}
 COMMAND_RUNS = ("now", "menu", "terminal")
+COMMAND_PAGES = ("usage",)
 
 # 11. Setup (#5184). SETUP = {
 #      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md, GEMINI.md),
@@ -345,14 +354,15 @@ SETUP_KEYS = {"instructions": str, "import": (str, type(None)), "skills_dir": (s
 
 # Each part: the module names that make it up, and the dict whose keys check (name, shape).
 PARTS = {
-    "describe": {"data": ("DESCRIBE", DESCRIBE_KEYS), "functions": ("read_models",), "required": True},
+    "describe": {"data": ("DESCRIBE", DESCRIBE_KEYS), "functions": ("read_models", "context_window"), "required": True},
     "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ()},
     "effort": {"data": ("EFFORT", EFFORT_KEYS), "functions": ("read_effort_levels", "read_effort")},
     "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command"), "required": True},
     "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ("start_session",)},
     "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "parse_chat_line", "chat_chain",
                                                         "chat_title", "chat_cwd", "chat_usage", "chat_requests",
-                                                        "chat_settings", "chat_cache_line", "chat_texts")},
+                                                        "chat_settings", "chat_cache_line", "chat_texts",
+                                                        "chat_limits")},
     "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook")},
     "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ()},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
@@ -519,6 +529,8 @@ def check(module, mid=None):
         out += _shape(f"COMMANDS[{i}]", c, COMMAND_KEYS, ("name",))
         if isinstance(c, dict) and "run" in c and c["run"] not in COMMAND_RUNS:
             out.append(f"COMMANDS[{i}]['run'] is {c['run']!r}, not one of {', '.join(COMMAND_RUNS)}")
+        if isinstance(c, dict) and "page" in c and c["page"] not in COMMAND_PAGES:
+            out.append(f"COMMANDS[{i}]['page'] is {c['page']!r}, not one of {', '.join(COMMAND_PAGES)}")
         if isinstance(c, dict) and c.get("setting") not in (None, "model", "effort") and c["setting"] not in [
                 x.get("key") for x in getattr(module, "SETTINGS", None) or () if isinstance(x, dict)]:
             out.append(f"COMMANDS[{i}]['setting'] is {c['setting']!r}, which is no setting of the Settings dialog")
@@ -659,6 +671,16 @@ class Adapter:
         got = f() if f else None
         return list(got) if got else list(self.describe["models"])
 
+    def context_window(self, model):
+        """The tokens of the model's context window (#5224: the context meter), or None when the adapter does not
+        know it. context_window(model) -> int | None."""
+        f = self._fn("context_window")
+        try:
+            got = f(model) if f and model else None
+        except Exception:  # noqa: BLE001 - a reader of a CLI's files: none, not an error page
+            return None
+        return int(got) if isinstance(got, (int, float)) and got > 0 else None
+
     def build_command(self, name, folder, model, effort, settings, prompt):
         f = self._fn("build_command")
         if f is None:
@@ -734,6 +756,20 @@ class Adapter:
     def chat_settings(self, lines):
         f = self._fn("chat_settings")
         return dict(f(list(lines)) or {}) if f else {}
+
+    def chat_usage(self, lines):
+        """{"input", "output", "cache_read", "cache_write"} token counts of the lines, or None without the reader."""
+        f = self._fn("chat_usage")
+        got = f(list(lines)) if f else None
+        return dict(got) if got else None
+
+    def chat_limits(self, lines):
+        """The plan limits the chat log says last (#5224): [{"name", "used_percent", "window_minutes", "resets_at"
+        (ISO or None)}], {"credits": text} entries too; None when the agent writes none to its log (they show only
+        on its screen). chat_limits(lines) -> list | None."""
+        f = self._fn("chat_limits")
+        got = f(list(lines)) if f else None
+        return list(got) if got is not None else None
 
     def chat_cache_line(self, raw, st):
         f = self._fn("chat_cache_line")

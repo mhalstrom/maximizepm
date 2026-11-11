@@ -95,6 +95,19 @@ def session_commands(h, path):
     finally:
         conn.close()
 
+def session_usage(h, path):
+    """The Usage panel of a session (#5224): its context, tokens, calls and plan limits."""
+    from urllib.parse import parse_qs, urlsplit
+    from .. import sessions
+    conn = core.connect()
+    try:
+        return h._send(200, sessions.session_usage(conn, parse_qs(urlsplit(h.path).query).get("agent", [""])[0]))
+    except RiverError as e:
+        return h._send(409, {"error": str(e)})
+    finally:
+        conn.close()
+
+
 def full_screen(h, path):
     """Full screen in a tab of its own (#4620)."""
     from urllib.parse import parse_qs, urlsplit
@@ -151,6 +164,7 @@ GET = [
     (lambda path: path == "/api/session-items", session_items),
     (lambda path: path == "/api/session-prompts", session_prompts),
     (lambda path: path == "/api/session-commands", session_commands),
+    (lambda path: path == "/api/session-usage", session_usage),
     (lambda path: path in ("/view", "/api/view-key"), full_screen),
     (lambda path: path in ("/api/sessions", "/api/session"), running),
 ]

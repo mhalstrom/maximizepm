@@ -667,6 +667,26 @@ for _c in COMMANDS:
 for _c in COMMANDS:
     if _c["name"] in {'model': 'model', 'effort': 'effort'}:
         _c["setting"] = {'model': 'model', 'effort': 'effort'}[_c["name"]]
+# The commands whose view the page's Usage panel gives (#5224, mark 2026-11-11: 'about usage, context etc'): the
+# context against the model's window, the tokens and calls of the session. Claude Code writes no plan limit to its
+# transcript, so the panel says that /usage shows them on its screen and offers the Terminal tab.
+for _c in COMMANDS:
+    if _c["name"] in ("usage", "context", "cost", "status", "stats"):
+        _c["page"] = "usage"
+
+
+# The context window of each family (#5224): Claude Code 2.1 calls of claude-opus-5-5, claude-sonnet-5-5 and
+# claude-fable-5-2 read up to 687k tokens of context (transcripts of 2026-11-11), so their window is 1M; no haiku
+# call read more than 200k. A model id ending in [1m] asks for the 1M window.
+CONTEXT_WINDOWS = {"opus": 1_000_000, "sonnet": 1_000_000, "fable": 1_000_000, "haiku": 200_000}
+
+
+def context_window(model):
+    """The tokens of the context window of a Claude model (a name or an id), or None for a model of no family here."""
+    m = (model or "").lower()
+    if m.endswith("[1m]"):
+        return 1_000_000
+    return next((n for fam, n in CONTEXT_WINDOWS.items() if fam in m), None)
 
 
 def read_commands(folder):

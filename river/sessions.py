@@ -869,7 +869,19 @@ def view(conn, agent, cursor=None, root=None, croot=None, prompt=None, pane=Fals
             "entries": got["entries"], "cursor": got["cursor"], "older": older,
             "refs": item_refs(conn, got["entries"]),
             "turn": turn, "state": key, "state_label": label, "session_url": a.get("session_url"),
-            "cache": cache_state(conn, agent, found=(kind, path)) if a.get("role") == "expert" else None}
+            "cache": cache_state(conn, agent, found=(kind, path)) if a.get("role") == "expert" else None,
+            "context": context_meter(conn, agent, kind, path)}
+
+
+def context_meter(conn, agent, kind, path):
+    """{"used", "window", "model"} of the session's last model call, for the context meter of its header (#5224);
+    None before its first call. window is None when the adapter does not know the model's."""
+    c = cache_state(conn, agent, found=(kind, path)) if path else None
+    if not c:
+        return None
+    ad = _adapter(kind)
+    return {"used": c["context"], "window": ad.context_window(c["model"]) if ad and c["model"] else None,
+            "model": c["model"]}
 
 
 def last_cwd(path, tail=1024 * 1024):
@@ -970,6 +982,77 @@ def cache_state(conn, name, root=None, croot=None, at=None, found=None):
             "left": max(0, int((until - t).total_seconds())), "ttl": ttl, "ttl_from": ttl_from, "context": context,
             "last_call": last["at"], "model": model, "next_usd": round(usd, 4) if usd is not None else None,
             "next_eq": round(eq), "fresh": not warm and context >= fresh_min, "fresh_min": fresh_min}
+
+
+# The Usage panel of a session (#5224, mark 2026-11-11: 'about usage, context etc'): what the agent's /usage,
+# /context, /cost, /status and /stats show, from data the adapter already reads, for every agent. The context of the
+# last model call against the model's window (cache_state, the adapter's context_window), the tokens and model calls
+# of the session (the adapter's chat_requests, as maxpm usage counts them), and the plan limits where the agent
+# writes them to its log (the adapter's chat_limits); where it shows them only on its screen, the panel says so.
+USAGE_TAIL = 2 * 1024 * 1024  # bytes of the log's end where the last plan limits are
+
+
+def session_usage(conn, name, root=None, croot=None):
+    """{agent, label, model, context, window, percent, calls, input, output, cache_read, cache_write, eq, limits,
+    limits_note, measured}: each number None when the logs do not give it. calls and the tokens sum every session id
+    of the agent (a resume or a restart starts a new one); eq is input-token equivalents (core.usage_eq)."""
+    a = conn.execute("SELECT name, model, agent_type, native_address FROM agents WHERE name=?", (name,)).fetchone()
+    if a is None:
+        raise core.RiverError(f"{name} is not a registered agent")
+    kind, path = transcript(conn, name, root, croot)
+    ad = _adapter(kind) or (_agents.find(a["agent_type"]) if a["agent_type"] else None)
+    cache = cache_state(conn, name, root, croot, found=(kind, path)) if path else None
+    model = (cache or {}).get("model") or a["model"]
+    context = (cache or {}).get("context")
+    window = ad.context_window(model) if ad and model else None
+    tot = {"calls": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "eq": 0.0}
+    measured = False
+    sids = [r[0] for r in conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen",
+                                       (name,))]
+    if a["native_address"] and a["native_address"] not in sids:
+        sids.append(a["native_address"])  # Codex: its thread id is the session's address (CHAT['ref'] address)
+    for sid in sids:
+        got = core._session_requests(sid, root)
+        if not got:
+            continue
+        measured = True
+        for _at, u in got[0].values():
+            tot["calls"] += 1
+            for k in ("input", "output", "cache_read"):
+                tot[k] += u.get(k) or 0
+            tot["cache_write"] += (u.get("write_1h") or 0) + (u.get("write_5m") or 0)
+            tot["eq"] += core.usage_eq(u)
+    if not measured and ad is not None and path and ad.has("chat_usage"):
+        # No model calls to count (an adapter with no chat_requests): the tokens that the log itself sums up.
+        try:
+            text, _start, _end = _read(path, 0)
+            u = ad.chat_usage(text.splitlines())
+        except (OSError, ValueError, EOFError):
+            u = None
+        if u and any(u.get(k) for k in ("input", "output", "cache_read", "cache_write")):
+            measured = True
+            tot.update({k: u.get(k) or 0 for k in ("input", "output", "cache_read", "cache_write")}, calls=None)
+            tot["eq"] = core.usage_eq({"input": tot["input"], "cache_read": tot["cache_read"], "write_1h": 0,
+                                       "write_5m": tot["cache_write"]})
+    limits = None
+    if ad is not None and path and ad.has("chat_limits"):
+        try:
+            text, _start, _end = _read(path, None, USAGE_TAIL)
+            limits = ad.chat_limits(text.splitlines())
+        except (OSError, ValueError, EOFError):
+            limits = None
+    label = ad.label if ad else "This agent"
+    note = None
+    if limits is None:
+        note = (f"{label} writes no plan limit to its log: its own screen shows them. Open the Terminal tab and type "
+                f"its command there." if ad is None or not ad.has("chat_limits") else
+                f"{label} has written no plan limit to this session's log yet.")
+    pct = round(100 * context / window, 1) if context is not None and window else None
+    return {"agent": name, "label": ad.label if ad else None, "model": model, "context": context, "window": window,
+            "percent": pct, "measured": measured,
+            **({k: (round(v) if k == "eq" and v is not None else v) for k, v in tot.items()} if measured else
+               dict.fromkeys(tot)),
+            "limits": limits, "limits_note": note}
 
 
 # The Artifacts tab (#4620): what the sessions made or named that the side panel can show. Files a session wrote
