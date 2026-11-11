@@ -101,6 +101,7 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   #searchDlg .box { min-height: 100%; box-sizing: border-box; border: 0; border-radius: 0; box-shadow: none;
     padding: calc(8px + env(safe-area-inset-top)) 12px calc(16px + env(safe-area-inset-bottom)); }
   #searchDlg h2 { font-size: 17px; }
+  #searchDlg .searchbar select { flex-basis: 100%; }  /* on a phone each filter has its own row (#5335) */
 
   /* Room at the bottom, so Safari's bar never covers the last rows. */
   main { padding: 12px 10px calc(72px + env(safe-area-inset-bottom)); }

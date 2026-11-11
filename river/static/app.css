@@ -232,7 +232,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #search { width: 180px; }
 #searchDlg { --dlg-w: 820px; }
 #searchDlg .searchbar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-#searchDlg .searchbar input { flex: 1 1 240px; min-width: 0; }
+/* The words field has a row of its own, so its placeholder is never cut (under the mic); the three filters share the
+   row under it, so none wraps alone (#5335). */
+#searchDlg .searchbar input { flex: 1 1 100%; min-width: 0; }
+#searchDlg .searchbar select { flex: 1 1 0; min-width: 0; }
 /* A result of the search: .qrow, not .srow, which sessions.css gives the session rows (#4891). */
 #searchDlg .qrow { padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer; }
 #searchDlg .qrow:hover { background: var(--bg); }
