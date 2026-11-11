@@ -304,7 +304,7 @@ button.srow-it { cursor: pointer; }
 .sp-note { padding: var(--sp-6); font-size: var(--fs-m); }
 .sp-list { display: flex; flex-direction: column; gap: var(--sp-2); }
 .sp-list .art-row { flex-direction: column; align-items: flex-start; gap: var(--sp-2); }
-.sp-list .art-btns > .btn:first-child { margin-left: var(--btn-inset); }  /* Open under the name (#5314) */
+.sp-list .art-btns > button.btn:first-child { margin-left: var(--btn-inset); }  /* Open under the name (#5314) */
 .sp-card { display: flex; flex-direction: column; gap: var(--sp-3); align-items: flex-start; }
 .sp-card a.btn { background: var(--accent); color: var(--accent-ink); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-5); text-decoration: none; font-size: var(--fs-m); }
 @media (max-width: 759px) {

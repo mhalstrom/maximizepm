@@ -17,4 +17,5 @@
 .warn-t { color: var(--warn); }
 .gc-subs { margin-top: var(--sp-2); }
 .gc-add { padding-top: var(--sp-3); }
-.gc-subs > .btn, .gc-add > .btn { margin-left: var(--btn-inset); }  /* + sub-goal and + goal on the text's edge (#5314) */
+.gc-subs > .btn { margin-left: var(--btn-inset); }  /* + sub-goal and + goal on the text's edge (#5314) */
+.gc-add > .btn { margin-left: calc(var(--btn-inset) + var(--sp-0)); }  /* the cards' text starts 2 px in */

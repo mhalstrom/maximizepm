@@ -108,7 +108,8 @@ button.btn:hover { background: var(--bubble); }
 /* A text button that starts a line under text sits on the text's left edge: its padding and border go into a
    negative margin, so its label lines up with the text above (#5314). Use it where a .btn begins a left line. */
 :root { --btn-inset: calc(-1 * (var(--sp-2) + var(--hair))); }
-#setup .fix > button.btn:not(.primary):first-child { margin-left: var(--btn-inset); }
+/* A fix line of text buttons only moves as a whole, so a button that wraps to a second line lines up too. */
+#setup .fix:not(:has(> :not(button.btn:not(.primary)))) { margin-left: var(--btn-inset); }
 /* A card that is one button (button.js kind "card", #5046): no button look; the card's class draws it. */
 button.cardbtn { display: block; width: 100%; text-align: left; font: inherit; color: var(--ink); cursor: pointer; }
 button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); padding: 4px 12px; }
