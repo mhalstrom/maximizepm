@@ -190,6 +190,7 @@ button.srow-it { cursor: pointer; }
 .wlines pre { font: calc(var(--fs-xs) + var(--hair) / 2)/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--sp-2) 0 0; }
 .wopt { display: flex; gap: var(--sp-3); align-items: flex-start; font-size: var(--fs-base); cursor: pointer; }
 .wopt input { margin-top: calc(var(--sp-0) + var(--hair)); }
+.wnote { margin-top: var(--sp-3); }  /* the one note of a session in no tmux pane (#5359) */
 .wblock textarea { width: 100%; box-sizing: border-box; min-height: var(--h-text-min); resize: vertical; font: inherit; }
 .wblock .wgo { align-self: flex-end; }
 /* A menu's own keys (#5244): one send button for each, at the right. */

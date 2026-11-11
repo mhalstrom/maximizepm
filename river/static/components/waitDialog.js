@@ -25,7 +25,7 @@ function promptBlock(w, n) {
     <div class="wkind">Prompt in its terminal</div>
     <div class="wq">${esc(w.question || w.tool || "The terminal waits for an answer")}</div>
     ${w.command ? `<div class="wcmd">${esc(w.command)}</div>` : ""}
-    ${w.why ? `<div class="muted" style="font-size:12px">${esc(w.why)}</div>` : ""}
+    ${w.why ? `<div class="muted t-s">${esc(w.why)}</div>` : ""}
     <details class="wlines"${w.options.length ? "" : " open"}><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
     ${w.options.length ? opts : `<div class="muted">MaximizePM cannot read its choices (a slider or a list with no
       numbers): <span class="link" data-term="${esc(agent)}" tabindex="0" role="button">answer it in the terminal</span>.</div>`}
@@ -54,7 +54,6 @@ function questionBlock(w) {
     <div class="wq">${esc(w.body)}</div>
     ${w.note ? `<div class="muted">The manager: ${esc(w.note)}</div>` : ""}
     <textarea class="wanswer" placeholder="Your answer" aria-label="Your answer"></textarea>
-    ${pane ? "" : `<div class="muted" style="font-size:12px">This session runs in no tmux pane here, so the answer goes to the queue only; the session reads it with maxpm inbox.</div>`}
     <button class="btn primary wgo" type="submit">${pane ? "Send to the chat" : "Answer"}</button>
   </form>`;
 }
@@ -66,7 +65,11 @@ export function closeWaiting() { dlg.close(); }
 export function openWaiting(s, opts = {}) {
   agent = s.name; pane = !!s.terminal; onSent = opts.onSent || null;
   $("#waitTitle").textContent = `Waits for you: ${s.name}`;
-  $("#waitList").innerHTML = s.waiting.map((w, n) => w.kind === "question" ? questionBlock(w) : promptBlock(w, n)).join("");
+  // With no pane, one note under the heading for every question, not the same note under each one (#5359).
+  const note = !pane && s.waiting.some(w => w.kind === "question")
+    ? `<div class="muted t-s wnote">This session runs in no tmux pane here, so an answer goes to the queue only; the session reads it with maxpm inbox.</div>`
+    : "";
+  $("#waitList").innerHTML = note + s.waiting.map((w, n) => w.kind === "question" ? questionBlock(w) : promptBlock(w, n)).join("");
   // Files and local pages in the question, the command and the terminal's text open in the side panel (#4689).
   $("#waitList").dataset.agent = s.name;
   $("#waitList").querySelectorAll(".wq, .wcmd, .wlines pre").forEach(x => linkArtifacts(x, s.name, { inPre: true }));
