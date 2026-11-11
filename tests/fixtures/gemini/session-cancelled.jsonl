@@ -1,0 +1,3 @@
+{"sessionId": "c1", "projectHash": "x", "startTime": "2026-11-11T07:56:00.000Z", "lastUpdated": "2026-11-11T07:56:00.000Z", "kind": "main"}
+{"id": "c1u", "timestamp": "2026-11-11T07:56:01.000Z", "type": "user", "content": [{"text": "Remove the build folder."}]}
+{"id": "c1g", "timestamp": "2026-11-11T07:56:02.000Z", "type": "gemini", "content": "", "model": "gemini-3.8-flash", "toolCalls": [{"id": "run_shell_command__call_3", "name": "run_shell_command", "args": {"command": "rm -rf build"}, "status": "cancelled", "timestamp": "2026-11-11T07:56:09.000Z", "resultDisplay": "Tool call cancelled by user.", "displayName": "Shell"}]}

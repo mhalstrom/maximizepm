@@ -52,7 +52,7 @@ class Contract(Env):
             self.assertEqual(agents.check(a.module, mid), [])
             self.assertEqual(a.source, "builtin")
             self.assertEqual(a.missing(), [])
-            for part in ("describe", "effort", "launch", "identity", "resume", "chat"):
+            for part in ("describe", "launch", "identity", "resume", "chat") + (("effort",) if mid in ("claude", "codex") else ()):
                 self.assertTrue(a.supports(part), (mid, part))
             for part in ("state", "detect", "input") if mid in ("claude", "codex") else ():  # #5183
                 self.assertTrue(a.supports(part), (mid, part))
@@ -79,8 +79,8 @@ class Contract(Env):
     def test_names_are_found_in_any_case_and_an_unknown_name_says_what_is_registered(self):
         self.assertIs(agents.find("Claude-Code"), agents.get("claude"))
         self.assertIsNone(agents.find(""))
-        with self.assertRaisesRegex(RiverError, r"agent 'gemini' is not registered.*claude, codex.*agents/<id>\.py"):
-            agents.get("gemini")
+        with self.assertRaisesRegex(RiverError, r"agent 'nosuch' is not registered.*claude, codex.*agents/<id>\.py"):
+            agents.get("nosuch")
 
     def test_check_names_each_problem(self):
         self.assertEqual(agents.check(module(DESCRIBE=GOOD), "pi"), [])
@@ -164,15 +164,15 @@ class Overrides(Env):
 
     def test_a_broken_user_module_is_left_out_and_named_and_the_built_in_one_stays(self):
         self.user_module("claude", "DESCRIBE = {'id': 'claude', 'label': 'C', 'exe': 'c', 'family': 'claude'}\n1/0\n")
-        self.user_module("gemini", "DESCRIBE = {'id': 'gemini', 'label': 'Gemini', 'exe': 'gemini'}\n")
+        self.user_module("nosuch", "DESCRIBE = {'id': 'nosuch', 'label': 'No such', 'exe': 'nosuch'}\n")
         self.user_module("Bad-Name", "DESCRIBE = {}\n")
         self.assertEqual(agents.get("claude").source, "builtin")
         err = agents.errors()
         self.assertIn("ZeroDivisionError", err["claude"])
-        self.assertIn("DESCRIBE has no 'family'", err["gemini"])
+        self.assertIn("DESCRIBE has no 'family'", err["nosuch"])
         self.assertIn("must be an id", err["Bad-Name"])
-        with self.assertRaisesRegex(RiverError, r"agent 'gemini' is not registered \(.*gemini\.py: DESCRIBE has no 'family'"):
-            agents.get("gemini")
+        with self.assertRaisesRegex(RiverError, r"agent 'nosuch' is not registered \(.*nosuch\.py: DESCRIBE has no 'family'"):
+            agents.get("nosuch")
 
     def test_two_agents_with_one_alias_are_named(self):
         self.user_module("cc", "DESCRIBE = {'id': 'cc', 'label': 'CC', 'exe': 'cc', 'family': 'claude', 'aliases': ['claude-code']}\n")

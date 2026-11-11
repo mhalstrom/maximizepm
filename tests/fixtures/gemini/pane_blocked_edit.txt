@@ -1,0 +1,23 @@
+
+ ███            █████████  ██████████ ██████   ██████ █████ ██████   █████ █████
+░░░███         ███░░░░░███░░███░░░░░█░░██████ ██████ ░░███ ░░██████ ░░███ ░░███
+
+Tips for getting started:
+1. Ask questions, edit files, or run commands.
+2. Be specific for the best results.
+3. Create GEMINI.md files to customize your interactions with Gemini.
+4. /help for more information.
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ?  Edit app.py: print('hi') => print('hello')                                                    │
+│                                                                                                  │
+│ 1 - print('hi')                                                                                  │
+│ 1 + print('hello')                                                                               │
+│                                                                                                  │
+│ Apply this change?                                                                               │
+│                                                                                                  │
+│ ● 1. Allow once                                                                                  │
+│   2. Allow for this session                                                                      │
+│   3. Modify with external editor                                                                 │
+│   4. No, suggest changes (esc)                                                                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

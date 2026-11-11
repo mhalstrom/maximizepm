@@ -1,0 +1,20 @@
+
+ ███            █████████  ██████████ ██████   ██████ █████ ██████   █████ █████
+░░░███         ███░░░░░███░░███░░░░░█░░██████ ██████ ░░███ ░░██████ ░░███ ░░███
+
+Tips for getting started:
+1. Ask questions, edit files, or run commands.
+2. Be specific for the best results.
+3. Create GEMINI.md files to customize your interactions with Gemini.
+4. /help for more information.
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Do you trust the files in this folder?                                                           │
+│                                                                                                  │
+│ Trusting a folder allows Gemini CLI to load its local configurations, including custom commands, │
+│ hooks, MCP servers, agent skills, and settings.                                                  │
+│                                                                                                  │
+│ ● 1. Trust folder (demo)                                                                         │
+│   2. Trust parent folder (Projects)                                                              │
+│   3. Don't trust                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

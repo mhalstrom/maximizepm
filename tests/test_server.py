@@ -2969,7 +2969,7 @@ class LaunchProfiles(unittest.TestCase):
             core._launch_agent_cmd(self.c, pid, "Grok", options={"remote_control": "off"})
         # Settings and entries are checked when set.
         for key, value, msg in (("claude_remote_control", "yes", "on or off"), ("codex_approval", "always", "one of"),
-                                ("claude_prompt", " ", "first prompt"), ("launch_agents", "X=@gemini", "platform is one of"),
+                                ("claude_prompt", " ", "first prompt"), ("launch_agents", "X=@nosuch", "platform is one of"),
                                 ("launch_agents", "X=@codex colour=red", "no option 'colour'"),
                                 ("launch_agents", "X=@codex sandbox", "option=value")):
             with self.assertRaisesRegex(RiverError, msg):
@@ -3047,13 +3047,13 @@ class LaunchProfiles(unittest.TestCase):
         plain = core.item_add(c, "shop", "fix the parser", priority=3)["id"]
         self.assertEqual(core.item_show(c, own)["agent"], "codex")
         with self.assertRaisesRegex(RiverError, "agent type is one of"):
-            core.item_edit(c, plain, models={"agent": "gemini"})
+            core.item_edit(c, plain, models={"agent": "nosuch"})
         with self.assertRaisesRegex(RiverError, "runs openai models.*model opus is claude"):
             core.item_edit(c, own, models={"model": "opus"})
         # Rules pick a type from the files an item touches or a word in its title; default_agent is the fallback.
         core.config_set(c, "agent_rules", "codex: *.css, logo")
         with self.assertRaisesRegex(RiverError, "needs the form"):
-            core.config_set(c, "agent_rules", "gemini: *.css")
+            core.config_set(c, "agent_rules", "nosuch: *.css")
         ann = core.annotate(c)
         self.assertEqual([(ann[i]["agent"], ann[i]["agent_from"]) for i in (css, logo, own, plain)],
                          [("codex", "agent_rules"), ("codex", "agent_rules"), ("codex", "item"), (None, None)])
