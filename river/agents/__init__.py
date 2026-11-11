@@ -145,10 +145,15 @@ class Raw(str):
 #      "url":        its web link with {id} ("https://.../{id}"), or one link for every session (Codex's web app), or None,
 #      "inside_env": the variables that tell that a command runs inside this agent (CLAUDECODE, CODEX_THREAD_ID);
 #                    this replaces core.agent_type_from_env,
+#      "id_pattern": a regex that the whole id must match, or None for SAFE_ID (#5212: an id from the environment
+#                    names a log file, so it never holds a path or a glob),
 #    }
+# With source "env" and CHAT["ref"] "session", each maxpm command records the id it finds in "env" for the acting
+# agent (core.session_from_env, agent_sessions): the Sessions tab then finds the agent's chat log by it (#5212).
 IDENTITY_SOURCES = ("hook", "env", "log", "pane")
 IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "log_glob": (str, type(None)), "pane": (str, type(None)),
-                 "url": (str, type(None)), "inside_env": (list, tuple)}
+                 "url": (str, type(None)), "inside_env": (list, tuple), "id_pattern": (str, type(None))}
+SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 
 # 6. Chat log (#5182: river/sessions.py reads every chat log through this part, and core.measure_usage the usage).
 # chat_path(session_ref, folder, root=None) -> the log file of a session (a path), or None; session_ref is what
@@ -378,6 +383,8 @@ def check(module, mid=None):
         out += _shape("IDENTITY", ident, IDENTITY_KEYS, ("source",))
         if isinstance(ident, dict) and ident.get("source") not in IDENTITY_SOURCES:
             out.append(f"IDENTITY['source'] is {ident.get('source')!r}, not one of {', '.join(IDENTITY_SOURCES)}")
+        if isinstance(ident, dict) and isinstance(ident.get("id_pattern"), str):
+            out += _regex("IDENTITY['id_pattern']", ident["id_pattern"])
     if (getattr(module, "chat_path", None) is None) != (getattr(module, "parse_chat", None) is None):
         out.append("the chat part needs chat_path and parse_chat together")
     chat = getattr(module, "CHAT", None)

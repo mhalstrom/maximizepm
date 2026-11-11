@@ -1593,7 +1593,7 @@ def _for_other(conn, actor):
     that has a session of its own already."""
     me = (os.environ.get("MAXPM_AGENT") or "").strip()
     if not me:
-        owner = core.session_owner(conn, core.claude_session_from_env())
+        owner = core.session_owner(conn, core.session_from_env())
         return bool(owner and actor and owner != actor
                     and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone()
                     and conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? LIMIT 1", (actor,)).fetchone())
@@ -1722,7 +1722,7 @@ def _run(args, conn):
     if st and not args.json:
         print(_stop_banner(actor, st), file=sys.stderr)
     if not for_other:  # the manager's session stays the manager's (#5060)
-        core.record_claude_session(conn, actor, core.claude_session_from_env())  # before done measures the item
+        core.record_session(conn, actor, core.session_from_env())  # before done measures the item
     try:
         res = dispatch(conn, args, actor)
     except RiverError:
@@ -1737,7 +1737,7 @@ def _run(args, conn):
     me = res.get("agent") if args.cmd in ("go", "plan", "manage") and isinstance(res, dict) else actor
     if not for_other:
         core.record_session_url(conn, me, core.session_url_from_env())
-        core.record_claude_session(conn, me, core.claude_session_from_env())
+        core.record_session(conn, me, core.session_from_env())
     with core.tx(conn):
         core.sync_needs_you(conn)  # the command may have made a human item ready, or sent a question to a person
     if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json

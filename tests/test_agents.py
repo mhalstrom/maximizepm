@@ -828,3 +828,52 @@ class SettingsAndEffort(Env):
         for part in ("a toggle is on or off", "not one of its choices", "such a setting is a toggle with a flag",
                      "nothing shows it", "come from DESCRIBE and EFFORT", "the key 'a' twice"):
             self.assertIn(part, got)
+
+
+class SessionFromEnv(Env):
+    """#5212: each maxpm command records the session id of an agent whose adapter takes it from an environment
+    variable (IDENTITY source 'env') and finds its chat log by it (CHAT ref 'session'), as it does for Claude Code."""
+
+    HERMES = """
+        import os
+        from pathlib import Path
+        DESCRIBE = {"id": "hermes", "label": "Hermes", "exe": "hermes", "family": "multi"}
+        IDENTITY = {"source": "env", "env": "HERMES_SESSION_ID", "inside_env": ["HERMES_SESSION_ID"]}
+        CHAT = {"compressed": False, "file_tools": [], "ref": "session", "cache_write": False}
+
+        def chat_path(ref, folder, root=None):
+            p = Path(os.environ["HERMES_LOGS"]) / f"{ref}.jsonl"
+            return p if p.is_file() else None
+
+        def parse_chat(lines):
+            return [], None
+    """
+
+    def test_the_id_of_each_agent_comes_from_its_adapter(self):
+        uuid = "44444444-4444-4444-8444-444444444444"
+        self.assertEqual(core.session_from_env({"CLAUDE_CODE_SESSION_ID": uuid}), uuid)
+        self.assertIsNone(core.session_from_env({"CLAUDE_CODE_SESSION_ID": "local-abc"}))  # Claude Code's are UUIDs
+        self.assertIsNone(core.session_from_env({"CODEX_THREAD_ID": "t1"}))  # Codex's goes to native_address
+        self.assertIsNone(core.session_from_env({}))
+        self.assertEqual(core.session_from_env({"HERMES_SESSION_ID": "local-abc"}), "local-abc")  # the built-in Hermes
+        self.user_module("hermes", self.HERMES)
+        env = {"HERMES_SESSION_ID": "local-abc", "CLAUDE_CODE_SESSION_ID": uuid}  # started from a Claude Code shell
+        self.assertEqual(core.session_from_env(env), "local-abc")
+        for bad in ("../x", "*", "a/b", ""):
+            self.assertIsNone(core.session_from_env({"HERMES_SESSION_ID": bad}), bad)
+
+    def test_a_command_records_it_and_the_sessions_tab_finds_the_chat(self):
+        logs = Path(self.tmp.name) / "hermes"
+        logs.mkdir()
+        (logs / "local-abc.jsonl").write_text("{}\n")
+        self.user_module("hermes", self.HERMES)
+        core.register(self.c, "w")
+        clean = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "CODEX", "MAXPM_AGENT"))}
+        with mock.patch.dict(os.environ, {**clean, "HERMES_SESSION_ID": "local-abc", "HERMES_LOGS": str(logs)},
+                             clear=True), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "w", "who"])  # any maxpm command of the agent
+        self.assertEqual([r[0] for r in self.c.execute("SELECT session_id FROM agent_sessions WHERE agent='w'")],
+                         ["local-abc"])
+        with mock.patch.dict(os.environ, {"HERMES_LOGS": str(logs)}):
+            self.assertEqual(sessions.transcript(self.c, "w"), ("hermes", logs / "local-abc.jsonl"))

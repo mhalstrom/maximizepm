@@ -8418,6 +8418,27 @@ def claude_session_from_env(env=None):
     return sid if _SESSION_ID_RE.match(sid) else None
 
 
+def session_from_env(env=None):
+    """The session id this command runs in, for agent_sessions (#5212): from the first agent adapter whose IDENTITY
+    takes the id from an environment variable that is set (source 'env') and whose chat log is found by that id
+    (CHAT['ref'] 'session'), when the id matches its IDENTITY['id_pattern'] (else agents.SAFE_ID); or None. Claude
+    Code: CLAUDE_CODE_SESSION_ID; Hermes: HERMES_SESSION_ID. Codex's thread id goes to native_address instead (its
+    CHAT['ref'] is 'address'). The order of agents.from_env: every other agent first, then codex, then claude: an
+    agent started from a Claude Code shell keeps CLAUDE_CODE_SESSION_ID."""
+    from . import agents
+    env = os.environ if env is None else env
+    got = agents.load()
+    order = sorted(m for m in got if m not in ("codex", "claude")) + [m for m in ("codex", "claude") if m in got]
+    for m in order:
+        ad, ident = got[m], got[m].identity or {}
+        if ident.get("source") != "env" or not ident.get("env") or ad.chat_ref() != "session":
+            continue
+        sid = str(env.get(ident["env"]) or "").strip()
+        if sid and re.fullmatch(ident.get("id_pattern") or agents.SAFE_ID, sid):
+            return sid
+    return None
+
+
 # ---------------------------------------------------------------- activity hooks
 
 # Claude Code runs the hooks of its adapter (river/agents/claude.py) in a session that river started (launch option
@@ -8691,14 +8712,15 @@ def report_release(conn, agent):
 
 
 def session_owner(conn, sid):
-    """The agent that MaximizePM recorded last for Claude Code session `sid` (it may be gone now), or None."""
+    """The agent that MaximizePM recorded last for session `sid` (it may be gone now), or None."""
     r = sid and conn.execute("SELECT agent FROM agent_sessions WHERE session_id=? ORDER BY first_seen DESC, rowid DESC "
                              "LIMIT 1", (sid,)).fetchone()
     return r["agent"] if r else None
 
 
-def record_claude_session(conn, name, sid):
-    """Remember that agent `name` ran a command in Claude Code session `sid` (once per pair)."""
+def record_session(conn, name, sid):
+    """Remember that agent `name` ran a command in session `sid` (once per pair): a Claude Code session, or the
+    session of any agent whose adapter names its id (session_from_env, #5212)."""
     if not (name and sid) or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? AND session_id=?",
                                           (name, sid)).fetchone():
         return
@@ -8706,6 +8728,9 @@ def record_claude_session(conn, name, sid):
         with tx(conn):
             conn.execute("INSERT OR IGNORE INTO agent_sessions (agent, session_id, first_seen) VALUES (?,?,?)",
                          (name, sid, iso(now())))
+
+
+record_claude_session = record_session  # its name before #5212
 
 
 def transcripts_root():

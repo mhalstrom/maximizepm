@@ -35,7 +35,9 @@ LAUNCH = {"session_name": True, "system_prompt_file": True, "hooks_file": True, 
           "autocompact": True, "background": True}
 
 IDENTITY = {"source": "env", "env": "CLAUDE_CODE_SESSION_ID", "log_glob": None, "pane": None, "url": None,
-            "inside_env": ["CLAUDECODE"]}
+            "inside_env": ["CLAUDECODE"],
+            # its session ids are UUIDs (core._SESSION_ID_RE): the name of its transcript, <id>.jsonl
+            "id_pattern": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"}
 
 
 def _q(s):
