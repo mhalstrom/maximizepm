@@ -71,7 +71,7 @@ function renderInbox() {
     placeholder: "No messages.", responsiveLayout: "collapse", responsiveLayoutCollapseStartOpen: false,
     rowFormatter: (row) => { row.getElement().classList.add("msg"); row.getElement().classList.toggle("read", inboxDone(row.getData().m)); },
     columns: [
-      { formatter: "responsiveCollapse", width: 28, minWidth: 28, headerSort: false, filter: false, resizable: false },
+      { formatter: "responsiveCollapse", cssClass: "col-toggle", width: 28, minWidth: 28, headerSort: false, filter: false, resizable: false },
       { title: "Message", field: "body", minWidth: 320, responsive: 0, cssClass: "wrap", html: (r) => inboxCell(r.m) },
       { title: "From", field: "from", width: 120, filter: "select", responsive: 1 },
       { title: "Kind", field: "kind", width: 90, filter: "select", responsive: 1 },
