@@ -39,7 +39,14 @@ const putHtml = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h;
 const MI = "sess-mi";
 function headerOpen(s) {
   const set = s.provider ? button("Settings", { cls: MI, data: { settings: s.name }, title: "The settings this session runs with, and what you can change" }) : "";
-  return headerOpenBtn(s) + set + (s.running ? endButton(s, { cls: MI + " sess-mi-end" }) : "");
+  return headerOpenBtn(s) + pinRow(s) + set + (s.running ? endButton(s, { cls: MI + " sess-mi-end" }) : "");
+}
+// Pin and Unpin of a worker in the ⋯ menu (#5400): a touch screen has no hover, so the row's pin does not show there.
+function pinRow(s) {
+  if (!s.running || ["manager", "expert", "assistant"].includes(s.role)) return "";
+  const on = isPinned(s);
+  return button(on ? "Unpin" : "Pin to the top", { cls: MI, data: { "pin-to": on ? "off" : "on", "pin-name": s.name },
+    title: on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions" });
 }
 // The texts of the web link and of why there is none come from the session's agent (components/agents.js, #5184);
 // a session of no known agent takes the main agent's.
@@ -298,30 +305,49 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       list = j.sessions;
       proposals = j.proposals || [];
       forgetDrafts(list);
-      // At load: the session chosen last, else the first. A session that ended gives way to the first.
-      if (!pane && (!agent || (!pinned && !list.some(s => s.name === agent)))) {
-        const want = store(PICKED);
-        pick((list.find(s => s.name === want) || list.find(s => s.role === "manager") || list[0] || {}).name || null, false);
-      }
-      renderList(mgr, list.filter(x => x.role === "manager"), agent, NO_MANAGER);
-      // The experts in their own group under the manager (#4955): sessions the person talks with for days.
-      const ex = list.filter(x => x.role === "expert");
-      expertGroup.classList.toggle("hidden", !ex.length);
-      renderList(experts, ex, agent, "");
-      // The person's assistant under the You row (#5110), not among the workers.
-      renderList(assist, list.filter(x => x.role === "assistant"), agent, "");
-      // Pinned workers first, each group in today's order (#5007; sort is stable).
-      const workers = list.filter(x => !["manager", "expert", "assistant"].includes(x.role));
-      workers.sort((a, b) => isPinned(b) - isPinned(a));
-      renderList(side, workers, agent,
-        `<div class="muted">No other agent session runs now. Start one with Start an agent, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
-      proposeCard();
-      fit();
-      autoWait();
+      draw();
     } catch (e) {
       side.innerHTML = `<div class="muted">Could not read the sessions: ${esc(e.message)}</div>`;
       delete side.dataset.empty;
     } finally { busy = false; if (again) refresh(); }
+  }
+
+  // The rows from the list as it is now: refresh after each read, and a pin at once (#5400).
+  function draw() {
+    // At load: the session chosen last, else the first. A session that ended gives way to the first.
+    if (!pane && (!agent || (!pinned && !list.some(s => s.name === agent)))) {
+      const want = store(PICKED);
+      pick((list.find(s => s.name === want) || list.find(s => s.role === "manager") || list[0] || {}).name || null, false);
+    }
+    renderList(mgr, list.filter(x => x.role === "manager"), agent, NO_MANAGER);
+    // The experts in their own group under the manager (#4955): sessions the person talks with for days.
+    const ex = list.filter(x => x.role === "expert");
+    expertGroup.classList.toggle("hidden", !ex.length);
+    renderList(experts, ex, agent, "");
+    // The person's assistant under the You row (#5110), not among the workers.
+    renderList(assist, list.filter(x => x.role === "assistant"), agent, "");
+    // Pinned workers first, each group in today's order (#5007; sort is stable).
+    const workers = list.filter(x => !["manager", "expert", "assistant"].includes(x.role));
+    workers.sort((a, b) => isPinned(b) - isPinned(a));
+    renderList(side, workers, agent,
+      `<div class="muted">No other agent session runs now. Start one with Start an agent, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
+    proposeCard();
+    fit();
+    autoWait();
+  }
+
+  // Pin or unpin a worker (#5007), from its row or the ⋯ menu (#5400). The rows and the menu change at once, not at
+  // the next read of the sessions (about 5 s later); a refused pin reads them again.
+  async function setPin(name, on) {
+    if (!actor()) return toast("Choose your name in 'You are' first", true);
+    const s = list.find(x => x.name === name), me = actor();
+    if (s) {
+      s.pinned_by = on ? [...new Set([...(s.pinned_by || []), me])] : (s.pinned_by || []).filter(x => x !== me);
+      draw();
+    }
+    try { await act("session_pin", { agent: name, on }); } catch (_) { /* act showed why */ }
+    await refresh();
+    if (name === agent) poll();  // the ⋯ menu says Pin or Unpin again
   }
 
   async function poll() {
@@ -822,6 +848,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   }
   $("#sessOpen").addEventListener("click", (e) => {
     const end = e.target.closest("[data-end]"); if (end) return endIt(end.dataset.end);
+    const pn = e.target.closest("[data-pin-to]"); if (pn) return setPin(pn.dataset.pinName, pn.dataset.pinTo === "on");
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
@@ -833,11 +860,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const pin = e.target.closest("[data-pin]");
     if (pin) {  // the pin does not open the session
       e.preventDefault();
-      if (!actor()) return toast("Choose your name in 'You are' first", true);
-      const on = !pin.classList.contains("on");
-      try { await act("session_pin", { agent: pin.dataset.pin, on }); } catch (_) { return; }
-      refresh();
-      return;
+      return setPin(pin.dataset.pin, !pin.classList.contains("on"));
     }
     if (e.target.closest("[data-open], a")) return;  // an item link opens in the side panel
     const r = e.target.closest(".srow-main") && e.target.closest("[data-session]"); if (!r) return;
