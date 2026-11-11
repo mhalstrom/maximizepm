@@ -6356,10 +6356,22 @@ def _native_text(kind, sender, body):
     return f"[maxpm {kind} from {sender}] {body} (maxpm --as <you> inbox; maxpm go shows your queue)"
 
 
+def _stop_text(conn, agent, sender, reason):
+    """The stop request that goes into a session (#5249): the exact commands for each item it holds, then go, which
+    ends it. A Codex session that got only 'inbox; go' answered in words and kept its item."""
+    held = [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                                          "ORDER BY id", (agent,))]
+    me = f"maxpm --as {agent}"
+    steps = "".join(f" For #{i}: {me} done {i} --output \"<what changed, commit>\" when it is finished, else {me} "
+                    f"release {i} --note \"<what is done, what is left>\"." for i in held)
+    return (f"[maxpm stop request from {sender}] {reason} Commit the work that is finished.{steps} Then run {me} go "
+            f"once more: with nothing held it ends this session. Answering in words does not end it.")
+
+
 def _deliver_entry(conn, entry_id):
     r = conn.execute("SELECT * FROM queue_entries WHERE id=?", (entry_id,)).fetchone()
-    st = deliver_native(conn, r["agent"], _native_text("stop request" if r["kind"] == "stop" else "instruction",
-                                                       r["added_by"] or "maxpm", r["body"]))
+    st = deliver_native(conn, r["agent"], _stop_text(conn, r["agent"], r["added_by"] or "maxpm", r["body"])
+                        if r["kind"] == "stop" else _native_text("instruction", r["added_by"] or "maxpm", r["body"]))
     with tx(conn):
         conn.execute("UPDATE queue_entries SET native_status=? WHERE id=?", (st, entry_id))
     return st
@@ -6422,6 +6434,31 @@ def _finish_stop(conn, agent):
         if not conn.execute("SELECT 1 FROM events WHERE actor='maxpm' AND change=?", (f"{agent} ended (stopped)",)).fetchone():
             _event(conn, None, "maxpm", f"{agent} ended (stopped)")
     return True
+
+
+def end_stopped(conn, agent):
+    """Finish the stop of an agent that ended its turn without finishing it (#5249: a Codex session answered 'Stopped
+    as requested.' and ran no maxpm command, so it kept its item and its row said 'Ending' for half an hour).
+    maxpm serve calls it when the agent sits idle at its prompt after the stop request (server.fresh_sessions):
+    each item it still holds goes back to the queue with a note and CHECK FIRST (its commits may hold part of the
+    work), its goals, targets and queue go as in _finish_stop, the senders of what it did not read hear it, and it
+    is unregistered. Returns {"ended", "why", "released"}, or None when it has no stop request."""
+    a = conn.execute("SELECT stop_at, stop_by, stop_reason FROM agents WHERE name=?", (agent,)).fetchone()
+    if a is None or not a["stop_at"]:
+        return None
+    why = (f"stopped by {a['stop_by'] or 'maxpm'} ({a['stop_reason']}); its turn ended without the release, so "
+           f"MaximizePM finished the stop")
+    released = []
+    for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                          (agent,)).fetchall():
+        release(conn, r["id"], f"{agent} was {why}. CHECK FIRST: its commits (git log --grep '#{r['id']}') and "
+                               f"files may hold part of the work", agent)
+        with tx(conn):
+            conn.execute("UPDATE items SET needs_check=1 WHERE id=? AND status='open'", (r["id"],))
+        released.append(r["id"])
+    _finish_stop(conn, agent)
+    out = end_idle(conn, agent, why, force=True)
+    return {**(out or {"ended": None, "why": why}), "released": released}
 
 
 # ---------------------------------------------------------------- registry and leases
@@ -12613,13 +12650,15 @@ def hand_over(conn, agent, news):
     return ids
 
 
-def end_idle(conn, agent, why):
+def end_idle(conn, agent, why, force=False):
     """End an agent that is idle at its prompt and holds nothing: tell the senders of what it never read (a
     message, an instruction in its queue), release its goals, and unregister it. Returns None when it holds an
-    item or owns a target (it stays)."""
+    item or owns a target (it stays). force (a stopped agent, end_stopped): it ends also while it waits on a
+    person's answer, since nobody needs its work any more; it must hold nothing."""
     with tx(conn):
         if conn.execute("SELECT 1 FROM items WHERE assignee=? AND status IN ('in_progress','held')", (agent,)).fetchone() \
-                or conn.execute("SELECT 1 FROM targets WHERE owner=?", (agent,)).fetchone() or waits_on_person(conn, {agent}):
+                or conn.execute("SELECT 1 FROM targets WHERE owner=?", (agent,)).fetchone() \
+                or (not force and waits_on_person(conn, {agent})):
             return None
         unread = conn.execute("SELECT id, kind, from_agent, item_id FROM messages WHERE to_agent=? AND from_agent<>'maxpm' "
                               "AND (read_at IS NULL OR (kind='question' AND state='open'))", (agent,)).fetchall()

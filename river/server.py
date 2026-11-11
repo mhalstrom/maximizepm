@@ -1892,9 +1892,10 @@ def _pane_reports(conn, states):
 IDLE = {}
 
 
-def _idle_panes(conn, names, after):
+def _idle_panes(conn, names, after, prompt_ok=()):
     """{agent: pane} for the agents among names whose tmux pane shows the agent CLI (not a shell) with no prompt
-    (prompt_pattern: a person answers that) and the same screen for `after`. One look per pass of the loop."""
+    (prompt_pattern: a person answers that) and the same screen for `after`. One look per pass of the loop.
+    prompt_ok: agents whose prompt counts as idle (a stopped agent: nobody needs its answer, #5249)."""
     import re
     for agent in [a for a in IDLE if a not in names]:
         del IDLE[agent]
@@ -1913,7 +1914,7 @@ def _idle_panes(conn, names, after):
             continue  # the pane closed since the list
         text = _plain(screen["text"])
         rx, layout, _ = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
-        if screen["ended"] or (rx and _prompt_found(_prompt_tail(text), rx, layout)):
+        if screen["ended"] or (agent not in prompt_ok and rx and _prompt_found(_prompt_tail(text), rx, layout)):
             IDLE.pop(agent, None)  # a shell, or a prompt that a person answers
             continue
         st = IDLE.get(agent)
@@ -2036,6 +2037,10 @@ def fresh_sessions(conn, runner=None):
     - An agent idle at its prompt (_idle_panes, idle_after) with news (core.idle_news): its work goes to fresh
       sessions (core.hand_over), and it ends.
     - An agent idle at its prompt with nothing in hand and no river command for idle_end: it ends.
+    - An agent with a stop request that sits idle at its prompt for idle_after after the request and its last river
+      command (a prompt on its screen counts as idle: nobody needs its answer): MaximizePM finishes the stop
+      (core.end_stopped: its items go back to the queue with CHECK FIRST, and it ends). A session can answer a stop
+      in words only and keep its item, and the page showed it as Ending until a person cleaned up (#5249).
     An agent in whose session a command runs (core.busy_now) is not idle, whatever its screen shows; nor is one
     that waits on a person's answer (core.waits_on_person): the person may answer in its terminal; nor one that
     waits for a background command or a subagent of its own (core.background_work): it reads its news when the
@@ -2074,13 +2079,28 @@ def fresh_sessions(conn, runner=None):
                              (a["name"],)).fetchone()
         if news or (end.total_seconds() and idle >= end and not holds):
             cands[a["name"]] = news
+    stopped = set()
+    for a in conn.execute("SELECT name, last_seen, stop_at FROM agents WHERE kind='ai' AND stop_at IS NOT NULL").fetchall():
+        if t - max(core.parse_iso(a["stop_at"]), core.parse_iso(a["last_seen"])) >= after:
+            cands[a["name"]], stopped = None, stopped | {a["name"]}  # it had idle_after to finish the stop itself
     for agent in core.busy_now(conn, set(cands)) if cands else ():
         del cands[agent]  # a long command with a quiet screen: the agent works
-    for agent in core.waits_on_person(conn, set(cands)) if cands else ():
+    for agent in core.waits_on_person(conn, set(cands) - stopped) if cands else ():
         del cands[agent]  # it asked a person and waits for the answer, maybe in its terminal: not idle
     for agent in [a for a in cands if _has_background(conn, a, cands[a])]:
         del cands[agent]  # it waits for its own background command or subagent: the harness wakes it (#1611)
-    for agent, pane in _idle_panes(conn, cands, after).items():
+    for agent, pane in _idle_panes(conn, cands, after, prompt_ok=stopped).items():
+        if agent in stopped:
+            try:
+                ended = core.end_stopped(conn, agent)
+            except RiverError:
+                ended = None
+            if ended and ended.get("ended"):
+                IDLE.pop(agent, None)
+                out["ended"][agent] = ended["why"]
+                if any(p["pane"] == pane and p["agent"] == agent for p in _tmux_panes(everywhere=True)):
+                    _tmux("kill-pane", "-t", pane, check=False)
+            continue  # its items wait in the queue: a person stopped it, so nothing starts for them by itself
         news, why = cands[agent], f"idle at its prompt with nothing in hand for {core.setting(conn, 'idle_end')}"
         ids = []
         if news:

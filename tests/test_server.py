@@ -2428,6 +2428,69 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual([x for x in passes if x != {"started": {}, "ended": {}, "failed": {}}], [])
         self.assertTrue(len(passes) > 80 and pane in self.tmux.panes)
 
+    def test_a_session_that_answers_a_stop_in_words_only_still_ends(self):
+        # #5249: a Codex session answered a stop request with 'Stopped as requested.', ran no maxpm command, kept its
+        # item, and a stray menu stayed open in its pane; its row said 'Ending: asked to stop' for 28 minutes.
+        core.register(self.c, "mark", human=True)
+        item = core.item_add(self.c, "shop", "rename the field")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.IDLE.clear)
+        p = mock.patch.object(core, "now", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        clock[0] += core.timedelta(seconds=1)
+        core.activity(self.c, name)
+        core.claim(self.c, item, name)
+        nothing = {"started": {}, "ended": {}, "failed": {}}
+
+        def tick(after=30):
+            clock[0] += core.timedelta(seconds=after)
+            return server.fresh_sessions(self.c)
+        # The stop text names the exact commands for the item it holds, then go.
+        text = core._stop_text(self.c, name, "mark", "mark needs the slot.")
+        for want in (f"maxpm --as {name} done {item} --output", f"maxpm --as {name} release {item} --note",
+                     f"Then run maxpm --as {name} go once more"):
+            self.assertIn(want, text)
+        core.stop_agent(self.c, name, "mark needs the slot.", actor="mark")
+        # Its answer is words only; a menu stays open in its pane (a prompt that nobody needs answered now).
+        pane["screen"] = ("• Stopped as requested.\n\n  Select model\n› 1. gpt-6-luna\n  2. gpt-6.1-sol\n\n"
+                          "  Press enter to confirm or esc to go back")
+        self.assertEqual([tick() for _ in range(3)], [nothing] * 3)  # it may still finish the stop itself
+        self.assertEqual(core.item_show(self.c, item)["assignee"], name)
+        ended = {}
+        for _ in range(8):
+            ended.update(tick()["ended"])
+        self.assertIn(name, ended)
+        self.assertIn("stopped by mark (mark needs the slot.)", ended[name])
+        it = core.item_show(self.c, item)
+        self.assertEqual((it["status"], it["assignee"]), ("open", None))
+        self.assertIn("CHECK FIRST", it["events"][0]["change"] + " ".join(e["change"] for e in it["events"][:3]))
+        self.assertEqual(self.c.execute("SELECT needs_check FROM items WHERE id=?", (item,)).fetchone()[0], 1)
+        self.assertIsNone(self.c.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone())  # no 'Ending' row
+        self.assertNotIn(pane, self.tmux.panes)  # the pane river opened for it is closed
+
+    def test_a_stopped_session_that_still_runs_maxpm_commands_is_left_to_finish(self):
+        core.register(self.c, "mark", human=True)
+        item = core.item_add(self.c, "shop", "rename the field")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.IDLE.clear)
+        p = mock.patch.object(core, "now", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        clock[0] += core.timedelta(seconds=1)
+        core.activity(self.c, name)
+        core.claim(self.c, item, name)
+        core.stop_agent(self.c, name, "mark needs the slot.", actor="mark")
+        pane["screen"] = "⏺ I commit the finished part.\n\n╭────╮\n│ >  │\n╰────╯\n  ? for shortcuts"
+        for _ in range(12):  # a maxpm command each minute: it works on the stop
+            clock[0] += core.timedelta(seconds=60)
+            core.activity(self.c, name)
+            self.assertEqual(server.fresh_sessions(self.c)["ended"], {})
+        core.release(self.c, item, "stopped: the rename is half done", name)
+        self.assertEqual(core.item_show(self.c, item)["assignee"], None)
+
     def test_work_for_an_agent_idle_at_its_prompt_goes_to_a_fresh_session(self):
         import threading
         from unittest import mock
