@@ -416,8 +416,10 @@ DETECT = {
     "working": r"\bWaiting for \S+$",
     # Every question of Aider (io.confirm_ask; Aider asks no other kind): '<question> (Y)es/(N)o[/(A)ll]
     # [/(S)kip all][/(D)on't ask again] [Yes]: ', with nothing typed after it. Examples: create a file, add a file,
-    # run a shell command, add its output, fix lint errors, add .aider* to .gitignore, open a URL.
-    "blocked": [r"\(Y\)es/\(N\)o(?:/\([A-Z]\)[^/\[]*)*\s\[[^\]]*\]:$"],
+    # run a shell command, add its output, fix lint errors, add .aider* to .gitignore, open a URL. In a narrow pane
+    # (57 columns) prompt_toolkit puts the ':' on a line of its own, so the question line may end at ']' (#5265); the
+    # watcher takes that ':' line as the rest of the question.
+    "blocked": [r"\(Y\)es/\(N\)o(?:/\([A-Z]\)[^/\[]*)*\s\[[^\]]*\]:?$"],
     # Aider's questions take y, n, a, s or d; there is no option to type an answer instead.
     "tell_instead": None,
     # No pasted images in the prompt: /paste reads the clipboard, and /add <file.png> adds an image file.

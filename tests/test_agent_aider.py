@@ -190,6 +190,16 @@ class Detect(Env):
         for name, q in questions.items():
             self.assertEqual(watch(screen(f"blocked-{name}")), ("blocked", q), name)
 
+    def test_a_question_whose_colon_went_to_the_next_line_in_a_narrow_pane(self):
+        # Recorded at 57 columns (#5265): '... (Y)es/(N)o [Yes]' and ':' alone on the line under it.
+        narrow = screen("blocked-gitignore-narrow")
+        self.assertIn("[Yes]\n:\n", narrow)
+        self.assertEqual(watch(narrow), ("blocked", "Add .aider* to .gitignore (recommended)?"))
+        # The person answered: ': y' joined to the question matches no more, so it waits no more.
+        self.assertEqual(watch(narrow.replace("[Yes]\n:\n", "[Yes]\n: y\n")), (None, None))
+        # Text under the question that is not its rest: no prompt.
+        self.assertEqual(watch(narrow.replace("[Yes]\n:\n", "[Yes]\nRunning git add .gitignore\n")), (None, None))
+
     def test_typed_text_and_an_answered_question_say_neither(self):
         # What the person typed and has not sent yet: the state stays idle.
         self.assertEqual(watch(screen("idle-diff-mode").rstrip() + " what next"), (None, None))

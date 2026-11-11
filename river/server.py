@@ -1736,6 +1736,10 @@ def _prompt_found(tail, rx, layout=None):
     lines, top, end = parts["lines"], parts["top"], parts["end"]
     if end is None:
         end = under = max(n for n, x in enumerate(tail) if rx.search(x)) + 1
+        # The rest of the question on a line of its own, where the terminal broke it (Aider's ':' in a narrow pane,
+        # #5265): the two lines joined still match. An answer typed after it (': y') makes them match no more.
+        if under < len(tail) and tail[under].strip() and rx.search(tail[under - 1].rstrip() + tail[under].strip()):
+            under += 1
     elif top > 0 and lay["rule"].match(lines[top - 1]):
         return None  # the input box: a rule, then the marked line with what the person typed
     else:
