@@ -589,6 +589,54 @@ class Adopt(Base):
         server.session_setting_live(self.c, "ag", "model", "sonnet")
         self.assertIn("/model sonnet", " ".join(str(k) for k in self.tmux.panes[0]["keys"]))
 
+    def pane(self):
+        """A tmux pane of ag at its idle prompt, as after a move into tmux."""
+        self.tmux.session = True
+        self.tmux._pane(name="ag")
+        self.tmux.panes[0].update(agent="ag", running="claude", screen="⏺ Done.\n\n╭────╮\n│ >  │\n╰────╯\n  ? for shortcuts")
+
+    def test_a_change_in_place_shows_until_the_next_reply_names_the_setting(self):
+        """#5288: after /model with no reply, Claude Code's transcript still names the old model, and the dialog showed
+        it. A change that the page sent shows ('changed now') until a line written after it names the setting."""
+        def reply(model):
+            with open(self.path, "a") as f:
+                f.write(json.dumps({"type": "assistant", "timestamp": "2026-11-08T10:01:00Z", "cwd": self.dir.name,
+                                    "message": {"role": "assistant", "model": model, "stop_reason": "end_turn",
+                                                "content": [{"type": "text", "text": "ok"}]}}) + "\n")
+
+        def model():
+            row = next(r for r in sessions.session_settings(self.c, "ag", self.root, self.croot)["settings"]
+                       if r["key"] == "model")
+            return row["value"], row["source"]
+        self.pane()
+        reply("claude-opus-5-5")
+        self.quiet()
+        self.assertEqual(model(), ("opus", "session"))
+        server.session_setting_live(self.c, "ag", "model", "sonnet")
+        self.assertEqual(model(), ("sonnet", "changed now"))
+        with open(self.path, "a") as f:  # what Claude Code writes for the command itself names no model
+            f.write(json.dumps({"type": "user", "message": {"role": "user", "content": "<command-name>/model</command-name>"}}) + "\n")
+        self.assertEqual(model(), ("sonnet", "changed now"))
+        reply("claude-opus-5-5")  # the CLI did not take it: its next reply says what it runs
+        self.assertEqual(model(), ("opus", "session"))
+        self.quiet()
+        server.session_setting_live(self.c, "ag", "model", "sonnet")
+        reply("claude-sonnet-5-5")
+        self.assertEqual(model(), ("sonnet", "session"))
+
+    def test_a_slash_command_with_a_value_from_the_message_box_shows_in_the_dialog(self):
+        """#5288: /effort <value> typed in the message box, once the pane took it, shows in the dialog as well."""
+        self.pane()
+        self.quiet()
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        with mock.patch.object(server, "command_taken", lambda *a: "ran"):
+            server.session_send(self.c, "ag", "/effort high", who="mark")
+        self.assertIn("/effort high", self.tmux.panes[0]["keys"])
+        row = next(r for r in sessions.session_settings(self.c, "ag", self.root, self.croot)["settings"]
+                   if r["key"] == "effort")
+        self.assertEqual((row["value"], row["source"]), ("high", "changed now"))
+
     def test_restart_keeps_the_settings_the_session_runs_with(self):
         """#5274: a restart took the profile's defaults for every setting the person did not change (Amp started with
         --visibility private came back without it). Now it keeps what the running command line shows, and changes

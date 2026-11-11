@@ -1373,6 +1373,7 @@ def session_setting_live(conn, agent, key, value, who=None):
     send_keys(pane, [{"key": "Enter"}])
     with core.tx(conn):
         core._event(conn, None, who or "maxpm", f"{agent}: {spec['label']} set to {value} in place")
+    sessions.record_live(conn, agent, key, value)  # the dialog shows it before the next turn names it (#5288)
     return {"agent": agent, "key": key, "value": value}
 
 
@@ -2811,6 +2812,10 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
         _keep_prompt(conn, agent, text, who)
         if cmd:
             out["command"] = {"name": cmd["name"], "run": cmd["run"], "taken": command_taken(conn, agent, pane, text)}
+            if cmd["setting"] and cmd["args"] and out["command"]["taken"] == "ran":
+                # /model <value> or /effort <value> ran: the Settings dialog shows it before the next turn (#5288).
+                from . import sessions
+                sessions.record_live(conn, agent, cmd["setting"], cmd["args"].split()[0])
         return out
     # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
     # prompt early), then Enter.

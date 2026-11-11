@@ -588,6 +588,7 @@ CREATE TABLE IF NOT EXISTS agents (
   report_seq      INTEGER,                   -- the --seq of its last maxpm report, so a late one changes nothing
   report_session  TEXT,                      -- the --session-id of that report
   resume_argv     TEXT,                      -- the command that resumes its session, from maxpm report -- ... (JSON)
+  live_settings   TEXT,                      -- settings the page changed in place, {key: {value, base}} (JSON, #5288)
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
   host           TEXT,
   pid_cmd        TEXT,
@@ -1090,7 +1091,8 @@ def _migrate(conn):
     for col in ("activity_at", "activity_event", "activity_prompt", "activity_told", "activity_waits"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
-    for col, kind in (("report_seq", "INTEGER"), ("report_session", "TEXT"), ("resume_argv", "TEXT")):
+    for col, kind in (("report_seq", "INTEGER"), ("report_session", "TEXT"), ("resume_argv", "TEXT"),
+                      ("live_settings", "TEXT")):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
     if "session_url" not in acols:

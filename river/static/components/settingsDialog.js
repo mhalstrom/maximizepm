@@ -12,7 +12,9 @@ import { nameChoices, OTHER } from "./modelPick.js";
 
 const dlg = makeDialog($("#setDlg"));
 let cur = null, onDone = null;
-const SRC = { session: "from the session", "command line": "from its command line", default: "the default" };
+const SRC = { session: "from the session", "command line": "from its command line", default: "the default",
+  // Sent from this page with no turn after it yet (#5288): the session names it at its next turn.
+  "changed now": "changed from this page; the session names it at its next turn" };
 
 function field(s, i) {
   const val = s.value == null ? "" : s.value;

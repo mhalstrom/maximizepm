@@ -1250,6 +1250,61 @@ def _transcript_settings(kind, path):
     return ad.chat_settings(text.splitlines())
 
 
+def record_live(conn, agent, key, value, root=None, croot=None):
+    """A setting that the page changed in place (#5288: the Settings dialog's Change now, or /model <value> and
+    /effort <value> from the message box). Codex writes a turn_context only at its next turn, and Claude Code names
+    the model only on its next reply, so until then the transcript shows the old value. Kept with the transcript's
+    file and size now: session_settings shows the change until a line written after that names the setting (the next
+    turn says what the session runs, also when the CLI did not take the change)."""
+    import json as _json
+    _kind, path = transcript(conn, agent, root, croot)
+    try:
+        size = Path(path).stat().st_size if path else None
+    except OSError:
+        size = None
+    with core.tx(conn):
+        r = conn.execute("SELECT live_settings FROM agents WHERE name=?", (agent,)).fetchone()
+        if not r:
+            return None
+        try:
+            live = _json.loads(r["live_settings"] or "{}")
+        except ValueError:
+            live = {}
+        live[key] = {"value": value, "path": str(path) if path else None, "size": size}
+        conn.execute("UPDATE agents SET live_settings=? WHERE name=?", (_json.dumps(live), agent))
+    return live[key]
+
+
+def _live_settings(conn, agent):
+    import json as _json
+    r = conn.execute("SELECT live_settings FROM agents WHERE name=?", (agent,)).fetchone()
+    try:
+        return _json.loads(r["live_settings"] or "{}") if r else {}
+    except ValueError:
+        return {}
+
+
+LIVE_READ = 4 * 1024 * 1024  # at most this much of a transcript after a change in place
+
+
+def _live_holds(kind, path, key, got):
+    """Whether a change in place (record_live) still shows: the session's transcript is the same file, and nothing
+    written after the change names the setting. Another file (a new session, a compaction into a new file) or
+    a line that names it: the transcript says what the session runs."""
+    if not got or not path or got.get("path") != str(path) or got.get("size") is None:
+        return False
+    ad = _adapter(kind)
+    if ad is None or not ad.has("chat_settings"):
+        return True
+    try:
+        with open(path, "rb") as f:
+            f.seek(got["size"])
+            text = f.read(LIVE_READ).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return ad.chat_settings(text.splitlines()).get(key) is None
+
+
 def session_settings(conn, agent, root=None, croot=None):
     """The Settings dialog of a session (#4625): its provider's settings with the value it runs with now (from its
     transcript, else its command line), where each comes from, whether it changes in place or needs a restart,
@@ -1269,9 +1324,14 @@ def session_settings(conn, agent, root=None, croot=None):
             seen = {}
     cmd = a.get("pid_cmd") or pane_command(conn, agent, ad)
     models = core.platform_models(conn, prov["id"]) if prov["id"] in core.launch_platforms() else []
+    live = _live_settings(conn, agent)
     out = []
     for spec in ad.session_specs():
         value, source = seen.get(spec["key"]), "session"
+        got = live.get(spec["key"])
+        if got and _live_holds(kind, path, spec["key"], got):
+            # A change the page made in place, with no turn after it yet (#5288): newer than the transcript.
+            value, source = got["value"], "changed now"
         if value is None and spec.get("cmd"):
             m = _re.search(spec["cmd"], cmd)
             value, source = (m.group(1), "command line") if m else (None, None)
