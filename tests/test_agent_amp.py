@@ -173,6 +173,34 @@ class Screens(Env):
             self.assertEqual(conn.execute("SELECT activity_event FROM agents WHERE name='amp-1'").fetchone()[0],
                              f"report:{want}", name)
 
+    def test_the_answer_card_reads_a_new_session_by_the_program_in_its_pane(self):
+        """#5271: a new Amp session blocked at 'Approval Required' before its first maxpm command, so it had no
+        agent type yet. The pane watcher saw the prompt (it reads the pane's process), but the answer card
+        (pane_prompts, api/session-prompts) read the pane with no adapter, and its options were empty."""
+        from tests.test_server import FakeTmux
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "amp-1")
+        self.assertIsNone(core.state_adapter(conn, "amp-1"))
+        tmux = FakeTmux()
+        tmux.session = True
+        tmux._pane(name="amp-1")
+        tmux.panes[0].update(agent="amp-1", running="amp", screen=fixture("pane_approval_turn.txt"))
+        old_runner, old_platform, old_pause = server.TMUX_RUNNER, core.PLATFORM, server.PROMPT_PAUSE
+        server.TMUX_RUNNER, core.PLATFORM, server.PROMPT_PAUSE = tmux, "linux", 0
+        self.addCleanup(lambda: setattr(server, "TMUX_RUNNER", old_runner))
+        self.addCleanup(lambda: setattr(core, "PLATFORM", old_platform))
+        self.addCleanup(lambda: setattr(server, "PROMPT_PAUSE", old_pause))
+        pane = tmux.panes[0]["id"]
+        card = server.pane_prompts(conn, {"amp-1": pane})["amp-1"]
+        self.assertEqual(card["options"], ["Allow Once", "Reject with feedback", "Allow All for This Session",
+                                           "Allow All for Every Session"])
+        self.assertEqual(card["tell"], 1)
+        # The person's own text goes by Amp's 'Reject with feedback', read with the same adapter.
+        with mock.patch.object(server, "agent_terminals", lambda c: {"amp-1": pane}):
+            got = server.prompt_answer(conn, "amp-1", card["sig"], other="use the test folder", who="mark")
+        self.assertEqual(got["picked"], "Reject with feedback")
+
 
 class Chat(Env):
     def test_the_export_becomes_a_file_of_finished_messages(self):

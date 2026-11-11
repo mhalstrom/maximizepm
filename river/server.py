@@ -2680,15 +2680,20 @@ def pane_prompts(conn, terminals):
     for every pane (#4607). A prompt: {question, options (their text, as the CLI lists them), selected (the option
     the marker is on), tool, command, why, lines (the prompt's lines as the pane shows them), sig (what the page
     sends back with an answer, so a prompt that changed gets no keys), tell (the number of the option that lets the
-    person type what to do instead, or None)}."""
+    person type what to do instead, or None)}. A session that ran no maxpm command yet has no agent type: its pane
+    is read with the adapter of the program that runs there, as the pane watcher reads it (#5271: a new Amp session
+    blocked at 'Approval Required' before its first command, and the card had no options)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
     if not pattern or not terminals:
         return {}
     out = {}
     texts = _pane_texts(sorted(set(terminals.values())))
+    procs = {}
+    if any(core.state_adapter(conn, a) is None for a in terminals):  # the pane's process and tty: one tmux command
+        procs = {p["pane"]: (p["running"], p["tty"]) for p in _tmux_panes(everywhere=True)}
     for agent, pane in terminals.items():
         tail = _prompt_tail(_plain(texts.get(pane) or ""))
-        rx, layout, _ = _pane_rule(conn, agent)
+        rx, layout, _ = _pane_rule(conn, agent, *procs.get(pane, (None, None)))
         parts = _prompt_found(tail, rx, layout)
         if not parts:
             continue
@@ -2723,8 +2728,7 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
     if text:
         if len(text) > 4000:
             raise RiverError("text is at most 4000 characters")
-        tell = _pane_rule(conn, agent)[1]["tell"]
-        n = next((i for i, o in enumerate(opts) if tell.search(o)), None)
+        n = p["tell"]  # read with the pane's adapter, as the card was (#5271)
         terminal_keys(conn, agent, _menu_keys(at, n) if n is not None else [{"key": "Escape"}], who)
         time.sleep(PROMPT_PAUSE)
         terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
