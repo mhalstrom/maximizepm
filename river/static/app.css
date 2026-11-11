@@ -179,6 +179,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .tree { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 6px; padding: 8px; }
 .link { color: var(--accent); cursor: pointer; }
+/* A plain link is the accent color in both themes, visited or not, not the browser's blue and purple (#5318).
+   :where() keeps it weak: a link with a class of its own (a.btn) keeps its color. */
+:where(a:link, a:visited) { color: var(--accent); }
 /* Dialogs (#5028): components/dialog.js gives each dialog the class dlg (the overlay) and closes it the same
    three ways (#5027). A dialog sets only what differs: --dlg-w (its width), --dlg-z (above another dialog). */
 .dlg { position: fixed; inset: 0; z-index: var(--dlg-z, 15); background: var(--scrim); display: flex; align-items: flex-start; justify-content: center; padding: 6vh var(--sp-6); overflow-y: auto; }
@@ -187,8 +190,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #setup { --dlg-w: 680px; }
 #setup .step { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
 #setup .mark { font-weight: 700; }
-#setup .mark.ok { color: #1a7f37; }
-#setup .mark.todo { color: #bf8700; }
+#setup .mark.ok { color: var(--ready); }  /* state tokens, so each theme has its own value (#5318) */
+#setup .mark.todo { color: var(--prog); }
 #setup .sub { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
 #setup .fix { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 #setup code { font-size: 12px; }
@@ -305,7 +308,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .folderForm .ff-out:empty { display: none; }
 .folderForm .ff-out .btn { margin-left: 4px; }
 /* Setup guide: the first step not done yet, numbered steps, and the optional extras. */
-#setup .step.next { background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: 8px; padding-left: 6px; padding-right: 6px; }
+/* The current step: its box reaches out into the margin, so its number and text stay in line with the other steps (#5318). */
+#setup .step.next { background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: var(--r-m);
+  padding-left: var(--sp-2); padding-right: var(--sp-2); margin-left: calc(-1 * var(--sp-2)); margin-right: calc(-1 * var(--sp-2)); }
 #setup .mark.opt { color: var(--muted); }
 #setup details.more { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #setup details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
