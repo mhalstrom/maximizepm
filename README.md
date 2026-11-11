@@ -38,6 +38,7 @@ Sessions shows each running agent session as a chat: you read it, type to it,
 and answer its permission prompts and questions there; its You row holds what
 waits on you. Plan is the plan of the work: projects, goals, items, the graph,
 releases, what is done, and how many more sessions the ready work could use.
+Settings opens from the ⋯ menu in the top right corner.
 
 ![A tour of the page: what waits on you, an agent's session, an item, and the views of Plan](site/img/board-tour.gif)
 
@@ -90,18 +91,20 @@ Mermaid from a CDN.
 
 ## The page
 
-`maxpm serve --open` opens the page at http://127.0.0.1:8765. It has two areas,
-Sessions and Plan, and Settings. Each view has an address of its own
+`maxpm serve --open` opens the page at http://127.0.0.1:8765. Its bar has the two
+areas, Sessions and Plan, and Terminal (a plain shell on this computer, in the
+page); Settings opens from the ⋯ menu in the top right corner. Each view has an address of its own
 (`/sessions/<session>`, `/you`, `/plan/graph?project=shop`, `?item=12` for an
 item), so a link, a reload, and Back show the same view.
 
 | Area | What it shows |
 |---|---|
-| Sessions | Each running agent session as a chat, with its item, a message box, and a side panel. Start an agent at the top of the list; Give work to a session that waits; its queue in its Items list |
-| Sessions > You | What waits on you: Needs you, the items an agent took off your list, your inbox. Go through with an agent starts a session that takes them with you, one at a time. The first page when something waits |
+| Sessions | Each running agent session as a chat, with its item, a message box, and a side panel. Start an agent at the top of the list; Give work to a session that waits; its queue in its Items list. The message box keeps a draft for each session, and its microphone dictates. Scroll up for the chat before a compaction |
+| Sessions > You | What waits on you: Needs you, the items an agent took off your list, your inbox. Go through with an agent starts your assistant, a session of its own that takes them with you, one at a time (Open your assistant shows it again). The first page when something waits |
 | Sessions > Artifacts | The files, local pages, and claude.ai artifacts that the sessions wrote or named |
 | Plan | A left bar of projects and their goals sets the scope of every view: Overview (next up, the work of each project or goal, capacity, what is blocked outside), Items, Goals (done-when, handoff, sub-goals), Graph, Releases (each deploy target), Done |
-| Settings | Every setting, its default, and its overrides; the people of the queue |
+| Terminal | A plain shell on this computer, in the page |
+| Settings (⋯ menu) | Every setting, its default, and its overrides; the people of the queue; Open setup guide |
 
 ![Plan > Overview: the scope on the left, next up, the work of each project, and capacity](site/img/plan-light.png)
 
@@ -114,6 +117,20 @@ starts), the answer goes into its terminal, and so does what you type in the mes
 files and pictures.
 
 ![The ! dialog: a permission prompt of an agent, answered from the page](site/img/sessions-prompt.png)
+
+The message box keeps what you typed for each session: switch to another
+session, or reload the page, and the draft (with the files you attached) is
+still there. Every box that takes text has a microphone: on a Mac with macOS 26,
+the Mac turns your speech into text on the device (Apple's SpeechAnalyzer),
+also for the page on your phone.
+
+![The message box: a draft for this session, and the microphone while it listens](site/img/composer.png)
+
+When an agent's context is compacted, the chat shows a line "Compacted" with
+the time, and the summary folded under it. Scroll up, and the chat reads the
+lines before it, back to the start of the session.
+
+![A chat after a compaction: the Compacted line, with the earlier lines above it](site/img/sessions-history.png)
 
 ![Sessions > Artifacts: what the sessions wrote or named, to open beside the chat or full screen](site/img/artifacts.png)
 
@@ -187,8 +204,10 @@ The first time you open the page, a setup guide shows what MaximizePM found,
 with a button to fix each step: your name, the `maxpm` command for agents, a
 project folder and its block, the agent to start, a first task, and the first
 agent. More steps are optional: how agents start, the Claude Code skills,
-phone notifications, and an issue tracker. "Don't show again" hides it; the
-Settings tab opens it again.
+phone notifications, and an issue tracker. "Don't show again" hides it;
+Open setup guide in Settings (the ⋯ menu) opens it again.
+
+![Settings in the ⋯ menu of the header](site/img/menu.png)
 
 Every button on the page that starts an agent opens one launch dialog (see
 [Model and effort](#model-and-effort)). The Start button offers Claude Code
@@ -329,7 +348,8 @@ Claim next with an agent, Deploy now, Review and deploy, Start manager) opens
 one dialog: the agent, the model (only the agent's family, inside the item's
 limits, the recommendation preselected), the effort, the work (for Start), and
 under More the agent's launch options. The dialog keeps your last choices
-in this browser. The session gets `MAXPM_MODEL`. When a session already waits
+in this browser. There is no choice of where it opens: every agent starts in
+tmux (below). The session gets `MAXPM_MODEL`. When a session already waits
 for work in that project (`maxpm wait`), Start and Dispatch give the item to
 it and open no terminal. Else Start and Dispatch (and `maxpm launch`) name
 the new session (`MAXPM_AGENT`), reserve the item for it, and set
@@ -339,6 +359,8 @@ MaximizePM command within `connect_within` (5m) shows to the manager as NOT
 CONNECTED (its agent did not start, or waits on a prompt in its terminal),
 its project counts as having no agent, and the item reserved for it is free
 again.
+
+![The launch dialog: the agent, the model, the effort, and the work](site/img/launch.png)
 
 Claude Code and Codex start from launch profiles: a launch_agents entry
 `Claude Code=@claude-code` or `Codex=@codex`, and MaximizePM builds the command
@@ -359,10 +381,11 @@ differ (`maxpm config set claude_remote_control off --project shop`):
 
 A Claude Code session that MaximizePM starts for an item gets a name (`claude
 --name`, also the Remote Control session name): the goal the item serves,
-else `#<id> <title>`, at most 48 characters. The new terminal tab or console
-window gets the same title. A session for another purpose gets that purpose
+else `#<id> <title>`, at most 48 characters. Its tmux pane (a console window
+on Windows) gets the same title. A session for another purpose gets that purpose
 as its name: `maxpm manager`, `help #7 <title>`, `unblock #7 <title>`,
-`monitor #7 <title>`, `deploy web`, `review web`, `needs you`.
+`monitor #7 <title>`, `deploy web`, `review web`, `needs you` (your assistant,
+an agent named `you-<id>`).
 
 The model and effort go in as `--model`/`--effort` (Claude Code) and
 `-m`/`-c model_reasoning_effort=` (Codex); Codex also gets `--add-dir` for
@@ -405,7 +428,7 @@ tmux window of its own again, and `maxpm view --list` prints the panes.
 ended, or its CLI is still open but the agent left the queue, stopped, or is
 gone, and holds nothing. A pane that shows a prompt stays, and
 `maxpm view --list` says for each pane why `--tidy` closes it. On the page,
-Close N finished in the Agents panel does the same. `maxpm serve` also does
+Close N finished under the list of sessions does the same. `maxpm serve` also does
 it by itself every 20 minutes (`tidy_every`; `0s` turns it off), and it
 closes a pane where the agent CLI is still open only when the screen stayed
 the same for two minutes (`idle_after`), so a busy agent keeps its pane. A
@@ -421,8 +444,8 @@ no Terminal app, so it also works over SSH. `maxpm serve` also ends, every
 tmux itself: its `maxpm launch` asks the running `maxpm serve` to start the
 session, and a person runs `maxpm view`.
 
-An agent that runs in tmux also has a Terminal button on the page and in the
-desktop app (the Agents list, and the manager). It shows what the agent's
+An agent that runs in tmux also has Open in terminal in the ⋯ menu of its
+session on the Sessions tab (also in the desktop app). It shows what the agent's
 terminal shows now, and the keys you type there go to the agent: a prompt that
 waits in the terminal can be read and answered from the page. This works from
 the moment the session starts, before its first MaximizePM command, which is when a
@@ -564,7 +587,10 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   what waits for you in it. The ! dialog answers a permission prompt or a
   question, and opens by itself when a new one comes. For a session in a tmux
   pane, the message box types into its terminal, with files and pictures.
-  Items and Artifacts show what the session took and wrote.
+  Items and Artifacts show what the session took and wrote. The message box
+  keeps a draft for each session through a switch and a reload. After a
+  compaction, a "Compacted" line marks it, and scrolling up reads the lines
+  before it.
 - Dictation: every box that takes text has a microphone. On a Mac with macOS 26
   the Mac turns speech into text on the device (Apple's SpeechAnalyzer), also
   for the page on your phone; elsewhere the browser's own speech recognition does.
@@ -581,8 +607,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   `maxpm go --role owner` takes the next free goal. A shared goal
   (`maxpm goal edit <name> --shared`) has no owner: `maxpm go` gives it to no
   agent, and its items stay open to every agent, so several agents work on it
-  at the same time. The page shows goal cards with owner and progress, and
-  filters by goal.
+  at the same time. Plan > Goals shows each goal with its owner and progress,
+  and the left bar of Plan scopes every view to one goal.
 - Goal handoff: `maxpm goal handoff <goal> --file <path>` stores a new
   version of what the goal is, the decisions so far, the files that matter,
   and what is left. The owner's `maxpm go` briefing shows it, and so does the
@@ -603,7 +629,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   folder and a session used it less than `base_warm` (50m) ago.
   `maxpm add ... --no-goal-context` starts an item fresh.
 - `maxpm go` roles: owner, worker, unblocker, reviewer, deployer, context,
-  manager, expert, idle. After `done`, an agent takes the next item at once
+  manager, expert, assistant, idle. After `done`, an agent takes the next item at once
   (`auto_continue`). With no item, it runs `maxpm wait` (a blocking command
   costs no tokens; in Claude Code a background command, so a message that a
   person types reaches the session at once), which returns when work is pushed
@@ -622,8 +648,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   When a prompt (a permission prompt, a folder trust question;
   `prompt_pattern`) stays on the screen for `prompt_wait` (20s), each person
   gets an alert with the question, each option and the keys that choose it,
-  the item the agent holds, and a link to the session. Answer it with the
-  Terminal button on the page. A Claude Code session that MaximizePM starts
+  the item the agent holds, and a link to the session. Answer it in the ! dialog
+  on the Sessions tab, or with Open in terminal. A Claude Code session that MaximizePM starts
   also reports each tool call, permission prompt, and turn end through hooks
   (`claude_activity_hooks`). When the agent holds an item, a permission
   prompt alerts the manager at once, and so does a turn end, but not while
@@ -715,6 +741,10 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   `maxpm notify run`). Phone notifications go out at ntfy priority `high`
   (`ntfy_priority`), so the phone shows a banner; the ntfy app also needs the
   phone's permission for banners and the lock screen.
+- Your assistant: Go through with an agent (Sessions > You) starts the
+  person's assistant (role assistant, named `you-<id>`, one for each person):
+  a long-lived session that takes the Needs you list with the person, one item
+  at a time, and takes no queue work.
 - Planning and shipping: tasks with dependencies and priorities (`maxpm guide
   manager`, section Writing tasks), deploy targets (`maxpm target add`,
   `describe`, `own`, `release`, `give`, `show`, `list`, `cadence`, `cut`,
@@ -765,8 +795,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   it is done). Ship requests collect on the open deploy item, and its review
   (the deploy item when there is no review) is ready only at the cut of the
   last release plus the cadence. `maxpm ship` tells the worker with which
-  release its change goes out; `maxpm target show <target>` and the Targets
-  tab show when the next release can start and what waits for it. For a
+  release its change goes out; `maxpm target show <target>` and Plan >
+  Releases show when the next release can start and what waits for it. For a
   release that cannot wait (a fix of a production defect, a person's
   request), the target owner, the manager, or a person runs
   `maxpm target release-now <target> --reason "<why>"`. The history of the
@@ -815,7 +845,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   `maxpm add "<title>" --backlog "<why not now>"`, list them by project and
   priority with `maxpm backlog`, and take one up again with
   `maxpm activate <id>`. The counts show the backlog apart ("2 in backlog"),
-  and Plan > Items on the page has a "show backlog" box and an Activate
+  and Plan > Items on the page has a "backlog" box and an Activate
   button. An item that waits on a backlog item is never ready, so
   `maxpm backlog` names such items and asks for `--force`, and `maxpm
   blockers` says "a backlog item". An agent's item must be released first,

@@ -106,8 +106,12 @@ Object.defineProperty(document, "visibilityState", { get: () => "visible" });\n`
     await tidyPaths();  // first: the text with ~ is what the box measures
     let rect;
     if (selector) {
-      const r = await js(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); if (!e) return null;
-        e.scrollIntoView({ block: "start" }); const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, width: b.width, height: b.height }; })()`);
+      // One selector, or a list of them: the box around all of them.
+      const r = await js(`(() => { const es = ${JSON.stringify([].concat(selector))}.map(q => document.querySelector(q));
+        if (es.some(e => !e)) return null;
+        if (es.length === 1) es[0].scrollIntoView({ block: "start" });
+        const bs = es.map(e => e.getBoundingClientRect()), x = Math.min(...bs.map(b => b.left)), y = Math.min(...bs.map(b => b.top));
+        return { x, y, width: Math.max(...bs.map(b => b.right)) - x, height: Math.max(...bs.map(b => b.bottom)) - y }; })()`);
       if (!r) throw new Error(`${name}: nothing matches ${selector}`);
       await sleep(200);
       rect = { x: Math.max(0, Math.floor(r.x - pad)), y: Math.max(0, Math.floor(r.y - pad)),
@@ -242,6 +246,37 @@ while True:
     await until(`(document.querySelector("#spBody .sp-md") || {}).textContent > ""`);
     await sleep(600); await shot(`sessions-${theme}.png`);
   }
+  // The message box (#5112, #5107): a draft of its own for each session, and the microphone while it listens (the
+  // Mac turns the speech into text). The draft is cleared after the picture, so no other picture shows it.
+  await open("sessions/web-agent?as=alex");
+  await dlgOpen(); await js(`document.querySelector("#waitDismiss").click()`);
+  const typeDraft = (text, on) => js(`(() => { const t = document.querySelector("#sessText"); t.value = ${JSON.stringify(text)};
+    t.dispatchEvent(new Event("input", { bubbles: true }));
+    const m = document.querySelector("#sessMic"); m.classList.remove("hidden"); m.classList.toggle("on", ${on});
+    m.setAttribute("aria-pressed", "${on}"); })()`);
+  await typeDraft("Keep the originals in web/originals too, and tell me how large the folder is", true);
+  await sleep(300); await shot("composer.png", "#sessBar", 8);
+  await typeDraft("", false);
+  // A chat after a compaction (#5120): scrolled up, the 'Compacted' divider with the lines before it above.
+  await open("sessions/api-agent?as=alex");
+  if (await until(`!document.querySelector("#waitDlg").classList.contains("hidden")`, 10)) await js(`document.querySelector("#waitDismiss").click()`);
+  await until(`!!document.querySelector("#sessCol .chat-div")`);
+  await js(`(() => { const b = document.querySelector("#sessBody"); b.scrollTop = 0; b.dispatchEvent(new Event("scroll")); })()`);
+  if (!await until(`!!document.querySelector('#sessCol .chat-div[data-kind="compacted"]') && /Start of the session/.test(document.querySelector("#sessCol").textContent)`))
+    throw new Error("the chat of api-agent shows no compaction");
+  await js(`(() => { const d = document.querySelector('#sessCol .chat-div[data-kind="compacted"]'), b = document.querySelector("#sessBody");
+    b.scrollTop += d.getBoundingClientRect().top - b.getBoundingClientRect().top - b.clientHeight / 2; })()`);
+  await sleep(1500); await shot("sessions-history.png");
+  // Settings opens from the ⋯ menu of the header (#5116).
+  await open("?as=alex");
+  await js(`document.querySelector("#hdrMore").click()`); await sleep(400);
+  await shot("menu.png", ["#hdrMore", "#hdrMenu"], 0);  // the button and its card, not the page under it
+  // The launch dialog that every Start opens: the agent, the model, the effort, the work; no 'Open in' (#5105).
+  await open("sessions/web-agent?as=alex");
+  await dlgOpen(); await js(`document.querySelector("#waitDismiss").click()`);
+  await js(`document.querySelector('#sessStart [data-launch]').click()`);
+  if (!await until(`!!document.querySelector("#launchDlg:not(.hidden) .box")`)) throw new Error("no launch dialog");
+  await sleep(400); await shot("launch.png", "#launchDlg .box", 0);
   await open("artifacts?as=alex");
   await until(`document.querySelectorAll("#artList .art-row").length >= 4`);
   await shot("artifacts.png", "#sessArts", 8);

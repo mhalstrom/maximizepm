@@ -74,8 +74,23 @@ chats = {
                               "input": {"command": 'git commit -am "Resize the product photos"',
                                         "description": "Commit the resized photos"}}], 5, "tool_use")
     ),
+    # api-agent's context was compacted once (#5120): the chat shows a 'Compacted' divider, the summary folded under
+    # it, and the lines before it when you scroll up.
     "api-agent": (
-        line("user", "go", 40)
+        line("user", "Read the cart code and write down what the orders API needs.", 95)
+        + call("Read", 94, "Read 210 lines", file_path=str(shop / "web/cart/Cart.tsx"))
+        + call("Grep", 93, "7 matches", pattern="checkout", path=str(shop / "web"))
+        + say("The cart sends the items, the address, and the payment token at checkout. The orders API needs to "
+              "create an order from that, show one order with its status, and list a customer's orders. I wrote it "
+              f"down in {orders}.", 90)
+        + line("user", "Good. Then build it.", 60)
+        + json.dumps({"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted",
+                      "timestamp": at(42), "cwd": str(shop)}) + "\n"
+        + json.dumps({"type": "user", "isCompactSummary": True, "timestamp": at(42), "cwd": str(shop),
+                      "message": {"role": "user", "content": "This session continues an earlier conversation. Summary: "
+                                  "the user asked for the orders API; api/orders.md lists three routes and four status "
+                                  "values. Next: build the routes and their tests."}}) + "\n"
+        + line("user", "go", 40)
         + call("Bash", 40, "You are MaximizePM agent api-agent. Role: WORKER.\nYOUR ITEM #2: Build the orders API",
                command="maxpm go", description="Take work from the queue")
         + call("Read", 39, "Read 61 lines", file_path=orders)
