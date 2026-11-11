@@ -129,6 +129,10 @@ DEFAULT_SETTINGS = {
     # (cdn.jsdelivr.net cdnjs.cloudflare.com). In every case the page runs in a sandbox of its own origin: it never
     # reads maxpm's page, its token or its data.
     "canvas_network": "on",
+    # The browser of a project in the side panel (#4631): it refuses loopback and private addresses (127.0.0.0/8, ::1,
+    # 10/8, 172.16/12, 192.168/16, 169.254/16), so a page cannot reach maxpm serve, a test database or the Docker API.
+    # The hosts it may open anyway, as host or host:port, separated by spaces or commas (localhost:5173).
+    "browser_allow": "",
     # The Terminal tab (#4803): a plain shell on this computer in the page, for a person (never an agent). On for
     # the page on this computer; through the relay only when web_terminal_relay is on too, because whoever holds
     # the relay sign-in could then run any command here.

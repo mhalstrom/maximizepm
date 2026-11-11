@@ -805,6 +805,42 @@ def build_parser():
     x.add_argument("name")
     x = prs.add_parser("list"); x.add_argument("--archived", action="store_true", help="the archived projects")
 
+    br = sub.add_parser("browser", help="the browser of a project (#4631): the person sees and uses it in the side panel of "
+                        "the Sessions tab; a session drives it with these commands (one controller at a time)")
+    brs = br.add_subparsers(dest="bcmd", required=True)
+    bp = argparse.ArgumentParser(add_help=False)
+    bp.add_argument("--project", help="default: the project of the item you hold, or of this folder")
+    x = brs.add_parser("status", parents=[bp], help="whether it runs, its tabs, and who controls it")
+    x = brs.add_parser("open", parents=[bp], help="open an address in the tab the panel shows (and show the browser in "
+                       "your side panel)")
+    x.add_argument("url"); x.add_argument("--no-show", action="store_true", help="do not open it in your side panel")
+    x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab; prints the file's path")
+    x.add_argument("--out", help="the file to write (default: a new file in the temporary folder)")
+    x.add_argument("--full", action="store_true", help="the whole page, not only what shows")
+    x = brs.add_parser("html", parents=[bp], help="the HTML of the page (the DOM as it is now)")
+    x.add_argument("--out", help="write it to this file")
+    x = brs.add_parser("text", parents=[bp], help="the text of the page as a person reads it")
+    x = brs.add_parser("click", parents=[bp], help="click an element (--selector) or a point (x y, CSS pixels)")
+    x.add_argument("x", nargs="?", type=float); x.add_argument("y", nargs="?", type=float)
+    x.add_argument("--selector", help="a CSS selector; the first element that matches")
+    x = brs.add_parser("type", parents=[bp], help="type text (into --selector, after a click on it; else where the focus is)")
+    x.add_argument("text"); x.add_argument("--selector")
+    x = brs.add_parser("key", parents=[bp], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., or one character")
+    x.add_argument("key")
+    x = brs.add_parser("eval", parents=[bp], help="run JavaScript in the page and print its value (JSON)")
+    x.add_argument("js")
+    for name, h in (("back", "go back"), ("forward", "go forward"), ("reload", "load the page again"),
+                    ("control", "take control for your session: other sessions and the person's input wait"),
+                    ("release", "give control up"), ("close", "close the browser (its profile and sign-ins stay)"),
+                    ("window", "show it as a normal window (for a site that refuses a headless browser, a sign-in)"),
+                    ("headless", "back into the side panel, with no window")):
+        brs.add_parser(name, parents=[bp], help=h)
+    x = brs.add_parser("give", parents=[bp], help="say that a subagent of your session drives it now (the panel shows "
+                       "its label); your session keeps control")
+    x.add_argument("label", help="the subagent, for example browser")
+    x = brs.add_parser("tab", parents=[bp], help="show another tab (its id from maxpm browser status)"); x.add_argument("id")
+    x = brs.add_parser("new-tab", parents=[bp], help="open a new tab"); x.add_argument("url", nargs="?", default="about:blank")
+    x = brs.add_parser("close-tab", parents=[bp], help="close a tab (default: the one that shows)"); x.add_argument("id", nargs="?")
     cv = sub.add_parser("canvas", help="canvases: pages that a session makes and maxpm keeps (HTML, Markdown, SVG), "
                         "with versions and the comments people write on them")
     cvs = cv.add_subparsers(dest="cvcmd", required=True)
@@ -1825,6 +1861,47 @@ def in_sandbox():
 RETRY_WAIT = 1.0  # seconds between two tries to reach a maxpm serve that does not listen
 
 
+
+def _browser_cmd(conn, a, actor):
+    """maxpm browser: maxpm serve runs the browser (river/browser.py); the command asks it (ask_server)."""
+    b = a.bcmd
+    action = {"new-tab": "new_tab", "close-tab": "close_tab", "headless": "window"}.get(b, b)
+    args = {"action": action, "project": a.project, "cwd": os.getcwd()}
+    if b == "open":
+        args.update(url=a.url, show=not a.no_show)
+    elif b == "screenshot":
+        args["full"] = a.full
+    elif b == "click":
+        if a.selector is None and (a.x is None or a.y is None):
+            raise RiverError("name what to click: maxpm browser click --selector '<css>', or maxpm browser click <x> <y>")
+        args.update(selector=a.selector, x=a.x, y=a.y)
+    elif b == "type":
+        args.update(text=a.text, selector=a.selector)
+    elif b == "key":
+        args["key"] = a.key
+    elif b == "eval":
+        args["js"] = a.js
+    elif b == "give":
+        args["sub"] = a.label
+    elif b in ("tab", "close-tab"):
+        args["target"] = a.id
+    elif b == "new-tab":
+        args["url"] = a.url
+    elif b in ("window", "headless"):
+        args["window"] = b == "window"
+    res = ask_server(conn, "browser", args, actor, timeout=120)
+    if b == "screenshot":
+        import base64
+        import tempfile
+        out = Path(a.out).expanduser() if a.out else Path(tempfile.gettempdir()) / (
+            f"maxpm-browser-{res['project']}-{time.strftime('%Y%m%d-%H%M%S')}.png")
+        out.write_bytes(base64.b64decode(res.pop("png")))
+        res["file"] = str(out.resolve())
+    if b == "html" and a.out:
+        Path(a.out).expanduser().write_text(res.pop("html"))
+        res["file"] = str(Path(a.out).expanduser().resolve())
+    return res
+
 def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     """Ask the maxpm serve of this queue to do one page action (server.OPS) and return its result; RiverError
     says why not. The server runs outside any sandbox. A sandbox refuses a direct connection to this computer;
@@ -2270,6 +2347,8 @@ def dispatch(conn, a, actor):
         if getattr(a, "archived", False):
             return {"archived_projects": core.project_archived(conn)}
         return core.project_list(conn)
+    if c == "browser":
+        return _browser_cmd(conn, a, actor)
     if c == "canvas":
         return _canvas_dispatch(conn, a, actor)
     if c == "goal":
@@ -3721,6 +3800,36 @@ def _comment_lines(r, indent="  "):
     return out
 
 
+
+def render_browser(a, res):
+    b = a.bcmd
+    if b == "html" and "html" in res:
+        print(res["html"])
+        return
+    if b == "text":
+        print(res.get("text", ""))
+        return
+    if b == "eval":
+        print(json.dumps(res.get("value"), indent=2, ensure_ascii=False))
+        return
+    if res.get("file"):
+        print(res["file"])
+        return
+    if not res.get("running"):
+        print(f"browser of {res['project']}: not running (maxpm browser open <address> starts it)")
+    else:
+        print(f"browser of {res['project']}: {'a window' if res.get('window') else 'in the side panel (headless)'}")
+        print(f"  page: {res.get('title') or '(no title)'}  {res.get('url') or ''}")
+        if len(res.get("tabs") or []) > 1:
+            for t in res["tabs"]:
+                print(f"  {'*' if t['on'] else ' '} tab {t['id']}: {_cut(t['title'] or t['url'], 70)}")
+    c = res.get("controller")
+    if c:
+        print(f"  controlled by {c['who']}" + (f" (subagent {c['sub']})" if c.get("sub") else "")
+              + (" (the person)" if c["kind"] == "person" else "") + f" since {c.get('since', '')}")
+    else:
+        print("  controlled by nobody: maxpm browser control takes it")
+
 def render_canvas(a, res):
     v = a.cvcmd
     if v == "kit":
@@ -3990,6 +4099,8 @@ def render(a, res):
         if res["dry_run"]:
             print("Run it again without --dry-run to add them.")
         return
+    if c == "browser":
+        return render_browser(a, res)
     if c == "canvas":
         return render_canvas(a, res)
     if c == "goal" and a.gcmd == "handoff":

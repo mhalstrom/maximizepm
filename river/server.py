@@ -3428,7 +3428,8 @@ def frame_check(url):
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
 TYPING_OPS = ("terminal_keys", "session_send", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
-              "shell_open", "shell_keys", "shell_close")  # the Terminal tab's shells (#4803)
+              "shell_open", "shell_keys", "shell_close",  # the Terminal tab's shells (#4803)
+              "browser_input")  # the person's mouse and keys in a project's browser (#4631)
 
 
 REPO = PKG.parent
@@ -3969,8 +3970,8 @@ OPS = {
 
 def _view_routes():
     """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
-    from .routes import artifacts, canvas, done, projects, sessions, settings, targets, terminal, you
-    views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal)
+    from .routes import artifacts, browser, canvas, done, projects, sessions, settings, targets, terminal, you
+    views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal, browser)
     for v in views:
         for key in v.OPS:
             assert key not in OPS, key
@@ -4051,6 +4052,8 @@ class Handler(BaseHTTPRequestHandler):
                 st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
                 st["relay"] = relay.status()
                 st["canvas_opens"] = canvas_opens()  # maxpm canvas open: the page opens the canvas (#4783)
+                from .routes import browser as browser_routes
+                st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
                 st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
                 if delta:
                     from . import statedelta

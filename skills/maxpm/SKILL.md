@@ -479,6 +479,22 @@ this computer, with each version, and that the user opens in the MaximizePM page
 - `maxpm canvas list` shows the canvases; `maxpm canvas show <name> [--version N] [--text]` reads one;
   `maxpm canvas save <name> <path>` writes a version as a file when it must go into git.
 
+## The project's browser
+
+Each project has one browser that `maxpm serve` runs (headless Google Chrome, its own profile). The user sees
+and uses it in the side panel of your session (Browser), and you drive the same browser:
+
+- `maxpm browser open <address>` (it also shows the browser in your side panel), `text`, `html [--out f]`,
+  `screenshot [--out f] [--full]` (prints the PNG's path: read it), `click --selector '<css>'` (or `click <x> <y>`),
+  `type "<text>" [--selector '<css>']`, `key Enter`, `eval "<js>"`, `back`, `reload`, `status`.
+- One controller at a time. `maxpm browser control` takes it for your session; `maxpm browser give <label>` says
+  that your subagent (for example `browser`) drives it now; `maxpm browser release` gives it up. While the user
+  holds it (Take control in the panel), commands that change the page are refused: wait, and read
+  `maxpm browser status`. Reads (text, html, screenshot) always work.
+- The browser opens no loopback or private address (your dev server, a test database): the user allows one for
+  the project with `maxpm config set browser_allow "localhost:5173" --project <name>`. Only the user signs in;
+  never type a password. A site that refuses a headless browser: the user presses Open as a window.
+
 ## Expert sessions
 
 An expert is a session that the user talks with for hours or days about one

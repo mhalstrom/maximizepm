@@ -23,6 +23,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Sheet (phone) | the same dialog: under 760 px `.dlg` is the full width from the top (phone.css) | |
 | Drawer | `drawer.js` (the item drawer) | |
 | Side panel | `sidePanel.js` (Sessions tab), `itemView.js` for an item in it | |
+| Browser of a project | `browserTool.js`: `openBrowser(session)`, `browserOpens(list)` | a tool tab of the side panel (#4631): frames of serve's Chrome, the person's input, who controls it |
 | Menu (⋯) | `menu.js`: `makeMenu(btn, host, {cls, group, onChange, closeOn, outside})` | a class on the host while it is open, `aria-expanded`, Esc and a choice close it, and a click outside `outside`; one menu of a group at a time. The header ⋯ and the tab sheet (app.js, phone.css `.hdr-menu`), the session head ⋯ (sessions.js; a card `.sess-menu` with rows `.sess-mi`) |
 | Archive a project | `archiveProject.js`: `archiveProject(S, name)`, `restoreProject(name)` | the confirm dialog says what archiving does; Restore is in Plan's left bar, Archived projects (#5197) |
 | End a session | `endSession.js`: `endButton(s, {icon})`, `endSession(s)` | the confirm dialog: stop request, expert end, End now (#5041) |

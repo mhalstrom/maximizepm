@@ -15,6 +15,7 @@ import { openSettings } from "../components/settingsDialog.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
 import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
+import { openBrowser } from "../components/browserTool.js";
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
 import { contextMeter, openUsage } from "../components/usagePanel.js";
@@ -204,6 +205,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // there as lists.
   $("#tab-sessions").addEventListener("click", (e) => {
     const l = e.target.closest("[data-sp-open]"); if (l) return openList(l.dataset.spOpen);
+    if (e.target.closest("[data-sp-browser]")) return openBrowser(agent).catch(() => {});  // #4631
     if (e.target.closest("#sessYou, #sessArts")) return;  // these views open an item in the drawer, as their tabs did
     const o = e.target.closest("[data-open]");
     if (!o || !/^\d+$/.test(o.dataset.open) || e.metaKey || e.ctrlKey) return;

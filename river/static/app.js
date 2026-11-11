@@ -10,6 +10,7 @@ import { openTerminal } from "./components/terminalDialog.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
 import { openInPanel, onPanel, panelTargets, canvasState, canvasOpens } from "./components/sidePanel.js";
+import { browserOpens } from "./components/browserTool.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { installMics } from "./components/dictate.js";
@@ -255,6 +256,7 @@ async function refresh() {
   renderRelay();
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
+  browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
   renderGraph(false); renderLog(false); renderHealth(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();

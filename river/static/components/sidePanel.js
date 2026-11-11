@@ -4,7 +4,8 @@
 // page in a frame when the site allows it (GET /api/frame-check), else its title and Open in a new tab. Tabs for
 // several, an address bar, Reload, Open in a new tab, Close, and a handle to resize it (the width stays).
 // Each session has its own tabs (#4632), kept in this browser across reloads; each tab shows what it holds (file,
-// image, page, site, tool). A tool (#4631) opens as a tab too: openTool(key, title, render).
+// image, page, site, tool). A tool (#4631) opens as a tab too: openTool(key, title, render); the first tool is the
+// browser of the session's project (components/browserTool.js).
 // A canvas (#4768, a page that a session keeps in maxpm: maxpm canvas put) opens as a tab "canvas:<id>": its newest
 // version in a frame of its own origin (or drawn, for Markdown), a version menu, and a reload in place, at the same
 // scroll position, when the session puts a new version. A new canvas of the shown session opens here by itself.
@@ -45,6 +46,8 @@ const panel = () => $("#sessPanel");
 let told = () => {};
 export function onPanel(fn) { told = fn; }
 const tell = () => told(session, (tabs.find(t => t.id === on) || {}).target || null);
+// The session whose tabs the panel holds (the browser tool opens for it, #4631).
+export function panelSession() { return session; }
 // The targets of this session's tabs, to find an artifact by its id.
 export function panelTargets() { return tabs.map(t => t.target); }
 // The tab of a thing in a list of tabs: one tab for each thing, whatever address named it (#5000, lib.targetKey).
