@@ -1618,10 +1618,12 @@ def _family(ladder, model):
 
 def _check_model_name(value):
     # Full CLI ids pass too: claude-opus-5-5[1m] (the context size) and us.anthropic.claude-opus-5-5-v1:0 (#4950).
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}(\[[A-Za-z0-9]{1,8}\])?$", value):
-        raise RiverError(f"model {value!r}: a model name uses letters, digits, '.', '_', '-', ':', and an end "
+    # A multi agent's provider/model text (opencode/big-pickle, openrouter/Qwen/Qwen3-Coder) has '/' and keeps its
+    # case: a provider's model id can hold capitals (#5236).
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}(\[[A-Za-z0-9]{1,8}\])?$", value):
+        raise RiverError(f"model {value!r}: a model name uses letters, digits, '.', '_', '-', ':', '/', and an end "
                          f"such as [1m]")
-    return value.lower()
+    return value if "/" in value else value.lower()
 
 
 def _check_effort(conn, value, levels=None):
@@ -1657,17 +1659,26 @@ def _check_limits(ladder, lo, hi):
                 raise RiverError(f"min model {a} is stronger than max model {b} ({fa}: {', '.join(ladder[fa])})")
 
 
-def model_check(ladder, model, lo, hi):
+def model_check(ladder, model, lo, hi, family=None):
     """Whether a session running `model` may take an item with limits lo/hi (comma lists).
 
     Returns (allowed, reason). A limit compares only models of the session's family; a limit that names
     no model of that family does not apply, and the reason says so. A model that the ladder does not know
     (not a ladder name, and no full id that holds one) takes no item with a limit: nothing says that it is
-    weak or strong enough (#4950)."""
+    weak or strong enough (#4950).
+
+    family: the model family of the session's agent (its adapter's DESCRIBE['family']), when it is known. A family
+    that model_ladder does not list ("multi": OpenCode, Pi and Goose take a free provider/model text) has no order,
+    so no limit applies to it (#5236, docs/agent-adapters.md option A). The family decides, not the text: a
+    provider/model text such as openrouter/anthropic/claude-opus-5 holds a ladder name, but no order says that the
+    provider's model is the same model."""
     if not (lo or hi):
         return True, ""
     if not model:
         return True, ""
+    if family and family not in ladder:
+        return True, (f"limits min {lo or '-'}, max {hi or '-'} do not apply: model {model} is of the {family} "
+                      f"family, which model_ladder does not order")
     fam, pos = _family(ladder, model)
     if fam is None:
         names = ", ".join(m for ms in ladder.values() for m in ms)
@@ -1896,6 +1907,16 @@ def session_type(conn, name):
     got = _adapters().load()  # the first agent of that family that MaximizePM can start (claude: Claude Code)
     return next((_platform_of(got[i]) for i in _adapters().ids()
                  if _startable(got[i]) and got[i].describe["family"] == fam), None)
+
+
+def session_family(conn, name, stype=None):
+    """The model family of a session's agent type (its adapter's DESCRIBE['family']), or None when MaximizePM does
+    not know the agent type or it is not registered."""
+    stype = stype or session_type(conn, name)
+    if not stype:
+        return None
+    a = _adapters().find(stype)
+    return a.describe.get("family") if a else None
 
 
 def agent_type_check(session, item_agent):
@@ -7216,7 +7237,8 @@ def _model_refusal(conn, it, actor, any_type=False):
     m = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn), ladder_text)
     ok, why = agent_type_check(stype, m["agent"])
     if ok and model:
-        ok, why = model_check(parse_ladder(ladder_text), model, m["min_model"], m["max_model"])
+        ok, why = model_check(parse_ladder(ladder_text), model, m["min_model"], m["max_model"],
+                              session_family(conn, actor, stype))
     return None if ok else why
 
 
@@ -7240,6 +7262,7 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
     model = model or agent_model(conn, actor)
     ladder = parse_ladder(setting(conn, "model_ladder")) if model else None
     stype = session_type(conn, actor)
+    family = session_family(conn, actor, stype)
     doer_for = None
     if actor:
         r = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone()
@@ -7255,7 +7278,7 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
         for a in pool:
             ok, why = agent_type_check(None if actor and a["reserved_for"] == actor else stype, a["agent"])
             if ok and model:
-                ok, why = model_check(ladder, model, a["min_model"], a["max_model"])
+                ok, why = model_check(ladder, model, a["min_model"], a["max_model"], family)
             if ok:
                 a["model_note"] = why
                 out.append(a)
@@ -11303,15 +11326,17 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         if agent is None:
             raise RiverError(f"#{top['id']} is for {top['agent']}, and no launch_agents entry runs it; add one: "
                              f"maxpm config set launch_agents \"...; {platform_spec(top['agent'])['label']}=@{top['agent']}\"")
+    plat = _launch_agent_cmd(conn, p["id"], agent, None, effort, options, None, prompt)["platform"]
     if model:
-        ok, why = model_check(parse_ladder(setting(conn, "model_ladder")), model, top["min_model"], top["max_model"])
+        # The agent's family decides whether the limits apply (#5236): a multi agent's provider/model text has no order.
+        ok, why = model_check(parse_ladder(setting(conn, "model_ladder")), model, top["min_model"], top["max_model"],
+                              platform_spec(plat)["family"] if plat else None)
         if not ok:
             raise RiverError(f"#{top['id']} {why}; pick another model")
         model_why = "chosen for this launch"
     else:
         # No model named: the item's own (#4961), of the agent's family, so the session declares it (MAXPM_MODEL)
         # and its limits hold. A default model is not forced on the CLI.
-        plat = _launch_agent_cmd(conn, p["id"], agent, None, effort, options, None, prompt)["platform"]
         model, model_why = session_model(conn, _item(conn, top["id"]), platform_spec(plat)["family"] if plat else None,
                                          defaults=False)
     name = session_title(top["goals"], top["id"], top["title"])

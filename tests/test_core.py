@@ -4611,6 +4611,49 @@ class Models(Base):
         b2 = core.go(self.c, self.dir.name, "s2", model="opus")
         self.assertEqual(b2["item"]["id"], big)
 
+    def test_limits_do_not_apply_to_an_agent_of_the_multi_family(self):
+        """#5236: OpenCode (Pi, Goose: DESCRIBE['family'] multi) runs a provider/model text, and every item had the
+        global default max model, so such an agent could neither start on nor claim any item. Option A of
+        docs/agent-adapters.md: the limits apply only to the families of model_ladder. The family decides, not the
+        text: a multi model text that holds a ladder name (claude-fable-5) is still not ordered."""
+        core.config_set(self.c, "default_max_model", "opus")
+        ladder = core.parse_ladder(core.setting(self.c, "model_ladder"))
+        ok, why = core.model_check(ladder, "opencode/big-pickle", None, "opus", "multi")
+        self.assertTrue(ok)
+        self.assertIn("multi family, which model_ladder does not order", why)
+        self.assertTrue(core.model_check(ladder, "openrouter/anthropic/claude-fable-5", "fable", "opus", "multi")[0])
+        # A known family keeps #4950 and its order.
+        self.assertFalse(core.model_check(ladder, "mystery", None, "opus", "claude")[0])
+        self.assertFalse(core.model_check(ladder, "fable", None, "opus", "claude")[0])
+        x = core.item_add(self.c, "a", "any task")["id"]
+        y = core.item_add(self.c, "a", "another task")["id"]
+        core.register(self.c, "oc")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='opencode' WHERE name='oc'")
+        # A provider/model text is a model name: '/' passes, and its case stays.
+        self.assertEqual(core.set_agent_model(self.c, "oc", "openrouter/Qwen/Qwen3-Coder"), "openrouter/Qwen/Qwen3-Coder")
+        self.assertEqual(core.set_agent_model(self.c, "oc", "opencode/big-pickle"), "opencode/big-pickle")
+        self.assertEqual(core.session_family(self.c, "oc"), "multi")
+        self.assertIsNone(core._model_refusal(self.c, core._item(self.c, x), "oc"))
+        got = core.next_item(self.c, "a", claim=True, actor="oc")
+        self.assertEqual([g["id"] for g in got], [x])
+        core.release(self.c, x, "oc")
+        core.claim(self.c, y, "oc")
+        core.register(self.c, "mark", human=True)
+        # The launch: the agent of the launch decides.
+        r = core.launch_target(self.c, item=x, agent="OpenCode", model="opencode/big-pickle", actor="mark")
+        self.assertEqual(r["model_why"], "chosen for this launch")
+        with self.assertRaisesRegex(RiverError, "not in model_ladder"):
+            core.launch_target(self.c, item=x, agent="Claude Code", model="my-claude-x", actor="mark")
+        core.push(self.c, x, "oc", None, "mark")  # a hand-off applies the same rule
+        # A Claude Code session with an unknown model still takes no item with a limit.
+        core.set_agent_model(self.c, "s1", "my-claude-x")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='s1'")
+        core.release(self.c, y, "oc")
+        with self.assertRaisesRegex(RiverError, "not in model_ladder"):
+            core.claim(self.c, y, "s1")
+
     def test_push_give_and_queue_refuse_a_session_whose_model_the_limits_exclude(self):
         """#4950: each way to hand an item to a session applies the same limit as claim; before, a push or a
         queue entry held the item for a session that could never claim it, and give moved the lease to it."""
