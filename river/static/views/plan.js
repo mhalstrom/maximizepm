@@ -30,8 +30,9 @@ export function renderPlanSide() {
   const live = (i) => !["done", "dropped"].includes(i.status) && !i.backlog;
   const per = S.projects.map(p => ({ p, items: S.items.filter(i => i.project === p.name && live(i)) }));
   const goals = (S.goals || []).filter(g => g.status === "open" && g.project === scope.project).sort((a, b) => a.rank - b.rank);
+  const archived = S.archived_projects || [];
   const sig = JSON.stringify([scope, per.map(x => [x.p.name, x.items.map(i => [i.id, i.status, i.ready, i.waits_on])]),
-    goals.map(g => [g.name, g.owner, g.shared, g.parent, g.items_open.length, g.items_done.length])]);
+    goals.map(g => [g.name, g.owner, g.shared, g.parent, g.items_open.length, g.items_done.length]), archived, archivedOpen]);
   if (sig === sideSig) return;
   sideSig = sig;
   const card = (name, label, items, extra) => {
@@ -52,9 +53,23 @@ export function renderPlanSide() {
   $("#planSide").innerHTML = card("", "All projects", per.flatMap(x => x.items), "")
     + per.map(({ p, items }) => card(p.name, p.name, items, items.length ? miniGraph(items) : `<span class="gc-none">No open items</span>`)
       + (p.name === scope.project ? goalList : "")).join("")
-    + `<div class="plan-foot">${button("+ project", { cls: "plain", data: { "plan-addproject": 1 }, title: "Add a project: with a folder, or without one" })}</div>`;
+    + `<div class="plan-foot">${button("+ project", { cls: "plain", data: { "plan-addproject": 1 }, title: "Add a project: with a folder, or without one" })}${archived.length
+      ? button(`Archived projects (${archived.length})`, { pressed: archivedOpen, data: { "plan-archived": 1 }, attrs: `aria-expanded="${archivedOpen}" aria-controls="planArchived"`,
+        title: archivedOpen ? "Hide the archived projects" : "Show the archived projects: Restore brings one back with its items" }) : ""}</div>`
+    + (archived.length && archivedOpen ? archivedList(archived) : "");
   const on = $("#planSide .gcard.on, #planSide .gl-goal.on"), side = $("#planSide");
   if (on && side.scrollWidth > side.clientWidth) side.scrollTo({ left: on.offsetLeft - side.offsetLeft - 10 });
+}
+
+// Archived projects (#5197): a list at the foot of the left bar, closed by default. Each row: the name, its open and
+// done items, when it was archived, and Restore (op project_restore). Archive itself is on a project of the Items view.
+let archivedOpen = false;
+export function toggleArchived() { archivedOpen = !archivedOpen; renderPlanSide(); }
+function archivedList(list) {
+  const row = (p) => `<div class="arch-row"><div class="arch-name"><b>${esc(p.name)}</b><span class="gc-n">${p.open_items} open · ${p.done_items} done${p.archived_at
+    ? ` · archived ${esc(p.archived_at.slice(0, 10))}` : ""}</span></div>${button("Restore", { data: { "restore-project": p.name },
+    title: `Bring ${p.name} back as the least important project: its open items are in the queue again` })}</div>`;
+  return `<div class="plan-archived" id="planArchived" aria-label="Archived projects">${list.map(row).join("")}</div>`;
 }
 
 // Add item, Add a goal, Add a project: one dialog; the project and the goal come from the scope.

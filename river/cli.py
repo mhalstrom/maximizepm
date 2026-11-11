@@ -714,8 +714,11 @@ def build_parser():
     x = prs.add_parser("rank"); x.add_argument("name"); x.add_argument("rank", type=int)
     x = prs.add_parser("rename", help="give a project a new name; the old name stops at once")
     x.add_argument("name"); x.add_argument("new")
-    x = prs.add_parser("archive"); x.add_argument("name")
-    prs.add_parser("list")
+    x = prs.add_parser("archive", help="archive a project: its items leave the queue and the lists; nothing is deleted")
+    x.add_argument("name")
+    x = prs.add_parser("restore", aliases=["unarchive"], help="bring an archived project back, with its items")
+    x.add_argument("name")
+    x = prs.add_parser("list"); x.add_argument("--archived", action="store_true", help="the archived projects")
 
     cv = sub.add_parser("canvas", help="canvases: pages that a session makes and maxpm keeps (HTML, Markdown, SVG), "
                         "with versions and the comments people write on them")
@@ -2186,6 +2189,10 @@ def dispatch(conn, a, actor):
             return core.project_rename(conn, a.name, a.new, actor)
         if a.pcmd == "archive":
             return core.project_archive(conn, a.name, actor)
+        if a.pcmd in ("restore", "unarchive"):
+            return core.project_restore(conn, a.name, actor)
+        if getattr(a, "archived", False):
+            return {"archived_projects": core.project_archived(conn)}
         return core.project_list(conn)
     if c == "canvas":
         return _canvas_dispatch(conn, a, actor)
@@ -3876,6 +3883,24 @@ def render(a, res):
               f"the rank, the target and the settings follow")
         print(f"  the old name {res['was']} does not work from now on; agents keep their names, and a new agent "
                   "gets the new name")
+        return
+    if c == "project" and a.pcmd in ("archive", "restore", "unarchive"):
+        n = f"{res['open_items']} open item{'s' * (res['open_items'] != 1)}" + (f" ({res['in_progress']} in progress: {', '.join(res['holders'])})"
+                                                 if res["in_progress"] else "")
+        if res["archived"]:
+            print(f"project {res['name']} is archived: its {n} left the queue and the lists; nothing is deleted")
+            if res["in_progress"]:
+                print("  the sessions that hold its items keep them until they finish or release them")
+            print(f"  to bring it back: maxpm project restore {res['name']}")
+        else:
+            print(f"project {res['name']} is back, at rank {res['rank']}: its {n} in the queue again")
+            print(f"  to move it up: maxpm project rank {res['name']} <rank>")
+        return
+    if c == "project" and isinstance(res, dict) and "archived_projects" in res:
+        for p in res["archived_projects"]:
+            print(f"{p['name']}  ({p['open_items']} open, {p['done_items']} done"
+                  + (f"; archived {p['archived_at'][:10]}" if p["archived_at"] else "") + ")")
+        print("(no archived projects)" if not res["archived_projects"] else "to bring one back: maxpm project restore <name>")
         return
     if c == "project":
         if isinstance(res, dict) and "ready_count" in res:

@@ -33,6 +33,9 @@ OPS = {
     "project_add": lambda c, a, who: core.project_add(c, a["name"], a.get("rank"), a.get("notes", ""), who),
     "project_rank": lambda c, a, who: core.project_rank(c, a["name"], a["rank"], who),
     "project_describe": lambda c, a, who: core.project_describe(c, a["name"], a["text"], who),
+    # Plan tab (#5197): archive a project (its items leave the queue and the lists; nothing is deleted), and restore one.
+    "project_archive": lambda c, a, who: core.project_archive(c, a["name"], who),
+    "project_restore": lambda c, a, who: core.project_restore(c, a["name"], who),
     "item_add": lambda c, a, who: core.item_add(c, a["project"], a["title"], int(a.get("priority", 2)),
                                                 a.get("notes", ""), a.get("doer", "any"),
                                                 [int(x) for x in a.get("after", [])], who,

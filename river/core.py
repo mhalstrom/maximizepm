@@ -1959,12 +1959,55 @@ def project_rank(conn, name, rank, actor=None):
     return project_list(conn)
 
 
+def _project_counts(conn, project_id):
+    """The open, in-progress and done items of a project, and who holds the ones in progress."""
+    rows = conn.execute("SELECT status, assignee FROM items WHERE project_id=?", (project_id,)).fetchall()
+    held = [r for r in rows if r["status"] in ("in_progress", "held")]
+    return {"open_items": sum(r["status"] in OPEN_STATES for r in rows), "in_progress": len(held),
+            "holders": sorted({r["assignee"] for r in held if r["assignee"]}),
+            "done_items": sum(r["status"] == "done" for r in rows)}
+
+
 def project_archive(conn, name, actor=None):
+    """Archive a project (#5197): its items leave the queue and every list, and no session is offered them. Nothing is
+    deleted: project_restore brings it back with its items, goals and settings. A session that holds one of its items
+    keeps it until it finishes or releases it."""
     with tx(conn):
-        name = _project(conn, name)["name"]
+        p = _project(conn, name)
+        name = p["name"]
+        if p["archived"]:
+            raise RiverError(f"project {name} is archived already; to bring it back: maxpm project restore {name}")
         conn.execute("UPDATE projects SET archived=1, rank=100000 WHERE name=?", (name,))
+        # The projects after it move up one place, so the ranks stay 1..n.
+        for i, r in enumerate(conn.execute("SELECT name FROM projects WHERE archived=0 ORDER BY rank, id").fetchall(), 1):
+            conn.execute("UPDATE projects SET rank=? WHERE name=?", (i, r["name"]))
         _event(conn, None, actor, f"project {name} archived")
-    return project_list(conn)
+    return {"name": name, "archived": True, **_project_counts(conn, p["id"])}
+
+
+def project_restore(conn, name, actor=None):
+    """Bring an archived project back (#5197), as the least important project: its open items are in the queue again.
+    `maxpm project rank` moves it up."""
+    with tx(conn):
+        p = _project(conn, name)
+        name = p["name"]
+        if not p["archived"]:
+            raise RiverError(f"project {name} is not archived; archived projects: maxpm project list --archived")
+        top = conn.execute("SELECT COALESCE(MAX(rank),0) m FROM projects WHERE archived=0").fetchone()["m"]
+        conn.execute("UPDATE projects SET archived=0, rank=? WHERE name=?", (top + 1, name))
+        _event(conn, None, actor, f"project {name} restored")
+    return {"name": name, "archived": False, "rank": top + 1, **_project_counts(conn, p["id"])}
+
+
+def project_archived(conn):
+    """The archived projects, last archived first, with their item counts (the Plan tab's Archived list)."""
+    out = []
+    for r in conn.execute("SELECT id, name, notes, path FROM projects WHERE archived=1").fetchall():
+        at = conn.execute("SELECT MAX(at) m FROM events WHERE item_id IS NULL AND (change=? OR change LIKE ?)",
+                          (f"project {r['name']} archived", f"project {r['name']} archived (%")).fetchone()["m"]
+        out.append({"name": r["name"], "notes": r["notes"], "path": r["path"], "archived_at": at,
+                    **_project_counts(conn, r["id"])})
+    return sorted(out, key=lambda r: (r["archived_at"] or "", r["name"]), reverse=True)
 
 
 def project_path(conn, name, path, actor=None, move=False):
@@ -11504,6 +11547,7 @@ def state(conn, closed=True):
     return {
         "now": iso(now()),
         "projects": project_list(conn),
+        "archived_projects": project_archived(conn),  # the Plan tab's Archived list (#5197)
         "items": [{k: v for k, v in a.items() if k != "sort_key"} for a in shown
                   if closed or a["status"] not in CLOSED_STATES],
         "closed_counts": closed_counts,

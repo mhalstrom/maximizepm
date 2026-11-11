@@ -4190,6 +4190,57 @@ class ProjectTracker(Base):
         self.assertEqual(core.project_tracker(self.c, "a", "none", "t")["tracker"], "")  # clearing twice is fine
 
 
+class ProjectArchive(Base):
+    """#5197: archive a project, list the archived ones, and restore one."""
+
+    def test_archive_takes_its_items_out_and_restore_brings_them_back(self):
+        for n in ("a", "b", "c"):
+            core.project_add(self.c, n)
+        x = self.add("b", "x")
+        self.add("b", "y")
+        core.register(self.c, "ag")
+        core.claim(self.c, x, "ag")
+        r = core.project_archive(self.c, "b", "mark")
+        self.assertEqual((r["name"], r["archived"], r["open_items"], r["in_progress"], r["holders"]),
+                         ("b", True, 2, 1, ["ag"]))
+        self.assertEqual([(p["name"], p["rank"]) for p in core.project_list(self.c)], [("a", 1), ("c", 2)])
+        self.assertEqual(core.ready_list(self.c), [])
+        st = core.state(self.c)
+        self.assertNotIn("b", [i["project"] for i in st["items"]])
+        (arch,) = st["archived_projects"]
+        self.assertEqual((arch["name"], arch["open_items"], arch["done_items"]), ("b", 2, 0))
+        self.assertTrue(arch["archived_at"])
+        with self.assertRaisesRegex(RiverError, "archived already; .*maxpm project restore b"):
+            core.project_archive(self.c, "b")
+        r = core.project_restore(self.c, "b", "mark")
+        self.assertEqual((r["archived"], r["rank"]), (False, 3))
+        self.assertEqual([p["name"] for p in core.project_list(self.c)], ["a", "c", "b"])
+        self.assertEqual(core.project_archived(self.c), [])
+        self.assertIn("y", [a["title"] for a in core.ready_list(self.c)])
+        with self.assertRaisesRegex(RiverError, "not archived"):
+            core.project_restore(self.c, "b")
+        self.assertEqual([e["change"] for e in core.recent_events(self.c, 2)], ["project b restored", "project b archived"])
+
+    def test_the_cli_archives_lists_and_restores(self):
+        from river import cli
+        core.project_add(self.c, "a")
+        self.add("a", "x")
+        self.c.close()
+        os.environ["MAXPM_DB"], old = self.path, os.environ.get("MAXPM_DB")
+        self.addCleanup(lambda: os.environ.__setitem__("MAXPM_DB", old) if old else os.environ.pop("MAXPM_DB", None))
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                cli.run(["-q", *words])
+            return out.getvalue()
+        self.assertIn("project a is archived: its 1 open item left the queue", run("project", "archive", "a"))
+        self.assertIn("a  (1 open, 0 done; archived", run("project", "list", "--archived"))
+        self.assertIn("project a is back, at rank 1", run("project", "unarchive", "a"))
+        self.assertIn("(no archived projects)", run("project", "list", "--archived"))
+        self.c = core.connect(self.path)
+
+
 class TrackerWriteBack(Base):
     def setUp(self):
         super().setUp()

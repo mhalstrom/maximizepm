@@ -311,6 +311,42 @@ try {
         self.assertEqual((got["moved"], got["replaced"], got["scrolled"], got["boxbar"], got["top"]), ([], 0, 0, 0, True),
                          "\n".join(got["moved"]) or got)
 
+    def test_archive_a_project_in_plan_and_restore_it(self):
+        """#5197: Archive on a project of Plan > Items asks first and says that nothing is deleted; the project then
+        leaves the left bar, Archived projects (closed at first) lists it, and Restore brings it back."""
+        core.project_add(self.c, "old")
+        core.item_add(self.c, "old", "a leftover")
+        driver = r"""
+try {
+  await until(() => window.__appReady && q("#sessYouRow .srow"), "the page");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  q('nav button[data-tab="plan"]').click(); q('[data-plan-view="items"]').click();
+  await until(() => q('#projects [data-archive-project="old"]'), "Archive on the project old");
+  check(!q("[data-plan-archived]"), "no Archived projects while none is archived");
+  q('#projects [data-archive-project="old"]').click();
+  await until(() => q("#archDlg") && !q("#archDlg").classList.contains("hidden"), "the confirm dialog");
+  const text = q("#archDlg").textContent;
+  check(/1 open item leaves the queue/.test(text) && /Nothing is deleted/.test(text), "the dialog says what archiving does: " + text);
+  q("[data-arch-cancel]").click();
+  await sleep(300);
+  check(q('#planSide [data-scope-project="old"]'), "Cancel archives nothing");
+  q('#projects [data-archive-project="old"]').click();
+  await until(() => !q("#archDlg").classList.contains("hidden"), "the dialog again");
+  q("[data-arch-go]").click();
+  await until(() => !q('#planSide [data-scope-project="old"]') && q("[data-plan-archived]"), "old leaves the left bar");
+  check(/Archived projects \(1\)/.test(q("[data-plan-archived]").textContent) && !q("#planArchived"), "the list is closed at first");
+  q("[data-plan-archived]").click();
+  await until(() => q('#planArchived [data-restore-project="old"]'), "Restore in the Archived projects list");
+  check(/1 open/.test(q("#planArchived").textContent), "its open items: " + q("#planArchived").textContent);
+  q('#planArchived [data-restore-project="old"]').click();
+  await until(() => q('#planSide [data-scope-project="old"]') && !q("[data-plan-archived]"), "old is back");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+        self.drive(driver)
+        self.assertEqual(core.project_archived(self.c), [])
+        self.assertEqual([e["change"] for e in core.recent_events(self.c, 2)], ["project old restored", "project old archived"])
+
     def test_a_table_in_a_message_keeps_its_words_whole_in_a_wide_chat(self):
         """#5155 (mark: 'look at the format of that table. we need have the chat size be a bit wider'): at 1280 px the
         chat column takes most of the pane, and in a 5-column table no cell breaks inside a word ('Ti me r'): a short

@@ -338,6 +338,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .end-check { display: flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-m); margin: var(--sp-3) 0; }
 .end-now { margin-top: var(--sp-4); padding: var(--sp-3); border: var(--hair) solid var(--warn); border-radius: var(--r-m); background: var(--warn-bg); font-size: var(--fs-m); }
 .end-now .actions { justify-content: flex-end; margin-top: var(--sp-2); }
+/* Archive a project (archiveProject.js, #5197): the same look as End. */
+#archDlg { --dlg-w: var(--w-dlg-s); }
+.arch-box h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-l); overflow-wrap: anywhere; }
+.arch-box p { margin: var(--sp-2) 0; font-size: var(--fs-m); }
+.arch-box > .actions { justify-content: flex-end; margin-top: var(--sp-5); }
 /* The message box of a chat (components/composer.js, #5078): a round + on the left, then one pill field that holds the
    text, the microphone while it is empty, and a round send arrow when it has text. No outline, a quiet focus. */
 .composer { display: flex; align-items: flex-end; gap: var(--sp-3); }

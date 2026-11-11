@@ -2,6 +2,7 @@
 import { esc, left } from "../lib.js";
 import { chip, ownerChip } from "./chip.js";
 import { bar, pct } from "./bar.js";
+import { button } from "./button.js";
 
 // A .ny card: a head line, then the body. cls adds classes (for example "msg read").
 export function nyCard(head, body, cls = "") {
@@ -40,7 +41,8 @@ export function projCard(p, closed, inner) {
         <span class="rk" title="Project rank: 1 is the most important">${p.rank}</span><b>${esc(p.name)}</b>
         <span class="spacer"></span>
         <button class="iconbtn" data-rank="${esc(p.name)}" data-to="${p.rank - 1}" title="more important">↑</button>
-        <button class="iconbtn" data-rank="${esc(p.name)}" data-to="${p.rank + 1}" title="less important">↓</button></div>
+        <button class="iconbtn" data-rank="${esc(p.name)}" data-to="${p.rank + 1}" title="less important">↓</button>
+        ${button("Archive", { data: { "archive-project": p.name }, title: "Archive this project: its items leave the queue and the lists; nothing is deleted (#5197)" })}</div>
       ${inner}
     </div>`;
 }

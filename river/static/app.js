@@ -6,6 +6,7 @@ import { makeDialog, ASK_AGAIN_MS } from "./components/dialog.js";
 import { agentStart } from "./components/agentStart.js";
 import { chooseLaunch, launchArgs } from "./components/launchDialog.js";
 import { chooseStop } from "./components/agentActions.js";
+import { archiveProject, restoreProject } from "./components/archiveProject.js";
 import { openTerminal } from "./components/terminalDialog.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
 import { folderForm, wireFolderForms } from "./components/folderForm.js";
@@ -299,6 +300,11 @@ document.addEventListener("click", async (e) => {
   const sg = t.closest("[data-scope-goal]"); if (sg) return setScope(sg.dataset.scopeProject, scope.goal === sg.dataset.scopeGoal ? "" : sg.dataset.scopeGoal);
   const sp = t.closest("[data-scope-project]"); if (sp) return setScope(sp.dataset.scopeProject, "");
   if (t.closest("[data-plan-addproject]")) return plan.openAdd("project");
+  // Archive a project (Items view), the Archived projects list of the left bar, and Restore (#5197).
+  const ap = t.closest("[data-archive-project]");
+  if (ap) { const name = ap.dataset.archiveProject; if (await archiveProject(S, name) && scope.project === name) setScope("", ""); return; }
+  if (t.closest("[data-plan-archived]")) return plan.toggleArchived();
+  const rp = t.closest("[data-restore-project]"); if (rp) { await restoreProject(rp.dataset.restoreProject); return; }
   // A goal card of the Items view: that goal is the scope (a second click: its project).
   const card = t.closest("[data-goal]"); if (card) { const g = (S.goals || []).find(x => x.name === card.dataset.goal);
     if (g) setScope(g.project, scope.goal === g.name ? "" : g.name); return; }
