@@ -1206,26 +1206,33 @@ def build_parser():
     x = sts.add_parser("rm", help="remove a step"); x.add_argument("id", type=int)
     x = sts.add_parser("move", help="move a step within its project"); x.add_argument("id", type=int)
     x.add_argument("to", type=int, help="new position (1 is first)")
-    po = sub.add_parser("policy", help="the rules sessions follow (queue, project, role), each with its source and "
-                        "reason; the briefings print the ones that apply")
+    po = sub.add_parser("policy", help="the rules sessions follow, each with its source and reason: global ones ship "
+                        "with MaximizePM, user ones are yours (queue, project, role); the briefings print the ones "
+                        "that apply")
     pos = po.add_subparsers(dest="polcmd", required=True)
     x = pos.add_parser("list", help="every policy, or those of one project or role")
     x.add_argument("--project"); x.add_argument("--role", help="worker, reviewer, deployer, owner, manager, expert")
     x.add_argument("--for", dest="for_role", metavar="ROLE",
                    help="what applies to a session of this role (with --project: in that project)")
-    x = pos.add_parser("show", help="one policy in full"); x.add_argument("id", help="p12 or 12")
-    x = pos.add_parser("add", help="add a rule: short text, its reason and source, and a scope (default: the whole queue)")
+    k = x.add_mutually_exclusive_group()
+    k.add_argument("--global", dest="kind", action="store_const", const="global", help="only the global policies")
+    k.add_argument("--user", dest="kind", action="store_const", const="user", help="only your own policies")
+    x = pos.add_parser("show", help="one policy in full"); x.add_argument("id", help="p12 (yours) or g3 (global)")
+    x = pos.add_parser("add", help="add your own rule: short text, its reason and source, and a scope (default: the "
+                       "whole queue)")
     x.add_argument("text", help="the rule, in one or two plain sentences")
     x.add_argument("--reason", required=True, help="why the rule exists")
     x.add_argument("--source", help="who decided it, and when: 'mark 2026-11-11' (default: you, today)")
     x.add_argument("--project", help="only sessions in this project")
     x.add_argument("--role", help="only this role: " + ", ".join(core.POLICY_ROLES))
     x.add_argument("--item", action="append", metavar="ID", help="an item the rule came from (repeatable)")
+    x.add_argument("--adds-to", metavar="G", help="the global policy (g3) this rule adds to")
     x = pos.add_parser("edit", help="change a policy's text, reason, source, scope or items"); x.add_argument("id")
     x.add_argument("--text"); x.add_argument("--reason"); x.add_argument("--source")
     x.add_argument("--project"); x.add_argument("--no-project", action="store_true", help="every project")
     x.add_argument("--role", help="a role, or any")
     x.add_argument("--item", action="append", metavar="ID", help="replace the item links (--item '' clears them)")
+    x.add_argument("--adds-to", metavar="G", help="the global policy it adds to (none: no longer)")
     x = pos.add_parser("retire", help="delete a policy (no tombstone; the history keeps one line)"); x.add_argument("id")
     x = sub.add_parser("release", help="give a claimed item back; with no item, an agent's hook says that its session "
                        "ended (docs/agent-adapters.md)")
@@ -2440,14 +2447,14 @@ def dispatch(conn, a, actor):
         if a.polcmd == "list":
             if a.for_role:
                 return core.policies_for(conn, [a.project] if a.project else [], a.for_role)
-            return core.policy_list(conn, a.project, a.role)
+            return core.policy_list(conn, a.project, a.role, a.kind)
         if a.polcmd == "show":
             return core.policy_show(conn, a.id)
         if a.polcmd == "add":
-            return core.policy_add(conn, a.text, a.reason, a.source, a.project, a.role, a.item, actor)
+            return core.policy_add(conn, a.text, a.reason, a.source, a.project, a.role, a.item, actor, a.adds_to)
         if a.polcmd == "edit":
             return core.policy_edit(conn, a.id, a.text, a.reason, a.source, a.project, a.no_project, a.role,
-                                    a.item, actor)
+                                    a.item, actor, a.adds_to)
         return core.policy_retire(conn, a.id, actor)
     if c == "release":
         if a.id is None:
@@ -2776,15 +2783,22 @@ def policy_line(p, width=200):
     """A policy in one line, as a briefing shows it: id, scope, the rule (cut), and its source."""
     t = " ".join(p["text"].split())
     t = t if len(t) <= width else t[:width - 1].rstrip() + "…"
-    return f"  {p['pid']} [{p['scope']}] {t}  ({p['source']})"
+    return (f"  {p['pid']} [{p['scope']}] {t}  ({p['source']}"
+            + (f"; adds to {p['adds_to']}" if p.get("adds_to") else "") + ")")
 
 
 def policy_full(p):
     out = [f"{p['pid']} [{p['scope']}] {p['text']}", f"  source: {p['source']}", f"  reason: {p['reason']}"]
+    if p.get("adds_to"):
+        out.append(f"  adds to the global policy {p['adds_to']} (maxpm policy show {p['adds_to']})")
     if p.get("items"):
         out.append("  items: " + "; ".join(f"#{i['id']} {i['title']} ({i['status']})" for i in p["items"]))
-    out.append(f"  added {core.show_time(p['created_at'])}" + (f" by {p['created_by']}" if p.get("created_by") else "")
-               + (f", changed {core.show_time(p['changed_at'])}" if p.get("changed_at") else ""))
+    if p["kind"] == "global":
+        out.append("  ships with MaximizePM (river/policies.json); it changes only by a commit and a release")
+        out += [f"  your addition: {x['pid']} [{x['scope']}] {x['text']}" for x in p.get("added_by_user", [])]
+    else:
+        out.append(f"  added {core.show_time(p['created_at'])}" + (f" by {p['created_by']}" if p.get("created_by") else "")
+                   + (f", changed {core.show_time(p['changed_at'])}" if p.get("changed_at") else ""))
     return out
 
 
@@ -2792,7 +2806,8 @@ def policy_lines(pols, other=0):
     """The POLICIES block of a briefing: the rules that apply to this session, in short form."""
     if not pols and not other:
         return []
-    out = ["POLICIES (rules for this session; the full text and reason: maxpm policy show <id>):"]
+    out = ["POLICIES (rules for this session: global ones ship with MaximizePM, user ones are this queue's own; "
+           "the full text and reason: maxpm policy show <id>):"]
     out += [policy_line(p) for p in pols]
     if other:
         out.append(f"  and {other} policy(ies) of projects or other roles: maxpm policy list")
@@ -3896,7 +3911,7 @@ def render(a, res):
         else:
             if not res:
                 print("(no policies: maxpm policy add \"<rule>\" --reason \"<why>\" --source \"<who, date>\" "
-                      "[--project P] [--role R])")
+                      "[--project P] [--role R] [--adds-to g<n>])")
             for p in res:
                 print(policy_line(p))
         return

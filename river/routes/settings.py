@@ -19,9 +19,9 @@ OPS = {
     # Policies (#5308): the rules sessions follow, shown in their briefings.
     "policy_add": lambda c, a, who: core.policy_add(c, a.get("text"), a.get("reason"), a.get("source"),
                                                     a.get("project") or None, a.get("role") or None,
-                                                    a.get("items"), who),
+                                                    a.get("items"), who, a.get("adds_to") or None),
     "policy_edit": lambda c, a, who: core.policy_edit(c, a["id"], a.get("text"), a.get("reason"), a.get("source"),
                                                       a.get("project") or None, bool(a.get("no_project")),
-                                                      a.get("role"), a.get("items"), who),
+                                                      a.get("role"), a.get("items"), who, a.get("adds_to")),
     "policy_retire": lambda c, a, who: core.policy_retire(c, a["id"], who),
 }

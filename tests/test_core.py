@@ -8312,32 +8312,41 @@ class ShortTitles(Base):
             core.agent_now(self.c, "ag", "")
 
 
+
 class Policies(Base):
-    """Policies (#5308): rules in the queue, with scope, source and reason, printed in the briefings they apply to."""
+    """Policies (#5308): global ones ship with MaximizePM (river/policies.json); user ones live in the queue, with
+    scope, source and reason. The briefings print the ones that apply. The texts here are placeholders: a person's
+    own rules never go into the repo."""
 
     def setUp(self):
         super().setUp()
+        g = os.path.join(self.dir.name, "policies.json")
+        with open(g, "w") as f:
+            json.dump({"policies": [{"id": "g1", "text": "Global rule A", "reason": "reason A", "source": "tester 2026-01-01"},
+                                    {"id": "g2", "text": "Global rule B", "reason": "reason B", "source": "tester 2026-01-01",
+                                     "role": "manager"}]}, f)
+        patch = mock.patch.object(core, "GLOBAL_POLICIES_FILE", g)
+        patch.start()
+        self.addCleanup(patch.stop)
         core.project_add(self.c, "web", path=self.dir.name)
         core.project_add(self.c, "api")
         self.it = self.add("web", "Build the header")
-        self.q = core.policy_add(self.c, "Run the tests before each commit", "a broken main stops every session",
-                                 "mark 2026-11-11", actor="mark")
-        self.p = core.policy_add(self.c, "Ask before a push of public text", "the repo is public", "mark 2026-11-11",
-                                 project="web", items=[str(self.it)])
-        self.r = core.policy_add(self.c, "Never review a release you worked on", "a clean eye", role="reviewer",
-                                 actor="mark")
-        self.m = core.policy_add(self.c, "Tell the person in one line", "short", role="manager")
-        self.o = core.policy_add(self.c, "API keys stay out of logs", "secrets", project="api")
-        self.w = core.policy_add(self.c, "Name the item in commits", "cleanup finds it", project="web", role="worker")
+        self.q = core.policy_add(self.c, "Rule Q", "reason Q", "tester 2026-01-01", actor="tester")
+        self.p = core.policy_add(self.c, "Rule P", "reason P", "tester 2026-01-01", project="web", items=[str(self.it)],
+                                 adds_to="g1")
+        self.r = core.policy_add(self.c, "Rule R", "reason R", role="reviewer", actor="tester")
+        self.m = core.policy_add(self.c, "Rule M", "reason M", role="manager")
+        self.o = core.policy_add(self.c, "Rule O", "reason O", project="api")
+        self.w = core.policy_add(self.c, "Rule W", "reason W", project="web", role="worker")
 
     def ids(self, rows):
-        return [p["id"] for p in rows]
+        return [p["pid"] for p in rows]
 
     def test_add_checks_and_defaults(self):
-        self.assertEqual(self.p["scope"], "web")
+        self.assertEqual((self.p["kind"], self.p["scope"], self.p["adds_to"]), ("user", "user: web", "g1"))
         self.assertEqual(self.p["items"][0]["id"], self.it)
-        self.assertEqual(self.w["scope"], "web, worker")
-        self.assertTrue(self.r["source"].startswith("mark 20"))  # no source: the actor, today
+        self.assertEqual(self.w["scope"], "user: web, worker")
+        self.assertTrue(self.r["source"].startswith("tester 20"))  # no source: the actor, today
         with self.assertRaisesRegex(RiverError, "say why"):
             core.policy_add(self.c, "x", "")
         with self.assertRaisesRegex(RiverError, "no policy role"):
@@ -8346,26 +8355,39 @@ class Policies(Base):
             core.policy_add(self.c, "x", "y", items=["9999"])
         with self.assertRaisesRegex(RiverError, "no project"):
             core.policy_add(self.c, "x", "y", project="nope")
+        with self.assertRaisesRegex(RiverError, "no global policy"):
+            core.policy_add(self.c, "x", "y", adds_to="g9")
+
+    def test_global_policies_change_only_in_the_repo(self):
+        for f in (lambda: core.policy_edit(self.c, "g1", text="x"), lambda: core.policy_retire(self.c, "G1")):
+            with self.assertRaisesRegex(RiverError, "g1 is a global policy: it ships with MaximizePM"):
+                f()
+        g = core.policy_show(self.c, "g1")
+        self.assertEqual((g["kind"], g["scope"]), ("global", "global: queue"))
+        self.assertEqual(self.ids(g["added_by_user"]), [self.p["pid"]])
+        self.assertEqual(self.ids(core.policy_list(self.c, kind="global")), ["g1", "g2"])
+        self.assertEqual(self.ids(core.policy_list(self.c, project="web")), [self.p["pid"], self.w["pid"]])
 
     def test_what_applies_to_each_role(self):
-        self.assertEqual(self.ids(core.policies_for(self.c, ["web"], "worker")), [self.q["id"], self.p["id"], self.w["id"]])
-        self.assertEqual(self.ids(core.policies_for(self.c, ["web"], "reviewer")),
-                         [self.q["id"], self.r["id"], self.p["id"], self.w["id"]])  # a reviewer is a worker too
-        self.assertEqual(self.ids(core.policies_for(self.c, ["api"], "expert")), [self.q["id"], self.o["id"]])
-        self.assertEqual(self.ids(core.policies_for(self.c, role="manager")), [self.q["id"], self.m["id"]])
+        q, p, r, m, o, w = (x["pid"] for x in (self.q, self.p, self.r, self.m, self.o, self.w))
+        self.assertEqual(self.ids(core.policies_for(self.c, ["web"], "worker")), ["g1", q, p, w])
+        self.assertEqual(self.ids(core.policies_for(self.c, ["web"], "reviewer")), ["g1", q, r, p, w])  # a worker too
+        self.assertEqual(self.ids(core.policies_for(self.c, ["api"], "expert")), ["g1", q, o])
+        self.assertEqual(self.ids(core.policies_for(self.c, role="manager")), ["g1", "g2", q, m])
 
     def test_go_and_manage_briefings_print_them(self):
         b = core.go(self.c, self.dir.name, "w1")
         self.assertEqual(b["item"]["id"], self.it)
-        self.assertEqual(self.ids(b["policies"]), [self.q["id"], self.p["id"], self.w["id"]])
+        self.assertEqual(self.ids(b["policies"]), ["g1", self.q["pid"], self.p["pid"], self.w["pid"]])
         from river import cli
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.render_go(b)
         self.assertIn("POLICIES", out.getvalue())
-        self.assertIn(f"{self.p['pid']} [web] Ask before a push of public text  (mark 2026-11-11)", out.getvalue())
+        self.assertIn("g1 [global: queue] Global rule A  (tester 2026-01-01)", out.getvalue())
+        self.assertIn(f"{self.p['pid']} [user: web] Rule P  (tester 2026-01-01; adds to g1)", out.getvalue())
         m = core.manage(self.c, self.dir.name, "boss")
-        self.assertEqual(self.ids(m["policies"]), [self.q["id"], self.m["id"]])
+        self.assertEqual(self.ids(m["policies"]), ["g1", "g2", self.q["pid"], self.m["pid"]])
         self.assertEqual(m["other_policies"], 4)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -8373,17 +8395,18 @@ class Policies(Base):
         self.assertIn("and 4 policy(ies) of projects or other roles", out.getvalue())
 
     def test_edit_and_retire(self):
-        p = core.policy_edit(self.c, self.p["pid"], text="Ask first", no_project=True, role="expert", items=[""])
-        self.assertEqual((p["text"], p["scope"], p["items"]), ("Ask first", "expert", []))
+        p = core.policy_edit(self.c, self.p["pid"], text="Rule P2", no_project=True, role="expert", items=[""],
+                             adds_to="none")
+        self.assertEqual((p["text"], p["scope"], p["items"], p["adds_to"]), ("Rule P2", "user: expert", [], None))
         self.assertTrue(p["changed_at"])
-        p = core.policy_edit(self.c, p["id"], project="api", role="any")
-        self.assertEqual(p["scope"], "api")
+        p = core.policy_edit(self.c, p["id"], project="api", role="any", adds_to="g2")
+        self.assertEqual((p["scope"], p["adds_to"]), ("user: api", "g2"))
         with self.assertRaisesRegex(RiverError, "say what changes"):
             core.policy_edit(self.c, p["id"])
-        core.policy_retire(self.c, f"p{p['id']}", actor="mark")
+        core.policy_retire(self.c, f"p{p['id']}", actor="tester")
         with self.assertRaisesRegex(RiverError, "no policy"):
             core.policy_show(self.c, p["id"])
-        self.assertNotIn(p["id"], self.ids(core.policy_list(self.c)))
+        self.assertNotIn(p["pid"], self.ids(core.policy_list(self.c)))
         self.assertIn("retired", core.recent_events(self.c)[0]["change"])  # the history keeps one line
 
     def test_cli_and_state(self):
@@ -8391,11 +8414,31 @@ class Policies(Base):
         out = io.StringIO()
         with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), contextlib.redirect_stdout(out), \
                 contextlib.redirect_stderr(io.StringIO()):
-            cli.run(["--as", "mark", "policy", "add", "Keep it short", "--reason", "people read it", "--role", "owner"])
+            cli.run(["--as", "tester", "policy", "add", "Rule N", "--reason", "reason N", "--role", "owner",
+                     "--adds-to", "g1"])
             cli.run(["policy", "list", "--for", "owner", "--project", "web"])
-        self.assertIn("added p7 [owner] Keep it short", out.getvalue())
+            cli.run(["policy", "show", "g1"])
+        self.assertIn("added p7 [user: owner] Rule N", out.getvalue())
         self.assertIn("Name it in your item's output", out.getvalue())
-        self.assertIn("p7 [owner] Keep it short", out.getvalue().split("Name it")[1])
+        self.assertIn("p7 [user: owner] Rule N", out.getvalue().split("Name it")[1])
+        self.assertIn("your addition: p7 [user: owner] Rule N", out.getvalue())
         st = core.state(self.c)
-        self.assertEqual(len(st["policies"]), 7)
+        self.assertEqual([p["kind"] for p in st["policies"]], ["global"] * 2 + ["user"] * 7)
         self.assertIn("reviewer", st["policy_roles"])
+
+
+class ShippedPolicies(unittest.TestCase):
+    """The global policies file that ships with MaximizePM (#5308) loads, and each entry is whole."""
+
+    def test_the_shipped_file_is_valid(self):
+        with open(core.GLOBAL_POLICIES_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        ids = [r["id"] for r in data["policies"]]
+        self.assertEqual(len(ids), len(set(ids)), "a global policy id is used twice")
+        for r in data["policies"]:
+            self.assertRegex(r["id"], r"^g[1-9]\d*$")
+            self.assertLessEqual(set(r), {"id", "text", "reason", "source", "role"}, "a global policy names no project")
+            for k in ("text", "reason", "source"):
+                self.assertTrue(r.get(k, "").strip(), f"{r['id']} has no {k}")
+            self.assertIn(r.get("role"), (None,) + core.POLICY_ROLES)
+        self.assertEqual(len(core.global_policies()), len(ids))

@@ -1,0 +1,4 @@
+{
+  "about": "Global policies (#5308): rules that ship with MaximizePM and apply to the sessions of every user's queue. Each has an id (g1, g2, ...; never reuse one), the rule (text), its reason, its source (who decided it, and when), and an optional role (worker, reviewer, deployer, owner, manager, expert; none: every session). They change only by a commit and a release. A person's own rules are user policies in their queue (maxpm policy add), never here.",
+  "policies": []
+}

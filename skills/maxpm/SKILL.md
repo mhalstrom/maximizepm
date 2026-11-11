@@ -617,14 +617,15 @@ your alert or question blocked when it sees that you stand still: you run
 
 ## Policies
 
-The rules for your session are in the queue, as policies: the go briefing
-prints the ones that apply to you under POLICIES (the queue's, your project's,
-and your role's). Follow them like the rules of this guide.
+The rules for your session are policies: the go briefing prints the ones that
+apply to you under POLICIES (the queue's, your project's, and your role's).
+Global ones (g1, g2, ...) ship with MaximizePM; user ones (p1, p2, ...) are the
+person's own rules in this queue. Follow them like the rules of this guide.
 `maxpm policy show <id>` gives the full text, the reason, and who decided it.
 The user states a new rule for the sessions ("from now on ..."): add it as a
 policy, not as a note in your memory files, which no other agent reads:
 `maxpm policy add "<rule>" --reason "<why>" --source "<person> <date>"
-[--project P] [--role R]`, and name it in your item's output
+[--project P] [--role R] [--adds-to g<n>]`, and name it in your item's output
 (`done <id> --output "... policy p12"`). A rule that must hold every time
 becomes code or a setting: add a task for it.
 

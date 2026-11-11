@@ -4425,14 +4425,15 @@ class PolicyOps(unittest.TestCase):
         self.dir.cleanup()
 
     def test_add_edit_retire(self):
-        op = lambda name, args: server.OPS[name](self.c, args, "mark")
+        op = lambda name, args: server.OPS[name](self.c, args, "tester")
         # The page sends "" for "every project" and "every role".
-        p = op("policy_add", {"text": "Ask first", "reason": "public", "source": "", "project": "web", "role": ""})
-        self.assertEqual((p["scope"], p["created_by"]), ("web", "mark"))
+        p = op("policy_add", {"text": "Rule A", "reason": "reason A", "source": "", "project": "web", "role": "",
+                              "adds_to": ""})
+        self.assertEqual((p["scope"], p["created_by"], p["adds_to"]), ("user: web", "tester", None))
         p = op("policy_edit", {"id": p["id"], "role": "reviewer"})
-        self.assertEqual(p["scope"], "web, reviewer")
+        self.assertEqual(p["scope"], "user: web, reviewer")
         op("policy_retire", {"id": p["id"]})
-        self.assertEqual(core.state(self.c)["policies"], [])
+        self.assertEqual([x for x in core.state(self.c)["policies"] if x["kind"] == "user"], [])
 
 
 class KillPane(unittest.TestCase):

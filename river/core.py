@@ -840,9 +840,10 @@ CREATE TABLE IF NOT EXISTS sent_prompts (
 );
 CREATE INDEX IF NOT EXISTS sent_prompts_agent ON sent_prompts(agent, id);
 
--- Policies (#5308): the rules that sessions follow, kept in the queue, so each agent (Claude Code, Codex, any other)
--- reads the ones that apply to it in its briefing. Scope: the whole queue (no project, no role), a project, a role,
--- or a role in a project. Retire deletes the row: no tombstones.
+-- User policies (#5308): the rules a person sets for the sessions of this queue, so each agent (Claude Code, Codex,
+-- any other) reads the ones that apply to it in its briefing. Scope: the whole queue (no project, no role), a project,
+-- a role, or a role in a project. Retire deletes the row: no tombstones. The global policies that ship with
+-- MaximizePM are in river/policies.json, not here.
 CREATE TABLE IF NOT EXISTS policies (
   id          INTEGER PRIMARY KEY,
   project_id  INTEGER REFERENCES projects(id),
@@ -851,6 +852,7 @@ CREATE TABLE IF NOT EXISTS policies (
   source      TEXT NOT NULL,             -- who decided it, and when: 'mark 2026-11-11'
   reason      TEXT NOT NULL,
   items       TEXT,                      -- linked item ids, separated by spaces
+  adds_to     TEXT,                      -- the global policy (g<n>) it adds to, if any
   created_by  TEXT,
   created_at  TEXT NOT NULL,
   changed_at  TEXT
@@ -1092,6 +1094,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE projects ADD COLUMN path TEXT")
     if "target" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN target TEXT")
+    if "adds_to" not in {r["name"] for r in conn.execute("PRAGMA table_info(policies)")}:
+        conn.execute("ALTER TABLE policies ADD COLUMN adds_to TEXT")
     if "nudged_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN nudged_at TEXT")
     acols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
@@ -12239,10 +12243,18 @@ def state(conn, closed=True):
 
 
 # ---------------------------------------------------------------- policies (#5308)
-# A policy is a rule that sessions follow, with its source and reason, kept in the queue instead of in one agent's
+# A policy is a rule that sessions follow, with its source and reason, kept by MaximizePM instead of in one agent's
 # memory files: Claude Code memory reaches only Claude Code sessions in one folder, and nobody sees which rule applied.
 # maxpm go, manage and the expert briefing print the policies that apply to the session. No rule engine: a policy
 # that must be enforced becomes code or a setting.
+#
+# Two kinds (mark 2026-11-11). GLOBAL policies ship with MaximizePM in river/policies.json: they apply to every
+# user's queue and change only by a commit and a release (ids g1, g2, ...; scope the queue or a role, never a
+# project, which is a user's own). USER policies are the rules a person sets for their own queue: rows of the
+# policies table (ids p1, p2, ...), which never go into the repo. maxpm policy add, edit and retire change user
+# policies only; a user policy may add to a global one (adds_to).
+
+GLOBAL_POLICIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policies.json")
 
 # The roles a policy can name. A worker policy applies to every session that takes queue work: a worker, a goal
 # owner, a reviewer, a deployer (they are workers with a kind of task). A manager or an expert gets only its own.
@@ -12258,10 +12270,44 @@ def _policy_roles(role):
     return {"worker"} | ({role} if role in POLICY_ROLES else set())
 
 
+def global_policies():
+    """The global policies that ship with MaximizePM, from river/policies.json, as the views of user policies are."""
+    import json
+    try:
+        with open(GLOBAL_POLICIES_FILE, encoding="utf-8") as f:
+            rows = json.load(f).get("policies", [])
+    except FileNotFoundError:
+        return []
+    out = []
+    for r in rows:
+        role = r.get("role")
+        out.append({"id": r["id"], "pid": r["id"], "kind": "global", "project": None, "role": role,
+                    "text": r["text"], "reason": r["reason"], "source": r["source"], "items": [], "adds_to": None,
+                    "scope": "global: " + (role or "queue"), "created_by": None, "created_at": None,
+                    "changed_at": None})
+    return out
+
+
+def _global_policy(gid):
+    g = {p["id"]: p for p in global_policies()}.get(str(gid).strip().lower())
+    if not g:
+        raise RiverError(f"no global policy {gid!r}; the global ones: maxpm policy list --global")
+    return g
+
+
+def _is_global_id(pid):
+    t = str(pid).strip().lower()
+    return t[:1] == "g" and t[1:].isdigit()
+
+
 def _policy_id(pid):
+    if _is_global_id(pid):
+        raise RiverError(f"{str(pid).strip().lower()} is a global policy: it ships with MaximizePM "
+                         f"(river/policies.json) and changes only by a commit and a release. Add your own rule to it: "
+                         f"maxpm policy add \"<rule>\" --reason \"<why>\" --adds-to {str(pid).strip().lower()}")
     s = str(pid).strip().lower().lstrip("p")
     if not s.isdigit():
-        raise RiverError(f"no policy {pid!r}; a policy id is a number (p12 or 12): maxpm policy list")
+        raise RiverError(f"no policy {pid!r}; a policy id is p12 (yours) or g3 (global): maxpm policy list")
     return int(s)
 
 
@@ -12296,14 +12342,15 @@ def _policy_items(conn, items):
 
 
 def policy_scope(p):
-    """The scope of a policy in words: queue, the project, the role, or both."""
-    return ", ".join(x for x in (p.get("project"), p.get("role")) if x) or "queue"
+    """The scope of a user policy in words: user: queue, the project, the role, or both."""
+    return "user: " + (", ".join(x for x in (p.get("project"), p.get("role")) if x) or "queue")
 
 
 def _policy_view(conn, r):
     p = dict(r)
     p.pop("project_id", None)
     p["pid"] = f"p{p['id']}"
+    p["kind"] = "user"
     p["scope"] = policy_scope(p)
     ids = [int(i) for i in (p.get("items") or "").split()]
     p["items"] = [{"id": i, "title": x["title"], "status": x["status"]} for i in ids
@@ -12311,8 +12358,13 @@ def _policy_view(conn, r):
     return p
 
 
-def policy_add(conn, text, reason, source=None, project=None, role=None, items=None, actor=None):
-    """Add a policy. source says who decided it and when; with none, the actor and today's date."""
+def _adds_to(gid):
+    return _global_policy(gid)["id"] if gid else None
+
+
+def policy_add(conn, text, reason, source=None, project=None, role=None, items=None, actor=None, adds_to=None):
+    """Add a user policy. source says who decided it and when; with none, the actor and today's date. adds_to: the
+    global policy (g<n>) it adds to."""
     text, reason = (text or "").strip(), (reason or "").strip()
     if not text:
         raise RiverError("say the rule: maxpm policy add \"<rule>\" --reason \"<why>\" --source \"<who, date>\"")
@@ -12322,17 +12374,18 @@ def policy_add(conn, text, reason, source=None, project=None, role=None, items=N
     pid = _project(conn, project)["id"] if project else None
     role = _policy_role(role)
     source = (source or "").strip() or f"{actor or 'unknown'} {now().date().isoformat()}"
+    adds_to = _adds_to(adds_to)
     with tx(conn):
-        cur = conn.execute("INSERT INTO policies(project_id, role, text, source, reason, items, created_by, created_at) "
-                           "VALUES (?,?,?,?,?,?,?,?)", (pid, role, text, source, reason, _policy_items(conn, items),
-                                                       actor, iso(now())))
+        cur = conn.execute("INSERT INTO policies(project_id, role, text, source, reason, items, adds_to, created_by, "
+                           "created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                           (pid, role, text, source, reason, _policy_items(conn, items), adds_to, actor, iso(now())))
         p = _policy_view(conn, _policy_row(conn, cur.lastrowid))
         _event(conn, None, actor, f"policy {p['pid']} added ({p['scope']}): {text}")
     return p
 
 
 def policy_edit(conn, pid, text=None, reason=None, source=None, project=None, no_project=False, role=None,
-                items=None, actor=None):
+                items=None, actor=None, adds_to=None):
     """Change a policy: its text, reason, source, scope (project, role; role any clears it), or its item links
     (items replaces them; an empty list clears them)."""
     r = _policy_row(conn, pid)
@@ -12352,9 +12405,11 @@ def policy_edit(conn, pid, text=None, reason=None, source=None, project=None, no
         ch["role"] = _policy_role(role)
     if items is not None:
         ch["items"] = _policy_items(conn, items)
+    if adds_to is not None:  # "" or "none": it adds to no global policy
+        ch["adds_to"] = None if adds_to.strip().lower() in ("", "none") else _adds_to(adds_to)
     if not ch:
         raise RiverError(f"say what changes: maxpm policy edit p{r['id']} --text|--reason|--source|--project|"
-                         f"--no-project|--role|--item")
+                         f"--no-project|--role|--item|--adds-to")
     with tx(conn):
         conn.execute(f"UPDATE policies SET {', '.join(k + '=?' for k in ch)}, changed_at=? WHERE id=?",
                      (*ch.values(), iso(now()), r["id"]))
@@ -12373,11 +12428,20 @@ def policy_retire(conn, pid, actor=None):
 
 
 def policy_show(conn, pid):
+    if _is_global_id(pid):
+        g = _global_policy(pid)
+        return dict(g, added_by_user=[p for p in policy_list(conn, kind="user") if p["adds_to"] == g["id"]])
     return _policy_view(conn, _policy_row(conn, pid))
 
 
-def policy_list(conn, project=None, role=None):
-    """Every policy, or those of one project or role (a filter on the scope as written, not on what applies)."""
+def policy_list(conn, project=None, role=None, kind=None):
+    """Every policy, global ones first, or those of one project or role (a filter on the scope as written, not on
+    what applies). kind: global or user for one kind. A project filter leaves out the global ones: they name none."""
+    out = []
+    if kind != "user" and not project:
+        out = [g for g in global_policies() if not role or g["role"] == _policy_role(role)]
+    if kind == "global":
+        return out
     q, args = [], []
     if project:
         q.append("x.project_id=?")
@@ -12388,13 +12452,13 @@ def policy_list(conn, project=None, role=None):
     rows = conn.execute("SELECT x.*, p.name project FROM policies x LEFT JOIN projects p ON p.id=x.project_id "
                         + ("WHERE " + " AND ".join(q) if q else "")
                         + " ORDER BY x.project_id IS NOT NULL, p.rank, p.name, x.role IS NOT NULL, x.role, x.id", args)
-    return [_policy_view(conn, r) for r in rows]
+    return out + [_policy_view(conn, r) for r in rows]
 
 
 def policies_for(conn, projects=(), role=None):
-    """The policies that apply to a session: the queue's, those of its projects, and those of its role (also in
-    its projects). A manager runs every project: it gets the queue's and every manager policy, and the count of
-    the project policies it does not see."""
+    """The policies that apply to a session, global ones first: the queue's, those of its projects, and those of its
+    role (also in its projects). A manager runs every project: it gets the queue's and every manager policy, and the
+    count of the project policies it does not see."""
     roles = _policy_roles(role)
     out = []
     for p in policy_list(conn):
@@ -13970,7 +14034,7 @@ def manage(conn, cwd, actor=None, takeover=None):
         conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(_finding_keys(f)), actor))
     pol = policies_for(conn, role="manager")
     return {"agent": actor, "new_name": new_name, "role": "manager", "status": status(conn), "findings": f,
-            "policies": pol, "other_policies": conn.execute("SELECT COUNT(*) FROM policies").fetchone()[0] - len(pol),
+            "policies": pol, "other_policies": len(policy_list(conn)) - len(pol),
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
             "wait_high": setting(conn, "manage_wait_high", agent=actor),
             "wait_low": setting(conn, "manage_wait_low", agent=actor),

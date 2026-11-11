@@ -23,12 +23,14 @@ export function renderSettings() {
   }));
 }
 
-// Policies: each rule with its scope, source and reason; ✕ retires it (deletes it: no tombstone).
+// Policies: each rule with its kind and scope, source and reason. Global ones ship with MaximizePM and change only by
+// a release; a user one has ✕, which retires it (deletes it: no tombstone).
 export function renderPolicies() {
   const P = S.policies || [];
-  const html = P.map(p => `<div class="policy"><div class="policy-body">${chip("c-p", esc(p.pid))} ${chip("", esc(p.scope))} ${esc(p.text)}`
-    + `<div class="muted t-s">${esc(p.reason)} · ${esc(p.source)}${p.items.length ? " · " + p.items.map(i => "#" + i.id).join(" ") : ""}</div></div>`
-    + iconButton("✕", `Retire ${p.pid}`, { data: { retirePolicy: p.id } }) + `</div>`).join("")
+  const html = P.map(p => `<div class="policy"><div class="policy-body">${chip(p.kind === "global" ? "c-human" : "c-p", esc(p.pid))} ${chip("", esc(p.scope))} ${esc(p.text)}`
+    + `<div class="muted t-s">${esc(p.reason)} · ${esc(p.source)}${p.adds_to ? " · adds to " + esc(p.adds_to) : ""}${p.items.length ? " · " + p.items.map(i => "#" + i.id).join(" ") : ""}`
+    + `${p.kind === "global" ? " · ships with MaximizePM" : ""}</div></div>`
+    + (p.kind === "user" ? iconButton("✕", `Retire ${p.pid}`, { data: { retirePolicy: p.id } }) : "") + `</div>`).join("")
     || `<div class="muted">No policies yet. A policy is a rule for the sessions: maxpm policy add "&lt;rule&gt;" --reason "&lt;why&gt;".</div>`;
   const el = $("#policies"); if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
   const opts = (sel, list, first) => {
@@ -38,13 +40,14 @@ export function renderPolicies() {
   };
   opts("#polProject", (S.projects || []).map(p => p.name), "every project");
   opts("#polRole", S.policy_roles || [], "every role");
+  opts("#polAddsTo", P.filter(p => p.kind === "global").map(p => p.pid), "no global policy");
 }
 $("#polGo").addEventListener("click", async () => {
   const text = $("#polText").value.trim(), reason = $("#polReason").value.trim();
   if (!text || !reason) return toast("Type the rule and its reason", true);
   try {
     const p = await act("policy_add", { text, reason, source: $("#polSource").value.trim(), project: $("#polProject").value,
-                                        role: $("#polRole").value });
+                                        role: $("#polRole").value, adds_to: $("#polAddsTo").value });
     $("#polText").value = ""; $("#polReason").value = ""; $("#polSource").value = "";
     toast(`Added ${p.pid}: the briefings of ${p.scope === "queue" ? "every session" : p.scope} show it`);
   } catch (e) { /* act showed the error */ }
@@ -67,7 +70,7 @@ $("#regGo").addEventListener("click", async () => {
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
   if (t.dataset.retirePolicy) return run(async () => {
-    const p = (S.policies || []).find(x => x.id === +t.dataset.retirePolicy);
+    const p = (S.policies || []).find(x => x.kind === "user" && x.id === +t.dataset.retirePolicy);
     if (p && !confirm(`Retire ${p.pid}? It is deleted, and no briefing shows it again.\n${p.text}`)) return;
     return act("policy_retire", { id: +t.dataset.retirePolicy }).then(() => toast("Retired")).catch(() => {});
   });
