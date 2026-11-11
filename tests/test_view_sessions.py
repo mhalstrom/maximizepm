@@ -2216,3 +2216,62 @@ class OutsideTmux(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdapterFolder(Base):
+    """#5266: a log that names its folder under a key of its own (Copilot: session.start's data.context.cwd) gives
+    it through the adapter's chat_cwd, also when the tail that the page reads does not reach that line, so Restart
+    with these settings works for such an agent."""
+
+    CSID = "11111111-2222-4333-8444-555555555555"  # the session of tests/fixtures/copilot/events.jsonl
+
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.dir.name) / "copilot-home"
+        env = mock.patch.dict(os.environ, {"COPILOT_HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
+        fixture = Path(__file__).resolve().parent / "fixtures" / "copilot" / "events.jsonl"
+        self.log = self.home / "session-state" / self.CSID / "events.jsonl"
+        self.log.parent.mkdir(parents=True)
+        self.log.write_text(fixture.read_text())
+        sessions._HEAD_CWD.clear()
+
+    def test_the_folder_comes_from_the_adapter_in_the_tail_and_from_the_head(self):
+        whole = sessions.entries("copilot", self.log, None, 1)
+        self.assertEqual(whole["cwd"], "/tmp/proj")
+        # A tail of the last 2000 bytes holds no session.start and no session.resume: the head names it.
+        sessions._TAIL_CACHE.clear()
+        tail = sessions.entries("copilot", self.log, None, 1, 2000)
+        self.assertEqual(tail["cwd"], "/tmp/proj")
+        self.assertEqual(sessions.head_cwd("claude", self.log), None)  # an adapter with no chat_cwd: no head read
+
+    def test_restart_with_new_settings_of_a_quiet_copilot_session(self):
+        import subprocess
+        from tests.test_server import FakeTmux
+        platform, core.PLATFORM = core.PLATFORM, "linux"
+        self.addCleanup(setattr, core, "PLATFORM", platform)
+        tmux = server.TMUX_RUNNER = FakeTmux()
+        self.addCleanup(setattr, server, "TMUX_RUNNER", None)
+        tmux_path, core.tmux_path = core.tmux_path, lambda: "/usr/bin/tmux"
+        self.addCleanup(setattr, core, "tmux_path", tmux_path)
+        proc = subprocess.Popen(["sleep", "60"])  # the copilot CLI in its Terminal tab
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        info = core.proc_info(proc.pid)
+        if info is None:
+            self.skipTest("no ps here (an agent sandbox)")
+        core.register(self.c, "cop")
+        core.record_claude_session(self.c, "cop", self.CSID)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='copilot', pid=?, host=?, pid_cmd=? WHERE name='cop'",
+                           (proc.pid, core.this_host(), info[2]))
+        t = time.time() - 600
+        os.utime(self.log, (t, t))
+        server.session_restart(self.c, "cop", {"effort": "low"}, who="mark")
+        proc.wait(5)
+        line = tmux.panes[0]["keys"][0]
+        self.assertIn("cd /tmp/proj && ", line)
+        self.assertIn("MAXPM_AGENT=cop copilot --plugin-dir ", line)  # the hook plugin loads again
+        self.assertIn(f" --resume {self.CSID} ", line)  # the id of its folder, not the log's file name (events)
+        self.assertIn("--model qwen3:1.7b --reasoning-effort low", line)  # the model the chat ran on

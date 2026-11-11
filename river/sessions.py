@@ -106,6 +106,25 @@ def transcript(conn, agent, root=None, croot=None):
     return (best[1], best[2]) if best else (None, None)
 
 
+def session_ref(conn, agent, ad, path):
+    """The agent's session id whose chat log is path (#5266): the name of the log file before its first dot when it
+    is one of the agent's session ids (Claude Code: <id>.jsonl), else the id whose chat_path is path (Copilot:
+    <id>/events.jsonl), newest first; else that file name."""
+    stem = Path(path).name.split(".")[0]
+    ids = [r["session_id"] for r in conn.execute(
+        "SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC", (agent,))]
+    if stem in ids or ad is None or ad.chat_ref() != "session":
+        return stem
+    for sid in ids:
+        try:
+            got = ad.chat_path(sid)
+        except Exception:  # noqa: BLE001 - an adapter's reader (a user module too) never breaks a restart
+            continue
+        if got and Path(got) == Path(path):
+            return sid
+    return stem
+
+
 def no_log_note(conn, agent, root=None, croot=None):
     """Why the Sessions tab shows no chat of `agent` (#5257): which agent's log MaximizePM looked for (the adapter of
     the agent's type) and why it found none: the agent's type is not known yet, the agent keeps no log that
@@ -431,15 +450,51 @@ def _parse(kind, raw, start, cut=False):
         turn = st or turn
         p = d.get("payload") if isinstance(d.get("payload"), dict) else d  # the folder the session runs in
         cwd = p.get("cwd") if isinstance(p.get("cwd"), str) else cwd
+    if cwd is None and ad is not None and ad.has("chat_cwd"):
+        # A log that keeps the folder under a key of its own (Copilot: session.start's data.context.cwd; Goose:
+        # working_dir): the adapter reads it from these lines (#5266).
+        cwd = _adapter_cwd(ad, raw.decode("utf-8", "replace").splitlines())
     return {"entries": out, "offs": offs, "turn": turn, "cwd": cwd, "start": start}
+
+
+def _adapter_cwd(ad, lines):
+    """The folder that the adapter's chat_cwd reads in lines, or None (a reader that fails reads nothing)."""
+    try:
+        got = ad.module.chat_cwd(list(lines))
+    except Exception:  # noqa: BLE001 - an adapter's reader (a user module too) never breaks the chat
+        return None
+    return got if isinstance(got, str) and got else None
+
+
+_HEAD_CWD = {}  # str(path) -> the folder chat_cwd reads at the start of the log: it does not change
+HEAD_BYTES = 256 * 1024
+
+
+def head_cwd(kind, path):
+    """The folder the session started in, as the adapter's chat_cwd reads it in the first HEAD_BYTES of its log, or
+    None. For a log that names its folder only at its start (Copilot's session.start, #5266), when the tail that the
+    page and the Settings dialog read does not reach it. Kept for each file."""
+    ad = _adapter(kind)
+    if ad is None or not ad.has("chat_cwd") or not path:
+        return None
+    key = str(path)
+    if key not in _HEAD_CWD:
+        try:
+            raw = _bytes(path, 0, HEAD_BYTES)
+        except OSError:
+            return None
+        if len(raw) == HEAD_BYTES:
+            raw = raw[:raw.rfind(b"\n") + 1]  # complete lines only
+        _HEAD_CWD[key] = _adapter_cwd(ad, raw.decode("utf-8", "replace").splitlines())
+    return _HEAD_CWD[key]
 
 
 def _entries(kind, path, cursor, limit=LIMIT, tail=TAIL_BYTES):
     raw, start, end = _read_raw(path, cursor, tail)
     r = _parse(kind, raw, start, cut=cursor is None and start > 0)
     k = max(0, len(r["entries"]) - limit) if cursor is not None else 0
-    return {"entries": r["entries"][k:], "offs": r["offs"][k:], "cursor": end, "turn": r["turn"], "cwd": r["cwd"],
-            "start": r["start"]}
+    return {"entries": r["entries"][k:], "offs": r["offs"][k:], "cursor": end, "turn": r["turn"],
+            "cwd": r["cwd"] or head_cwd(kind, path), "start": r["start"]}
 
 
 def _page_back(kind, path, before, limit=LIMIT):
