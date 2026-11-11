@@ -60,12 +60,14 @@ FAMILIES = ("claude", "openai", "multi")
 #      "model_live":    the text typed into a running session to change its model ("/model {value}"), or None: a
 #                       restart applies it (the Settings dialog of a session, #5169),
 #      "model_read":    a regex whose group 1 reads the model back from the session's command line, or None,
+#      "platform":      the name that settings, launch profiles (@claude-code) and a session's agent type store, when
+#                       it is not the id (Claude Code: "claude-code"); it must be the id or an alias (#5185),
 #    }
 # read_models() -> [model name or CLI id] | None: an optional reader of the models the CLI knows now (Codex:
 # ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands.
 DESCRIBE_KEYS = {"id": str, "label": str, "exe": str, "aliases": (list, tuple), "family": str,
                  "models": (list, tuple), "default_model": str, "model_ids": dict, "prefix": str,
-                 "model_live": (str, type(None)), "model_read": (str, type(None))}
+                 "model_live": (str, type(None)), "model_read": (str, type(None)), "platform": str}
 DESCRIBE_REQUIRED = ("id", "label", "exe", "family")
 
 # 2. Settings. SETTINGS = [{
@@ -378,6 +380,9 @@ def check(module, mid=None):
     if isinstance(d, dict):
         if mid and d.get("id") != mid:
             out.append(f"DESCRIBE['id'] is {d.get('id')!r}; it must be the file name, {mid!r}")
+        if isinstance(d.get("platform"), str) and d["platform"].lower() not in (
+                [str(d.get("id", "")).lower()] + [str(x).lower() for x in d.get("aliases") or ()]):
+            out.append(f"DESCRIBE['platform'] is {d['platform']!r}; it must be the id or one of the aliases")
         if d.get("family") is not None and d.get("family") not in FAMILIES:
             out.append(f"DESCRIBE['family'] is {d.get('family')!r}, not one of {', '.join(FAMILIES)}")
     for i, s in enumerate(getattr(module, "SETTINGS", None) or ()):
@@ -808,15 +813,35 @@ def get(name):
 
 def from_env(env=None):
     """The adapter of the agent that a command runs inside (IDENTITY['inside_env']), or None. MAXPM_AGENT_TYPE names
-    it by hand (a name that no agent has counts as none). Every other adapter first, then codex before claude: a Codex started from a Claude Code shell keeps
-    CLAUDECODE (core.agent_type_from_env reads it the same way until #5181)."""
+    it by hand (a name that no agent has counts as none). The order is env_order(): a Codex started from a Claude Code
+    shell keeps CLAUDECODE."""
     env = os.environ if env is None else env
     named = find(env.get("MAXPM_AGENT_TYPE"))
     if named:
         return named
     got = load()
-    order = sorted(m for m in got if m not in ("codex", "claude")) + [m for m in ("codex", "claude") if m in got]
-    return next((got[m] for m in order if got[m].inside(env)), None)
+    return next((got[m] for m in env_order() if got[m].inside(env)), None)
+
+
+# The agents whose environment another agent started from their shell keeps: they come last when MaximizePM tells
+# which agent a command runs inside (from_env, core.session_id_from_env). A Codex started from a Claude Code shell
+# keeps CLAUDECODE and CLAUDE_CODE_SESSION_ID, so claude is last of all.
+ENV_LAST = ("codex", "claude")
+
+
+def env_order():
+    """The ids of the registered agents in the order from_env tests their environment: every other agent by id, then
+    ENV_LAST."""
+    got = load()
+    return sorted(m for m in got if m not in ENV_LAST) + [m for m in ENV_LAST if m in got]
+
+
+def by_exe(exe):
+    """The agent whose program (DESCRIBE['exe']) is the last part of `exe` (any case), or None; built-in agents
+    first."""
+    n = Path(exe or "").name.lower()
+    got = load()
+    return next((got[m] for m in ids() if n and got[m].describe["exe"].lower() == n), None) if n else None
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -897,10 +922,10 @@ def page_list():
 
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "instruction_files", "import_files", "shared_readers",
-           "setup_entry", "page_list"]
+           "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe"]
 
 
-# Last, after every name above: core imports the built-in adapters while it loads (PLATFORM_EFFORTS), and they import
+# Last, after every name above: core imports the built-in adapters while it loads (their setting defaults), and they import
 # Raw from here. With this import at the top, a program that imported river.agents first got a half-loaded package
 # when core asked for Raw, and failed (#5207). Here, either module may be imported first.
 from ..core import RiverError, river_dir  # noqa: E402

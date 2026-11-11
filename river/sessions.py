@@ -26,15 +26,8 @@ TOOL_MAX = 160            # the one line of a tool call
 DETAIL_MAX = 4000         # a tool call's input, and its result, when the page opens it
 PREVIEW = 4               # the lines a card shows
 ADOPT_QUIET = 120         # tmux_adopt: a session moves into tmux after its turn ended and it wrote nothing this long
-PLATFORMS = {"claude": "claude-code", "codex": "codex"}
-# The chat providers the Sessions tab knows (#4627): the label each session shows. A new provider is one more row
-# here (#4625 adds its settings); the page draws what it gets. The settings of each provider's Settings dialog come
-# from its agent adapter (Adapter.session_specs, river/agents, #5169).
-# Voice (#4626): what each CLI's own voice mode does is in its adapter, SETUP["voice"] (#5184).
-PROVIDERS = {
-    "claude-code": {"label": "Claude Code"},
-    "codex": {"label": "Codex"},
-}
+# The chat provider of a session (#4627): its agent adapter gives the label, the voice text (SETUP["voice"], #5184) and
+# the settings of its Settings dialog (Adapter.session_specs, #5169). There is no table of providers here (#5185).
 
 
 def _place(conn, item_id):
@@ -49,12 +42,11 @@ def _place(conn, item_id):
 def provider(agent_type, kind=None):
     """{id, label, agent, voice_cli} of a session's chat provider: its agent type, else the kind of its transcript.
     agent: the id of its adapter (GET /api/agents), or None; voice_cli: its adapter's SETUP["voice"]."""
-    from . import agents
-    pid = agent_type or PLATFORMS.get(kind or "")
+    a = _agents.find(agent_type) if agent_type else _adapter(kind)
+    pid = agent_type or (core._platform_of(a) if a else None)
     if not pid:
         return None
-    a = agents.find(pid)
-    return {"id": pid, "label": PROVIDERS.get(pid, {}).get("label") or pid, "agent": a.id if a else None,
+    return {"id": pid, "label": a.label if a else pid, "agent": a.id if a else None,
             "voice_cli": (a.setup or {}).get("voice") if a else None}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
           "expert": "talks with you",
@@ -505,7 +497,8 @@ def adopt_check(conn, a, kind, path, turn, cwd, waiting=None):
         return "never", "tmux_adopt is off"
     if os.name == "nt" or not core.tmux_path():
         return "never", "tmux is not installed"
-    if not path or kind not in PLATFORMS:
+    ad = _adapter(kind)
+    if not path or ad is None or not ad.supports("resume"):
         return "never", "MaximizePM has no transcript of it, so it does not know which chat to resume"
     if not (a.get("pid") and a.get("host") == core.this_host() and a.get("pid_cmd")):
         return "never", "its process on this computer is not known"

@@ -12,6 +12,7 @@ DESCRIBE = {
     "default_model": "",
     "model_ids": {},
     "prefix": "claude_",
+    "platform": "claude-code",  # the name in settings, launch profiles (@claude-code) and agents.agent_type
 }
 
 
@@ -83,10 +84,9 @@ def parse_command(words):
     """A hand-written claude command that a profile builds exactly: --model {model}, --effort {effort},
     --remote-control (with no session name after it), --permission-mode <a known mode>, and one prompt. Anything
     else (another flag, a fixed model) keeps it a custom command, so nothing is lost."""
-    from ..core import LAUNCH_PLATFORMS
     if not words or Path(words[0]).name.lower() != "claude":
         return None
-    modes = LAUNCH_PLATFORMS["claude-code"]["options"]["permission_mode"]["choices"]
+    modes = next(sp["choices"] for sp in SETTINGS if sp["key"] == "permission_mode")
     opts, prompt, i = {"remote_control": "off"}, None, 1
     while i < len(words):
         t, nxt = words[i], (words[i + 1] if i + 1 < len(words) else None)

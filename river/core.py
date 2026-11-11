@@ -350,8 +350,8 @@ DEFAULT_SETTINGS = {
 # The roles that agent_for.<role> names (#5168).
 AGENT_ROLES = ("worker", "manager", "reviewer", "deployer", "expert", "context")
 
-# The launch platforms (LAUNCH_PLATFORMS) and their options come from the agent adapters (river/agents, #5169): see
-# the end of this module, where the built-in adapters are imported.
+# The agents MaximizePM starts, and their options, come from the agent adapters (river/agents, #5169, #5185): see
+# launch_platforms() and the end of this module, where the built-in adapters' setting defaults go in DEFAULT_SETTINGS.
 
 SCHEMA = """
 -- One-time data changes that already ran (key: the change).
@@ -1492,9 +1492,9 @@ def _adapters():
 
 
 def _platform_of(adapter):
-    """The launch platform name of an adapter (claude-code, codex): the key of LAUNCH_PLATFORMS among its id and
-    aliases, while the profile options live there (#5185); else its id."""
-    return next((n for n in adapter.names() if n in LAUNCH_PLATFORMS), adapter.id) if adapter else None
+    """The platform name of an adapter: the name that settings, launch profiles (@claude-code) and agents.agent_type
+    store, its DESCRIBE['platform'] (Claude Code: claude-code), else its id (#5185)."""
+    return (adapter.describe.get("platform") or adapter.id) if adapter else None
 
 
 def _startable(adapter):
@@ -1891,7 +1891,11 @@ def session_type(conn, name):
     if r["agent_type"]:
         return r["agent_type"]
     fam, _ = _family(parse_ladder(setting(conn, "model_ladder")), r["model"])
-    return next((p for p, pl in LAUNCH_PLATFORMS.items() if pl["family"] == fam), None) if fam else None
+    if not fam:
+        return None
+    got = _adapters().load()  # the first agent of that family that MaximizePM can start (claude: Claude Code)
+    return next((_platform_of(got[i]) for i in _adapters().ids()
+                 if _startable(got[i]) and got[i].describe["family"] == fam), None)
 
 
 def agent_type_check(session, item_agent):
@@ -8437,8 +8441,7 @@ def session_from_env(env=None):
     from . import agents
     env = os.environ if env is None else env
     got = agents.load()
-    order = sorted(m for m in got if m not in ("codex", "claude")) + [m for m in ("codex", "claude") if m in got]
-    for m in order:
+    for m in agents.env_order():
         ad, ident = got[m], got[m].identity or {}
         if ident.get("source") != "env" or not ident.get("env") or ad.chat_ref() != "session":
             continue
@@ -8469,11 +8472,16 @@ def activity_hook_settings():
     return agents.get("claude").module.hook_settings(report_command())
 
 
+def hook_file(adapter):
+    """The hook file of an adapter with the hooks_file capability, beside the queue: its install_hooks writes it when
+    its text changes (Claude Code: claude-hooks.json, which claude --settings reads)."""
+    return adapter.install_hooks(None, report_command())[-1]
+
+
 def activity_hook_file():
-    """The file beside the queue that claude --settings reads (the claude adapter's install_hooks writes it when its
-    text changes)."""
+    """Claude Code's hook file (hook_file of the claude adapter)."""
     from . import agents
-    return agents.get("claude").install_hooks(None, report_command())[-1]
+    return hook_file(agents.get("claude"))
 
 
 def activity_agent(conn, sid=None, env=None):
@@ -10659,18 +10667,6 @@ def model_name_of(models, value):
     return next((m["name"] for m in models if re.search(r"(?:^|[-_.])" + re.escape(m["name"]) + r"(?:$|[-_.])", v)), None)
 
 
-def codex_models():
-    """{id: [effort levels]} from the Codex model cache (~/.codex/models_cache.json), or None without one."""
-    import json
-    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
-    try:
-        data = json.loads(path.read_text())
-        return {m["slug"]: [x["effort"] for x in m.get("supported_reasoning_levels") or [] if x.get("effort")]
-                for m in data.get("models") or [] if m.get("slug")}
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        return None
-
-
 # The system whose shell gets the commands river builds: its quoting, and how the page opens a session (a
 # tmux pane; a console window on Windows, where tmux does not run). Tests set it.
 PLATFORM = sys.platform
@@ -10817,22 +10813,6 @@ def autocompact_tokens(value):
     return n
 
 
-CODEX_FLAGS = None  # the flags `codex --help` lists, read once (tests set it)
-
-
-def codex_flags():
-    """The long flags of the installed Codex CLI (an empty set when it does not run)."""
-    global CODEX_FLAGS
-    if CODEX_FLAGS is None:
-        import subprocess
-        try:
-            out = subprocess.run(["codex", "--help"], capture_output=True, text=True, timeout=15).stdout
-        except (OSError, subprocess.SubprocessError):
-            out = ""
-        CODEX_FLAGS = set(re.findall(r"(?<![\w-])(--[a-z][\w-]*)", out))
-    return CODEX_FLAGS
-
-
 def shell_command(words):
     """An adapter's argv as one shell command line: each word quoted for the shell, but a Raw word (the args
     setting, as the person wrote it), which goes in as it is."""
@@ -10909,9 +10889,14 @@ def entry_exe(cmd):
     return cmd.split()[0] if cmd.split() else ""
 
 
+# The agents that had launch profiles when the one-time change _migrate_launch_agents came: only their hand-written
+# commands become profiles, so a queue that runs it late gets what it got then. Fixed history, not a list of agents.
+_PROFILE_MIGRATION = ("claude", "codex")
+
+
 def profile_from_command(cmd):
     """An old hand-written command that a profile can build exactly -> (platform, options); else None. Each adapter's
-    parse_command reads it: unknown flags, a fixed model, or another --add-dir keep the command custom, so nothing
+    parse_command of an agent in _PROFILE_MIGRATION reads it: unknown flags, a fixed model, or another --add-dir keep the command custom, so nothing
     is lost."""
     import shlex
     try:
@@ -10920,11 +10905,11 @@ def profile_from_command(cmd):
         return None
     if not w:
         return None
-    for ad in _adapters().load().values():
-        platform = _platform_of(ad)
-        got = ad.parse_command(w) if platform in LAUNCH_PLATFORMS else None
+    for mid in _PROFILE_MIGRATION:
+        ad = _adapters().find(mid)
+        got = ad.parse_command(w) if _startable(ad) else None
         if got:
-            return platform, {**got["settings"], "prompt": got["prompt"]}
+            return _platform_of(ad), {**got["settings"], "prompt": got["prompt"]}
     return None
 
 
@@ -10974,7 +10959,7 @@ def _migrate_launch_agents(conn):
                     out.append((label, cmd))
                     continue
                 platform, opts = got
-                pl = LAUNCH_PLATFORMS[platform]
+                pl = platform_spec(platform)
                 if platform not in base:
                     base[platform] = {}
                     for k in pl["options"]:
@@ -11437,7 +11422,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         if fork_of and caps.get("fork"):
             built["fork"] = fork_of
         if caps.get("hooks_file") and opts.get("activity_hooks") == "on":
-            built["hooks_file"] = activity_hook_file()
+            built["hooks_file"] = hook_file(_adapters().get(prof[0]))
         if autocompact and caps.get("autocompact") and "--autocompact" not in opts.get("args", ""):
             built["autocompact"] = autocompact
         else:
@@ -11533,7 +11518,7 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     effort = ov.get("effort") or (m.group(1) if m else None)
     settings = {**opts, "noflags": list(ov.get("noflags") or ())}
     if ad.launch.get("hooks_file") and opts.get("activity_hooks") == "on":
-        settings["hooks_file"] = activity_hook_file()
+        settings["hooks_file"] = hook_file(ad)
     tokens = autocompact_tokens(setting(conn, "manager_autocompact")) if a["role"] == "manager" else None
     if tokens and ad.launch.get("autocompact"):
         settings["autocompact"] = tokens
@@ -11560,13 +11545,6 @@ def _check_agent_effort(ad, mid, effort):
                          f"pick one of them")
 
 
-# Which model family an agent CLI runs, by the program that starts it, and the effort levels its CLI takes: from the
-# built-in adapters (river/agents; their modules import no more of core at load). #5185 removes these tables.
-from .agents import claude as _claude_adapter, codex as _codex_adapter  # noqa: E402
-AGENT_FAMILIES = {m.DESCRIBE["exe"]: m.DESCRIBE["family"] for m in (_claude_adapter, _codex_adapter)}
-PLATFORM_EFFORTS = {m.DESCRIBE["family"]: list(m.EFFORT["levels"]) for m in (_claude_adapter, _codex_adapter)}
-
-
 def _platform_entry(describe, specs):
     """A launch platform from an adapter's DESCRIBE and its setting specs (Adapter.options()): {label, exe, family,
     prefix, options: {key: {kind, default, choices, text, label}}}."""
@@ -11576,16 +11554,14 @@ def _platform_entry(describe, specs):
                             "text": sp["text"], "label": sp["label"]} for k, sp in specs.items()}}
 
 
-# Agent platforms river can start from a launch profile ("Label=@claude-code" in launch_agents), from the built-in
-# adapters' SETTINGS (#5169): each option maps to the CLI's own flags, and is also a setting, <prefix><option>, so a
-# project can differ (most specific wins). launch_platforms() adds every other registered agent; #5185 removes this
-# table.
-from .agents import Adapter as _Adapter  # noqa: E402
-LAUNCH_PLATFORMS = {name: _platform_entry(m.DESCRIBE, _Adapter(m, "builtin").options())
-                    for name, m in (("claude-code", _claude_adapter), ("codex", _codex_adapter))}
-for _pl in LAUNCH_PLATFORMS.values():
-    for _o, _spec in _pl["options"].items():
-        DEFAULT_SETTINGS[_pl["prefix"] + _o] = _spec["default"]
+# Each option of a built-in agent is also a setting, <prefix><option>, so a project can differ (most specific wins):
+# its default goes in DEFAULT_SETTINGS here, once, so setting() finds it without a walk of the registry. A user's
+# adapter module adds its defaults through setting_default (#5169). No table of platforms (#5185).
+from . import agents as _agents_pkg  # noqa: E402
+for _mid in _agents_pkg.BUILTIN:
+    _ad = _agents_pkg.Adapter(_agents_pkg._builtin(_mid), "builtin")
+    for _o, _spec in _ad.options().items():
+        DEFAULT_SETTINGS.setdefault(_ad.describe["prefix"] + _o, _spec["default"])
 
 
 def launch_platforms():
@@ -11656,7 +11632,9 @@ def launch_options(conn):
     for label, cmd in parse_launch_agents(setting(conn, "launch_agents")):
         prof = parse_profile(cmd)
         ad = _adapters().find(prof[0]) if prof else None
-        fam = platform_spec(prof[0])["family"] if prof else AGENT_FAMILIES.get(Path(entry_exe(cmd)).name.lower())
+        # A custom command: the agent whose program it runs (its first word), for the family and the effort levels.
+        by_exe = None if prof else _adapters().by_exe(entry_exe(cmd))
+        fam = platform_spec(prof[0])["family"] if prof else by_exe and by_exe.describe["family"]
         fam = fam if fam in ladder else None
         out.append({"label": label, "family": fam, "platform": prof[0] if prof else None,
                     "agent_type": prof[0] if prof else _exe_platform(cmd),
@@ -11664,7 +11642,8 @@ def launch_options(conn):
                                [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
                                 for f, ms in ladder.items() if fam in (None, f) for m in ms]),
                     # A profile offers the efforts of its adapter (#5169); none when the agent has no effort.
-                    "efforts": ad.effort_choices() if ad else PLATFORM_EFFORTS.get(fam, levels),
+                    "efforts": ad.effort_choices() if ad else (
+                        list((by_exe.effort or {}).get("levels") or levels) if fam and by_exe else levels),
                     "takes_model": bool(prof) or "{model}" in cmd,
                     "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
                     # The options the dialog can change for one launch, preset from the entry and the settings.

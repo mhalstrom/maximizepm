@@ -17,4 +17,5 @@ for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", 
 
 core.tmux_path = lambda: None
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin
-core.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them
+from river.agents import codex as codex_adapter  # noqa: E402
+codex_adapter.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them

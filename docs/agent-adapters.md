@@ -278,3 +278,21 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
 - The effort is Amp's mode (`--mode low|medium|high|ultra`), which also picks the model, so DESCRIBE has no models. A
   first prompt goes on stdin (`printf '%s\n' <prompt> | amp`). Amp has no slash commands: "/" opens its command
   palette, and keys typed at once land in the wrong place, so the adapter has no COMMANDS.
+
+
+## As built in #5185 (the old tables go)
+
+- `core.LAUNCH_PLATFORMS`, `AGENT_FAMILIES`, `PLATFORM_EFFORTS`, `sessions.PLATFORMS` and `sessions.PROVIDERS` are
+  gone. A platform name (the name that settings, launch profiles and `agents.agent_type` store) is the adapter's
+  `DESCRIBE["platform"]` (Claude Code: `claude-code`), else its id; `core._platform_of` reads it, and `check` refuses
+  a platform that is not the id or an alias. `core.launch_platforms()` and `core.platform_spec()` give what the table
+  gave, for every registered agent.
+- The built-in adapters' setting defaults go in `DEFAULT_SETTINGS` once, when core loads. A custom command's family
+  and effort levels come from the agent whose program it runs (`agents.by_exe`). The order in which MaximizePM tests
+  the environment of each agent is `agents.env_order()` (`ENV_LAST`: codex, then claude).
+- A session's provider label and voice text come from its adapter; a session outside tmux moves into tmux when its
+  agent has the resume part. Codex's model cache reader and flag reader (`codex_models`, `codex_flags`,
+  `CODEX_FLAGS`) moved from core into `codex.py`. The hook file of a start is the hook file of that start's adapter.
+- Kept on purpose: `core._PROFILE_MIGRATION` (the agents of the one-time change of launch_agents into profiles: fixed
+  history), `server.KNOWN_AGENTS` (the commands that the setup guide offers), the Claude desktop and ChatGPT desktop
+  writers of `maxpm setup-agent`, and the `root`/`croot` test folders of `sessions.transcript`.

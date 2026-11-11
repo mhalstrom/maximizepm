@@ -2100,11 +2100,11 @@ class NotConnected(TmuxBase):
         self.assertEqual((card["state"], card["state_label"]), ("ended", "ended before its first maxpm command"))
 
     def test_codex_gets_no_daemon_when_it_knows_the_flag(self):
-        self.addCleanup(setattr, core, "CODEX_FLAGS", set())
-        core.CODEX_FLAGS = {"--no-daemon", "--sandbox"}
+        self.addCleanup(setattr, codex_agent, "CODEX_FLAGS", set())
+        codex_agent.CODEX_FLAGS = {"--no-daemon", "--sandbox"}
         self.assertIn(" --no-daemon ", core.build_command("codex", {"prompt": "go"}) + " ")
         self.assertEqual(core.build_command("codex", {"prompt": "go", "args": "--no-daemon"}).count("--no-daemon"), 1)
-        core.CODEX_FLAGS = set()
+        codex_agent.CODEX_FLAGS = set()
         self.assertNotIn("--no-daemon", core.build_command("codex", {"prompt": "go"}))
 
 

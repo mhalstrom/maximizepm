@@ -17,7 +17,6 @@ DESCRIBE = {
 
 def read_models():
     """The model ids in Codex's own model cache (~/.codex/models_cache.json, or $CODEX_HOME), or None without one."""
-    from ..core import codex_models
     got = codex_models()
     return sorted(got) if got else None
 
@@ -49,7 +48,6 @@ IDENTITY = {"source": "env", "env": "CODEX_THREAD_ID", "log_glob": None, "pane":
 def read_effort_levels(model):
     """The effort levels Codex takes for model id `model`, from its model cache; None when the cache does not list it.
     MaximizePM refuses another effort for that model before it starts Codex."""
-    from ..core import codex_models
     return (codex_models() or {}).get(model) if model else None
 
 
@@ -59,7 +57,7 @@ def build_command(name, folder, model, effort, settings, prompt):
     session with an API key, when it may use its shared background server ("requires api_key_model_discovery to be
     disabled"); --no-daemon runs it alone (#4621), when the installed Codex has the flag and the person did not take
     it out (settings['noflags'])."""
-    from ..core import codex_flags, river_dir
+    from ..core import river_dir
     s = settings
     words = ["codex"] + (["resume", s["resume"]] if s.get("resume") else [])
     words += (["-m", model] if model else []) + ([w.format(value=effort) for w in EFFORT["flag"]] if effort else [])
@@ -82,10 +80,10 @@ def resume_command(session_ref, model, effort, settings, name=None):
 def parse_command(words):
     """A hand-written codex command that a profile builds exactly: -m {model}, -c model_reasoning_effort={effort},
     --sandbox and --ask-for-approval with a known value, --add-dir of the queue folder, and one prompt."""
-    from ..core import LAUNCH_PLATFORMS, river_dir
+    from ..core import river_dir
     if not words or Path(words[0]).name.lower() != "codex":
         return None
-    choices = LAUNCH_PLATFORMS["codex"]["options"]
+    choices = {sp["key"]: sp for sp in SETTINGS}
     opts, prompt, i = {}, None, 1
     while i < len(words):
         t, nxt = words[i], (words[i + 1] if i + 1 < len(words) else None)
@@ -443,3 +441,37 @@ def write_mcp_config(path=None, remove=False):
             "Restart the ChatGPT desktop app, then use Work or Codex mode (plain Chat mode does not reach servers "
             "on this computer). Ask it, for example: \"plan my next work with MaximizePM\" or \"what waits on me in MaximizePM?\". "
             "Codex CLI sessions see MaximizePM too; in a project folder they work as usual.")
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# The installed Codex: its model cache and its flags (moved from core.py, #5185)
+# ---------------------------------------------------------------------------------------------------------------
+
+def codex_models():
+    """{id: [effort levels]} from the Codex model cache (~/.codex/models_cache.json), or None without one."""
+    import json
+    from pathlib import Path
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
+    try:
+        data = json.loads(path.read_text())
+        return {m["slug"]: [x["effort"] for x in m.get("supported_reasoning_levels") or [] if x.get("effort")]
+                for m in data.get("models") or [] if m.get("slug")}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+CODEX_FLAGS = None  # the flags `codex --help` lists, read once (tests set it); moved from core (#5185)
+
+
+def codex_flags():
+    """The long flags of the installed Codex CLI (an empty set when it does not run)."""
+    global CODEX_FLAGS
+    if CODEX_FLAGS is None:
+        import re
+        import subprocess
+        try:
+            out = subprocess.run(["codex", "--help"], capture_output=True, text=True, timeout=15).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        CODEX_FLAGS = set(re.findall(r"(?<![\w-])(--[a-z][\w-]*)", out))
+    return CODEX_FLAGS

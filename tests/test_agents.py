@@ -69,15 +69,22 @@ class Contract(Env):
             a.build_command("w", "/tmp", "opus", None, {}, "go")
         self.assertIsNone(a.resume_command("s1"))
 
-    def test_the_built_in_describe_matches_the_platform_tables_of_today(self):
+    def test_the_built_in_describe_gives_the_platform_names_that_settings_store(self):
+        # No platform table is left (#5185): the platform name (claude-code, codex) is the adapter's.
         for mid, platform in (("claude", "claude-code"), ("codex", "codex")):
-            d, pl = agents.get(mid).describe, core.LAUNCH_PLATFORMS[platform]
+            d, pl = agents.get(mid).describe, core.platform_spec(platform)
             self.assertEqual((d["label"], d["exe"], d["family"], d["prefix"]), (pl["label"], pl["exe"], pl["family"], pl["prefix"]))
             self.assertIs(agents.get(platform), agents.get(mid))
+            self.assertEqual(core._platform_of(agents.get(mid)), platform)
+        for name in ("LAUNCH_PLATFORMS", "AGENT_FAMILIES", "PLATFORM_EFFORTS"):
+            self.assertFalse(hasattr(core, name), name)
+        self.assertFalse(hasattr(sessions, "PLATFORMS") or hasattr(sessions, "PROVIDERS"))
+        self.assertEqual(agents.check(module(DESCRIBE={**GOOD, "platform": "pi-agent"})), [])
+        self.assertIn("must be the id or one of the aliases", " ".join(agents.check(module(DESCRIBE={**GOOD, "platform": "x"}))))
         ladder = core.parse_ladder(core.DEFAULT_SETTINGS["model_ladder"])
         self.assertEqual(agents.get("claude").describe["models"], ladder["claude"])
         self.assertEqual(agents.get("codex").describe["models"], ladder["openai"])
-        ids = core.LAUNCH_PLATFORMS["codex"]["options"]["model_ids"]["default"]
+        ids = core.platform_spec("codex")["options"]["model_ids"]["default"]
         self.assertEqual(agents.get("codex").describe["model_ids"], dict(p.split("=") for p in ids.replace(" ", "").split(",")))
 
     def test_names_are_found_in_any_case_and_an_unknown_name_says_what_is_registered(self):
@@ -351,8 +358,10 @@ class StartPaths(Env):
         self.assertIsNone(cx.effort["live"])
         self.assertIn("--effort high", core.build_command("claude-code", {"prompt": "go"}, "opus", "high"))
         self.assertIn("-c model_reasoning_effort=xhigh", core.build_command("codex", {"prompt": "go"}, "sol", "xhigh"))
-        self.assertEqual(core.PLATFORM_EFFORTS, {"claude": cl.effort["levels"], "openai": cx.effort["levels"]})
-        self.assertEqual(core.AGENT_FAMILIES, {"claude": "claude", "codex": "openai"})
+        # A custom command's family and effort levels come from the agent whose program it runs (agents.by_exe).
+        self.assertIs(agents.by_exe("/usr/local/bin/Claude"), cl)
+        self.assertIs(agents.by_exe("codex"), cx)
+        self.assertIsNone(agents.by_exe("nope"))
         import re
         self.assertEqual(re.search(cx.effort["read"], "codex -c model_reasoning_effort=low go").group(1), "low")
         self.assertEqual(re.search(cl.effort["read"], "claude --effort max go").group(1), "max")
@@ -828,7 +837,7 @@ class SettingsAndEffort(Env):
     def test_the_built_in_launch_platforms_are_the_adapters_settings(self):
         for platform, mid in (("claude-code", "claude"), ("codex", "codex")):
             a = agents.get(mid)
-            self.assertEqual(list(core.LAUNCH_PLATFORMS[platform]["options"]), list(a.options()))
+            self.assertEqual(list(core.platform_spec(platform)["options"]), list(a.options()))
             for key, spec in a.options().items():
                 self.assertEqual(core.DEFAULT_SETTINGS[a.config_key(key)], spec["default"])
         self.assertEqual(core.setting(self.c, "claude_remote_control"), "on")

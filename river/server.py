@@ -439,9 +439,10 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
             raise RiverError(f"#{task['id']} names no model, so say which model the expert {name} runs: --model <name>")
     first = EXPERT_PROMPT.format(name=name, topic=topic)
     handed = core.expert_handover(conn, task["id"], actor, summary, sources, canvases, sessions)
-    # Resume: the chat of the agent it ran in (agents.agent_type, Claude Code when not recorded), through that
-    # adapter's resume_command (#5168); an agent that cannot resume starts fresh and reads the notes.
-    platform = core.agent_type_of(conn, name) or "claude-code"
+    # Resume: the chat of the agent it ran in (agents.agent_type; when not recorded, the first registered agent that
+    # MaximizePM can start, Claude Code), through that adapter's resume_command (#5168); an agent that cannot resume
+    # starts fresh and reads the notes.
+    platform = core.agent_type_of(conn, name) or next(iter(core.agent_types()), None)
     ad = core._adapters().find(platform)
     sid = core.last_claude_session(conn, name) if resume and ad is not None and ad.supports("resume") else None
     if agent is None and not sid:  # agent_for.expert, else default_agent, for the task (#5168)
@@ -3095,8 +3096,8 @@ def update_apply(repo=REPO, restart=_restart_soon):
     return {**update_status(repo, fetch=False), "updated": True, "from": st["head"], "commits": st["commits"]}
 
 
-# Agent CLIs the setup guide offers for the Start button. Claude Code and Codex are launch profiles: river
-# builds their commands from their options (core.LAUNCH_PLATFORMS). The others get an explicit first prompt,
+# Agent CLIs the setup guide offers for the Start button. Claude Code and Codex are launch profiles: MaximizePM
+# builds their commands from their adapters' options (core.platform_spec). The others get an explicit first prompt,
 # so they work even where the agent does not read the project's instruction file.
 KNOWN_AGENTS = [
     ("Claude Code", "claude", "@claude-code"),
