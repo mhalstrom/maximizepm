@@ -232,11 +232,12 @@ DETECT = {
     # The question box ends with an option that lets the person type the answer (a regex).
     "tell_instead": r"Other \(type your answer\)",
     # The layout of a blocked screen (river/agents DETECT_LAYOUT; server._prompt_found reads it). The menu marks its
-    # selected option with ❯ inside a frame of │ ╭ ╰, as the defaults say. Under the box the watcher accepts only a
-    # rule or a key hint, and Hermes draws more there, so "rule" also takes those lines: the spinner line
-    # ("── ⠧ ❓ <question> · 25s ─── <title> ─"), the input line of a blocked turn ("? ❯", "⚠ ❯"), the status bar
-    # (" ☤ <model> · ..."), and the reason line under an approval's menu, inside its box (" delete in root path").
-    "rule": r"^\s*[─━]{8,}\s*$|^\s*── .*─\s*$|^\s*[?⚠] ❯\s*$|^\s*☤ |^ [A-Za-z][^│❯›]{0,80}$",
+    # selected option with ❯ inside a frame of │ ╭ ╰, as the defaults say. The lines inside the box under the menu
+    # (an approval's reason, " delete in root path") are the prompt's (#5213). Under the box the watcher accepts only
+    # a rule or a key hint, and Hermes draws more there, so "rule" also takes those lines: the spinner line
+    # ("── ⠧ ❓ <question> · 25s ─── <title> ─"), the input line of a blocked turn ("? ❯", "⚠ ❯"), and the status bar
+    # (" ☤ <model> · ...").
+    "rule": r"^\s*[─━]{8,}\s*$|^\s*── .*─\s*$|^\s*[?⚠] ❯\s*$|^\s*☤ ",
     "hint": r"↑/↓ to select, Enter to (?:lock|confirm)",
     # A path of an image file as the first word of a prompt attaches the image; the prompt then shows a badge
     # "[📎 <file name>]" and no number, so MaximizePM pastes the path.
