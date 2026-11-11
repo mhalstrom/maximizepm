@@ -549,6 +549,8 @@ def export_lines(session_id, db=None):
     except sqlite3.Error:
         return None
     h = {"type": "session", **{k: head[k] for k in SESSION_COLUMNS}}
+    # cwd: the key where the Sessions tab looks for a session's folder (sessions.last_cwd: the / list's commands).
+    h["cwd"] = h["directory"]
     try:
         h["model"] = json.loads(h["model"]) if h["model"] else None
     except ValueError:
@@ -755,7 +757,8 @@ def chat_title(lines):
 
 
 def chat_cwd(lines):
-    return (_header(lines) or {}).get("directory")
+    head = _header(lines) or {}
+    return head.get("cwd") or head.get("directory")
 
 
 def chat_usage(lines):

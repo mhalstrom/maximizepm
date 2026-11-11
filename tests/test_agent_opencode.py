@@ -366,6 +366,27 @@ class Database(Env):
         self.assertEqual((kind, Path(path).name), ("opencode", f"{SESSION_ID}.jsonl"))
         self.assertEqual(self.a.chat_ref(), "session")
 
+    def test_the_slash_list_offers_the_custom_commands_of_the_sessions_folder(self):
+        # #5275: sessions.last_cwd finds the folder by a "cwd" key; the header names it.
+        from river import sessions
+        work = self.root / "work"
+        (work / ".opencode" / "commands").mkdir(parents=True)
+        (work / ".opencode" / "commands" / "hello.md").write_text("---\ndescription: Say hello\n---\nhi\n")
+        db = self.make_db([("session.jsonl", SESSION_ID, None)])
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE session_v2 SET directory=?", (str(work),))
+        conn.commit()
+        conn.close()
+        mconn = core.connect()
+        core.register(mconn, "oc1")
+        mconn.execute("UPDATE agents SET agent_type='opencode' WHERE name='oc1'")
+        mconn.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('oc1', ?, '2026-11-11')",
+                      (SESSION_ID,))
+        mconn.commit()
+        got = sessions.session_commands(mconn, "oc1")
+        self.assertEqual((got["provider"], got["folder"]), ("opencode", str(work)))
+        self.assertIn("hello", [c["name"] for c in got["commands"]])
+
     def test_an_id_of_another_agent_is_no_opencode_id_and_reads_nothing(self):
         with mock.patch.object(opencode, "export_lines") as export:
             for other in ("7f3c2a10-5b9e-4c1d-9a2f-0e6d4b8c1a21", "T-12345678", "ses_x"):
