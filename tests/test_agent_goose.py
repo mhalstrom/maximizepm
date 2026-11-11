@@ -181,7 +181,6 @@ class Screens(unittest.TestCase):
         self.assertEqual(parts["question"], "◆  Goose would like to call the above tool, do you allow?")
         self.assertEqual(parts["options"][0], ("Allow (Allow the tool call once)", True))
 
-    @unittest.expectedFailure  # #5209: the watcher lists no other option of a cliclack menu yet (each has ○)
     def test_the_tool_approval_is_blocked_with_its_options(self):
         state, parts = watch(pane("blocked_tool"))
         self.assertEqual(state, "blocked")

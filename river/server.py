@@ -1423,6 +1423,7 @@ def _layout(detect=None):
     if got is None:
         got = _LAYOUTS[key] = {"box": re.escape(d["frame"]), "frame": d["frame"],
                                "mark": re.compile(f"^(\\s*)([{re.escape(d['menu'])}])\\s*(\\S.*)$"),
+                               "other": d["other"] and re.compile(f"^(\\s*)([{re.escape(d['other'])}])\\s*(\\S.*)$"),
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
                                "tell": re.compile(tell)}
     return got
@@ -1491,17 +1492,23 @@ def _prompt_parts(tail, layout=None):
     options, top = [], len(lines)
     if at is not None:
         m = mark.match(lines[at])
-        col = len(lines[at]) - len(m.group(3))
+        col, mcol, other = len(lines[at]) - len(m.group(3)), len(m.group(1)), lay["other"]
+
+        def marked(x):
+            """The text of an option that the layout's other mark marks at the selected mark's column, or None."""
+            o = other and other.match(x)
+            return o.group(3).strip() if o and len(o.group(1)) == mcol else None
 
         def option(x):
-            return len(x) - len(x.lstrip()) == col and not lay["hint"].search(x)
+            return marked(x) is not None or (len(x) - len(x.lstrip()) == col and not lay["hint"].search(x))
         top = at
         while top > 0 and option(lines[top - 1]):
             top -= 1
         end = at + 1
         while end < len(lines) and option(lines[end]):
             end += 1
-        options = [(m.group(3).strip() if n == at else lines[n].strip(), n == at) for n in range(top, end)]
+        options = [(m.group(3).strip() if n == at else marked(lines[n]) or lines[n].strip(), n == at)
+                   for n in range(top, end)]
         framed = re.compile(f"^\\s*[{lay['box']}]")
         frame_end = end
         if framed.match(tail[at]):

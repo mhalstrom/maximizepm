@@ -579,8 +579,10 @@ DETECT = {
     ],
     "tell_instead": None,  # the approval menu has Allow, Always Allow, Deny and Cancel: no option to type an answer
     "image_paste": None,  # the goose CLI takes no pasted image; a path in the prompt goes to its read_image tool
-    # cliclack marks the selected option with ● and draws │ before each line of a menu and └ under it.
+    # cliclack marks the selected option with ● and each other one with ○, and draws │ before each line of a menu and
+    # └ under it.
     "menu": "●",
+    "other": "○",
 }
 
 # ---------------------------------------------------------------------------------------------------------------

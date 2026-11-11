@@ -225,6 +225,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "image_paste":  how a pasted image shows in its prompt, with {n} ("[Image #{n}]"), or None,
 #      and the layout of a blocked screen, each optional (DETECT_LAYOUT holds the values of a key left out):
 #      "menu":         the characters that mark the selected option of a menu ("❯›"),
+#      "other":        the characters that mark each other option, at the column of the selected one's mark (cliclack:
+#                      "●" selected, "○" each other one); "": the other options have no mark, and their text starts
+#                      at the column of the selected option's text (Claude Code, Codex),
 #      "frame":        the characters of the frame some CLIs draw around a prompt,
 #      "rule":         a regex of a dashed rule (the input box's edge),
 #      "hint":         a regex of the line that names keys ("Enter to confirm · Esc to cancel"),
@@ -239,9 +242,10 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool}
 DETECT_KEYS = {"process": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
-               "menu": str, "frame": str, "rule": str, "hint": str}
+               "menu": str, "other": str, "frame": str, "rule": str, "hint": str}
 DETECT_LAYOUT = {
     "menu": "❯›",
+    "other": "",
     "frame": "│┃╭╮╰╯┌┐└┘",
     "rule": r"^\s*[─━╌╍┄┅═-]{8,}\s*$",
     "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]",
