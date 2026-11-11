@@ -221,6 +221,39 @@ class Launch(Env):
             self.assertIsNone(self.a.parse_command(bad), bad)
 
 
+class DefaultModel(Env):
+    """#5284: a launch that names no model, of an item that names none, runs the adapter's DESCRIBE default_model
+    (OpenCode: its free opencode/big-pickle), not whatever model OpenCode's TUI remembers."""
+
+    def setUp(self):
+        super().setUp()
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        (self.root / "shop").mkdir()
+        core.project_add(self.c, "shop", path=str(self.root / "shop"))
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; OpenCode=@opencode")
+
+    def test_no_model_named_runs_the_adapters_default(self):
+        x = core.item_add(self.c, "shop", "work")["id"]
+        t = core.launch_target(self.c, agent="OpenCode", item=x)
+        self.assertEqual((t["model"], t["env"].get("MAXPM_MODEL")), ("opencode/big-pickle", "opencode/big-pickle"))
+        self.assertIn('"model":"opencode/big-pickle"', t["command"])
+        self.assertIn("the default model of OpenCode", t["model_why"])
+        # Any start path: the focused and manager starts build with no model too.
+        cmd = core._launch_agent_cmd(self.c, core._project(self.c, "shop")["id"], "OpenCode")
+        self.assertEqual((cmd["model"], cmd["adapter_default"]), ("opencode/big-pickle", True))
+
+    def test_a_model_named_wins_and_an_agent_with_no_default_gets_none(self):
+        x = core.item_add(self.c, "shop", "work")["id"]
+        t = core.launch_target(self.c, agent="OpenCode", item=x, model="openrouter/qwen/qwen3-coder")
+        self.assertEqual((t["model"], t["model_why"]), ("openrouter/qwen/qwen3-coder", "chosen for this launch"))
+        t = core.launch_target(self.c, agent="Claude Code", item=x)
+        self.assertEqual((t["model"], t["adapter_default"]), (None, False))  # Claude Code names no default
+        self.assertNotIn("--model", t["command"])
+        core.config_set(self.c, "default_model", "opus")  # the setting is still not forced on the CLI (#4961)
+        self.assertIsNone(core.launch_target(self.c, agent="Claude Code", item=x)["model"])
+
+
 class Detect(Env):
     """The screen rules against the screens recorded in tmux. The plugin is the one source of the state; these rules
     hold the pane's data, and must still say each recorded screen right."""

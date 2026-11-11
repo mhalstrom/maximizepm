@@ -11482,6 +11482,8 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
                                          defaults=False)
     name = session_title(top["goals"], top["id"], top["title"])
     cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt)
+    if not model and cmd["adapter_default"]:  # #5284: the adapter names a default model; the item names none
+        model, model_why = cmd["model"], f"#{top['id']} names no model: the default model of {platform_spec(plat)['label']}"
     base = fork_base(conn, top, p["path"], model, cmd["platform"])
     if base:  # a worker of the goal starts from the warm base: it reads the goal's context from the cache
         cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt, fork_of=base["session_id"])
@@ -11576,6 +11578,14 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     prof = parse_profile(pick[1])
     # The CLI gets its own id for the model (codex -m gpt-6-astra); river keeps the ladder name everywhere else.
     platform = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
+    # No model named: the adapter's own default (DESCRIBE['default_model'], #5284: OpenCode runs on its free model,
+    # not on whatever model its TUI remembers); "" lets the agent pick. The default_model setting is not forced on
+    # the CLI (#4961).
+    adapter_default = None
+    if not model and platform:
+        a = _adapters().find(platform)
+        adapter_default = (a.describe.get("default_model") or None) if a else None
+        model = _check_model_name(adapter_default) if adapter_default else None
     mid = model_id(conn, platform, model, project_id, prof[1] if prof else None)
     if effort and platform:
         _check_agent_effort(_adapters().get(platform), mid, effort)
@@ -11614,6 +11624,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     return {"agent": pick[0], "command": cmd, "platform": prof[0] if prof else None, "options": opts,
             "session_id": session_id,
             "model": model, "model_id": mid, "effort": effort or None, "custom_prompt": prompt,
+            "adapter_default": bool(adapter_default),
             "autocompact": autocompact, "first_prompt": first,
             "env": {"MAXPM_MODEL": model} if model else {}}
 
