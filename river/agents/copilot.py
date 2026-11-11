@@ -500,6 +500,24 @@ def _read(f):
         return ""
 
 
+# How each command works from the page (#5220, #5291): GitHub Copilot CLI in tmux on 2026-11-11. /permissions opens a
+# numbered menu (the Settings row Permissions) and /model a picker (Model); /context shows its context view and /usage
+# its plan's premium requests ('1 / 200 AIC'): the Usage panel gives the session's side of them (its plan limits show
+# only on its screen). /session, /resume, /config, /settings and the other views need the terminal; the others run.
+_RUNS = {
+    "terminal": {"agent", "skills", "mcp", "plugin", "tasks", "ide", "diff", "pr", "lsp", "terminal-setup", "sandbox",
+                 "list-dirs", "resume", "session", "share", "remote", "rewind", "help", "changelog", "diagnose",
+                 "statusline", "version", "experimental", "memory", "instructions", "config", "env", "limits",
+                 "login", "settings", "subagents", "user", "voice"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] in ("model", "permissions"):
+        _c["setting"], _c["run"] = _c["name"], ("menu" if _c["name"] == "permissions" else "terminal")
+    if _c["name"] in ("context", "usage"):
+        _c["page"], _c["run"] = "usage", "terminal"
+
+
 def read_commands(folder):
     """The custom slash commands of a session in `folder`, as the CLI lists them: the project's Claude Code
     commands (.claude/commands/*.md), and the skills of the project (.github/skills, .agents/skills,

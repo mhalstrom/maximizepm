@@ -682,6 +682,20 @@ def _recipes():
     return [c for c in out if c.get("command")]
 
 
+# How each command works from the page (#5220, #5291): goose in tmux on 2026-11-11. /mode asks which mode (the
+# Settings row Mode) and /model prints the model or switches it (Model); /status prints the model, the tokens and the
+# context against its window ('Context: 0 / 1050000 tokens'): the Usage panel. The lists it prints need the terminal.
+_RUNS = {
+    "terminal": {"help", "skills", "prompts", "doctor", "r", "t"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] in ("model", "mode"):
+        _c["setting"], _c["run"] = _c["name"], ("menu" if _c["name"] == "mode" else "terminal")
+    if _c["name"] == "status":
+        _c["page"], _c["run"] = "usage", "terminal"
+
+
 def read_commands(folder):
     """The custom slash commands of a session in folder: the recipes of config.yaml, then the skills (each skill is a
     slash command by its name). A name of a built-in command is left out, as goose does."""

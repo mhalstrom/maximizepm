@@ -559,3 +559,18 @@ SETUP = {
     "voice": "/voice records from the microphone and types the words as the prompt (it needs an OpenAI key).",
     "open_link": None,
 }
+
+
+# How each command works from the page (#5220, #5291). Aider is a line-based program: a command prints its answer into
+# the terminal. From its own descriptions (on this Mac it waited at its .gitignore question first): /model and
+# /reasoning-effort set what the Settings rows Model and Effort set; /tokens reports the tokens of the chat (the Usage
+# panel); the lists it prints (/settings, /models, /ls, /map, /diff, /help) need the terminal; the others run.
+_RUNS = {
+    "terminal": {"settings", "models", "ls", "map", "diff", "help", "editor", "edit", "editor-model", "weak-model"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] in ("model", "reasoning-effort"):
+        _c["setting"], _c["run"] = ("model" if _c["name"] == "model" else "effort"), "terminal"
+    if _c["name"] == "tokens":
+        _c["page"], _c["run"] = "usage", "terminal"

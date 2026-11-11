@@ -390,3 +390,16 @@ with no argument, nothing goes to the terminal. A command with an argument goes 
 | Cursor CLI 2026.11.11 (#5290) | `/model`, `/sandbox` | Settings: Model, Sandbox |
 | Cursor CLI | `/config`, `/resume`, `/rewind`, `/about`, `/logs`, `/help`, `/mcp`, `/plugin`, `/team`, `/load-workspace` | needs the terminal; Cursor logs no token counts, so it has no Usage panel |
 | Cursor CLI | the toggles (`/ask`, `/max-mode`, `/fast`, `/auto-review`, `/run-everything`, ...), `/clear`, `/fork`, `/summarize`, `/rename`, `/goal`, `/plan` | run at once |
+| GitHub Copilot CLI (#5291) | `/model`, `/permissions` (a numbered menu) | Settings: Model, Permissions |
+| GitHub Copilot CLI | `/context`, `/usage` | the Usage panel; its plan's premium requests ('1 / 200 AIC') show only on its screen |
+| GitHub Copilot CLI | `/session`, `/resume`, `/config`, `/settings`, `/agent`, `/skills`, `/mcp`, `/plugin`, `/tasks`, `/rewind`, `/limits` and its other views | needs the terminal |
+| GitHub Copilot CLI | `/new`, `/clear`, `/compact`, `/fork`, `/rename`, `/plan`, `/ask`, `/review`, `/copy`, `/exit`, ... | run at once |
+| Aider (#5291; it waited at its `.gitignore` question here: from its descriptions) | `/model`, `/reasoning-effort` | Settings: Model, Effort |
+| Aider | `/tokens` | the Usage panel |
+| Aider | `/settings`, `/models`, `/ls`, `/map`, `/diff`, `/help`, `/editor`, `/editor-model`, `/weak-model` | needs the terminal (it prints them) |
+| Aider | `/add`, `/drop`, `/ask`, `/code`, `/architect`, `/clear`, `/reset`, `/undo`, `/commit`, `/run`, `/test`, `/lint`, ... | run at once |
+| goose (#5291) | `/model`, `/mode` (it asks which) | Settings: Model, Mode |
+| goose | `/status` | the Usage panel (goose shows 'Context: 0 / 1050000 tokens' for gpt-5.6-terra on its screen) |
+| goose | `/help`, `/skills`, `/prompts`, `/doctor`, `/r`, `/t` | needs the terminal |
+| goose | `/compact`, `/clear`, `/new`, `/goal`, `/grind`, `/exit`, ... | run at once |
+| Amp (#5291) | none | Amp has no slash commands ("/" opens its command palette, #5196); the Usage panel opens from the context meter |

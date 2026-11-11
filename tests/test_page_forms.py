@@ -168,5 +168,29 @@ class Group2(unittest.TestCase):
         self.assertEqual(st["model"], "gemini-3.8-flash")
         self.assertGreater(st["last"]["context"], 0)
 
+
+class Group3(unittest.TestCase):
+    """#5291: GitHub Copilot CLI, Aider, Goose and Amp."""
+
+    def marks(self, aid):
+        a = agents.get(aid)
+        self.assertEqual(agents.check(a.module, aid), [])
+        self.assertTrue(all(c.get("run") in agents.COMMAND_RUNS for c in a.commands), aid)
+        return ({c["name"]: c["setting"] for c in a.commands if c.get("setting")},
+                sorted(c["name"] for c in a.commands if c.get("page") == "usage"),
+                {c["name"]: c["run"] for c in a.commands})
+
+    def test_the_commands(self):
+        settings, usage, runs = self.marks("copilot")
+        self.assertEqual((settings, usage), ({"model": "model", "permissions": "permissions"}, ["context", "usage"]))
+        self.assertEqual((runs["permissions"], runs["session"], runs["compact"]), ("menu", "terminal", "now"))
+        settings, usage, runs = self.marks("aider")
+        self.assertEqual((settings, usage), ({"model": "model", "reasoning-effort": "effort"}, ["tokens"]))
+        self.assertEqual((runs["settings"], runs["undo"]), ("terminal", "now"))
+        settings, usage, runs = self.marks("goose")
+        self.assertEqual((settings, usage), ({"model": "model", "mode": "mode"}, ["status"]))
+        self.assertEqual((runs["mode"], runs["compact"]), ("menu", "now"))
+        self.assertEqual(agents.get("amp").commands, [])  # Amp has no slash commands: "/" opens its palette
+
 if __name__ == "__main__":
     unittest.main()
