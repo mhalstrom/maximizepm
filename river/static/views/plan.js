@@ -85,10 +85,11 @@ export function openAdd(part, { project, parent } = {}) {
   addDialog.open();
   (part === "goal" ? $("#goalName") : part === "project" ? $("#addProjPart input") : $("#addTitle")).focus();
 }
-// The parent of a new goal: an open goal of the chosen project that is no sub-goal itself (one level).
+// The parent of a new goal: an open goal of the chosen project that is no sub-goal itself (one level). Before the
+// first state loads, S is null: the list is empty, so Add item still opens in the first seconds of a page (#5407).
 function fillParents() {
   const proj = $("#goalProject").value, el = $("#goalParent");
-  const list = (S.goals || []).filter(g => g.status === "open" && g.project === proj && !g.parent);
+  const list = ((S && S.goals) || []).filter(g => g.status === "open" && g.project === proj && !g.parent);
   el.innerHTML = `<option value="">none: a goal of its own</option>` + list.map(g => `<option value="${esc(g.name)}">${esc(g.name)}</option>`).join("");
 }
 $("#goalProject").addEventListener("change", fillParents);
