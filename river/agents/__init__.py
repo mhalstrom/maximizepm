@@ -32,8 +32,6 @@ import os
 import re
 from pathlib import Path
 
-from ..core import RiverError, river_dir
-
 # ---------------------------------------------------------------------------------------------------------------
 # The contract: names and shapes
 # ---------------------------------------------------------------------------------------------------------------
@@ -670,3 +668,9 @@ def from_env(env=None):
 
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir"]
+
+
+# Last, after every name above: core imports the built-in adapters while it loads (PLATFORM_EFFORTS), and they import
+# Raw from here. With this import at the top, a program that imported river.agents first got a half-loaded package
+# when core asked for Raw, and failed (#5207). Here, either module may be imported first.
+from ..core import RiverError, river_dir  # noqa: E402

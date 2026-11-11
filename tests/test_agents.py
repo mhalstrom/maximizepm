@@ -467,6 +467,22 @@ class PaneState(Env):
         self.assertEqual(got["picked"], "2. No, and tell Codex what to do differently")
 
 
+class ImportOrder(unittest.TestCase):
+    def test_each_module_imports_first_in_a_new_interpreter(self):
+        """#5207: core imports the built-in adapters while it loads, and they import Raw from river.agents. A user
+        adapter module or a script that imports river.agents (or an adapter) before core must work."""
+        import subprocess
+        import sys
+        root = str(Path(__file__).resolve().parent.parent)
+        names = ["river.agents"] + [f"river.agents.{p.stem}" for p in sorted((Path(root) / "river" / "agents").glob("*.py"))
+                                    if p.stem != "__init__"] + ["river.core", "river.cli"]
+        for name in names:
+            r = subprocess.run([sys.executable, "-c", f"import {name}; import river.agents as a; a.Raw; a.load()"],
+                               cwd=root, capture_output=True, text=True, timeout=60,
+                               env={**os.environ, "MAXPM_DB": os.path.join(tempfile.gettempdir(), "maxpm-5207-none.db")})
+            self.assertEqual(r.returncode, 0, f"import {name} first: {r.stderr.strip().splitlines()[-1:]}")
+
+
 if __name__ == "__main__":
     unittest.main()
 
