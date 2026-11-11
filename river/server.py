@@ -2631,7 +2631,7 @@ def terminal_keys(conn, agent, keys, who=None):
     """Type into an agent's tmux pane from the page: keys is a list of {"text": "..."} (typed as it is) and
     {"key": "Enter"} (a key in TERMINAL_KEYS). Only a person does this: an agent does not answer another
     agent's prompts through river."""
-    pane = _typing_pane(conn, agent, who)
+    pane = _typing_pane(conn, agent, who, shell=True)  # the Terminal tab types into a shell too; its callers check
     return {"agent": agent, "pane": pane, "sent": send_keys(pane, keys)}
 
 
@@ -2654,8 +2654,10 @@ def send_keys(pane, keys):
     return len(keys)
 
 
-def _typing_pane(conn, agent, who):
-    """The tmux pane a person may type into for this agent; RiverError for an agent, or with no pane."""
+def _typing_pane(conn, agent, who, shell=False):
+    """The tmux pane a person may type into for this agent; RiverError for an agent, or with no pane. shell: the pane
+    may show only a shell (the Terminal tab, where a person types keys into the pane on purpose); the message box,
+    the answer card and the settings never type into a shell (#5298)."""
     row = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
     if row and row["kind"] != "human":
         raise RiverError("only a person types into an agent's terminal")
@@ -2666,7 +2668,7 @@ def _typing_pane(conn, agent, who):
         row = next((p for p in _tmux_panes(everywhere=True) if p["pane"] == pane), None)
     except RiverError:
         row = None
-    if row and row["ended"]:
+    if row and row["ended"] and not shell:
         # Only a shell runs there: the agent ended in that pane. A text sent there runs as a shell command (#5298).
         raise RiverError(f"the terminal of {agent} shows only a shell: its agent ended there, so nothing was typed; "
                          f"look at the terminal, then start the session again")

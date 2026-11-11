@@ -2292,10 +2292,13 @@ class OldPane(TmuxBase):
         self.tmux.end(self.pane)
         self.assertEqual(server.agent_terminals(self.c), {"ag": self.pane["id"]})  # the page still shows the terminal
         for send in (lambda: server.session_send(self.c, "ag", "Test 3: what was the first word?", who="mark"),
-                     lambda: server.terminal_keys(self.c, "ag", [{"text": "y"}], "mark")):
+                     lambda: server.prompt_answer(self.c, "ag", "any", 0, None, "mark")):
             with self.assertRaisesRegex(core.RiverError, "shows only a shell"):
                 send()
         self.assertEqual(self.pane["keys"], [])
+        # The Terminal tab: a person types keys into the pane on purpose, also into its shell.
+        server.terminal_keys(self.c, "ag", [{"text": "ls"}, {"key": "Enter"}], "mark")
+        self.assertEqual(self.pane["keys"][-2:], ["ls", "Enter"])
 
     def test_a_restart_takes_the_name_off_the_old_panes_of_this_queue(self):
         self.tmux._pane(name="ag")
