@@ -11782,12 +11782,22 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
             raise RiverError(f"#{top['id']} {why}; pick another model")
         model_why = "chosen for this launch"
     else:
-        # No model named: the item's own (#4961), of the agent's family, so the session declares it (MAXPM_MODEL)
-        # and its limits hold. A default model is not forced on the CLI.
-        model, model_why = session_model(conn, _item(conn, top["id"]), platform_spec(plat)["family"] if plat else None,
-                                         defaults=False)
+        # No model named: the item's own (#4961), else the default_model setting (#5346: the manager launched seven
+        # items with default_model opus and each pane ran Sonnet, the CLI's own default), of the agent's family, so
+        # the session declares it (MAXPM_MODEL) and its limits hold. With neither, the agent's own default runs.
+        model, model_why = session_model(conn, _item(conn, top["id"]), platform_spec(plat)["family"] if plat else None)
     name = session_title(top["goals"], top["id"], top["title"])
-    cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt)
+    cmd = None
+    if effort is None:
+        # The same for the effort (#5346): the item's own, else default_effort; a level that this agent does not
+        # take is left out, and the agent's own default runs.
+        effort = top.get("effort") or None
+        if effort:
+            try:
+                cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt)
+            except RiverError:
+                effort = None
+    cmd = cmd or _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt)
     if not model and cmd["adapter_default"]:  # #5284: the adapter names a default model; the item names none
         model, model_why = cmd["model"], f"#{top['id']} names no model: the default model of {platform_spec(plat)['label']}"
     base = fork_base(conn, top, p["path"], model, cmd["platform"])

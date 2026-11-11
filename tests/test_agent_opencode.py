@@ -250,8 +250,17 @@ class DefaultModel(Env):
         t = core.launch_target(self.c, agent="Claude Code", item=x)
         self.assertEqual((t["model"], t["adapter_default"]), (None, False))  # Claude Code names no default
         self.assertNotIn("--model", t["command"])
-        core.config_set(self.c, "default_model", "opus")  # the setting is still not forced on the CLI (#4961)
-        self.assertIsNone(core.launch_target(self.c, agent="Claude Code", item=x)["model"])
+        # The setting default_model applies to an item with no model (#5346), and the session runs it.
+        core.config_set(self.c, "default_model", "opus")
+        t = core.launch_target(self.c, agent="Claude Code", item=x)
+        self.assertEqual((t["model"], t["model_why"]), ("opus", "the default model (global)"))
+        self.assertIn("--model", t["command"])
+        # The same for default_effort (#5346).
+        core.config_set(self.c, "default_effort", "high")
+        self.assertIn("high", core.launch_target(self.c, agent="Claude Code", item=x)["command"])
+        core.config_unset(self.c, "default_effort")
+        # Not of the agent's family: the agent's own default.
+        self.assertEqual(core.launch_target(self.c, agent="OpenCode", item=x)["model"], "opencode/big-pickle")
 
 
 class Detect(Env):

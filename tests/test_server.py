@@ -1460,7 +1460,8 @@ class LaunchInTmux(unittest.TestCase):
         # launch --item of a plain item found during the Fable work: the default model (#4979: only an expert inherits).
         z = core.item_add(self.c, "shop", "fix what the design found", found_during=design)["id"]
         r = server.dispatch_item(self.c, z)
-        self.assertIsNone(r["model"])  # the agent CLI's own default: a default is not forced on the CLI
+        # The default model (#5346), not the model of the work it was found during.
+        self.assertEqual(r["model"], core.setting(self.c, "default_model") or None)
         self.assertNotIn("fable", self.tmux.panes[-1]["keys"][0])
         # expert start --item of an item that a Fable session worked on: Fable (its last session's model).
         q = core.item_add(self.c, "shop", "a second design", models={"max_model": "fable"})["id"]
