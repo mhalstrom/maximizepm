@@ -45,7 +45,10 @@
 /* A phone (#4890): narrower cards, so part of the next one shows, and the row fades at its right edge: it scrolls.
    The mask reads only the alpha of its color, so any opaque token does. */
 @media (max-width: 759px) {
-  .plan-side { -webkit-mask-image: linear-gradient(to right, var(--ink) 82%, transparent); mask-image: linear-gradient(to right, var(--ink) 82%, transparent); padding-right: var(--fade); }
+  .plan-side { -webkit-mask-image: linear-gradient(to right, var(--ink) 82%, transparent); mask-image: linear-gradient(to right, var(--ink) 82%, transparent); padding-right: var(--fade); scrollbar-width: none; }
+  /* No scrollbar under the cards: the fade says the row scrolls; in dark, color-scheme drew a grey thumb under
+     the All projects card (#5358). As header nav in phone.css. */
+  .plan-side::-webkit-scrollbar { display: none; }
   .gcard { flex-basis: var(--w-card-phone); }
 }
 @media (max-width: 800px) {
