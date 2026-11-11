@@ -1610,6 +1610,9 @@ try {
         driver = DRIVE_HEAD + r"""
 try {
   await until(() => q('#sessions [data-session="ag"] .srow-end') && q('#sessOpen [data-end="ag"]'), "End on the row and in the header");
+  // The stop goes with the person of "You are" (#actor), which the page fills from api/state; the rows come from
+  // api/sessions, and under load they can show first. A stop with no actor is refused (#5287).
+  await until(() => q("#actor") && q("#actor").value === "mark", "the page knows the person");
   const head = q('#sessOpen [data-end="ag"]').textContent;
   q('#sessions [data-session="ag"] .srow-end').click();
   await until(() => q("#endDlg") && !q("#endDlg").classList.contains("hidden"), "the dialog");
