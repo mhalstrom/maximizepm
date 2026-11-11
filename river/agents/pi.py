@@ -467,19 +467,31 @@ def _header(lines):
     return next((r for r in _rows(lines[:5]) if r.get("type") == "session"), None)
 
 
+def _head(p):
+    """(header, id of the first entry) of a session file; (None, None) when it cannot be read."""
+    try:
+        with open(p) as f:
+            rows = _rows([f.readline(), f.readline()])
+    except OSError:
+        return None, None
+    return (next((r for r in rows if r.get("type") == "session"), None),
+            next((r.get("id") for r in rows if r.get("type") != "session"), None))
+
+
 def chat_chain(path, refs=None):
     """The session files across forks and clones, oldest first: each header's parentSession, back to the first (it
-    needs no refs, #5182)."""
-    out, p = [], Path(path)
-    while p and p not in out:
-        out.append(p)
-        try:
-            with open(p) as f:
-                head = _header([f.readline()])
-        except OSError:
+    needs no refs, #5182). A /fork or /clone file holds a copy of its branch from the root, with the same entry ids
+    (Pi 1.5.2, #5204): its parent adds nothing, and the chain stops there, so the chat shows no message twice. A
+    child that does not start with its parent's first entry (newSession with a parentSession) continues it."""
+    p = Path(path)
+    out, (head, first) = [p], _head(p)
+    while (head or {}).get("parentSession"):
+        parent = Path(head["parentSession"])
+        head, parent_first = _head(parent)
+        if parent in out or head is None or (first and first == parent_first):
             break
-        parent = (head or {}).get("parentSession")
-        p = Path(parent) if parent else None
+        out.append(parent)
+        first = parent_first
     return out[::-1]
 
 

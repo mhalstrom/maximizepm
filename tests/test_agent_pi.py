@@ -12,7 +12,7 @@ from river import agents, core
 from river.agents import pi
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "pi"
-SESSION_ID = "7f3c2a10-5b9e-4c1d-9a2f-0e6d4b8c1a21"
+SESSION_ID = "01a1c9a9-ece6-719c-93fd-20aeef4f656d"  # recorded from Pi 1.5.2 (#5204)
 
 
 def lines(name="session.jsonl"):
@@ -114,34 +114,41 @@ class Chat(Env):
     def test_the_chat_is_the_active_branch_in_the_shared_entries(self):
         entries, turn = self.a.parse_chat(lines())
         roles = [e["role"] for e in entries]
-        self.assertEqual(roles, ["event", "event", "user", "assistant", "tool", "result", "summary", "tool", "result",
-                                 "divider", "summary", "tool", "result", "event", "assistant"])
+        # A real Pi 1.5.2 session (tests/fixtures/pi/README.md): a bash call with an image, a /tree branch with its
+        # summary, a read that fails, a compaction, a !command, and a thinking level change.
+        self.assertEqual(roles, ["event", "event", "user", "tool", "result", "assistant", "summary", "user", "tool",
+                                 "result", "assistant", "divider", "summary", "tool", "result", "event", "user",
+                                 "assistant"])
         self.assertEqual(turn, "idle")
-        text = json.dumps(entries)
-        self.assertNotIn("left on another branch", text)  # the branch /tree left
-        self.assertNotIn("I run the briefing first", text)  # thinking stays out
+        assistant = [e["text"] for e in entries if e["role"] == "assistant"]
+        self.assertNotIn("this answer is left on another branch.", assistant)  # the branch /tree left
+        self.assertNotIn("The user wants me to run", json.dumps(entries))  # thinking stays out
         user = entries[2]
-        self.assertEqual(user["text"], "run maxpm go in this folder and follow the briefing")
-        self.assertEqual(user["images"], ["data:image/png;base64,iVBORw0KGgo="])
-        self.assertEqual(entries[4], {"at": "2026-11-11T08:00:02.000Z", "role": "tool", "text": "bash",
-                                      "id": "toolu_01", "name": "bash", "detail": "maxpm go"})
-        self.assertEqual((entries[5]["for"], entries[5]["error"]), ("toolu_01", False))
-        self.assertEqual((entries[7]["detail"], entries[8]["error"]), ("notes.md", True))
-        self.assertEqual(entries[9]["kind"], "compacted")
-        self.assertEqual((entries[11]["detail"], entries[12]["text"]), ("git status", "nothing to commit"))
-        self.assertEqual(entries[0]["text"], "model: anthropic/claude-opus-5-5")
+        self.assertTrue(user["text"].startswith("Run the shell command `echo hello` with the bash tool"))
+        self.assertEqual(len(user["images"]), 1)
+        self.assertTrue(user["images"][0].startswith("data:image/png;base64,iVBORw0KGgo"))
+        self.assertEqual(entries[3], {"at": "2026-11-11T08:12:00.482Z", "role": "tool", "text": "bash",
+                                      "id": "m7p3XwlbF", "name": "bash", "detail": "echo hello"})
+        self.assertEqual((entries[4]["for"], entries[4]["error"], entries[4]["text"]), ("m7p3XwlbF", False, "hello\n"))
+        self.assertTrue(entries[6]["text"].startswith("The user explored a different conversation branch"))
+        self.assertEqual((entries[8]["detail"], entries[9]["error"]), ("missing.md", True))
+        self.assertEqual(entries[11]["kind"], "compacted")
+        self.assertEqual((entries[13]["detail"], entries[14]["text"]), ("echo nothing to commit", "nothing to commit\n"))
+        self.assertEqual(entries[13]["id"], entries[14]["for"])
+        self.assertEqual((entries[15]["text"], entries[17]["text"]), ("thinking: off", "done."))
+        self.assertEqual(entries[0]["text"], "model: mistral/mistral-small-latest")
         for e in entries:
             self.assertIn(e["role"], agents.ENTRY_ROLES)
 
     def test_the_turn_follows_the_last_message(self):
         head = lines()[:-1]
-        row = lambda m: json.dumps({"type": "message", "id": "z1", "parentId": "a0000014",
-                                    "timestamp": "2026-11-11T08:01:00.000Z", "message": m})
+        row = lambda m: json.dumps({"type": "message", "id": "z1", "parentId": "9550b5bf",
+                                    "timestamp": "2026-11-11T08:13:00.000Z", "message": m})
         self.assertEqual(self.a.parse_chat(head + [row({"role": "user", "content": "more"})])[1], "working")
         self.assertEqual(self.a.parse_chat(head + [row({"role": "assistant", "content": [], "stopReason": "toolUse"})])[1],
                          "working")
         self.assertEqual(self.a.parse_chat(head + [row({"role": "assistant", "content": [], "stopReason": "aborted"})]),
-                         (self.a.parse_chat(head)[0] + [{"at": "2026-11-11T08:01:00.000Z", "role": "event",
+                         (self.a.parse_chat(head)[0] + [{"at": "2026-11-11T08:13:00.000Z", "role": "event",
                                                          "text": "interrupted"}], "idle"))
         self.assertEqual(self.a.parse_chat([]), ([], None))
         # Pi 1.x writes a system message when the tools change: it says nothing of the turn (#5204).
@@ -153,16 +160,16 @@ class Chat(Env):
         ls = lines()
         self.assertEqual(pi.chat_title(ls), "maxpm-pi-1")
         self.assertEqual(pi.chat_cwd(ls), "/work/demo")
-        # Four model calls, one on the branch that /tree left: each one was billed.
-        self.assertEqual(pi.chat_usage(ls), {"input": 4800, "output": 320, "cache_read": 36000, "cache_write": 1600})
+        # Six model calls, one on the branch that /tree left: each one was billed.
+        self.assertEqual(pi.chat_usage(ls), {"input": 6854, "output": 278, "cache_read": 2720, "cache_write": 0})
         # Pi 1.x: a usage entry is a call with no message (a cache warm), billed too (#5204).
-        warm = json.dumps({"type": "usage", "id": "u1", "parentId": "a0000014", "timestamp": "2026-11-11T08:02:00.000Z",
+        warm = json.dumps({"type": "usage", "id": "u1", "parentId": "e2c0f2de", "timestamp": "2026-11-11T08:14:00.000Z",
                            "kind": "cache_warm", "usage": {"input": 0, "output": 0, "cacheRead": 50000, "cacheWrite": 0}})
-        self.assertEqual(pi.chat_usage(ls + [warm])["cache_read"], 86000)
+        self.assertEqual(pi.chat_usage(ls + [warm])["cache_read"], 52720)
         import re
         got = [m.group(1) for m in (re.search(pi.EFFORT["read"], ln) for ln in ls) if m]
-        self.assertEqual(got, ["high", "medium"])
-        self.assertEqual(pi.read_effort(self.a.parse_chat(ls)[0]), "medium")
+        self.assertEqual(got, ["high", "off"])  # Mistral Small has only off and high
+        self.assertEqual(pi.read_effort(self.a.parse_chat(ls)[0]), "off")
 
     def test_chat_path_finds_a_session_by_id_in_its_folder_or_any(self):
         d = self.root / "pi-agent" / "sessions" / pi.folder_key("/work/demo")
@@ -171,20 +178,40 @@ class Chat(Env):
         shutil.copy(FIX / "session.jsonl", f)
         self.assertEqual(pi.folder_key("/work/demo"), "--work-demo--")
         self.assertEqual(self.a.chat_path(SESSION_ID, "/work/demo"), f)
-        self.assertEqual(self.a.chat_path("7f3c2a10", "/elsewhere"), f)  # the first characters, any folder
+        self.assertEqual(self.a.chat_path("01a1c9a9-ece6", "/elsewhere"), f)  # the first characters, any folder
         self.assertEqual(self.a.chat_path(str(f)), f)
         self.assertIsNone(self.a.chat_path("0000ffff", "/work/demo"))
         self.assertIsNone(self.a.chat_path("../x", None))
         with mock.patch.dict(os.environ, {"PI_CODING_AGENT_SESSION_DIR": str(self.root / "none")}):
             self.assertIsNone(self.a.chat_path(SESSION_ID, "/work/demo"))
 
-    def test_the_chain_follows_forks_back_to_the_first_file(self):
+    def test_a_fork_holds_its_branch_so_the_chain_stops_at_it(self):
+        # Pi 1.5.2 copies the branch into the fork with the same entry ids (#5204): the parent would show it twice.
         first = self.root / "first.jsonl"
         shutil.copy(FIX / "session.jsonl", first)
         fork = self.root / "fork.jsonl"
         fork.write_text((FIX / "fork.jsonl").read_text().replace("PARENT", str(first)))
-        self.assertEqual(pi.chat_chain(fork), [first, fork])
+        self.assertEqual(pi.chat_chain(fork), [fork])
         self.assertEqual(pi.chat_chain(first), [first])
+        entries, turn = self.a.parse_chat(fork.read_text().splitlines())
+        self.assertEqual([e["text"] for e in entries if e["role"] == "assistant"][-2:],
+                         ["The file missing.md does not exist.", "go on."])
+        self.assertEqual(turn, "idle")
+
+    def test_the_chain_follows_a_child_that_continues_its_parent(self):
+        # A new session with a parentSession (an extension's newSession) starts empty: the parent comes first.
+        first = self.root / "first.jsonl"
+        shutil.copy(FIX / "session.jsonl", first)
+        child = self.root / "child.jsonl"
+        child.write_text("\n".join(json.dumps(r) for r in (
+            {"type": "session", "version": 3, "id": "c1", "timestamp": "2026-11-11T09:00:00.000Z", "cwd": "/work/demo",
+             "parentSession": str(first)},
+            {"type": "message", "id": "c0000001", "parentId": None, "timestamp": "2026-11-11T09:00:01.000Z",
+             "message": {"role": "user", "content": "go on"}})) + "\n")
+        self.assertEqual(pi.chat_chain(child), [first, child])
+        gone = self.root / "gone.jsonl"
+        gone.write_text(child.read_text().replace(str(first), str(self.root / "missing.jsonl")))
+        self.assertEqual(pi.chat_chain(gone), [gone])  # a parent that is gone is left out
 
 
 class Commands(Env):
