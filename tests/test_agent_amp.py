@@ -120,6 +120,9 @@ class Launch(Env):
         self.assertEqual(got, {"settings": {"no_ide": "on", "fast": "on"}, "prompt": "run maxpm go"})
         got = self.a.parse_command(shlex.split("printf '%s\\n' 'go' | amp --visibility workspace"))
         self.assertEqual(got, {"settings": {"visibility": "workspace", "no_ide": "off"}, "prompt": "go"})
+        # The first real choice reads back too (#5240: the choices no longer start with '').
+        got = self.a.parse_command(shlex.split("printf '%s\\n' 'go' | amp --visibility private"))
+        self.assertEqual(got, {"settings": {"visibility": "private", "no_ide": "off"}, "prompt": "go"})
         for bad in ("amp", 'echo go | amp -x "do it"', "echo go | amp threads continue T-12345678",
                     "echo go | amp --dangerously-allow-all", "echo go | claude", 'echo a b | amp'):
             self.assertIsNone(self.a.parse_command(shlex.split(bad)), bad)
