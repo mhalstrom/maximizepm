@@ -328,7 +328,10 @@ class State(Env):
     @unittest.skipUnless(shutil.which("node"), "no node")
     def test_the_plugin_reports_the_recorded_run_as_the_real_one_did(self):
         """Run the plugin in node with a stand-in for OpenCode's TUI API, fire the events that a probe plugin recorded
-        in a real run at it, and compare its maxpm commands with those of the real run (reports.txt)."""
+        in a real run at it, and compare its maxpm commands with those of the real run (reports.txt). The plugin starts
+        each command as a detached process and never waits for it, so the order in which they finish varies with
+        the load (#5228): the harness records each spawn in the order the plugin makes it, and the file the stand-in
+        maxpm writes shows only that every one of them ran."""
         out = self.root / "calls.txt"
         report = ["/bin/sh", "-c", f'printf "%s\\n" "$*" >> {out}', "sh", "--as", "oc1", "report"]
         self.a.install_hooks("/work/demo", report)
@@ -336,6 +339,11 @@ class State(Env):
         harness = self.root / "harness.mjs"
         harness.write_text("""
             import fs from "node:fs";
+            import cp from "node:child_process";
+            import { syncBuiltinESMExports } from "node:module";
+            const issued = [], spawn = cp.spawn;
+            cp.spawn = (cmd, args, opts) => { issued.push([cmd, ...args]); return spawn(cmd, args, opts); };
+            syncBuiltinESMExports();  // the plugin's own import { spawn } sees the wrapper
             const plugin = (await import(process.argv[2])).default;
             const events = fs.readFileSync(process.argv[3], "utf8").trim().split("\\n").map((l) => JSON.parse(l));
             let route = { type: "home" }, status, listener;
@@ -352,26 +360,30 @@ class State(Env):
               await new Promise((r) => setTimeout(r, 5));
             }
             dispose?.();
-            await new Promise((r) => setTimeout(r, 300));
+            console.log(JSON.stringify(issued));
         """)
         env = {**os.environ, "MAXPM_AGENT": "oc1"}
         run = subprocess.run(["node", str(harness), plugin.as_uri(), str(FIX / "events.jsonl")], capture_output=True,
                              text=True, env=env, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)
-        for _ in range(50):  # the reports run in processes of their own
-            if out.exists() and "release" in out.read_text():
-                break
-            time.sleep(0.1)
-        calls = [ln.split() for ln in out.read_text().splitlines()]
+        # The words after the stand-in's "sh", split as the stand-in prints them ("$*").
+        calls = [" ".join(argv[4:]).split() for argv in json.loads(run.stdout)]
         real = [ln.split() for ln in (FIX / "reports.txt").read_text().splitlines()]
 
         def states(cs):
             return [c[c.index("--state") + 1] if "--state" in c else c[2] for c in cs]
 
-        reports = sorted((c for c in calls if "--seq" in c), key=lambda c: int(c[c.index("--seq") + 1]))
-        self.assertEqual(states(reports) + ["release"], states(real))
+        self.assertEqual(states(calls), states(real))
         self.assertEqual(states(real), ["idle", "working", "blocked", "working", "idle", "release"])
         self.assertEqual(calls[-1], ["--as", "oc1", "release"])
+        reports = [c for c in calls if "--seq" in c]
+        seqs = [int(c[c.index("--seq") + 1]) for c in reports]
+        self.assertEqual(seqs, sorted(set(seqs)))  # each report's seq is above the last: a late one changes nothing
+        for _ in range(100):  # each command runs in a process of its own, in no fixed order
+            if out.exists() and len(out.read_text().splitlines()) >= len(calls):
+                break
+            time.sleep(0.1)
+        self.assertEqual(sorted(ln.split() for ln in out.read_text().splitlines()), sorted(calls))
         blocked = next(c for c in reports if "blocked" in c)
         msg = blocked[blocked.index("--message") + 1: blocked.index("--session-id")]
         self.assertEqual(msg, ["permission:", "read", ".env"])  # 2.2.7 names the file in 'resources'
@@ -382,6 +394,7 @@ class State(Env):
         out2 = subprocess.run(["node", str(harness), plugin.as_uri(), str(FIX / "events.jsonl")], capture_output=True,
                               text=True, timeout=60, env={k: v for k, v in env.items() if k != "MAXPM_AGENT"})
         self.assertEqual(out2.returncode, 0, out2.stderr)
+        self.assertEqual(json.loads(out2.stdout), [])
         time.sleep(0.3)
         self.assertEqual(len(out.read_text().splitlines()), len(calls))  # not started by MaximizePM: no report
 
