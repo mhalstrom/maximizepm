@@ -380,6 +380,8 @@ def _print_show(a):
               f"joins the next deploy item")
     if (a.get("release") or {}).get("text") or (a.get("release") or {}).get("in_cut"):  # maxpm ship
         print(f"  {_ship_line(a['release'])}")
+    if a.get("ship_warning"):  # maxpm ship of an item that is not done (#5386)
+        print(f"  WARNING: {a['ship_warning']}")
     if a["notes"]:
         print("  notes:", a["notes"])
     for line in _context_lines(a):

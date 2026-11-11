@@ -8015,6 +8015,7 @@ def ship(conn, item_id, actor=None):
             "JOIN deps rf ON rf.item_id=r.id WHERE d.kind='deploy' AND d.target=? AND d.status='open' AND d.cut_at "
             f"IS NOT NULL AND r.kind='review' AND r.status IN {OPEN_STATES} AND rf.blocked_by=? ORDER BY d.id LIMIT 1",
             (tg["name"], it["id"])).fetchone()
+        fix_of_cut = dep is not None  # the review of the cut release waits on it anyway: no warning below
         if dep is None:
             dep = conn.execute("SELECT * FROM items WHERE kind='deploy' AND target=? AND status='open' AND cut_at IS NULL "
                                "ORDER BY id LIMIT 1", (tg["name"],)).fetchone()
@@ -8055,7 +8056,18 @@ def ship(conn, item_id, actor=None):
                               f"{tg['name']}", dep["id"])
         _cadence_sync(conn)  # a new release waits (a cut release, the cadence) from its first ship request
     # release: when this release can start, for the worker that asked; in_cut: the item joined a cut release.
-    return dict(item_show(conn, dep["id"]), release=dict(release_plan(conn, tg["name"]), in_cut=bool(dep["cut_at"])))
+    res = dict(item_show(conn, dep["id"]), release=dict(release_plan(conn, tg["name"]), in_cut=bool(dep["cut_at"])))
+    if it["status"] in OPEN_STATES and not fix_of_cut:
+        # An item that stays open after this release (a walk item, part 1 of a split build) holds the deploy and
+        # its review until it is done (#5386; 2026-10-15 #2123 and 2026-11-03 #4201 held releases so).
+        waits = f"deploy #{dep['id']}" + (f" and review #{rv['id']}" if rv is not None else "")
+        undo = f"maxpm undep {dep['id']} --on {it['id']}" + (f"; maxpm undep {rv['id']} --on {it['id']}"
+                                                             if rv is not None else "")
+        res["ship_warning"] = (f"#{it['id']} is {it['status'].replace('_', ' ')}: {waits} now wait on it until it is "
+                               f"done. Ship when the item is done (maxpm done {it['id']} --ship). It stays open after "
+                               f"this release (a part of it went out): undo with {undo}, and tell the target owner "
+                               f"what goes out")
+    return res
 
 
 def _release_review(conn, dep, tg, actor, force=False):

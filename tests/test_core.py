@@ -1438,6 +1438,29 @@ class Ship(Base):
         with self.assertRaises(RiverError):
             core.ship(self.c, d["id"], "dev")
 
+    def test_a_ship_of_an_open_item_warns_that_the_release_waits_on_it(self):
+        # #5386: a walk item, or part 1 of a split build, stays open after its release; ship held the release.
+        core.config_set(self.c, "review", "on")
+        walk = self.add("site", "walk the onboarding")
+        core.claim(self.c, walk, "dev")
+        d = core.ship(self.c, walk, "dev")
+        rv = [i for i in d["waits_on"] if i != walk][0]
+        w = d["ship_warning"]
+        self.assertIn(f"#{walk} is in progress: deploy #{d['id']} and review #{rv} now wait on it", w)
+        self.assertIn(f"maxpm done {walk} --ship", w)
+        self.assertIn(f"maxpm undep {d['id']} --on {walk}; maxpm undep {rv} --on {walk}", w)
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+            cli.run(["--as", "dev", "ship", str(walk)])
+        self.assertIn(f"  WARNING: #{walk} is in progress:", out.getvalue())
+        # Done, then ship: no warning.
+        x = self.add("site", "a page")
+        core.claim(self.c, x, "ops")
+        res = core.done(self.c, x, "abc", "ops", ship_it=True)
+        self.assertNotIn("ship_warning", core.ship(self.c, x, "ops"))
+        self.assertEqual(res["shipped_in"], d["id"])
+
 
 class Plan(Base):
     def test_plan_says_the_planner_role_is_gone(self):
