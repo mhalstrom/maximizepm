@@ -54,23 +54,26 @@ class Describe(Env):
         self.assertIs(agents.from_env({"PI_CODING_AGENT": "true", "CLAUDECODE": "1"}), self.a)
         self.assertIsNone(agents.from_env({"PI_CODING_AGENT": ""}))
 
-    def test_effort_maps_max_to_pis_top_level(self):
-        self.assertEqual(self.a.effort_name("max"), "xhigh")
-        self.assertEqual(self.a.effort_name("low"), "low")
-        self.assertTrue(set(pi.EFFORT["map"].values()) <= set(pi.EFFORT["levels"]))
+    def test_each_maxpm_effort_is_a_pi_level_of_the_same_name(self):
+        """Pi 1.x has max (0.73.1 stopped at xhigh) and /thinking <level> in a running session (#5204)."""
+        self.assertEqual([self.a.effort_name(x) for x in agents.MAXPM_EFFORTS], list(agents.MAXPM_EFFORTS))
+        self.assertTrue(set(agents.MAXPM_EFFORTS) <= set(pi.EFFORT["levels"]))
+        self.assertEqual(pi.EFFORT["live"].format(value="max"), "/thinking max")
 
     def test_the_built_in_commands_have_names_and_no_slash(self):
         names = [c["name"] for c in self.a.read_commands(None)]
         self.assertIn("compact", names)
         self.assertIn("resume", names)
         self.assertFalse(any(n.startswith("/") for n in names))
+        self.assertTrue({"thinking", "trust", "bug", "mcp"} <= set(names))  # Pi 1.5.2 (#5204)
+        self.assertEqual(len(names), len(set(names)))
 
 
 class Launch(Env):
     def test_build_command_puts_each_part_on_its_flag(self):
         argv = self.a.build_command("w1", "/work/demo", "anthropic/claude-opus-5-5", "max",
                                     {"tools": "read,bash", "offline": "on", "args": "--no-skills --verbose"}, "go")
-        self.assertEqual(argv, ["pi", "--model", "anthropic/claude-opus-5-5", "--thinking", "xhigh", "--tools",
+        self.assertEqual(argv, ["pi", "--model", "anthropic/claude-opus-5-5", "--thinking", "max", "--tools",
                                 "read,bash", "--offline", "--no-skills --verbose", "go"])
         self.assertIsInstance(argv[-2], agents.Raw)  # the person's own shell text goes in as it is
         self.assertEqual(self.a.build_command("w1", None, None, None, {}, None), ["pi"])
@@ -141,6 +144,10 @@ class Chat(Env):
                          (self.a.parse_chat(head)[0] + [{"at": "2026-11-11T08:01:00.000Z", "role": "event",
                                                          "text": "interrupted"}], "idle"))
         self.assertEqual(self.a.parse_chat([]), ([], None))
+        # Pi 1.x writes a system message when the tools change: it says nothing of the turn (#5204).
+        system = json.dumps({"type": "message", "id": "z2", "parentId": "z1", "timestamp": "2026-11-11T08:01:01.000Z",
+                             "message": {"role": "system", "content": "", "toolsRemoved": [{"name": "write"}]}})
+        self.assertEqual(self.a.parse_chat(head + [row({"role": "user", "content": "more"}), system])[1], "working")
 
     def test_title_cwd_usage_and_effort(self):
         ls = lines()
@@ -148,6 +155,10 @@ class Chat(Env):
         self.assertEqual(pi.chat_cwd(ls), "/work/demo")
         # Four model calls, one on the branch that /tree left: each one was billed.
         self.assertEqual(pi.chat_usage(ls), {"input": 4800, "output": 320, "cache_read": 36000, "cache_write": 1600})
+        # Pi 1.x: a usage entry is a call with no message (a cache warm), billed too (#5204).
+        warm = json.dumps({"type": "usage", "id": "u1", "parentId": "a0000014", "timestamp": "2026-11-11T08:02:00.000Z",
+                           "kind": "cache_warm", "usage": {"input": 0, "output": 0, "cacheRead": 50000, "cacheWrite": 0}})
+        self.assertEqual(pi.chat_usage(ls + [warm])["cache_read"], 86000)
         import re
         got = [m.group(1) for m in (re.search(pi.EFFORT["read"], ln) for ln in ls) if m]
         self.assertEqual(got, ["high", "medium"])

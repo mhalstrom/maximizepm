@@ -1,14 +1,18 @@
-"""The Pi adapter (docs/agent-adapters.md, #5170): pi, the coding agent of the npm package @mariozechner/pi-coding-agent.
+"""The Pi adapter (docs/agent-adapters.md, #5170): pi, the coding agent of the npm package @earendil-works/pi-coding-agent
+(before: @mariozechner/pi-coding-agent).
 
-What this module rests on, read from Pi 0.73.1 (its docs/ and dist/ in the npm package):
+What this module rests on, read from Pi 0.73.1 (#5170) and checked against Pi 1.5.2, as installed (#5204: pi --help,
+dist/core/slash-commands.js, docs/):
 
 - Pi takes a free "provider/model" text (--model, with an optional ":<thinking>" suffix), so its family is "multi":
   no --min-model or --max-model limit applies to it.
-- Thinking levels: off, minimal, low, medium, high, xhigh (--thinking). No slash command changes the level; the
-  /settings menu and a key cycle it, so EFFORT has no live text.
+- Thinking levels: off, minimal, low, medium, high, xhigh, max (--thinking; max is new in 1.x). /thinking <level>
+  changes it in a running session (1.x; 0.73.1 had no command for it).
 - Pi has no permission popups, no plan mode and no background bash (its README, "Design Principles"). Its own screens
   never wait for a person, so the state is working or idle. Only another extension's dialog can wait, and no
-  extension sees that of another one: Pi reports no blocked state.
+  extension sees that of another one: Pi reports no blocked state. Pi 1.x asks one question at start, the project
+  trust question, but only in a folder with Pi resources of its own (.pi/settings.json, extensions, skills: its
+  docs/security.md), before an extension loads; --approve trusts the folder for one run, /trust saves the answer.
 - State and the session id come from one TypeScript extension (install_hooks): it calls maxpm report on
   session_start (idle, with the session id and the resume command), agent_start (working) and agent_end (idle), and
   maxpm release on session_shutdown with reason "quit". It runs only in a session that MaximizePM started (it needs
@@ -61,13 +65,13 @@ SETTINGS = [
      "read": None},
 ]
 
-LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"]
+LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 EFFORT = {
     "levels": LEVELS,
-    "map": {"max": "xhigh"},  # Pi's top level is xhigh
+    "map": {},  # each MaximizePM level has the same name in Pi
     "flag": ["--thinking", "{value}"],
-    "live": None,
+    "live": "/thinking {value}",
     # A thinking_level_change entry of the session file.
     "read": r'"type":"thinking_level_change".*"thinkingLevel":"([a-z]+)"',
 }
@@ -96,28 +100,34 @@ STATE = {"state": "hook", "session_id": "hook"}
 
 INPUT = {"native": None}
 
-# Pi's built-in slash commands (dist/core/slash-commands.js of 0.73.1), with the argument hints of docs/usage.md.
+# Pi's built-in slash commands (BUILTIN_SLASH_COMMANDS of dist/core/slash-commands.js, Pi 1.5.2), in its order, with
+# the argument hints of docs/slash-commands.md; /mcp from the same page (built-in MCP support is on unless --no-mcp).
 COMMANDS = [
     {"name": "settings", "description": "Open settings menu", "hint": ""},
-    {"name": "model", "description": "Select model (opens selector UI)", "hint": "[search]"},
+    {"name": "model", "description": "Select model (opens selector UI)", "hint": "[provider/model]"},
+    {"name": "tree", "description": "Navigate session tree (switch branches)", "hint": ""},
+    {"name": "thinking", "description": "Set thinking level", "hint": "[level]"},
     {"name": "scoped-models", "description": "Enable/disable models for Ctrl+P cycling", "hint": ""},
-    {"name": "export", "description": "Export session (HTML default, or specify path: .html/.jsonl)", "hint": "[file]"},
-    {"name": "import", "description": "Import and resume a session from a JSONL file", "hint": "<file>"},
-    {"name": "share", "description": "Share session as a secret GitHub gist", "hint": ""},
+    {"name": "export", "description": "Export session (HTML default, or specify path: .html/.jsonl)", "hint": "[path]"},
+    {"name": "import", "description": "Import a JSONL session, preserving its ID and working directory", "hint": "<path>"},
+    {"name": "share", "description": "Share session via a Radius artifact or a GitHub gist", "hint": ""},
+    {"name": "bug", "description": "Report a bug to the Pi developers", "hint": "[description]"},
     {"name": "copy", "description": "Copy last agent message to clipboard", "hint": ""},
-    {"name": "name", "description": "Set session display name", "hint": "<name>"},
+    {"name": "name", "description": "Set session display name", "hint": "[name]"},
     {"name": "session", "description": "Show session info and stats", "hint": ""},
     {"name": "changelog", "description": "Show changelog entries", "hint": ""},
     {"name": "hotkeys", "description": "Show all keyboard shortcuts", "hint": ""},
     {"name": "fork", "description": "Create a new fork from a previous user message", "hint": ""},
     {"name": "clone", "description": "Duplicate the current session at the current position", "hint": ""},
-    {"name": "tree", "description": "Navigate session tree (switch branches)", "hint": ""},
-    {"name": "login", "description": "Configure provider authentication", "hint": ""},
+    {"name": "trust", "description": "Save project trust decision for future sessions", "hint": ""},
+    {"name": "login", "description": "Configure provider authentication", "hint": "[provider]"},
     {"name": "logout", "description": "Remove provider authentication", "hint": ""},
     {"name": "new", "description": "Start a new session", "hint": ""},
-    {"name": "compact", "description": "Manually compact the session context", "hint": "[prompt]"},
-    {"name": "resume", "description": "Resume a different session", "hint": ""},
-    {"name": "reload", "description": "Reload keybindings, extensions, skills, prompts, and themes", "hint": ""},
+    {"name": "compact", "description": "Manually compact the session context", "hint": "[instructions]"},
+    {"name": "resume", "description": "Resume another session", "hint": ""},
+    {"name": "reload", "description": "Reload keybindings, extensions, skills, prompts, themes, and context files",
+     "hint": ""},
+    {"name": "mcp", "description": "Manage MCP servers", "hint": ""},
     {"name": "quit", "description": "Quit pi", "hint": ""},
 ]
 
@@ -432,8 +442,10 @@ def _entries(row):
 
 
 def _turn(path):
-    """working or idle from the last message on the branch, or None when it has none."""
-    last = next((r["message"] for r in reversed(path) if r.get("type") == "message" and r.get("message")), None)
+    """working or idle from the last message on the branch, or None when it has none. A system message (Pi 1.x writes
+    one when the tools or skills change) says nothing of the turn."""
+    last = next((r["message"] for r in reversed(path) if r.get("type") == "message" and r.get("message")
+                 and r["message"].get("role") != "system"), None)
     if last is None:
         return None
     role = last.get("role")
@@ -482,11 +494,14 @@ def chat_cwd(lines):
 
 
 def chat_usage(lines):
-    """The tokens of every model call in the file, on every branch: Pi bills each call once."""
+    """The tokens of every model call in the file, on every branch: Pi bills each call once. Also the usage entries of
+    Pi 1.x (a call with no message, such as a cache warm)."""
     tot = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     for r in _rows(lines):
         m = r.get("message") if r.get("type") == "message" else None
         u = (m or {}).get("usage") if (m or {}).get("role") == "assistant" else None
+        if r.get("type") == "usage":
+            u = r.get("usage")
         if isinstance(u, dict):
             for k, src in (("input", "input"), ("output", "output"), ("cache_read", "cacheRead"),
                            ("cache_write", "cacheWrite")):
