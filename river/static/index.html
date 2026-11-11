@@ -47,11 +47,13 @@
        Settings (with People) opens from here, not from a tab of the bar (#5116); its address stays /settings. -->
   <div class="hdr-menu" id="hdrMenu">
   <button class="btn" type="button" id="settingsBtn" data-tab="settings" title="Every setting, its default and its overrides; the people of the queue">Settings</button>
+  <label class="sub" id="themeLbl">Theme
   <select id="theme" title="Theme: System follows your computer's light or dark setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+  </label>
   <button class="btn hidden" id="relayBtn">Connect relay</button>
   <button class="btn primary hidden" id="loopLate"></button>
   <button class="btn" id="updateBtn" title="Pull the latest MaximizePM from git and restart this page's server">Update</button>
-  <label class="sub" title="Who you are on this page. What you do here (claim, done, messages) is recorded under this name, and Needs you shows your items. Agents name themselves on the command line.">You are
+  <label class="sub" id="actorLbl" title="Who you are on this page. What you do here (claim, done, messages) is recorded under this name, and Needs you shows your items. Agents name themselves on the command line.">You are
     <select id="actor"></select>
   </label>
   <span class="sub" id="stamp"></span>

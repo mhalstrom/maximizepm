@@ -10,16 +10,19 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
    by itself. A tap outside it (the scrim: clear on a desktop, dark on a phone and a tablet) or Esc closes it. */
 #hdrMore { display: inline-flex; align-items: center; justify-content: center; font-size: 18px; line-height: 1; }
 header.more, header.no-actor { z-index: 6; }
-header:not(.more) .hdr-menu > #settingsBtn, header:not(.more) .hdr-menu > #theme, header:not(.more) .hdr-menu > #relayBtn, header:not(.more) .hdr-menu > #updateBtn,
-header:not(.more) .hdr-menu > #stamp, header:not(.more):not(.no-actor) .hdr-menu > label.sub { display: none; }
-header.more .hdr-menu > label.sub, header.no-actor .hdr-menu > label.sub { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
+header:not(.more) .hdr-menu > #settingsBtn, header:not(.more) .hdr-menu > #themeLbl, header:not(.more) .hdr-menu > #relayBtn, header:not(.more) .hdr-menu > #updateBtn,
+header:not(.more) .hdr-menu > #stamp, header:not(.more):not(.no-actor) .hdr-menu > #actorLbl { display: none; }
+header.more .hdr-menu > label.sub, header.no-actor .hdr-menu > #actorLbl { display: flex; align-items: center; gap: 6px; flex: 1 1 100%; }
 .hdr-menu > label.sub select { flex: 1; min-width: 0; }
 .hdr-menu { display: none; }
 header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction: column; align-items: stretch; gap: 8px;
   position: absolute; top: 100%; right: 6px; width: min(320px, calc(100vw - 12px)); box-sizing: border-box; padding: 10px 12px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 24px rgba(0,0,0,.25); }
 .hdr-menu > select, .hdr-menu > .btn { width: 100%; }
-.hdr-menu > #stamp { text-align: center; }
+/* One left edge in the card (#5319): the text buttons' labels, the Theme and You are labels and the time all start
+   where a text button's label starts (its padding and border: --btn-inset). */
+.hdr-menu > .btn:not(.primary) { text-align: left; }
+.hdr-menu > label.sub, .hdr-menu > #stamp { padding-left: calc(-1 * var(--btn-inset)); }
 #hdrScrim:not(.hidden) { display: block; position: fixed; inset: 0; z-index: 5; }
 
 @media (max-width: 1023px) {
