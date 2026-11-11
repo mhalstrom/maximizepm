@@ -1440,7 +1440,8 @@ def session_settings(conn, agent, root=None, croot=None):
             value, source = got["value"], "changed now"
         if value is None and spec.get("cmd"):
             m = _re.search(spec["cmd"], cmd)
-            value, source = (m.group(1), "command line") if m else (None, None)
+            # A toggle's regex matches its flag (or an alias such as --yolo): that is "on" (#5299).
+            value, source = (("on" if spec.get("flag") else m.group(1)), "command line") if m else (None, None)
         if value is None and spec.get("flag") and cmd:
             value, source = ("on" if spec["flag"] in cmd.split() else "off"), "command line"
         if value is None and spec.get("default"):

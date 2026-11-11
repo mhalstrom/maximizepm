@@ -45,22 +45,24 @@ DESCRIBE = {
     "model_ids": {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5",
                   "fable": "claude-fable-5-2", "sol": "gpt-5.6-sol", "terra": "gpt-5.6-terra", "luna": "gpt-5.6-luna"},
     "prefix": "cursor_",
+    # The command line names the model as --model <id>; /model opens a picker, so no text switches it (#5299).
+    "model_read": r"(?:^|\s)--model[= ](\S+)",
 }
 
 # The settings of a start. "args" and "prompt" go in by build_command; the others by their flag.
 SETTINGS = [
     {"key": "force", "label": "Run Everything", "kind": "toggle", "choices": [], "default": "off",
      "text": "run every command without asking, unless the permissions deny it (--force)",
-     "flag": ["--force"], "live": "/run-everything", "read": r"(--force|--yolo)\b"},
+     "flag": ["--force"], "live": "/run-everything", "read": r"(--force|--yolo)\b", "session": True},
     {"key": "auto_review", "label": "Auto-review", "kind": "toggle", "choices": [], "default": "off",
      "text": "a classifier of Cursor runs safe tool calls and asks for the rest (--auto-review)",
-     "flag": ["--auto-review"], "live": "/auto-review", "read": r"(--auto-review)\b"},
+     "flag": ["--auto-review"], "live": "/auto-review", "read": r"(--auto-review)\b", "session": True},
     {"key": "sandbox", "label": "Sandbox", "kind": "choice", "choices": ["enabled", "disabled"], "default": "",
      "text": "run its commands in Cursor's sandbox; empty: as cli-config.json says (--sandbox)",
-     "flag": ["--sandbox", "{value}"], "live": None, "read": r"--sandbox[ =](enabled|disabled)\b"},
+     "flag": ["--sandbox", "{value}"], "live": None, "read": r"--sandbox[ =](enabled|disabled)\b", "session": True},
     {"key": "mode", "label": "Mode", "kind": "choice", "choices": ["plan", "ask"], "default": "",
      "text": "plan: read-only, it proposes a plan; ask: questions and answers, read-only (--mode)",
-     "flag": ["--mode", "{value}"], "live": None, "read": r"--mode[ =](plan|ask)\b"},
+     "flag": ["--mode", "{value}"], "live": None, "read": r"--mode[ =](plan|ask)\b", "session": True},
     {"key": "trust", "label": "Trust the folder", "kind": "toggle", "choices": [], "default": "off",
      "text": "start in a folder that Cursor does not trust yet without its trust question (--trust)",
      "flag": ["--trust"], "live": None, "read": r"(--trust)\b"},

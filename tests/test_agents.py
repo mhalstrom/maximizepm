@@ -1023,6 +1023,18 @@ class SettingsAndEffort(Env):
         self.assertEqual(got["sandbox"]["value"], "workspace")
         self.assertEqual(agents.get("grok").describe["model_live"].format(value="grok-4.5"), "/model grok-4.5")
 
+    def test_the_settings_dialog_of_a_cursor_session_reads_its_command_line(self):
+        # #5299: Model and Effort showed 'not known' and none of Cursor's settings.
+        core.register(self.c, "c1")
+        self.c.execute("UPDATE agents SET agent_type='cursor', pid_cmd='cursor-agent --model claude-opus-5-5-high "
+                       "--force --sandbox enabled --mode plan go' WHERE name='c1'")
+        got = {s["key"]: s for s in sessions.session_settings(self.c, "c1")["settings"]}
+        self.assertEqual(list(got), ["model", "effort", "force", "auto_review", "sandbox", "mode"])
+        self.assertEqual(got["model"]["value"], "opus")
+        self.assertEqual(got["effort"]["value"], "high")
+        self.assertEqual((got["force"]["value"], got["sandbox"]["value"], got["mode"]["value"]),
+                         ("on", "enabled", "plan"))
+
     def test_check_names_a_setting_spec_that_cannot_work(self):
         bad = module(DESCRIBE={**GOOD, "id": "x"}, SETTINGS=[
             {"key": "a", "kind": "toggle", "default": "maybe"},
