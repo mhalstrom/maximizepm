@@ -371,6 +371,20 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .composer.has-text .cmp-send { display: inline-flex; }
 .composer.has-text .cmp-mic:not(.on) { display: none; }
 .cmp-plus:focus-visible, .cmp-mic:focus-visible, .cmp-send:focus-visible { outline: var(--hair-2) solid var(--accent); outline-offset: var(--hair); }
+/* The "/" list of a message box (components/slashList.js, #5186): the matching slash commands of the session's agent, over
+   the chat above the pill; the chosen row has the accent's background. */
+.slash-list { position: absolute; left: 0; right: 0; bottom: calc(100% + var(--sp-2)); z-index: 3; max-height: var(--h-pre);
+  overflow-y: auto; background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-l);
+  box-shadow: var(--shadow-pop); padding: var(--sp-1); }
+.slash-list.hidden { display: none; }
+.slash-row { display: flex; align-items: baseline; gap: var(--sp-4); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-s);
+  cursor: pointer; font-size: var(--fs-m); min-width: 0; }
+.slash-row.on { background: var(--accent); color: var(--accent-ink); }
+.slash-name { flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.slash-hint, .slash-desc { color: var(--muted); }
+.slash-row.on .slash-hint, .slash-row.on .slash-desc { color: inherit; opacity: .85; }
+.slash-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @keyframes micpulse { 50% { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) { .cmp-mic.on, .mic-float.on { animation: none; } }
 /* The microphone of every other box that takes text (components/dictate.js, #5107): a fixed overlay at the box's right

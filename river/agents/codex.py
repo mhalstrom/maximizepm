@@ -293,3 +293,59 @@ SETTINGS = [
      "text": "Codex runs without its shared background server (--no-daemon; MaximizePM adds it when the installed "
              "Codex has it)", "flag": ["--no-daemon"], "config": False, "session": True},
 ]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 10. Commands (#5186): the "/" list of the Sessions message box
+# ---------------------------------------------------------------------------------------------------------------
+
+# The built-in slash commands that a person types most, with the descriptions of Codex 0.159.1 (read from its
+# program).
+COMMANDS = [
+    {"name": "model", "description": "choose what model and reasoning effort to use", "hint": ""},
+    {"name": "approvals", "description": "choose what Codex is allowed to do", "hint": ""},
+    {"name": "review", "description": "review my current changes and find issues", "hint": ""},
+    {"name": "new", "description": "start a new chat during a conversation", "hint": ""},
+    {"name": "resume", "description": "resume a saved chat", "hint": ""},
+    {"name": "fork", "description": "fork the current chat", "hint": ""},
+    {"name": "rename", "description": "rename the current thread", "hint": "<name>"},
+    {"name": "init", "description": "create an AGENTS.md file with instructions for Codex", "hint": ""},
+    {"name": "compact", "description": "summarize conversation to prevent hitting the context limit", "hint": ""},
+    {"name": "recap", "description": "summarize the current conversation now", "hint": ""},
+    {"name": "plan", "description": "switch to Plan mode", "hint": ""},
+    {"name": "goal", "description": "set or view the goal for a long-running task", "hint": "[goal]"},
+    {"name": "side", "description": "start a side conversation in an ephemeral fork", "hint": "[question]"},
+    {"name": "copy", "description": "copy the last response or part of it", "hint": ""},
+    {"name": "export", "description": "export the conversation as markdown", "hint": ""},
+    {"name": "diff", "description": "show git diff (including untracked files)", "hint": ""},
+    {"name": "mention", "description": "mention a file", "hint": "<file>"},
+    {"name": "status", "description": "show current session configuration and token usage", "hint": ""},
+    {"name": "usage", "description": "view account usage or use a usage limit reset", "hint": ""},
+    {"name": "skills", "description": "use skills to improve how Codex performs specific tasks", "hint": ""},
+    {"name": "hooks", "description": "view and manage lifecycle hooks", "hint": ""},
+    {"name": "mcp", "description": "list configured MCP tools; use /mcp verbose for details", "hint": "[verbose]"},
+    {"name": "apps", "description": "manage apps", "hint": ""},
+    {"name": "plugins", "description": "browse plugins", "hint": ""},
+    {"name": "experimental", "description": "toggle experimental features", "hint": ""},
+    {"name": "statusline", "description": "configure which items appear in the status line", "hint": ""},
+    {"name": "theme", "description": "choose a syntax highlighting theme", "hint": ""},
+    {"name": "vim", "description": "toggle Vim mode for the composer", "hint": ""},
+    {"name": "voice", "description": "start or stop voice; use /voice settings to choose a voice", "hint": ""},
+    {"name": "cd", "description": "change the current working directory", "hint": "<path>"},
+    {"name": "pwd", "description": "show the current working directory", "hint": ""},
+    {"name": "ps", "description": "list background terminals", "hint": ""},
+    {"name": "clear", "description": "clear the terminal and start a new chat", "hint": ""},
+    {"name": "feedback", "description": "send logs to maintainers", "hint": ""},
+    {"name": "logout", "description": "log out of Codex", "hint": ""},
+    {"name": "quit", "description": "exit Codex", "hint": ""},
+]
+
+
+def read_commands(folder):
+    """The user's custom prompts (~/.codex/prompts/*.md, or $CODEX_HOME/prompts), which Codex runs as
+    /prompts:<name>. Codex reads no project folder for them, so folder does not change the list."""
+    import os
+    from pathlib import Path
+    from . import slash
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    return slash.md_commands(home / "prompts", "prompts:", recursive=False)

@@ -227,3 +227,23 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
   launch dialog (models, efforts, options), Settings > Setup, `maxpm config set <prefix><key>` and the config list
   take an agent that is not built in. An agent with no effort has no Effort field in the launch dialog; a "multi"
   agent offers its own model list (`read_models`).
+
+  settings have no config keys yet (#5169): its profile options are the entry's own, else the spec's default.
+
+## As built in #5186 (commands)
+
+- `COMMANDS` of `claude.py` and `codex.py`: the built-in slash commands that a person types most, with the
+  descriptions of Claude Code 2.1.322 and Codex 0.159.1 (read from their programs). `read_commands(folder)` adds the
+  custom ones. Claude Code: `.claude/commands` and the skills of `.claude/skills` in the folder and its parents up to
+  the repository root (the nearer one wins), then `~/.claude/commands` and `~/.claude/skills` (or
+  `$CLAUDE_CONFIG_DIR`), then the commands and skills of each installed plugin that `enabledPlugins` turns on, as
+  `<plugin>:<name>`. A skill with `user-invocable: false` is left out. Codex: `~/.codex/prompts/*.md` (or
+  `$CODEX_HOME`) as `prompts:<name>`. `river/agents/slash.py` reads the Markdown files and their front matter
+  (`description`, `argument-hint`); a user's adapter may use it too.
+- `GET /api/session-commands?agent=<name>`: `{agent, provider, folder, commands}`. The folder is the cwd of the
+  session's transcript; the agent is its agent type, else the kind of its transcript.
+- The page: `components/slashList.js`. The list opens while the caret is in the command's name (the text starts with
+  "/" and has no space before the caret), and matches the names that start with the typed text, then those that hold
+  it. Enter sends the text as typed; after Up or Down chose a row, Enter completes that row first and then sends.
+  A click on a row completes it.
+

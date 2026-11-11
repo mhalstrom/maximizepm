@@ -56,6 +56,8 @@ class Contract(Env):
                 self.assertTrue(a.supports(part), (mid, part))
             for part in ("state", "detect", "input") if mid in ("claude", "codex") else ():  # #5183
                 self.assertTrue(a.supports(part), (mid, part))
+            if mid in ("claude", "codex"):
+                self.assertTrue(a.supports("commands"), mid)  # #5186
         self.assertEqual(agents.ids()[:2], ["claude", "codex"])
 
     def test_a_module_with_no_launch_part_loads_but_cannot_start(self):

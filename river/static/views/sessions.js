@@ -21,6 +21,7 @@ import { endButton, endSession } from "../components/endSession.js";
 import { button, buttonEl } from "../components/button.js";
 import { composerHtml, composerState } from "../components/composer.js";
 import { makeMenu } from "../components/menu.js";
+import { makeSlashList } from "../components/slashList.js";
 import { markYou } from "./you.js";
 import { S } from "../page.js";
 import { renderGive } from "./sessions-work.js";
@@ -531,8 +532,16 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   text.addEventListener("input", () => { grow(); sendState(); saveDraft(); });
   text.addEventListener("blur", saveDraft);  // its cursor
   window.addEventListener("pagehide", saveDraft);
+  // The "/" list (#5186): the slash commands of the session's agent; while it is open it takes Up, Down, Tab and Esc.
+  const slash = makeSlashList(text, text.parentElement, {
+    key: () => agent,
+    load: () => agent ? fetch("api/session-commands?agent=" + encodeURIComponent(agent)).then(r => r.ok ? r.json() : null)
+      .then(j => (j && j.commands) || []) : Promise.resolve([]),
+    onChange: () => { grow(); sendState(); saveDraft(); },
+  });
   text.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!empty()) $("#sessBar").requestSubmit(); }
+    if (slash.keydown(e)) { e.preventDefault(); e.stopPropagation(); return; }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); slash.close(); if (!empty()) $("#sessBar").requestSubmit(); }
     else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && recall(e.key === "ArrowUp" ? 1 : -1, e)) e.preventDefault();
   });
   // The earlier prompts (#4855), as in a shell: Up brings back the prompts sent to this session from this box,

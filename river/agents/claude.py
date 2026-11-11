@@ -502,3 +502,142 @@ SETTINGS = [
      "text": "hooks that report the session's tool calls, permission prompts and turn ends to MaximizePM (--settings "
              "with the hook file; maxpm report --hook claude), so the manager hears of a session that stands still"},
 ]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 10. Commands (#5186): the "/" list of the Sessions message box
+# ---------------------------------------------------------------------------------------------------------------
+
+# The built-in slash commands that a person types most, with the descriptions of Claude Code 2.1.322 (read from its
+# program). Not every one: commands for one platform, for a paid plan's setup, or for its own tests stay out.
+COMMANDS = [
+    {"name": "add-dir", "description": "Add a new working directory", "hint": "<path>"},
+    {"name": "agents", "description": "Manage agent configurations", "hint": ""},
+    {"name": "branch", "description": "Create a branch of the current conversation at this point", "hint": ""},
+    {"name": "btw", "description": "Ask a quick side question without interrupting the main conversation",
+     "hint": "<question>"},
+    {"name": "clear", "description": "Start a new session with empty context; previous session stays on disk "
+                                     "(resumable with /resume)", "hint": ""},
+    {"name": "compact", "description": "Free up context by summarizing the conversation so far",
+     "hint": "[instructions]"},
+    {"name": "config", "description": "Open settings", "hint": ""},
+    {"name": "context", "description": "Visualize current context usage as a colored grid", "hint": ""},
+    {"name": "copy", "description": "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)",
+     "hint": "[N]"},
+    {"name": "cost", "description": "Show the total cost and duration of the current session", "hint": ""},
+    {"name": "doctor", "description": "Diagnose and verify your Claude Code installation and settings", "hint": ""},
+    {"name": "effort", "description": "Set effort level for model usage", "hint": "[low|medium|high|xhigh|max]"},
+    {"name": "exit", "description": "Exit the REPL", "hint": ""},
+    {"name": "export", "description": "Export the current conversation to a file or clipboard", "hint": "[filename]"},
+    {"name": "feedback", "description": "Send feedback to Anthropic or report a bug", "hint": ""},
+    {"name": "fork", "description": "Copy this conversation into a new background session and keep working here",
+     "hint": ""},
+    {"name": "goal", "description": "Set a goal Claude checks before stopping", "hint": "<goal>"},
+    {"name": "help", "description": "Show help and available commands", "hint": ""},
+    {"name": "hooks", "description": "View hook configurations for tool events", "hint": ""},
+    {"name": "ide", "description": "Manage IDE integrations and show status", "hint": ""},
+    {"name": "init", "description": "Initialize a new CLAUDE.md file with codebase documentation", "hint": ""},
+    {"name": "insights", "description": "Generate a report analyzing your Claude Code sessions", "hint": ""},
+    {"name": "keybindings", "description": "Open your keyboard shortcuts file", "hint": ""},
+    {"name": "login", "description": "Sign in with your Anthropic account", "hint": ""},
+    {"name": "logout", "description": "Sign out from your Anthropic account", "hint": ""},
+    {"name": "mcp", "description": "Manage MCP servers", "hint": ""},
+    {"name": "memory", "description": "Edit CLAUDE.md files and memory settings", "hint": ""},
+    {"name": "model", "description": "Set the AI model for Claude Code", "hint": "[model]"},
+    {"name": "output-style", "description": "Set the output style", "hint": "[style]"},
+    {"name": "permissions", "description": "Manage allow and deny tool permission rules", "hint": ""},
+    {"name": "plan", "description": "Enable plan mode or view the current session plan", "hint": ""},
+    {"name": "plugin", "description": "Manage Claude Code plugins", "hint": ""},
+    {"name": "privacy-settings", "description": "View and update your privacy settings", "hint": ""},
+    {"name": "recap", "description": "Generate a one-line session recap now", "hint": ""},
+    {"name": "release-notes", "description": "View release notes", "hint": ""},
+    {"name": "reload-plugins", "description": "Activate pending plugin changes in the current session", "hint": ""},
+    {"name": "reload-skills", "description": "Pick up skills added or changed on disk during this session",
+     "hint": ""},
+    {"name": "resume", "description": "Resume a conversation", "hint": "[session]"},
+    {"name": "review", "description": "Review a pull request", "hint": "[pr]"},
+    {"name": "rewind", "description": "Restore the code and/or conversation to a previous point", "hint": ""},
+    {"name": "sandbox", "description": "Configure the sandbox of Bash commands", "hint": ""},
+    {"name": "security-review", "description": "Complete a security review of the pending changes on the current "
+                                               "branch", "hint": ""},
+    {"name": "skills", "description": "List available skills", "hint": ""},
+    {"name": "status", "description": "Show Claude Code status including version, model, account, API "
+                                      "connectivity, and tool statuses", "hint": ""},
+    {"name": "statusline", "description": "Set up Claude Code's status line UI", "hint": ""},
+    {"name": "tasks", "description": "List and manage background tasks", "hint": ""},
+    {"name": "terminal-setup", "description": "Install the Shift+Enter key binding for newlines", "hint": ""},
+    {"name": "theme", "description": "Change the theme", "hint": ""},
+    {"name": "todos", "description": "List current todo items", "hint": ""},
+    {"name": "upgrade", "description": "Upgrade your plan for higher rate limits and more Opus", "hint": ""},
+    {"name": "usage", "description": "Show plan usage limits", "hint": ""},
+    {"name": "vim", "description": "Toggle between Vim and Normal editing modes", "hint": ""},
+    {"name": "voice", "description": "Toggle voice mode", "hint": "[hold|tap|off]"},
+]
+
+
+def _config_dir():
+    import os
+    from pathlib import Path
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def _enabled_plugins(dirs):
+    """{plugin key 'name@marketplace': on} from enabledPlugins of the user's settings, then each project's
+    .claude/settings.json and settings.local.json, the folder nearest the session last (it wins)."""
+    import json
+    files = [_config_dir() / "settings.json"]
+    for d in reversed(dirs):
+        files += [d / ".claude" / "settings.json", d / ".claude" / "settings.local.json"]
+    on = {}
+    for f in files:
+        try:
+            got = json.loads(f.read_text(encoding="utf-8")).get("enabledPlugins")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(got, dict):
+            on.update({k: bool(v) for k, v in got.items()})
+    return on
+
+
+def _plugin_commands(dirs):
+    """The commands and skills of each installed and enabled plugin, as '<plugin>:<name>' (installed_plugins.json
+    names each plugin's folder; a project's install counts only for a session in that project)."""
+    import json
+    from pathlib import Path
+    from . import slash
+    try:
+        installed = json.loads((_config_dir() / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    on, mine = _enabled_plugins(dirs), {str(d) for d in dirs}
+    out = []
+    for key, installs in sorted((installed.get("plugins") or {}).items()):
+        if not on.get(key) or not isinstance(installs, list):
+            continue
+        for inst in installs:
+            if not isinstance(inst, dict) or not inst.get("installPath"):
+                continue
+            if inst.get("scope") not in (None, "user") and str(inst.get("projectPath") or "") not in mine:
+                continue
+            base, prefix = Path(inst["installPath"]), key.split("@")[0] + ":"
+            out += slash.md_commands(base / "commands", prefix) + slash.skill_commands(base / "skills", prefix)
+            break
+    return out
+
+
+def read_commands(folder):
+    """The custom slash commands of a session that runs in folder: the commands of .claude/commands and the skills
+    of .claude/skills in folder and its parents up to the repository root, then the user's (~/.claude/commands,
+    ~/.claude/skills), then the enabled plugins' ('<plugin>:<name>'). A name that comes twice: the nearer one."""
+    from . import slash
+    dirs = slash.project_dirs(folder)
+    got = []
+    for d in dirs:
+        got += slash.md_commands(d / ".claude" / "commands")
+    got += slash.md_commands(_config_dir() / "commands")
+    for d in dirs:
+        got += slash.skill_commands(d / ".claude" / "skills")
+    got += slash.skill_commands(_config_dir() / "skills")
+    got += _plugin_commands(dirs)
+    built_in = {c["name"] for c in COMMANDS}
+    return slash.unique(e for e in got if e["name"] not in built_in)

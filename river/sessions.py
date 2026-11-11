@@ -1081,6 +1081,27 @@ def sent_prompts(conn, agent):
                                             (agent, PROMPTS_KEEP))]
 
 
+def session_commands(conn, agent, root=None, croot=None):
+    """The slash commands of a session for the "/" list of its message box (#5186): its agent's built-in commands,
+    then the custom ones for the folder it runs in (its transcript's last cwd). An agent with no commands part, or
+    a session whose agent MaximizePM does not know, gives an empty list."""
+    from . import agents
+    a = conn.execute("SELECT agent_type FROM agents WHERE name=?", (agent,)).fetchone()
+    if a is None:
+        return {"agent": agent, "provider": None, "folder": None, "commands": []}
+    kind, path = transcript(conn, agent, root, croot)
+    adapter = agents.find(a["agent_type"] or "") or agents.find(kind or "")
+    folder = None
+    if path:
+        try:
+            folder = last_cwd(path)
+        except (OSError, ValueError, EOFError):
+            folder = None
+    if adapter is None:
+        return {"agent": agent, "provider": None, "folder": folder, "commands": []}
+    return {"agent": agent, "provider": adapter.id, "folder": folder, "commands": adapter.read_commands(folder)}
+
+
 def _transcript_settings(kind, path):
     """The settings a session's chat log shows last (the adapter's chat_settings): Claude Code puts the model and
     effort on each reply and a line for each permission mode; Codex a turn_context at each turn."""
