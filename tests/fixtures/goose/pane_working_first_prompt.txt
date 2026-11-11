@@ -1,0 +1,6 @@
+
+    __( O)>  ● new session · ollama qwen2.5:3b
+   \____)    20261111_4 · /Users/me/work
+     L L     goose is ready
+  ⏳ waiting for extensions to finish loading...
+  ✓ extensions ready

@@ -1,0 +1,7 @@
+
+    __( O)>  ● new session · ollama qwen2.5:3b
+   \____)    20261111_1 · /Users/me/work
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> Enter to send · Ctrl+J newline

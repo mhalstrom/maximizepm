@@ -1,0 +1,21 @@
+{
+ "id": "20261111_1",
+ "name": "maxpm-test",
+ "working_dir": "/Users/me/work",
+ "created_at": "2026-11-11 07:45:52",
+ "updated_at": "2026-11-11 07:48:50",
+ "provider_name": "ollama",
+ "model_config_json": "{\"model_name\":\"qwen2.5:3b\",\"temperature\":null,\"max_tokens\":null,\"toolshim\":false,\"toolshim_model\":null}",
+ "goose_mode": "approve",
+ "input_tokens": 178,
+ "output_tokens": null,
+ "total_tokens": 178,
+ "cache_read_tokens": null,
+ "cache_write_tokens": null,
+ "accumulated_input_tokens": 11512,
+ "accumulated_output_tokens": 212,
+ "accumulated_total_tokens": 11724,
+ "accumulated_cache_read_tokens": 5395,
+ "accumulated_cache_write_tokens": 0,
+ "accumulated_cost": null
+}

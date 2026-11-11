@@ -1,0 +1,29 @@
+
+    __( O)>  ● new session · ollama qwen2.5:3b
+   \____)    20261111_1 · /Users/me/work
+     L L     goose is ready
+  ⏳ loading extensions in background...
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ 0% 0/128k
+> Use the shell tool to run the command: echo hello-goose
+  ✓ extensions ready
+
+
+  ────────────────────────────────────────
+  ▸ shell
+    command: echo hello-goose
+
+
+  Tool approval request
+    {
+      "tool_name": "shell",
+      "arguments": {
+        "command": "echo hello-goose"
+      }
+    }
+
+◆  Goose would like to call the above tool, do you allow?
+│  ● Allow (Allow the tool call once)
+│  ○ Always Allow
+│  ○ Deny
+│  ○ Cancel
+└
