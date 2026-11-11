@@ -367,10 +367,12 @@ class Go(Base):
                       "Then it is a step for the user (below), with the exact command and the reason of the refusal; "
                       "the user runs it or allows it. Stand at your prompt only for a release to production or a "
                       "deletion of data", first)
-        self.assertIn(f"The user should look at the finished result: push, maxpm --as {me} done {x}, then maxpm --as "
-                      f"{me} add \"Look at <result>\" --doer human --found-during {x}. Ask before the push only for "
-                      f"public text, a release to production, a step that deletes data or costs money, or when the "
-                      f"item says so.", first)
+        self.assertIn(f"The finished result needs a look: push, maxpm --as {me} done {x}, then check it yourself "
+                      f"(open it, take screenshots, compare with the item), or maxpm --as {me} add \"Check <result>: "
+                      f"<where>, with screenshots\" --found-during {x} (an agent does it). Add a person item (--doer "
+                      f"human) only for a taste or product decision that no rule and no earlier word of the person "
+                      f"settles; the manager sees it first. Ask before the push only for public text, a release to "
+                      f"production, a step that deletes data or costs money, or when the item says so.", first)
         with self.assertRaisesRegex(RiverError, "finish or release it before you wait"):
             core.wait(self.c, self.web, me, step="0s", sleep=lambda s: None)
         # The short form of a later briefing keeps one line for each.
@@ -381,8 +383,9 @@ class Go(Base):
                       f"then maxpm --as {me} inbox --wait", later)
         self.assertIn("a refused command: a step for the user, with the exact command and the reason of the refusal",
                       later)
-        self.assertIn(f"the user should look at the result: push, done, then maxpm --as {me} add \"Look at ...\" "
-                      f"--doer human --found-during {y}", later)
+        self.assertIn(f"the result needs a look: push, done, then check it yourself or maxpm --as {me} add \"Check "
+                      f"<result> ...\" --found-during {y}; a person item only for a taste or product decision", later)
+        self.assertNotIn("Look at <result>\" --doer human", first + later)
 
     def test_the_project_decides_the_look_at_a_finished_result(self):
         core.config_set(self.c, "auto_continue", "on")  # it takes unrelated work after done (not tree, #4994)
@@ -433,9 +436,10 @@ class Go(Base):
         b = core.go(self.c, self.api)
         other, first = b["agent"], text(b)
         self.assertEqual((b["item"]["id"], b["result_look"]), (z, "push_first"))
-        self.assertIn(f"The user should look at the finished result: push, maxpm --as {other} done {z}, then maxpm "
-                      f"--as {other} add \"Look at <result>\" --doer human --found-during {z}. Ask before the push only "
-                      f"for public text", first)
+        self.assertIn(f"The finished result needs a look: push, maxpm --as {other} done {z}, then check it yourself",
+                      first)
+        self.assertIn(f"maxpm --as {other} add \"Check <result>: <where>, with screenshots\" --found-during {z} (an "
+                      f"agent does it). Add a person item (--doer human) only for a taste or product decision", first)
         self.assertNotIn("asks first", first)
         self.assertEqual(core.project_show(self.c, "api")["result_look"], "push_first")
         self.assertIn("  look at a finished result: project api has result_look push_first (chosen for this project).\n",
@@ -459,8 +463,8 @@ class Go(Base):
                       "project yet).\n"
                       "  ask_first:  the worker shows the result, asks in the queue, and waits for the person's yes "
                       "before the push.\n"
-                      "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the "
-                      "result.\n"
+                      "  push_first: the worker pushes, closes the item, and checks the result (or adds an agent "
+                      "check); the person gets only a taste or product decision.\n"
                       "  recommended here: ask_first, because it has no deploy target, so a push can be live at once. "
                       "Also ask_first when a push to main is live at once (a site, a public repository).\n"
                       "  tell the person the recommendation and its reason; store their answer: "

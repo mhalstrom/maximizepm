@@ -111,7 +111,8 @@ DEFAULT_SETTINGS = {
     # session. on: any ready work. off: it stops and reports after each task. Its own queue comes first in each.
     "auto_continue": "tree",
     # The look of a person at a finished result (a page, a text, a design), for each project (#1668).
-    # push_first: the worker pushes, closes the item, and adds a person's item for the look. ask_first: the worker
+    # push_first: the worker pushes, closes the item, and checks the result itself or adds an agent check item; a
+    # person item only for a taste or product decision (global policy g1, #5347). ask_first: the worker
     # commits, asks in the queue (maxpm ask), and waits for the yes before the push. Under both, public text, a
     # release to production, a step that deletes data or costs money, and an item that says so are asked first.
     # No project gets push_first in silence (#1682): the setup recommends a value (look_setup) and the person

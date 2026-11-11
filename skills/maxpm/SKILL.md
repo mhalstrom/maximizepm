@@ -391,7 +391,7 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   sends the question on to the person (`maxpm forward`). The person gets it by
   itself after `question_hold` (10m). Your wait does not change.
   The same holds for an alert to a person and for a person item (`--doer
-  human`: a "Look at", an approval): while a manager is active it sees them
+  human`: a decision, an approval): while a manager is active it sees them
   first, does or closes them, or forwards them; the person gets what is left
   after `question_hold`. Keep adding the item or alert as before; do not
   message the person on the side. Items that a person added go to them at once.
@@ -402,15 +402,19 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   prompt that the person types in a session that `maxpm serve` started closes
   its questions by itself (its hooks). `maxpm go`, the line after each command,
   and the end of your turn remind you of your open questions.
-- The user should look at a finished result (a page, a text, a design): the
-  project's setting `result_look` decides, and the go briefing states the rule
-  of your item's project.
-  - `push_first`: push first, close the item, and add
-    `maxpm add "Look at <result>: <where>" --doer human --found-during <id>`.
-    What the user wants changed becomes new items. Do not hold the item for
-    the word "push". Ask before the push only for public text (a README, a
-    site), a release to production, a step that deletes data or costs money,
-    or when the item says "ask before the push".
+- A finished result needs a look (a page, a text, a design): the project's
+  setting `result_look` decides, and the go briefing states the rule of your
+  item's project.
+  - `push_first`: push first, close the item, and check the result yourself:
+    open it, take screenshots, and compare it with the item. When you cannot,
+    an agent does it: `maxpm add "Check <result>: <where>, with screenshots"
+    --found-during <id>`. Add a person item (`--doer human`) only for a taste
+    or product decision that no rule and no earlier word of the person
+    settles; the manager sees it first (global policy g1: bring the user
+    nothing that the manager can answer). Do not hold the item for the word
+    "push". Ask before the push only for public text (a README, a site), a
+    release to production, a step that deletes data or costs money, or when
+    the item says "ask before the push".
   - `ask_first`: commit, do not push, and ask in the queue:
     `maxpm ask <person> "Look at <result>: <where>. Push?" --item <id>`. Then
     wait at your prompt for the yes; `maxpm serve` keeps your lease while the

@@ -2919,7 +2919,8 @@ def look_setup_lines(name, look):
     return [f"look at a finished result: project {name} has result_look {value} "
             + ("(chosen for this project)." if look["chosen"] else "(nobody chose for this project yet)."),
             "  ask_first:  the worker shows the result, asks in the queue, and waits for the person's yes before the push.",
-            "  push_first: the worker pushes, closes the item, and adds an item for the person's look at the result.",
+            "  push_first: the worker pushes, closes the item, and checks the result (or adds an agent check); the "
+            "person gets only a taste or product decision.",
             f"  recommended here: {rec}, because {look['why']}. Also ask_first when a push to main is live at once "
             f"(a site, a public repository).",
             (f"  change it: maxpm config set result_look {other} --project {name}" if look["chosen"] else
@@ -2928,15 +2929,17 @@ def look_setup_lines(name, look):
 
 
 def _look_rule(b, it, r, short=False):
-    """The briefing lines for a look of the user at the finished result. The item's project decides (setting
-    result_look, #1668): push first and add an item for the look, or ask first and wait for the yes."""
+    """The briefing lines for a look at the finished result. The item's project decides (setting result_look, #1668):
+    push first and check the result (the worker, or an agent check item), or ask first and wait for the yes. Under
+    push first, a person item only for a taste or product decision (global policy g1: bring the user nothing the
+    manager can answer, #5347)."""
     ask = b.get("result_look") == "ask_first"
     if short:
         if ask:
             return [f"  the user should look at the result: this project asks first: commit, no push, {r} ask <person> "
                     f"\"Look at ...\" --item {it['id']}, wait for the yes, then push and done"]
-        return [f"  the user should look at the result: push, done, then {r} add \"Look at ...\" --doer human "
-                f"--found-during {it['id']}"]
+        return [f"  the result needs a look: push, done, then check it yourself or {r} add \"Check <result> ...\" "
+                f"--found-during {it['id']}; a person item only for a taste or product decision"]
     if ask:
         return [f"  - The user should look at the finished result: this project asks first (setting result_look). "
                 f"Commit, do not push, and",
@@ -2944,8 +2947,13 @@ def _look_rule(b, it, r, short=False):
                 f"prompt for the yes.",
                 f"    MaximizePM keeps your lease while the question is open. After the yes: push, then "
                 f"{r} done {it['id']}."]
-    return [f"  - The user should look at the finished result: push, {r} done {it['id']}, then "
-            f"{r} add \"Look at <result>\" --doer human --found-during {it['id']}.",
+    return [f"  - The finished result needs a look: push, {r} done {it['id']}, then check it yourself (open it, take "
+            f"screenshots, compare with the item), or",
+            f"    {r} add \"Check <result>: <where>, with screenshots\" --found-during {it['id']}   (an agent does "
+            f"it).",
+            f"    Add a person item (--doer human) only for a taste or product decision that no rule and no earlier "
+            f"word of the person settles;",
+            f"    the manager sees it first.",
             f"    Ask before the push only for public text, a release to production, a step that deletes data or "
             f"costs money, or when the item says so."]
 
