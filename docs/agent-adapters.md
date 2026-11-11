@@ -122,3 +122,20 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
   goes into `agent_sessions`, the resume command into `agents.resume_argv` (JSON).
 - `maxpm release` with no item sets `activity_event` to `report:gone`: the agent is gone at once, as when its process
   ends. Its next maxpm command makes it present again. `maxpm release <id>` gives an item back, as before.
+
+## As built in #5181
+
+- `claude.py` and `codex.py` have their effort, launch, identity and resume parts. `core.build_command`,
+  `_launch_agent_cmd`, `profile_from_command`, `resume_command` (and its effort read-back), `agent_type_from_env`,
+  `fork_base`, the `wait_background` of the go briefing, the effort check of a start, and the web link of an agent
+  with no session link call the adapter. `core.shell_command(argv)` quotes each word; an `agents.Raw` word (the args
+  setting) goes in as it is.
+- What MaximizePM adds to a start goes to `build_command` as the keys of `agents.LAUNCH_KEYS` (the skill in the
+  system prompt, the hooks file, a fork, a resume, the manager's autocompact, the words a person took out), each only
+  when `LAUNCH` names the capability. The adapter puts them on its command line in its own way.
+- `PLATFORM_EFFORTS` and `AGENT_FAMILIES` are read from the built-in adapters until #5185 removes them. The platform
+  names `claude-code` and `codex` stay the keys of `LAUNCH_PLATFORMS` and of the stored settings; each one is an id or
+  alias of an adapter.
+- Left for the next items: the transcript readers of `_ran_model` and the session id of `move_into_tmux` (#5182, by
+  the chat part), the Claude-only expert resume of `start_expert` (#5168), the settings of `LAUNCH_PLATFORMS` and
+  `sessions.PROVIDERS` (#5169).

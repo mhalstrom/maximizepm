@@ -93,19 +93,41 @@ EFFORT_KEYS = {"levels": (list, tuple, type(None)), "map": dict, "flag": (list, 
                "live": (str, type(None)), "read": (str, type(None))}
 
 # 4. Launch (required). build_command(name, folder, model, effort, settings, prompt) -> argv (a list of str):
-#    name: the session's MaximizePM name; folder: where it runs; model and effort: MaximizePM names (effort may be
-#    None); settings: {setting key: value} after the most specific scope wins; prompt: the first prompt.
-# LAUNCH = {capability: bool}, the parts of a start that the agent takes. parse_command(argv) -> a profile
-# {"model", "effort", "settings": {key: value}, "prompt"} read back from an old command, or None when argv does
-# not start this agent.
-LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extra_dirs", "fork")
+#    name: the session's MaximizePM name (None: no name); folder: where it runs (None when the caller does not say);
+#    model: the id the CLI takes (MaximizePM maps a model_ladder name through model_ids first), or None; effort: a
+#    MaximizePM level, or None; settings: {setting key: value} after the most specific scope wins, plus the
+#    MaximizePM keys of LAUNCH_KEYS when the caller wants them; prompt: the first prompt. MaximizePM quotes each word
+#    for the shell, but a Raw word, which goes in as it is (the args setting: a person's own shell text).
+# LAUNCH = {capability: bool}, the parts of a start that the agent takes (LAUNCH_CAPABILITIES). parse_command(argv)
+# -> a profile {"settings": {key: value}, "prompt": str} read back from an old hand-written command (a list of words;
+# "{model}" and "{effort}" stand for the values MaximizePM fills in), or None when a profile cannot build it exactly.
+LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extra_dirs", "fork", "resume",
+                       "autocompact", "background")
+#    session_name: it takes a session name; system_prompt_file: the maxpm skill goes into its system prompt;
+#    hooks_file: MaximizePM's hooks file goes on its command line; extra_dirs: the queue folder goes on its command
+#    line as a folder it may write; fork: a session starts as a fork of another one; resume: build_command resumes a
+#    session (resume_command uses it); autocompact: it compacts at a token count; background: it runs a command in
+#    the background and wakes the session when it ends (maxpm wait runs there, not in the foreground).
+# The MaximizePM keys in settings, each only when the caller wants it and LAUNCH has its capability:
+LAUNCH_KEYS = {
+    "system_prompt_file": "True: put the maxpm skill into the system prompt",
+    "hooks_file": "the path of MaximizePM's hooks file",
+    "fork": "the session id to start a fork of",
+    "resume": "the session id to resume (resume_command)",
+    "autocompact": "the token count to compact at",
+    "noflags": "the words a person took out of the args setting (they stay out of what the adapter adds itself)",
+}
+
+
+class Raw(str):
+    """A word of build_command that MaximizePM puts into the shell command as it is, with no quotes."""
 
 # 5. Session identity. IDENTITY = {
 #      "source":     how MaximizePM learns the session's id after the start: one of IDENTITY_SOURCES,
 #      "env":        the variable that holds it ("env" source), or None,
 #      "log_glob":   the glob of the new log file in a known folder ("log" source; ~ expands), or None,
 #      "pane":       a regex whose group 1 is the id in the pane's text ("pane" source), or None,
-#      "url":        its web link with {id} ("https://.../{id}"), or None,
+#      "url":        its web link with {id} ("https://.../{id}"), or one link for every session (Codex's web app), or None,
 #      "inside_env": the variables that tell that a command runs inside this agent (CLAUDECODE, CODEX_THREAD_ID);
 #                    this replaces core.agent_type_from_env,
 #    }
@@ -131,7 +153,6 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple)}
 #      "state":      the one source of the state: "hook" (install_hooks puts a hook or plugin in place that calls
 #                    maxpm report) or "detect" (maxpm's pane watcher applies DETECT and calls maxpm report),
 #      "session_id": the one source of the session id: "hook" (the report carries --session-id) or IDENTITY,
-#      "background": True when the agent waits in the foreground for its background commands,
 #    }
 # No chain of fallbacks: each signal has one declared source.
 # install_hooks(folder, report) -> [argv words to add to the start] | None: puts the hooks in place; `report` is the
@@ -145,7 +166,7 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple)}
 #      "image_paste":  how a pasted image shows in its prompt, with {n} ("[Image #{n}]"), or None,
 #    }
 STATE_SOURCES = ("hook", "detect")
-STATE_KEYS = {"state": str, "session_id": str, "background": bool}
+STATE_KEYS = {"state": str, "session_id": str}
 DETECT_KEYS = {"process": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None))}
 
@@ -154,7 +175,8 @@ DETECT_KEYS = {"process": str, "idle": str, "working": str, "blocked": (list, tu
 # codex queue --thread {address} {text}), or None}.
 INPUT_KEYS = {"native": (list, tuple, type(None))}
 
-# 9. Resume. resume_command(session_ref, model, effort, settings) -> argv, or None when it cannot resume that session.
+# 9. Resume. resume_command(session_ref, model, effort, settings, name=None) -> argv, or None when it cannot resume that
+# session. The arguments are those of build_command; settings["prompt"] is the first prompt after the resume.
 
 # 10. Commands. COMMANDS = [{"name": "compact" (no "/"), "description": str, "hint": the argument hint or ""}, ...]:
 # the built-in slash commands. read_commands(folder) -> the same shape: its custom commands for a session that runs in
@@ -373,9 +395,9 @@ class Adapter:
         f = self._fn("parse_command")
         return f(list(argv)) if f else None
 
-    def resume_command(self, session_ref, model=None, effort=None, settings=None):
+    def resume_command(self, session_ref, model=None, effort=None, settings=None, name=None):
         f = self._fn("resume_command")
-        got = f(session_ref, model, effort, dict(settings or {})) if f else None
+        got = f(session_ref, model, effort, dict(settings or {}), name=name) if f else None
         return list(got) if got else None
 
     def chat_path(self, session_ref, folder=None):
@@ -510,15 +532,16 @@ def get(name):
 
 def from_env(env=None):
     """The adapter of the agent that a command runs inside (IDENTITY['inside_env']), or None. MAXPM_AGENT_TYPE names
-    it by hand. Non-built-in adapters first, then codex before claude: a Codex started from a Claude Code shell keeps
+    it by hand (a name that no agent has counts as none). Non-built-in adapters first, then codex before claude: a Codex started from a Claude Code shell keeps
     CLAUDECODE (core.agent_type_from_env reads it the same way until #5181)."""
     env = os.environ if env is None else env
-    if env.get("MAXPM_AGENT_TYPE"):
-        return find(env["MAXPM_AGENT_TYPE"])
+    named = find(env.get("MAXPM_AGENT_TYPE"))
+    if named:
+        return named
     got = load()
     order = sorted(m for m in got if m not in BUILTIN) + [m for m in ("codex", "claude") if m in got]
     return next((got[m] for m in order if got[m].inside(env)), None)
 
 
-__all__ = ["Adapter", "BUILTIN", "PARTS", "STATES", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
+__all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir"]

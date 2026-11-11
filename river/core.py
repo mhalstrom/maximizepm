@@ -1505,11 +1505,24 @@ def parse_ladder(value):
     return fams
 
 
+def _adapters():
+    """The agent adapters (river/agents, docs/agent-adapters.md): imported when first used, since they import core."""
+    from . import agents
+    return agents
+
+
+def _platform_of(adapter):
+    """The launch platform name of an adapter (claude-code, codex): the key of LAUNCH_PLATFORMS among its id and
+    aliases, while the profile options live there (#5185); else its id."""
+    return next((n for n in adapter.names() if n in LAUNCH_PLATFORMS), adapter.id) if adapter else None
+
+
 def _agent_platform(value):
-    """A launch platform from an agent type: 'codex', 'claude-code' (or 'claude'); None when it is none of them."""
-    v = (value or "").strip().lower().replace(" ", "-")
-    v = {"claude": "claude-code"}.get(v, v)
-    return v if v in LAUNCH_PLATFORMS else None
+    """A launch platform from an agent type: the id or an alias of a registered adapter that has a profile
+    ('codex', 'claude-code' or 'claude'); None when it is none of them."""
+    a = _adapters().find((value or "").strip().replace(" ", "-"))
+    p = _platform_of(a)
+    return p if p in LAUNCH_PLATFORMS else None
 
 
 def _check_agent_type(conn, value):
@@ -1526,10 +1539,16 @@ def _check_agent_type(conn, value):
     return p
 
 
-def _exe_platform(cmd):
-    """The platform a custom launch_agents command runs, by its program: claude or codex."""
+def _exe_adapter(cmd):
+    """The adapter whose program a command starts (its first word's file name is the adapter's exe), or None."""
     exe = Path(cmd.split()[0]).name.lower() if cmd.split() else ""
-    return {"claude": "claude-code", "codex": "codex"}.get(exe)
+    return next((a for a in _adapters().load().values() if exe and Path(a.describe["exe"]).name.lower() == exe), None)
+
+
+def _exe_platform(cmd):
+    """The platform a custom launch_agents command runs, by its program (claude-code for claude, codex for codex)."""
+    p = _platform_of(_exe_adapter(cmd))
+    return p if p in LAUNCH_PLATFORMS else None
 
 
 def parse_agent_rules(value):
@@ -1814,16 +1833,13 @@ def agent_model(conn, name):
 
 def agent_type_from_env(env):
     """The agent CLI a command runs in, from its environment: MAXPM_AGENT_TYPE (to set it by hand), else
-    the CLI's own variables (Codex: CODEX_THREAD_ID; Claude Code: CLAUDECODE). Codex first: a Codex started
-    from a Claude Code shell keeps CLAUDECODE."""
+    the CLI's own variables, which each adapter names (IDENTITY['inside_env']; Codex: CODEX_THREAD_ID; Claude Code:
+    CLAUDECODE). Codex first: a Codex started from a Claude Code shell keeps CLAUDECODE (agents.from_env)."""
     t = _agent_platform(env.get("MAXPM_AGENT_TYPE"))
     if t:
         return t
-    if env.get("CODEX_THREAD_ID") or env.get("CODEX_SANDBOX"):
-        return "codex"
-    if env.get("CLAUDECODE"):
-        return "claude-code"
-    return None
+    p = _platform_of(_adapters().from_env({k: v for k, v in env.items() if k != "MAXPM_AGENT_TYPE"}))
+    return p if p in LAUNCH_PLATFORMS else None
 
 
 def outside_tmux(env):
@@ -6667,7 +6683,11 @@ def agent_web_url(conn, name):
     r = conn.execute("SELECT kind, session_url, agent_type FROM agents WHERE name=?", (name,)).fetchone() if name else None
     if not r or r["kind"] != "ai":
         return None
-    return r["session_url"] or (CODEX_WEB if r["agent_type"] == "codex" else None)
+    if r["session_url"]:
+        return r["session_url"]
+    ad = _adapters().find(r["agent_type"]) if r["agent_type"] else None
+    url = (ad.identity or {}).get("url") if ad else None
+    return url if url and "{id}" not in url else None  # an app with no link for each session (Codex: CODEX_WEB)
 
 
 # ---------------------------------------------------------------- needs you
@@ -8999,7 +9019,8 @@ def fork_base(conn, item, path, model, platform):
     """The base a new session for this item starts from (claude --resume <base> --fork-session), or None: a
     Claude Code session, an item of an open goal that needs goal context, a base in the same folder, of the
     same model, that a session used less than base_warm ago."""
-    if platform != "claude-code" or not item.get("goals") or item.get("no_goal_context"):
+    ad = _adapters().find(platform) if platform else None
+    if not (ad and ad.launch.get("fork")) or not item.get("goals") or item.get("no_goal_context"):
         return None
     for name in item["goals"]:
         g = conn.execute("SELECT * FROM goals WHERE name=? AND status='open'", (name,)).fetchone()
@@ -10739,33 +10760,21 @@ def codex_flags():
     return CODEX_FLAGS
 
 
+def shell_command(words):
+    """An adapter's argv as one shell command line: each word quoted for the shell, but a Raw word (the args
+    setting, as the person wrote it), which goes in as it is."""
+    raw = _adapters().Raw
+    return " ".join(w if isinstance(w, raw) else _shell_quote(w) for w in words)
+
+
 def build_command(platform, opts, model=None, effort=None, name=None):
-    """The command line that starts a platform's CLI with these options. name: the session's name, for a
-    CLI that takes one (claude --name, and the Remote Control session name); Codex has no flag for it."""
-    q = _shell_quote
-    if platform == "claude-code":
-        parts = ["claude"] + (["--name", q(name)] if name else [])
-        # Quoted: a full id can end in [1m], a glob in zsh (#4950).
-        parts += (["--model", q(model)] if model else []) + (["--effort", effort] if effort else [])
-        parts += ["--permission-mode", opts["permission_mode"]] if opts.get("permission_mode") else []
-        parts += [opts["args"].strip()] if opts.get("args", "").strip() else []
-        # The prompt goes before --remote-control: that flag takes an optional session name after it.
-        parts.append(q(opts["prompt"]))
-        parts += ["--remote-control"] + ([q(name)] if name else []) if opts.get("remote_control") == "on" else []
-    elif platform == "codex":
-        parts = ["codex"] + (["-m", q(model)] if model else []) + (["-c", f"model_reasoning_effort={effort}"] if effort else [])
-        parts += ["--sandbox", opts["sandbox"]] if opts.get("sandbox") else []
-        parts += ["--ask-for-approval", opts["approval"]] if opts.get("approval") else []
-        parts += ["--add-dir", q(river_dir())]
-        # Codex 0.159 ends at start, in a session with an API key, when it may use its shared background server
-        # ("requires api_key_model_discovery to be disabled"); --no-daemon runs it alone (#4621).
-        if "--no-daemon" in codex_flags() and "--no-daemon" not in opts.get("args", ""):
-            parts.append("--no-daemon")
-        parts += [opts["args"].strip()] if opts.get("args", "").strip() else []
-        parts.append(q(opts["prompt"]))
-    else:
+    """The command line that starts a platform's CLI with these options, by its adapter's build_command. name: the
+    session's name, for a CLI that takes one (claude --name, and the Remote Control session name); Codex has no flag
+    for it. opts may hold the MaximizePM keys of agents.LAUNCH_KEYS (fork, resume, hooks_file, ...)."""
+    ad = _adapters().find(platform)
+    if ad is None or not ad.supports("launch"):
         raise RiverError(f"no command builder for {platform}")
-    return " ".join(parts)
+    return shell_command(ad.build_command(name, None, model, effort, opts, opts.get("prompt")))
 
 
 # maxpm launch --prompt: a first instruction for one session. It follows the profile's prompt, so the session
@@ -10805,8 +10814,9 @@ def entry_exe(cmd):
 
 
 def profile_from_command(cmd):
-    """An old hand-written command that a profile can build exactly -> (platform, options); else None.
-    Unknown flags, a fixed model, or another --add-dir keep the command custom, so nothing is lost."""
+    """An old hand-written command that a profile can build exactly -> (platform, options); else None. Each adapter's
+    parse_command reads it: unknown flags, a fixed model, or another --add-dir keep the command custom, so nothing
+    is lost."""
     import shlex
     try:
         w = shlex.split(cmd)
@@ -10814,47 +10824,12 @@ def profile_from_command(cmd):
         return None
     if not w:
         return None
-    exe = Path(w[0]).name.lower()
-    platform = {"claude": "claude-code", "codex": "codex"}.get(exe)
-    if platform is None:
-        return None
-    opts, prompt, i = {}, None, 1
-    if platform == "claude-code":
-        opts["remote_control"] = "off"
-    choices = LAUNCH_PLATFORMS[platform]["options"]
-    while i < len(w):
-        t, nxt = w[i], (w[i + 1] if i + 1 < len(w) else None)
-        if platform == "claude-code" and t == "--model" and nxt == "{model}" or \
-                platform == "claude-code" and t == "--effort" and nxt == "{effort}" or \
-                platform == "codex" and t in ("-m", "--model") and nxt == "{model}" or \
-                platform == "codex" and t in ("-c", "--config") and nxt == "model_reasoning_effort={effort}":
-            i += 2
-        elif platform == "claude-code" and t == "--remote-control":
-            if nxt is not None and not nxt.startswith("-"):
-                return None  # a session name, or a prompt that the flag would take as one
-            opts["remote_control"] = "on"
-            i += 1
-        elif platform == "claude-code" and t == "--permission-mode" and nxt in choices["permission_mode"]["choices"]:
-            opts["permission_mode"] = nxt
-            i += 2
-        elif platform == "codex" and t in ("-s", "--sandbox") and nxt in choices["sandbox"]["choices"]:
-            opts["sandbox"] = nxt
-            i += 2
-        elif platform == "codex" and t in ("-a", "--ask-for-approval") and nxt in choices["approval"]["choices"]:
-            opts["approval"] = nxt
-            i += 2
-        elif platform == "codex" and t == "--add-dir" and nxt is not None and (
-                nxt == "{maxpm_dir}" or os.path.realpath(os.path.expanduser(nxt)) == os.path.realpath(river_dir())):
-            i += 2
-        elif not t.startswith("-") and prompt is None and t.strip() and ";" not in t:
-            prompt = t
-            i += 1
-        else:
-            return None
-    if prompt is None:
-        return None
-    opts["prompt"] = prompt
-    return platform, opts
+    for ad in _adapters().load().values():
+        platform = _platform_of(ad)
+        got = ad.parse_command(w) if platform in LAUNCH_PLATFORMS else None
+        if got:
+            return platform, {**got["settings"], "prompt": got["prompt"]}
+    return None
 
 
 def _migrate_levels(conn):
@@ -11298,24 +11273,26 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         raise RiverError(f"effort {effort!r}: a level such as low, medium, high")
     prof = parse_profile(pick[1])
     # The CLI gets its own id for the model (codex -m gpt-6-astra); river keeps the ladder name everywhere else.
-    platform = prof[0] if prof else {"claude": "claude-code", "codex": "codex"}.get(Path(entry_exe(pick[1])).name.lower())
+    platform = prof[0] if prof else _exe_platform(entry_exe(pick[1]))
     mid = model_id(conn, platform, model, project_id, prof[1] if prof else None)
-    if effort and platform == "codex":
-        _check_codex_effort(mid, effort)
+    if effort and platform:
+        _check_agent_effort(_adapters().get(platform), mid, effort)
     prompt = custom_prompt(prompt) if prompt is not None else None
     if prof:
         opts = profile_options(conn, prof[0], prof[1], project_id, options)
         if prompt:
             opts = {**opts, "prompt": join_prompt(opts["prompt"], prompt)}
-        built = opts
-        if prof[0] == "claude-code" and opts.get("skill_prompt") == "on":
-            built = {**opts, "args": skill_prompt_args(opts.get("args", ""))}
-        if fork_of and prof[0] == "claude-code":  # fork_base: start from a goal's warm base
-            built = {**built, "args": f"--resume {_shell_quote(fork_of)} --fork-session " + built.get("args", "")}
-        if prof[0] == "claude-code" and opts.get("activity_hooks") == "on" and "--settings" not in built.get("args", ""):
-            built = {**built, "args": f"--settings {_shell_quote(activity_hook_file())} " + built.get("args", "")}
-        if autocompact and prof[0] == "claude-code" and "--autocompact" not in built.get("args", ""):
-            built = {**built, "args": f"--autocompact {autocompact} " + built.get("args", "")}
+        # What MaximizePM adds to the start, each only where the adapter takes it (agents.LAUNCH_KEYS): the skill in
+        # the system prompt, a fork of a goal's warm base (fork_base), the hooks file, the manager's autocompact.
+        caps, built = _adapters().get(prof[0]).launch, dict(opts)
+        if caps.get("system_prompt_file") and opts.get("skill_prompt") == "on":
+            built["system_prompt_file"] = True
+        if fork_of and caps.get("fork"):
+            built["fork"] = fork_of
+        if caps.get("hooks_file") and opts.get("activity_hooks") == "on":
+            built["hooks_file"] = activity_hook_file()
+        if autocompact and caps.get("autocompact") and "--autocompact" not in opts.get("args", ""):
+            built["autocompact"] = autocompact
         else:
             autocompact = None
         cmd = build_command(prof[0], built, mid, effort or None, name)
@@ -11400,40 +11377,41 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
             "prompt": ov.get("prompt") or ADOPT_PROMPT.format(agent=agent), **(ov.get("opts") or {})}
     args = " ".join(x for x in opts.get("args", "").split() if x not in (ov.get("noflags") or ()))
     opts["args"] = " ".join([args] + [f for f in (ov.get("flags") or ()) if f not in args.split()]).strip()
-    # The effort it ran at: from its recorded command line (the agents table keeps no effort).
-    m = re.search(r"(?:--effort |model_reasoning_effort=)([a-z][a-z0-9_-]{0,31})\b", a["pid_cmd"] or "")
+    ad = _adapters().get(platform)
+    # The effort it ran at: from its recorded command line, by the adapter's rule (the agents table keeps no effort).
+    m = re.search(ad.effort["read"], a["pid_cmd"] or "") if (ad.effort or {}).get("read") else None
     effort = ov.get("effort") or (m.group(1) if m else None)
-    q = _shell_quote
-    if platform == "claude-code":
-        args = f"--resume {q(session_id)} " + opts.get("args", "")
-        if opts.get("activity_hooks") == "on" and "--settings" not in args:
-            args = f"--settings {q(activity_hook_file())} " + args
-        tokens = autocompact_tokens(setting(conn, "manager_autocompact")) if a["role"] == "manager" else None
-        if tokens and "--autocompact" not in args:
-            args = f"--autocompact {tokens} " + args
-        cmd = build_command(platform, {**opts, "args": args}, mid, effort, a["session"] or agent)
-    else:
-        cmd = build_command(platform, opts, mid, effort)
-        cmd = f"codex resume {q(session_id)}" + cmd[len("codex"):]
-    if platform == "codex" and "--no-daemon" in (ov.get("noflags") or ()):
-        cmd = cmd.replace(" --no-daemon", "")
+    settings = {**opts, "noflags": list(ov.get("noflags") or ())}
+    if ad.launch.get("hooks_file") and opts.get("activity_hooks") == "on":
+        settings["hooks_file"] = activity_hook_file()
+    tokens = autocompact_tokens(setting(conn, "manager_autocompact")) if a["role"] == "manager" else None
+    if tokens and ad.launch.get("autocompact"):
+        settings["autocompact"] = tokens
+    argv = ad.resume_command(session_id, mid, effort, settings, name=a["session"] or agent)
+    if not argv:
+        raise RiverError(f"{ad.label} cannot resume a session: MaximizePM cannot resume {agent}")
+    cmd = shell_command(argv)
     return {"command": cmd, "agent": pick[0], "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
 
 
-def _check_codex_effort(mid, effort):
-    """Refuse an effort that Codex does not take: for the model, when the Codex model cache lists it,
-    else Codex's levels in PLATFORM_EFFORTS."""
-    known = codex_models() or {}
-    levels = known.get(mid) if mid else None
-    levels = levels or PLATFORM_EFFORTS["openai"]
+def _check_agent_effort(ad, mid, effort):
+    """Refuse an effort that an agent with a per-model reader of its levels (EFFORT and read_effort_levels: Codex)
+    does not take: for the model, when the reader lists it, else the adapter's EFFORT levels. An agent with no such
+    reader takes the effort as it is."""
+    read = getattr(ad.module, "read_effort_levels", None)
+    if not read or not ad.effort:
+        return
+    levels = read(mid) or ad.effort.get("levels") or []
     if effort not in levels:
-        raise RiverError(f"Codex{' ' + mid if mid else ''} takes effort {', '.join(levels)}, not {effort}; pick one of them")
+        raise RiverError(f"{ad.label}{' ' + mid if mid else ''} takes effort {', '.join(levels)}, not {effort}; "
+                         f"pick one of them")
 
 
-# Which model family an agent CLI runs, by the program that starts it, and the effort levels its CLI takes.
-AGENT_FAMILIES = {"claude": "claude", "codex": "openai"}
-PLATFORM_EFFORTS = {"claude": ["low", "medium", "high", "xhigh", "max"],
-                    "openai": ["low", "medium", "high", "xhigh", "max"]}
+# Which model family an agent CLI runs, by the program that starts it, and the effort levels its CLI takes: from the
+# built-in adapters (river/agents; their modules import no more of core at load). #5185 removes these tables.
+from .agents import claude as _claude_adapter, codex as _codex_adapter  # noqa: E402
+AGENT_FAMILIES = {m.DESCRIBE["exe"]: m.DESCRIBE["family"] for m in (_claude_adapter, _codex_adapter)}
+PLATFORM_EFFORTS = {m.DESCRIBE["family"]: list(m.EFFORT["levels"]) for m in (_claude_adapter, _codex_adapter)}
 # One line per model in the launch dialog: when it fits.
 MODEL_NOTES = {
     "haiku": "quick, simple work: lookups, formatting, trivial edits",
@@ -11638,7 +11616,9 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
     if not it and brief.get("agent"):
         # Claude Code holds a typed message (the terminal, the page's message box, SendMessage) while a foreground
         # command runs: a session there waits in a background command, so a talk reaches it at once (#4948).
-        brief["wait_background"] = (agent_type or session_type(conn, brief["agent"])) == "claude-code"
+        kind = agent_type or session_type(conn, brief["agent"])
+        ad = _adapters().find(kind) if kind else None
+        brief["wait_background"] = bool(ad and ad.launch.get("background"))  # its CLI runs maxpm wait in the background
     return brief
 
 

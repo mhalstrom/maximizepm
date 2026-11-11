@@ -46,17 +46,22 @@ GOOD = {"id": "pi", "label": "Pi", "exe": "pi", "aliases": ["pi-agent"], "family
 
 
 class Contract(Env):
-    def test_the_built_in_adapters_pass_the_check_and_have_only_their_describe_part(self):
+    def test_the_built_in_adapters_pass_the_check_and_have_every_required_part(self):
         for mid in agents.BUILTIN:
             a = agents.get(mid)
             self.assertEqual(agents.check(a.module, mid), [])
             self.assertEqual(a.source, "builtin")
-            self.assertEqual(a.missing(), ["launch"])
-            self.assertTrue(a.supports("describe"))
-            self.assertFalse(any(a.supports(p) for p in agents.PARTS if p != "describe"))
-            with self.assertRaisesRegex(RiverError, "no launch part"):
-                a.build_command("w", "/tmp", "opus", None, {}, "go")
+            self.assertEqual(a.missing(), [])
+            for part in ("describe", "effort", "launch", "identity", "resume"):
+                self.assertTrue(a.supports(part), (mid, part))
         self.assertEqual(agents.ids()[:2], ["claude", "codex"])
+
+    def test_a_module_with_no_launch_part_loads_but_cannot_start(self):
+        a = agents.Adapter(module(DESCRIBE=GOOD), "test")
+        self.assertEqual(a.missing(), ["launch"])
+        with self.assertRaisesRegex(RiverError, "agent pi has no launch part"):
+            a.build_command("w", "/tmp", "opus", None, {}, "go")
+        self.assertIsNone(a.resume_command("s1"))
 
     def test_the_built_in_describe_matches_the_platform_tables_of_today(self):
         for mid, platform in (("claude", "claude-code"), ("codex", "codex")):
@@ -100,18 +105,18 @@ class Contract(Env):
                        "text": "", "flag": ["--mode", "{value}"], "live": None, "read": r"--mode (\S+)"}],
             EFFORT={"levels": ["low", "high"], "map": {"medium": "low", "xhigh": "high", "max": "high"},
                     "flag": ["--thinking", "{value}"], "live": None, "read": None},
-            LAUNCH={"session_name": True, "fork": False},
+            LAUNCH={"session_name": True, "fork": False, "background": True},
             build_command=lambda name, folder, model, effort, settings, prompt: ["pi", "--model", model, prompt],
             IDENTITY={"source": "env", "env": "PI_SESSION", "log_glob": None, "pane": None, "url": None,
                       "inside_env": ["PI_SESSION"]},
             CHAT={"compressed": False, "file_tools": ["write"]},
             chat_path=lambda ref, folder: f"/logs/{ref}.jsonl",
             parse_chat=lambda lines: ([{"at": None, "role": "assistant", "text": x} for x in lines], "idle"),
-            STATE={"state": "detect", "session_id": "identity", "background": False},
+            STATE={"state": "detect", "session_id": "identity"},
             DETECT={"process": "pi", "idle": r"^> $", "working": r"esc to interrupt", "blocked": [r"Allow\?"],
                     "tell_instead": "No, and tell Pi what to do", "image_paste": "[image {n}]"},
             INPUT={"native": None},
-            resume_command=lambda ref, model, effort, settings: ["pi", "--resume", ref],
+            resume_command=lambda ref, model, effort, settings, name=None: ["pi", "--resume", ref],
             COMMANDS=[{"name": "compact", "description": "compact the chat", "hint": ""}],
             read_commands=lambda folder: [{"name": "mine", "description": "", "hint": "<x>"}],
             SETUP={"instructions": "AGENTS.md", "skills_dir": None, "voice": None, "open_link": None},
@@ -271,6 +276,67 @@ class Report(Env):
         self.assertEqual(code, 0)
         self.assertEqual(self.c.execute("SELECT status FROM items WHERE id=?", (it,)).fetchone()["status"], "open")
         self.assertNotEqual(self.row()["activity_event"], core.REPORT_GONE)
+
+
+class StartPaths(Env):
+    """#5181: launch, resume, profile and identity go through the adapters, with no change of behaviour."""
+
+    def test_the_agent_type_comes_from_each_adapters_identity(self):
+        self.assertEqual(core.agent_type_from_env({"CLAUDECODE": "1"}), "claude-code")
+        self.assertEqual(core.agent_type_from_env({"CLAUDECODE": "1", "CODEX_THREAD_ID": "t"}), "codex")
+        self.assertEqual(core.agent_type_from_env({"CODEX_SANDBOX": "seatbelt"}), "codex")
+        self.assertEqual(core.agent_type_from_env({"MAXPM_AGENT_TYPE": "claude", "CODEX_THREAD_ID": "t"}), "claude-code")
+        self.assertEqual(core.agent_type_from_env({"MAXPM_AGENT_TYPE": "nonsense", "CLAUDECODE": "1"}), "claude-code")
+        self.assertIsNone(core.agent_type_from_env({}))
+
+    def test_a_user_module_changes_what_core_builds(self):
+        before = core.build_command("codex", {"prompt": "go"}, "gpt-6-luna")
+        self.assertTrue(before.startswith("codex -m gpt-6-luna "), before)
+        self.user_module("codex", """
+            from river.agents import Raw
+            DESCRIBE = {"id": "codex", "label": "Codex", "exe": "codex", "family": "openai"}
+            LAUNCH = {"resume": True}
+            def build_command(name, folder, model, effort, settings, prompt):
+                return ["/opt/codex", "-m", model, Raw("--x 'a b'"), prompt]
+            def resume_command(ref, model, effort, settings, name=None):
+                return ["/opt/codex", "resume", ref, settings["prompt"]]
+        """)
+        self.assertEqual(core.build_command("codex", {"prompt": "run go now"}, "gpt-6-luna"),
+                         "/opt/codex -m gpt-6-luna --x 'a b' 'run go now'")
+
+    def test_profile_from_command_reads_through_each_adapter(self):
+        self.assertEqual(core.profile_from_command("claude --model {model} --permission-mode plan go --remote-control"),
+                         ("claude-code", {"remote_control": "on", "permission_mode": "plan", "prompt": "go"}))
+        self.assertEqual(core.profile_from_command("codex -m {model} -s read-only 'run go'"),
+                         ("codex", {"sandbox": "read-only", "prompt": "run go"}))
+        self.assertIsNone(core.profile_from_command("claude --model opus go"))  # a fixed model stays custom
+        self.assertIsNone(core.profile_from_command("gemini go"))
+
+    def test_effort_flags_and_the_effort_read_back_are_the_adapters(self):
+        cl, cx = agents.get("claude"), agents.get("codex")
+        self.assertEqual(cl.effort["live"], "/effort {value}")
+        self.assertIsNone(cx.effort["live"])
+        self.assertIn("--effort high", core.build_command("claude-code", {"prompt": "go"}, "opus", "high"))
+        self.assertIn("-c model_reasoning_effort=xhigh", core.build_command("codex", {"prompt": "go"}, "sol", "xhigh"))
+        self.assertEqual(core.PLATFORM_EFFORTS, {"claude": cl.effort["levels"], "openai": cx.effort["levels"]})
+        self.assertEqual(core.AGENT_FAMILIES, {"claude": "claude", "codex": "openai"})
+        import re
+        self.assertEqual(re.search(cx.effort["read"], "codex -c model_reasoning_effort=low go").group(1), "low")
+        self.assertEqual(re.search(cl.effort["read"], "claude --effort max go").group(1), "max")
+
+    def test_only_an_agent_that_forks_gets_a_fork_base_and_only_one_with_background_commands_waits_there(self):
+        item = {"goals": ["g"], "no_goal_context": False}
+        self.assertIsNone(core.fork_base(self.c, item, self.tmp.name, "opus", "codex"))
+        self.assertIsNone(core.fork_base(self.c, item, self.tmp.name, "opus", None))
+        self.assertTrue(agents.get("claude").launch["background"])
+        self.assertFalse(agents.get("codex").launch.get("background"))
+
+    def test_the_web_link_of_an_agent_with_no_session_link_comes_from_its_identity(self):
+        core.register(self.c, "cx")
+        self.c.execute("UPDATE agents SET agent_type='codex' WHERE name='cx'")
+        self.assertEqual(core.agent_web_url(self.c, "cx"), core.CODEX_WEB)
+        self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='cx'")
+        self.assertIsNone(core.agent_web_url(self.c, "cx"))
 
 
 if __name__ == "__main__":
