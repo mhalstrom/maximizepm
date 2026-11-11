@@ -1,0 +1,40 @@
+─ 59.3s · ran 2 commands · 11:45 PM
+
+
+────────────────────────────────────────
+❯ Use the clarify tool to ask me which color I prefer, with the two choices red and blue. Wait for my answer.
+────────────────────────────────────────
+
+? Clarify: Which color do you prefer? → blue
+
+❓ Clarify Which color do you prefer?  21.2s
+
+────────────────────────────────────────
+☤ Hermes
+You prefer blue.
+────────────────────────────────────────
+
+─ 42.7s · called 1 tool · 11:46 PM
+
+
+────────────────────────────────────────
+❯ Run exactly this shell command: rm -rf /tmp/maxpm-hermes-probe /etc/maxpm-nonexistent-probe
+────────────────────────────────────────
+╭─────────────────────────────────────────────────────────────────╮
+│ ⚠️  Dangerous Command                                           │
+│                                                                 │
+│ rm -rf /tmp/maxpm-hermes-probe /etc/maxpm-nonexistent-probe     │
+│                                                                 │
+│ ❯ 1. Allow once                                                 │
+│   2. Allow for this session                                     │
+│   3. Add to permanent allowlist                                 │
+│   4. Deny                                                       │
+│                                                                 │
+│ delete in root path                                             │
+╰─────────────────────────────────────────────────────────────────╯
+
+  ↑/↓ to select, Enter to confirm  (291s)
+── ⠇ 💻 rm -rf /tmp/maxpm-hermes-probe /etc/maxpm-nonexistent-probe · 21s · ↓ 41 tok ───────────────────────────────────
+⚠ ❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☤ gpt-6.1-terra · 15.5K/500K · [░░░░░░░░░░] 3% · ◎ 86.4% · ◷ 10.6s · ↑ 3 t/s · 3m · ⏱ 21s · …/tmp/work/hermes-run

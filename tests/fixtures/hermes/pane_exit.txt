@@ -1,0 +1,8 @@
+Resume this session with:
+  hermes --resume local-a52f877bc92e683b2568b21f70409c0805725b04c01d9d5597ef9de6585441b0
+  hermes -c "Inspect HERMES environment and write hello.txt"
+Session:        local-a52f877bc92e683b2568b21f70409c0805725b04c01d9d5597ef9de6585441b0
+Title:          Inspect HERMES environment and write hello.txt
+Duration:       2m 0s
+Messages:       10 (2 user, 6 tool calls)
+Pane is dead (status 0, Tue Nov 10 23:56:06 2026)

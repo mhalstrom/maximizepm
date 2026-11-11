@@ -1,0 +1,16 @@
+
+Welcome to Hermes Agent! Type your message or /help for commands.
+✦ Tip: Save money: hermes tools disables unused tools, hermes skills config trims skills down.
+
+
+
+────────────────────────────────────────
+❯ Run the shell command `sleep 15; ls` and tell me what it printed. Then delete the folder old with the command `rm -rf
+old`.
+────────────────────────────────────────
+
+💻 $ sleep 15 + 1 command  15.7s
+── ⠼ (¬_¬) processing... · 38s · ↓ 26 tok ────────────────────────────────────────── Run shell commands and delete old ─
+☤ ❯ type to redirect this turn · Tab queues it for after
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☤ gpt-6.1-terra · 15.2K/500K · [░░░░░░░░░░] 3% · ◎ 24.4% · ◷ 11.7s · ↑ 2 t/s · 1m · ⏱ 37s

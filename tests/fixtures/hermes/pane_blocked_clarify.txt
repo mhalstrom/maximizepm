@@ -1,0 +1,40 @@
+✦ Tip: Save money: hermes tools disables unused tools, hermes skills config trims skills down.
+
+
+
+────────────────────────────────────────
+❯ Run the shell command `sleep 15; ls` and tell me what it printed. Then delete the folder old with the command `rm -rf
+old`.
+────────────────────────────────────────
+
+💻 $ sleep 15 + 1 command  15.7s
+💻 $ rm -rf old  8.7s
+
+────────────────────────────────────────
+☤ Hermes
+sleep 15; ls printed:
+
+notes.txt
+
+rm -rf old completed without output.
+────────────────────────────────────────
+
+─ 59.3s · ran 2 commands · 11:45 PM
+
+
+────────────────────────────────────────
+❯ Use the clarify tool to ask me which color I prefer, with the two choices red and blue. Wait for my answer.
+────────────────────────────────────────
+╭─ Hermes Agent needs your input ────────────────╮
+│ 1 question                                     │
+│ ▸ Which color do you prefer?                   │
+│   ❯ 1. red (Recommended)                       │
+│     2. blue                                    │
+│     3. Other (type your answer)                │
+╰────────────────────────────────────────────────╯
+
+  ↑/↓ to select, Enter to lock, Tab next question  (3579s)
+── ⠏ ❓ Which color do you prefer? · 31s · ↓ 35 tok ──────────────────────────────── Run shell commands and delete old ─
+? ❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☤ gpt-6.1-terra · 15.4K/500K · [░░░░░░░░░░] 3% · ◎ 80.2% · ◷ 10.7s · ↑ 3 t/s · 2m · ⏱ 31s · …/tmp/work/hermes-run
