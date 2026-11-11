@@ -66,6 +66,17 @@ class Contract(Env):
         self.assertEqual(a.config_key("permissions"), "copilot_permissions")
         self.assertEqual(a.state, {"state": "hook", "session_id": "hook"})
 
+    def test_no_choice_is_blank_since_the_page_adds_the_agents_own_option_itself(self):
+        # #5235: the launch dialog and Settings > Setup put 'the agent's own' (value '') first; a '' in the choices
+        # showed a second, blank option. The default '' still means the agent's own, and starts no flag.
+        a = agents.get("copilot")
+        for key in ("permissions", "mode"):
+            spec = next(x for x in a.settings if x["key"] == key)
+            self.assertNotIn("", spec["choices"], key)
+            self.assertEqual(spec["default"], "", key)
+        words = a.build_command("w1", "/p", None, None, {"permissions": "", "mode": ""}, "go")
+        self.assertFalse([w for w in words if w in ("--mode",) or w.startswith(("--allow", "--assisted"))])
+
     def test_a_command_inside_copilot_is_copilots_also_when_it_was_started_from_claude_code(self):
         self.assertEqual(agents.from_env({"COPILOT_CLI": "1", "CLAUDECODE": "1"}).id, "copilot")
         self.assertEqual(agents.from_env({"CLAUDECODE": "1"}).id, "claude")

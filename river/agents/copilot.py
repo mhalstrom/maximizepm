@@ -49,12 +49,12 @@ DESCRIBE = {
 
 SETTINGS = [
     {"key": "permissions", "label": "Permissions", "kind": "choice",
-     "choices": ["", "assisted-approval", "allow-all-tools", "allow-all"], "default": "",
+     "choices": ["assisted-approval", "allow-all-tools", "allow-all"], "default": "",
      "text": "empty: Copilot asks before each tool call that changes something; assisted-approval: its safety judge "
              "decides; allow-all-tools: no question for tools; allow-all: also any path and URL",
      "flag": ["--{value}"], "live": None, "read": r"--(assisted-approval|allow-all-tools|allow-all)\b",
      "session": True},
-    {"key": "mode", "label": "Mode", "kind": "choice", "choices": ["", "interactive", "plan", "autopilot"],
+    {"key": "mode", "label": "Mode", "kind": "choice", "choices": ["interactive", "plan", "autopilot"],
      "default": "", "text": "the agent mode at the start; plan writes a plan first, autopilot goes on by itself",
      "flag": ["--mode", "{value}"], "live": None, "read": r"--mode (interactive|plan|autopilot)\b",
      "session": True},
@@ -115,8 +115,8 @@ def parse_command(words):
     from ..core import river_dir
     if not words or Path(words[0]).name.lower() != "copilot":
         return None
-    perms = [c for c in SETTINGS[0]["choices"] if c]
-    modes = [c for c in SETTINGS[1]["choices"] if c]
+    perms = SETTINGS[0]["choices"]
+    modes = SETTINGS[1]["choices"]
     opts, prompt, i = {}, None, 1
     while i < len(words):
         t, nxt = words[i], (words[i + 1] if i + 1 < len(words) else None)
