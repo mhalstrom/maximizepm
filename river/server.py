@@ -766,13 +766,24 @@ def _pane_texts(panes):
     return {pane: "\n".join(lines) for pane, lines in texts.items()}
 
 
+class _Tail(list):
+    """The last lines of a pane (_prompt_tail), with the lines just above them (above): a dialog taller than the
+    tail has its title there (#5226)."""
+    above = ()
+
+
+PROMPT_ABOVE = 30  # lines above the tail where the title of a tall dialog may be
+
+
 def _prompt_tail(text):
     """The last lines of a pane's text (no blank ones): where a prompt shows. Claude Code blinks the dot (⏺)
     of the tool call that waits on a permission prompt, so it is a space on every other look. A space in its
     place gives the same lines on each look, and a prompt that stays on the screen stays the same (#4280)."""
     import re
     lines = [x.rstrip() for x in text.splitlines() if x.strip()]
-    return [re.sub(r"^(\s*)⏺", r"\1 ", x) for x in lines[-PROMPT_LINES:]]
+    tail = _Tail(re.sub(r"^(\s*)⏺", r"\1 ", x) for x in lines[-PROMPT_LINES:])
+    tail.above = lines[-PROMPT_LINES - PROMPT_ABOVE:-PROMPT_LINES] if len(lines) > PROMPT_LINES else []
+    return tail
 
 
 def _done_panes(conn, panes, terminals=None):
@@ -1608,9 +1619,33 @@ def _prompt_parts(tail, layout=None):
         if "?" in lines[n]:
             question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
             break
+    if question is None and options and framed.match(tail[at]):
+        question = _frame_title(tail, lines, at, framed)  # a dialog with a title, not a question (Amp, #5226)
     return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
             "top": top, "end": end if options else None, "frame_end": frame_end if options else None, "lines": lines,
             **_prompt_command(lines[:qat] if qat is not None else [], lay)}
+
+
+_CORNER = re.compile(r"^\s*[╭┌┏╔]")
+_BORDER = re.compile(r"^[─━═╌╍┄┅\s-]+|[─━═╌╍┄┅\s-]+$")
+
+
+def _frame_title(tail, lines, at, framed):
+    """The title of the box that a menu (its marked line: at) is in, as the question of a prompt that asks none:
+    the text in the box's top border ('╭─ Approval Required ───╮'), else its first line of text ('│ Out of
+    Credits'); None when the box's top border is not in the tail or the lines above it (tail.above). lines: tail
+    without the frame."""
+    rows = list(getattr(tail, "above", ())) + list(tail[:at])
+    n = len(rows) - 1
+    while n >= 0 and framed.match(rows[n]) and not _CORNER.match(rows[n]):
+        n -= 1
+    if n < 0 or not _CORNER.match(rows[n]):
+        return None
+    title = _BORDER.sub("", rows[n].strip().strip("╭╮┌┐┏┓╔╗"))
+    if not title:
+        inside = (framed.sub("", x).rstrip(" │┃║") for x in rows[n + 1:])
+        title = next((x.strip() for x in inside if x.strip()), "")
+    return title[:240] or None
 
 
 def _prompt_found(tail, rx, layout=None):

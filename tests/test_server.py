@@ -2820,6 +2820,45 @@ class PaneProgram(unittest.TestCase):
         self.assertEqual((got["tty"], got["running"], got["target"]), (f"/dev/ttys00{pane[1:]}", "claude", "maxpm:0.0"))
 
 
+class FrameTitle(unittest.TestCase):
+    """A dialog that asks no question but has a title (Amp: 'Approval Required' in its top border, 'Out of
+    Credits' as its first line) gives the title as the prompt's question, so the alert names it and its options
+    (#5226). The fixtures are Amp's recorded panes (tests/fixtures/amp)."""
+
+    def read(self, name):
+        from river import agents
+        from pathlib import Path
+        a = agents.get("amp")
+        text = (Path(__file__).parent / "fixtures" / "amp" / name).read_text()
+        tail = server._prompt_tail(text)
+        return tail, server._prompt_found(tail, server._AnyOf(tuple(a.detect["blocked"])), server._layout(a.detect)), \
+            server._layout(a.detect)
+
+    def test_the_title_of_a_dialog_is_its_question(self):
+        tail, found, lay = self.read("pane_credits.txt")
+        self.assertEqual(found["question"], "Out of Credits")
+        tail, found, lay = self.read("pane_approval_turn.txt")
+        self.assertEqual(len(tail), server.PROMPT_LINES)
+        self.assertTrue(any("Approval Required" in x for x in tail.above))  # taller than the tail
+        self.assertEqual(found["question"], "Approval Required")
+        body, q, _ = server.prompt_alert("amp-1", "maxpm:1.0", tail, "%3", {"id": 7, "title": "Fix it"}, lay)
+        self.assertEqual(q, "Approval Required")
+        self.assertIn("Question: Approval Required Keys: Enter = Allow Once (selected now); Down, then Enter = "
+                      "Reject with feedback;", body)
+        self.assertNotIn("no question river can read", body)
+
+    def test_a_question_still_wins_and_a_box_with_no_top_border_has_no_title(self):
+        box = ["╭─ Edit file ───────╮", "│ Do you want to make this edit?  │", "│ ❯ 1. Yes │", "│   2. No  │",
+               "╰──────────────────╯"]
+        parts = server._prompt_parts(server._Tail(box))
+        self.assertEqual(parts["question"], "Do you want to make this edit?")
+        parts = server._prompt_parts(server._Tail(box[2:]))
+        self.assertIsNone(parts["question"])
+        self.assertEqual([o for o, _ in parts["options"]], ["1. Yes", "2. No"])
+        parts = server._prompt_parts(["❯ 1. Yes", "  2. No"])  # no frame, a plain list: no title either
+        self.assertIsNone(parts["question"])
+
+
 class Watched(unittest.TestCase):
     def test_dev_reload_sees_subfolders_but_not_vendor(self):
         from pathlib import Path
