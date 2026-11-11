@@ -91,8 +91,9 @@ button.srow-it { cursor: pointer; }
   .sess-side .slist { flex: none; max-height: 40vh; }
   .sess-main { height: 75vh; }
 }
-/* The chat view of a session (#4604): a middle column of readable width. */
-.chat-col { max-width: 48rem; margin: 0 auto; width: 100%; box-sizing: border-box; }
+/* The chat view of a session (#4604): a middle column of readable width. It grows with the pane (#5155, mark: 'we need
+   have the chat size be a bit wider. that is a frequent issue'): 90% of a wide pane, at least 48rem, at most 76rem. */
+.chat-col { max-width: clamp(48rem, 90%, 76rem); margin: 0 auto; width: 100%; box-sizing: border-box; }
 /* A message box with more lines reaches up over the chat (#5111): the foot's negative margin keeps the chat's frame, so
    typing moves nothing in the chat; the foot has the panel's background, above the chat. */
 .chat-foot { flex: none; position: relative; z-index: 1; background: var(--panel);
@@ -124,7 +125,11 @@ button.srow-it { cursor: pointer; }
 .md pre:hover .copy, .md pre .copy:focus { opacity: 1; }
 .md blockquote { border-left: calc(var(--sp-0) + var(--hair)) solid var(--line); padding-left: var(--sp-4); color: var(--muted); }
 .md table { border-collapse: collapse; display: block; overflow-x: auto; }
-.md th, .md td { border: var(--hair) solid var(--line); padding: var(--sp-1) var(--sp-3); text-align: left; vertical-align: top; }
+/* A cell breaks only between words (#5155: 'Timer' showed as 'Ti me r'): the bubble's overflow-wrap: anywhere made each
+   letter a break point, so the table squeezed its short columns to one letter. Now a short column takes the width of
+   its longest word, long text wraps between words, and a table wider than its bubble scrolls in its own box. */
+.md th, .md td { border: var(--hair) solid var(--line); padding: var(--sp-1) var(--sp-3); text-align: left; vertical-align: top;
+  overflow-wrap: normal; word-break: normal; }
 .md hr { border: 0; border-top: var(--hair) solid var(--line); margin: calc(var(--sp-5) + var(--sp-0)) 0; }
 .tool { margin: 0 0 var(--sp-0); font-size: calc(var(--fs-s) + var(--hair) / 2); line-height: 1.5; }
 .msg + .tool, .msg-event + .tool { margin-top: calc(-1 * var(--sp-1)); }

@@ -311,6 +311,50 @@ try {
         self.assertEqual((got["moved"], got["replaced"], got["scrolled"], got["boxbar"], got["top"]), ([], 0, 0, 0, True),
                          "\n".join(got["moved"]) or got)
 
+    def test_a_table_in_a_message_keeps_its_words_whole_in_a_wide_chat(self):
+        """#5155 (mark: 'look at the format of that table. we need have the chat size be a bit wider'): at 1280 px the
+        chat column takes most of the pane, and in a 5-column table no cell breaks inside a word ('Ti me r'): a short
+        column takes the width of its longest word, long text wraps between words, and the page does not scroll
+        sideways (a table wider than its bubble scrolls in its own box)."""
+        from tests.test_view_sessions import claude_line
+        long = ("the release went out at 07:00 after the review passed and the hook ran without errors, and the "
+                "monitor saw no new errors in the log for an hour")
+        table = ("Here is the state of the targets:\n\n| Target | Timer | Gate | Who pushes | Result |\n|---|---|---|---|---|\n"
+                 + "".join(f"| prod{n} | none | review | the deployer | {long} |\n" for n in range(3))
+                 + "| docs | 2h | none | manager | ok |\n")
+        wide = "| " + " | ".join(f"Column{n}" for n in range(14)) + " |\n|" + "---|" * 14 + "\n| " + " | ".join(
+            f"value{n}" for n in range(14)) + " |\n"
+        self.write(claude_line("assistant", [{"type": "text", "text": table}], "end_turn")
+                   + claude_line("assistant", [{"type": "text", "text": "And a wide one:\n\n" + wide}], "end_turn"))
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessCol .msg-agent table"), "the table in the chat");
+  await sleep(300);
+  const col = q("#sessCol"), body = q("#sessBody");
+  const broken = [];
+  for (const cell of col.querySelectorAll(".msg-agent th, .msg-agent td")) {
+    const walk = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+      for (const m of t.data.matchAll(/\S+/g)) {
+        const r = document.createRange(); r.setStart(t, m.index); r.setEnd(t, m.index + m[0].length);
+        const tops = new Set([...r.getClientRects()].map(x => Math.round(x.top)));
+        if (tops.size > 1) broken.push(m[0]);
+      }
+    }
+  }
+  const tables = [...col.querySelectorAll(".msg-agent table")];
+  const last = tables[0].querySelector("tbody tr td:last-child");
+  const one = tables[0].querySelector("tbody tr:last-child td:last-child");  // 'ok': one line
+  post({ broken, colw: col.getBoundingClientRect().width, panew: body.clientWidth,
+         wraps: last.getBoundingClientRect().height > 2 * one.getBoundingClientRect().height,
+         pageSide: body.scrollWidth - body.clientWidth,
+         ownScroll: tables[1].scrollWidth > tables[1].clientWidth,
+         inBubble: tables.every(t => t.getBoundingClientRect().right <= t.closest(".msg-agent").getBoundingClientRect().right + 1) });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag", size="1280,900")
+        self.assertEqual(got["broken"], [], got)
+        self.assertGreater(got["colw"], 0.85 * got["panew"], got)
+        self.assertEqual((got["wraps"], got["pageSide"], got["ownScroll"], got["inBubble"]), (True, 0, True, True), got)
+
     def test_typing_in_the_message_box_moves_nothing_at_desktop_width(self):
         """#5111: typing in the message box moves nothing in the chat above it, replaces nothing, scrolls nothing."""
         self.type_in_the_box("1240,900")
