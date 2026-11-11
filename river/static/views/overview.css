@@ -14,6 +14,7 @@
 .wp-h:hover { background: var(--bg); }
 .wp-h .tw { color: var(--muted); width: var(--sp-5); }
 .wp-h .counts { color: var(--muted); font-size: var(--fs-s); margin-left: auto; white-space: nowrap; }
+.wp-h .counts .cnt { white-space: nowrap; }  /* '8 blocked outside' stays on one line (#5375) */
 /* A phone: the counts of a project row take their own line under its name, not past the right edge (#5327). */
 @media (max-width: 759px) {
   .wp-h { flex-wrap: wrap; row-gap: var(--sp-0); }

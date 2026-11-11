@@ -37,12 +37,14 @@ export function renderWork() {
     groups = goals.map(g => ({ key: "g:" + g.name, label: g.name, items: mine.filter(i => (i.goals || []).includes(g.name)) }));
     if (!scope.goal) groups.push({ key: "n:" + scope.project, label: "no goal", items: mine.filter(i => !(i.goals || []).length) });
   }
+  // Each count is one phrase that never breaks; a wrapped line breaks only between them (#5375).
+  const counts = parts => parts.filter(Boolean).map(p => `<span class="cnt">${esc(p)}</span>`).join(" · ");
   put($("#work"), groups.filter(g => g.items.length).map(g => {
     const items = g.items, ready = items.filter(i => i.ready).length, run = items.filter(i => ["in_progress", "held"].includes(i.status)).length;
     const hum = items.filter(i => i.ready && i.doer === "human").length, blocked = items.filter(i => i.blocked_reason).length;
     const isOpen = opened.has(g.key), shown = items.slice().sort(itemOrder).slice(0, 8);
     return `<div class="wp"><div class="wp-h" data-wp="${esc(g.key)}"><span class="tw">${isOpen ? "▾" : "▸"}</span><b>${esc(g.label)}</b>
-        <span class="counts">${items.length} open · ${ready} ready${run ? ` · ${run} running` : ""}${hum ? ` · ${hum} for a person` : ""}${blocked ? ` · ${blocked} blocked outside` : ""}</span></div>
+        <span class="counts">${counts([`${items.length} open`, `${ready} ready`, run && `${run} running`, hum && `${hum} for a person`, blocked && `${blocked} blocked outside`])}</span></div>
       ${isOpen ? `<div class="wp-items">${shown.map(i => itemRow(i)).join("")}${items.length > shown.length ? `<div class="muted wp-more">${items.length - shown.length} more: <span class="link" data-plan-view="items">Items</span></div>` : ""}</div>` : ""}</div>`;
   }).join("") || `<div class="muted">No open items.</div>`);
 }
