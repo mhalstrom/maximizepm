@@ -1207,3 +1207,23 @@ class ChatPathType(Env):
                 continue
             src = inspect.getsource(f)
             self.assertNotRegex(src, r"return str\(", f"{mid}.chat_path returns a str")
+
+
+class DetectItem(unittest.TestCase):
+    """#5261: DETECT['item'] says where the mark of a menu option stands; the default keeps it first."""
+
+    def test_the_check_names_a_bad_item(self):
+        base = {"idle": "i", "working": "w", "blocked": ["b"]}
+        good = types.SimpleNamespace(DESCRIBE=GOOD, DETECT={**base, "item": r"\d+ \({mark}\)"})
+        self.assertEqual(agents.check(good, "pi"), [])
+        for item, why in ((r"\d+", "has no {mark}"), (r"(\d+) {mark}", "a group of its own"), (r"[{mark}", "no valid")):
+            got = agents.check(types.SimpleNamespace(DESCRIBE=GOOD, DETECT={**base, "item": item}), "pi")
+            self.assertTrue(any(why in p for p in got), (item, got))
+
+    def test_the_default_layout_reads_a_mark_first_and_an_item_reads_it_after_the_number(self):
+        from river import server
+        first = server._layout({"menu": "❯"})["mark"].match("  ❯ 1. Yes")
+        self.assertEqual((first.group(1), first.group(2), first.group(3)), ("  ", "❯", "1. Yes"))
+        after = server._layout({"menu": "●", "item": r"\d+ \({mark}\)"})["mark"].match("  3 (●) Yes, proceed")
+        self.assertEqual((after.group(1), after.group(2), after.group(3)), ("  ", "●", "Yes, proceed"))
+        self.assertIsNone(server._layout({"menu": "●", "item": r"\d+ \({mark}\)"})["mark"].match("  ● Yes"))

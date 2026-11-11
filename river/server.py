@@ -1547,9 +1547,13 @@ def _layout(detect=None):
     key = (*sorted(d.items()), tell)
     got = _LAYOUTS.get(key)
     if got is None:
+        # An option's line: its indent, then the mark where DETECT['item'] puts it ("{mark}": first; Grok: after the
+        # number, "3 (●) Yes, proceed", #5261), then its text. Groups: 1 the indent, 2 the mark, 3 the text.
+        item = lambda chars: re.compile("^(\\s*)" + d["item"].replace("{mark}", f"([{re.escape(chars)}])")
+                                        + "\\s*(\\S.*)$")
         got = _LAYOUTS[key] = {"box": re.escape(d["frame"]), "frame": d["frame"],
-                               "mark": re.compile(f"^(\\s*)([{re.escape(d['menu'])}])\\s*(\\S.*)$"),
-                               "other": d["other"] and re.compile(f"^(\\s*)([{re.escape(d['other'])}])\\s*(\\S.*)$"),
+                               "mark": item(d["menu"]),
+                               "other": d["other"] and item(d["other"]),
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
                                "tell": re.compile(tell)}
     return got
@@ -1725,6 +1729,11 @@ def _frame_title(tail, lines, at, framed):
     n = len(rows) - 1
     while n >= 0 and framed.match(rows[n]) and not _CORNER.match(rows[n]):
         n -= 1
+    if n >= 0 and n + 1 < len(rows) and not _CORNER.match(rows[n]):
+        # A box with a left edge only (Grok's ┃, #5261): the line above it is no part of it, and its first line of
+        # text, without a leading mark ("›  Delete notes.txt with rm"), is its title.
+        inside = (re.sub(r"^[^\w(\[\"']+", "", framed.sub("", x).rstrip(" │┃║")) for x in rows[n + 1:])
+        return next((x.strip() for x in inside if x.strip()), "")[:240] or None
     if n < 0 or not _CORNER.match(rows[n]):
         return None
     title = _BORDER.sub("", rows[n].strip().strip("╭╮┌┐┏┓╔╗"))

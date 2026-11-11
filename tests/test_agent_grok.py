@@ -427,3 +427,72 @@ class Commands(Home):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def watch(text):
+    """What maxpm serve's pane watcher (server.watch_prompts) reads from a screen with Grok's DETECT: (state,
+    question, options). state: blocked, working, idle, or None (the screen says neither)."""
+    from river import server
+    tail = server._prompt_tail(server._plain(text))
+    parts = server._prompt_found(tail, server._AnyOf(grok.DETECT["blocked"]), server._layout(grok.DETECT))
+    if parts:
+        return "blocked", parts["question"], parts["options"]
+    return server._screen_state(tail, grok.DETECT), None, None
+
+
+# The free usage limit, rebuilt from the lines that #5189 quoted (no capture of it was kept): a ┃ box with the
+# sentence and a numbered menu, and the key hint under it; above it, the end of the chat.
+USAGE_LIMIT = """
+  I will add the test next.
+
+  ┃
+  ┃  You hit your free usage limit.
+  ┃
+  ┃  1 ({one}) Upgrade to SuperGrok
+  ┃  2 ({two}) Wait until the limit resets
+  ┃
+
+  Tab:next answer  │  Esc:scrollback  │  Shift+x:dismiss
+"""
+
+
+class Watcher(unittest.TestCase):
+    """#5261: the pane watcher itself (not only the regexes) finds each blocked screen of Grok, with its question and
+    its menu, and reads the other screens as working or idle."""
+
+    def test_the_trust_question_is_blocked_above_its_version_line(self):
+        self.assertEqual(watch((FIX / "pane_blocked_trust.txt").read_text()),
+                         ("blocked", "Do you trust the contents of this directory?", []))
+
+    def test_the_permission_menu_has_its_header_and_options_with_the_mark_after_the_number(self):
+        state, question, options = watch((FIX / "pane_blocked_permission.txt").read_text())
+        self.assertEqual((state, question), ("blocked", "Delete notes.txt with rm"))
+        self.assertEqual(options, [("Yes, and don't ask again for anything (always-approve mode)", False),
+                                   ("Always allow: rm notes.txt", False), ("Yes, proceed", True),
+                                   ("No, reject (type to add feedback)", False), ("Never allow: rm notes.txt", False)])
+        from river import server
+        self.assertRegex(options[3][0], server._layout(grok.DETECT)["tell"])
+
+    def test_the_free_usage_limit_is_blocked_with_or_without_a_selected_option(self):
+        self.assertEqual(watch(USAGE_LIMIT.format(one="●", two="○")),
+                         ("blocked", "You hit your free usage limit.",
+                          [("Upgrade to SuperGrok", True), ("Wait until the limit resets", False)]))
+        self.assertEqual(watch(USAGE_LIMIT.format(one="○", two="○"))[0], "blocked")
+
+    def test_the_other_screens_and_quoted_words_are_not_blocked(self):
+        want = {"pane_working_thinking.txt": "working", "pane_working_tool.txt": "working",
+                "pane_idle.txt": "idle", "pane_idle_start.txt": "idle", "pane_slash.txt": "idle"}
+        for name, s in want.items():
+            self.assertEqual(watch((FIX / name).read_text()), (s, None, None), name)
+        # The words of a blocked screen in the chat, with the input box under them: no prompt.
+        idle = (FIX / "pane_idle.txt").read_text().splitlines()
+        quoted = "\n".join(["  You hit your free usage limit. Do you trust the contents of this directory?"] + idle)
+        self.assertEqual(watch(quoted)[0], "idle")
+
+    def test_the_process_of_a_release_build_is_found_by_its_command_line(self):
+        import re
+        rx = grok.DETECT["process_args"]
+        for line in ("grok-1.0.77-mac --agent /q/grok-agent.md", "/opt/homebrew/bin/grok", "grok --resume abc"):
+            self.assertRegex(line, rx)
+        for line in ("grokker run", "/x/grok-notes.txt", "python3 grok.py"):
+            self.assertIsNone(re.search(rx, line), line)

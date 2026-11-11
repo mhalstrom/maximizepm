@@ -260,6 +260,8 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "other":        the characters that mark each other option, at the column of the selected one's mark (cliclack:
 #                      "●" selected, "○" each other one); "": the other options have no mark, and their text starts
 #                      at the column of the selected option's text (Claude Code, Codex),
+#      "item":         where the mark stands in an option's line: a regex with {mark} for it and no group of its own
+#                      ("{mark}": the mark comes first; Grok: r"\d+ \({mark}\)" for "3 (●) Yes, proceed", #5261),
 #      "frame":        the characters of the frame some CLIs draw around a prompt,
 #      "rule":         a regex of a dashed rule (the input box's edge),
 #      "hint":         a regex of the line that names keys ("Enter to confirm · Esc to cancel"),
@@ -274,10 +276,11 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool}
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
-               "menu": str, "other": str, "frame": str, "rule": str, "hint": str}
+               "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str}
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
+    "item": "{mark}",
     "frame": "│┃╭╮╰╯┌┐└┘",
     "rule": r"^\s*[─━╌╍┄┅═-]{8,}\s*$",
     "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]",
@@ -472,6 +475,14 @@ def check(module, mid=None):
             for k in ("idle", "working", "rule", "hint", "tell_instead", "process_args"):
                 if isinstance(det.get(k), str):
                     out += _regex(f"DETECT[{k!r}]", det[k])
+            if isinstance(det.get("item"), str):
+                if "{mark}" not in det["item"]:
+                    out.append("DETECT['item'] has no {mark}")
+                else:
+                    rx = det["item"].replace("{mark}", "(x)")
+                    bad = _regex("DETECT['item']", rx)
+                    out += bad or ([] if re.compile(rx).groups == 1 else
+                                   ["DETECT['item'] has a group of its own; use (?:...)"])
             for i, p in enumerate(det.get("blocked") or ()):
                 out += _regex(f"DETECT['blocked'][{i}]", p) if isinstance(p, str) else [f"DETECT['blocked'][{i}] is no str"]
     if getattr(module, "INPUT", None) is not None:

@@ -204,18 +204,28 @@ STATE = {"state": "hook", "session_id": "hook"}
 # menu shows under the running turn's "[stop]" line.
 DETECT = {
     "process": "grok",
+    # tmux names the process of a release build after its file (grok-1.0.77-mac): found in its command line instead.
+    "process_args": r"(?:^|/)grok(?:-\d[\w.]*-[a-z]+)?(?:\s|$)",
     # The footer of the prompt with nothing running: "Shift+Tab:mode │ Ctrl+x:shortcuts" (while a turn runs,
     # Ctrl+c:cancel comes between them); or the welcome screen of a new session, which has no footer yet.
     "idle": r"(?m)Shift\+Tab:mode\s+│\s+Ctrl\+x:shortcuts\s*$|Resume session\s+ctrl\+r",
     # The status line of a running turn ends in "[stop]": "⠴ Thinking… 1.4s   3.0s ⇣1.33k [stop]".
     "working": r"(?m)\[stop\]\s*$",
-    "blocked": [r"Do you trust the contents of this directory\?",
-                r"(?m)^\s*┃\s+\d+ \([○●]\) (Yes, proceed|No, reject)"],
+    # The pane watcher reads these screens with the layout keys below (#5261): the trust question (its last option,
+    # "No, quit  n", is the last line of the prompt), each numbered menu in a ┃ box (a permission, the free usage
+    # limit), and the free usage limit's own words.
+    "blocked": [r"Do you trust the contents of this directory\?", r"(?m)^\s*No, quit\s+n\s*$",
+                r"(?m)^\s*┃\s+\d+ \([○●]\) \S", r"You hit your free usage limit"],
     "tell_instead": r"No, reject \(type to add feedback\)",
     "image_paste": "[Image #{n}]",
     "menu": "●",  # the selected option: "3 (●) Yes, proceed"; the others are "(○)"
+    "other": "○",
+    "item": r"\d+ \({mark}\)",  # the mark comes after the option's number
     "frame": "│┃╭╮╰╯",
-    "hint": r"\d+/\d+:select\s+│",  # "1/5:select │ Tab:next option │ ←/→:scope │ ... │ Ctrl+c:cancel"
+    # Also under a prompt: the version line at the foot of the trust screen ("Grok Build  1.0.77 [stable]").
+    "rule": r"^\s*[─━╌╍┄┅═-]{8,}\s*$|^\s*Grok Build\s+\d[\w.]*\s+\[\w+\]\s*$",
+    # "1/5:select │ Tab:next option │ ←/→:scope │ ... │ Ctrl+c:cancel"; "Tab:next answer │ Esc:scrollback │ ..."
+    "hint": r"\d+/\d+:select\s+│|Tab:next answer\s+│",
 }
 
 # The hooks go into a Grok agent definition (a Markdown file with a front matter, grok --agent <file>) beside the
