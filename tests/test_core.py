@@ -3176,6 +3176,35 @@ class Upgrade(Base):
             line = f.read().splitlines()[-1]
         self.assertRegex(line, r"held=\d+\.\ds pid=\d+ .* thread=MainThread in item_add$")
 
+    def test_needs_you_and_a_command_take_no_write_lock_when_nothing_changes(self):
+        core.project_add(self.c, "a")
+        core.register(self.c, "mark", human=True)
+        core.item_add(self.c, "a", "pick a color", doer="human")
+        self.assertEqual(len(core.needs_you(self.c)), 1)
+        holder = sqlite3.connect(self.path, isolation_level=None)
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN IMMEDIATE")
+        self.c.execute("PRAGMA busy_timeout=200")
+        t = time.time()
+        self.assertEqual(len(core.needs_you(self.c)), 1)  # before #5396 it waited for the lock, 2-4 s each time
+        core.sync_needs_you_now(self.c)
+        self.assertLess(time.time() - t, 0.5)
+        holder.execute("ROLLBACK")
+
+    def test_a_sync_that_meets_a_newer_write_runs_again_in_a_tx(self):
+        calls = []
+        real = core.sync_needs_you
+
+        def once_locked(conn):
+            calls.append(conn.in_transaction)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real(conn)
+        with mock.patch.object(core, "sync_needs_you", once_locked):
+            core.sync_needs_you_now(self.c)
+        self.assertEqual(calls, [True, True])
+        self.assertFalse(self.c.in_transaction)
+
     def test_the_schema_id_is_the_same_in_every_process(self):
         out = {subprocess.run([sys.executable, "-c", "from river import core; print(core.schema_print())"],
                               capture_output=True, text=True, check=True).stdout.strip() for _ in range(3)}

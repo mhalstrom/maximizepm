@@ -4224,8 +4224,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = op(conn, body.get("args", {}), actor)
                 finally:
                     hooks_soon(conn, core.hook_token())  # a release event of this action: its hook runs after the answer
-                with core.tx(conn):
-                    core.sync_needs_you(conn)
+                core.sync_needs_you_now(conn)
                 return self._send(200, {"ok": True, "result": result})
             finally:
                 core.EVENT_VIA.reset(via)

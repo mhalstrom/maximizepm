@@ -1789,8 +1789,7 @@ def _run(args, conn):
     if not for_other:
         core.record_session_url(conn, me, core.session_url_from_env())
         core.record_session(conn, me, core.session_from_env())
-    with core.tx(conn):
-        core.sync_needs_you(conn)  # the command may have made a human item ready, or sent a question to a person
+    core.sync_needs_you_now(conn)  # the command may have made a human item ready, or sent a question to a person
     if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json
             and sys.stdin.isatty() and sys.stdout.isatty()):
         conn.close()

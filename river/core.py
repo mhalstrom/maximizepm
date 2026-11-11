@@ -7039,7 +7039,7 @@ def activity(conn, actor, tries=None):
     with tx(conn, tries):
         expired = _sweep(conn)
         _touch_agent(conn, actor)
-        sync_needs_you(conn)
+    sync_needs_you_now(conn, tries)
     return expired
 
 
@@ -7192,6 +7192,30 @@ def sync_needs_you(conn):
                     item_id=m["item_id"], message_id=mid, human=m["to_agent"])
 
 
+def sync_needs_you_now(conn, tries=None):
+    """sync_needs_you for a caller that holds no transaction. It runs first in a read transaction (BEGIN
+    DEFERRED), which takes no write lock: most of the time the queue and its needs-you rows match already, and
+    sync_needs_you writes nothing. Only when it writes does SQLite take the write lock; when another command
+    wrote since this read began, or the lock stays busy, it runs again in a tx. Before #5396 every command ran
+    it twice in a write transaction, and its annotate() of the whole queue held the lock 2-4 s with 20 sessions,
+    each time the page asked for needs-you."""
+    conn.execute("BEGIN DEFERRED")
+    try:
+        sync_needs_you(conn)
+    except sqlite3.OperationalError as e:
+        conn.execute("ROLLBACK")
+        if "database is locked" not in str(e):
+            raise
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+        return
+    with tx(conn, tries):
+        sync_needs_you(conn)
+
+
 def forward_note(conn, q):
     """What the manager added when it forwarded question q to the person (#5307): its note in the thread, or None."""
     r = conn.execute("SELECT m.body FROM messages m JOIN agents a ON a.name=m.from_agent AND a.role='manager' "
@@ -7208,8 +7232,7 @@ def needs_you(conn, human=None, include_closed=False, limit=100):
     queue order (effective priority, project rank, what they unblock). Closed
     events follow, newest first. Each item event carries its effective priority,
     where that priority comes from, and how many open items it unblocks."""
-    with tx(conn):
-        sync_needs_you(conn)
+    sync_needs_you_now(conn)
     sql = ("SELECT n.*, i.title item_title, p.name project, m.kind message_kind, m.from_agent, m.body "
            "FROM needs_you n LEFT JOIN items i ON i.id=n.item_id LEFT JOIN projects p ON p.id=i.project_id "
            "LEFT JOIN messages m ON m.id=n.message_id WHERE 1=1")

@@ -347,8 +347,7 @@ def _adapter(conn, channel):
 
 def run(conn, now_=False):
     """Send every channel batch that is due. Returns one result per channel batch it tried."""
-    with core.tx(conn):
-        core.sync_needs_you(conn)
+    core.sync_needs_you_now(conn)
     t = core.now()
     by_channel = {}
     for r in core.outbox(conn):
