@@ -187,8 +187,11 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
     import secrets
     name = f"{t['project']}-{secrets.token_hex(2)}"
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
-    core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
-    _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner)
+    try:
+        core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
+        _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner)
+    except Exception as e:
+        _undo_start(conn, name, e, item_id=t["item"]["id"], actor=actor)
     if t.get("fork_of"):  # it reads the goal's base from the cache, which keeps the base warm
         core.base_used(conn, t["fork_of"]["session_id"])
         with core.tx(conn):
@@ -200,6 +203,26 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
             core._event(conn, t["item"]["id"], actor or "maxpm", f"{name} launched with a custom prompt: "
                         + flat[:200] + ("..." if len(flat) > 200 else ""))
     return {**t, "session_name": name}
+
+
+def _undo_start(conn, name, error, item_id=None, target=None, actor=None):
+    """Take back a start whose terminal did not open (#5263): no session runs under the new name, so it gives back
+    the target it was handed, unregisters (which ends its push and its queue entries), and records why on the item.
+    Before, the name stayed with the item pushed to it for reserve_ttl, and the next Start said nothing was ready.
+    Raises RiverError with the terminal's error."""
+    why = str(error) if isinstance(error, RiverError) else f"{type(error).__name__}: {error}"
+    try:
+        if target:
+            core.target_release(conn, target, name)
+        core.unregister(conn, name, actor)
+        if item_id is not None:
+            with core.tx(conn):
+                core._event(conn, item_id, actor or "maxpm", f"the start of {name} failed, so it was taken back: "
+                            + why[:200])
+    except RiverError:
+        pass  # what could be undone is undone; the terminal's error is what the person needs
+    raise RiverError(f"the session did not start: {why}; MaximizePM took the start back"
+                     + (f" (#{item_id} is open again)" if item_id is not None else "")) from error
 
 
 def open_agent_on(conn, item_id, runner=None, agent=None, person=None, actor=None, model=None, effort=None,
@@ -365,7 +388,10 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     name = f"manager-{secrets.token_hex(2)}"
     core.register(conn, name, note="started from the page as the manager")
     core._set_role_note(conn, name, "manager", None)  # the next Start manager sees it at once
-    _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner)
+    try:
+        _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner)
+    except Exception as e:
+        _undo_start(conn, name, e, actor=actor)
     return {**t, "session_name": name}
 
 
@@ -2228,7 +2254,10 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{dep_id}")
     with core.tx(conn):
         core.target_handoff(conn, target, name, why)
-    _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": focus, **t["env"]}, runner)
+    try:
+        _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": focus, **t["env"]}, runner)
+    except Exception as e:
+        _undo_start(conn, name, e, item_id=dep_id, target=target)
     return {**t, "session_name": name}
 
 

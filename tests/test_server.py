@@ -76,6 +76,37 @@ class LaunchAgent(unittest.TestCase):
         self.assertNotIn("export", sent[0])
         self.assertRegex(sent[0], r"&& (MAXPM_DB=\S+ )?MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ claude ")
 
+    @staticmethod
+    def _broken(line):
+        raise RiverError("tmux: File name too long")  # #5263: a test serve whose tmux socket path was too long
+
+    def test_a_start_whose_terminal_fails_is_taken_back_so_the_next_start_works(self):
+        core.project_add(self.c, "shop", path=self.dir.name)
+        a = core.item_add(self.c, "shop", "first")["id"]
+        with self.assertRaisesRegex(RiverError, r"did not start: tmux: File name too long; .*#%d is open again" % a):
+            server.launch_agent(self.c, runner=self._broken)
+        self.assertEqual(self.c.execute("SELECT name FROM agents WHERE name LIKE 'shop-%'").fetchall(), [])
+        it = core._item(self.c, a)
+        self.assertEqual((it["status"], it["reserved_for"], it["reserved_until"]), ("open", None, None))
+        self.assertTrue(any("failed, so it was taken back: tmux: File name too long" in r["change"]
+                            for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (a,))))
+        sent = []
+        t = server.launch_agent(self.c, runner=sent.append)  # before: 'nothing is ready for an agent'
+        self.assertEqual((t["item"]["id"], core._item(self.c, a)["reserved_for"]), (a, t["session_name"]))
+        with self.assertRaisesRegex(RiverError, "did not start"):  # Dispatch goes the same way
+            server.dispatch_item(self.c, core.item_add(self.c, "shop", "second")["id"], runner=self._broken)
+
+    def test_a_manager_or_deployer_whose_terminal_fails_leaves_no_name_and_no_target(self):
+        core.project_add(self.c, "shop", path=self.dir.name)
+        with self.assertRaisesRegex(RiverError, "did not start: tmux: File name too long"):
+            server.start_manager(self.c, runner=self._broken)
+        self.assertEqual(self.c.execute("SELECT name FROM agents WHERE name LIKE 'manager-%'").fetchall(), [])
+        rv, dep = self._release(owner=None, review="off")
+        with self.assertRaisesRegex(RiverError, "did not start"):
+            server.start_deployer(self.c, "web", dep, "the release is ready", runner=self._broken)
+        self.assertIsNone(core.target_show(self.c, "web")["owner"])
+        self.assertEqual(self.c.execute("SELECT name FROM agents WHERE name LIKE 'deploy-web-%'").fetchall(), [])
+
     def test_goal_context_session_builds_a_base_and_workers_start_as_forks(self):
         import json
         from river import cli
