@@ -1,0 +1,15 @@
+<!-- The Health view of Plan (#5356, decision 2 of the canvas does-maxpm-work): does MaximizePM work. The headline and
+     the measures of maxpm health against the time before, a small graph per measure by day with the change log marked,
+     and the goal comparison. maxpm serve puts it into plan.html, at view: health. -->
+<div id="plan-health" class="plan-view hidden">
+  <div class="panel">
+    <h2>Does MaximizePM work?<span class="spacer"></span>
+      <select id="healthSince" title="The time the numbers cover; each number also shows the time of the same length before it"><option value="7d" selected>last 7 days</option><option value="30d">last 30 days</option></select>
+    </h2>
+    <div id="healthTiles" class="h-tiles"></div>
+    <div id="healthNote" class="muted t-s"></div>
+  </div>
+  <div class="panel"><h2>By day</h2><div id="healthGraphs" class="h-graphs"></div></div>
+  <div class="panel" id="healthChangesBox"><h2>Changes</h2><div id="healthChanges"></div></div>
+  <div class="panel"><h2>Goal against no goal</h2><div id="healthGoal"></div></div>
+</div>

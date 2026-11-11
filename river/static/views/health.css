@@ -1,0 +1,26 @@
+/* The Health view of Plan (#5356): stat tiles, a small bar graph per measure, the goal table. */
+#plan-health, #plan-health .panel { min-width: 0; max-width: 100%; }
+.h-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--w-card-phone)), 1fr)); gap: var(--sp-5); margin-bottom: var(--sp-4); }
+.h-tile { display: flex; flex-direction: column; gap: var(--sp-0); }
+.h-tile .h-val { font-size: var(--fs-2xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+.h-tile.h-main .h-val { color: var(--accent); }
+.h-tile .h-label { font-size: var(--fs-m); }
+.h-tile .h-before { font-size: var(--fs-s); color: var(--muted); font-variant-numeric: tabular-nums; }
+.h-graphs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--w-l)), 1fr)); gap: var(--sp-6); }
+.h-graph { min-width: 0; }
+.h-graph h3 { font-size: var(--fs-m); font-weight: 600; margin: 0 0 var(--sp-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.h-graph svg { display: block; width: 100%; height: var(--h-bars); }
+.h-graph .h-bar { fill: var(--accent); }
+.h-graph .h-hit { fill: transparent; }
+.h-graph .h-hit:hover + .h-bar, .h-graph .h-hit:hover { fill: var(--accent-ink); fill-opacity: .15; }
+.h-graph .h-base { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.h-graph .h-change { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.h-axis { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--muted); margin-top: var(--sp-0); }
+.h-table { width: 100%; border-collapse: collapse; font-size: var(--fs-m); font-variant-numeric: tabular-nums; }
+.h-table th, .h-table td { white-space: nowrap; text-align: right; padding: var(--sp-1) var(--sp-3); border-bottom: var(--hair) solid var(--line); }
+.h-table th:first-child, .h-table td:first-child { text-align: left; }
+.h-table th { font-weight: 600; color: var(--muted); font-size: var(--fs-s); }
+.h-table tr.h-proj td { font-weight: 600; padding-top: var(--sp-4); }
+.h-table .h-small { color: var(--muted); }
+.h-wrap { overflow-x: auto; max-width: 100%; }
+.h-change-row { font-size: var(--fs-m); margin-bottom: var(--sp-2); }

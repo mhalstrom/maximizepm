@@ -11082,13 +11082,69 @@ def _goal_split(conn, t0, t1, pid):
     return {"projects": projects, "total": total, "left_out": one_sided, "min_group": HEALTH_MIN_GROUP}
 
 
-def health(conn, since="7d", until=None, project=None, by=None):
+def _health_days(conn, t0, t1, pid, minutes):
+    """The measures of maxpm health per day (UTC) from t0 to t1, for the graphs of the Health view (#5356): done
+    items, rework (reopens, lost claims, review fixes), needs-you rows opened, person minutes per done item, the
+    idle share of the sampled session time, and the median cost of the items done that day."""
+    a, b = iso(t0), iso(t1)
+    pw = " AND i.project_id=?" if pid is not None else ""
+    pa = [pid] if pid is not None else []
+    day = {}
+    d, last = t0.date(), (t1 - timedelta(seconds=1)).date()
+    while d <= last:
+        day[d.isoformat()] = {"day": d.isoformat(), "done": 0, "rework": 0, "needs_you": 0, "eqs": [],
+                              "idle": None, "sampled_secs": 0}
+        d += timedelta(days=1)
+
+    def add(sql, args, key):
+        for r in conn.execute(sql, args):
+            if r["d"] in day:
+                day[r["d"]][key] += r["n"]
+    add("SELECT substr(i.closed_at, 1, 10) AS d, COUNT(*) AS n FROM items i WHERE i.status='done' "
+        "AND i.closed_at>=? AND i.closed_at<?" + pw + " GROUP BY d", [a, b] + pa, "done")
+    add("SELECT substr(e.at, 1, 10) AS d, COUNT(*) AS n FROM events e JOIN items i ON i.id=e.item_id "
+        "WHERE (e.change LIKE 'reopened%' OR e.change LIKE 'lease expired%') AND e.at>=? AND e.at<?" + pw
+        + " GROUP BY d", [a, b] + pa, "rework")
+    add("SELECT substr(i.created_at, 1, 10) AS d, COUNT(*) AS n FROM items i WHERE i.context LIKE ? "
+        "AND i.created_at>=? AND i.created_at<?" + pw + " GROUP BY d", [REVIEW_FIX_CONTEXT + "%", a, b] + pa, "rework")
+    add("SELECT substr(n.opened_at, 1, 10) AS d, COUNT(*) AS n FROM needs_you n LEFT JOIN messages m "
+        "ON m.id=n.message_id LEFT JOIN items i ON i.id=COALESCE(n.item_id, m.item_id) WHERE n.opened_at>=? "
+        "AND n.opened_at<?" + pw + " GROUP BY d", [a, b] + pa, "needs_you")
+    for r in conn.execute(
+            "SELECT substr(i.closed_at, 1, 10) AS d, u.input + ? * u.cache_read + ? * u.write_1h + ? * u.write_5m "
+            "AS eq FROM items i JOIN (SELECT item_id, SUM(input) AS input, SUM(cache_read) AS cache_read, "
+            "SUM(write_1h) AS write_1h, SUM(write_5m) AS write_5m FROM item_usage GROUP BY item_id) u "
+            "ON u.item_id=i.id WHERE i.status='done' AND i.closed_at>=? AND i.closed_at<?" + pw,
+            [EQ_READ, EQ_WRITE_1H, EQ_WRITE_5M, a, b] + pa):
+        if r["d"] in day:
+            day[r["d"]]["eqs"].append(r["eq"])
+    sw = " AND project_id=?" if pid is not None else ""
+    for r in conn.execute("SELECT substr(at, 1, 10) AS d, SUM(secs) AS total, "
+                          "SUM(CASE WHEN state='waiting_work' THEN secs ELSE 0 END) AS idle FROM session_samples "
+                          "WHERE at>=? AND at<? AND state<>'none'" + sw + " GROUP BY d", [a, b] + pa):
+        if r["d"] in day and r["total"]:
+            day[r["d"]]["idle"] = r["idle"] / r["total"]
+            day[r["d"]]["sampled_secs"] = r["total"]
+    out = []
+    for v in day.values():
+        eqs = v.pop("eqs")
+        n = v["done"]
+        v["median_eq"] = statistics.median(eqs) if eqs else None
+        v["rework_rate"] = v["rework"] / n if n else None
+        v["person_minutes_per_item"] = v["needs_you"] * minutes / n if n else None
+        out.append(v)
+    return out
+
+
+def health(conn, since="7d", until=None, project=None, by=None, days=False):
     """maxpm health: does MaximizePM work? The measures of the canvas does-maxpm-work (decided 2026-11-11, #5338)
     for the time from since to until, and for the time of the same length before it, so a change shows. Headline:
     person minutes per done item (a proxy: needs-you rows x health_person_minutes / items done), with items done
     per day and the rework rate beside it, so a fall in quality shows. Rework: reopens, lost claims (a lease ran
     out) and the fix items of a failed review, per done item. Cost in input-token equivalents (maxpm usage)."""
-    t1 = until if isinstance(until, datetime) else (parse_when(until) if until else now())
+    # Default end: the start of the next second, as iso() keeps whole seconds: an item closed this second counts.
+    t1 = until if isinstance(until, datetime) else (parse_when(until) if until else
+                                                    now().replace(microsecond=0) + timedelta(seconds=1))
     if since == "all":
         first = conn.execute("SELECT MIN(created_at) AS t FROM items").fetchone()["t"]
         t0 = parse_iso(first) if first else t1
@@ -11103,6 +11159,8 @@ def health(conn, since="7d", until=None, project=None, by=None):
     before = _health_range(conn, t0 - (t1 - t0), t0, pid, minutes)
     res = {"project": project, "person_minutes": minutes, "now": now_r, "before": before,
            "changes": _change_effects(conn, t0, t1, pid, minutes)}
+    if days:
+        res["days"] = _health_days(conn, t0, t1, pid, minutes)
     if by == "goal":
         res["by_goal"] = _goal_split(conn, t0, t1, pid)
     elif by:

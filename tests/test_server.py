@@ -4493,3 +4493,47 @@ class KillPane(unittest.TestCase):
         self.assertIsNotNone(p.returncode)
         self.assertEqual(core.agent_status(self.c, "aider-1")["state"], "stopped")
         self.assertIsNone(core._item(self.c, item)["reserved_for"])
+
+
+class HealthApi(unittest.TestCase):
+    """GET /api/health: the numbers of maxpm health for the Health view of Plan, with a row per day (#5356)."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def get(self, path):
+        out = {}
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address = path, ("127.0.0.1", 5555)
+        h.headers = {"Host": "127.0.0.1:8765"}
+        h._send = lambda code, body, *a, **k: out.update(code=code, body=json.loads(json.dumps(body, default=str)))
+        h.do_GET()
+        return out["code"], out["body"]
+
+    def test_the_view_gets_the_days_the_goal_split_and_the_changes(self):
+        core.project_add(self.c, "shop")
+        x = core.item_add(self.c, "shop", "work")["id"]
+        core.register(self.c, "w")
+        core.register(self.c, "mark", human=True)
+        core.claim(self.c, x, "w")
+        core.done(self.c, x, actor="w")
+        core.change_add(self.c, "manager first", at=core.now() - core.timedelta(days=1), actor="mark")
+        code, body = self.get("/api/health?since=7d")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(body["days"]), 8)  # a part of a day at each end
+        self.assertEqual(sum(d["done"] for d in body["days"]), 1)
+        self.assertEqual(body["now"]["done"], 1)
+        self.assertIn("by_goal", body)
+        self.assertEqual([c["name"] for c in body["changes"]], ["manager first"])
+        code, body = self.get("/api/health?since=7d&project=shop")
+        self.assertEqual((code, body["project"]), (200, "shop"))
+        code, body = self.get("/api/health?since=7d&project=nope")
+        self.assertEqual(code, 400)
+        self.assertIn("no project 'nope'", body["error"])

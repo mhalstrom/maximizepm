@@ -13,7 +13,7 @@ import { S, scope, planView } from "../page.js";
 import { miniGraph } from "./graph.js";
 
 // The views of Plan, in the order of their buttons.
-export const PLAN_VIEWS = [["overview", "Overview"], ["items", "Items"], ["goals", "Goals"], ["graph", "Graph"], ["releases", "Releases"], ["done", "Done"]];
+export const PLAN_VIEWS = [["overview", "Overview"], ["items", "Items"], ["goals", "Goals"], ["graph", "Graph"], ["releases", "Releases"], ["done", "Done"], ["health", "Health"]];
 
 export function renderPlanViews() {
   const html = PLAN_VIEWS.map(([k, name]) => button(esc(name), { cls: "plan-vbtn", pressed: planView === k, data: { "plan-view": k },

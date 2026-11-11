@@ -4092,6 +4092,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": str(e)})
             finally:
                 conn.close()
+        if path == "/api/health":
+            # The Health view of Plan (#5356): core.health, the one behind maxpm health, with the goal split and a
+            # row per day for the graphs.
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+            conn = core.connect()
+            try:
+                return self._send(200, core.health(conn, q.get("since") or "7d", project=q.get("project") or None,
+                                                   by="goal", days=True))
+            except (RiverError, ValueError) as e:
+                return self._send(400, {"error": str(e)})
+            finally:
+                conn.close()
         if path == "/api/update":
             if DESKTOP:  # the page hides the button when git is false
                 return self._send(200, {"git": False, "desktop": True, "boot": BOOT})
