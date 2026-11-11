@@ -12280,12 +12280,20 @@ def global_policies():
         return []
     out = []
     for r in rows:
-        role = r.get("role")
-        out.append({"id": r["id"], "pid": r["id"], "kind": "global", "project": None, "role": role,
+        roles = _global_roles(r.get("role"))
+        out.append({"id": r["id"], "pid": r["id"], "kind": "global", "project": None,
+                    "role": ", ".join(roles) or None, "roles": roles,
                     "text": r["text"], "reason": r["reason"], "source": r["source"], "items": [], "adds_to": None,
-                    "scope": "global: " + (role or "queue"), "created_by": None, "created_at": None,
+                    "scope": "global: " + (", ".join(roles) or "queue"), "created_by": None, "created_at": None,
                     "changed_at": None})
     return out
+
+
+def _global_roles(role):
+    """The roles of a global policy: its "role" is none (every session), one role, or a list of roles."""
+    if not role:
+        return []
+    return [role] if isinstance(role, str) else list(role)
 
 
 def _global_policy(gid):
@@ -12351,6 +12359,7 @@ def _policy_view(conn, r):
     p.pop("project_id", None)
     p["pid"] = f"p{p['id']}"
     p["kind"] = "user"
+    p["roles"] = [p["role"]] if p["role"] else []
     p["scope"] = policy_scope(p)
     ids = [int(i) for i in (p.get("items") or "").split()]
     p["items"] = [{"id": i, "title": x["title"], "status": x["status"]} for i in ids
@@ -12439,7 +12448,7 @@ def policy_list(conn, project=None, role=None, kind=None):
     what applies). kind: global or user for one kind. A project filter leaves out the global ones: they name none."""
     out = []
     if kind != "user" and not project:
-        out = [g for g in global_policies() if not role or g["role"] == _policy_role(role)]
+        out = [g for g in global_policies() if not role or _policy_role(role) in g["roles"]]
     if kind == "global":
         return out
     q, args = [], []
@@ -12463,9 +12472,9 @@ def policies_for(conn, projects=(), role=None):
     out = []
     for p in policy_list(conn):
         if role == "manager":
-            hit = p["role"] == "manager" or (not p["role"] and not p["project"])
+            hit = "manager" in p["roles"] or (not p["roles"] and not p["project"])
         else:
-            hit = (not p["project"] or p["project"] in projects) and (not p["role"] or p["role"] in roles)
+            hit = (not p["project"] or p["project"] in projects) and (not p["roles"] or bool(roles & set(p["roles"])))
         if hit:
             out.append(p)
     return out

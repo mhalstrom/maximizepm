@@ -1,4 +1,15 @@
 {
-  "about": "Global policies (#5308): rules that ship with MaximizePM and apply to the sessions of every user's queue. Each has an id (g1, g2, ...; never reuse one), the rule (text), its reason, its source (who decided it, and when), and an optional role (worker, reviewer, deployer, owner, manager, expert; none: every session). They change only by a commit and a release. A person's own rules are user policies in their queue (maxpm policy add), never here.",
-  "policies": []
+  "about": "Global policies (#5308): rules that ship with MaximizePM and apply to the sessions of every user's queue. Each has an id (g1, g2, ...; never reuse one), the rule (text), its reason, its source (who decided it, and when), and an optional role: one role or a list of roles (worker, reviewer, deployer, owner, manager, expert; none: every session). They change only by a commit and a release. A person's own rules are user policies in their queue (maxpm policy add), never here.",
+  "policies": [
+    {
+      "id": "g1",
+      "text": "The manager works for the user: bring the user nothing that the manager can answer. A worker asks the manager first, and goes to the user only for what the manager cannot decide (a decision or approval only the user can give, an account, payment or legal step). The manager answers each question itself when it can, and sends on to the user only what it cannot answer.",
+      "reason": "The point of MaximizePM is less work for the user: the user sees only what the manager cannot answer. #5307 enforces this in code: a question from a session to a person goes to the active manager first, and reaches the person only when the manager neither answers nor forwards it within question_hold (10m).",
+      "source": "mark 2026-11-11",
+      "role": [
+        "manager",
+        "worker"
+      ]
+    }
+  ]
 }

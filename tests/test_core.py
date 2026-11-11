@@ -8375,6 +8375,19 @@ class Policies(Base):
         self.assertEqual(self.ids(core.policies_for(self.c, ["api"], "expert")), ["g1", q, o])
         self.assertEqual(self.ids(core.policies_for(self.c, role="manager")), ["g1", "g2", q, m])
 
+    def test_a_global_policy_of_several_roles(self):
+        g = os.path.join(self.dir.name, "policies2.json")
+        with open(g, "w") as f:
+            json.dump({"policies": [{"id": "g1", "text": "Rule MW", "reason": "r", "source": "tester 2026-01-01",
+                                     "role": ["manager", "worker"]}]}, f)
+        with mock.patch.object(core, "GLOBAL_POLICIES_FILE", g):
+            (g1,) = core.policy_list(self.c, kind="global")
+            self.assertEqual((g1["scope"], g1["roles"]), ("global: manager, worker", ["manager", "worker"]))
+            for role, has in (("manager", True), ("worker", True), ("reviewer", True), ("expert", False)):
+                self.assertEqual("g1" in self.ids(core.policies_for(self.c, ["web"], role)), has, role)
+            self.assertEqual(self.ids(core.policy_list(self.c, role="manager", kind="global")), ["g1"])
+            self.assertEqual(self.ids(core.policy_list(self.c, role="expert", kind="global")), [])
+
     def test_go_and_manage_briefings_print_them(self):
         b = core.go(self.c, self.dir.name, "w1")
         self.assertEqual(b["item"]["id"], self.it)
@@ -8440,5 +8453,7 @@ class ShippedPolicies(unittest.TestCase):
             self.assertLessEqual(set(r), {"id", "text", "reason", "source", "role"}, "a global policy names no project")
             for k in ("text", "reason", "source"):
                 self.assertTrue(r.get(k, "").strip(), f"{r['id']} has no {k}")
-            self.assertIn(r.get("role"), (None,) + core.POLICY_ROLES)
+            roles = r.get("role")
+            for x in ([roles] if isinstance(roles, str) or roles is None else roles):
+                self.assertIn(x, (None,) + core.POLICY_ROLES)
         self.assertEqual(len(core.global_policies()), len(ids))
