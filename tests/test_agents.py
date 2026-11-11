@@ -1081,3 +1081,38 @@ class SharedGateway(Env):
         with mock.patch.dict(os.environ, env), mock.patch.object(core, "proc_tty", lambda pid: "ttys030"):
             self.c.execute("UPDATE agents SET pid=4243 WHERE name='h1'")
             self.assertFalse(core.drop_background_process(self.c, "h1"))  # a process on a terminal stays
+
+
+class ChatPathType(Env):
+    """#5260: Grok's chat_path returned a str, sessions.transcript called stat() on it, and the Sessions tab listed no
+    session at all. Adapter.chat_path gives a Path for any module, and the built-in modules return one."""
+
+    def test_a_str_from_a_user_module_becomes_a_path(self):
+        log = Path(self.tmp.name) / "s1.log"
+        log.write_text("{}\n")
+        self.user_module("strlog", f"""
+            DESCRIBE = {{"id": "strlog", "label": "Str", "exe": "strlog", "family": "multi"}}
+            CHAT = {{"compressed": False, "file_tools": [], "ref": "session", "cache_write": False}}
+            def chat_path(ref, folder, root=None):
+                return {str(log)!r} if ref == "s1" else ""
+            def parse_chat(lines):
+                return [], None
+        """)
+        a = agents.get("strlog")
+        self.assertEqual(a.chat_path("s1"), log)
+        self.assertIsNone(a.chat_path("other"))  # "" is no file
+        core.register(self.c, "w")
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO agent_sessions(agent, session_id, first_seen) VALUES ('w', 's1', ?)",
+                           (core.iso(core.now()),))
+        self.assertEqual(sessions.transcript(self.c, "w"), ("strlog", log))
+
+    def test_every_built_in_chat_path_returns_a_path_or_none(self):
+        import inspect
+        for mid in agents.BUILTIN:
+            m = agents.load()[mid].module
+            f = getattr(m, "chat_path", None)
+            if f is None:
+                continue
+            src = inspect.getsource(f)
+            self.assertNotRegex(src, r"return str\(", f"{mid}.chat_path returns a str")

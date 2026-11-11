@@ -308,9 +308,9 @@ class Recorded(Home):
         d.mkdir(parents=True)
         (d / "updates.jsonl").write_text("")
         a = agents.Adapter(grok, "builtin")
-        self.assertEqual(a.chat_path(SID), str(d / "updates.jsonl"))
+        self.assertEqual(a.chat_path(SID), d / "updates.jsonl")
         with mock.patch("os.path.realpath", lambda p: "/work/repo"):
-            self.assertEqual(a.chat_path(SID, "/tmp/link-to-repo"), str(d / "updates.jsonl"))
+            self.assertEqual(a.chat_path(SID, "/tmp/link-to-repo"), d / "updates.jsonl")
         for bad in ("", "../x", ".hidden", "nope"):
             self.assertIsNone(a.chat_path(bad), bad)
 

@@ -639,12 +639,14 @@ class Adapter:
         return (self.chat or {}).get("ref")
 
     def chat_path(self, session_ref, folder=None, root=None):
-        """The log file of a session, or None; root (a folder that replaces the agent's own log folder) goes to the
-        module only when it is given."""
+        """The log file of a session (a Path), or None; root (a folder that replaces the agent's own log folder) goes to
+        the module only when it is given. A module that returns a str gets a Path back: the Sessions tab calls stat()
+        on it, and one adapter's str hid every session of the tab (#5260)."""
         f = self._fn("chat_path")
         if f is None or not session_ref:
             return None
-        return f(session_ref, folder, root=root) if root else f(session_ref, folder)
+        got = f(session_ref, folder, root=root) if root else f(session_ref, folder)
+        return Path(got) if got else None
 
     def parse_chat_line(self, d, line=None):
         """(entries, turn) of one decoded log line; line: its text, for a module with parse_chat only."""

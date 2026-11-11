@@ -545,9 +545,9 @@ def chat_path(session_ref, folder=None, root=None):
     if folder:
         p = base / quote(os.path.realpath(os.path.expanduser(folder)), safe="") / sid / "updates.jsonl"
         if p.is_file():
-            return str(p)
+            return p
     got = sorted(base.glob(f"*/{sid}/updates.jsonl"))
-    return str(got[0]) if got else None
+    return got[0] if got else None
 
 
 def _at(x):
