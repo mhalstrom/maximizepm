@@ -386,6 +386,10 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   answer with `maxpm answer` (the person, the manager, or the page) comes into
   your terminal as a prompt that starts `[maxpm answer from ...]`. A wait
   that you only say in chat looks idle: `maxpm serve` gives your work to others.
+  While a manager is active, a question to a person goes to the manager first:
+  it answers you itself (`[maxpm answer from <manager> for <person> ...]`), or
+  sends the question on to the person (`maxpm forward`). The person gets it by
+  itself after `question_hold` (10m). Your wait does not change.
   Close each question you asked as soon as you have its answer, from any
   channel (your chat, a message, a canvas card), or the person keeps seeing it
   in 'Waits for you': `maxpm answer <question-id> --self "<the answer>"`. When

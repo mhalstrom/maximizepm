@@ -52,6 +52,7 @@ function questionBlock(w) {
   return `<form class="wblock" data-kind="question" data-id="${w.id}">
     <div class="wkind">Question to ${esc(w.to)}${w.item_id ? ` · <span class="link" data-open="${w.item_id}">#${w.item_id}</span>` : ""}</div>
     <div class="wq">${esc(w.body)}</div>
+    ${w.note ? `<div class="muted">The manager: ${esc(w.note)}</div>` : ""}
     <textarea class="wanswer" placeholder="Your answer" aria-label="Your answer"></textarea>
     ${pane ? "" : `<div class="muted" style="font-size:12px">This session runs in no tmux pane here, so the answer goes to the queue only; the session reads it with maxpm inbox.</div>`}
     <button class="btn primary wgo" type="submit">${pane ? "Send to the chat" : "Answer"}</button>

@@ -5438,6 +5438,107 @@ class Kill(Base):
         self.assertEqual(core.agent_status(self.c, "ag")["state"], "gone")  # at once, not after gone_after
 
 
+class QuestionHold(Base):
+    """#5307: mark, 2026-11-11: worker questions that he had settled opened 'Waits for you' on his page; 'these sorts
+    of questions should not come to me or block waiting for me'. A question from a session to a person goes to the
+    active manager first; the person sees only what the manager forwards, or what it leaves for question_hold."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        self.x = self.add("a", "x")
+        core.claim(self.c, self.x, "w1")
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+
+    def events(self):
+        return [dict(r) for r in self.c.execute("SELECT change FROM events WHERE item_id=?", (self.x,))]
+
+    def person_sees(self, qid):
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        return any(n.get("message_id") == qid for n in core.needs_you(self.c, "mark"))
+
+    def test_the_manager_gets_it_first_and_forwards_it(self):
+        q = core.message(self.c, "question", "Put it on main for the push?", to="mark", item=self.x, actor="w1")[0]
+        self.assertEqual(q["held_for"], "boss")
+        self.assertIn("held for the manager boss", q["held_note"])
+        self.assertFalse(self.person_sees(q["id"]))
+        self.assertNotIn("Put it on main", core.prompt_for_all(self.c, "mark"))
+        from river import sessions
+        self.assertEqual(sessions._open_questions(self.c, "w1"), [])
+        # The asker's wait does not change: it still waits on the person's answer.
+        self.assertEqual(core.waits_on_person(self.c, ["w1"]), {"w1": q["id"]})
+        # The manager's watch wakes at once, with the question and the two commands.
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait for a held question"))
+        self.assertEqual(len(w["messages"]), 1)
+        self.assertIn(f"maxpm forward {q['id']}", w["messages"][0]["body"])
+        self.assertIn("Put it on main", w["messages"][0]["body"])
+        self.assertTrue([x for x in w["findings"]["questions"] if x["id"] == q["id"] and x["held_for"] == "boss"])
+        # Only a manager (or a person) forwards it.
+        with self.assertRaisesRegex(RiverError, "only the manager"):
+            core.forward(self.c, q["id"], actor="w1")
+        core.forward(self.c, q["id"], "I checked the diff; it is safe", actor="boss")
+        self.assertIsNone(core.message_show(self.c, q["id"])["held_for"])
+        self.assertTrue(self.person_sees(q["id"]))
+        ev = [n for n in core.needs_you(self.c, "mark") if n.get("message_id") == q["id"]][0]
+        self.assertIn("the manager: I checked the diff", ev["summary"])
+        self.assertEqual(sessions._open_questions(self.c, "w1")[0]["id"], q["id"])
+        with self.assertRaisesRegex(RiverError, "with mark already"):
+            core.forward(self.c, q["id"], actor="boss")
+
+    def test_the_manager_answers_for_the_person(self):
+        q = core.message(self.c, "question", "Which branch?", to="mark", item=self.x, actor="w1")[0]
+        a = core.answer(self.c, q["id"], "main", actor="boss")
+        self.assertEqual(core.message_show(self.c, q["id"])["state"], "answered")
+        self.assertFalse(self.person_sees(q["id"]))
+        t = core.thread(self.c, q["id"])["messages"]
+        self.assertEqual([m.get("for_person") for m in t if m["id"] == a["id"]], ["mark"])
+        self.assertTrue(any("for mark (the manager)" in h["change"] for h in self.events()))
+        # The manager's alert about it is read: no watch wakes for it.
+        self.assertEqual(core.unread(self.c, "boss")["unread"], 0)
+        from river import cli
+        out = io.StringIO()
+        db = self.c.execute("PRAGMA database_list").fetchone()[2]
+        with mock.patch.dict(os.environ, {"MAXPM_DB": db}), contextlib.redirect_stdout(out):
+            cli.run(["--as", "w1", "thread", str(q["id"])])
+        self.assertIn("answer from boss for mark to w1", out.getvalue())
+
+    def test_with_no_manager_action_the_person_gets_it_after_question_hold(self):
+        clock = [core.now()]
+        with mock.patch.object(core, "now", lambda: clock[0]):
+            q = core.message(self.c, "question", "Approve?", to="mark", item=self.x, actor="w1")[0]
+            clock[0] += timedelta(minutes=9)
+            self.assertFalse(self.person_sees(q["id"]))
+            clock[0] += timedelta(minutes=2)
+            self.assertTrue(self.person_sees(q["id"]))
+        self.assertTrue(any("did not answer or forward it within question_hold" in h["change"]
+                            for h in self.events()))
+
+    def test_not_held_without_an_active_manager_or_for_the_manager_or_with_hold_0s(self):
+        core.config_set(self.c, "question_hold", "0s")
+        q = core.message(self.c, "question", "A?", to="mark", item=self.x, actor="w1")[0]
+        self.assertIsNone(q["held_for"])
+        self.assertTrue(self.person_sees(q["id"]))
+        core.config_unset(self.c, "question_hold")
+        q = core.message(self.c, "question", "B?", to="mark", actor="boss")[0]
+        self.assertIsNone(q["held_for"])  # the manager's own question
+        q = core.message(self.c, "question", "C?", to="boss", actor="w1")[0]
+        self.assertIsNone(q["held_for"])  # not to a person
+        core.unregister(self.c, "boss", "mark")
+        q = core.message(self.c, "question", "D?", to="mark", item=self.x, actor="w1")[0]
+        self.assertIsNone(q["held_for"])
+        self.assertTrue(self.person_sees(q["id"]))
+
+    def test_a_held_question_goes_to_the_person_when_the_manager_ends(self):
+        q = core.message(self.c, "question", "E?", to="mark", item=self.x, actor="w1")[0]
+        core.unregister(self.c, "boss", "mark")
+        self.assertTrue(self.person_sees(q["id"]))
+        self.assertTrue(any("is no longer active" in h["change"] for h in self.events()))
+
+
 class Manager(Base):
     """maxpm manage: one manager session at a time that runs the other agents (#430)."""
 
@@ -7624,6 +7725,7 @@ class Activity(Base):
     def test_a_persons_prompt_in_the_askers_chat_answers_its_open_questions(self):
         """#4995: mark answered two maxpm questions by typing in the asking session's chat; they stayed open, and the
         page kept 'Waits for you' and 'waits for an answer'. Now the prompt closes them, with its text as the answer."""
+        core.config_set(self.c, "question_hold", "0s")  # the person has the questions at once, not the manager (#5307)
         q1 = core.send(self.c, "question", "Do you agree?", to="mark", item=self.item, actor="w")["id"]
         q2 = core.send(self.c, "question", "Which of the changes 1-3?", to="mark", item=self.item, actor="w")["id"]
         self.assertEqual(core.waits_on_person(self.c, ["w"]), {"w": q1})

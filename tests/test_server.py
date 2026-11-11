@@ -2333,6 +2333,8 @@ class LaunchInTmux(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             cli.render_go(b)
         self.assertIn(f"ask <person> \"<what to approve>\" --item {dep}", out.getvalue())
+        # The question goes to mark at once, not to the manager first (#5307), so the manager's alert is this one.
+        core.config_set(self.c, "question_hold", "0s")
         q = core.send(self.c, "question", "make prod-release is ready: reply 'deploy' in my terminal", to="mark",
                       item=dep, actor=name)["id"]
         self.assertEqual(core.waits_on_person(self.c), {name: q})
@@ -2394,7 +2396,7 @@ class LaunchInTmux(unittest.TestCase):
         # The idle prompt: the answer goes in once, then Enter, and the asker has read it.
         pane["running"] = "claude"
         self.assertEqual(server.paste_answers(self.c), {m["id"]: pane["id"]})
-        self.assertEqual(typed(), [f"[maxpm answer from boss to your question #{q} (#{a})] yes, publish it\n"
+        self.assertEqual(typed(), [f"[maxpm answer from boss for mark to your question #{q} (#{a})] yes, publish it\n"
                                    f"Your question was: Publish the page?"])
         self.assertEqual(pane["keys"][-1], "Enter")
         self.assertEqual(server.paste_answers(self.c), {})
@@ -2426,7 +2428,7 @@ class LaunchInTmux(unittest.TestCase):
         sent.clear()
         m5 = core.answer(self.c, q5, "ship it", "boss")
         self.assertEqual(m5["native_status"], "sent")
-        self.assertIn(f"[maxpm answer from boss to your question #{q5} (#{a})] ship it Your question was: Ship?",
+        self.assertIn(f"[maxpm answer from boss for mark to your question #{q5} (#{a})] ship it Your question was: Ship?",
                       sent[-1])
 
     def test_serve_keeps_the_last_lines_of_a_session_that_ended_before_it_connected(self):

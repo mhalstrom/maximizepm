@@ -659,7 +659,8 @@ def _footer(conn, actor):
 def _fmt_msg(m, indent=""):
     to = m["to_agent"] or (f"the holder of #{m['item_id']}" if m["item_id"] else "?")
     about = f" about #{m['item_id']}" + (f" {m['item_title']}" if m.get("item_title") else "") if m["item_id"] else ""
-    head = f"{indent}#{m['id']} {m['kind']} from {m['from_agent']} to {to}{about}  ({m['created_at']}"
+    by = f" for {m['for_person']}" if m.get("for_person") else ""  # the manager answered for the person (#5307)
+    head = f"{indent}#{m['id']} {m['kind']} from {m['from_agent']}{by} to {to}{about}  ({m['created_at']}"
     if m["kind"] in ("question", "offer") or m["state"] not in ("open", "read"):
         head += f", {m['state']}"
     if m.get("level_set"):
@@ -667,6 +668,8 @@ def _fmt_msg(m, indent=""):
     if m.get("blocked"):  # with what MaximizePM saw, when the sender did not set the flag
         head += {"waits": ", blocked (the sender waits for messages)",
                  "item": ", blocked (the sender released or blocked its item)"}.get(m["blocked"], ", blocked")
+    if m.get("held_for"):
+        head += f", held for the manager {m['held_for']}"
     if m["unread"]:
         head += ", new"
     if m["reply_to"]:
@@ -1311,6 +1314,9 @@ def build_parser():
                    "record their words as the answer and close the question")
     x.add_argument("--self", dest="self_answer", action="store_true", help="you asked it, and you have the answer "
                    "from any channel (a message, a canvas card, your chat): record it and close the question")
+    x = sub.add_parser("forward", help="the manager: send a question that waits for you on to the person it asks")
+    x.add_argument("id", type=int)
+    x.add_argument("--note", help="what you add for the person (what you checked, your recommendation)")
     x = sub.add_parser("withdraw", help="close a question you asked that is moot now (the work answered it)")
     x.add_argument("id", type=int)
     x.add_argument("--note", required=True, help="why it is moot")
@@ -2531,6 +2537,8 @@ def dispatch(conn, a, actor):
         return core.answer(conn, a.id, a.text, actor, in_chat=a.in_chat, self_answer=a.self_answer)
     if c == "withdraw":
         return core.withdraw(conn, a.id, a.note, actor)
+    if c == "forward":
+        return core.forward(conn, a.id, a.note, actor)
     if c == "inbox":
         if a.wait:
             return core.inbox_wait(conn, actor, a.timeout)
@@ -2729,7 +2737,9 @@ def _findings_lines(f, r):
     for x in f["targets"]:
         out.append(f"  TARGET {x['target']}: owner {x['owner']} is {x['state']}.  {r} target give {x['target']} --to <agent>")
     for x in f["questions"]:
-        out.append(f"  QUESTION #{x['id']} from {x['from_agent']} to {x['to_agent']}: {_cut(x['body'], 70)}")
+        out.append(f"  QUESTION #{x['id']} from {x['from_agent']} to {x['to_agent']}: {_cut(x['body'], 70)}"
+                   + (f"\n    waits for you, not {x['to_agent']}: maxpm answer {x['id']} \"...\", or maxpm forward {x['id']}"
+                      if x.get("held_for") else ""))
     for x in f.get("unneeded", []):
         c = x["closes"][0]
         out.append(f"  MAY BE UNNECESSARY #{x['id']} [{x['project']}] {_cut(x['title'], 50)}"
@@ -4265,6 +4275,8 @@ def render(a, res):
             else:
                 more = f" (native: {m['native_status']})" if m.get("native_status") else ""
             print(f"sent #{m['id']} {m['kind']} to {to}" + (", blocked" if m.get("blocked") else "") + more)
+            if m.get("held_note"):
+                print(f"  {m['held_note']}")
         return
     if c == "accept" and a.message:
         print(f"accepted alert #{res['id']}" + (f"; see: maxpm show {res['item_id']}" if res["item_id"] else "")
@@ -4282,10 +4294,13 @@ def render(a, res):
         if res.get("native_status") == "sent":
             print(f"answered question #{res['reply_to']}: the answer went into the session of {res['to_agent']}")
             return
+        print(f"answered: sent #{res['id']} to {res['to_agent']}; question #{res['reply_to']} is closed")
+        return
     if c == "withdraw":
         print(f"question #{res['withdrawn']} is withdrawn: {res['note']}")
         return
-        print(f"answered: sent #{res['id']} to {res['to_agent']}; question #{res['reply_to']} is closed")
+    if c == "forward":
+        print(f"question #{res['id']} went on to {res['to_agent']}: their Waits for you, needs-you and phone show it now")
         return
     if c == "inbox":
         if isinstance(res, dict):  # --wait

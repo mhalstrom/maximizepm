@@ -642,9 +642,10 @@ def running(conn, terminals=None):
 
 
 def _open_questions(conn, name):
+    # Not a question held for the manager (#5307): the person sees only what the manager forwards.
     return conn.execute("SELECT m.id, m.body, m.item_id, m.to_agent, m.created_at FROM messages m JOIN agents p ON "
                         "p.name=m.to_agent AND p.kind='human' WHERE m.kind='question' AND m.state='open' AND "
-                        "m.from_agent=? ORDER BY m.id", (name,)).fetchall()
+                        "m.held_for IS NULL AND m.from_agent=? ORDER BY m.id", (name,)).fetchall()
 
 
 def _last_talk(entries):
@@ -675,7 +676,7 @@ def waiting_for(conn, a, prompt=None, pane=False, said=None):
         # An old question does not open the dialog by itself (#5001); the person still reaches it from the card.
         old = bool(limit.total_seconds()) and core.now() - core.parse_iso(r["created_at"]) > limit
         out.append({"kind": "question", "id": r["id"], "body": r["body"], "item_id": r["item_id"], "to": r["to_agent"],
-                    "asked_at": r["created_at"], "old": old})
+                    "asked_at": r["created_at"], "old": old, "note": core.forward_note(conn, r)})
     return out
 
 

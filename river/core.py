@@ -236,6 +236,10 @@ DEFAULT_SETTINGS = {
     # its row) only while the question is younger than question_popup_max (#5001); an older open question stays in
     # the card's count, its 'Answer it' link, and maxpm needs-you, but does not pop up. 0s: every question pops up.
     "question_popup_max": "10m",
+    # A question from a session to a person goes to the active manager first (#5307): its watch wakes at once, and it
+    # answers the question (maxpm answer) or sends it on to the person (maxpm forward). With no manager action within
+    # question_hold, or no active manager, the person gets it (Waits for you, needs-you, phone). 0s: the person at once.
+    "question_hold": "10m",
     # maxpm serve closes the tmux panes of sessions that are done every tidy_every, as maxpm view --tidy does; a pane
     # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. It also
     # ends the tmux servers the tests left behind with their socket gone (maxpm view --orphans). 0s: never.
@@ -632,7 +636,9 @@ CREATE TABLE IF NOT EXISTS messages (
   native_status TEXT,
   level       TEXT,  -- low when the sender or MaximizePM said so; NULL: high (DEFAULT_LEVEL)
   blocked     TEXT,  -- who said that its item stands still until the answer (BLOCKED_SIGNS); NULL: nobody
-  asker_reminded TEXT  -- a question: when the Stop hook reminded its asker to close it (#5001)
+  asker_reminded TEXT, -- a question: when the Stop hook reminded its asker to close it (#5001)
+  held_for    TEXT,  -- a question to a person: the manager that answers or forwards it first (#5307); NULL: the person has it
+  held_until  TEXT   -- then it goes to the person by itself (question_hold)
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -1184,6 +1190,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE messages ADD COLUMN level TEXT")
     if "blocked" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN blocked TEXT")
+    if "held_for" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
+        conn.execute("ALTER TABLE messages ADD COLUMN held_for TEXT")
+        conn.execute("ALTER TABLE messages ADD COLUMN held_until TEXT")
     if "fresh_start" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN fresh_start TEXT")
         conn.execute("DELETE FROM settings WHERE key='wake_after'")  # the pane wake of #729 is gone (#758)
@@ -1359,7 +1368,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -6996,10 +7005,13 @@ def sync_needs_you(conn):
     want_items = {a["id"]: a for a in ann.values()
                   if a["ready"] and a["doer"] == "human" and not a["project_archived"]}
     want_msgs = {}
+    _release_held(conn)
     if humans:
+        # A question held for the manager (#5307) is not the person's yet.
         for r in conn.execute(
                 f"SELECT * FROM messages WHERE kind IN ('question','alert') AND to_agent IN ({','.join('?' * len(humans))}) "
-                "AND ((kind='question' AND state='open') OR (kind='alert' AND read_at IS NULL))", sorted(humans)):
+                "AND ((kind='question' AND state='open' AND held_for IS NULL) OR (kind='alert' AND read_at IS NULL))",
+                sorted(humans)):
             want_msgs[r["id"]] = r
     t = iso(now())
     for ev in conn.execute("SELECT * FROM needs_you WHERE closed_at IS NULL").fetchall():
@@ -7024,8 +7036,18 @@ def sync_needs_you(conn):
         # A prompt alert names the window, the question, and the keys (server.watch_prompts): all of it, or the
         # person still cannot act on it from the notification (#2713).
         cut = 600 if m["body"].startswith(PROMPT_NOTE) else 120
-        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {m['body'][:cut]}",
+        fwd = forward_note(conn, m) if m["kind"] == "question" else None
+        _open_event(conn, "message", f"{m['kind']} from {m['from_agent']}: {m['body'][:cut]}"
+                    + (f" (the manager: {fwd[:200]})" if fwd else ""),
                     item_id=m["item_id"], message_id=mid, human=m["to_agent"])
+
+
+def forward_note(conn, q):
+    """What the manager added when it forwarded question q to the person (#5307): its note in the thread, or None."""
+    r = conn.execute("SELECT m.body FROM messages m JOIN agents a ON a.name=m.from_agent AND a.role='manager' "
+                     "WHERE m.reply_to=? AND m.kind='note' AND m.to_agent=? ORDER BY m.id DESC LIMIT 1",
+                     (q["id"], q["to_agent"])).fetchone()
+    return r["body"] if r else None
 
 
 def needs_you(conn, human=None, include_closed=False, limit=100):
@@ -9524,6 +9546,7 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                                          and _item_stands(conn, actor, item) else None)
         mid = _send(conn, kind, actor, body.strip(), to=to, item_id=item, reply_to=reply_to,
                     level=level if level != DEFAULT_LEVEL else None, blocked=sign)
+        held = _hold_question(conn, mid) if kind == "question" else None
         if reply_to is not None:
             # Replying to a message means the sender read it.
             if conn.execute(f"SELECT 1 FROM messages m WHERE m.id=? AND {_TO_ME}", (reply_to, actor, actor)).fetchone():
@@ -9540,11 +9563,97 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
               else deliver_native(conn, to, _native_text(kind, actor, body.strip())))
         with tx(conn):
             conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
+    if held:
+        # The manager's watch wakes at once for it (blocked); a platform with native_message brings it into the session.
+        st = deliver_native(conn, held["manager"], _native_text("alert", "maxpm", held["body"]))
+        with tx(conn):
+            conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, held["alert"]))
     res = message_show(conn, mid)
+    if held:
+        res["held_note"] = (f"held for the manager {held['manager']}: it answers you, or sends the question on to {to}; "
+                            f"{to} gets it by itself after {held['hold']} (question_hold). Your wait does not change")
     if manager and not res["blocked"] and not _is_person(conn, actor):
         # For the sender: how long the manager's watch lets it wait (the command says how to shorten that).
         res["manager_wait"] = setting(conn, "manage_wait_" + res["level"], agent=to)
     return res
+
+
+def _hold_question(conn, mid):
+    """Inside a tx, at the send of question mid (#5307). A question from a session to a person goes to the active
+    manager first: mark wrote 'these sorts of questions should not come to me or block waiting for me' after worker
+    questions he had settled already opened 'Waits for you' on his page. The question is held for the manager
+    (held_for) until question_hold ends: the person's needs-you, Waits for you and phone do not show it. The manager
+    gets a blocked alert in the question's thread, so its watch wakes at once; it answers (maxpm answer) or sends the
+    question on (maxpm forward). Not for a question from a person or from a manager, and not with no active manager.
+    Returns {"manager", "alert", "body", "hold"}, or None when the person has the question at once."""
+    q = _message(conn, mid)
+    if not _is_person(conn, q["to_agent"]) or _is_person(conn, q["from_agent"]) or _is_manager(conn, q["from_agent"]):
+        return None
+    hold = setting(conn, "question_hold", agent=q["from_agent"])
+    boss = active_manager(conn) if parse_duration(hold).total_seconds() > 0 else None
+    if not boss:
+        return None
+    person, about = q["to_agent"], (f" about #{q['item_id']}" if q["item_id"] is not None else "")
+    conn.execute("UPDATE messages SET held_for=?, held_until=? WHERE id=?",
+                 (boss, iso(now() + parse_duration(hold)), mid))
+    body = (f"{q['from_agent']} asks {person} (question #{mid}{about}): {' '.join(q['body'].split())[:600]}. "
+            f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: "
+            f"maxpm answer {mid} \"...\". Else send it on to {person}: maxpm forward {mid} [--note \"<what you add>\"]. "
+            f"With neither within {hold} (question_hold), {person} gets it.")
+    alert = _send(conn, "alert", "maxpm", body, to=boss, item_id=q["item_id"], reply_to=mid, blocked="sender")
+    if q["item_id"] is not None:
+        _event(conn, q["item_id"], "maxpm", f"question #{mid} to {person} held for the manager {boss} ({hold})")
+    return {"manager": boss, "alert": alert, "body": body, "hold": hold}
+
+
+def _unhold_question(conn, q, why=None):
+    """Inside a tx. Question q is no longer held for the manager (#5307): the manager answered or forwarded it, its
+    question_hold ended, or the question closed. The manager's alert about it is read, so no watch wakes for it.
+    why: the event on the item when the person gets the question now."""
+    if not q["held_for"]:
+        return
+    t = iso(now())
+    conn.execute("UPDATE messages SET held_for=NULL, held_until=NULL WHERE id=?", (q["id"],))
+    conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state=CASE WHEN state='open' THEN 'read' ELSE state END "
+                 "WHERE reply_to=? AND from_agent='maxpm' AND kind='alert' AND to_agent=?", (t, q["id"], q["held_for"]))
+    if why and q["item_id"] is not None:
+        _event(conn, q["item_id"], "maxpm", f"question #{q['id']} goes to {q['to_agent']}: {why}")
+
+
+def _release_held(conn):
+    """Inside a tx (sync_needs_you). A held question goes to the person when its question_hold ended, or when the
+    manager it waits for is no longer the active manager; a closed question is no longer held."""
+    rows = conn.execute("SELECT * FROM messages WHERE held_for IS NOT NULL").fetchall()
+    if not rows:
+        return
+    boss, t = active_manager(conn), now()
+    for q in rows:
+        if q["kind"] != "question" or q["state"] != "open":
+            _unhold_question(conn, q)
+        elif not q["held_until"] or parse_iso(q["held_until"]) <= t:
+            _unhold_question(conn, q, f"the manager {q['held_for']} did not answer or forward it within question_hold")
+        elif q["held_for"] != boss:
+            _unhold_question(conn, q, f"the manager {q['held_for']} is no longer active")
+
+
+def forward(conn, msg_id, note=None, actor=None):
+    """maxpm forward <id> [--note]: the manager sends a question that it held (#5307) on to the person asked, who
+    then sees it (Waits for you, needs-you, phone). note: what the manager adds for the person, a note in the
+    question's thread."""
+    if not actor:
+        raise RiverError("forward needs an agent name: set MAXPM_AGENT or pass --as <name>")
+    with tx(conn):
+        q = _message(conn, msg_id)
+        if q["kind"] != "question" or q["state"] != "open":
+            raise RiverError(f"message {msg_id} is no open question; see: maxpm thread {msg_id}")
+        if not q["held_for"]:
+            raise RiverError(f"question {msg_id} is with {q['to_agent'] or 'its holder'} already; nothing to forward")
+        if not (_is_manager(conn, actor) or _is_person(conn, actor)):
+            raise RiverError(f"only the manager forwards a held question; answer it with: maxpm answer {msg_id} \"...\"")
+        _unhold_question(conn, q, f"forwarded by {actor}" + (f": {note.strip()}" if note and note.strip() else ""))
+        if note and note.strip():
+            _send(conn, "note", actor, note.strip(), to=q["to_agent"], item_id=q["item_id"], reply_to=q["id"])
+    return message_show(conn, msg_id)
 
 
 def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
@@ -9582,17 +9691,22 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
         # Before the question closes: the asker waits at its prompt for this answer (the guide says so), and runs
         # no maxpm command that would read it.
         waits = q["from_agent"] in waits_on_person(conn, [q["from_agent"]])
+        # The manager answers a question to a person (#5307): in the thread it is the manager's answer for the person.
+        for_person = answered_for(conn, q, actor)
+        _unhold_question(conn, q)
         mid = _send(conn, "answer", actor, body.strip(), to=q["from_agent"], item_id=q["item_id"], reply_to=q["id"])
         conn.execute("UPDATE messages SET state='answered', closed_at=?, read_at=COALESCE(read_at, ?), "
                      "to_agent=COALESCE(to_agent, ?) WHERE id=?", (t, t, actor, q["id"]))
         if q["item_id"] is not None:
-            _event(conn, q["item_id"], actor, f"answered question #{q['id']}")
+            _event(conn, q["item_id"], actor, f"answered question #{q['id']}"
+                   + (f" for {for_person} (the manager)" if for_person and _is_manager(conn, actor)
+                      else f" for {for_person}" if for_person else ""))
             # The asker ended (it filed its question and stopped): a fresh session takes the item, with the answer.
             if not conn.execute("SELECT 1 FROM agents WHERE name=?", (q["from_agent"],)).fetchone():
                 _want_fresh(conn, q["item_id"], f"[question #{q['id']} from {q['from_agent']}] {q['body']}\n"
                             f"[answer from {actor}] {body.strip()}")
     if waits:
-        _deliver_answer(conn, q, mid, actor, body.strip())
+        _deliver_answer(conn, q, mid, actor, body.strip(), for_person)
     return message_show(conn, mid)
 
 
@@ -9601,22 +9715,30 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
 ANSWER_TO_PANE = "waits for the asker's idle prompt (maxpm serve types it there)"
 
 
-def answer_text(q, sender, body):
+def answered_for(conn, q, sender):
+    """The person that question q asked, when an agent (the manager) and not that person answers it (#5307); else None."""
+    to = q["to_agent"]
+    return to if to and to != sender and _is_person(conn, to) and not _is_person(conn, sender) else None
+
+
+def answer_text(q, sender, body, for_person=None):
     """The answer as the asker reads it in its session (#5303): it starts with '[maxpm ', so the asker's prompt hook
-    (_talk) does not take it for a person's answer to its other open questions."""
+    (_talk) does not take it for a person's answer to its other open questions. for_person: the manager answered a
+    question to that person (#5307)."""
     item = f" (#{q['item_id']})" if q["item_id"] is not None else ""
-    return (f"[maxpm answer from {sender} to your question #{q['id']}{item}] {body}\n"
+    by = f"{sender} for {for_person}" if for_person else sender
+    return (f"[maxpm answer from {by} to your question #{q['id']}{item}] {body}\n"
             f"Your question was: {' '.join(q['body'].split())[:300]}")
 
 
-def _deliver_answer(conn, q, mid, sender, body):
+def _deliver_answer(conn, q, mid, sender, body, for_person=None):
     """An answer to a question whose asker waits at its prompt (waits_on_person) goes into its session, as an alert
     does (#5303): the asker ran maxpm ask and ended its turn, so no maxpm command of its own reads the answer. The
     manager answered markhalstrom-site-3a49's question with maxpm answer, and the session sat at its prompt for an
     hour until the manager typed the answer into its tmux pane by hand. Through the platform's native_message when
     the asker has one; else maxpm serve types it into the asker's tmux pane when its idle prompt shows
     (server.paste_answers). An asker in no pane gets it in a fresh session (fresh_sessions), as other news."""
-    st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body))
+    st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body, for_person))
     how = "sent into its session" if st == "sent" else (
         ("" if st.startswith("no native channel") else f"native {st}; ") + "maxpm serve types it into its pane")
     if st != "sent":
@@ -9818,6 +9940,13 @@ def thread(conn, msg_id, actor=None):
                 f"SELECT m.id FROM messages m WHERE m.thread_id=? AND m.read_at IS NULL AND m.from_agent<>? AND {_TO_ME}",
                 (root, actor, actor, actor))}
             _mark_read(conn, mine)
+    by_id = {r["id"]: r for r in rows}
+    for r in rows:
+        # An answer from someone other than the person asked: the manager answered for the person (#5307).
+        q = by_id.get(r["reply_to"]) if r["kind"] == "answer" else None
+        if q and q["kind"] == "question" and q["to_agent"] and q["to_agent"] != r["from_agent"] \
+                and _is_person(conn, q["to_agent"]):
+            r["for_person"] = q["to_agent"]
     return {"thread_id": root, "messages": rows}
 
 
@@ -10753,7 +10882,8 @@ def prompt_for_all(conn, person=None):
     items = sorted((a for a in ann.values() if a["ready"] and a["doer"] == "human" and not a["project_archived"]),
                    key=lambda a: a["sort_key"])
     qs = [dict(r) for r in conn.execute(
-        "SELECT id, from_agent, body, item_id FROM messages WHERE kind='question' AND state='open' AND to_agent=? ORDER BY id",
+        "SELECT id, from_agent, body, item_id FROM messages WHERE kind='question' AND state='open' AND to_agent=? "
+        "AND held_for IS NULL ORDER BY id",
         (person,))]
     if not items and not qs:
         return f"Nothing in the MaximizePM queue waits on {person} now."
@@ -13650,8 +13780,8 @@ def manager_findings(conn):
                if states.get(r["owner"], "gone") in ("away", "gone", "stopped")]
     humans = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human'")]
     questions = [dict(r) for r in conn.execute(
-        f"SELECT id, from_agent, to_agent, body, item_id FROM messages WHERE kind='question' AND state='open' "
-        f"AND to_agent IN ({','.join('?' * len(humans))}) ORDER BY id", humans)] if humans else []
+        f"SELECT id, from_agent, to_agent, body, item_id, held_for, held_until FROM messages WHERE kind='question' "
+        f"AND state='open' AND to_agent IN ({','.join('?' * len(humans))}) ORDER BY id", humans)] if humans else []
     loop = serve_loop(conn)
     unneeded = [{"id": e["id"], "title": e["title"], "doer": e["doer"], "project": e["project"],
                  "closes": [{"id": c["id"], "why": c["why"]} for c in e["closes"]]}

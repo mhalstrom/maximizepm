@@ -209,8 +209,22 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm goal edit <name> --shared`. The owner goes (and is told), `maxpm go`
   never gives the goal to an agent again, and nothing is reserved.
   `maxpm goal edit <name> --owned` undoes it.
-- **QUESTION** to the user or **WAITS ON THE USER**: tell the user in chat, one
-  decision at a time (`maxpm guide decisions`). Do not answer for them.
+- **A question held for you** (a session asked the user with `maxpm ask` or
+  `maxpm send question`; while you are the active manager it comes to you
+  first, and your watch wakes at once): the user does not see it yet. Decide
+  whether the user is needed. Answer it yourself when the answer is in the
+  plan, in the user's earlier words, or in a rule they set (a worker asks
+  "Put it on main for the push?" for a change the user approved already):
+  `maxpm answer <id> "<answer>"`. The asker gets it in its session, and the
+  thread shows your answer for the user, who can read it later. Send it on
+  when only the user can decide (a release to production, a deletion of data,
+  money, public text, a choice the user did not make yet):
+  `maxpm forward <id> --note "<what you checked, your recommendation>"`. The
+  user then sees it in 'Waits for you', needs-you, and on the phone. With
+  neither within `question_hold` (10m), the user gets it.
+- **QUESTION** to the user (one you forwarded, or one that `question_hold`
+  sent on) or **WAITS ON THE USER**: tell the user in chat, one decision at a
+  time (`maxpm guide decisions`). Do not answer for them.
 - **A command that agents are refused again and again** (the auto mode
   classifier or a permission prompt refuses a normal step of the project: the
   checkout of a review gate, the removal of an agent's own build folder, the

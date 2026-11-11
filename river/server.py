@@ -686,7 +686,7 @@ def paste_answers(conn):
         if not (ad and ad.detect) or _screen_state(tail, ad.detect) != "idle":
             continue
         q = core._message(conn, r["reply_to"])
-        text = core.answer_text(q, r["from_agent"], r["body"])
+        text = core.answer_text(q, r["from_agent"], r["body"], core.answered_for(conn, q, r["from_agent"]))
         with core.tx(conn):  # first, so an answer is never typed twice
             if not conn.execute("UPDATE messages SET native_status=?, read_at=?, state='read' WHERE id=? AND "
                                 "native_status=? AND read_at IS NULL",
