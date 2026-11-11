@@ -23,7 +23,12 @@
 .arch-name b { font-size: var(--fs-m); color: var(--muted); overflow-wrap: anywhere; }
 .arch-name .gc-n { display: block; font-size: var(--fs-xs); color: var(--muted); }
 #addDlg { --dlg-w: var(--w-dlg-m); }
+/* The dialog's own button at the right, as in the other dialogs; the goal and project parts below it are a section of
+   their own, under a line (#5333). */
+#addDlg .add-actions { justify-content: flex-end; }
 #addDlg .add-part { margin-top: var(--sp-3); }
+#addDlg .form + .add-part { border-top: var(--hair) solid var(--line); padding-top: var(--sp-3); margin-top: var(--sp-5); }
+#addDlg .add-form > .btn { justify-self: end; }
 #addDlg .add-form { margin-top: var(--sp-3); }
 .plan-layout { display: grid; grid-template-columns: var(--w-side) minmax(0, 1fr); gap: var(--sp-6); align-items: start; }
 .plan-side { border-top: 0; position: sticky; top: var(--sp-5); max-height: calc(100vh - var(--sp-7)); overflow-y: auto; padding: var(--sp-4); }

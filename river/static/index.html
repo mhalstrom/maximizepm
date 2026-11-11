@@ -118,12 +118,12 @@
 
 <!-- Add item (Plan, #5102 step 4): the project and the goal come from Plan's scope; a goal and a project fold below. -->
 <div id="addDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="addTitleH"><div class="box">
-  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-    <h2 id="addTitleH" style="margin:0">Add item</h2>
+  <div class="dlg-head">
+    <h2 id="addTitleH">Add item</h2>
     <button class="iconbtn" id="addClose" title="Close">✕</button>
   </div>
         <div class="form">
-          <input id="addTitle" placeholder="Title">
+          <label>Title<input id="addTitle" placeholder="What is to be done"></label>
           <div class="two">
             <label>Project<select id="addProject"></select></label>
             <label>Priority<select id="addPrio"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
@@ -135,8 +135,8 @@
           <label title="Ids of the items it waits on">Waits on<input id="addAfter" placeholder="3, 7"></label>
           <label title="Ids of the items whose output it reads; it also waits on them">Reads<input id="addFeeds" placeholder="4"></label>
           <label>Goal<select id="addGoal"><option value="">no goal</option></select></label>
-          <textarea id="addNotes" rows="2" placeholder="Notes"></textarea>
-          <button class="btn primary" id="addGo">Add</button>
+          <label>Notes<textarea id="addNotes" rows="2" placeholder="Why, where, what is decided"></textarea></label>
+          <div class="actions add-actions"><button class="btn primary" id="addGo">Add</button></div>
         </div>
         <details id="addGoalPart" class="add-part"><summary>Add a goal</summary>
           <div class="form add-form">
