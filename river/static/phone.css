@@ -23,6 +23,8 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
    where a text button's label starts (its padding and border: --btn-inset). */
 .hdr-menu > .btn:not(.primary) { text-align: left; }
 .hdr-menu > label.sub, .hdr-menu > #stamp { padding-left: calc(-1 * var(--btn-inset)); }
+/* Theme and You are: the words in one column, so both selects start at one edge too. */
+header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2 * var(--sp-7) + var(--sp-1)) minmax(0, 1fr); }
 #hdrScrim:not(.hidden) { display: block; position: fixed; inset: 0; z-index: 5; }
 
 @media (max-width: 1023px) {
