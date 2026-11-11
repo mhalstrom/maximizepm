@@ -8461,3 +8461,90 @@ class ShippedPolicies(unittest.TestCase):
             for x in ([roles] if isinstance(roles, str) or roles is None else roles):
                 self.assertIn(x, (None,) + core.POLICY_ROLES)
         self.assertEqual(len(core.global_policies()), len(ids))
+
+
+class SessionSamples(Base):
+    """maxpm serve records each live session's state once a minute, so maxpm health can show idle time (#5352)."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        core.project_add(self.c, "b")
+        self.x = self.add("a", "x")
+        self.y = self.add("a", "y")
+        self.z = self.add("b", "z")
+        core.register(self.c, "mark", human=True)
+        for n in ("w1", "w2", "w3", "boss", "ex", "old"):
+            core.register(self.c, n)
+        core.claim(self.c, self.x, "w1")
+        core.claim(self.c, self.y, "w3")
+        core.claim(self.c, self.z, "w2")
+        core.done(self.c, self.z, actor="w2")  # w2 has nothing in hand now; it worked in project b
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.execute("UPDATE agents SET role='expert' WHERE name='ex'")
+        self.c.execute("UPDATE agents SET stop_at=? WHERE name='old'", (core.iso(core.now()),))
+        self.c.commit()
+        core.message(self.c, "question", "Push it?", to="mark", item=self.y, actor="w3")
+        self.t0 = core.now()
+
+    def rows(self):
+        return {r["agent"]: dict(r) for r in self.c.execute("SELECT * FROM session_samples WHERE state<>'none'")}
+
+    def test_each_live_session_gets_its_state(self):
+        self.assertEqual(core.sample_sessions(self.c, at=self.t0), 5)
+        r = self.rows()
+        self.assertEqual({a: v["state"] for a, v in r.items()},
+                         {"w1": "working", "w2": "waiting_work", "w3": "waiting_person", "boss": "manager",
+                          "ex": "expert"})
+        self.assertEqual(r["w1"]["item_id"], self.x)
+        pa = self.c.execute("SELECT id FROM projects WHERE name='a'").fetchone()["id"]
+        pb = self.c.execute("SELECT id FROM projects WHERE name='b'").fetchone()["id"]
+        self.assertEqual(r["w1"]["project_id"], pa)
+        self.assertEqual(r["w2"]["project_id"], pb)  # the project of the item it held last
+        self.assertEqual(r["w1"]["secs"], 60)
+
+    def test_at_most_once_per_sample_every_and_a_late_pass_counts_little(self):
+        core.sample_sessions(self.c, at=self.t0)
+        self.assertEqual(core.sample_sessions(self.c, at=self.t0 + core.timedelta(seconds=30)), 0)
+        self.assertEqual(core.sample_sessions(self.c, at=self.t0 + core.timedelta(seconds=58)), 5)
+        core.sample_sessions(self.c, at=self.t0 + core.timedelta(hours=3))  # serve was down: 5 minutes, not 3 hours
+        secs = [r["secs"] for r in self.c.execute("SELECT secs FROM session_samples WHERE agent='w1' ORDER BY at")]
+        self.assertEqual(secs, [60, 58, 300])
+
+    def test_no_session_records_only_the_time(self):
+        self.c.execute("UPDATE agents SET stop_at=? WHERE kind='ai'", (core.iso(core.now()),))
+        self.c.commit()
+        self.assertEqual(core.sample_sessions(self.c, at=self.t0), 0)
+        self.assertEqual(self.rows(), {})
+        self.assertEqual(core.idle_share(self.c, since=self.t0 - core.timedelta(minutes=1),
+                                         until=self.t0 + core.timedelta(minutes=1))["total_secs"], 0)
+
+    def test_old_rows_go_and_0s_turns_it_off(self):
+        core.sample_sessions(self.c, at=self.t0 - core.timedelta(days=91))
+        core.sample_sessions(self.c, at=self.t0)
+        ats = {r["at"] for r in self.c.execute("SELECT at FROM session_samples")}
+        self.assertEqual(ats, {core.iso(self.t0)})
+        core.config_set(self.c, "sample_keep", "200d")
+        core.config_set(self.c, "sample_every", "0s")
+        self.assertEqual(core.sample_sessions(self.c, at=self.t0 + core.timedelta(hours=1)), 0)
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "sample_every", "often")
+
+    def test_idle_share(self):
+        for m in range(3):
+            core.sample_sessions(self.c, at=self.t0 + core.timedelta(minutes=m))
+        s = core.idle_share(self.c, since=self.t0, until=self.t0 + core.timedelta(minutes=5))
+        self.assertEqual(s["total_secs"], 5 * 180)
+        self.assertEqual(s["sessions"], 5)
+        self.assertEqual(s["samples"], 15)
+        self.assertAlmostEqual(s["idle"], 0.2)
+        self.assertAlmostEqual(s["share"]["working"], 0.2)
+        self.assertEqual(s["first"], core.iso(self.t0))
+        a = core.idle_share(self.c, since=self.t0, until=self.t0 + core.timedelta(minutes=5), project="a")
+        self.assertEqual(a["sessions"], 2)  # w1 working and w3 waiting on mark; w2's last item is in b
+        self.assertEqual(a["idle"], 0)
+        b = core.idle_share(self.c, since=self.t0, until=self.t0 + core.timedelta(minutes=5), project="b")
+        self.assertEqual(b["idle"], 1.0)
+        # since as a duration back from until: 1m before t0+2m holds only the last pass (t0+1m is at the edge)
+        last = core.idle_share(self.c, "1m", until=self.t0 + core.timedelta(minutes=2, seconds=1))
+        self.assertEqual(last["samples"], 5)

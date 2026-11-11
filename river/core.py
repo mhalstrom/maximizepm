@@ -264,6 +264,11 @@ DEFAULT_SETTINGS = {
     # runs in the holder's session. busy_max: how long after an agent's last river command these signs still
     # count (a server that an agent left running would hold an item for ever). 0s: only river commands renew.
     "busy_max": "4h",
+    # maxpm serve records the state of each live session (working, waiting_person, waiting_work, manager, expert)
+    # in session_samples at most once per sample_every, so the share of session time spent idle has a history
+    # (#5352, decision 5 of the canvas does-maxpm-work). 0s: no samples. sample_keep: rows older than this go.
+    "sample_every": "1m",
+    "sample_keep": "90d",
     "manage_every": "30m",
     # maxpm manage --watch waits this long after the first new finding, and then returns all new findings at
     # once: they often come in groups (an agent ends, then its lease runs out), and each wake makes the manager
@@ -859,6 +864,20 @@ CREATE TABLE IF NOT EXISTS policies (
   changed_at  TEXT
 );
 
+-- One row per live AI session per sample (#5352): what the session did at that time, so maxpm health can show
+-- the share of session time spent idle. secs: the time this row stands for (the gap since the sample before it).
+CREATE TABLE IF NOT EXISTS session_samples (
+  id          INTEGER PRIMARY KEY,
+  at          TEXT NOT NULL,
+  agent       TEXT NOT NULL,
+  state       TEXT NOT NULL,             -- working, waiting_person, waiting_work, manager, expert
+  role        TEXT,
+  item_id     INTEGER,
+  project_id  INTEGER,
+  secs        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_samples_at ON session_samples(at);
+
 CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
@@ -1380,7 +1399,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -10739,6 +10758,99 @@ def canvas_save(conn, ref, path, version=None, project=None, force=False):
     except OSError as e:
         raise RiverError(f"cannot write {p}: {e.strerror}")
     return {"canvas": d["name"], "version": d["shown"]["version"], "path": str(p), "bytes": d["bytes"]}
+
+
+# ---------------------------------------------------------------- session samples (#5352)
+
+SAMPLE_STATES = ("working", "waiting_person", "waiting_work", "manager", "expert")
+# A pass that comes late (serve was down, the machine slept) counts at most this many sample_every for its rows,
+# so a night with serve down does not show as hours of idle time.
+SAMPLE_GAP_MAX = 5
+
+
+def _sample_state(conn, a, held, waiting):
+    """The state of one live AI session for a sample: (state, item_id, project_id)."""
+    it = held.get(a["name"])
+    if a["name"] in waiting:
+        return "waiting_person", it and it["id"], it and it["project_id"]
+    if it:
+        return "working", it["id"], it["project_id"]
+    role = a["role"] or ""
+    if role == "expert":
+        p = conn.execute("SELECT id FROM projects WHERE name=?", (a["expert_project"],)).fetchone() \
+            if a["expert_project"] else None
+        return "expert", None, p and p["id"]
+    if role == "manager":
+        return "manager", None, None
+    # The project of the item it held last: an idle worker counts against the project it works in.
+    p = conn.execute("SELECT project_id FROM items WHERE assignee=? ORDER BY COALESCE(claimed_at, created_at) DESC "
+                     "LIMIT 1", (a["name"],)).fetchone()
+    return "waiting_work", None, p and p["project_id"]
+
+
+def sample_sessions(conn, at=None):
+    """One pass of the loop of maxpm serve: record the state of each live AI session in session_samples, at most
+    once per sample_every, and delete rows older than sample_keep. Returns the number of rows it wrote (0 when the
+    last sample is too new, or sample_every is 0s). Working: it holds an item (in progress or held). Waiting_person:
+    it waits at its prompt for a person's answer (waits_on_person). Waiting_work: a worker with nothing in hand.
+    A manager and an expert hold no item by design, so they have states of their own."""
+    every = parse_duration(setting(conn, "sample_every")).total_seconds()
+    if not every:
+        return 0
+    at = at or now()
+    last = conn.execute("SELECT MAX(at) AS at FROM session_samples").fetchone()["at"]
+    gap = (at - parse_iso(last)).total_seconds() if last else every
+    if gap < every * 0.9:  # a pass a little early (notify_interval does not divide sample_every) still samples
+        return 0
+    secs = int(round(min(max(gap, 0), every * SAMPLE_GAP_MAX)))
+    live = [a for a in conn.execute("SELECT * FROM agents WHERE kind='ai' AND COALESCE(role, '')<>'assistant'")
+            if _agent_state(conn, a) not in ("gone", "stopped")]
+    held = {}
+    for it in conn.execute("SELECT id, project_id, assignee FROM items WHERE status IN ('in_progress','held') "
+                           "AND assignee IS NOT NULL ORDER BY status='held', claimed_at DESC"):
+        held.setdefault(it["assignee"], it)  # an item in progress before a held one: what it works on now
+    waiting = waits_on_person(conn) if live else {}
+    keep = parse_duration(setting(conn, "sample_keep"))
+    with tx(conn):
+        for a in live:
+            state, item_id, project_id = _sample_state(conn, a, held, waiting)
+            conn.execute("INSERT INTO session_samples (at, agent, state, role, item_id, project_id, secs) "
+                         "VALUES (?,?,?,?,?,?,?)", (iso(at), a["name"], state, a["role"], item_id, project_id, secs))
+        if not live:
+            # No session: write nothing, but remember the time, so the first sample after a quiet hour counts one
+            # sample_every and not the hour.
+            conn.execute("INSERT INTO session_samples (at, agent, state, secs) VALUES (?, '', 'none', 0)", (iso(at),))
+        conn.execute("DELETE FROM session_samples WHERE at<?", (iso(at - keep),))
+    return len(live)
+
+
+def idle_share(conn, since="7d", until=None, project=None):
+    """The share of sampled session time in each state, from since (a duration back from now, or a time) to until.
+    project: only the rows of that project (by the item held, else the item held last). Returns a dict: secs and
+    share per state, total_secs, sessions (distinct agents), samples, idle (the waiting_work share: the time a
+    worker session had nothing to do), and first (the oldest sample, so a reader knows how far back it goes)."""
+    t1 = until if isinstance(until, datetime) else (parse_when(until) if until else now())
+    t0 = since if isinstance(since, datetime) else (t1 - parse_duration(since) if _DURATION.match(since or "")
+                                                    else parse_when(since))
+    sql = "SELECT state, SUM(secs) AS secs, COUNT(*) AS n, COUNT(DISTINCT agent) AS agents FROM session_samples " \
+          "WHERE at>=? AND at<? AND state<>'none'"
+    args = [iso(t0), iso(t1)]
+    if project is not None:
+        sql += " AND project_id=?"
+        args.append(_project(conn, project)["id"])
+    rows = conn.execute(sql + " GROUP BY state", args).fetchall()
+    by = {s: 0 for s in SAMPLE_STATES}
+    for r in rows:
+        by[r["state"]] = by.get(r["state"], 0) + (r["secs"] or 0)
+    total = sum(by.values())
+    sessions = conn.execute("SELECT COUNT(DISTINCT agent) AS n FROM session_samples WHERE at>=? AND at<? "
+                            "AND state<>'none'" + (" AND project_id=?" if project is not None else ""),
+                            args).fetchone()["n"]
+    first = conn.execute("SELECT MIN(at) AS at FROM session_samples WHERE state<>'none'").fetchone()["at"]
+    share = {s: (v / total if total else 0.0) for s, v in by.items()}
+    return {"since": iso(t0), "until": iso(t1), "secs": by, "share": share, "total_secs": total,
+            "sessions": sessions, "samples": sum(r["n"] for r in rows), "idle": share["waiting_work"],
+            "first": first}
 
 
 # ---------------------------------------------------------------- capacity
