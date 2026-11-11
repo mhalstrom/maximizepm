@@ -497,3 +497,49 @@ def read_commands(folder, home=None):
             seen.add(c["name"])
             uniq.append(c)
     return uniq
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Setup (#5250)
+# ---------------------------------------------------------------------------------------------------------------
+
+def write_mcp_config(path=None, remove=False):
+    """Add (or remove) MaximizePM's MCP server in Cursor's user MCP file, ~/.cursor/mcp.json ({"mcpServers": {"maxpm":
+    {command, args, env}}}; path: another file, such as a project's .cursor/mcp.json). The other servers and keys
+    stay; the old file is kept as mcp.json.bak. The entry is setup_entry() without MAXPM_CHAT: a Cursor CLI session
+    runs in a project folder, so go briefs it for that folder, not as a chat. Cursor asks once in each folder before
+    it uses a new server, unless the session starts with --approve-mcps (the approve_mcps setting) or a person runs
+    cursor-agent mcp enable maxpm there."""
+    from . import setup_entry
+    from ..core import RiverError
+    f = Path(path).expanduser() if path else cursor_dir() / "mcp.json"
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
+    try:
+        data = json.loads(old) if old.strip() else {}
+    except ValueError as e:
+        raise RiverError(f"{f} is not valid JSON ({e}); fix it first, MaximizePM does not overwrite it") from None
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        raise RiverError(f"{f}: expected an object with an mcpServers object; fix it first")
+    servers = data.setdefault("mcpServers", {})
+    if remove:
+        if "maxpm" not in servers:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        del servers["maxpm"]
+    else:
+        entry = setup_entry()
+        entry = {**entry, "env": {k: v for k, v in entry["env"].items() if k != "MAXPM_CHAT"}}
+        if servers.get("maxpm") == entry:
+            return f"MaximizePM is already in {f}; nothing changed"
+        servers["maxpm"] = entry
+    if old:
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f.name + ".maxpm-tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, f)
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). New cursor-agent sessions no longer see it."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") + ".\n"
+            "New cursor-agent sessions see its tools (cursor-agent mcp list shows it). Cursor asks once in each folder "
+            "before it uses the server: approve it there, run cursor-agent mcp enable maxpm in the folder, or turn on "
+            "the Cursor CLI setting 'Approve MCP servers' (--approve-mcps).")

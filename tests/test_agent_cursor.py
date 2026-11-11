@@ -259,3 +259,52 @@ class Commands(Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Setup(Env):
+    """write_mcp_config puts MaximizePM's MCP server into ~/.cursor/mcp.json (#5250); HOME is the test's home."""
+
+    def file(self):
+        return self.root / "home" / ".cursor" / "mcp.json"
+
+    def test_it_adds_the_server_to_a_new_file_without_the_chat_flag(self):
+        got = self.a.write_mcp_config()
+        self.assertTrue(got.startswith(f"added MaximizePM to {self.file()}"), got)
+        self.assertIn("cursor-agent mcp enable maxpm", got)
+        entry = json.loads(self.file().read_text())["mcpServers"]["maxpm"]
+        want = agents.setup_entry()
+        self.assertEqual((entry["command"], entry["args"]), (want["command"], want["args"]))
+        self.assertEqual(entry["env"], {"MAXPM_DB": str(self.root / "t.db")})  # a folder session, not a chat
+        self.assertFalse(self.file().with_name("mcp.json.bak").exists())
+
+    def test_the_other_servers_and_keys_stay_and_the_old_file_is_kept(self):
+        self.file().parent.mkdir(parents=True)
+        old = {"mcpServers": {"github": {"url": "https://example.test/mcp"}}, "other": 1}
+        self.file().write_text(json.dumps(old))
+        self.a.write_mcp_config()
+        new = json.loads(self.file().read_text())
+        self.assertEqual(new["mcpServers"]["github"], old["mcpServers"]["github"])
+        self.assertEqual(new["other"], 1)
+        self.assertEqual(json.loads(self.file().with_name("mcp.json.bak").read_text()), old)
+        self.assertIn("nothing changed", self.a.write_mcp_config())  # the same entry again
+
+    def test_remove_takes_only_maxpm_out(self):
+        self.assertIn("has no MaximizePM entry", self.a.write_mcp_config(remove=True))
+        self.file().parent.mkdir(parents=True)
+        self.file().write_text(json.dumps({"mcpServers": {"github": {"url": "https://example.test/mcp"}}}))
+        self.a.write_mcp_config()
+        self.assertIn("took MaximizePM out", self.a.write_mcp_config(remove=True))
+        self.assertEqual(json.loads(self.file().read_text()), {"mcpServers": {"github": {"url": "https://example.test/mcp"}}})
+
+    def test_another_file_and_a_file_that_is_no_json(self):
+        project = self.root / "proj" / ".cursor" / "mcp.json"
+        self.a.write_mcp_config(str(project))
+        self.assertIn("maxpm", json.loads(project.read_text())["mcpServers"])
+        self.assertFalse(self.file().exists())
+        project.write_text("{ not json")
+        with self.assertRaises(core.RiverError):
+            self.a.write_mcp_config(str(project))
+        self.assertEqual(project.read_text(), "{ not json")  # left as it was
+        project.write_text(json.dumps({"mcpServers": []}))
+        with self.assertRaises(core.RiverError):
+            self.a.write_mcp_config(str(project))
