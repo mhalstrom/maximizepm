@@ -14,6 +14,11 @@
 .wp-h:hover { background: var(--bg); }
 .wp-h .tw { color: var(--muted); width: var(--sp-5); }
 .wp-h .counts { color: var(--muted); font-size: var(--fs-s); margin-left: auto; white-space: nowrap; }
+/* A phone: the counts of a project row take their own line under its name, not past the right edge (#5327). */
+@media (max-width: 759px) {
+  .wp-h { flex-wrap: wrap; row-gap: var(--sp-0); }
+  .wp-h .counts { white-space: normal; margin-left: 0; flex: 1 1 100%; padding-left: calc(var(--sp-5) + var(--sp-3)); }
+}
 .wp-items { padding: 0 0 var(--sp-2) var(--sp-6); }
 .wp-more { font-size: var(--fs-s); padding: var(--sp-1) var(--sp-2); }
 .panel h2 .claim-agent { font-size: var(--fs-s); font-weight: 400; text-transform: none; letter-spacing: normal; display: flex; align-items: center; gap: var(--sp-1); }
