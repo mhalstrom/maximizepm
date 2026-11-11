@@ -106,6 +106,40 @@ def transcript(conn, agent, root=None, croot=None):
     return (best[1], best[2]) if best else (None, None)
 
 
+def no_log_note(conn, agent, root=None, croot=None):
+    """Why the Sessions tab shows no chat of `agent` (#5257): which agent's log MaximizePM looked for (the adapter of
+    the agent's type) and why it found none: the agent's type is not known yet, the agent keeps no log that
+    MaximizePM reads, no session id is recorded yet, or the log file is not on this computer."""
+    a = conn.execute("SELECT agent_type, platform, native_address FROM agents WHERE name=?", (agent,)).fetchone()
+    ad = _agents.find((a["agent_type"] or a["platform"]) if a else None)
+    head = f"No chat of {agent} on this computer"
+    if ad is None:
+        readers = [x.label for x in _agents.load().values() if x.supports("chat")]
+        return (f"{head}: MaximizePM does not know which agent it runs yet (it learns it from the session's first "
+                f"maxpm command). It reads the chat logs of {', '.join(readers)}.")
+    if not ad.supports("chat"):
+        return f"{head}: {ad.label} keeps no chat log that MaximizePM reads."
+    how = ad.chat_ref()
+    if how is None:
+        return (f"{head}: MaximizePM has no rule to find the log of a {ad.label} session (its adapter names no "
+                f"CHAT['ref']).")
+    ref = None
+    if how == "session":
+        r = conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC "
+                         "LIMIT 1", (agent,)).fetchone()
+        ref = r["session_id"] if r else None
+    elif how == "address":
+        ref = a["native_address"]
+    if not ref:
+        return (f"{head}: no {ad.label} session id of {agent} is recorded yet, so MaximizePM cannot find its log; "
+                f"its next maxpm command records it.")
+    path = ad.chat_path(ref, None, {"claude": root, "codex": croot}.get(ad.id))
+    zst = "" if _zstd() or ad.id != "codex" else " (a compressed Codex log needs Python 3.14)"
+    if path is None:
+        return f"{head}: {ad.label} has no log of session {ref} here{zst}."
+    return f"{head}: the {ad.label} log of session {ref} is not here ({path}){zst}."
+
+
 def _read(path, cursor, tail=TAIL_BYTES):
     """(text, start, end): the complete lines of the file from byte `cursor` on (None: its last `tail` bytes), the
     byte where that text starts, and the byte after its last complete line, the next cursor."""
@@ -747,8 +781,7 @@ def view(conn, agent, cursor=None, root=None, croot=None):
         key, label = state(conn, a, None)
         return {"agent": agent, "transcript": None, "entries": [], "cursor": None, "turn": None, "state": key,
                 "state_label": label, "session_url": a.get("session_url"),
-                "note": f"No transcript of {agent} on this computer: MaximizePM reads Claude Code transcripts and "
-                        f"Codex session logs" + ("." if _zstd() else " (Codex logs need Python 3.14).")}
+                "note": no_log_note(conn, agent, root, croot)}
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
     key, label = state(conn, a, turn)

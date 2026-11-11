@@ -4,7 +4,9 @@ import json
 import os
 import tempfile
 import time
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from river import core, server, sessions
@@ -352,7 +354,32 @@ class Sessions(Base):
         core.register(self.c, "nobody")
         v = sessions.view(self.c, "nobody", None, self.root, self.croot)
         self.assertEqual(v["entries"], [])
-        self.assertIn("No transcript of nobody", v["note"])
+        self.assertIn("No chat of nobody on this computer: MaximizePM does not know which agent it runs yet", v["note"])
+
+    def test_the_note_of_a_missing_chat_names_the_agent_and_why(self):
+        # #5257: the note names the agent whose log MaximizePM looked for, and why it found none.
+        core.register(self.c, "gm")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='gemini' WHERE name='gm'")
+        note = sessions.view(self.c, "gm", None, self.root, self.croot)["note"]
+        self.assertIn("no Gemini CLI session id of gm is recorded yet", note)
+        self.assertNotIn("Claude Code", note)
+        core.register(self.c, "x1")
+        from river import agents as _agents
+        nolog = types.SimpleNamespace(label="Plain", supports=lambda part: part != "chat")
+        noref = types.SimpleNamespace(label="Loose", supports=lambda part: True, chat_ref=lambda: None)
+        for fake, want in ((nolog, "Plain keeps no chat log that MaximizePM reads"),
+                           (noref, "no rule to find the log of a Loose session")):
+            with mock.patch.object(_agents, "find", lambda name, f=fake: f if name else None):
+                with core.tx(self.c):
+                    self.c.execute("UPDATE agents SET agent_type='x' WHERE name='x1'")
+                self.assertIn(want, sessions.no_log_note(self.c, "x1"))
+        core.register(self.c, "cc")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='cc'")
+        core.record_claude_session(self.c, "cc", "5c1f0000-0000-4000-8000-000000000000")
+        note = sessions.view(self.c, "cc", None, self.root, self.croot)["note"]
+        self.assertIn("Claude Code has no log of session 5c1f0000-0000-4000-8000-000000000000 here", note)
 
     def test_a_first_read_of_a_long_transcript_starts_at_a_whole_line(self):
         self.write(claude_line("assistant", [{"type": "text", "text": "x" * 5000}], "tool_use") * 3)
