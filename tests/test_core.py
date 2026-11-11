@@ -23,6 +23,12 @@ class Base(unittest.TestCase):
         # delete a file that is open.
         self.addCleanup(self.dir.cleanup)
         self.path = os.path.join(self.dir.name, "t.db")
+        # Everything that lives beside the queue (the hook file claude-hooks.json, serve-loop.json) goes to the
+        # temporary folder, in every class: two Models tests wrote the person's real ~/.maximizepm/claude-hooks.json
+        # (#5381 fixed Models alone; #5398).
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": self.path})
+        env.start()
+        self.addCleanup(env.stop)
         self.c = core.connect(self.path)
 
     def tearDown(self):
@@ -4622,12 +4628,7 @@ class Models(Base):
     """Recommended model and effort per item, min/max limits, and sessions that declare their model (#319)."""
 
     def setUp(self):
-        super().setUp()
-        from unittest import mock
-        # A launch writes the Claude Code hook file beside the queue: the test's queue, never ~/.maximizepm (#5381).
-        env = mock.patch.dict(os.environ, {"MAXPM_DB": self.path})
-        env.start()
-        self.addCleanup(env.stop)
+        super().setUp()  # Base points MAXPM_DB at the test's queue: a launch writes its hook file there (#5381)
         core.project_add(self.c, "a")
         core.project_path(self.c, "a", self.dir.name)
         for n in ("s1", "s2"):
