@@ -156,7 +156,7 @@ def launch_agent(conn, project=None, runner=None, agent=None, actor=None, model=
     # A custom prompt always opens a new session: a waiting one would get it only second-hand, as a message.
     t = core.launch_target(conn, project, agent, None, model, effort, spread=project is None, options=options,
                            prompt=prompt)
-    waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"])
+    waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the Start button: you were waiting for work", actor)
         return {**t, "pushed_to": waiting}
@@ -172,7 +172,7 @@ def dispatch_item(conn, item_id, runner=None, agent=None, actor=None, model=None
     With a custom prompt (maxpm launch --prompt) it always opens a new session."""
     t = core.launch_target(conn, agent=agent, item=item_id, model=model, effort=effort, options=options, actor=actor,
                            prompt=prompt)
-    waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"])
+    waiting = None if t["custom_prompt"] else core.waiting_agent_for(conn, t["project"], t["item"]["id"], model)
     if waiting:
         core.push(conn, t["item"]["id"], waiting, "from the page: Dispatch; you were waiting for work", actor)
         return {**t, "pushed_to": waiting}

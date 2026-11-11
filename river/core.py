@@ -11923,20 +11923,31 @@ def launch_migration_note(conn):
     return f"{r['change']} (on {r['at']})" if r else None
 
 
-def waiting_agent_for(conn, project, item_id=None):
+def waiting_agent_for(conn, project, item_id=None, model=None):
     """An active session that waits for work in this project (maxpm wait), longest waiting first; with
     item_id, only one whose model the item's limits allow, and for a release review, none that worked on
     the release (release_authors) or held a task before (used_session, #4968); with auto_continue tree, only a
-    session whose tree holds the item, or one that held no task (#4994)."""
+    session whose tree holds the item, or one that held no task (#4994). model (maxpm launch --model): only a
+    session that runs that model; else a new session starts on it (#5383: launch --item --model fable gave the item
+    to a waiting Opus session). A session that recorded no model gets no item with a min-model of its own."""
     it = _item(conn, item_id) if item_id is not None else None
     if it is not None and it["tier"] == "expert":
         return None  # a new session starts for an expert-tier task; a waiting worker does not get it (#4959)
+    ladder = parse_ladder(setting(conn, "model_ladder")) if model or (it is not None and it["min_model"]) else None
+    want = (ladder_short(ladder, model) or model) if model else None
+
+    def model_fits(name):
+        have = agent_model(conn, name)
+        if want:
+            return bool(have) and (ladder_short(ladder, have) or have) == want
+        return bool(have) or it is None or not it["min_model"]
     authors = release_authors(conn, it["id"]) if it is not None and it["kind"] == "review" else set()
     for r in conn.execute("SELECT name, waiting_in FROM agents WHERE role='waiting' AND kind='ai' "
                           "ORDER BY waiting_since").fetchall():
         a = agent_status(conn, r["name"])
         if a["state"] == "active" and not a["holds"] and project in (r["waiting_in"] or "").split(","):
             if (r["name"] not in authors and (it is None or not _model_refusal(conn, it, r["name"]))
+                    and model_fits(r["name"])
                     and (it is None or it["kind"] not in FRESH_KINDS or used_session(conn, r["name"], it["id"]) is None)
                     and (it is None or _in_tree(it["id"], tree_mode(conn, r["name"])))):
                 return r["name"]

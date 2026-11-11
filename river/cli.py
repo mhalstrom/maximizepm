@@ -2320,7 +2320,7 @@ def dispatch(conn, a, actor):
                                    spread=a.project is None and a.item is None, options=opts or None, actor=actor,
                                    prompt=a.prompt)
             return {**t, "dry_run": True, "would_push_to": None if t["custom_prompt"] else
-                    core.waiting_agent_for(conn, t["project"], t["item"]["id"])}
+                    core.waiting_agent_for(conn, t["project"], t["item"]["id"], a.model)}
         if in_sandbox():
             # A sandbox blocks the tmux socket for this command. maxpm serve runs outside it and opens the
             # session, as for the page's Start and Dispatch.

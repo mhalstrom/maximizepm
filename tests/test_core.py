@@ -8872,3 +8872,48 @@ class Health(Base):
         with contextlib.redirect_stdout(out):
             cli.run(["--as", "", "health", "--until", "2026-11-11T00:00", "--by", "goal"])
         self.assertIn("no project has done items of both kinds in this time", out.getvalue())
+
+
+class LaunchWaitingModel(Base):
+    """maxpm launch --item gives the item to a waiting session only when its model fits: the item's limits, and the
+    model the person names with --model (#5383)."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "p", path=self.dir.name)
+        self.fab = core.item_add(self.c, "p", "review the design", models={"model": "fable", "min_model": "fable"},
+                                 actor="t")["id"]
+        self.plain = core.item_add(self.c, "p", "plain work", actor="t")["id"]
+
+    def waits(self, name, model=None):
+        core.register(self.c, name)
+        if model:
+            core.set_agent_model(self.c, name, model)
+        core.wait(self.c, self.dir.name, name, step="0s", sleep=lambda s: None)
+
+    def test_an_opus_session_does_not_get_a_fable_item(self):
+        self.waits("op", "claude-opus-5-5")  # the case of 2026-11-10: a full model id
+        self.assertIsNone(core.waiting_agent_for(self.c, "p", self.fab))
+        self.assertEqual(core.waiting_agent_for(self.c, "p", self.plain), "op")
+
+    def test_a_session_with_no_model_gets_no_item_with_a_min_model(self):
+        self.waits("anon")
+        self.assertIsNone(core.waiting_agent_for(self.c, "p", self.fab))
+        self.assertEqual(core.waiting_agent_for(self.c, "p", self.plain), "anon")
+        self.waits("fb", "claude-fable-5-2")
+        self.assertEqual(core.waiting_agent_for(self.c, "p", self.fab), "fb")
+
+    def test_the_model_the_person_names_starts_a_new_session(self):
+        self.waits("op", "claude-opus-5-5")
+        self.waits("anon")
+        self.assertIsNone(core.waiting_agent_for(self.c, "p", self.plain, model="fable"))
+        self.assertEqual(core.waiting_agent_for(self.c, "p", self.plain, model="opus"), "op")
+        self.assertEqual(core.waiting_agent_for(self.c, "p", self.plain, model="claude-opus-5-5"), "op")
+        from river import cli
+        out = io.StringIO()
+        old = os.environ.get("MAXPM_DB")
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(lambda: os.environ.__setitem__("MAXPM_DB", old) if old else os.environ.pop("MAXPM_DB", None))
+        with contextlib.redirect_stdout(out):
+            cli.run(["--json", "--as", "", "launch", "--item", str(self.plain), "--model", "fable", "--dry-run"])
+        self.assertIsNone(json.loads(out.getvalue())["would_push_to"])
