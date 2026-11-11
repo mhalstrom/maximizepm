@@ -582,7 +582,11 @@ try {
   await fetch("/__doc");
   await until(() => q(".doc-decision"), "the doc with its decision cards");
   const out = { pending: q(".doc-pending").textContent.trim(), cards: [...document.querySelectorAll(".doc-decision")].map(c => c.id),
-                opts: [...document.querySelectorAll("#decision-1 [data-doc-opt]")].map(b => b.textContent) };
+                opts: [...document.querySelectorAll("#decision-1 [data-doc-opt]")].map(b => b.textContent),
+                title: q("#decision-1 .doc-dtitle").textContent.trim(),
+                labels: [...document.querySelectorAll("#decision-1 .doc-label")].map(b => b.textContent),
+                text: q("#decision-1 > p").textContent,
+                row: [...q("#decision-1 .doc-ans-row").children].map(x => x.tagName) };
   // #4845: a second click while the first answer goes does nothing; the card says that it is sending.
   q('#decision-1 [data-doc-opt="Cloudflare"]').click();
   out.sending = q("#decision-1 [data-doc-answer]").textContent; out.disabled = q('#decision-1 [data-doc-opt="OVH"]').disabled;
@@ -604,6 +608,12 @@ try {
         self.assertEqual(got["pending"], "Being written: what the relay is for")
         self.assertEqual(got["cards"], ["decision-1", "decision-2"])
         self.assertEqual(got["opts"], ["OVH", "Cloudflare"])
+        # #5360: the first line is the card's title, the labels of the form are marked, and no word is lost.
+        self.assertEqual(got["title"], "Decision 1 of 2: Where it runs  (item #1)")
+        self.assertEqual(got["labels"], ["What you decide:", "Your answer:"])
+        self.assertEqual(got["text"], 'Decision 1 of 2: Where it runs  (item #1)What you decide: the host.\n'
+                                      'Your answer: "OVH" or "Cloudflare".')
+        self.assertEqual(got["row"], ["INPUT", "BUTTON"], "the box and Answer have a row of their own")
         self.assertIn("mark answered", got["answered"])
         self.assertIn("Cloudflare", got["answered"])
         self.assertEqual((got["sending"], got["disabled"]), ("Sending…", True))

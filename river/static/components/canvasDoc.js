@@ -33,6 +33,48 @@ export function answerOptions(text) {
 
 const isHeading = (el) => /^H[1-6]$/.test(el.tagName);
 
+// #5360: the parts of a decision card read as a form, not as one wall of text. The first line ("Decision 1 of 2:
+// <name>") becomes the card's title, and each label of the decision form at the start of a line is bold. The elements
+// stay where they are (the side panel finds a card's section by its first element), only their text is wrapped.
+const LABEL = /(^|\n)([ \t]*)(What you decide|Why it matters|Options|My recommendation|Your answer):/g;
+function markTitle(start) {
+  if (isHeading(start)) { start.classList.add("doc-dtitle"); return; }
+  const take = [];
+  for (const node of [...start.childNodes]) {
+    const nl = node.nodeType === 3 ? node.data.indexOf("\n") : -1;
+    if (nl < 0) { take.push(node); continue; }
+    const rest = node.splitText(nl); rest.data = rest.data.slice(1);  // the title is a block: the break goes
+    take.push(node); break;
+  }
+  const title = document.createElement("span"); title.className = "doc-dtitle";
+  start.prepend(title); title.append(...take);
+}
+function markLabels(part) {
+  const walk = document.createTreeWalker(part, NodeFilter.SHOW_TEXT), nodes = [];
+  while (walk.nextNode()) if (!walk.currentNode.parentElement.closest("code, pre, .doc-dtitle")) nodes.push(walk.currentNode);
+  for (const node of nodes) {
+    const block = node.parentElement.closest("p, li, div") || part, r = document.createRange();
+    const title = block.querySelector(":scope > .doc-dtitle");  // a line starts after the title
+    if (title && title.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) r.setStartAfter(title);
+    else r.setStart(block, 0);
+    r.setEnd(node, 0);
+    const lineStart = /(^|\n)[ \t]*$/.test(r.toString());
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    LABEL.lastIndex = 0;
+    while ((m = LABEL.exec(node.data))) {
+      if (!m[1] && (m.index !== 0 || !lineStart)) continue;
+      const at = m.index + m[1].length + m[2].length;
+      frag.append(node.data.slice(last, at));
+      const b = document.createElement("span"); b.className = "doc-label"; b.textContent = m[3] + ":";
+      frag.append(b); last = at + m[3].length + 1;
+    }
+    if (!last) continue;
+    frag.append(node.data.slice(last));
+    node.replaceWith(frag);
+  }
+}
+
 // The newest answer to each decision: {n: comment}, from the canvas's comments (anchor decision:<n>).
 function answersOf(meta) {
   const answers = {};
@@ -92,10 +134,13 @@ export function decorateDoc(root, source, meta, { ref, live, done, current }) {
     card.className = "doc-decision"; card.id = "decision-" + n; card.dataset.decision = n;
     start.before(card); card.append(...parts);
     const opts = answerOptions(parts.map(x => x.textContent).join("\n")), a = answers[n];
+    markTitle(start); parts.forEach(markLabels);
+    // The options on one row (they wrap), the box and Answer on their own row, which never wraps: on a phone the box
+    // keeps its words and Answer stays beside it (#5360).
     const bar = document.createElement("div"); bar.className = "doc-answer";
     bar.innerHTML = (a ? `<div class="doc-answered" data-sig="${esc(answeredHtml(a))}">${answeredHtml(a)}</div>` : "")
-      + (live ? `<div class="cv-acts">${opts.map(o => `<button class="btn" type="button" data-doc-opt="${esc(o)}">${esc(o)}</button>`).join("")}
-        <input data-doc-other placeholder="${opts.length ? "or your own words" : "your answer"}" aria-label="Your answer to decision ${n}">
+      + (live ? (opts.length ? `<div class="cv-acts doc-opts">${opts.map(o => `<button class="btn" type="button" data-doc-opt="${esc(o)}">${esc(o)}</button>`).join("")}</div>` : "")
+        + `<div class="cv-acts doc-ans-row"><input data-doc-other placeholder="${opts.length ? "or your own words" : "your answer"}" aria-label="Your answer to decision ${n}">
         <button class="btn primary" type="button" data-doc-answer>${a ? "Answer again" : "Answer"}</button></div>` : "");
     card.append(bar);
     // #4845: one answer per click. While it goes, the card's buttons and box wait and say so; then the answer shows

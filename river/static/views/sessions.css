@@ -283,6 +283,12 @@ button.srow-it { cursor: pointer; }
 @keyframes doc-dots { to { width: 1.2em; } }
 .doc-decision { border: var(--hair) solid var(--line); border-left: var(--sp-1) solid var(--accent); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-5); margin: var(--sp-5) 0; background: var(--panel); }
 .doc-decision > p { white-space: pre-line; margin: var(--sp-1) 0; }
+/* #5360: the title of a decision card, and the labels of its form, so the card does not read as one wall of text. */
+.doc-dtitle { display: block; font-weight: 600; font-size: var(--fs-base); margin-bottom: var(--sp-2); }
+.doc-decision > .doc-dtitle { margin-top: var(--sp-1); }
+.doc-label { display: inline-block; font-weight: 600; margin-top: var(--sp-2); }
+.cv-acts.doc-ans-row { flex-wrap: nowrap; }
+.doc-ans-row .btn { flex: none; }
 .doc-answer { display: flex; flex-direction: column; gap: var(--sp-2); margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: var(--hair) dashed var(--line); font-size: var(--fs-m); }
 .doc-answered { background: var(--bg); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-3); }
 .doc-edit { font-size: var(--fs-s); font-weight: normal; border: 0; background: none; color: var(--accent); cursor: pointer; opacity: 0; padding: 0 var(--sp-1); }
