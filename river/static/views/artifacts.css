@@ -15,4 +15,4 @@
 .art-btns { display: flex; gap: var(--sp-2); flex: none; }
 .art-btns .btn { font-size: var(--fs-s); }
 .art-btns a.btn { background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-4); color: var(--ink); text-decoration: none; }
-@media (max-width: 700px) { .art-row { flex-direction: column; align-items: flex-start; } }
+@media (max-width: 700px) { .art-row { flex-direction: column; align-items: flex-start; } .art-btns > .btn:first-child { margin-left: var(--btn-inset); } }

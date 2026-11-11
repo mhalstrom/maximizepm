@@ -17,3 +17,4 @@
 .warn-t { color: var(--warn); }
 .gc-subs { margin-top: var(--sp-2); }
 .gc-add { padding-top: var(--sp-3); }
+.gc-subs > .btn, .gc-add > .btn { margin-left: var(--btn-inset); }  /* + sub-goal and + goal on the text's edge (#5314) */
