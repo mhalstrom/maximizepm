@@ -7,6 +7,7 @@ plain dicts and lists, so the CLI and the web server share one code path.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import math
 import os
@@ -17,6 +18,7 @@ import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import monotonic as _monotonic
 
 # One database per user, in the home folder (sandboxed agents must be allowed to write there).
 # The product: an instructions file that names it has its block.
@@ -1105,14 +1107,55 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=10000")
-    conn.executescript(SCHEMA)
-    _migrate(conn)
-    _migrate_launch_agents(conn)
-    _migrate_levels(conn)
+    _upgrade(conn)
     return conn
 
 
+def _code_print(co):
+    """The parts of a code object that say what it does: its bytecode, the names it calls, and its constants,
+    nested functions included. Line numbers and memory addresses are not part of it, so an edit elsewhere in
+    core.py does not change it."""
+    parts = [co.co_code, repr(co.co_names).encode()]
+    for k in co.co_consts:
+        if hasattr(k, "co_code"):
+            parts.append(_code_print(k))
+        else:  # a frozenset's order follows the string hashes of the process: sort it
+            parts.append(repr(sorted(map(repr, k)) if isinstance(k, frozenset) else k).encode())
+    return b"\0".join(parts)
+
+
+def schema_print():
+    """One short id of the schema and of the migrations that this code runs. A change to SCHEMA or to a
+    migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
+    h = hashlib.sha1(SCHEMA.encode())
+    for f in (_migrate, _migrate_launch_agents, _migrate_levels):
+        h.update(_code_print(f.__code__))
+    return h.hexdigest()[:16]
+
+
+def _upgrade(conn):
+    """Run SCHEMA and the migrations, but only when this code's schema id is not in meta yet. Before #5396 every
+    connect ran them, and _migrate wrote with no condition (DELETE FROM settings WHERE key='launch_in'), so
+    every command, also a read, waited for the write lock, outside tx and its retries: with 20 sessions a
+    command died with 'database is locked'. Now a normal connect reads one row of meta. Each id stays in meta,
+    so an older maxpm serve and a newer maxpm command do not run the migrations in turn until serve restarts."""
+    key = "schema:" + schema_print()
+    try:
+        if conn.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone():
+            return
+    except sqlite3.OperationalError:
+        pass  # a new database: no meta table yet
+    conn.executescript(SCHEMA)  # CREATE ... IF NOT EXISTS only; executescript ends an open transaction itself
+    with tx(conn):
+        _migrate(conn)
+    _migrate_launch_agents(conn)
+    _migrate_levels(conn)
+    with tx(conn):
+        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, iso(now())))
+
+
 def _migrate(conn):
+    """Add what an older queue lacks. It runs inside the tx of _upgrade, once for each new schema id."""
     # Every agent starts in a tmux pane now (#5105): the setting that chose a Terminal tab or window is gone.
     conn.execute("DELETE FROM settings WHERE key='launch_in'")
     if "ready" not in {r["name"] for r in conn.execute("PRAGMA table_info(close_checks)")}:
@@ -1277,6 +1320,7 @@ def _migrate(conn):
 
 
 LOCK_TRIES = 3  # a write waits busy_timeout (10s) this many times for the lock of the queue
+LOCK_SLOW = 2.0  # a transaction that holds the write lock this many seconds or more gets a line in locked.log (#5396)
 
 
 class tx:
@@ -1298,6 +1342,7 @@ class tx:
         for _ in range(self.tries):
             try:
                 self.conn.execute("BEGIN IMMEDIATE")
+                self.t0 = _monotonic()
                 return self.conn
             except sqlite3.OperationalError as e:
                 if "database is locked" not in str(e):
@@ -1311,6 +1356,9 @@ class tx:
     def __exit__(self, exc_type, exc, tb):
         _PROCS.reset(self.procs)
         self.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        held = _monotonic() - self.t0
+        if held >= LOCK_SLOW:
+            _log_held(self.conn, held, sys._getframe(1))
         return False
 
 
@@ -1341,6 +1389,29 @@ def _log_locked(conn, tries):
         if path:
             with open(Path(path).parent / "locked.log", "a") as f:
                 f.write(f"{iso(now())} tries={tries} pid={os.getpid()} {' '.join(sys.argv[1:4])}\n")
+    except Exception:
+        pass
+
+
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
+
+
+def _log_held(conn, seconds, frame):
+    """One line in locked.log for a transaction that held the write lock LOCK_SLOW or longer: how long, the
+    command, its thread, and the MaximizePM functions that ran it. The lines of the commands that gave up
+    (_log_locked) name only the waiters; this line names the holder (#5396). Never an error of its own."""
+    try:
+        chain = []
+        while frame is not None and len(chain) < 6:
+            if frame.f_code.co_filename.startswith(_PKG_DIR):
+                chain.append(frame.f_code.co_name)
+            frame = frame.f_back
+        path = conn.execute("PRAGMA database_list").fetchone()[2]
+        if path:
+            import threading
+            with open(Path(path).parent / "locked.log", "a") as f:
+                f.write(f"{iso(now())} held={seconds:.1f}s pid={os.getpid()} {' '.join(sys.argv[1:4])} "
+                        f"thread={threading.current_thread().name} in {'<'.join(chain)}\n")
     except Exception:
         pass
 

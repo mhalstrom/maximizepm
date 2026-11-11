@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -766,7 +767,7 @@ class Targets(Base):
         raw = sqlite3.connect(self.path)
         raw.executescript("DROP TABLE projects; CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, "
                           "rank INTEGER NOT NULL, notes TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0, "
-                          "created_at TEXT NOT NULL);")
+                          "created_at TEXT NOT NULL); DELETE FROM meta WHERE key LIKE 'schema:%';")  # an old queue has no schema id of this code (#5396)
         raw.close()
         self.c = core.connect(self.path)
         cols = {r["name"] for r in self.c.execute("PRAGMA table_info(projects)")}
@@ -820,6 +821,7 @@ class Context(Base):
         raw = sqlite3.connect(self.path)
         for col in ("context", "touches", "check"):
             raw.execute(f'ALTER TABLE items DROP COLUMN "{col}"')
+        raw.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
         raw.commit()
         raw.close()
         self.c = core.connect(self.path)
@@ -3139,6 +3141,46 @@ class Takeover(Base):
         self.assertEqual([t["id"] for t in core.takeovers(self.c)], [self.h])
         self.assertEqual(core.takeovers_seen(self.c, [], "mark"), {"seen": 0})
 
+
+class Upgrade(Base):
+    """connect() runs SCHEMA and the migrations once for each schema id, not on every command (#5396)."""
+
+    def test_a_connect_writes_nothing_while_another_command_holds_the_write_lock(self):
+        path = self.c.execute("PRAGMA database_list").fetchone()[2]
+        holder = sqlite3.connect(path, isolation_level=None)
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN IMMEDIATE")
+        t = time.time()
+        c = core.connect(path)
+        self.addCleanup(c.close)
+        self.assertLess(time.time() - t, 1)  # before #5396 it waited busy_timeout (10s), then died
+        self.assertTrue(c.execute("SELECT 1 FROM meta WHERE key=?", ("schema:" + core.schema_print(),)).fetchone())
+        holder.execute("ROLLBACK")
+
+    def test_a_new_schema_id_runs_the_migrations_again(self):
+        path = self.c.execute("PRAGMA database_list").fetchone()[2]
+        self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'launch_in', 'tab')")
+        core.connect(path).close()  # the same schema id: nothing runs
+        self.assertTrue(self.c.execute("SELECT 1 FROM settings WHERE key='launch_in'").fetchone())
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")
+        core.connect(path).close()
+        self.assertIsNone(self.c.execute("SELECT 1 FROM settings WHERE key='launch_in'").fetchone())
+        self.assertEqual(self.c.execute("SELECT count(*) FROM meta WHERE key LIKE 'schema:%'").fetchone()[0], 1)
+
+    def test_a_long_transaction_names_itself_in_locked_log(self):
+        self.addCleanup(setattr, core, "LOCK_SLOW", core.LOCK_SLOW)
+        core.LOCK_SLOW = 0
+        core.project_add(self.c, "a")
+        core.item_add(self.c, "a", "anything")
+        with open(os.path.join(self.dir.name, "locked.log")) as f:
+            line = f.read().splitlines()[-1]
+        self.assertRegex(line, r"held=\d+\.\ds pid=\d+ .* thread=MainThread in item_add$")
+
+    def test_the_schema_id_is_the_same_in_every_process(self):
+        out = {subprocess.run([sys.executable, "-c", "from river import core; print(core.schema_print())"],
+                              capture_output=True, text=True, check=True).stdout.strip() for _ in range(3)}
+        self.assertEqual(out, {core.schema_print()})
+
 class Prompts(Base):
     def test_prompt_for_item_and_all(self):
         core.project_add(self.c, "a", path=self.dir.name)
@@ -4363,6 +4405,7 @@ class TrackerWriteBack(Base):
         self.c.execute("CREATE TABLE r2 AS SELECT item_id, ref, url, created_at FROM item_refs")
         self.c.execute("DROP TABLE item_refs")
         self.c.execute("ALTER TABLE r2 RENAME TO item_refs")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
         self.c.close()
         self.c = core.connect(self.path)
         self.assertIn("synced_at", {r["name"] for r in self.c.execute("PRAGMA table_info(item_refs)")})
@@ -6047,6 +6090,7 @@ class Manager(Base):
             self.c.execute("UPDATE messages SET level=? WHERE id=?", (lvl, i))
         self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'manage_wait_normal', '7m')")
         self.c.execute("DELETE FROM meta WHERE key='message_levels_1608'")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
         self.c.commit()
         c2 = core.connect(self.path)
         self.addCleanup(c2.close)
@@ -6330,6 +6374,7 @@ class Rename(Base):
         self.c.execute("CREATE TABLE aliases (kind TEXT NOT NULL, alias TEXT NOT NULL, ref_id INTEGER NOT NULL, "
                        "created_at TEXT NOT NULL, until TEXT, PRIMARY KEY (kind, alias))")
         self.c.execute("INSERT INTO aliases VALUES ('project', 'older', 1, '2026-10-01T00:00:00Z', '2027-01-01T00:00:00Z')")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
         self.c.commit()
         self.c.close()
         self.c = core.connect(self.path)
@@ -7385,6 +7430,7 @@ class Backlog(Base):
     def test_the_columns_come_by_migration(self):
         self.c.execute("ALTER TABLE items DROP COLUMN backlog_at")
         self.c.execute("ALTER TABLE items DROP COLUMN backlog_note")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
         self.c.close()
         self.c = core.connect(self.path)
         cols = {r["name"] for r in self.c.execute("PRAGMA table_info(items)")}

@@ -2293,6 +2293,7 @@ class LaunchInTmux(unittest.TestCase):
             self.assertEqual(len(self.tmux.panes), 2)
         # A queue that chose a Terminal tab before: the setting goes at the next connect.
         self.c.execute("INSERT INTO settings(scope, key, value) VALUES ('global', 'launch_in', 'tab')")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
         self.c.commit()
         self.c.close()
         self.c = core.connect()
@@ -3580,6 +3581,7 @@ class LaunchProfiles(unittest.TestCase):
         self.c.execute("INSERT INTO settings(scope,key,value) VALUES (?,?,?) "
                        "ON CONFLICT(scope,key) DO UPDATE SET value=excluded.value", (scope, "launch_agents", value))
         self.c.execute("DELETE FROM meta WHERE key='launch_profiles'")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
         self.c.close()
         self.c = core.connect()
         return self.c.execute("SELECT value FROM settings WHERE scope=? AND key='launch_agents'", (scope,)).fetchone()["value"]
