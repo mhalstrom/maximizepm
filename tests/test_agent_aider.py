@@ -100,7 +100,9 @@ class Launch(Env):
         log = str(self.root / "aider" / "w1.chat.history.md")
         self.assertEqual(argv, ["aider", "--model", "anthropic/claude-sonnet-4-5", "--reasoning-effort", "high",
                                 "--edit-format", "diff", "--no-auto-commits", "--yes-always",
-                                "--chat-history-file", log, "--no-show-release-notes",
+                                "--no-gitignore", "--no-show-model-warnings", "--no-analytics",
+                                "--chat-history-file", log, "--input-history-file",
+                                str(self.root / "aider" / "w1.input.history"), "--no-show-release-notes",
                                 "--set-env", "MAXPM_AIDER_SESSION=w1"])
         self.assertNotIn("run maxpm go", argv)  # FIRST_PROMPT: the start path pastes it
         self.assertEqual(aider.FIRST_PROMPT, "paste")
@@ -124,7 +126,23 @@ class Launch(Env):
 
     def test_no_name_leaves_aiders_own_log(self):
         argv = self.a.build_command(None, None, "sonnet", None, {}, None)
-        self.assertEqual(argv, ["aider", "--model", "sonnet", "--no-show-release-notes"])
+        self.assertEqual(argv, ["aider", "--model", "sonnet", "--no-gitignore", "--no-show-model-warnings",
+                                "--no-analytics", "--no-show-release-notes"])
+
+    def test_a_start_asks_no_question_unless_a_setting_says_so(self):
+        # #5270: a page start of Aider stopped at 'Add .aider* to .gitignore (recommended)?' and, for an ollama
+        # model with no OLLAMA_API_BASE, at 'Open documentation url for more info?'. Both are off by default.
+        argv = self.a.build_command("w1", None, "ollama_chat/qwen2.5:3b", None, {}, None)
+        self.assertIn("--no-gitignore", argv)
+        self.assertIn("--no-show-model-warnings", argv)
+        self.assertIn("--no-analytics", argv)
+        self.assertIn("--no-show-release-notes", argv)
+        argv = self.a.build_command("w1", None, None, None, {"gitignore": "on", "model_warnings": "on",
+                                                             "analytics": "on"}, None)
+        for flag in ("--no-gitignore", "--no-show-model-warnings", "--no-analytics"):
+            self.assertNotIn(flag, argv)
+        got = self.a.parse_command(["aider", "--no-gitignore", "--no-show-model-warnings", "--no-analytics"])
+        self.assertEqual(got["settings"], {"gitignore": "off", "model_warnings": "off", "analytics": "off"})
 
     def test_a_hand_written_command_that_a_profile_builds_reads_back(self):
         got = self.a.parse_command(["aider", "--model", "{model}", "--reasoning-effort", "{effort}",
@@ -143,10 +161,12 @@ class Launch(Env):
         log.write_text((FIX / "chat.history.md").read_text())
         argv = self.a.resume_command("w1", "sonnet", "medium", {"prompt": "go on", "fork": "x"}, name="w2")
         self.assertEqual(argv, ["aider", "--model", "sonnet", "--reasoning-effort", "medium",
-                                "--chat-history-file", str(log), "--restore-chat-history", "--no-show-release-notes",
-                                "--set-env", "MAXPM_AIDER_SESSION=w2"])
-        self.assertEqual(self.a.resume_command(str(log))[:4], ["aider", "--chat-history-file", str(log),
-                                                                "--restore-chat-history"])
+                                "--no-gitignore", "--no-show-model-warnings", "--no-analytics",
+                                "--chat-history-file", str(log), "--input-history-file",
+                                str(self.root / "aider" / "w1.input.history"), "--restore-chat-history",
+                                "--no-show-release-notes", "--set-env", "MAXPM_AIDER_SESSION=w2"])
+        self.assertEqual(self.a.resume_command(str(log))[4:8], ["--chat-history-file", str(log), "--input-history-file",
+                                                                 str(self.root / "aider" / "w1.input.history")])
 
     def test_a_maxpm_command_inside_aider_records_the_name_and_the_sessions_tab_finds_the_log(self):
         self.assertEqual(aider.IDENTITY["source"], "env")

@@ -63,13 +63,26 @@ SETTINGS = [
      "flag": ["--edit-format", "{value}"], "live": "/chat-mode {value}", "read": r"--edit-format[= ](\S+)"},
     {"key": "auto_commits", "label": "Commit each edit", "kind": "toggle", "choices": [], "default": "on",
      "text": "Aider commits each edit it makes, with a message it writes (/undo takes the last one back).",
-     "flag": [], "live": None, "read": None},  # on is Aider's default; build_command adds --no-auto-commits for off
+     "flag": [], "live": None, "read": None},  # on is Aider's default; off: --no-auto-commits (OFF_FLAGS)
     {"key": "yes_always", "label": "Yes to every question", "kind": "toggle", "choices": [], "default": "off",
      "text": "Answers yes to Aider's questions (add a file, create a file); a shell command still waits for a person.",
      "flag": ["--yes-always"], "live": None, "read": None},
     {"key": "cache_prompts", "label": "Prompt cache", "kind": "toggle", "choices": [], "default": "off",
      "text": "Asks the provider to cache the prompt (Anthropic, DeepSeek): later turns cost less.",
      "flag": ["--cache-prompts"], "live": None, "read": None},
+    # A start asks no question (#5270): nobody watches a new pane, and the first prompt waits for the idle line.
+    {"key": "gitignore", "label": "Add .aider* to .gitignore", "kind": "toggle", "choices": [], "default": "off",
+     "text": "On: Aider asks at the start to add its files (.aider*) to the project's .gitignore. Off: it does not ask.",
+     "flag": [], "live": None, "read": None},  # off: --no-gitignore (OFF_FLAGS)
+    {"key": "model_warnings", "label": "Model warnings at the start", "kind": "toggle", "choices": [],
+     "default": "off",
+     "text": "On: Aider warns about a model it knows little of (or a missing variable such as OLLAMA_API_BASE) and "
+             "asks to open its docs. Off: it starts at once; a missing key shows at the first prompt.",
+     "flag": [], "live": None, "read": None},  # off: --no-show-model-warnings (OFF_FLAGS)
+    {"key": "analytics", "label": "Aider's analytics", "kind": "toggle", "choices": [], "default": "off",
+     "text": "On: Aider's own choice (it asks one new user in ten, once). Off: no analytics for the session, and no "
+             "question; a choice stored before stays as it is.",
+     "flag": [], "live": None, "read": None},  # off: --no-analytics (OFF_FLAGS)
     {"key": "weak_model", "label": "Weak model", "kind": "text", "choices": [], "default": "",
      "text": "The model for commit messages and chat summaries; empty: Aider picks one for the main model.",
      "flag": ["--weak-model", "{value}"], "live": "/weak-model {value}", "read": r"--weak-model[= ](\S+)"},
@@ -109,6 +122,10 @@ FIRST_PROMPT = "paste"
 
 SESSION_ENV = "MAXPM_AIDER_SESSION"
 
+# The toggles whose "off" is a flag of Aider's (on is Aider's own behaviour, with no flag).
+OFF_FLAGS = {"auto_commits": "--no-auto-commits", "gitignore": "--no-gitignore",
+             "model_warnings": "--no-show-model-warnings", "analytics": "--no-analytics"}
+
 
 def chat_dir():
     """The folder of the chat logs of the sessions that MaximizePM starts: aider/ beside the queue."""
@@ -124,6 +141,11 @@ def chat_file(name):
     return chat_dir() / f"{_safe(name)}.chat.history.md"
 
 
+def input_file(name):
+    """The prompt history of session `name` (Up in Aider's input line): beside its chat log, not in the project."""
+    return chat_dir() / f"{_safe(name)}.input.history"
+
+
 def _skill_file():
     """A file of the maxpm skill (the same file as Claude Code's skill_prompt), or None."""
     from .. import core
@@ -132,12 +154,15 @@ def _skill_file():
 
 
 def build_command(name, folder, model, effort, settings, prompt):
-    """aider [--model M] [--reasoning-effort E] [settings] --chat-history-file <its log> [--restore-chat-history]
-    --no-show-release-notes --set-env MAXPM_AIDER_SESSION=<name> [--read <skill>] [--read AGENTS.md] [args].
-    The session's log is chat_file(name); a resume (settings['resume']) appends to the log of the session it resumes.
-    With no name and no resume, Aider keeps its own log in the git root. The prompt is not in the argv
-    (FIRST_PROMPT). AGENTS.md of the folder goes in with --read, as Aider reads no instruction file by itself. The
-    release notes question comes once per new version, before the prompt, in a pane nobody watches yet: it is off."""
+    """aider [--model M] [--reasoning-effort E] [settings] --chat-history-file <its log> --input-history-file <its
+    prompts> [--restore-chat-history] --no-show-release-notes --set-env MAXPM_AIDER_SESSION=<name> [--read <skill>]
+    [--read AGENTS.md] [args]. The session's log is chat_file(name); a resume (settings['resume']) appends to the log
+    and the prompts of the session it resumes. With no name and no resume, Aider keeps both in the git root. The
+    prompt is not in the argv (FIRST_PROMPT). AGENTS.md of the folder goes in with --read, as Aider reads no
+    instruction file by itself. A start asks no question (#5270), as nobody watches a new pane yet: the release notes
+    question is off, and so are, by their settings' defaults, the .gitignore question, the analytics question and the
+    model warnings (with
+    them off, ollama_chat/<model> reaches the local Ollama at its default address with no OLLAMA_API_BASE)."""
     s = settings or {}
     argv = ["aider"]
     if model:
@@ -147,15 +172,15 @@ def build_command(name, folder, model, effort, settings, prompt):
         argv += [w.format(value=level) for w in EFFORT["flag"]]
     for spec in SETTINGS:
         value = str(s.get(spec["key"]) or spec["default"] or "").strip()
-        if spec["key"] == "auto_commits":
-            argv += ["--no-auto-commits"] if value == "off" else []
+        if spec["key"] in OFF_FLAGS:
+            argv += [OFF_FLAGS[spec["key"]]] if value == "off" else []
         elif spec["kind"] == "toggle":
             argv += list(spec["flag"]) if value == "on" else []
         elif value and spec["flag"]:
             argv += [w.format(value=value) for w in spec["flag"]]
     log = s.get("resume") or name
     if log:
-        argv += ["--chat-history-file", str(chat_file(log))]
+        argv += ["--chat-history-file", str(chat_file(log)), "--input-history-file", str(input_file(log))]
     if s.get("resume"):
         argv.append("--restore-chat-history")
     argv.append("--no-show-release-notes")
@@ -189,8 +214,8 @@ def parse_command(words):
         elif t == "--weak-model" and nxt and not nxt.startswith("-"):
             opts["weak_model"] = nxt
             i += 2
-        elif t == "--no-auto-commits":
-            opts["auto_commits"] = "off"
+        elif t in OFF_FLAGS.values():
+            opts[next(k for k, f in OFF_FLAGS.items() if f == t)] = "off"
             i += 1
         elif t in ("--yes-always", "--cache-prompts"):
             opts[t[2:].replace("-", "_")] = "on"
