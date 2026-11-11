@@ -913,6 +913,20 @@ class SettingsAndEffort(Env):
         self.assertEqual((got["yolo"]["value"], got["yolo"]["default_key"]), ("on", None))
         self.assertEqual(sessions.check_value(sessions.setting_spec("xyz", "mode"), "careful"), "careful")
 
+    def test_the_settings_dialog_of_a_grok_session_reads_its_command_line(self):
+        # #5262: Model and Effort showed 'not known' and Grok's own settings were missing.
+        core.register(self.c, "g1")
+        self.c.execute("UPDATE agents SET agent_type='grok', pid_cmd='grok -m grok-4.7 --reasoning-effort low "
+                       "--permission-mode default --sandbox workspace go' WHERE name='g1'")
+        got = {s["key"]: s for s in sessions.session_settings(self.c, "g1")["settings"]}
+        self.assertEqual(list(got), ["model", "effort", "permission_mode", "sandbox"])
+        self.assertEqual((got["model"]["value"], got["model"]["live"]), ("grok-4.7", True))
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("low", "command line"))
+        self.assertEqual((got["permission_mode"]["value"], got["permission_mode"]["default_key"]),
+                         ("default", "grok_permission_mode"))
+        self.assertEqual(got["sandbox"]["value"], "workspace")
+        self.assertEqual(agents.get("grok").describe["model_live"].format(value="grok-4.5"), "/model grok-4.5")
+
     def test_check_names_a_setting_spec_that_cannot_work(self):
         bad = module(DESCRIBE={**GOOD, "id": "x"}, SETTINGS=[
             {"key": "a", "kind": "toggle", "default": "maybe"},

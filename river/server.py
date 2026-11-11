@@ -1363,8 +1363,10 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
     a, kind, path, tail = _quiet_session(conn, agent, who)
     if not (a.get("pid") and a.get("host") == core.this_host() and a.get("pid_cmd") and core.pid_alive(a["pid"])):
         raise RiverError(f"the process of {agent} on this computer is not known; restart it by hand")
-    if not tail.get("cwd"):
-        raise RiverError(f"the transcript of {agent} does not name its folder")
+    cwd = tail.get("cwd") or core.proc_cwd(a["pid"])  # Grok's and Copilot's logs name no folder (#5262)
+    if not cwd:
+        raise RiverError(f"the folder of {agent} is not known: its transcript does not name it, and its process does "
+                         f"not say; restart it by hand")
     prov = sessions.provider(a.get("agent_type"), kind)["id"]
     fixed_on_resume(prov, changes)
     ov, done, defaults = {"opts": {}, "flags": [], "noflags": []}, [], []
@@ -1383,7 +1385,7 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
     ov["prompt"] = (f"MaximizePM restarted this session with new settings ({'; '.join(done)}); your name, items and "
                     f"context are the same. Start again any background command you had running, then continue where "
                     f"you stopped: run maxpm --as {agent} go if you are not sure.")
-    pane = move_into_tmux(conn, a, kind, path, tail["cwd"], runner, end, ov, f"restarted with new settings ({'; '.join(done)})")
+    pane = move_into_tmux(conn, a, kind, path, cwd, runner, end, ov, f"restarted with new settings ({'; '.join(done)})")
     for k, v in defaults:
         core.config_set(conn, k, v)
     return {"agent": agent, "pane": pane, "changed": done, "defaults": [k for k, _ in defaults]}

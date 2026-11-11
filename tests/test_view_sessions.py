@@ -589,6 +589,25 @@ class Adopt(Base):
         server.session_setting_live(self.c, "ag", "model", "sonnet")
         self.assertIn("/model sonnet", " ".join(str(k) for k in self.tmux.panes[0]["keys"]))
 
+    def test_restart_takes_the_folder_from_the_process_when_the_transcript_names_none(self):
+        # #5262: Grok's and Copilot's logs have no cwd field, and Restart answered 'the transcript of ag does not name
+        # its folder'. The folder of the agent's own process is the session's folder.
+        import subprocess
+        proc = subprocess.Popen(["sleep", "60"], cwd=self.dir.name)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        if core.proc_cwd(proc.pid) is None:
+            self.skipTest("no lsof or /proc here")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'", (proc.pid, core.proc_info(proc.pid)[2]))
+        Path(self.path).write_text(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn"))  # no cwd
+        self.quiet()
+        got = server.session_restart(self.c, "ag", {"permission_mode": "plan"})
+        self.assertEqual(got["changed"], ["Permission mode plan"])
+        line = self.tmux.panes[0]["keys"][0]
+        self.assertIn(f"cd {os.path.realpath(self.dir.name)} && ", line)
+        self.assertIn("--permission-mode plan", line)
+
     def test_a_process_in_a_tmux_pane_is_never_ended(self):
         """#5060: two agents had one pid (a command with --as for another agent wrote it), the map from pids to names
         kept one of them, and tmux_adopt took the other for a session outside tmux: it ended the manager in its pane.

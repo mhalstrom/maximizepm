@@ -36,6 +36,9 @@ DESCRIBE = {
     "default_model": "",
     "model_ids": {},
     "prefix": "grok_",
+    # /model <model> switches the model of a running session; the command line names it as -m or --model (#5262).
+    "model_live": "/model {value}",
+    "model_read": r"(?:^|\s)(?:-m|--model)[= ](\S+)",
 }
 
 
@@ -74,10 +77,11 @@ SETTINGS = [
      "default": "",
      "text": "when Grok asks before a tool call (--permission-mode; bypassPermissions is always-approve); "
              "empty: Grok's own setting ([ui] permission_mode in ~/.grok/config.toml)",
-     "flag": ["--permission-mode", "{value}"], "live": None, "read": r"--permission-mode[= ]([A-Za-z]+)"},
+     "flag": ["--permission-mode", "{value}"], "live": None, "read": r"--permission-mode[= ]([A-Za-z]+)",
+     "session": True},
     {"key": "sandbox", "label": "Sandbox", "kind": "choice", "choices": SANDBOXES, "default": "",
      "text": "the sandbox profile of its file and network access (--sandbox); empty: Grok's own setting",
-     "flag": ["--sandbox", "{value}"], "live": None, "read": r"--sandbox[= ]([A-Za-z_-]+)"},
+     "flag": ["--sandbox", "{value}"], "live": None, "read": r"--sandbox[= ]([A-Za-z_-]+)", "session": True},
     {"key": "args", "label": "More arguments", "kind": "text", "default": "",
      "text": "more arguments, put before the prompt", "flag": [], "live": None, "read": None},
     {"key": "prompt", "label": "First prompt", "kind": "text",
@@ -96,7 +100,8 @@ EFFORT = {
     "map": {"max": "xhigh"},
     "flag": ["--reasoning-effort", "{value}"],
     "live": "/effort {value}",
-    "read": None,
+    # The session's command line names it (#5262); Grok's updates.jsonl does not.
+    "read": r"--reasoning-effort[= ]([a-z]+)",
 }
 
 

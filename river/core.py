@@ -6000,6 +6000,26 @@ def pid_alive(pid):
     return True
 
 
+def proc_cwd(pid):
+    """The working folder of process pid on this computer, or None (#5262): a session's folder when its chat log does
+    not name it (Grok, Copilot). Linux: /proc/<pid>/cwd; macOS: lsof; Windows: None."""
+    import subprocess
+    if not pid or PLATFORM == "win32":
+        return None
+    link = f"/proc/{int(pid)}/cwd"
+    if os.path.exists(link):
+        try:
+            return os.readlink(link)
+        except OSError:
+            return None
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return next((x[1:] for x in out.splitlines() if x.startswith("n/")), None)
+
+
 def proc_info(pid):
     """(parent pid, program name, command line) of a process, from ps (on Windows, from the system's process
     list); None when it does not run or no ps."""
