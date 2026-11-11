@@ -286,7 +286,7 @@ class Commands(Home):
         no_project = {c["name"]: c for c in gemini.read_commands(None)}
         self.assertEqual(no_project["review"]["description"], "Custom command from review.toml")
         for c in gemini.COMMANDS:
-            self.assertEqual(set(c), {"name", "description", "hint"})
+            self.assertTrue({"name", "description", "hint", "run"} <= set(c) <= set(agents.COMMAND_KEYS), c)  # #5290
             self.assertFalse(c["name"].startswith("/"))
 
     def test_the_toml_description_reads_without_tomllib_too(self):

@@ -124,5 +124,49 @@ class LastCall(unittest.TestCase):
                              {"used": 19099, "window": 256000, "model": "grok-4.7"})
 
 
+
+class Group2(unittest.TestCase):
+    """#5290: Hermes, Gemini CLI and Cursor CLI."""
+
+    def marks(self, aid):
+        a = agents.get(aid)
+        self.assertEqual(agents.check(a.module, aid), [])
+        self.assertTrue(all(c.get("run") in agents.COMMAND_RUNS for c in a.commands), aid)
+        return ({c["name"]: c["setting"] for c in a.commands if c.get("setting")},
+                sorted(c["name"] for c in a.commands if c.get("page") == "usage"),
+                {c["name"]: c["run"] for c in a.commands})
+
+    def test_the_commands(self):
+        settings, usage, runs = self.marks("hermes")
+        self.assertEqual((settings, usage), ({"model": "model", "reasoning": "effort"}, ["context", "status", "usage"]))
+        self.assertEqual((runs["sessions"], runs["compress"]), ("terminal", "now"))
+        settings, usage, runs = self.marks("gemini")
+        self.assertEqual((settings, usage), ({"model": "model"}, ["stats"]))
+        self.assertEqual((runs["settings"], runs["compress"]), ("terminal", "now"))
+        settings, usage, runs = self.marks("cursor")
+        self.assertEqual((settings, usage), ({"model": "model", "sandbox": "sandbox"}, []))
+        self.assertEqual((runs["config"], runs["resume"], runs["summarize"]), ("terminal", "terminal", "now"))
+
+    def test_hermes_reads_its_context_length_cache(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (Path(tmp.name) / "context_length_cache.yaml").write_text(
+            "context_lengths:\n  stealth/missingno@https://inference-api.nousresearch.com/v1: 262144\n"
+            "  reflection/beam-1.0:free@https://inference-api.nousresearch.com/v1: \n    262144\n"
+            "  gpt-6.1-terra@https://chatgpt.com/backend-api/codex: 500000\n"
+            "  gpt-6.1-sol@https://chatgpt.com/backend-api/codex: 500000\n  gpt-6.1-sol@https://api.openai.com/v1: 272000\n")
+        with mock.patch.dict(os.environ, {"HERMES_HOME": tmp.name}):
+            h = agents.get("hermes")
+            self.assertEqual((h.context_window("gpt-6.1-terra"), h.context_window("reflection/beam-1.0:free"),
+                              h.context_window("gpt-6.1-sol"), h.context_window("nope")), (500000, 262144, None, None))
+
+    def test_gemini_window_and_last_call(self):
+        g = agents.get("gemini")
+        self.assertEqual((g.context_window("gemini-3.8-flash"), g.context_window("pro"), g.context_window("gpt-6")),
+                         (1_048_576, 1_048_576, None))
+        st = fold(g, FIX / "gemini" / "session-2026-11-11T07-55-5d0c1b2a.jsonl")
+        self.assertEqual(st["model"], "gemini-3.8-flash")
+        self.assertGreater(st["last"]["context"], 0)
+
 if __name__ == "__main__":
     unittest.main()

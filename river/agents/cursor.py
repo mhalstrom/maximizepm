@@ -449,6 +449,19 @@ def _front(text):
     return meta_, parts[2]
 
 
+# How each command works from the page (#5220, #5290): Cursor Agent 2026.11.11 in tmux on 2026-11-11. /model opens its
+# picker (the Settings row Model) and /sandbox its sandbox settings (the Settings row Sandbox); /config and /resume
+# open full-screen views, and /about prints a card on its screen: they need the terminal. Cursor writes no token
+# count to its chat log, so no command opens the Usage panel. The toggles and the others run at once.
+_RUNS = {
+    "terminal": {"config", "resume", "rewind", "about", "logs", "help", "mcp", "plugin", "team", "load-workspace"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] in ("model", "sandbox"):
+        _c["setting"], _c["run"] = _c["name"], "terminal"
+
+
 def _commands(d):
     """The commands of a folder of .md files: each file's name, its front matter's description (else its first
     line), and its argument-hint."""

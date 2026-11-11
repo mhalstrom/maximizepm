@@ -547,6 +547,46 @@ def _toml_description(text):
     return (m.group(1) if m and m.group(1) is not None else (m.group(2) if m else "")) or ""
 
 
+# How each command works from the page (#5220, #5290). Gemini CLI was not signed in on this Mac (its commands ran into
+# its sign-in), so these come from its own descriptions: /model opens its model dialog (the Settings row Model);
+# /stats shows the session's tokens (the Usage panel); the dialogs and lists need the terminal; the others run at once.
+_RUNS = {
+    "terminal": {"about", "auth", "chat", "commands", "directory", "docs", "editor", "extensions", "help", "mcp",
+                 "memory", "permissions", "policies", "privacy", "restore", "resume", "rewind", "settings", "skills",
+                 "theme", "tools"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] == "model":
+        _c["setting"], _c["run"] = "model", "terminal"
+    if _c["name"] == "stats":
+        _c["page"], _c["run"] = "usage", "terminal"
+
+
+def context_window(model):
+    """The tokens of a Gemini model's window (#5290): the Gemini 2.5 and 3 models take 1,048,576 tokens of input; the
+    aliases (auto, pro, flash, flash-lite) are those models. None for another model."""
+    m = (model or "").lower()
+    return 1_048_576 if m in ("auto", "pro", "flash", "flash-lite") or m.startswith("gemini-") else None
+
+
+def chat_cache_line(raw, st):
+    """Fold one line of a session file into the cache state (#5290, the context meter): a gemini message's tokens are
+    one model call (its context: input with the cached part, output and thoughts), its model the message's model."""
+    try:
+        m = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    t = m.get("tokens") if isinstance(m, dict) and m.get("type") == "gemini" else None
+    if not isinstance(t, dict):
+        return
+    ctx = sum(int(t.get(k) or 0) for k in ("input", "output", "thoughts"))
+    if ctx and m.get("timestamp"):
+        st["last"] = {"start": m["timestamp"], "at": m["timestamp"], "context": ctx}
+        if m.get("model"):
+            st["model"] = m["model"]
+
+
 def read_commands(folder):
     """The custom commands for a session in `folder`: each .toml file under ~/.gemini/commands and under
     <folder>/.gemini/commands; a file in a subfolder is <sub>:<name> (git/commit.toml is /git:commit). A project

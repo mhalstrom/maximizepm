@@ -380,3 +380,13 @@ with no argument, nothing goes to the terminal. A command with an argument goes 
 | OpenCode | `/usage`, `/stats` | the Usage panel (the session's tokens; its window from the models.dev catalog in its database: opencode/big-pickle 200k); its workspace limits need `/connect`, on its screen |
 | OpenCode | `/status` (its servers), `/sessions`, `/resume`, `/continue`, `/agents`, `/themes`, `/settings`, `/effort`, `/thinking` (the model's variant), `/rename`, `/export` and its other dialogs | needs the terminal |
 | OpenCode | `/new`, `/clear`, `/compact`, `/fork`, `/undo`, `/review`, `/goal`, `/btw`, `/copy`, `/reload`, `/restart`, `/update`, `/exit` | run at once |
+| Hermes 0.22.7 (#5290) | `/model`, `/reasoning` | Settings: Model, Effort |
+| Hermes | `/status`, `/context`, `/usage` | the Usage panel (the session's totals from its log; its window from `~/.hermes/context_length_cache.yaml`); Hermes logs no single call, so no meter |
+| Hermes | `/history`, `/rollback`, `/agents`, `/queue`, `/sessions`, `/resume`, `/config`, `/approvals`, `/diff`, `/tools`, `/skills`, `/help`, `/version` | needs the terminal (it prints them into its scrollback, not its log) |
+| Hermes | `/new`, `/clear`, `/retry`, `/undo`, `/compress`, `/branch`, `/title`, `/stop`, `/bg`, `/btw`, `/steer`, `/goal`, `/plan`, `/review`, `/fast`, `/yolo`, `/verbose`, `/init`, `/image`, `/copy`, `/quit` | run at once |
+| Gemini CLI (#5290; not signed in here: from its descriptions) | `/model` | Settings: Model |
+| Gemini CLI | `/stats` | the Usage panel (its window: 1,048,576 for the Gemini 2.5 and 3 models) |
+| Gemini CLI | `/settings`, `/resume`, `/chat`, `/rewind`, `/restore`, `/permissions`, `/policies`, `/extensions`, `/mcp`, `/memory`, `/tools`, `/skills`, `/theme`, `/editor`, `/auth`, `/about`, `/directory`, `/commands`, `/docs`, `/help`, `/privacy` | needs the terminal |
+| Cursor CLI 2026.11.11 (#5290) | `/model`, `/sandbox` | Settings: Model, Sandbox |
+| Cursor CLI | `/config`, `/resume`, `/rewind`, `/about`, `/logs`, `/help`, `/mcp`, `/plugin`, `/team`, `/load-workspace` | needs the terminal; Cursor logs no token counts, so it has no Usage panel |
+| Cursor CLI | the toggles (`/ask`, `/max-mode`, `/fast`, `/auto-review`, `/run-everything`, ...), `/clear`, `/fork`, `/summarize`, `/rename`, `/goal`, `/plan` | run at once |

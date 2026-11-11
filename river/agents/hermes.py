@@ -654,6 +654,47 @@ def _front(text):
     return out
 
 
+# How each command works from the page (#5220, #5290): Hermes 0.22.7 in tmux on 2026-11-11 (with no provider signed
+# in): /context and /usage print into its scrollback ('No active agent' before a first message), /sessions prints a
+# list there; Hermes's chat log keeps none of it. /model and /reasoning set what the Settings rows Model and Effort
+# set; /status, /context and /usage show what the Usage panel shows. The views and lists it prints need the terminal;
+# the others run at once.
+_RUNS = {
+    "terminal": {"history", "rollback", "agents", "queue", "sessions", "resume", "config", "approvals", "diff",
+                 "tools", "skills", "help", "version"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] in ("model", "reasoning"):
+        _c["setting"], _c["run"] = ("model" if _c["name"] == "model" else "effort"), "terminal"
+    if _c["name"] in ("status", "context", "usage"):
+        _c["page"], _c["run"] = "usage", "terminal"
+
+
+def context_window(model):
+    """The tokens of a model's context window from Hermes's own cache (~/.hermes/context_length_cache.yaml, lines
+    '<model>@<base url>: <tokens>', a value also on the next line); #5290. None when it has no entry for the model, or
+    two entries that differ (two providers)."""
+    from pathlib import Path
+    try:
+        lines = (Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "context_length_cache.yaml"
+                 ).read_text().splitlines()
+    except OSError:
+        return None
+    import re
+    found, pending = set(), False
+    for ln in lines:
+        m = re.match(r"^\s*(.+?)@(\S+):\s*(\d*)\s*$", ln)
+        if m:
+            pending = m.group(1) == model and not m.group(3)
+            if m.group(1) == model and m.group(3):
+                found.add(int(m.group(3)))
+        elif pending and ln.strip().isdigit():
+            found.add(int(ln.strip()))
+            pending = False
+    return found.pop() if len(found) == 1 else None
+
+
 def read_commands(folder):
     """Each skill of $HERMES_HOME/skills is a slash command of the same name (/<skill name>): Hermes loads the skill
     into the turn. The skills sit at skills/<category>/<name>/SKILL.md or skills/<name>/SKILL.md."""

@@ -404,7 +404,7 @@ class Commands(HomeCase):
         names = [c["name"] for c in hermes.COMMANDS]
         self.assertEqual(len(names), len(set(names)))
         for c in hermes.COMMANDS:
-            self.assertEqual(set(c), {"name", "description", "hint"})
+            self.assertTrue({"name", "description", "hint", "run"} <= set(c) <= set(agents.COMMAND_KEYS), c)  # #5290
             self.assertFalse(c["name"].startswith("/"))
         self.assertTrue({"new", "compress", "model", "reasoning", "resume", "quit"} <= set(names))
         self.assertEqual(hermes.EFFORT["live"].format(value="high"), "/reasoning high")
