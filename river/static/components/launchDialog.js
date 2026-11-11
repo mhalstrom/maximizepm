@@ -8,6 +8,7 @@ import { $, esc, store } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { button, iconButton } from "./button.js";
 import { field, two, select } from "./form.js";
+import { modelChoices, OTHER } from "./modelPick.js";
 
 // The note under a custom launch_agents command that lacks {model} or {effort} (#5237). A profile (@<agent>) builds
 // its own command, so it has no note; an agent with no effort levels (OpenCode) has no {effort} to miss.
@@ -104,6 +105,11 @@ function el() {
   });
   d.addEventListener("change", (e) => {
     if (e.target.id === "lAgent") draw(values());
+    else if (e.target.id === "lModel") {
+      // "Other model…": the field that finds any model of a long list by typing (#5238).
+      const other = $("#lModelOther");
+      if (other) { other.classList.toggle("hidden", e.target.value !== OTHER); if (e.target.value === OTHER) other.focus(); }
+    }
     else if (e.target.id === "lWork") draw({ ...values(), agent: null });  // the new work's agent type picks again
     else if (e.target.dataset && e.target.dataset.lopt) e.target.dataset.changed = "1";
   });
@@ -116,7 +122,8 @@ function famOf(agent) { const o = (S.launch_options || []).find(x => x.label ===
 function values() {
   const d = $("#launchDlg"), q = (s) => d.querySelector(s);
   return { agent: q("#lAgent") ? q("#lAgent").value : (S.launch_options[0] || {}).label,
-           model: q("#lModel") ? q("#lModel").value : "", effort: q("#lEffort") ? q("#lEffort").value : "",
+           model: !q("#lModel") ? "" : q("#lModel").value === OTHER ? q("#lModelOther").value.trim() : q("#lModel").value,
+           effort: q("#lEffort") ? q("#lEffort").value : "",
            work: q("#lWork") ? q("#lWork").value : "",
            options: Object.fromEntries([...d.querySelectorAll("[data-lopt][data-changed]")].map(x =>
              [x.dataset.lopt, x.type === "checkbox" ? (x.checked ? "on" : "off") : x.value])) };
@@ -159,9 +166,15 @@ function draw(prev) {
           ${projects.length > 1 ? `<optgroup label="Project (its most important ready item)">${projects.map(p => `<option value="p:${esc(p)}" ${workSel === "p:" + p ? "selected" : ""}>${esc(p)}</option>`).join("")}</optgroup>` : ""}
           <optgroup label="Item">${rows.slice(0, 30).map(i => `<option value="i:${i.id}" ${workSel === "i:" + i.id ? "selected" : ""}>#${i.id} ${esc(i.title)}</option>`).join("")}</optgroup>
         </select>`) : `<div class="ld-work"><span class="muted">Work:</span> ${esc(ctx.what || "")}</div>`;
-  // The model's name only: the ladder's note on each model is its tooltip.
-  const modelSel = `<select id="lModel"><option value="">the agent's default</option>${models.map(m =>
-    `<option value="${esc(m.name)}" ${m.name === model ? "selected" : ""}${m.note ? ` title="${esc(m.note)}"` : ""}>${esc(m.name)}</option>`).join("")}</select>`;
+  // The model's name only: the ladder's note on each model is its tooltip. A long list (OpenCode) shows the
+  // adapter's own models and the current choice; "Other model…" finds the rest by typing (#5238).
+  const { shown, all } = modelChoices(models, model);
+  const modelSel = `<select id="lModel"><option value="">the agent's default</option>${shown.map(m =>
+    `<option value="${esc(m.name)}" ${m.name === model ? "selected" : ""}${m.note ? ` title="${esc(m.note)}"` : ""}>${esc(m.name)}</option>`).join("")}${
+    all.length ? `<option value="${OTHER}">Other model…</option>` : ""}</select>${all.length ? `
+    <input id="lModelOther" class="hidden" list="lModelAll" autocomplete="off" spellcheck="false"
+      placeholder="Type to find one of ${all.length} models" aria-label="Other model">
+    <datalist id="lModelAll">${all.map(m => `<option value="${esc(m.name)}"></option>`).join("")}</datalist>` : ""}`;
   const more = optionFields(opt);
   const box = $("#launchDlg .box");
   box.innerHTML = `

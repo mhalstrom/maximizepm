@@ -200,6 +200,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .ld-opts { display: flex; flex-wrap: wrap; gap: var(--sp-3) var(--sp-5); align-items: center; padding-top: var(--sp-3); }
 .form label.ld-opt { display: flex; gap: var(--sp-1); align-items: center; font-size: var(--fs-m); }
 .form label.ld-opt > select { min-width: 0; max-width: 100%; width: auto; }
+.form label > #lModelOther { min-width: 0; width: 100%; }  /* the search under the Model select (#5238) */
 /* An agent's terminal (components/terminalDialog.js): the box has its size from the window, never from the
    tmux pane; the pane's text scrolls inside the screen, both ways. */
 #termDlg { --dlg-z: 16; --dlg-w: 1200px; align-items: stretch; padding: 3vh var(--sp-5); overflow-y: visible; }

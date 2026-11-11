@@ -10650,9 +10650,13 @@ def platform_models(conn, platform, project_id=None, inline=None):
     ladder = parse_ladder(setting(conn, "model_ladder"))
     if fam and fam not in ladder:
         # A family with no ladder (a "multi" agent's provider/model texts, #5169): the adapter's own model list.
+        # The adapter's own models (DESCRIBE['models']) come first, marked pick: the launch dialog offers them
+        # and finds the rest of a long list by typing (#5238; OpenCode knows about 500).
         a = _adapters().find(platform)
-        return [{"name": m, "note": "", "family": fam, "id": a.describe["model_ids"].get(m, m)}
-                for m in (a.read_models() if a else [])]
+        picks = list(a.describe["models"]) if a else []
+        names = list(dict.fromkeys(picks + (a.read_models() if a else [])))
+        return [{"name": m, "note": "", "family": fam, "id": a.describe["model_ids"].get(m, m), "pick": m in picks}
+                for m in names]
     return [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam, "id": model_id(conn, platform, m, project_id, inline)}
             for m in ladder.get(fam, [])]
 

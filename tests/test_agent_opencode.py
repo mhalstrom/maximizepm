@@ -96,6 +96,40 @@ class Describe(Env):
         mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
         self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
 
+    def test_the_launch_dialog_gets_the_described_models_first_and_finds_the_rest_by_typing(self):
+        # #5238: `opencode models` lists about 500 models; the dialog offers the adapter's own ones (pick) first.
+        picks = opencode.DESCRIBE["models"]
+        others = [f"openrouter/vendor/model-{n}" for n in range(60)]
+        cli = others[:30] + [picks[1]] + others[30:]  # the CLI knows a pick too, in its own place
+        mock.patch.object(opencode, "MODELS_RUNNER", lambda: "\n".join(cli) + "\n").start()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        ms = core.platform_models(conn, "opencode")
+        self.assertEqual([m["name"] for m in ms], list(picks) + others)  # each model once, the picks first
+        self.assertEqual([m["name"] for m in ms if m["pick"]], list(picks))
+        if not shutil.which("node"):
+            return
+        js = Path(__file__).resolve().parent.parent / "river" / "static" / "components" / "modelPick.js"
+        code = f"""
+            const {{ modelChoices, LONG }} = await import({json.dumps(js.as_uri())});
+            const ms = {json.dumps(ms)};
+            const names = (r) => [r.shown.map(m => m.name), r.all.length];
+            console.log(JSON.stringify({{
+              long: names(modelChoices(ms, "")),
+              current: names(modelChoices(ms, "openrouter/vendor/model-7")),
+              short: names(modelChoices(ms.slice(0, LONG), "")),
+              nopick: names(modelChoices(ms.map(m => ({{ ...m, pick: false }})), "")),
+            }}));"""
+        r = subprocess.run(["node", "--input-type=module"], input=code, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        self.assertEqual(got["long"], [list(picks), len(ms)])
+        self.assertEqual(got["current"], [list(picks) + ["openrouter/vendor/model-7"], len(ms)])
+        self.assertEqual(got["short"], [[m["name"] for m in ms[:30]], 0])  # a short list: every model, no search
+        self.assertEqual(got["nopick"][1], 0)  # no picks: the whole list as before
+
 
 class Launch(Env):
     def test_the_model_goes_in_by_the_config_of_a_standalone_server(self):
