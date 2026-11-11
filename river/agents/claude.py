@@ -206,3 +206,268 @@ def read_hook(payload):
     else:  # Stop
         out.update(state="idle", waits=_waits(payload), again=bool(payload.get("stop_hook_active")))
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Chat log (#5182). Claude Code writes <config dir>/projects/<folder>/<session id>.jsonl, one JSON object a line:
+# a user or assistant line holds a message; a model call writes one line per content block, each with the call's usage.
+# ---------------------------------------------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+import re as _re  # noqa: E402
+from datetime import timedelta as _timedelta  # noqa: E402
+
+from .. import core as _core  # noqa: E402
+
+
+def _s():
+    """river.sessions, imported when first used: core imports the adapters while it loads, before sessions can."""
+    from .. import sessions
+    return sessions
+
+CHAT = {"compressed": False, "file_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit"], "ref": "session",
+        "cache_write": True}
+
+# A line this much older than the first line of a transcript was copied from the session a fork started from.
+FORK_SLACK = 30
+
+
+def chat_path(session_ref, folder=None, root=None):
+    """The newest transcript of the session id in the transcripts folder (core.transcripts_root), or None."""
+    return _s().newest(Path(root or _core.transcripts_root()).glob(f"*/{session_ref}.jsonl"))
+
+
+def parse_chat_line(d):
+    """The page lines of one Claude Code transcript line, and its turn state (working, idle, or None)."""
+    # A compaction (#5120): Claude Code keeps the lines before it in the file and writes a compact_boundary line, then
+    # the summary as a user line. The chat shows a divider, and the summary folded under it, never as the person's turn.
+    if d.get("type") == "system" and d.get("subtype") == "compact_boundary" and not d.get("isSidechain"):
+        return [{"at": d.get("timestamp"), "role": "divider", "kind": "compacted", "text": "Compacted"}], None
+    if d.get("type") not in ("user", "assistant") or d.get("isSidechain") or d.get("isMeta"):
+        return [], None
+    m = d.get("message") if isinstance(d.get("message"), dict) else {}
+    at, content, out = d.get("timestamp"), m.get("content"), []
+    if d.get("isCompactSummary"):
+        text = content if isinstance(content, str) else _s()._parts_text(content, ("text",))
+        return [{"at": at, "role": "summary", "text": _s()._clip(text.strip(), _s().TEXT_MAX)}], None
+    if d["type"] == "assistant":
+        for x in content if isinstance(content, list) else []:
+            if not isinstance(x, dict):
+                continue
+            if x.get("type") == "text" and x.get("text", "").strip():
+                out.append({"at": at, "role": "assistant", "text": _s()._clip(x["text"], _s().TEXT_MAX)})
+            elif x.get("type") == "tool_use":
+                out.append({"at": at, "role": "tool", "text": _s()._tool_line(x.get("name"), x.get("input")),
+                            "plain": _s().plain_tool(x.get("name"), x.get("input")),
+                            "id": x.get("id"), "detail": _s()._detail(x.get("input"))})
+        stop = m.get("stop_reason")
+        return out, ("idle" if stop in ("end_turn", "stop_sequence") else "working" if stop else None)
+    for x in content if isinstance(content, list) else []:
+        if isinstance(x, dict) and x.get("type") == "tool_result" and x.get("tool_use_id"):
+            out.append({"at": at, "role": "result", "for": x["tool_use_id"], "error": bool(x.get("is_error")),
+                        "text": _s()._clip(_s()._result_text(x.get("content")), _s().DETAIL_MAX)})
+    text = _s()._parts_text(content, ("text",)).strip()
+    if text.startswith("<task-notification>"):
+        out.append({"at": at, "role": "event", "text": "a background task ended"})
+    elif (text and not text.startswith("<")) or any(isinstance(x, dict) and x.get("type") == "image"
+                                                   for x in content if isinstance(content, list)):
+        # tags the CLI adds (a command's name and output, reminders) are no turn of the person
+        out.append(_s()._user_turn(at, text, sum(1 for x in content if isinstance(x, dict) and x.get("type") == "image")
+                                 if isinstance(content, list) else 0))
+    return out, "working"
+
+
+def parse_chat(lines):
+    return _s().parse_lines(parse_chat_line, lines)
+
+
+def chat_chain(path, refs=None):
+    """The transcripts of one chat, oldest first, path last (#5120): a session that Claude Code resumed into a new file
+    (a new session id of the agent) goes on in the same chat. Only files in the folder of the newest one count: a
+    session id that another session recorded for this agent is not its chat."""
+    out = []
+    for sid in refs or ():
+        p = Path(path).parent / f"{sid}.jsonl"
+        if p != Path(path) and p not in out and p.is_file():
+            out.append(p)
+    return out + [Path(path)]
+
+
+def chat_title(lines):
+    """The session title: the last custom-title record, or None."""
+    for line in reversed(lines):
+        if "custom-title" not in line:
+            continue
+        try:
+            d = _json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("type") == "custom-title" and isinstance(d.get("customTitle"), str):
+            return d["customTitle"]
+    return None
+
+
+def chat_settings(lines):
+    """The settings the transcript shows last: Claude Code puts the model and effort on each reply and a line for each
+    permission mode."""
+    got = {}
+    for line in lines:
+        if '"permission-mode"' in line:
+            m = _re.search(r'"permissionMode":\s*"([^"]+)"', line)
+            if m:
+                got["permission_mode"] = m.group(1)
+        elif line.startswith('{"') and '"assistant"' in line:
+            try:
+                d = _json.loads(line)
+            except ValueError:
+                continue
+            if d.get("type") != "assistant":
+                continue
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            if msg.get("model"):
+                got["model"] = msg["model"]
+            if isinstance(d.get("effort"), str):
+                got["effort"] = d["effort"]
+    return got
+
+
+def chat_cache_line(raw, st):
+    """Fold one transcript line (bytes) into the prompt cache state st (#5023): the start of the last model call (the
+    line before its answer: the person's prompt or a tool result), its context, and the cache lifetime in force (the
+    writes of the last call that wrote: 1h or 5m; a read keeps the lifetime of the entry it read)."""
+    if b'"user"' not in raw and b'"assistant"' not in raw:  # a quick test before the line is decoded
+        return
+    try:
+        d = _json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(d, dict) or not isinstance(d.get("timestamp"), str) or d.get("isSidechain"):
+        return
+    at = d["timestamp"]
+    m = d.get("message") if isinstance(d.get("message"), dict) else {}
+    if d.get("type") == "user":
+        st["sent"] = at
+        return
+    u = m.get("usage")
+    if d.get("type") != "assistant" or not isinstance(u, dict) or m.get("model") == "<synthetic>":
+        return
+    context = sum(u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                                           "output_tokens"))
+    if m.get("id") != st.get("mid"):  # a new model call; its lines after the first repeat its usage
+        st["mid"] = m.get("id")
+        st["last"] = {"start": st.get("sent") or at, "at": at, "context": context}
+    else:
+        st["last"] = dict(st["last"], at=at, context=context)
+    cc = u.get("cache_creation") or {}
+    if (cc.get("ephemeral_1h_input_tokens") or 0) > 0:
+        st["ttl"] = "1h"
+    elif (cc.get("ephemeral_5m_input_tokens") or 0) > 0:
+        st["ttl"] = "5m"
+    st["model"] = m.get("model") or st["model"]
+
+
+# Lines that never give an Artifacts hit, skipped before they are decoded: tool results and Claude Code's copies of
+# the API requests. JSON escapes a quote in text, so these words in a message do not match.
+_TEXTS_SKIP = (b'"type":"tool_result"', b'"type":"api-request')
+
+
+def chat_texts(raw):
+    """The texts of one transcript line (bytes) for the Artifacts tab: the text of the person's and the session's turns,
+    the path of each file a CHAT['file_tools'] call wrote, and the input of each other tool call."""
+    if any(k in raw for k in _TEXTS_SKIP):
+        return []
+    try:
+        d = _json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(d, dict):
+        return []
+    m = d.get("message") if isinstance(d.get("message"), dict) else None
+    if not m or d.get("type") not in ("user", "assistant") or d.get("isSidechain"):
+        return []
+    out, at, content = [], d.get("timestamp"), m.get("content")
+    if isinstance(content, str):
+        out.append((content, at, "named"))
+    for x in content if isinstance(content, list) else []:
+        if not isinstance(x, dict):
+            continue
+        if x.get("type") == "text":
+            out.append((x.get("text", ""), at, "named"))
+        elif x.get("type") == "tool_use":
+            inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+            if x.get("name") in CHAT["file_tools"] and inp.get("file_path"):
+                out.append((" " + str(inp["file_path"]), at, "wrote"))
+            else:
+                out.append((_json.dumps(inp, ensure_ascii=False), at, "named"))
+    return out
+
+
+def _usage(u):
+    """A transcript usage dict in the shared form of chat_usage."""
+    cc = u.get("cache_creation") or {}
+    w1, w5 = cc.get("ephemeral_1h_input_tokens"), cc.get("ephemeral_5m_input_tokens")
+    if w1 is None and w5 is None:
+        w1, w5 = u.get("cache_creation_input_tokens") or 0, 0
+    return {"input": u.get("input_tokens") or 0, "output": u.get("output_tokens") or 0,
+            "cache_read": u.get("cache_read_input_tokens") or 0,
+            "cache_write": u.get("cache_creation_input_tokens") or 0, "write_1h": w1 or 0, "write_5m": w5 or 0}
+
+
+def read_transcript(path):
+    """(requests, fork) of one transcript file. requests: {message id: (time, usage)}, each API request once
+    (Claude Code writes one line per content block, with the same usage). A fork (claude --resume <id>
+    --fork-session) starts with lines copied from its base, with the base's older times: they are left out,
+    and fork is True. Copied lines come before the session's own first request: a line there is copied when
+    it is FORK_SLACK older than the first line, or when the first user message is older than the start line
+    before it: claude -p writes a queue line when it starts, an interactive session a file-history snapshot
+    (its time inside the snapshot). Not the file's birth time: files are written again."""
+    reqs, first, fork, dequeued, leading, users = {}, None, False, None, True, 0
+    slack = _timedelta(seconds=FORK_SLACK)
+    with open(path, errors="replace") as f:
+        for line in f:
+            if not leading and ('"usage"' not in line or '"assistant"' not in line):
+                continue
+            try:
+                d = _json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            snap = d.get("snapshot") if d.get("type") == "file-history-snapshot" else None
+            if leading and isinstance(snap, dict) and isinstance(snap.get("timestamp"), str) and users == 0:
+                dequeued = _core._ts(snap["timestamp"]) or dequeued
+                continue
+            t = _core._ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
+            if t is None:
+                continue
+            if leading:
+                first = first or t
+                if d.get("type") == "queue-operation":
+                    dequeued = t
+                    continue
+                users += d.get("type") == "user"
+                before_queue = dequeued and t < dequeued - _timedelta(seconds=1)
+                if t < first - slack or (before_queue and (fork or (users == 1 and d.get("type") == "user"))):
+                    fork = True
+                    continue
+            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+            if d.get("type") == "assistant" and isinstance(msg.get("usage"), dict):
+                reqs.setdefault(msg.get("id") or d["timestamp"], (t, _usage(msg["usage"])))
+                leading = False
+    return reqs, fork
+
+
+def chat_requests(session_ref, root=None):
+    """All requests of a Claude Code session, its subagents' too, and whether it started as a fork; None when no
+    transcript of it is on this computer."""
+    mains = sorted(Path(root or _core.transcripts_root()).glob(f"*/{session_ref}.jsonl"))
+    if not mains:
+        return None
+    reqs, fork = {}, False
+    for p in mains:
+        r, f = read_transcript(p)
+        reqs.update(r)
+        fork = fork or f
+        for sub in sorted(p.parent.glob(f"{session_ref}/subagents/*.jsonl")):
+            reqs.update(read_transcript(sub)[0])
+    return reqs, fork

@@ -1184,7 +1184,10 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
     the queue does not count it as gone before the new process runs a river command. Returns the pane."""
     from . import sessions
     name, pid = a["name"], a["pid"]
-    sid = a.get("native_address") if kind == "codex" else Path(path).name.split(".")[0]
+    # The chat to resume: the address of an agent whose log is found by it (Codex's thread id), else the session id
+    # that names the log file (Claude Code), #5182.
+    ad = sessions._adapter(kind)
+    sid = a.get("native_address") if ad and ad.chat_ref() == "address" else Path(path).name.split(".")[0]
     held = conn.execute("SELECT project_id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                         "ORDER BY id LIMIT 1", (name,)).fetchone()
     names = core.projects_for_dir(conn, cwd)
@@ -2524,11 +2527,11 @@ def file_check(conn, paths, agent=None):
     from . import sessions
     cwd, named = None, []
     if agent:
-        _kind, tpath = sessions.transcript(conn, agent)
+        kind, tpath = sessions.transcript(conn, agent)
         if tpath:
             try:
                 cwd = sessions.last_cwd(tpath)
-                named = [h["target"] for h in sessions._artifact_hits(tpath) if h["kind"] == "file"]
+                named = [h["target"] for h in sessions._artifact_hits(tpath, kind) if h["kind"] == "file"]
             except (OSError, ValueError, EOFError):
                 pass
     return {p: _check_path(conn, p, cwd, named) for p in list(dict.fromkeys(paths))[:200]}

@@ -12,8 +12,8 @@ Each part is optional unless it is marked required; the page shows only what an 
  3. Effort: EFFORT, and optionally read_effort_levels(model) and read_effort(entries).
  4. Launch (required): build_command(), LAUNCH (capabilities), and optionally parse_command().
  5. Session identity: IDENTITY.
- 6. Chat log: chat_path() and parse_chat() together, CHAT, and optionally chat_chain(), chat_title(), chat_cwd(),
-    chat_usage(), chat_settings().
+ 6. Chat log: chat_path() and parse_chat() together, CHAT, and optionally parse_chat_line(), chat_chain(),
+    chat_title(), chat_cwd(), chat_usage(), chat_requests(), chat_settings(), chat_cache_line(), chat_texts().
  7. State: STATE, and DETECT (screen rules) or install_hooks() (a hook or plugin that calls maxpm report).
  8. Input: INPUT.
  9. Resume: resume_command().
@@ -135,19 +135,43 @@ IDENTITY_SOURCES = ("hook", "env", "log", "pane")
 IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "log_glob": (str, type(None)), "pane": (str, type(None)),
                  "url": (str, type(None)), "inside_env": (list, tuple)}
 
-# 6. Chat log. chat_path(session_ref, folder) -> the log file of a session (a path), or None. parse_chat(lines) ->
-# (entries, turn): the shared entries of a list of log lines (each a str), and the turn state at the end ("working",
-# "idle", or None when the lines do not say). CHAT = {"compressed": bool (the file is gzip), "file_tools": [the tool
-# names that write a file, for the Artifacts tab]}. Optional readers, each over the lines of one file:
-# chat_chain(path) -> [paths] across resumes, oldest first; chat_title(lines) -> str or None; chat_cwd(lines) ->
-# str or None; chat_usage(lines) -> {"input", "output", "cache_read", "cache_write"} token counts; chat_settings(lines)
-# -> {setting key: value} as the session runs now.
+# 6. Chat log (#5182: river/sessions.py reads every chat log through this part, and core.measure_usage the usage).
+# chat_path(session_ref, folder, root=None) -> the log file of a session (a path), or None; session_ref is what
+# CHAT["ref"] names, and root, when given, replaces the agent's own log folder (the tests give one). parse_chat(lines)
+# -> (entries, turn): the shared entries of a list of log lines (each a str), and the turn state at the end
+# ("working", "idle", or None when the lines do not say). CHAT = {
+#      "compressed":  bool: its log can be zstd-compressed (a .zst file; the readers decompress by the file's suffix),
+#      "file_tools":  [the tool names that write a file, for the Artifacts tab],
+#      "ref":         what finds the log of an agent's session: one of CHAT_REFS: "session" (the newest session id of
+#                     the agent, agent_sessions) or "address" (its native_address, when the agent runs this CLI),
+#      "cache_write": bool: a call after the prompt cache ran out reads the context at the cache write price (Claude
+#                     Code); False: at the input price (Codex),
+#    }
+# Optional readers:
+#   parse_chat_line(d) -> (entries, turn) of one decoded log line (a dict): the Sessions tab parses line by line, to
+#     know the byte where each entry's line starts (scrolling up); without it, it calls parse_chat([line]);
+#   chat_chain(path, refs=None) -> [paths] of one chat across resumes, oldest first, path last; refs: the agent's
+#     session refs, oldest first (Claude Code finds its resumed files by them; a log that names its parent needs none);
+#   chat_title(lines) -> str or None; chat_cwd(lines) -> str or None;
+#   chat_usage(lines) -> {"input", "output", "cache_read", "cache_write"} token counts of the lines;
+#   chat_requests(session_ref, root=None) -> (requests, fork) or None when no log of it is on this computer: requests
+#     {request id: (time, {"input", "output", "cache_read", "cache_write", "write_1h", "write_5m"} token counts)},
+#     each model call once, and fork True when the session started as a fork of another (core.measure_usage, the
+#     size of a goal base);
+#   chat_settings(lines) -> {setting key: value} as the session runs now;
+#   chat_cache_line(raw, st): fold one log line (bytes) into the prompt cache state st (a dict that starts as
+#     {"last": None, "ttl": None, "model": None}; the reader may keep keys of its own there): st["last"] = {"start",
+#     "at", "context"} of the last model call (when it started, its last line, the tokens of its context),
+#     st["ttl"] the cache lifetime the log shows ("1h", "5m"; None: the cache_ttl setting), st["model"];
+#   chat_texts(raw) -> [(text, time, how)]: the texts of one log line (bytes) where the Artifacts tab looks for files
+#     and links; how is "wrote" for the path of a CHAT["file_tools"] call, else "named". Tool results are left out.
 # An entry is a dict with "at" (ISO time or None), "role" (one of ENTRY_ROLES) and "text", and by role:
 #   user: "images" (a list of paths or data URLs) when it has some; tool: "id" (the call id), "name", "detail";
 #   result: "for" (the call id), "error" (bool); divider: "kind" ("compacted", "resumed").
 ENTRY_ROLES = ("assistant", "user", "tool", "result", "divider", "summary", "event")
 TURNS = ("working", "idle")
-CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple)}
+CHAT_REFS = ("session", "address")
+CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache_write": bool}
 
 # 7. State. STATE = {
 #      "state":      the one source of the state: "hook" (install_hooks puts a hook or plugin in place that calls
@@ -232,8 +256,9 @@ PARTS = {
     "effort": {"data": ("EFFORT", EFFORT_KEYS), "functions": ("read_effort_levels", "read_effort")},
     "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command"), "required": True},
     "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ()},
-    "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "chat_chain", "chat_title",
-                                                        "chat_cwd", "chat_usage", "chat_settings")},
+    "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "parse_chat_line", "chat_chain",
+                                                        "chat_title", "chat_cwd", "chat_usage", "chat_requests",
+                                                        "chat_settings", "chat_cache_line", "chat_texts")},
     "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook")},
     "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ()},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
@@ -313,6 +338,11 @@ def check(module, mid=None):
             out.append(f"IDENTITY['source'] is {ident.get('source')!r}, not one of {', '.join(IDENTITY_SOURCES)}")
     if (getattr(module, "chat_path", None) is None) != (getattr(module, "parse_chat", None) is None):
         out.append("the chat part needs chat_path and parse_chat together")
+    chat = getattr(module, "CHAT", None)
+    if chat is not None:
+        out += _shape("CHAT", chat, CHAT_KEYS)
+        if isinstance(chat, dict) and chat.get("ref") is not None and chat.get("ref") not in CHAT_REFS:
+            out.append(f"CHAT['ref'] is {chat.get('ref')!r}, not one of {', '.join(CHAT_REFS)}")
     st = getattr(module, "STATE", None)
     if st is not None:
         out += _shape("STATE", st, STATE_KEYS, ("state",))
@@ -432,13 +462,62 @@ class Adapter:
         got = f(session_ref, model, effort, dict(settings or {}), name=name) if f else None
         return list(got) if got else None
 
-    def chat_path(self, session_ref, folder=None):
-        f = self._fn("chat_path")
-        return f(session_ref, folder) if f else None
-
     def parse_chat(self, lines):
         f = self._fn("parse_chat")
         return f(list(lines)) if f else ([], None)
+
+    # The chat log readers (#5182). Each one gives the empty answer when the module lacks it.
+
+    def has(self, name):
+        """Whether the module has the function `name` (a chat log reader, for example)."""
+        return callable(self._fn(name))
+
+    def chat_ref(self):
+        """What finds the log of a session (CHAT['ref']): 'session', 'address', or None."""
+        return (self.chat or {}).get("ref")
+
+    def chat_path(self, session_ref, folder=None, root=None):
+        """The log file of a session, or None; root (a folder that replaces the agent's own log folder) goes to the
+        module only when it is given."""
+        f = self._fn("chat_path")
+        if f is None or not session_ref:
+            return None
+        return f(session_ref, folder, root=root) if root else f(session_ref, folder)
+
+    def parse_chat_line(self, d, line=None):
+        """(entries, turn) of one decoded log line; line: its text, for a module with parse_chat only."""
+        f = self._fn("parse_chat_line")
+        if f is not None:
+            return f(d)
+        import json
+        return self.parse_chat([line if line is not None else json.dumps(d)])
+
+    def chat_chain(self, path, refs=None):
+        f = self._fn("chat_chain")
+        return list(f(path, list(refs or ()))) if f else [path]
+
+    def chat_title(self, lines):
+        f = self._fn("chat_title")
+        return f(list(lines)) if f else None
+
+    def chat_requests(self, session_ref, root=None):
+        f = self._fn("chat_requests")
+        if f is None or not session_ref:
+            return None
+        return f(session_ref, root=root) if root else f(session_ref)
+
+    def chat_settings(self, lines):
+        f = self._fn("chat_settings")
+        return dict(f(list(lines)) or {}) if f else {}
+
+    def chat_cache_line(self, raw, st):
+        f = self._fn("chat_cache_line")
+        if f is not None:
+            f(raw, st)
+
+    def chat_texts(self, raw):
+        f = self._fn("chat_texts")
+        return list(f(raw) or ()) if f else []
 
     def read_commands(self, folder):
         f = self._fn("read_commands")

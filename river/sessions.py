@@ -2,9 +2,9 @@
 
 The page cannot show claude.ai or chatgpt.com in a frame (both refuse it), so maxpm serve reads the transcript file
 each agent CLI writes on this computer and sends its lines to the page: the person's and the agent's text, and
-each tool call as one line. Claude Code writes <config dir>/projects/<folder>/<session id>.jsonl (the session id
-comes from agent_sessions); Codex writes ~/.codex/sessions/<y>/<m>/<d>/rollout-<time>-<thread id>.jsonl, which it
-compresses to .jsonl.zst (the thread id is the agent's native_address). Nothing here writes to a session: a
+each tool call as one line. Each agent's adapter knows where its log is and how to read a line (its chat log part,
+river/agents, #5182): Claude Code's is found by the session id (agent_sessions), Codex's by the thread id (the
+agent's native_address). The readers here are the same for every agent. Nothing here writes to a session: a
 person types through its Open link (session_url), its terminal, or the text bar of the large view
 (server.session_send, for a session in a tmux pane).
 """
@@ -15,7 +15,8 @@ import re
 import time
 from pathlib import Path
 
-from . import core
+from . import core  # first: core loads the agent adapters while it loads (#5181)
+from . import agents as _agents
 
 TAIL_BYTES = 2 * 1024 * 1024  # the first read of the large view: the last part of the transcript only
 CARD_BYTES = 256 * 1024      # the read of a card: its last few lines
@@ -90,10 +91,6 @@ STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits 
           "ended": "ended before its first maxpm command"}
 
 
-def codex_root():
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
-
-
 def _zstd():
     try:
         from compression import zstd  # Python 3.14 and later
@@ -102,29 +99,47 @@ def _zstd():
         return None
 
 
-def transcript(conn, agent, root=None, croot=None):
-    """(kind, path) of the agent's newest transcript on this computer: kind claude or codex; or (None, None)."""
-    a = conn.execute("SELECT agent_type, platform, native_address FROM agents WHERE name=?", (agent,)).fetchone()
-    if a is None:
-        return None, None
-    found = []
-    for r in conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC "
-                          "LIMIT 1", (agent,)):
-        found += [("claude", p) for p in Path(root or core.transcripts_root()).glob(f"*/{r['session_id']}.jsonl")]
-    tid = a["native_address"] if (a["platform"] or "").lower() == "codex" else None
-    if tid and all(c.isalnum() or c == "-" for c in tid):
-        base = Path(croot or codex_root())
-        found += [("codex", p) for p in base.glob(f"*/*/*/rollout-*-{tid}.jsonl")]
-        if _zstd():
-            found += [("codex", p) for p in base.glob(f"*/*/*/rollout-*-{tid}.jsonl.zst")]
+def _adapter(kind):
+    """The adapter of a chat log kind (the adapter's id: claude, codex), or None."""
+    return _agents.find(kind) if kind else None
+
+
+def newest(paths):
+    """The path of the newest file among paths (by its time of change), or None."""
     best = None
-    for kind, p in found:
+    for p in paths:
         try:
             m = p.stat().st_mtime
         except OSError:
             continue
         if best is None or m > best[0]:
-            best = (m, kind, p)
+            best = (m, p)
+    return best[1] if best else None
+
+
+def transcript(conn, agent, root=None, croot=None):
+    """(kind, path) of the agent's newest chat log on this computer: kind is the id of the agent adapter that reads it
+    (claude, codex); or (None, None). Each adapter with a chat log part finds the log of its session by what its
+    CHAT['ref'] names. root and croot: the log folders of Claude Code and Codex that a test gives."""
+    a = conn.execute("SELECT agent_type, platform, native_address FROM agents WHERE name=?", (agent,)).fetchone()
+    if a is None:
+        return None, None
+    r = conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC LIMIT 1",
+                     (agent,)).fetchone()
+    runs = _agents.find(a["platform"]) if a["platform"] else None
+    roots = {"claude": root, "codex": croot}
+    best = None
+    for ad in _agents.load().values():
+        how = ad.chat_ref()
+        ref = (r["session_id"] if how == "session" and r else
+               a["native_address"] if how == "address" and runs is not None and runs.id == ad.id else None)
+        path = ad.chat_path(ref, None, roots.get(ad.id)) if ref and ad.supports("chat") else None
+        try:
+            m = path.stat().st_mtime if path else None
+        except OSError:
+            continue
+        if m is not None and (best is None or m > best[0]):
+            best = (m, ad.id, path)
     return (best[1], best[2]) if best else (None, None)
 
 
@@ -294,46 +309,6 @@ def _parts_text(content, kinds):
     return "\n".join(x.get("text", "") for x in content or [] if isinstance(x, dict) and x.get("type") in kinds)
 
 
-def _claude(d):
-    """The page lines of one Claude Code transcript line, and its turn state (working, idle, or None)."""
-    # A compaction (#5120): Claude Code keeps the lines before it in the file and writes a compact_boundary line, then
-    # the summary as a user line. The chat shows a divider, and the summary folded under it, never as the person's turn.
-    if d.get("type") == "system" and d.get("subtype") == "compact_boundary" and not d.get("isSidechain"):
-        return [{"at": d.get("timestamp"), "role": "divider", "kind": "compacted", "text": "Compacted"}], None
-    if d.get("type") not in ("user", "assistant") or d.get("isSidechain") or d.get("isMeta"):
-        return [], None
-    m = d.get("message") if isinstance(d.get("message"), dict) else {}
-    at, content, out = d.get("timestamp"), m.get("content"), []
-    if d.get("isCompactSummary"):
-        text = content if isinstance(content, str) else _parts_text(content, ("text",))
-        return [{"at": at, "role": "summary", "text": _clip(text.strip(), TEXT_MAX)}], None
-    if d["type"] == "assistant":
-        for x in content if isinstance(content, list) else []:
-            if not isinstance(x, dict):
-                continue
-            if x.get("type") == "text" and x.get("text", "").strip():
-                out.append({"at": at, "role": "assistant", "text": _clip(x["text"], TEXT_MAX)})
-            elif x.get("type") == "tool_use":
-                out.append({"at": at, "role": "tool", "text": _tool_line(x.get("name"), x.get("input")),
-                            "plain": plain_tool(x.get("name"), x.get("input")),
-                            "id": x.get("id"), "detail": _detail(x.get("input"))})
-        stop = m.get("stop_reason")
-        return out, ("idle" if stop in ("end_turn", "stop_sequence") else "working" if stop else None)
-    for x in content if isinstance(content, list) else []:
-        if isinstance(x, dict) and x.get("type") == "tool_result" and x.get("tool_use_id"):
-            out.append({"at": at, "role": "result", "for": x["tool_use_id"], "error": bool(x.get("is_error")),
-                        "text": _clip(_result_text(x.get("content")), DETAIL_MAX)})
-    text = _parts_text(content, ("text",)).strip()
-    if text.startswith("<task-notification>"):
-        out.append({"at": at, "role": "event", "text": "a background task ended"})
-    elif (text and not text.startswith("<")) or any(isinstance(x, dict) and x.get("type") == "image"
-                                                   for x in content if isinstance(content, list)):
-        # tags the CLI adds (a command's name and output, reminders) are no turn of the person
-        out.append(_user_turn(at, text, sum(1 for x in content if isinstance(x, dict) and x.get("type") == "image")
-                              if isinstance(content, list) else 0))
-    return out, "working"
-
-
 def _user_turn(at, text, images=0):
     """A person's turn, including saved uploads and how many image blocks the CLI put in it."""
     import re
@@ -351,38 +326,23 @@ def _user_turn(at, text, images=0):
     return e
 
 
-_CODEX_SKIP = ("# AGENTS.md", "<environment_context>", "<user_instructions>", "<")
-
-
-def _codex(d):
-    """The page lines of one Codex session log line, and its turn state."""
-    p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
-    at, t = d.get("timestamp"), p.get("type")
-    if d.get("type") == "compacted":  # Codex's compaction (#5120): its summary is the payload's message
-        out = [{"at": at, "role": "divider", "kind": "compacted", "text": "Compacted"}]
-        if isinstance(p.get("message"), str) and p["message"].strip():
-            out.append({"at": at, "role": "summary", "text": _clip(p["message"].strip(), TEXT_MAX)})
-        return out, None
-    if d.get("type") == "event_msg":
-        return [], {"task_started": "working", "task_complete": "idle", "turn_aborted": "idle"}.get(t)
-    if d.get("type") != "response_item":
-        return [], None
-    if t == "message" and p.get("role") in ("user", "assistant"):
-        text = _parts_text(p.get("content"), ("input_text", "output_text", "text")).strip()
-        if not text or (p["role"] == "user" and text.startswith(_CODEX_SKIP)):
-            return [], None
-        if p["role"] == "user":
-            return [_user_turn(at, text, sum(1 for x in p.get("content") or [] if isinstance(x, dict)
-                                             and x.get("type") in ("input_image", "image")))], None
-        return [{"at": at, "role": p["role"], "text": _clip(text, TEXT_MAX)}], None
-    if t in ("function_call", "custom_tool_call", "local_shell_call"):
-        inp = p.get("arguments") if t == "function_call" else p.get("input") if t == "custom_tool_call" else p.get("action")
-        return [{"at": at, "role": "tool", "text": _tool_line(p.get("name") or "shell", inp), "id": p.get("call_id"),
-                 "plain": plain_tool(p.get("name") or "shell", inp), "detail": _detail(inp)}], None
-    if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output") and p.get("call_id"):
-        return [{"at": at, "role": "result", "for": p["call_id"],
-                 "text": _clip(_result_text(p.get("output")), DETAIL_MAX)}], None
-    return [], None
+def parse_lines(parse_line, lines):
+    """(entries, turn) of a list of log lines (each a str), with parse_line(d) -> (entries, turn) for one decoded
+    line: the parse_chat of an adapter."""
+    out, turn = [], None
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        got, st = parse_line(d)
+        out += got
+        turn = st or turn
+    return out, turn
 
 
 _TAIL_CACHE = {}  # (path, tail) -> (size, mtime, the answer of entries(kind, path)): the page asks every few seconds
@@ -416,19 +376,20 @@ def _first(offs, limit):
 def _parse(kind, raw, start):
     """The page lines of the transcript bytes raw (complete lines; the first starts at byte start), with the byte
     where the line of each one starts, the state of the last turn, and the folder the session runs in."""
-    parse = _claude if kind == "claude" else _codex
+    ad = _adapter(kind)
     out, offs, turn, cwd, at = [], [], None, None, start
     for line in raw.splitlines(keepends=True):
         here, at = at, at + len(line)
         if not line.strip():
             continue
+        text = line.decode("utf-8", "replace")
         try:
-            d = json.loads(line.decode("utf-8", "replace"))
+            d = json.loads(text)
         except ValueError:
             continue
         if not isinstance(d, dict):
             continue
-        got, st = parse(d)
+        got, st = ad.parse_chat_line(d, text) if ad else ([], None)
         out += got
         offs += [here] * len(got)
         turn = st or turn
@@ -467,17 +428,14 @@ def _page_back(kind, path, before, limit=LIMIT):
 
 
 def transcript_chain(conn, agent, kind, path):
-    """The transcripts of one agent's chat, oldest first, the newest (path) last (#5120): a session that Claude Code
-    resumed into a new file (a new session id of the agent, agent_sessions) goes on in the same chat. Only files in the
-    folder of the newest one count: a session id that another session recorded for this agent is not its chat."""
-    if kind != "claude":
+    """The chat logs of one agent's chat, oldest first, the newest (path) last (#5120): the adapter's chat_chain over
+    the agent's session ids (agent_sessions, oldest first); only path for an adapter without one."""
+    ad = _adapter(kind)
+    if ad is None or not ad.has("chat_chain"):
         return [path]
-    out = []
-    for r in conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen, rowid", (agent,)):
-        p = Path(path).parent / f"{r['session_id']}.jsonl"
-        if p != Path(path) and p not in out and p.is_file():
-            out.append(p)
-    return out + [Path(path)]
+    refs = [r["session_id"] for r in conn.execute(
+        "SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen, rowid", (agent,))]
+    return ad.chat_chain(path, refs)
 
 
 def _older(chain, i, before, entries):
@@ -623,27 +581,20 @@ def _short_title(t, short=None):
     return core.short_title(t, short)
 
 
-def custom_title(path, tail=256 * 1024):
-    """The Claude Code session title (the last custom-title record of its transcript), or None."""
-    if not path or str(path).endswith(".zst"):
+def custom_title(path, kind, tail=256 * 1024):
+    """The session title in the last `tail` bytes of its chat log (the adapter's chat_title), or None."""
+    ad = _adapter(kind)
+    if not path or ad is None or not ad.has("chat_title"):
         return None
     text, _s, _e = _read(path, None, tail)
-    for line in reversed(text.splitlines()):
-        if "custom-title" not in line:
-            continue
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(d, dict) and d.get("type") == "custom-title" and isinstance(d.get("customTitle"), str):
-            return d["customTitle"]
-    return None
+    return ad.chat_title(text.splitlines())
 
 
-def work_name(conn, a, path=None, root=None, croot=None):
+def work_name(conn, a, path=None, root=None, croot=None, kind=None):
     """What a session works on, as the name the page shows for it (#4695); its agent id stays its address. In this
     order: its own headline (maxpm now --work) for its item; the short title of the item it holds; the goal it owns; Manager; the deploy targets it owns; the item it
-    finished last; its Claude Code session title; else its agent id without the four hex digits."""
+    finished last; its session title (the chat log's, kind: its adapter); else its agent id without the four hex
+    digits."""
     holds = a.get("holds") or []
     head, head_at = a.get("headline"), a.get("headline_at") or ""
     if holds:
@@ -669,9 +620,9 @@ def work_name(conn, a, path=None, root=None, croot=None):
     if r:  # the item it finished last; its line 2 says that it waits (#5086: no 'last:')
         return _short_title(r["title"], r["short"])
     if path is None:
-        _kind, path = transcript(conn, a["name"], root, croot)
+        kind, path = transcript(conn, a["name"], root, croot)
     try:
-        t = custom_title(path)
+        t = custom_title(path, kind)
     except (OSError, ValueError):
         t = None
     if t:
@@ -743,7 +694,7 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         card = {"doing": doing_now(a, key, label, tail["entries"]),
                 "adopt": adopt and {"when": adopt[0], "why": adopt[1]}, "provider": provider(a.get("agent_type"), kind),
                 "waiting": waiting_for(conn, a, prompt, bool((terminals or {}).get(a["name"])), said), "name": a["name"],
-                "title": work_name(conn, a, path, root, croot), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
+                "title": work_name(conn, a, path, root, croot, kind), "also": [], "agent_type": a.get("agent_type"), "model": a.get("model"),
                 "role": a.get("role"), "note": a.get("note"), "topic": a.get("expert_topic"),
                 "assistant_for": a.get("assistant_for"),
                 "talked_at": a.get("talked_at"), "pinned_by": a.get("pinned_by") or [],
@@ -828,57 +779,14 @@ def last_cwd(path, tail=1024 * 1024):
 
 # The prompt cache of a session (#5023). A person talks with an expert for hours; after a pause the model reads the
 # whole context again at the cache write price (Claude Code: 2x the input price for its 1-hour cache, 1.25x for the
-# 5-minute one) instead of the read price (0.025x to 0.1x). From the transcript: the start of the last model call
-# (the line before its answer: the person's prompt or a tool result), the context it read and wrote, and the cache
-# lifetime in force (the writes of the last call that wrote: 1h or 5m; a read keeps the lifetime of the entry it
-# read). A cache entry lives that long from the start of the call that wrote or read it. A Codex log says how much
-# of the input was cached, not for how long: cache_ttl then.
+# 5-minute one) instead of the read price (0.025x to 0.1x). From the chat log (the adapter's chat_cache_line): the
+# start of the last model call, the context it read and wrote, and the cache lifetime in force. A cache entry lives
+# that long from the start of the call that wrote or read it. A log that does not say how long: cache_ttl then.
 _CACHE_SCAN = {}  # path -> (size, mtime, end: the byte after the last complete line read, state)
 
 
 def _cache_new():
-    return {"sent": None, "mid": None, "last": None, "ttl": None, "model": None}
-
-
-def _cache_line(kind, raw, st):
-    """Fold one transcript line (bytes) into the cache state st."""
-    if kind == "claude":  # a quick test before the line is decoded (the type decides after it)
-        if b'"user"' not in raw and b'"assistant"' not in raw:
-            return
-    elif b'"token_count"' not in raw and b'"turn_context"' not in raw:
-        return
-    try:
-        d = json.loads(raw)
-    except ValueError:
-        return
-    if not isinstance(d, dict) or not isinstance(d.get("timestamp"), str) or d.get("isSidechain"):
-        return
-    at = d["timestamp"]
-    if kind == "claude":
-        m = d.get("message") if isinstance(d.get("message"), dict) else {}
-        if d.get("type") == "user":
-            st["sent"] = at
-            return
-        u = m.get("usage")
-        if d.get("type") != "assistant" or not isinstance(u, dict) or m.get("model") == "<synthetic>":
-            return
-        if m.get("id") != st["mid"]:  # a new model call; its lines after the first repeat its usage
-            st["mid"] = m.get("id")
-            st["last"] = {"start": st["sent"] or at, "at": at, "usage": u}
-        else:
-            st["last"] = dict(st["last"], at=at, usage=u)
-        cc = u.get("cache_creation") or {}
-        if (cc.get("ephemeral_1h_input_tokens") or 0) > 0:
-            st["ttl"] = "1h"
-        elif (cc.get("ephemeral_5m_input_tokens") or 0) > 0:
-            st["ttl"] = "5m"
-        st["model"] = m.get("model") or st["model"]
-        return
-    p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
-    if d.get("type") == "turn_context":
-        st["model"] = p.get("model") or st["model"]
-    elif p.get("type") == "token_count" and isinstance((p.get("info") or {}).get("last_token_usage"), dict):
-        st["last"] = {"start": at, "at": at, "usage": p["info"]["last_token_usage"]}
+    return {"last": None, "ttl": None, "model": None}
 
 
 def _cache_scan(kind, path):
@@ -887,11 +795,13 @@ def _cache_scan(kind, path):
     got = _CACHE_SCAN.get(str(path))
     if got and got[:2] == (s.st_size, s.st_mtime_ns):
         return got[3]
+    ad = _adapter(kind)
+    fold = ad.chat_cache_line if ad else (lambda raw, st: None)
     if str(path).endswith(".zst"):  # compressed: read as a whole (Codex logs, small)
         st = _cache_new()
         text, _s, end = _read(path, 0)
         for line in text.splitlines():
-            _cache_line(kind, line.encode(), st)
+            fold(line.encode(), st)
     else:
         start, st = (got[2], dict(got[3])) if got and s.st_size >= got[2] else (0, _cache_new())
         end = start
@@ -901,7 +811,7 @@ def _cache_scan(kind, path):
                 if not raw.endswith(b"\n"):
                     break
                 end += len(raw)
-                _cache_line(kind, raw, st)
+                fold(raw, st)
     _CACHE_SCAN[str(path)] = (s.st_size, s.st_mtime_ns, end, st)
     return st
 
@@ -924,13 +834,10 @@ def cache_state(conn, name, root=None, croot=None, at=None, found=None):
     start = core._ts(last["start"]) if last else None
     if start is None:
         return None
-    u = last["usage"]
-    if kind == "claude":
-        context = sum(u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
-                                               "output_tokens"))
-    else:  # Codex: input_tokens holds the cached part
-        context = (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)
-    ttl = st["ttl"] if kind == "claude" else None
+    context = last["context"]
+    ad = _adapter(kind)
+    write = bool(((ad.chat if ad else None) or {}).get("cache_write"))  # a cold call pays the write price
+    ttl = st["ttl"]
     ttl_from = "transcript" if ttl else "setting"
     ttl = ttl or core.setting(conn, "cache_ttl", agent=name)
     life = core.parse_duration(ttl)
@@ -941,11 +848,11 @@ def cache_state(conn, name, root=None, croot=None, at=None, found=None):
     price = core.model_price(conn, model)
     if price:
         inp, read, w5, w1 = price
-        per_m = read if warm else (w1 if life >= core.timedelta(hours=1) else w5) if kind == "claude" else inp
+        per_m = read if warm else (w1 if life >= core.timedelta(hours=1) else w5) if write else inp
         usd, eq = context * per_m / 1e6, context * per_m / inp
     else:
         usd, eq = None, context * (core.EQ_READ if warm else core.EQ_WRITE_1H if life >= core.timedelta(hours=1)
-                                    else core.EQ_WRITE_5M if kind == "claude" else 1)
+                                    else core.EQ_WRITE_5M if write else 1)
     fresh_min = core._k_tokens(core.setting(conn, "expert_fresh_min", agent=name))
     return {"state": "warm" if warm else "cold", "until": core.iso(until),
             "left": max(0, int((until - t).total_seconds())), "ttl": ttl, "ttl_from": ttl_from, "context": context,
@@ -962,11 +869,9 @@ def cache_state(conn, name, root=None, croot=None, at=None, found=None):
 # session reads fill its transcript fast (about 1 MB each in a tool result, #4681). 18 MB takes about 30 ms.
 ARTIFACT_DAYS = 1  # agents seen this recently, besides the running ones
 _ART_CACHE = {}  # path -> (size, mtime, end: the byte after the last complete line read, hits)
-# Lines that never give a hit, skipped before they are decoded: tool results (left out, see above) and Claude
-# Code's copies of the API requests. JSON escapes a quote in text, so these words in a message do not match.
+# Each adapter's chat_texts gives the texts of a line to look in, and skips tool results and lines with none.
 _FILE_RX = None
 _URL_RX = None
-_ART_SKIP = (b'"type":"tool_result"', b'"type":"function_call_output"', b'"type":"api-request')
 
 
 _ART_KEY_RX = None
@@ -996,26 +901,26 @@ def _hits_in(text, at, how):
     return out
 
 
-def _artifact_hits(path):
-    """The hits of one transcript: all of it at first, then the lines it added since the last read. A file that
-    became shorter (written again) is read again from its start."""
+def _artifact_hits(path, kind):
+    """The hits of one chat log (kind: its adapter): all of it at first, then the lines it added since the last read.
+    A file that became shorter (written again) is read again from its start."""
     st = Path(path).stat()
     got = _ART_CACHE.get(str(path))
     if got and got[:2] == (st.st_size, st.st_mtime_ns):
         return got[3]
     start, hits = (got[2], got[3]) if got and st.st_size >= got[2] else (0, [])
-    new, end = _scan_from(path, start)
+    new, end = _scan_from(path, start, _adapter(kind))
     hits = hits + new
     _ART_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, end, hits)
     return hits
 
 
-def _scan_from(path, start):
+def _scan_from(path, start, ad):
     """(hits, end): the hits in the complete lines from byte start on, and the byte after the last of them. A line
     the CLI still writes waits for the next read."""
     if str(path).endswith(".zst"):  # compressed: read as a whole (Codex logs, small)
         text, _s, end = _read(path, start)
-        return [h for line in text.splitlines() for h in _line_hits(line.encode())], end
+        return [h for line in text.splitlines() for h in _line_hits(line.encode(), ad)], end
     hits, end = [], start
     with open(path, "rb") as f:
         f.seek(start)
@@ -1023,45 +928,13 @@ def _scan_from(path, start):
             if not raw.endswith(b"\n"):
                 break
             end += len(raw)
-            hits += _line_hits(raw)
+            hits += _line_hits(raw, ad)
     return hits, end
 
 
-def _line_hits(raw):
-    """The hits of one transcript line (bytes)."""
-    if any(k in raw for k in _ART_SKIP):
-        return []
-    try:
-        d = json.loads(raw)
-    except ValueError:
-        return []
-    if not isinstance(d, dict):
-        return []
-    hits = []
-    at = d.get("timestamp")
-    m = d.get("message") if isinstance(d.get("message"), dict) else None
-    p = d.get("payload") if isinstance(d.get("payload"), dict) else None
-    if m and d.get("type") in ("user", "assistant") and not d.get("isSidechain"):
-        content = m.get("content")
-        if isinstance(content, str):
-            hits += _hits_in(content, at, "named")
-        for x in content if isinstance(content, list) else []:
-            if not isinstance(x, dict):
-                continue
-            if x.get("type") == "text":
-                hits += _hits_in(x.get("text", ""), at, "named")
-            elif x.get("type") == "tool_use":
-                inp = x.get("input") if isinstance(x.get("input"), dict) else {}
-                if x.get("name") in ("Write", "Edit", "MultiEdit", "NotebookEdit") and inp.get("file_path"):
-                    hits += [dict(h, how="wrote") for h in _hits_in(" " + str(inp["file_path"]), at, "wrote")]
-                else:
-                    hits += _hits_in(json.dumps(inp, ensure_ascii=False), at, "named")
-    elif p and d.get("type") == "response_item":
-        if p.get("type") == "message":
-            hits += _hits_in(_parts_text(p.get("content"), ("input_text", "output_text", "text")), at, "named")
-        elif p.get("type") in ("function_call", "custom_tool_call"):
-            hits += _hits_in(str(p.get("arguments") or p.get("input") or ""), at, "named")
-    return hits
+def _line_hits(raw, ad):
+    """The hits of one chat log line (bytes): in the texts that its adapter ad gives (chat_texts)."""
+    return [h for text, at, how in (ad.chat_texts(raw) if ad else ()) for h in _hits_in(text, at, how)]
 
 
 def _stamp(at):
@@ -1096,7 +969,7 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
         if not path:
             continue
         try:
-            hits = _artifact_hits(path)
+            hits = _artifact_hits(path, kind)
         except (OSError, ValueError, EOFError):
             continue
         if since:
@@ -1235,39 +1108,13 @@ def sent_prompts(conn, agent):
 
 
 def _transcript_settings(kind, path):
-    """The settings a session's transcript shows last: Claude Code puts the model and effort on each reply and a
-    line for each permission mode; Codex a turn_context at each turn."""
-    import re as _re
+    """The settings a session's chat log shows last (the adapter's chat_settings): Claude Code puts the model and
+    effort on each reply and a line for each permission mode; Codex a turn_context at each turn."""
+    ad = _adapter(kind)
+    if ad is None or not ad.has("chat_settings"):
+        return {}
     text, _s, _e = _read(path, None, CARD_BYTES * 4)
-    got = {}
-    for line in text.splitlines():
-        if kind == "claude":
-            if '"permission-mode"' in line:
-                m = _re.search(r'"permissionMode":\s*"([^"]+)"', line)
-                if m:
-                    got["permission_mode"] = m.group(1)
-            elif line.startswith('{"') and '"assistant"' in line:
-                try:
-                    d = json.loads(line)
-                except ValueError:
-                    continue
-                if d.get("type") != "assistant":
-                    continue
-                msg = d.get("message") if isinstance(d.get("message"), dict) else {}
-                if msg.get("model"):
-                    got["model"] = msg["model"]
-                if isinstance(d.get("effort"), str):
-                    got["effort"] = d["effort"]
-        elif '"turn_context"' in line:
-            try:
-                p = json.loads(line).get("payload") or {}
-            except ValueError:
-                continue
-            for k, v in (("model", p.get("model")), ("effort", p.get("effort")), ("approval", p.get("approval_policy")),
-                         ("sandbox", (p.get("sandbox_policy") or {}).get("type") if isinstance(p.get("sandbox_policy"), dict) else None)):
-                if v:
-                    got[k] = v
-    return got
+    return ad.chat_settings(text.splitlines())
 
 
 def session_settings(conn, agent, root=None, croot=None):

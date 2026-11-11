@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from river import core, server, sessions
+from river.agents import codex as codex_agent
 
 SID = "11111111-2222-3333-4444-555555555555"
 SID2 = "66666666-7777-8888-9999-000000000000"
@@ -139,7 +140,7 @@ class History(Base):
             sessions.older_page(self.c, "ag", other.name, None, self.root, self.croot)
 
     def test_a_codex_compaction_is_a_divider_with_its_summary(self):
-        got, _ = sessions._codex(json.loads(codex_line("compacted", {"message": "what was done so far"})))
+        got, _ = codex_agent.parse_chat_line(json.loads(codex_line("compacted", {"message": "what was done so far"})))
         self.assertEqual([(e["role"], e.get("kind"), e["text"]) for e in got],
                          [("divider", "compacted", "Compacted"), ("summary", None, "what was done so far")])
 
@@ -2055,7 +2056,7 @@ class ArtifactScan(unittest.TestCase):
                            "message": {"role": kind, "content": content}}, separators=(",", ":")) + "\n"
 
     def targets(self):
-        return sorted({h["target"] for h in sessions._artifact_hits(self.path)})
+        return sorted({h["target"] for h in sessions._artifact_hits(self.path, "claude")})
 
     def test_names_before_many_pictures_and_only_new_lines_later(self):
         from unittest import mock
@@ -2073,7 +2074,7 @@ class ArtifactScan(unittest.TestCase):
             f.write('{"type":"assistant","message":{"content":[{"type":"text","text":"/p/half')  # still written
         lines = []
         real = sessions._line_hits
-        with mock.patch.object(sessions, "_line_hits", lambda raw: lines.append(raw) or real(raw)):
+        with mock.patch.object(sessions, "_line_hits", lambda raw, ad: lines.append(raw) or real(raw, ad)):
             self.assertEqual(self.targets(), ["/p/a.png", "/p/b.png", "/p/c.png", "/p/typed.png"])
             with open(self.path, "a") as f:
                 f.write('.png"}]}}\n')

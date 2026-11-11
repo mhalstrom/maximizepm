@@ -455,8 +455,9 @@ def _header(lines):
     return next((r for r in _rows(lines[:5]) if r.get("type") == "session"), None)
 
 
-def chat_chain(path):
-    """The session files across forks and clones, oldest first: each header's parentSession, back to the first."""
+def chat_chain(path, refs=None):
+    """The session files across forks and clones, oldest first: each header's parentSession, back to the first (it
+    needs no refs, #5182)."""
     out, p = [], Path(path)
     while p and p not in out:
         out.append(p)

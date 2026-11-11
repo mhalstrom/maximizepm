@@ -162,3 +162,28 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
   for an adapter whose `STATE['background']` is false.
 - Copies left for #5185: the default of `prompt_pattern` (the built-in adapters' blocked words) and of
   `native_message` (Codex's `INPUT['native']`); a test checks that they match the adapters.
+
+## As built in #5182
+
+- The chat log part reads every chat log of the Sessions tab, the Artifacts tab, the prompt cache and the usage
+  measurement. `river/sessions.py` keeps only the readers that are the same for every agent: the byte windows, the
+  cursors, the caches, the shared entry helpers (`_clip`, `_tool_line`, `plain_tool`, `_user_turn`) and the paging.
+  Its functions keep their names (`transcript`, `transcript_chain`, `custom_title`, `_transcript_settings`,
+  `cache_state`, `artifacts`); each one asks the adapter of the log's kind (the adapter id: `claude`, `codex`).
+- New in the contract: `CHAT["ref"]` (`session`: the log is found by the agent's newest session id; `address`: by
+  its native_address when the agent runs this CLI) and `CHAT["cache_write"]` (a call after the cache ran out pays the
+  cache write price, or the input price). New optional readers: `parse_chat_line(d)` (one decoded line: the Sessions
+  tab parses line by line to keep the byte of each entry; without it, it calls `parse_chat([line])`),
+  `chat_cache_line(raw, st)`, `chat_texts(raw)` (the texts where the Artifacts tab looks for files and links;
+  `CHAT["file_tools"]` names the tools whose path is a file the session wrote), and `chat_requests(session_ref)`
+  (each model call once with its time and token counts, and whether the session started as a fork:
+  `core.measure_usage` and the size of a goal base). `chat_path` takes `root=` (a log folder that a test gives), and
+  `chat_chain(path, refs=None)` takes the agent's session ids, by which Claude Code finds its resumed files.
+- Claude Code: the parser, the chain, the title, the settings, the cache, the Artifacts texts and the requests
+  (`read_transcript`, `FORK_SLACK`) are in `river/agents/claude.py`. Codex: the parser, the settings, the cache, the
+  Artifacts texts and its log folder (`$CODEX_HOME/sessions`) are in `river/agents/codex.py`.
+- `core._ran_model` finds and reads a log through the platform's adapter, and `server.move_into_tmux` takes the
+  native_address of an agent whose `CHAT["ref"]` is `address`. `sessions.PLATFORMS` and `PROVIDERS` stay for #5185
+  and #5169.
+- Checked: the old and the new readers give the same entries, turns, settings, titles, cache states, Artifacts hits
+  and requests on 12 real logs (eight of Claude Code, four of Codex).

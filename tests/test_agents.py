@@ -52,7 +52,7 @@ class Contract(Env):
             self.assertEqual(agents.check(a.module, mid), [])
             self.assertEqual(a.source, "builtin")
             self.assertEqual(a.missing(), [])
-            for part in ("describe", "effort", "launch", "identity", "resume"):
+            for part in ("describe", "effort", "launch", "identity", "resume", "chat"):
                 self.assertTrue(a.supports(part), (mid, part))
             for part in ("state", "detect", "input") if mid in ("claude", "codex") else ():  # #5183
                 self.assertTrue(a.supports(part), (mid, part))
@@ -469,3 +469,91 @@ class PaneState(Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatLog(Env):
+    """#5182: the chat log readers of the Sessions tab, the Artifacts tab, the prompt cache and the usage measurement
+    go through each adapter's chat log part, so an agent with its own log format needs no change in sessions.py."""
+
+    TOY = """
+        import json, os
+        from datetime import datetime, timezone
+        from pathlib import Path
+        DESCRIBE = {"id": "toy", "label": "Toy", "exe": "toy", "family": "multi"}
+        CHAT = {"compressed": False, "file_tools": [], "ref": "session", "cache_write": False}
+
+        def chat_path(ref, folder, root=None):
+            p = Path(os.environ["TOY_LOGS"]) / f"{ref}.log"
+            return p if p.is_file() else None
+
+        def parse_chat(lines):  # no parse_chat_line: the Sessions tab gives it one line at a time
+            out, turn = [], None
+            for line in lines:
+                d = json.loads(line)
+                out.append({"at": d["t"], "role": "user" if d["who"] == "me" else "assistant", "text": d["text"]})
+                turn = "working" if d["who"] == "me" else "idle"
+            return out, turn
+
+        def chat_title(lines):
+            return "Toy talk"
+
+        def chat_texts(raw):
+            d = json.loads(raw)
+            return [(d["text"], d["t"], "named")]
+
+        def chat_cache_line(raw, st):
+            d = json.loads(raw)
+            if d["who"] == "toy":
+                st["last"] = {"start": d["t"], "at": d["t"], "context": 1200}
+
+        def chat_requests(ref, root=None):
+            if not chat_path(ref, None):
+                return None
+            u = {"input": 10, "output": 5, "cache_read": 100, "cache_write": 0, "write_1h": 0, "write_5m": 0}
+            return {"r1": (datetime(2026, 11, 11, tzinfo=timezone.utc), u)}, False
+    """
+
+    def test_the_built_in_chat_parts(self):
+        claude, codex = agents.get("claude"), agents.get("codex")
+        self.assertEqual((claude.chat_ref(), codex.chat_ref()), ("session", "address"))
+        self.assertEqual(claude.chat["file_tools"], ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+        self.assertTrue(claude.chat["cache_write"])
+        self.assertFalse(codex.chat["cache_write"])
+        self.assertEqual(codex.chat_chain("/x/a.jsonl", ["s1"]), ["/x/a.jsonl"])  # no chain: the one file
+        # Pi's log names its parent: its chat_chain takes the refs and needs none; its chat_usage sums a file.
+        self.assertEqual(agents.get("pi").chat_chain("/no/such.jsonl", ["s1"]), [Path("/no/such.jsonl")])
+        self.assertIsNone(agents.get("pi").chat_requests("s1"))
+        self.assertIsNone(codex.chat_title(['{"type":"custom-title","customTitle":"t"}']))
+        self.assertEqual(claude.chat_title(['{"type":"custom-title","customTitle":"t"}']), "t")
+        bad = agents.check(module(DESCRIBE=GOOD, CHAT={"ref": "file", "cache_write": "yes"}), "pi")
+        self.assertTrue(any("CHAT['ref'] is 'file'" in p for p in bad), bad)
+        self.assertTrue(any("CHAT['cache_write'] is a str" in p for p in bad), bad)
+
+    def test_an_agent_with_its_own_log_format_shows_in_every_reader(self):
+        logs = Path(self.tmp.name) / "toy-logs"
+        logs.mkdir()
+        env = mock.patch.dict(os.environ, {"TOY_LOGS": str(logs)})
+        env.start()
+        self.addCleanup(env.stop)
+        roots = mock.patch.object(core, "transcripts_root", lambda: Path(self.tmp.name) / "no-claude")
+        roots.start()
+        self.addCleanup(roots.stop)
+        self.user_module("toy", self.TOY)
+        core.register(self.c, "w")
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('w', 'p1', ?)",
+                           (core.iso(core.now()),))
+        lines = [{"t": "2026-11-11T10:00:00Z", "who": "me", "text": "draw /tmp/plan.png"},
+                 {"t": "2026-11-11T10:00:05Z", "who": "toy", "text": "Done: /tmp/plan.png"}]
+        (logs / "p1.log").write_text("".join(json.dumps(d) + "\n" for d in lines))
+        self.assertEqual(sessions.transcript(self.c, "w")[0], "toy")
+        v = sessions.view(self.c, "w")
+        self.assertEqual([(e["role"], e["text"]) for e in v["entries"]],
+                         [("user", "draw /tmp/plan.png"), ("assistant", "Done: /tmp/plan.png")])
+        self.assertEqual(v["turn"], "idle")
+        self.assertEqual(sessions.work_name(self.c, core.agent_status(self.c, "w")), "Toy talk")
+        self.assertEqual([a["target"] for a in sessions.artifacts(self.c, agent="w")], ["/tmp/plan.png"])
+        cache = sessions.cache_state(self.c, "w", at=core.parse_iso("2026-11-11T10:01:00Z"))
+        self.assertEqual((cache["context"], cache["ttl_from"]), (1200, "setting"))
+        reqs, fork = core._session_requests("p1")
+        self.assertEqual((list(reqs), fork), (["r1"], False))

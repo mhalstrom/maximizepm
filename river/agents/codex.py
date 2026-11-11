@@ -128,3 +128,133 @@ DETECT = {
 
 # Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
 INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{text}"]}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Chat log (#5182). Codex writes ~/.codex/sessions/<y>/<m>/<d>/rollout-<time>-<thread id>.jsonl (or $CODEX_HOME),
+# which it compresses to .jsonl.zst; the thread id is the agent's native_address.
+# ---------------------------------------------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+
+
+def _s():
+    """river.sessions, imported when first used: core imports the adapters while it loads, before sessions can."""
+    from .. import sessions
+    return sessions
+
+CHAT = {"compressed": True, "file_tools": [], "ref": "address", "cache_write": False}
+
+
+def chat_root():
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+
+
+def chat_path(session_ref, folder=None, root=None):
+    """The newest session log of the thread id, or None. A .zst log counts only when Python can read it (3.14)."""
+    tid = session_ref
+    if not tid or not all(c.isalnum() or c == "-" for c in tid):
+        return None
+    base = Path(root or chat_root())
+    found = list(base.glob(f"*/*/*/rollout-*-{tid}.jsonl"))
+    if _s()._zstd():
+        found += list(base.glob(f"*/*/*/rollout-*-{tid}.jsonl.zst"))
+    return _s().newest(found)
+
+
+_SKIP = ("# AGENTS.md", "<environment_context>", "<user_instructions>", "<")
+
+
+def parse_chat_line(d):
+    """The page lines of one Codex session log line, and its turn state."""
+    p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+    at, t = d.get("timestamp"), p.get("type")
+    if d.get("type") == "compacted":  # Codex's compaction (#5120): its summary is the payload's message
+        out = [{"at": at, "role": "divider", "kind": "compacted", "text": "Compacted"}]
+        if isinstance(p.get("message"), str) and p["message"].strip():
+            out.append({"at": at, "role": "summary", "text": _s()._clip(p["message"].strip(), _s().TEXT_MAX)})
+        return out, None
+    if d.get("type") == "event_msg":
+        return [], {"task_started": "working", "task_complete": "idle", "turn_aborted": "idle"}.get(t)
+    if d.get("type") != "response_item":
+        return [], None
+    if t == "message" and p.get("role") in ("user", "assistant"):
+        text = _s()._parts_text(p.get("content"), ("input_text", "output_text", "text")).strip()
+        if not text or (p["role"] == "user" and text.startswith(_SKIP)):
+            return [], None
+        if p["role"] == "user":
+            return [_s()._user_turn(at, text, sum(1 for x in p.get("content") or [] if isinstance(x, dict)
+                                                and x.get("type") in ("input_image", "image")))], None
+        return [{"at": at, "role": p["role"], "text": _s()._clip(text, _s().TEXT_MAX)}], None
+    if t in ("function_call", "custom_tool_call", "local_shell_call"):
+        inp = p.get("arguments") if t == "function_call" else p.get("input") if t == "custom_tool_call" else p.get("action")
+        return [{"at": at, "role": "tool", "text": _s()._tool_line(p.get("name") or "shell", inp), "id": p.get("call_id"),
+                 "plain": _s().plain_tool(p.get("name") or "shell", inp), "detail": _s()._detail(inp)}], None
+    if t in ("function_call_output", "custom_tool_call_output", "local_shell_call_output") and p.get("call_id"):
+        return [{"at": at, "role": "result", "for": p["call_id"],
+                 "text": _s()._clip(_s()._result_text(p.get("output")), _s().DETAIL_MAX)}], None
+    return [], None
+
+
+def parse_chat(lines):
+    return _s().parse_lines(parse_chat_line, lines)
+
+
+def chat_settings(lines):
+    """The settings the log shows last: a turn_context at each turn."""
+    got = {}
+    for line in lines:
+        if '"turn_context"' not in line:
+            continue
+        try:
+            p = _json.loads(line).get("payload") or {}
+        except ValueError:
+            continue
+        for k, v in (("model", p.get("model")), ("effort", p.get("effort")), ("approval", p.get("approval_policy")),
+                     ("sandbox", (p.get("sandbox_policy") or {}).get("type") if isinstance(p.get("sandbox_policy"), dict) else None)):
+            if v:
+                got[k] = v
+    return got
+
+
+def chat_cache_line(raw, st):
+    """Fold one log line (bytes) into the prompt cache state st (#5023). A Codex log says how much of the input was
+    cached, not for how long: the cache_ttl setting then. input_tokens holds the cached part."""
+    if b'"token_count"' not in raw and b'"turn_context"' not in raw:
+        return
+    try:
+        d = _json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(d, dict) or not isinstance(d.get("timestamp"), str) or d.get("isSidechain"):
+        return
+    at = d["timestamp"]
+    p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+    if d.get("type") == "turn_context":
+        st["model"] = p.get("model") or st["model"]
+    elif p.get("type") == "token_count" and isinstance((p.get("info") or {}).get("last_token_usage"), dict):
+        u = p["info"]["last_token_usage"]
+        st["last"] = {"start": at, "at": at, "context": (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)}
+
+
+def chat_texts(raw):
+    """The texts of one log line (bytes) for the Artifacts tab: the text of each message and the input of each tool
+    call. Tool results are left out."""
+    if b'"type":"function_call_output"' in raw:
+        return []
+    try:
+        d = _json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(d, dict):
+        return []
+    p = d.get("payload") if isinstance(d.get("payload"), dict) else None
+    if not p or d.get("type") != "response_item":
+        return []
+    at = d.get("timestamp")
+    if p.get("type") == "message":
+        return [(_s()._parts_text(p.get("content"), ("input_text", "output_text", "text")), at, "named")]
+    if p.get("type") in ("function_call", "custom_tool_call"):
+        return [(str(p.get("arguments") or p.get("input") or ""), at, "named")]
+    return []

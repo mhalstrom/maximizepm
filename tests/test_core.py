@@ -13,6 +13,7 @@ from datetime import timedelta
 
 from river import core
 from river.core import RiverError
+from river.agents import claude as claude_agent
 
 
 class Base(unittest.TestCase):
@@ -1341,7 +1342,7 @@ class Usage(Base):
         copied = [{"type": "user", "timestamp": self.at(-5), "message": {"content": "base"}}, self.req(-4, "b1")]
         self.write(self.SID2, [{"type": "queue-operation", "operation": "dequeue", "timestamp": self.at(0)}] + copied
                    + [{"type": "user", "timestamp": self.at(1), "message": {"content": "work"}}, self.req(2, "f1")])
-        self.assertEqual(core.read_transcript(os.path.join(self.root, "projects", "-work-a", self.SID2 + ".jsonl"))[1], True)
+        self.assertEqual(claude_agent.read_transcript(os.path.join(self.root, "projects", "-work-a", self.SID2 + ".jsonl"))[1], True)
         for i in (x, z):
             core.measure_usage(self.c, i)
         self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id IN (?,?)", (core.iso(core.now()), x, z))
@@ -1358,7 +1359,7 @@ class Usage(Base):
         self.write(self.SID, [{"type": "attachment", "timestamp": self.at(0)},
                               {"type": "user", "timestamp": self.at(-0.01), "message": {"content": "go"}},
                               self.req(1, "a1")])
-        self.assertFalse(core.read_transcript(os.path.join(self.root, "projects", "-work-a", self.SID + ".jsonl"))[1])
+        self.assertFalse(claude_agent.read_transcript(os.path.join(self.root, "projects", "-work-a", self.SID + ".jsonl"))[1])
 
     def test_an_interactive_fork_is_known_by_its_snapshot_time(self):
         path = os.path.join(self.root, "projects", "-work-a", self.SID + ".jsonl")
@@ -1368,12 +1369,12 @@ class Usage(Base):
                               self.req(3, "copied"),
                               {"type": "user", "timestamp": self.at(10), "message": {"content": "go"}},
                               self.req(11, "own")])
-        reqs, fork = core.read_transcript(path)
+        reqs, fork = claude_agent.read_transcript(path)
         self.assertEqual((fork, sorted(reqs)), (True, ["own"]))
         # A fresh interactive session: its first message comes just after its snapshot.
         self.write(self.SID, [snap(0), {"type": "user", "timestamp": self.at(0.005), "message": {"content": "go"}},
                               self.req(1, "own")])
-        self.assertFalse(core.read_transcript(path)[1])
+        self.assertFalse(claude_agent.read_transcript(path)[1])
 
     def test_no_transcript_no_usage_and_the_session_id_from_the_environment(self):
         x = self.add("a", "x")

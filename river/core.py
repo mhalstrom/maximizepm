@@ -8359,8 +8359,6 @@ def reopen(conn, item_id, actor=None):
 # Anthropic bills a cache read at 0.1 of the input price, a 1-hour cache write at 2.0 and a 5-minute write at
 # 1.25. "eq" is input-token equivalents on that scale; output tokens are shown apart.
 EQ_READ, EQ_WRITE_1H, EQ_WRITE_5M = 0.1, 2.0, 1.25
-# A line this much older than the first line of a transcript was copied from the session a fork started from.
-FORK_SLACK = 30
 _SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -8708,50 +8706,6 @@ def _ts(s):
         return None
 
 
-def read_transcript(path):
-    """(requests, fork) of one transcript file. requests: {message id: (time, usage)}, each API request once
-    (Claude Code writes one line per content block, with the same usage). A fork (claude --resume <id>
-    --fork-session) starts with lines copied from its base, with the base's older times: they are left out,
-    and fork is True. Copied lines come before the session's own first request: a line there is copied when
-    it is FORK_SLACK older than the first line, or when the first user message is older than the start line
-    before it: claude -p writes a queue line when it starts, an interactive session a file-history snapshot
-    (its time inside the snapshot). Not the file's birth time: files are written again."""
-    reqs, first, fork, dequeued, leading, users = {}, None, False, None, True, 0
-    slack = timedelta(seconds=FORK_SLACK)
-    with open(path, errors="replace") as f:
-        for line in f:
-            if not leading and ('"usage"' not in line or '"assistant"' not in line):
-                continue
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(d, dict):
-                continue
-            snap = d.get("snapshot") if d.get("type") == "file-history-snapshot" else None
-            if leading and isinstance(snap, dict) and isinstance(snap.get("timestamp"), str) and users == 0:
-                dequeued = _ts(snap["timestamp"]) or dequeued
-                continue
-            t = _ts(d["timestamp"]) if isinstance(d.get("timestamp"), str) else None
-            if t is None:
-                continue
-            if leading:
-                first = first or t
-                if d.get("type") == "queue-operation":
-                    dequeued = t
-                    continue
-                users += d.get("type") == "user"
-                before_queue = dequeued and t < dequeued - timedelta(seconds=1)
-                if t < first - slack or (before_queue and (fork or (users == 1 and d.get("type") == "user"))):
-                    fork = True
-                    continue
-            msg = d.get("message") if isinstance(d.get("message"), dict) else {}
-            if d.get("type") == "assistant" and isinstance(msg.get("usage"), dict):
-                reqs.setdefault(msg.get("id") or d["timestamp"], (t, msg["usage"]))
-                leading = False
-    return reqs, fork
-
-
 # The harness of Claude Code runs background tasks for a session: a command started with run_in_background, a
 # command that ran into its time limit and was moved to the background, and a background subagent. The session
 # ends its turn, and the harness wakes it when the task ends. To maxpm serve such a session looked idle at its
@@ -8862,40 +8816,28 @@ def background_work(conn, agent, root=None):
     return out
 
 
-def _session_requests(sid, root):
-    """All requests of a Claude Code session, its subagents' too, and whether it started as a fork; None
-    when no transcript of it is on this computer."""
-    mains = sorted(Path(root).glob(f"*/{sid}.jsonl"))
-    if not mains:
-        return None
-    reqs, fork = {}, False
-    for p in mains:
-        r, f = read_transcript(p)
-        reqs.update(r)
-        fork = fork or f
-        for sub in sorted(p.parent.glob(f"{sid}/subagents/*.jsonl")):
-            reqs.update(read_transcript(sub)[0])
-    return reqs, fork
+def _session_requests(sid, root=None):
+    """(requests, fork) of a session id, from the chat log part of the first agent adapter that finds its log on
+    this computer (chat_requests: each model call once, with its time and token counts; fork: it started as a fork),
+    or None. root: the log folder that a test gives."""
+    from . import agents
+    for ad in agents.load().values():
+        got = ad.chat_requests(sid, root)
+        if got:
+            return got
+    return None
 
 
 def usage_eq(u):
-    """Input-token equivalents of a usage row (or a transcript usage dict)."""
-    if "cache_read" in u:
-        return u["input"] + EQ_READ * u["cache_read"] + EQ_WRITE_1H * u["write_1h"] + EQ_WRITE_5M * u["write_5m"]
-    cc = u.get("cache_creation") or {}
-    w1, w5 = cc.get("ephemeral_1h_input_tokens"), cc.get("ephemeral_5m_input_tokens")
-    if w1 is None and w5 is None:
-        w1, w5 = u.get("cache_creation_input_tokens") or 0, 0
-    return ((u.get("input_tokens") or 0) + EQ_READ * (u.get("cache_read_input_tokens") or 0)
-            + EQ_WRITE_1H * (w1 or 0) + EQ_WRITE_5M * (w5 or 0))
+    """Input-token equivalents of a usage row (or of one request of chat_requests)."""
+    return u["input"] + EQ_READ * u["cache_read"] + EQ_WRITE_1H * u["write_1h"] + EQ_WRITE_5M * u["write_5m"]
 
 
 def measure_usage(conn, item_id, root=None):
-    """Read the token usage of the sessions that held the item from their Claude Code transcripts, and store
-    it (item_usage; a new measurement replaces the old one). A request is charged to the item when the
+    """Read the token usage of the sessions that held the item from their chat logs (the adapters' chat_requests), and
+    store it (item_usage; a new measurement replaces the old one). A request is charged to the item when the
     session's agent held it at that time; when the agent held several items, to the one it took last.
     Returns the stored rows."""
-    root = Path(root) if root else transcripts_root()
     end_now = now()
     holds = lambda agent: [(parse_iso(h["started_at"]), parse_iso(h["ended_at"]) if h["ended_at"] else end_now,
                             h["id"], h["item_id"]) for h in conn.execute(
@@ -8916,18 +8858,10 @@ def measure_usage(conn, item_id, root=None):
                 active = [h for h in mine if h[0] <= t < h[1]]
                 if not active or max(active, key=lambda h: (h[0], h[2]))[3] != item_id:
                     continue
-                cc = u.get("cache_creation") or {}
-                w1, w5 = cc.get("ephemeral_1h_input_tokens"), cc.get("ephemeral_5m_input_tokens")
-                if w1 is None and w5 is None:
-                    w1, w5 = u.get("cache_creation_input_tokens") or 0, 0
-                inp, read = u.get("input_tokens") or 0, u.get("cache_read_input_tokens") or 0
                 row["turns"] += 1
-                row["input"] += inp
-                row["cache_read"] += read
-                row["write_1h"] += w1 or 0
-                row["write_5m"] += w5 or 0
-                row["output"] += u.get("output_tokens") or 0
-                row["peak_context"] = max(row["peak_context"], inp + read + (w1 or 0) + (w5 or 0))
+                for k in ("input", "cache_read", "write_1h", "write_5m", "output"):
+                    row[k] += u[k]
+                row["peak_context"] = max(row["peak_context"], u["input"] + u["cache_read"] + u["write_1h"] + u["write_5m"])
             if row["turns"]:
                 rows.append(row)
     with tx(conn):
@@ -9028,11 +8962,10 @@ def goal_base(conn, name, actor=None, ready=False, clear=False, session=None, mo
         if not session:
             raise RiverError("run maxpm goal base --ready inside the Claude Code context session: it records that "
                              "session (CLAUDE_CODE_SESSION_ID) as the base")
-        got = _session_requests(session, Path(root) if root else transcripts_root())
+        got = _session_requests(session, root)
         reqs = sorted(got[0].values(), key=lambda r: r[0]) if got else []
         last = reqs[-1][1] if reqs else {}
-        tokens = sum(last.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens",
-                                                 "cache_creation_input_tokens")) or None
+        tokens = sum(last.get(k) or 0 for k in ("input", "cache_read", "cache_write")) or None
         limit = _k_tokens(setting(conn, "base_max", project_id=g["project_id"]))
         if tokens and tokens > limit:
             warn = (f"the base has {tokens} tokens, above base_max {limit}: each fork reads all of it. Next time "
@@ -11366,19 +11299,20 @@ ADOPT_PROMPT = ("MaximizePM moved this session into a tmux pane, so the Sessions
 
 def _ran_model(pid_cmd, platform, session_id, transcript=None):
     """The model a session ran on, as its CLI named it, when the queue has none for it: the --model (-m) of its
-    recorded command line, else the model of the last reply in its transcript (a Claude Code transcript is found
-    by its session id). None when neither says."""
+    recorded command line, else the model of the last reply in its chat log (the adapter of the platform finds it
+    by the session id when its CHAT['ref'] is 'session', and reads it, #5182). None when neither says."""
     m = re.search(r"(?:^|\s)(?:--model|-m)[ =]([A-Za-z0-9._:/\[\]-]+)", pid_cmd or "")
     if m:
         return m.group(1)
+    from . import agents, sessions
+    ad = agents.find(platform)
     path = transcript
-    if not path and platform == "claude-code" and session_id:
-        path = next(iter(sorted(transcripts_root().glob(f"*/{session_id}.jsonl"))), None)
-    if not path or not Path(path).exists():
+    if not path and ad is not None and ad.chat_ref() == "session" and session_id:
+        path = ad.chat_path(session_id)
+    if ad is None or not path or not Path(path).exists():
         return None
-    from . import sessions
     try:
-        return sessions._transcript_settings("claude" if platform == "claude-code" else "codex", Path(path)).get("model")
+        return sessions._transcript_settings(ad.id, Path(path)).get("model")
     except (OSError, ValueError):
         return None
 
