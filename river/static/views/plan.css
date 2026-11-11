@@ -56,8 +56,10 @@
 }
 @media (max-width: 759px) { .plan-scope { display: none; } }  /* the left bar shows the scope */
 @media (max-width: 759px) {
-  .plan-bar { flex-wrap: nowrap; }
-  .plan-views { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  /* #5326: the views wrap onto as many lines as they need, so each one shows; Add item takes its own line. */
+  .plan-bar { flex-wrap: wrap; }
+  .plan-views { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; }
   .plan-bar .spacer { display: none; }
+  .plan-bar #planAdd { flex: 1 1 100%; }
 }
 #planAdd { white-space: nowrap; flex: none; }
