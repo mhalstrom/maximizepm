@@ -739,6 +739,50 @@ def _front(path):
     return out
 
 
+# How each command works from the page (#5220, #5289): tried in Grok 1.0.77 in tmux on 2026-11-11. /model and /effort
+# with no argument list their choices (the Settings rows Model and Effort); /session-info and /context show full-screen
+# views of the context against the model's window, and /usage its credit usage: the page's Usage panel gives them.
+# /resume, /rewind, /dashboard and the extension views are full-screen pickers. The others run at once.
+_RUNS = {
+    "terminal": {"resume", "rewind", "fork", "dashboard", "hooks", "plugins", "skills", "mcps", "settings", "memory",
+                 "doctor", "view-plan", "login"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] in ("model", "effort"):
+        _c["setting"], _c["run"] = _c["name"], "terminal"
+    if _c["name"] in ("context", "session-info", "usage"):
+        _c["page"], _c["run"] = "usage", "terminal"
+
+
+def context_window(model):
+    """The tokens of a Grok model's context window (#5289): its models cache's context_window (grok-4.7: 256000, as
+    /session-info shows), or None."""
+    m = _models_cache().get(model or "")
+    info = m.get("info") if isinstance(m, dict) else None
+    got = info.get("context_window") if isinstance(info, dict) else None
+    return int(got) if isinstance(got, (int, float)) and got > 0 else None
+
+
+def chat_cache_line(raw, st):
+    """Fold one line of updates.jsonl into the cache state (#5289, the context meter): Grok puts the tokens of the
+    context so far in each update's _meta.totalTokens, and the model in a user chunk's _meta.modelId."""
+    try:
+        x = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    p = x.get("params") if isinstance(x, dict) else None
+    u = (p or {}).get("update") if isinstance(p, dict) else None
+    if not isinstance(u, dict):
+        return
+    if u.get("sessionUpdate") == "user_message_chunk" and (u.get("_meta") or {}).get("modelId"):
+        st["model"] = u["_meta"]["modelId"]
+    total = (p.get("_meta") or {}).get("totalTokens")
+    at = _at(x)
+    if isinstance(total, int) and total > 0 and at:
+        st["last"] = {"start": at, "at": at, "context": total}
+
+
 def read_commands(folder):
     """Grok's custom slash commands for a session in folder: its skills (a folder with SKILL.md; user-invocable
     unless its front matter says false) and its legacy command files (commands/*.md), from the folder and its

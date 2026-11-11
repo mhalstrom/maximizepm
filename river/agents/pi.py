@@ -593,6 +593,61 @@ def _skills(d, top_md=False):
     return out
 
 
+# How each command works from the page (#5220, #5289): tried in Pi in tmux on 2026-11-11. /model (288 models) and
+# /thinking open a picker: the Settings rows Model and Effort. /session shows the session's tokens and cost: the
+# page's Usage panel. /settings, /resume, /tree, /fork, /scoped-models and the other pickers and lists are views in
+# the terminal. The others run at once.
+_RUNS = {
+    "terminal": {"settings", "tree", "scoped-models", "share", "hotkeys", "changelog", "fork", "trust", "login",
+                 "resume", "mcp"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] in ("model", "thinking"):
+        _c["setting"], _c["run"] = ("model" if _c["name"] == "model" else "effort"), "terminal"
+    if _c["name"] == "session":
+        _c["page"], _c["run"] = "usage", "terminal"
+
+
+def context_window(model):
+    """The tokens of a model's context window from Pi's model store (~/.pi/agent/models-store.json, contextWindow),
+    #5289. The same id can differ by provider (openai-codex/gpt-6.1-sol: 500k, openai/gpt-6.1-sol: 272k), so a
+    'provider/model' text reads its provider's; a bare id only when every provider agrees. None otherwise."""
+    import json
+    from pathlib import Path
+    try:
+        store = json.loads((Path.home() / ".pi" / "agent" / "models-store.json").read_text())
+    except (OSError, ValueError):
+        return None
+    text = str(model or "")
+    provider, _, mid = text.partition("/") if "/" in text else ("", "", text)
+    found = set()
+    for p, v in (store.items() if isinstance(store, dict) else ()):
+        if provider and p != provider:
+            continue
+        for m in (v.get("models") if isinstance(v, dict) else None) or ():
+            if isinstance(m, dict) and m.get("id") == mid and isinstance(m.get("contextWindow"), (int, float)):
+                found.add(int(m["contextWindow"]))
+    return found.pop() if len(found) == 1 else None
+
+
+def chat_cache_line(raw, st):
+    """Fold one line of a Pi session into the cache state (#5289, the context meter): an assistant message's usage is
+    one model call (its context: input, cache read and write, and output), its model 'provider/model'."""
+    try:
+        r = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    m = r.get("message") if isinstance(r, dict) and r.get("type") == "message" else None
+    if not isinstance(m, dict) or m.get("role") != "assistant" or not isinstance(m.get("usage"), dict):
+        return
+    u = m["usage"]
+    ctx = sum(int(u.get(k) or 0) for k in ("input", "cacheRead", "cacheWrite", "output"))
+    if ctx and r.get("timestamp"):
+        st["last"] = {"start": r["timestamp"], "at": r["timestamp"], "context": ctx}
+        st["model"] = f"{m['provider']}/{m['model']}" if m.get("provider") and m.get("model") else m.get("model")
+
+
 def read_commands(folder):
     """The prompt templates (/name) and skills (/skill:name) of a session in folder: ~/.pi/agent/prompts and
     .pi/prompts; ~/.pi/agent/skills, ~/.agents/skills, .pi/skills, and .agents/skills of the folder and each folder

@@ -841,6 +841,79 @@ def _commands_in(base):
     return out
 
 
+# How each command works from the page (#5220, #5289): tried in OpenCode in tmux on 2026-11-11. /models opens a
+# picker: the Settings row Model. /usage (the workspace's limits) and /stats (the tokens of all sessions) are views:
+# the page's Usage panel gives the session's. /status shows its servers, and /sessions, /themes, /agents and the other
+# dialogs are views in the terminal; /effort and /thinking switch the model's variant there (OpenCode has no effort
+# row). The others run at once.
+_RUNS = {
+    "terminal": {"agents", "cd", "connect", "continue", "debug", "diff", "editor", "effort", "export", "help",
+                 "highlights", "init", "mcps", "open", "pair", "plugins", "project", "projects", "rename", "resume",
+                 "sessions", "settings", "skills", "status", "terminal", "themes", "thinking", "timeline"},
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+    if _c["name"] == "models":
+        _c["setting"], _c["run"] = "model", "terminal"
+    if _c["name"] in ("usage", "stats"):
+        _c["page"], _c["run"] = "usage", "terminal"
+
+_catalog = {"at": 0.0, "models": None}
+
+
+def context_window(model):
+    """The tokens of a 'provider/model' context window from OpenCode's models.dev catalog (its database's kv row
+    models-dev:v2:catalog: limit.context; opencode/big-pickle 200k), read at most once in ten minutes (#5289)."""
+    import json
+    import sqlite3
+    from pathlib import Path
+    if _catalog["models"] is None or time.time() - _catalog["at"] > 600:
+        db = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "opencode" / "opencode.db"
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+            try:
+                row = conn.execute("SELECT value FROM kv WHERE key='models-dev:v2:catalog'").fetchone()
+            finally:
+                conn.close()
+            body = json.loads(row[0])["body"] if row else None
+            body = json.loads(body) if isinstance(body, str) else body
+            _catalog.update(at=time.time(), models=body if isinstance(body, dict) else {})
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+            return None
+    provider, _, mid = str(model or "").partition("/")
+    m = (((_catalog["models"] or {}).get(provider) or {}).get("models") or {}).get(mid)
+    got = ((m or {}).get("limit") or {}).get("context") if isinstance(m, dict) else None
+    return int(got) if isinstance(got, (int, float)) and got > 0 else None
+
+
+
+def _iso_ms(ms):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def chat_cache_line(raw, st):
+    """Fold one line of a chat file into the cache state (#5289, the context meter): an assistant row's tokens are
+    one model step (its context: input, cache read and write, output and reasoning), its model 'provider/model'."""
+    try:
+        r = json.loads(raw)
+    except (ValueError, TypeError):
+        return
+    d = r.get("data") if isinstance(r, dict) and r.get("type") == "assistant" else None
+    t = d.get("tokens") if isinstance(d, dict) else None
+    if not isinstance(t, dict):
+        return
+    cache = t.get("cache") or {}
+    ctx = sum(int(v or 0) for v in (t.get("input"), cache.get("read"), cache.get("write"), t.get("output"),
+                                     t.get("reasoning")))
+    if ctx and isinstance(r.get("time"), (int, float)):
+        at = _iso_ms(r["time"])
+        st["last"] = {"start": at, "at": at, "context": ctx}
+        m = d.get("model") or {}
+        if isinstance(m, dict) and m.get("id"):
+            st["model"] = f"{m['providerID']}/{m['id']}" if m.get("providerID") else m["id"]
+
+
 def read_commands(folder):
     """The custom commands of a session in folder: command/ and commands/ of .opencode in the folder and in each
     folder up to the git root, then of the global config folder. A name that comes twice keeps the first one."""

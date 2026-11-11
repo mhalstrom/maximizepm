@@ -368,3 +368,15 @@ with no argument, nothing goes to the terminal. A command with an argument goes 
 | Codex | `/review` | its numbered menu, answered in the page's dialog |
 | Codex | `/resume`, `/export`, `/diff`, `/mention`, `/skills`, `/hooks`, `/mcp`, `/apps`, `/plugins`, `/experimental`, `/statusline`, `/theme`, `/voice`, `/ps`, `/logout` | needs the terminal |
 | Codex | `/new`, `/clear`, `/fork`, `/rename`, `/compact`, `/plan` | run at once |
+| Grok CLI 1.0.77 (#5289) | `/model`, `/effort` | Settings: Model, Effort (with no argument Grok lists the choices) |
+| Grok CLI | `/session-info`, `/context`, `/usage` | the Usage panel; its window from the models cache (grok-4.7: 256k, as `/session-info` says); no plan limit in its log |
+| Grok CLI | `/resume`, `/rewind`, `/fork`, `/dashboard`, `/hooks`, `/plugins`, `/skills`, `/mcps`, `/settings`, `/memory`, `/doctor`, `/view-plan`, `/login` | needs the terminal (full-screen pickers and views) |
+| Grok CLI | `/new`, `/compact`, `/rename`, `/always-approve`, `/auto`, `/plan`, `/goal`, `/loop`, `/btw`, `/copy`, `/export`, `/remember`, `/quit` | run at once |
+| Pi (#5289) | `/model`, `/thinking` | Settings: Model, Effort (pickers in Pi) |
+| Pi | `/session` | the Usage panel; its window from `~/.pi/agent/models-store.json` by provider (openai-codex/gpt-6.1-sol: 500k, as its footer says) |
+| Pi | `/settings`, `/tree`, `/scoped-models`, `/share`, `/hotkeys`, `/changelog`, `/fork`, `/trust`, `/login`, `/resume`, `/mcp` | needs the terminal |
+| Pi | `/new`, `/compact`, `/clone`, `/name`, `/export`, `/import`, `/copy`, `/bug`, `/reload`, `/logout`, `/quit` | run at once |
+| OpenCode (#5289) | `/models` | Settings: Model |
+| OpenCode | `/usage`, `/stats` | the Usage panel (the session's tokens; its window from the models.dev catalog in its database: opencode/big-pickle 200k); its workspace limits need `/connect`, on its screen |
+| OpenCode | `/status` (its servers), `/sessions`, `/resume`, `/continue`, `/agents`, `/themes`, `/settings`, `/effort`, `/thinking` (the model's variant), `/rename`, `/export` and its other dialogs | needs the terminal |
+| OpenCode | `/new`, `/clear`, `/compact`, `/fork`, `/undo`, `/review`, `/goal`, `/btw`, `/copy`, `/reload`, `/restart`, `/update`, `/exit` | run at once |
