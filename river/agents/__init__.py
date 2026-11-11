@@ -137,6 +137,13 @@ LAUNCH_KEYS = {
 class Raw(str):
     """A word of build_command that MaximizePM puts into the shell command as it is, with no quotes."""
 
+
+# FIRST_PROMPT: how the first prompt reaches the agent. "argv" (the default): build_command puts it on the command
+# line. "paste": the CLI has no flag that sends a prompt and keeps the chat open (Aider), so build_command and
+# resume_command leave it out, and maxpm serve pastes it into the agent's tmux pane, then Enter, once DETECT['idle']
+# shows there (#5221). An adapter with "paste" needs DETECT.
+FIRST_PROMPTS = ("argv", "paste")
+
 # 5. Session identity. IDENTITY = {
 #      "source":     how MaximizePM learns the session's id after the start: one of IDENTITY_SOURCES,
 #      "env":        the variable that holds it ("env" source), or None,
@@ -382,6 +389,11 @@ def check(module, mid=None):
                     for k in e.get("map") or {} if k not in MAXPM_EFFORTS]
             if e.get("read"):
                 out += _regex("EFFORT['read']", e["read"])
+    first = getattr(module, "FIRST_PROMPT", "argv")
+    if first not in FIRST_PROMPTS:
+        out.append(f"FIRST_PROMPT is {first!r}, not one of {', '.join(FIRST_PROMPTS)}")
+    elif first == "paste" and not isinstance(getattr(module, "DETECT", None), dict):
+        out.append("FIRST_PROMPT is 'paste', but the module has no DETECT: maxpm serve cannot see its idle prompt")
     launch = getattr(module, "LAUNCH", None)
     if launch is not None:
         if not isinstance(launch, dict):
@@ -458,6 +470,7 @@ class Adapter:
         self.settings = list(getattr(m, "SETTINGS", None) or ())
         self.effort = getattr(m, "EFFORT", None)
         self.launch = dict(getattr(m, "LAUNCH", None) or {})
+        self.first_prompt = getattr(m, "FIRST_PROMPT", "argv")
         self.identity = getattr(m, "IDENTITY", None)
         self.chat = getattr(m, "CHAT", None)
         self.state = getattr(m, "STATE", None)

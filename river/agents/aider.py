@@ -104,7 +104,7 @@ LAUNCH = {"session_name": False, "system_prompt_file": True, "hooks_file": False
           "fork": False, "resume": True, "autocompact": False, "background": False}
 
 # Where the first prompt goes: "paste" (build_command leaves it out; the start path types it into the pane when
-# DETECT['idle'] shows, as a later message). Not part of the contract yet: see the module docstring.
+# DETECT['idle'] shows, as a later message): agents.FIRST_PROMPTS, server.paste_first_prompts (#5221).
 FIRST_PROMPT = "paste"
 
 SESSION_ENV = "MAXPM_AIDER_SESSION"

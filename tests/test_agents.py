@@ -487,6 +487,66 @@ class ImportOrder(unittest.TestCase):
             self.assertEqual(r.returncode, 0, f"import {name} first: {r.stderr.strip().splitlines()[-1:]}")
 
 
+class FirstPrompt(Env):
+    """#5221: an agent with FIRST_PROMPT 'paste' (Aider) gets its first prompt pasted into its tmux pane by maxpm serve,
+    once its idle prompt shows there."""
+
+    def setUp(self):
+        super().setUp()
+        from river import server
+        from tests.test_server import FakeTmux
+        self.server = server
+        self.platform, core.PLATFORM = core.PLATFORM, "linux"
+        self.tmux = server.TMUX_RUNNER = FakeTmux()
+        self.addCleanup(self._reset)
+        core.project_add(self.c, "shop", path=self.tmp.name)
+
+    def _reset(self):
+        core.PLATFORM, self.server.TMUX_RUNNER = self.platform, None
+
+    def start(self, agent):
+        t = {**core._launch_agent_cmd(self.c, None, agent, "opus", None, None, "w1"), "path": self.tmp.name,
+             "project": "shop", "session_title": "w1"}
+        self.server._open_terminal(t, {"MAXPM_AGENT": "w1", **t["env"]})
+        return t, next(p for p in self.tmux.panes if p["id"] == t["tmux_pane"])
+
+    def pastes(self):
+        return [c for c in self.tmux.calls if c[0] in ("set-buffer", "paste-buffer")]
+
+    def test_the_contract_names_first_prompt(self):
+        self.assertEqual((agents.get("aider").first_prompt, agents.get("claude").first_prompt), ("paste", "argv"))
+        self.assertIn("FIRST_PROMPT is 'typed', not one of argv, paste",
+                      agents.check(module(DESCRIBE=GOOD, FIRST_PROMPT="typed"), "pi"))
+        self.assertIn("FIRST_PROMPT is 'paste', but the module has no DETECT: maxpm serve cannot see its idle prompt",
+                      agents.check(module(DESCRIBE=GOOD, FIRST_PROMPT="paste"), "pi"))
+
+    def test_the_prompt_is_pasted_once_when_the_idle_prompt_shows(self):
+        t, pane = self.start("Aider")
+        self.assertNotIn("run maxpm go", t["command"])  # Aider takes no prompt on its command line
+        self.assertEqual(t["first_prompt"], "run maxpm go in this folder and follow the briefing")
+        pane["running"], pane["screen"] = "Python", "Aider v0.86.2\nMain model: opus\n░█  Waiting for opus"
+        self.assertEqual(self.server.paste_first_prompts(self.c), [])  # no idle prompt yet: it waits
+        self.assertEqual(self.pastes(), [])
+        pane["screen"] = "Aider v0.86.2\nMain model: opus\n\n>"
+        self.assertEqual(self.server.paste_first_prompts(self.c), [pane["id"]])
+        self.assertEqual(self.pastes()[0], ["set-buffer", "-b", "maxpm-send", "--", t["first_prompt"]])
+        self.assertEqual(pane["keys"][-1], "Enter")
+        self.assertEqual(self.server.paste_first_prompts(self.c), [])  # once
+        self.assertEqual(len(self.pastes()), 2)
+
+    def test_an_agent_that_takes_its_prompt_on_the_command_line_holds_none(self):
+        t, _ = self.start("Claude Code")
+        self.assertIsNone(t["first_prompt"])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM pane_prompts").fetchone())
+
+    def test_a_pane_that_ended_drops_its_prompt(self):
+        _, pane = self.start("Aider")
+        self.tmux.panes.remove(pane)
+        self.assertEqual(self.server.paste_first_prompts(self.c), [])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM pane_prompts").fetchone())
+        self.assertEqual(self.pastes(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

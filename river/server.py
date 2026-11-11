@@ -554,6 +554,52 @@ def _open_terminal(t, env, runner=None):
         runner(line)
         return
     t["tmux_pane"] = _tmux_open(t, env, line)
+    if t.get("first_prompt") and t.get("platform") and t["tmux_pane"]:
+        hold_first_prompt(t["tmux_pane"], t["platform"], t["first_prompt"])
+
+
+def hold_first_prompt(pane, kind, prompt):
+    """Keep the first prompt of an agent that takes none on its command line (FIRST_PROMPT 'paste'), until
+    paste_first_prompts sees its idle prompt in this pane (#5221)."""
+    conn = core.connect()
+    try:
+        with core.tx(conn):
+            conn.execute("INSERT OR REPLACE INTO pane_prompts (pane, kind, prompt, created_at) VALUES (?,?,?,?)",
+                         (pane, kind, prompt, core.iso(core.now())))
+    finally:
+        conn.close()
+
+
+def paste_first_prompts(conn):
+    """One look of maxpm serve (each pass): paste each held first prompt (hold_first_prompt) into its pane, then Enter,
+    once the agent's idle prompt (DETECT['idle'], _screen_state) shows there, as the message box of the Sessions tab
+    sends a text of several lines. A question that the agent asks first (a trust or setup question) shows no idle
+    prompt, so the prompt waits until the person has answered it. A pane that ended, or that this queue does not
+    know any more, drops its prompt. Returns the panes it pasted into."""
+    rows = conn.execute("SELECT pane, kind, prompt FROM pane_prompts ORDER BY created_at").fetchall()
+    if not rows or not core.tmux_path() and TMUX_RUNNER is None:
+        return []
+    live = {p["pane"]: p for p in _tmux_panes() if _own_pane(p)}
+    gone = [r["pane"] for r in rows if r["pane"] not in live or live[r["pane"]]["ended"]]
+    if gone:
+        with core.tx(conn):
+            conn.executemany("DELETE FROM pane_prompts WHERE pane=?", [(p,) for p in gone])
+    rows = [r for r in rows if r["pane"] not in gone]
+    texts, done = _pane_texts([r["pane"] for r in rows]), []
+    for r in rows:
+        ad = core._adapters().find(r["kind"])
+        if not (ad and ad.detect) or r["pane"] not in texts:
+            continue
+        if _screen_state(_prompt_tail(texts[r["pane"]]), ad.detect) != "idle":
+            continue
+        with core.tx(conn):  # first, so a failed paste is never typed twice
+            if not conn.execute("DELETE FROM pane_prompts WHERE pane=?", (r["pane"],)).rowcount:
+                continue  # another serve pass took it
+        _tmux("set-buffer", "-b", "maxpm-send", "--", r["prompt"])
+        _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", r["pane"])
+        _tmux("send-keys", "-t", r["pane"], "Enter")
+        done.append(r["pane"])
+    return done
 
 
 # Each agent river starts is a pane of one tmux session, so one terminal shows them all
@@ -1220,8 +1266,8 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
         core._touch_agent(conn, name)
         core._event(conn, None, "maxpm", f"{name} {why}: its process {pid} ended, and the same chat resumes "
                                          f"({t['agent']})")
-    spec = {"command": t["command"], "path": cwd, "project": name,
-            "session_title": a.get("session") or name}
+    spec = {"command": t["command"], "path": cwd, "project": name, "session_title": a.get("session") or name,
+            "platform": t.get("platform"), "first_prompt": t.get("first_prompt")}
     _open_terminal(spec, t["env"], runner)
     return spec.get("tmux_pane")
 

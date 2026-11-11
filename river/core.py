@@ -740,6 +740,15 @@ CREATE TABLE IF NOT EXISTS session_pins (
 );
 
 -- The Claude Code sessions (CLAUDE_CODE_SESSION_ID: the transcript's file name) each agent ran commands in.
+-- The first prompt of an agent that takes none on its command line (FIRST_PROMPT 'paste', Aider): maxpm serve pastes
+-- it into the tmux pane once the agent's idle prompt shows there, then deletes the row (#5221).
+CREATE TABLE IF NOT EXISTS pane_prompts (
+  pane        TEXT PRIMARY KEY,           -- the tmux pane id
+  kind        TEXT NOT NULL,              -- the agent's adapter (an id or alias)
+  prompt      TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agent_sessions (
   agent       TEXT NOT NULL,
   session_id  TEXT NOT NULL,
@@ -11380,7 +11389,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
     if pick is None:
         raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
-    model = _check_model_name(model) if model else None
+    model, first = _check_model_name(model) if model else None, None
     if effort and not re.match(r"^[a-z][a-z0-9_-]{0,31}$", effort):
         raise RiverError(f"effort {effort!r}: a level such as low, medium, high")
     prof = parse_profile(pick[1])
@@ -11408,6 +11417,8 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         else:
             autocompact = None
         cmd = build_command(prof[0], built, mid, effort or None, name)
+        if _adapters().get(prof[0]).first_prompt == "paste":  # not on its command line: serve pastes it (#5221)
+            first = opts.get("prompt")
     elif prompt:
         raise RiverError(f"{pick[0]} is a custom command ({pick[1]}), so it takes no --prompt; give it a profile "
                          f"in launch_agents (@claude-code or @codex) for one")
@@ -11418,7 +11429,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         opts, cmd, autocompact = {}, fill_launch_command(pick[1], mid, effort or None, name), None
     return {"agent": pick[0], "command": cmd, "platform": prof[0] if prof else None, "options": opts,
             "model": model, "model_id": mid, "effort": effort or None, "custom_prompt": prompt,
-            "autocompact": autocompact,
+            "autocompact": autocompact, "first_prompt": first,
             "env": {"MAXPM_MODEL": model} if model else {}}
 
 
@@ -11504,7 +11515,10 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     if not argv:
         raise RiverError(f"{ad.label} cannot resume a session: MaximizePM cannot resume {agent}")
     cmd = shell_command(with_hooks(ad, argv))
-    return {"command": cmd, "agent": pick[0], "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
+    return {"command": cmd, "agent": pick[0], "platform": platform,
+            # An agent that takes no prompt on its command line gets it pasted into its pane by serve (#5221).
+            "first_prompt": settings.get("prompt") if ad.first_prompt == "paste" else None,
+            "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
 
 
 def _check_agent_effort(ad, mid, effort):
