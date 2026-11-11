@@ -235,7 +235,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 #searchDlg .qrow .out { font-size: 12px; color: var(--muted); margin-top: 2px; overflow-wrap: anywhere; }
 @media (max-width: 640px) { #search { width: 100%; } }
 /* The toast stands under the header, not over the message box of a chat at the bottom (#5316). */
-#toast { position: fixed; top: calc(2 * var(--sp-7) + var(--sp-6)); left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 8px; display: none; z-index: 20; max-width: 90vw; }
+#toast { position: fixed; top: calc(2 * var(--sp-7) + var(--sp-6)); left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 8px; display: none; z-index: 20; width: max-content; max-width: 90vw; }
 /* An error: the warn color on its own light (or dark) background, readable in both themes (#5316). */
 #toast.err { background: var(--warn-bg); color: var(--warn); border: var(--hair) solid var(--warn); box-shadow: var(--shadow-pop); }
 .muted { color: var(--muted); }
