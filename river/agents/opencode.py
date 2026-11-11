@@ -93,6 +93,9 @@ IDENTITY = {
     "url": None,
     "inside_env": ["OPENCODE_SESSION_ID"],  # its shell tool sets it for each command
     "id_pattern": SESSION_ID,
+    # Its shell tool runs commands from the TUI's private server (opencode serve --stdio, no terminal); the session's
+    # own process is the TUI above it, on the pane's terminal (#5283).
+    "process": "nearest_terminal",
 }
 
 # ref: the Sessions tab finds the chat by the agent's newest session id (the plugin reports it); cache_write False:

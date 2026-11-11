@@ -6166,11 +6166,27 @@ def proc_tty(pid):
     return "" if not t.strip("?") else t
 
 
-def process_on_terminal(conn, name, env=None):
-    """Whether the session's own process of `name` must run on a terminal: its agent's adapter (the one this command
-    runs inside, else the agent's type) has IDENTITY['process'] 'terminal' (#5247: Hermes)."""
+def process_mode(conn, name, env=None):
+    """IDENTITY['process'] of the agent of `name`: of the adapter this command runs inside, else of the agent's type;
+    'ancestor' by default."""
     a = _adapters().from_env(os.environ if env is None else env) or state_adapter(conn, name)
-    return bool(a) and (a.identity or {}).get("process") == "terminal"
+    return ((a.identity or {}).get("process") if a else None) or "ancestor"
+
+
+def process_on_terminal(conn, name, env=None):
+    """Whether the session's own process of `name` must run on a terminal: its adapter's IDENTITY['process'] is
+    'terminal' (#5247: Hermes) or 'nearest_terminal' (#5283: OpenCode)."""
+    return process_mode(conn, name, env) in ("terminal", "nearest_terminal")
+
+
+def find_agent_process(conn, name, start=None, env=None):
+    """agent_process with the rule of the agent's adapter (IDENTITY['process'])."""
+    mode = process_mode(conn, name, env)
+    if mode == "terminal":
+        return agent_process(start, terminal=True)
+    if mode == "nearest_terminal":
+        return agent_process(start, climb=True)
+    return agent_process(start) if start else agent_process()
 
 
 def drop_background_process(conn, name):
@@ -6186,11 +6202,13 @@ def drop_background_process(conn, name):
     return False
 
 
-def agent_process(start=None, terminal=False):
+def agent_process(start=None, terminal=False, climb=False):
     """The agent CLI process that runs this river command: the first ancestor above the shell(s) that is not
     a shell (SHELLS). Returns (pid, command line), or (None, None) when it finds none (no ps, or on Windows a
     terminal that a person works in). terminal: that process counts only when it runs on a terminal
-    (process_on_terminal, #5247): a Hermes command runs under the gateway that every Hermes session shares."""
+    (process_on_terminal, #5247): a Hermes command runs under the gateway that every Hermes session shares.
+    climb: go on upward to the first process that runs on a terminal (#5283: an OpenCode command runs under the
+    TUI's private server, which has none; the TUI is the session's own process)."""
     pid = start or os.getppid()
     for _ in range(12):
         info = proc_info(pid)
@@ -6200,7 +6218,10 @@ def agent_process(start=None, terminal=False):
         if not _between(comm, args):
             if os.name == "nt" and re.sub(r"\.exe$", "", comm.lower()) in WIN_HOSTS:
                 return None, None
-            if terminal and os.name != "nt" and not proc_tty(pid):
+            if (terminal or climb) and os.name != "nt" and not proc_tty(pid):
+                if climb and ppid > 1:
+                    pid = ppid
+                    continue
                 return None, None
             return pid, args
         if ppid <= 1:

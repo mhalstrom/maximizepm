@@ -1493,7 +1493,7 @@ def _record_hook_process(conn, name):
     r = name and conn.execute("SELECT pid, host FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone()
     if not r or (r["pid"] and r["host"] == core.this_host() and core.pid_alive(r["pid"])):
         return
-    pid, cmd = core.agent_process(terminal=True) if terminal else core.agent_process()
+    pid, cmd = core.find_agent_process(conn, name)
     if pid:
         core.set_process(conn, name, pid, cmd)
 
@@ -1651,7 +1651,7 @@ def _record_process(conn, name):
     if not name or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone():
         return
     terminal = core.process_on_terminal(conn, name)
-    pid, cmd = core.agent_process(terminal=True) if terminal else core.agent_process()
+    pid, cmd = core.find_agent_process(conn, name)
     if pid:
         core.set_process(conn, name, pid, cmd)
     elif terminal:

@@ -1181,7 +1181,7 @@ class SharedGateway(Env):
         core.register(self.c, "h1")
         self.c.execute("UPDATE agents SET agent_type='hermes', pid=4242, pid_cmd='python3 -I -c gateway', host=? "
                        "WHERE name='h1'", (core.this_host(),))
-        gateway = lambda terminal=False: (None, None) if terminal else (4242, "python3 -I -c gateway")  # noqa: E731
+        gateway = lambda start=None, terminal=False: (None, None) if terminal else (4242, "python3 -I -c gateway")  # noqa: E731
         env = {"MAXPM_AGENT": "h1", "HERMES_SESSION_ID": "20261111_0001"}
         with mock.patch.dict(os.environ, env), mock.patch.object(core, "agent_process", gateway), \
                 mock.patch.object(core, "proc_tty", lambda pid: ""):
@@ -1191,6 +1191,37 @@ class SharedGateway(Env):
         with mock.patch.dict(os.environ, env), mock.patch.object(core, "proc_tty", lambda pid: "ttys030"):
             self.c.execute("UPDATE agents SET pid=4243 WHERE name='h1'")
             self.assertFalse(core.drop_background_process(self.c, "h1"))  # a process on a terminal stays
+
+
+class TuiAboveServer(Env):
+    """#5283: an OpenCode command runs under the TUI's private server (opencode serve --stdio, no terminal); the
+    session's own process is the TUI above it, on the pane's terminal. session_restart ended only the server and the
+    old TUI stayed alive in its pane."""
+
+    TREE = {100: (60, "zsh", "zsh -c maxpm go"), 60: (50, "opencode", "opencode serve --stdio --port 0"),
+            50: (40, "opencode", "opencode --standalone /work/demo"), 40: (1, "zsh", "-zsh")}
+    TTY = {60: "", 50: "ttys030", 40: "ttys030"}
+
+    def test_the_first_process_upward_on_a_terminal_is_the_session_s_own(self):
+        with mock.patch.object(core, "proc_info", self.TREE.get), mock.patch.object(core, "proc_tty", self.TTY.get):
+            self.assertEqual(core.agent_process(100, climb=True), (50, "opencode --standalone /work/demo"))
+            self.assertEqual(core.agent_process(100)[0], 60)  # the rule of every other agent: the first ancestor
+            self.assertEqual(core.agent_process(100, terminal=True), (None, None))  # Hermes: none
+        with mock.patch.object(core, "proc_info", self.TREE.get), mock.patch.object(core, "proc_tty", lambda pid: ""):
+            self.assertEqual(core.agent_process(100, climb=True), (None, None))  # no process on a terminal at all
+
+    def test_an_opencode_session_records_its_tui(self):
+        self.assertEqual(agents.get("opencode").identity["process"], "nearest_terminal")
+        core.register(self.c, "oc1")
+        self.c.execute("UPDATE agents SET agent_type='opencode', pid=60, pid_cmd='opencode serve --stdio --port 0', "
+                       "host=? WHERE name='oc1'", (core.this_host(),))
+        env = {"MAXPM_AGENT": "oc1", "OPENCODE_SESSION_ID": "ses_0123456789abcdefABCDEF0123"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(core, "proc_info", self.TREE.get), \
+                mock.patch.object(core, "proc_tty", self.TTY.get), mock.patch.object(os, "getppid", lambda: 100):
+            self.assertEqual(core.process_mode(self.c, "oc1"), "nearest_terminal")
+            cli._record_process(self.c, "oc1")
+        row = self.c.execute("SELECT pid, pid_cmd FROM agents WHERE name='oc1'").fetchone()
+        self.assertEqual((row["pid"], row["pid_cmd"]), (50, "opencode --standalone /work/demo"))
 
 
 class ChatPathType(Env):

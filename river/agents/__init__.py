@@ -161,7 +161,9 @@ FIRST_PROMPTS = ("argv", "paste")
 #      "process":    which process is the session's own (agents.pid: maxpm who, the busy checks, maxpm stop --kill):
 #                    "ancestor" (the default), the first process above a maxpm command's shells; "terminal", that
 #                    process only when it runs on a terminal, else none (#5247: Hermes runs the tools of every
-#                    session in one background gateway with no terminal, so the ancestor is that shared gateway),
+#                    session in one background gateway with no terminal, so the ancestor is that shared gateway);
+#                    "nearest_terminal", the first process upward from there that runs on a terminal (#5283:
+#                    OpenCode runs its tools from a private server, a child of its TUI with no terminal),
 #    }
 # start_session(name, settings) -> the session id that a start chooses itself, or None: the arguments of build_command
 # (Aider names its log by the start's name). The start path records it at once (agent_sessions), so the Sessions tab
@@ -172,7 +174,7 @@ IDENTITY_SOURCES = ("hook", "env", "log", "pane")
 IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "log_glob": (str, type(None)), "pane": (str, type(None)),
                  "url": (str, type(None)), "inside_env": (list, tuple), "id_pattern": (str, type(None)),
                  "process": (str, type(None))}
-IDENTITY_PROCESS = ("ancestor", "terminal")
+IDENTITY_PROCESS = ("ancestor", "terminal", "nearest_terminal")
 SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 
 # 6. Chat log (#5182: river/sessions.py reads every chat log through this part, and core.measure_usage the usage).
