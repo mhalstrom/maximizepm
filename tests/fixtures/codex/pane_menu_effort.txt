@@ -1,0 +1,31 @@
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.159.1)
+     ~/code/demo
+
+  Shall we make the thing that makes the other thing easier?
+
+• Model changed to gpt-6.1-terra medium
+
+• Model changed to gpt-6.1-terra medium
+
+
+• Context compacted · 2s
+
+  Worked for 2s • 12:31 AM
+
+
+  Select Reasoning Level for GPT-6.1 Terra
+
+
+  1. Low (default)     Fast responses with lighter reasoning
+› 2. Medium (current)  Balances speed and reasoning depth for everyday tasks
+  3. High              Greater reasoning depth for complex problems
+  4. Extra high        Extra high reasoning depth for complex problems
+  5. More reasoning…   Max and Ultra consume usage limits faster
+
+  enter default · s session · esc back

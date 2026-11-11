@@ -286,7 +286,10 @@ DETECT_LAYOUT = {
     "item": "{mark}",
     "frame": "│┃╭╮╰╯┌┐└┘",
     "rule": r"^\s*[─━╌╍┄┅═-]{8,}\s*$",
-    "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]",
+    # Also Codex's key lines ("enter select · esc back", "enter default · s session · esc back") and the key line over
+    # Claude Code's /model menu ("◐ Medium effort (default) ←/→ to adjust", #5220).
+    "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]"
+            r"|^\s*enter \w+ ·.*\besc \w+|←/→ to adjust",
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in
@@ -300,7 +303,17 @@ INPUT_KEYS = {"native": (list, tuple, type(None))}
 # 10. Commands. COMMANDS = [{"name": "compact" (no "/"), "description": str, "hint": the argument hint or ""}, ...]:
 # the built-in slash commands. read_commands(folder) -> the same shape: its custom commands for a session that runs in
 # folder (Claude: ~/.claude/commands, .claude/commands, the skills, plugin commands; Codex: ~/.codex/prompts).
-COMMAND_KEYS = {"name": str, "description": str, "hint": str}
+# "run" (#5220) says how the command works from the page's message box, typed with no arguments; the "/" list marks it:
+#   "now":      it runs at once; what it does shows in the chat, or it changes the session (/compact, /plan),
+#   "menu":     it opens a numbered menu, which the page's ! dialog shows and answers (/model, Codex's /review),
+#   "terminal": its view or its result shows only in the terminal (a full-screen view, a slider, a card printed in
+#               the pane: /config, Codex's /status); the page sends it and links to the terminal.
+# No "run" (a custom command, or an adapter that does not say): the page sends it and does not mark it.
+# "setting" (mark 2026-11-11, #5220): the key of the Settings dialog's row that does what the command does with no
+# argument ("model", "effort"). Typed with no argument, the page opens that dialog at the row, and nothing goes to the
+# terminal ("Change now" types the command with its argument); with an argument it goes as typed.
+COMMAND_KEYS = {"name": str, "description": str, "hint": str, "run": str, "setting": str}
+COMMAND_RUNS = ("now", "menu", "terminal")
 
 # 11. Setup (#5184). SETUP = {
 #      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md, GEMINI.md),
@@ -492,6 +505,11 @@ def check(module, mid=None):
         out += _shape("INPUT", module.INPUT, INPUT_KEYS)
     for i, c in enumerate(getattr(module, "COMMANDS", None) or ()):
         out += _shape(f"COMMANDS[{i}]", c, COMMAND_KEYS, ("name",))
+        if isinstance(c, dict) and "run" in c and c["run"] not in COMMAND_RUNS:
+            out.append(f"COMMANDS[{i}]['run'] is {c['run']!r}, not one of {', '.join(COMMAND_RUNS)}")
+        if isinstance(c, dict) and c.get("setting") not in (None, "model", "effort") and c["setting"] not in [
+                x.get("key") for x in getattr(module, "SETTINGS", None) or () if isinstance(x, dict)]:
+            out.append(f"COMMANDS[{i}]['setting'] is {c['setting']!r}, which is no setting of the Settings dialog")
     if getattr(module, "SETUP", None) is not None:
         out += _shape("SETUP", module.SETUP, SETUP_KEYS, ("instructions",))
     for part in PARTS.values():

@@ -7,6 +7,7 @@
 import { $, esc, act, toast, typeAction } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { linkArtifacts } from "./artLinks.js";
+import { openTerminal } from "./terminalDialog.js";
 
 const dlg = makeDialog($("#waitDlg"));
 let agent = null, pane = false, onSent = null;
@@ -25,8 +26,9 @@ function promptBlock(w, n) {
     <div class="wq">${esc(w.question || w.tool || "The terminal waits for an answer")}</div>
     ${w.command ? `<div class="wcmd">${esc(w.command)}</div>` : ""}
     ${w.why ? `<div class="muted" style="font-size:12px">${esc(w.why)}</div>` : ""}
-    <details class="wlines"><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
-    ${opts}
+    <details class="wlines"${w.options.length ? "" : " open"}><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
+    ${w.options.length ? opts : `<div class="muted">MaximizePM cannot read its choices (a slider or a list with no
+      numbers): <span class="link" data-term="${esc(agent)}" tabindex="0" role="button">answer it in the terminal</span>.</div>`}
     ${own ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`}
     <textarea class="wother" placeholder="What the agent does instead" aria-label="What the agent does instead"></textarea>
     <button class="btn primary wgo" type="submit">Send answer</button>
@@ -103,6 +105,10 @@ $("#waitList").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
   finally { btn.disabled = false; }
 });
-$("#waitList").addEventListener("click", (e) => { if (e.target.closest("[data-open]")) dlg.close(); });
+$("#waitList").addEventListener("click", (e) => {
+  if (e.target.closest("[data-open]")) dlg.close();
+  const t = e.target.closest("[data-term]");  // a prompt with no choices the page can read (#5220)
+  if (t) { dlg.close(); openTerminal(t.dataset.term); }
+});
 $("#waitClose").onclick = () => dlg.close();
 $("#waitDismiss").onclick = () => dlg.close();

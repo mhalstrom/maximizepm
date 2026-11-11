@@ -159,8 +159,19 @@ function entryNode(e) {
       m.append(b);
     }
     if (e.sent) m.append(el("div", "msg-note", "sent to its terminal"));
-    if (e.sent && e.track && norm(e.text)) { m.dataset.pending = norm(e.text); m.dataset.sentAt = Date.now(); }
+    if (e.sent && e.command) commandNote(m, e.command, e.terminal);
+    if (e.sent && e.track && norm(e.text)) {
+      m.dataset.pending = norm(e.text); m.dataset.sentAt = Date.now();
+      if (e.command) m.dataset.command = "1";  // no chat log line may come for it: the note says what it did
+    }
     return m;
+  }
+  // What a slash command printed (#5220: Claude Code keeps it in its chat log), folded under one line.
+  if (e.role === "output") {
+    const d = el("details", "cmd-out");
+    d.append(el("summary", "", "Output"));
+    d.append(el("pre", "", e.text));
+    return d;
   }
   if (e.role === "assistant") {
     const m = el("div", "msg msg-agent md");
@@ -215,10 +226,28 @@ function takePending(col, e) {
   const m = [...col.querySelectorAll(".msg-user[data-pending]")].find(x => x.dataset.pending === got);
   if (m) m.remove();
 }
-// A sent message that the transcript has not shown after PENDING_MAX says so.
+// What a slash command sent from the message box did (#5220): the server looked at the session's pane after its
+// Enter (session_send's command: {name, run, taken}). taken: "menu" (the ! dialog answers it), "waiting" (it is still
+// in the agent's input box), or "ran". A command whose run is "terminal" shows its view only in the terminal: the
+// note links to it (data-term; the view opens the terminal).
+const RAN = { menu: "opened a menu: choose in the dialog", waiting: "still in its input box: not taken", ran: "ran" };
+function commandNote(m, c, agent) {
+  const note = m.querySelector(".msg-note");
+  note.textContent = c.taken === "waiting" ? `sent to its terminal; ${RAN.waiting}`
+    : c.run === "terminal" ? `/${c.name} shows its view in the terminal. `
+    : `sent to its terminal; /${c.name} ${RAN[c.taken] || RAN.ran}`;
+  if (c.run === "terminal" && c.taken !== "waiting" && agent) {
+    const a = el("span", "link", "Open the terminal");
+    a.dataset.term = agent; a.tabIndex = 0; a.setAttribute("role", "button");
+    note.append(a);
+  }
+}
+
+// A sent message that the transcript has not shown after PENDING_MAX says so; not a slash command (#5220), whose note
+// says what it did.
 const PENDING_MAX = 30000;
 export function agePending(col) {
-  for (const m of col.querySelectorAll(".msg-user[data-pending]")) {
+  for (const m of col.querySelectorAll(".msg-user[data-pending]:not([data-command])")) {
     const note = m.querySelector(".msg-note");
     if (note && Date.now() - +m.dataset.sentAt > PENDING_MAX) note.textContent = "sent to its terminal; not taken yet";
   }

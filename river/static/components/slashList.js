@@ -6,13 +6,21 @@
 // except after Up or Down chose a row, when Enter completes that row first and then sends.
 //
 // makeSlashList(input, host, { load, onChange }): input is the textarea; the list goes into host (a box with
-// position: relative, above which it opens). load() returns a Promise of [{name, description, hint}]; key() names
+// position: relative, above which it opens). load() returns a Promise of [{name, description, hint, run}]; key() names
 // the session: when it changes, the next "/" loads that session's commands. onChange() runs after a
 // completion changed the text (the view resizes the box and saves the draft). keydown(e) returns true when the list
-// took the key; the view then does nothing more with it.
+// took the key; the view then does nothing more with it. lookup(text) gives the command a text to send names (#5220).
 import { esc } from "../lib.js";
 
 const MAX_ROWS = 50;
+// How a command works from the page (the adapter's COMMANDS run, #5220): a mark at the end of its row, and why. A
+// command that runs at once has no mark.
+const RUNS = {
+  menu: ["menu", "Opens a menu: the page shows it and you choose there"],
+  terminal: ["terminal", "Shows its view only in the terminal: after you send it, open the terminal"],
+  settings: ["opens Settings", "With no argument it opens the session's Settings at this setting; nothing goes to the terminal"],
+};
+const runOf = (c) => c.setting ? "settings" : c.run;
 let seq = 0;
 
 export function makeSlashList(input, host, { load, key = () => "", onChange = () => {} }) {
@@ -58,7 +66,9 @@ export function makeSlashList(input, host, { load, key = () => "", onChange = ()
     box.innerHTML = shown.map((c, i) =>
       `<div class="slash-row${i === at ? " on" : ""}" role="option" id="${id}-${i}" aria-selected="${i === at}" data-i="${i}">` +
       `<span class="slash-name">/${esc(c.name)}${c.hint ? ` <span class="slash-hint">${esc(c.hint)}</span>` : ""}</span>` +
-      `<span class="slash-desc">${esc(c.description || "")}</span></div>`).join("");
+      `<span class="slash-desc">${esc(c.description || "")}</span>` +
+      (RUNS[runOf(c)] ? `<span class="slash-run" title="${esc(RUNS[runOf(c)][1])}">${esc(RUNS[runOf(c)][0])}</span>` : "") +
+      `</div>`).join("");
     input.setAttribute("aria-activedescendant", `${id}-${at}`);
     const row = box.children[at];
     if (row) row.scrollIntoView({ block: "nearest" });
@@ -93,6 +103,18 @@ export function makeSlashList(input, host, { load, key = () => "", onChange = ()
     draw();
   }
   function reset() { gen++; forKey = key(); commands = null; loading = null; closedFor = null; close(); }
+  // The command that a text to send names (#5220): its entry of the session's list, or null. Loads the list first.
+  async function lookup(text) {
+    const m = /^\/(\S+)(\s+\S[\s\S]*)?$/.exec(String(text || "").trim());
+    if (!m) return null;
+    if (key() !== forKey) reset();
+    if (commands === null) {
+      const got = await Promise.resolve(load()).catch(() => []);
+      if (commands === null && key() === forKey) commands = Array.isArray(got) ? got : [];
+    }
+    const c = (commands || []).find(x => x.name === m[1]);
+    return c ? { ...c, args: (m[2] || "").trim() } : null;
+  }
   function complete(i) {
     const c = shown[i];
     if (!c) return;
@@ -130,6 +152,6 @@ export function makeSlashList(input, host, { load, key = () => "", onChange = ()
   input.addEventListener("keyup", (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") update(); });
   input.addEventListener("blur", close);
   return {
-    keydown, close, update, isOpen, reset,
+    keydown, close, update, isOpen, reset, lookup,
   };
 }

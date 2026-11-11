@@ -301,7 +301,7 @@ SETTINGS = [
 # program).
 COMMANDS = [
     {"name": "model", "description": "choose what model and reasoning effort to use", "hint": ""},
-    {"name": "approvals", "description": "choose what Codex is allowed to do", "hint": ""},
+    {"name": "permissions", "description": "choose what Codex is allowed to do", "hint": ""},  # not /approvals (#5220)
     {"name": "review", "description": "review my current changes and find issues", "hint": ""},
     {"name": "new", "description": "start a new chat during a conversation", "hint": ""},
     {"name": "resume", "description": "resume a saved chat", "hint": ""},
@@ -337,6 +337,26 @@ COMMANDS = [
     {"name": "logout", "description": "log out of Codex", "hint": ""},
     {"name": "quit", "description": "exit Codex", "hint": ""},
 ]
+
+# How each command works from the page (#5220, agents/__init__.py COMMAND_RUNS): tried in Codex 0.159.1 in tmux:
+# /model (two menus) and /review open a numbered menu; /status prints a card in the pane only; /compact runs at once.
+# Its chat log keeps no command or what one prints, so a command that prints its result is 'terminal'. The others by
+# what they show.
+_RUNS = {
+    "menu": {
+        "model", "permissions", "review",
+    },
+    "terminal": {
+        "resume", "export", "diff", "mention", "status", "usage", "skills", "hooks", "mcp", "apps", "plugins",
+        "experimental", "statusline", "theme", "voice", "pwd", "ps", "feedback", "logout",
+    },
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+# The commands that the Settings dialog does (#5220, mark 2026-11-11): with no argument the page opens it at that row.
+for _c in COMMANDS:
+    if _c["name"] in {'model': 'model'}:
+        _c["setting"] = {'model': 'model'}[_c["name"]]
 
 
 def read_commands(folder):

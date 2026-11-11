@@ -65,7 +65,8 @@ function sync() {
   $("#setRestart").textContent = n ? `Restart with ${n === 1 ? "this setting" : `these ${n} settings`}` : "Restart with these settings";
 }
 
-export async function openSettings(agent, { done } = {}) {
+// focus: the key of a setting whose field gets the focus (#5220: /model and /effort from the message box).
+export async function openSettings(agent, { done, focus } = {}) {
   onDone = done;
   $("#setTitle").textContent = `Settings of ${agent}`;
   $("#setList").innerHTML = `<div class="muted">Reading the session…</div>`;
@@ -79,6 +80,9 @@ export async function openSettings(agent, { done } = {}) {
     $("#setList").innerHTML = pageSection(agent) + `<div class="muted set-head">${esc(j.provider.label)}${j.transcript ? "" : " · no transcript here: the values come from its command line"}</div>`
       + j.settings.map(field).join("");
     sync();
+    const at = focus ? j.settings.findIndex(x => x.key === focus) : -1;
+    const el = at >= 0 && document.querySelector(`#setList [data-i="${at}"]`);
+    if (el) { el.closest(".set-row").classList.add("on"); el.focus(); el.scrollIntoView({ block: "nearest" }); }
   } catch (e) { $("#setList").innerHTML = pageSection(agent) + `<div class="muted">${esc(e.message)}</div>`; cur = null; }
 }
 

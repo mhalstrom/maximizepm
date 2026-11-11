@@ -245,6 +245,8 @@ def parse_chat_line(d):
     # the summary as a user line. The chat shows a divider, and the summary folded under it, never as the person's turn.
     if d.get("type") == "system" and d.get("subtype") == "compact_boundary" and not d.get("isSidechain"):
         return [{"at": d.get("timestamp"), "role": "divider", "kind": "compacted", "text": "Compacted"}], None
+    if d.get("type") == "system" and d.get("subtype") == "local_command" and not d.get("isSidechain"):
+        return _local_command(d), None
     if d.get("type") not in ("user", "assistant") or d.get("isSidechain") or d.get("isMeta"):
         return [], None
     m = d.get("message") if isinstance(d.get("message"), dict) else {}
@@ -281,6 +283,25 @@ def parse_chat_line(d):
 
 def parse_chat(lines):
     return _s().parse_lines(parse_chat_line, lines)
+
+
+_TAG = _re.compile(r"<(command-name|command-args|local-command-stdout|local-command-stderr)>(.*?)</\1>", _re.S)
+_ANSI = _re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _local_command(d):
+    """The page lines of a slash command that Claude Code ran by itself (#5220): a system line 'local_command' with
+    the command ('<command-name>/context</command-name>', its arguments), and another with what it printed
+    ('<local-command-stdout>'). The command is the person's turn, as they typed it; its output is a block of its
+    own, without the terminal's colours. The page has a turn for its message box's command to take its place."""
+    content = d.get("content") if isinstance(d.get("content"), str) else ""
+    tags = {k: v for k, v in _TAG.findall(content)}
+    at = d.get("timestamp")
+    if tags.get("command-name"):
+        text = (tags["command-name"].strip() + " " + tags.get("command-args", "").strip()).strip()
+        return [{"at": at, "role": "user", "text": text, "command": True}]
+    out = _ANSI.sub("", tags.get("local-command-stdout") or tags.get("local-command-stderr") or "").strip()
+    return [{"at": at, "role": "output", "text": _s()._clip(out, _s().DETAIL_MAX)}] if out else []
 
 
 def chat_chain(path, refs=None):
@@ -625,6 +646,27 @@ def _plugin_commands(dirs):
             out += slash.md_commands(base / "commands", prefix) + slash.skill_commands(base / "skills", prefix)
             break
     return out
+
+# How each command works from the page (#5220, agents/__init__.py COMMAND_RUNS): tried in Claude Code 2.1.322 in tmux:
+# /model and /export open a numbered menu; /config, /effort (a slider), /cost, /status and /skills a view in the
+# terminal; /compact, /context, /plan and /output-style run at once, and the chat shows what they print (its chat log
+# keeps it). The others by what they show.
+_RUNS = {
+    "menu": {
+        "model", "export",
+    },
+    "terminal": {
+        "agents", "btw", "config", "cost", "doctor", "effort", "feedback", "help", "hooks", "ide", "keybindings",
+        "login", "logout", "mcp", "memory", "permissions", "plugin", "privacy-settings", "release-notes", "resume",
+        "rewind", "sandbox", "skills", "status", "tasks", "terminal-setup", "theme", "upgrade", "usage", "voice",
+    },
+}
+for _c in COMMANDS:
+    _c["run"] = next((k for k, v in _RUNS.items() if _c["name"] in v), "now")
+# The commands that the Settings dialog does (#5220, mark 2026-11-11): with no argument the page opens it at that row.
+for _c in COMMANDS:
+    if _c["name"] in {'model': 'model', 'effort': 'effort'}:
+        _c["setting"] = {'model': 'model', 'effort': 'effort'}[_c["name"]]
 
 
 def read_commands(folder):

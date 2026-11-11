@@ -579,6 +579,20 @@ def state(conn, a, turn, waiting=None):
     return "working", STATES["working"]
 
 
+def pane_state(conn, a, turn, prompt=None, pane=False, waiting=None):
+    """state() with what the session's tmux pane shows now (server.pane_prompts): a prompt there is a prompt. For an
+    agent whose state comes from its pane (its adapter's STATE['state'] is 'detect': Codex), a pane read now that
+    shows no prompt wins over the blocked state that the watch of maxpm serve recorded up to notify_interval before
+    (#5220: after mark chose in Codex's /model menu, the page said for half a minute that it waited at a permission
+    prompt)."""
+    key, label = state(conn, a, turn, waiting)
+    if prompt and key != "stopping":
+        return "prompt", STATES["prompt"]
+    if key == "prompt" and pane and not prompt and core._state_source(conn, a["name"]) == "detect":
+        return state(conn, dict(a, activity_prompt=None), turn, waiting)
+    return key, label
+
+
 def adopt_check(conn, a, kind, path, turn, cwd, waiting=None):
     """tmux_adopt (#4598) for a session outside tmux: ("now", why) when maxpm serve moves it into a tmux pane now,
     ("later", why) when it moves after its turn, or ("never", why)."""
@@ -773,11 +787,11 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         if said and a["name"] in waiting and not any(
                 (core._ts(q["created_at"]) or said) > said for q in _open_questions(conn, a["name"])):
             waiting = {k: v for k, v in waiting.items() if k != a["name"]}
-        key, label = state(conn, a, tail["turn"], waiting)
         prompt = (prompts or {}).get(a["name"])
-        if prompt and key != "stopping":
-            key, label = "prompt", STATES["prompt"]
-        elif not path and not a.get("pid") and key not in ("stopping", "answer", "prompt"):
+        # The override of pane_state only after a read of the panes (prompts given), not with no read at all.
+        key, label = pane_state(conn, a, tail["turn"], prompt,
+                                prompts is not None and bool((terminals or {}).get(a["name"])), waiting)
+        if not path and not a.get("pid") and key not in ("stopping", "answer", "prompt"):
             # It ran no maxpm command and wrote no transcript: not working (#4621). Its pane shows a shell: it ended.
             # A prompt that the pane watcher reported (maxpm report --state blocked) waits on the person, also before
             # its first maxpm command: it stays a prompt (#5269).
@@ -829,19 +843,20 @@ def item_refs(conn, entries):
     return out
 
 
-def view(conn, agent, cursor=None, root=None, croot=None):
+def view(conn, agent, cursor=None, root=None, croot=None, prompt=None, pane=False):
     """The large view of one session: its lines after cursor (None: the last LIMIT of them), the next cursor, and
-    its state; with a note and no lines for an agent that has no transcript on this computer."""
+    its state; with a note and no lines for an agent that has no transcript on this computer. prompt: the prompt its
+    tmux pane shows now (server.pane_prompts), and pane: whether that pane was read for it (pane_state)."""
     a = core.agent_status(conn, agent)
     kind, path = transcript(conn, agent, root, croot)
     if not path:  # a session in a pane still gets the text bar
-        key, label = state(conn, a, None)
+        key, label = pane_state(conn, a, None, prompt, pane)
         return {"agent": agent, "transcript": None, "entries": [], "cursor": None, "turn": None, "state": key,
                 "state_label": label, "session_url": a.get("session_url"),
                 "note": no_log_note(conn, agent, root, croot)}
     got = entries(kind, path, cursor)
     turn = got["turn"] if got["turn"] or cursor is None else entries(kind, path)["turn"]
-    key, label = state(conn, a, turn)
+    key, label = pane_state(conn, a, turn, prompt, pane)
     older = None
     if cursor is None:  # the first read: where the earlier lines start, for scrolling up (#5120)
         chain = transcript_chain(conn, agent, kind, path)

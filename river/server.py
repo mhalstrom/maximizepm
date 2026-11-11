@@ -1365,7 +1365,10 @@ def session_setting_live(conn, agent, key, value, who=None):
     value = sessions.check_value(spec, value, conn, prov)
     if pane_prompts(conn, {agent: _typing_pane(conn, agent, who)}).get(agent):
         raise RiverError(f"a prompt waits in the terminal of {agent}: answer it first")
-    terminal_keys(conn, agent, [{"text": spec["live"].format(value=value)}, {"key": "Enter"}], who)
+    pane = _typing_pane(conn, agent, who)
+    send_keys(pane, [{"text": spec["live"].format(value=value)}])
+    time.sleep(ENTER_PAUSE)  # #5220: not an Enter inside the CLI's paste window
+    send_keys(pane, [{"key": "Enter"}])
     with core.tx(conn):
         core._event(conn, None, who or "maxpm", f"{agent}: {spec['label']} set to {value} in place")
     return {"agent": agent, "key": key, "value": value}
@@ -1678,7 +1681,8 @@ def _prompt_parts(tail, layout=None):
     under the menu inside its box belong to the prompt (Hermes puts the reason of a command approval there, #5213)."""
     lay = layout or _layout()
     lines = [re.sub(f"^\\s*[{lay['box']}]", "", x).rstrip(f" {lay['frame']}") for x in tail]
-    hint = next((m.group(0) for m in map(lay["hint"].search, lines) if m), None)
+    # The last key hint: a menu can have a line of other keys over its own (Claude Code's /model: "←/→ to adjust").
+    hint = next((m.group(0).strip() for m in map(lay["hint"].search, reversed(lines)) if m), None)
     mark = lay["mark"]
     # The last marked line: the lines above a prompt can show what the person typed before ("❯ run the tests"),
     # and with the first one river found no question in a real Claude Code prompt (#4280).
@@ -1693,10 +1697,14 @@ def _prompt_parts(tail, layout=None):
             o = other and other.match(x)
             return o.group(3).strip() if o and len(o.group(1)) == mcol else None
 
+        # A numbered menu (#5220): the lines above its first number are its title and what came before (Codex's
+        # "Select Model and Effort" and "Worked for 2s" start in the column of its options), not options.
+        numbered = bool(_NUMBERED.match(m.group(3)))
+
         def option(x):
             return marked(x) is not None or (len(x) - len(x.lstrip()) == col and not lay["hint"].search(x))
         top = at
-        while top > 0 and option(lines[top - 1]):
+        while top > 0 and option(lines[top - 1]) and not (numbered and not _NUMBERED.match(lines[top - 1].strip())):
             top -= 1
         end = at + 1
         while end < len(lines) and option(lines[end]):
@@ -1709,10 +1717,15 @@ def _prompt_parts(tail, layout=None):
             while frame_end < len(tail) and framed.match(tail[frame_end]):
                 frame_end += 1
     question, qat = None, None
-    for n in range(top - 1, -1, -1):
-        if "?" in lines[n]:
-            question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
-            break
+    near = [n for n in range(top - 1, max(top - 4, -1), -1) if "?" in lines[n]]
+    title = _menu_title(lines, top, col) if options and numbered and not near else None
+    if title is not None:
+        question, qat = lines[title].strip(), title  # a menu with a title asks no question: its title says what
+    else:
+        for n in range(top - 1, -1, -1):
+            if "?" in lines[n]:
+                question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
+                break
     if question is None and options and framed.match(tail[at]):
         question = _frame_title(tail, lines, at, framed)  # a dialog with a title, not a question (Amp, #5226)
     return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
@@ -1745,6 +1758,23 @@ def _frame_title(tail, lines, at, framed):
         inside = (framed.sub("", x).rstrip(" │┃║") for x in rows[n + 1:])
         title = next((x.strip() for x in inside if x.strip()), "")
     return title[:240] or None
+
+
+_NUMBERED = re.compile(r"\d+\.\s")
+
+
+def _menu_title(lines, top, col):
+    """The line number of a numbered menu's title, or None (#5220): the line over its first option (Codex: "Select
+    a review preset"); when that line starts left of the options and the one above it starts in the same column,
+    the upper one: a title over its description (Claude Code's /model: "Select model", then "Switch between Claude
+    models. ...")."""
+    if top < 1 or not lines[top - 1].strip() or _NUMBERED.match(lines[top - 1].strip()):
+        return None
+    indent = len(lines[top - 1]) - len(lines[top - 1].lstrip())
+    if indent != col and top >= 2 and lines[top - 2].strip() and \
+            len(lines[top - 2]) - len(lines[top - 2].lstrip()) == indent:
+        return top - 2
+    return top - 1
 
 
 def _prompt_found(tail, rx, layout=None):
@@ -2650,24 +2680,77 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
             _tmux("set-buffer", "-b", "maxpm-send", "--", part)
             _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
             time.sleep(PROMPT_PAUSE)
+        time.sleep(ENTER_PAUSE)
         _tmux("send-keys", "-t", pane, "Enter")
         _keep_prompt(conn, agent, text, who)
         return {"agent": agent, "pane": pane, "sent": 2, "text": prompt, "images": image_paths, "files": paths}
     if not text:
         raise RiverError("the message is empty: type a message first (the ! dialog answers a prompt)")
     if "\n" not in text:
-        keys = [{"text": text}, {"key": "Enter"}]
-        out = dict(terminal_keys(conn, agent, keys, who), text=text)
+        # The text, a pause, then Enter (#5220): Codex reads keys that come fast as a paste, and an Enter inside that
+        # paste is a new line in its input box, not a send. Its text could come back into the box after the command
+        # ran, too: mark's /model on 2026-11-11 left a second '/model' there.
+        cmd = slash_command(conn, agent, text)
+        if cmd and cmd["setting"] and not cmd["args"]:
+            # mark 2026-11-11: the Settings dialog does this command; its picker would wait in the terminal for keys.
+            raise RiverError(f"/{cmd['name']} with no argument opens a picker in the terminal: change the "
+                             f"{cmd['setting']} in the session's Settings, or type /{cmd['name']} <value>")
+        pane = _typing_pane(conn, agent, who)
+        send_keys(pane, [{"text": text}])
+        time.sleep(ENTER_PAUSE)
+        send_keys(pane, [{"key": "Enter"}])
+        out = {"agent": agent, "pane": pane, "sent": 2, "text": text}
         _keep_prompt(conn, agent, text, who)
+        if cmd:
+            out["command"] = {"name": cmd["name"], "run": cmd["run"], "taken": command_taken(conn, agent, pane, text)}
         return out
     # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
     # prompt early), then Enter.
     pane = _typing_pane(conn, agent, who)
     _tmux("set-buffer", "-b", "maxpm-send", "--", text)
     _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
+    time.sleep(ENTER_PAUSE)
     _tmux("send-keys", "-t", pane, "Enter")
     _keep_prompt(conn, agent, text, who)
     return {"agent": agent, "pane": pane, "sent": 2, "text": text}
+
+
+ENTER_PAUSE = 0.3  # between a message's text and its Enter (#5220: Codex's paste window; tests: 0)
+COMMAND_LOOK = 0.8  # after a slash command's Enter, before the look at its pane (tests: 0)
+BOX_LINES = 4  # the last lines of a pane where an agent's input box is
+
+
+def slash_command(conn, agent, text):
+    """The slash command that a message of the message box is (#5220): {"name": without the "/", "run": how it works
+    from the page (the adapter's COMMANDS: now, menu or terminal; None when the adapter does not say, or for a custom
+    command), "setting": the Settings dialog's row that does it, or None, "args": the text after the name}; None for
+    a message that is no slash command."""
+    m = re.match(r"/([A-Za-z0-9][\w:.-]*)(\s|$)", text)
+    if not m:
+        return None
+    ad = core.state_adapter(conn, agent)
+    c = next((c for c in (getattr(ad, "commands", None) or []) if c.get("name") == m.group(1)), {})
+    return {"name": m.group(1), "run": c.get("run"), "setting": c.get("setting"), "args": text[m.end():].strip()}
+
+
+def command_taken(conn, agent, pane, text):
+    """What a slash command did, read from its pane COMMAND_LOOK after its Enter (#5220): "menu" (a menu or another
+    prompt shows: the page's ! dialog answers it), "waiting" (the command is still in the agent's input box: the
+    agent did not take it), or "ran". The sign of a command, since no chat log line comes for it."""
+    time.sleep(COMMAND_LOOK)
+    tail = _prompt_tail(_plain(_pane_texts([pane]).get(pane) or ""))
+    rx, layout, ad = _pane_rule(conn, agent)
+    if rx and _prompt_found(tail, rx, layout):
+        return "menu"
+    idle = (ad.detect or {}).get("idle") if ad is not None else None
+    # The input box is at the end of the screen, with at most a rule and a status line under it; a line further up
+    # with its marker is the echo of a turn (Claude Code shows '❯ /context' above the command's output).
+    box = next((x for x in reversed(tail[-BOX_LINES:]) if idle and re.search(idle, x)), None)
+    if box is not None:
+        typed = re.sub(idle, "", box, count=1).strip()
+        if typed and text.strip().startswith(typed):
+            return "waiting"
+    return "ran"
 
 
 def _keep_prompt(conn, agent, text, who):

@@ -9,6 +9,7 @@ from unittest import mock
 
 from river import agents, core, server, sessions
 from river.agents import slash
+from river.core import RiverError
 from tests.test_view_sessions import DRIVE_HEAD, TmuxBase, claude_line, drive_page
 
 
@@ -201,3 +202,154 @@ try {
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def screen(agent, name):
+    return (FIXTURES / agent / name).read_text(encoding="utf-8")
+
+
+class MenuScreens(unittest.TestCase):
+    """#5220: the menus of slash commands, recorded from Codex 0.159.1 and Claude Code 2.1.322 in tmux, read as prompts
+    the page's ! dialog answers; Codex's "/" popup over its input box is no prompt."""
+
+    def found(self, agent, name):
+        ad = agents.find(agent)
+        tail = server._prompt_tail(screen(agent, name))
+        return server._prompt_found(tail, server._AnyOf(ad.detect["blocked"]), server._layout(ad.detect))
+
+    def test_codex_menus_give_their_title_their_numbered_options_and_their_keys(self):
+        p = self.found("codex", "pane_menu_model.txt")
+        self.assertEqual(p["question"], "Select Model and Effort")  # not the start screen's "...easier?" far above
+        self.assertEqual([o[0][:3] for o in p["options"]], [f"{n}. " for n in range(1, 9)])  # no title, no key line
+        self.assertEqual([o[1] for o in p["options"]].index(True), 2)  # the marker is on 3. GPT-6.1 Terra (current)
+        self.assertEqual(p["hint"], "enter select · esc back")
+        p = self.found("codex", "pane_menu_effort.txt")
+        self.assertEqual((p["question"], len(p["options"]), p["hint"]),
+                         ("Select Reasoning Level for GPT-6.1 Terra", 5, "enter default · s session · esc back"))
+        p = self.found("codex", "pane_menu_review.txt")
+        self.assertEqual((p["question"], p["options"][0]), ("Select a review preset",
+                                                            ("1. Review against a base branch  (PR Style)", True)))
+
+    def test_claude_codes_model_menu_is_a_prompt_with_its_title(self):
+        p = self.found("claude", "pane_menu_model.txt")
+        self.assertEqual(p["question"], "Select model")  # the title over its description line
+        self.assertEqual([o[0].split()[0] for o in p["options"]], ["1.", "2.", "3.", "4.", "5.", "▸"])
+        self.assertEqual(p["hint"], "Enter to set as default · s to use this session only · Esc to cancel")
+
+    def test_the_slash_popup_of_codex_is_no_prompt(self):
+        # '› /model  choose what model ...' over '› /mod': the input box and its popup (mark 2026-11-11: the page said
+        # it waited at a permission prompt).
+        self.assertIsNone(self.found("codex", "pane_slash_popup.txt"))
+
+
+class SentFromThePage(TmuxBase):
+    """#5220: a slash command from the message box: its text, a pause (Codex reads a fast Enter as part of a paste),
+    then Enter; then a look at the pane says what it did, since no chat log line comes for it."""
+
+    def setUp(self):
+        super().setUp()
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='codex' WHERE name='ag'")
+        self.pane["keys"].clear()
+
+    def send(self, text, shown):
+        self.pane["screen"] = shown
+        slept = []
+        with mock.patch.object(server, "ENTER_PAUSE", 0.25), mock.patch.object(server.time, "sleep", slept.append):
+            r = server.OPS["session_send"](self.c, {"agent": "ag", "text": text}, "mark")
+        return r, slept
+
+    def test_the_text_then_a_pause_then_enter(self):
+        r, slept = self.send("/review", screen("codex", "pane_menu_review.txt"))
+        self.assertEqual(self.pane["keys"], ["/review", "Enter"])
+        self.assertEqual(slept[0], 0.25)  # between the text and its Enter
+        self.assertEqual(r["command"], {"name": "review", "run": "menu", "taken": "menu"})
+
+    def test_a_command_still_in_the_input_box_was_not_taken(self):
+        r, _ = self.send("/status", "• Model changed\n\n› /status\n\n  GPT-6.1 Terra medium · ~/code/demo\n")
+        self.assertEqual(r["command"], {"name": "status", "run": "terminal", "taken": "waiting"})
+
+    def test_a_command_that_left_an_empty_box_ran(self):
+        r, _ = self.send("/compact", "• Context compacted · 2s\n\n› Ask Codex to do anything\n\n  GPT-6.1 Terra medium\n")
+        self.assertEqual(r["command"], {"name": "compact", "run": "now", "taken": "ran"})
+        r, _ = self.send("/prompts:mine", "› Ask Codex to do anything\n")  # a custom command: its run is not known
+        self.assertEqual(r["command"]["run"], None)
+        r, _ = self.send("please go on", "› Ask Codex to do anything\n")  # a message is no command
+        self.assertNotIn("command", r)
+        r, _ = self.send("/ not a command", "› Ask Codex to do anything\n")
+        self.assertNotIn("command", r)
+
+    def test_a_command_that_the_settings_dialog_does_goes_nowhere_without_an_argument(self):
+        # mark 2026-11-11: /model and /effort with no argument open the session's Settings; their pickers would wait in
+        # the terminal for keys (Claude Code saved a preselected effort as the default).
+        for agent_type, text in (("codex", "/model"), ("claude-code", "/effort"), ("claude-code", "/model ")):
+            with core.tx(self.c):
+                self.c.execute("UPDATE agents SET agent_type=? WHERE name='ag'", (agent_type,))
+            with self.assertRaisesRegex(RiverError, "opens a picker in the terminal: change the (model|effort) in the "
+                                                    "session's Settings"):
+                self.send(text, "❯ \n")
+        self.assertEqual(self.pane["keys"], [])
+        r, _ = self.send("/effort high", "❯ \n")  # with its argument it goes as typed
+        self.assertEqual((self.pane["keys"], r["command"]["name"]), (["/effort high", "Enter"], "effort"))
+
+    def test_a_menu_that_closed_is_no_prompt_on_the_page(self):
+        # The watch of maxpm serve recorded the menu as blocked; the pane now shows the input box again. For Codex,
+        # whose state comes from its pane, the page reads the pane at once and says idle, not 'waits at a prompt'.
+        core.report(self.c, "ag", "blocked", "Select Model and Effort")
+        self.pane["screen"] = screen("codex", "pane_slash_popup.txt")
+        self.assertNotEqual(self.cards()[0]["state"], "prompt")
+        v = sessions.view(self.c, "ag", None, self.root, self.croot, prompt=None, pane=True)
+        self.assertNotEqual(v["state"], "prompt")
+        self.pane["screen"] = screen("codex", "pane_menu_model.txt")  # the menu shows: a prompt
+        self.assertEqual(self.cards()[0]["state"], "prompt")
+        # An agent whose hooks report its prompts (Claude Code) keeps the hook's word.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        self.assertEqual(sessions.view(self.c, "ag", None, self.root, self.croot, prompt=None, pane=True)["state"],
+                         "prompt")
+
+
+class CommandRuns(unittest.TestCase):
+    """#5220: each built-in command of Claude Code and Codex says how it works from the page."""
+
+    def test_claude_and_codex_mark_every_command(self):
+        from river.agents import claude, codex
+        for mod in (claude, codex):
+            self.assertEqual(agents.check(mod, mod.DESCRIBE["id"]), [])
+            self.assertTrue(all(c["run"] in agents.COMMAND_RUNS for c in mod.COMMANDS))
+        runs = {c["name"]: c["run"] for c in claude.COMMANDS}
+        self.assertEqual((runs["model"], runs["config"], runs["context"], runs["compact"]), ("menu", "terminal", "now", "now"))
+        runs = {c["name"]: c["run"] for c in codex.COMMANDS}
+        self.assertEqual((runs["model"], runs["review"], runs["status"], runs["compact"]), ("menu", "menu", "terminal", "now"))
+        self.assertNotIn("approvals", runs)  # Codex 0.159.1: "Unrecognized command '/approvals'"; it is /permissions
+        self.assertEqual({c["name"]: c["setting"] for c in claude.COMMANDS if c.get("setting")},
+                         {"model": "model", "effort": "effort"})
+        self.assertEqual({c["name"]: c["setting"] for c in codex.COMMANDS if c.get("setting")}, {"model": "model"})
+
+    def test_a_wrong_run_is_a_problem_of_the_adapter(self):
+        import types
+        m = types.SimpleNamespace(DESCRIBE={"id": "x", "name": "X", "command": "x"},
+                                  COMMANDS=[{"name": "go", "description": "", "hint": "", "run": "later"}])
+        self.assertTrue(any("'later', not one of now, menu, terminal" in p for p in agents.check(m)))
+        m.COMMANDS = [{"name": "go", "description": "", "hint": "", "setting": "colour"}]
+        self.assertTrue(any("'colour', which is no setting of the Settings dialog" in p for p in agents.check(m)))
+
+
+class ClaudeCommandLines(unittest.TestCase):
+    """#5220: Claude Code writes a command it ran by itself, and what it printed, as system lines 'local_command'."""
+
+    def test_the_command_is_a_turn_and_its_output_a_block(self):
+        from river.agents import claude
+        def line(content):
+            return {"type": "system", "subtype": "local_command", "content": content, "timestamp": "2026-11-11T08:30:00Z"}
+        got, turn = claude.parse_chat_line(line("<command-name>/context</command-name>\n  <command-message>context"
+                                                "</command-message>\n  <command-args></command-args>"))
+        self.assertEqual((got, turn), ([{"at": "2026-11-11T08:30:00Z", "role": "user", "text": "/context",
+                                          "command": True}], None))
+        got, _ = claude.parse_chat_line(line("<local-command-stdout> \x1b[1mContext Usage\x1b[22m\n"
+                                             "\x1b[38;5;244m⛀ \x1b[39m34k/700k</local-command-stdout>"))
+        self.assertEqual([(e["role"], e["text"]) for e in got], [("output", "Context Usage\n⛀ 34k/700k")])
+        self.assertEqual(claude.parse_chat_line(line("<local-command-stdout></local-command-stdout>"))[0], [])

@@ -203,6 +203,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   });
   // A link or a file path in the chat opens in the side panel; Cmd or Ctrl+click keeps a new browser tab (#4619).
   col.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-term]");  // a slash command that shows its view in the terminal (#5220)
+    if (t) { e.preventDefault(); openTerminal(t.dataset.term); return; }
     const f = e.target.closest("[data-file]");
     if (f) { e.preventDefault(); openInPanel(f.dataset.file, agent); return; }
     const a = e.target.closest("a[href]");
@@ -211,7 +213,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   });
   col.addEventListener("keydown", (e) => {
     const f = e.key === "Enter" && e.target.closest("[data-file]"); if (f) { e.preventDefault(); openInPanel(f.dataset.file); }
-    const o = e.key === "Enter" && e.target.closest("span[data-open]"); if (o) { e.preventDefault(); o.click(); }
+    const o = e.key === "Enter" && e.target.closest("span[data-open], span[data-term]"); if (o) { e.preventDefault(); o.click(); }
   });
   const note = (text) => { col.replaceChildren(); const n = document.createElement("div"); n.className = "muted sl-none"; n.textContent = text; col.append(n); };
 
@@ -468,13 +470,16 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     }
   });
 
-  // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it.
+  // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it. A
+  // prompt that runs nothing (no tool, no command) is a menu: a slash command's (#5220), not a permission prompt.
   function waitLine(j) {
-    const w = $("#sessWait"), waits = ((list.find(x => x.name === agent) || {}).waiting || []).map(x => x.kind);
+    const w = $("#sessWait"), all = (list.find(x => x.name === agent) || {}).waiting || [], waits = all.map(x => x.kind);
+    const p = all.find(x => x.kind === "prompt"), menu = p && !p.elsewhere && !p.tool && !p.command;
     // A prompt in the terminal is a permission prompt or a question of the agent (Hermes's clarify tool, #5253).
-    const what = waits.includes("prompt") || j.state === "prompt" ? "It waits for your answer at a prompt in its terminal."
+    const what = menu ? "It shows a menu in its terminal."
+      : waits.includes("prompt") || j.state === "prompt" ? "It waits for your answer at a prompt in its terminal."
       : waits.includes("question") || j.state === "answer" ? "It waits for your answer to its question." : "";
-    w.innerHTML = what ? `${esc(what)} <span class="link" data-wait-open="1" tabindex="0" role="button">Answer it</span>` : "";
+    w.innerHTML = what ? `${esc(what)} <span class="link" data-wait-open="1" tabindex="0" role="button">${menu ? "Choose" : "Answer it"}</span>` : "";
     w.classList.toggle("hidden", !what);
   }
   // What may open the dialog without a click on 'Answer it': a prompt, or a question younger than question_popup_max
@@ -752,6 +757,14 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
         return;
       }
     }
+    // A command that the session's Settings does (#5220, mark 2026-11-11: /model, /effort with no argument): the
+    // dialog opens at its row, and nothing goes to the terminal, where its picker would wait for keys.
+    const cmd = files.length ? null : await slash.lookup(input.value);
+    if (cmd && cmd.setting && !cmd.args && to === agent) {
+      openSettings(to, { done: refresh, focus: cmd.setting });
+      input.value = ""; slash.close(); grow(); sendState(); saveDraft();
+      return;
+    }
     sending = true; renderFiles();
     let ok = true;
     try {
@@ -765,6 +778,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
         const ag = agentOf(ex.provider || ex.agent_type);
         const untracked = !!ag && ag.chat_commands === false && /^\//.test(String(r.text || "").trim());
         appendEntries(col, [{ role: "user", sent: true, track: !!r.text && !untracked, text: r.text || (sent.length ? "" : "(Enter)"),
+                              command: r.command || null, terminal: to,
                               images: (r.images || []).map(p => p.split(/[\\/]/).slice(-2).join("/")),
                               files: (r.files || []).filter(p => !(r.images || []).includes(p)).map(p => ({
                                 path: p.split(/[\\/]/).slice(-2).join("/"), name: p.split(/[\\/]/).pop().replace(/^\d{8}-\d{6}-[a-f0-9]{8}-/, "") })) }]);
@@ -772,6 +786,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
         sentPrompt(to, typed);
         body.scrollTop = body.scrollHeight;
         input.value = "";
+        slash.close();  // a send by the arrow, or a text the list was open for
         grow();
         saveDraft();  // sent: the draft is empty
       }

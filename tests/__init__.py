@@ -9,7 +9,7 @@ the MCP server there would read them (#2261). A test that needs one sets it itse
 names its own database, and the variable never points a test at the real queue by being removed."""
 import os
 
-from river import core, dictation
+from river import core, dictation, server
 
 for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS", "MAXPM_FORK_OF",
               "MAXPM_MODEL", "MAXPM_QUIET"):
@@ -19,3 +19,4 @@ core.tmux_path = lambda: None
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin
 from river.agents import codex as codex_adapter  # noqa: E402
 codex_adapter.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them
+server.ENTER_PAUSE = server.COMMAND_LOOK = 0  # no waits for a CLI's paste window or a command's screen (#5220)

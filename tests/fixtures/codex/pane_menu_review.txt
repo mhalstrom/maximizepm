@@ -1,0 +1,31 @@
+│ Run npm install -g @openai/codex to update.     │
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.159.1)
+     ~/code/demo
+
+  Shall we make the thing that makes the other thing easier?
+
+• Model changed to gpt-6.1-terra medium
+
+• Model changed to gpt-6.1-terra medium
+
+
+• Context compacted · 2s
+
+  Worked for 2s • 12:31 AM
+
+
+  Select a review preset
+
+
+› 1. Review against a base branch  (PR Style)
+  2. Review uncommitted changes
+  3. Review a commit
+  4. Custom review instructions
+
+  enter select · esc back

@@ -386,6 +386,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .slash-hint, .slash-desc { color: var(--muted); }
 .slash-row.on .slash-hint, .slash-row.on .slash-desc { color: inherit; opacity: .85; }
 .slash-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* How the command works from the page (#5220): "menu", "terminal". */
+.slash-run { flex: none; font-size: var(--fs-xs); color: var(--muted); border: var(--hair) solid var(--line);
+  border-radius: var(--r-s); padding: 0 var(--sp-2); }
+.slash-row.on .slash-run { color: inherit; border-color: currentColor; }
 @keyframes micpulse { 50% { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) { .cmp-mic.on, .mic-float.on { animation: none; } }
 /* The microphone of every other box that takes text (components/dictate.js, #5107): a fixed overlay at the box's right

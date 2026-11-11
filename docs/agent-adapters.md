@@ -247,6 +247,29 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
   it. Enter sends the text as typed; after Up or Down chose a row, Enter completes that row first and then sends.
   A click on a row completes it.
 
+## As built in #5220 (slash commands from the page)
+
+- Each entry of `COMMANDS` has `run`: how the command works from the message box, typed with no arguments. `now`: it
+  runs at once, and the chat shows what it does or it changes the session. `menu`: it opens a numbered menu, which
+  the page's ! dialog shows and answers. `terminal`: its view or its result shows only in the terminal (a
+  full-screen view, a slider, a card printed in the pane). No `run`: the page does not say. The "/" list marks
+  `menu` and `terminal`. Claude Code and Codex fill it for every built-in command; the other adapters may.
+- `session_send` types the text, waits `ENTER_PAUSE` (0.3 s), then sends Enter. Codex reads keys that come fast as a
+  paste: an Enter inside it was a new line in its input box, not a send, and the text could come back into the box
+  after the command ran (mark's /model, 2026-11-11).
+- A slash command writes no turn to the chat log of Codex, and Claude Code writes some only. So `session_send` looks
+  at the pane `COMMAND_LOOK` (0.8 s) after the Enter and returns `command: {name, run, taken}`. taken: `menu` (a
+  prompt shows), `waiting` (the command is still in the agent's input box, in the last `BOX_LINES` lines), or `ran`.
+  The page's bubble says it, and for a `terminal` command it links to the terminal.
+- Claude Code's `local_command` lines show in the chat: the command as the person's turn, and what it printed as a
+  folded Output block.
+- The pane reader (`server._prompt_parts`): a numbered menu's options are its numbered lines and the lines under them
+  in the same column; its title (the line over its first option, or the line above that one when both start left of
+  the options) is its question when no line with "?" is within three lines over it. The key line is the last hint
+  line; the hint pattern also takes Codex's "enter select · esc back" and Claude Code's "←/→ to adjust".
+- For an agent whose state comes from its pane (`STATE['state'] == 'detect'`: Codex), the pane read of the page wins
+  over the blocked state that the watch of maxpm serve recorded (`sessions.pane_state`).
+
 ## As built in #5184 (setup and the page)
 
 - `SETUP` holds `instructions`, `import` (the line with `{file}` by which the agent's instruction file imports
