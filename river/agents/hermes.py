@@ -51,6 +51,8 @@ DESCRIBE = {
     "default_model": "gpt-6.1-terra",
     "model_ids": {},
     "prefix": "hermes_",
+    # /model <id> switches the model of the running session (session-scoped); a resume cannot (#5252).
+    "model_live": "/model {value}",
 }
 
 
@@ -117,7 +119,12 @@ EFFORT = {
 
 # Hermes has no flag for a session name (-c <name> --create-if-missing resumes a session of that title when one
 # exists), and no flag for more folders or a system prompt file.
-LAUNCH = {"resume": True}
+# fixed_on_resume (#5252): Hermes freezes a session's creation flags at its start (hermes_cli/gateway_chat.py _POLICY:
+# model, provider, reasoning, toolsets, yolo, skills, checkpoints, ...). A resume may repeat one with the same value and
+# refuses a different one ("Resume retains gateway session policy; creation overrides are unsupported on resume"), so
+# resume_command passes none of them: the session keeps them all (also --checkpoints), and /model and /reasoning
+# change the model and effort of the running session.
+LAUNCH = {"resume": True, "fixed_on_resume": True}
 
 _TOGGLES = [s for s in SETTINGS if s["kind"] == "toggle"]
 _VALUED = [s for s in SETTINGS if s["kind"] != "toggle" and s["flag"]]
@@ -148,12 +155,16 @@ def build_command(name, folder, model, effort, settings, prompt):
 
 
 def resume_command(session_ref, model, effort, settings, name=None):
-    """hermes chat --cli --resume <session id>, with the profile's settings and settings['prompt'] as the first prompt
-    after the resume. Hermes goes back into the session's recorded folder."""
+    """hermes chat --cli --resume <session id> [<args>] [-q <prompt>]: settings['prompt'] is the first prompt after
+    the resume. No creation flag (no --provider, -m, --reasoning, toggle or toolset): Hermes keeps those the session
+    started with and refuses one that differs (LAUNCH fixed_on_resume, #5252), so model, effort and settings go
+    nowhere here. Hermes goes back into the session's recorded folder."""
     if not session_ref:
         return None
-    s = {k: v for k, v in (settings or {}).items() if k != "prompt"}
-    return build_command(name, None, model, effort, {**s, "resume": session_ref}, (settings or {}).get("prompt"))
+    s = settings or {}
+    words = ["hermes", "chat", "--cli", "--resume", session_ref]
+    words += [Raw(s["args"].strip())] if str(s.get("args") or "").strip() else []
+    return words + (["-q", s["prompt"]] if s.get("prompt") else [])
 
 
 _PARSE_TOGGLES = {w: spec["key"] for spec in _TOGGLES for w in spec["flag"]}

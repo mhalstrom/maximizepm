@@ -104,12 +104,29 @@ class Launch(unittest.TestCase):
     def test_resume_names_the_session_and_sends_the_prompt_after_it(self):
         a = agents.get("hermes")
         sid = "local-a52f877bc92e683b2568b21f70409c0805725b04c01d9d5597ef9de6585441b0"
-        got = a.resume_command(sid, "gpt-6.1-terra", "low", {"provider": "openai-codex", "prompt": "go on"})
-        self.assertEqual(got, ["hermes", "chat", "--cli", "--resume", sid, "--provider", "openai-codex", "-m",
-                               "gpt-6.1-terra", "--reasoning", "low", "-q", "go on"])
+        # No creation flag (#5252): Hermes refuses one that differs from the session's start ('Resume retains gateway
+        # session policy; creation overrides are unsupported on resume'), and keeps them all (also --checkpoints).
+        got = a.resume_command(sid, "gpt-6.1-terra", "low", {"provider": "openai-codex", "checkpoints": "on",
+                                                              "yolo": "on", "toolsets": "web", "prompt": "go on"})
+        self.assertEqual(got, ["hermes", "chat", "--cli", "--resume", sid, "-q", "go on"])
+        self.assertTrue(a.launch["fixed_on_resume"])
+        self.assertEqual(core.shell_command(a.resume_command(sid, None, None, {"args": "--max-turns 50"})),
+                         f"hermes chat --cli --resume {sid} --max-turns 50")
         # The exit screen of the recorded session names the same id for a resume.
         self.assertIn(f"hermes --resume {sid}", screen("pane_exit.txt"))
         self.assertIsNone(a.resume_command("", None, None, {}))
+
+    def test_a_restart_with_new_settings_is_refused_and_names_the_live_command(self):
+        """#5252: the restart ended Hermes at once and left a second pane at a shell; the Settings dialog changes the
+        model and the effort of a running Hermes session with /model and /reasoning (Change now)."""
+        from river import server
+        specs = {s["key"]: s for s in agents.get("hermes").session_specs()}
+        self.assertEqual((specs["model"]["live"], specs["effort"]["live"]), ("/model {value}", "/reasoning {value}"))
+        with self.assertRaisesRegex(core.RiverError, r"Hermes keeps the settings .* nothing restarted\. Model: Change now "
+                                                     r"\(it types /model gpt-6\.1-sol\); Effort: Change now \(it types "
+                                                     r"/reasoning medium\)"):
+            server.fixed_on_resume("hermes", {"model": "gpt-6.1-sol", "effort": "medium"})
+        server.fixed_on_resume("claude-code", {"effort": "high"})  # Claude Code resumes with new flags: no refusal
 
     def test_parse_command_reads_back_what_a_profile_builds_and_nothing_else(self):
         got = hermes.parse_command(["hermes", "chat", "--cli", "--provider", "anthropic", "-m", "{model}",

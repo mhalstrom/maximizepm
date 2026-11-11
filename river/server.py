@@ -1340,6 +1340,7 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
     if not tail.get("cwd"):
         raise RiverError(f"the transcript of {agent} does not name its folder")
     prov = sessions.provider(a.get("agent_type"), kind)["id"]
+    fixed_on_resume(prov, changes)
     ov, done, defaults = {"opts": {}, "flags": [], "noflags": []}, [], []
     for key, value in changes.items():
         spec = sessions.setting_spec(prov, key)
@@ -1360,6 +1361,23 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
     for k, v in defaults:
         core.config_set(conn, k, v)
     return {"agent": agent, "pane": pane, "changed": done, "defaults": [k for k, _ in defaults]}
+
+
+def fixed_on_resume(provider_id, changes):
+    """Refuse a restart with new settings of an agent whose resume keeps the settings the session started with
+    (LAUNCH fixed_on_resume: Hermes). The resume could not apply them: Hermes ends at once, and a second pane stays at
+    a shell (#5252). The refusal names the live command of each setting that has one (the dialog's Change now)."""
+    from . import sessions
+    ad = core._adapters().find(provider_id)
+    if not (ad and ad.launch.get("fixed_on_resume")):
+        return
+    ways = []
+    for key, value in changes.items():
+        spec = sessions.setting_spec(provider_id, key)
+        ways.append(f"{spec['label']}: Change now (it types {spec['live'].format(value=value)})" if spec.get("live")
+                    else f"{spec['label']}: only a new session takes another value")
+    raise RiverError(f"{ad.label} keeps the settings a session started with when it resumes, so a restart cannot change "
+                     f"them; nothing restarted. " + "; ".join(ways))
 
 
 def tmux_orphans_view(end=False):
