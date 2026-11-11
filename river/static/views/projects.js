@@ -5,6 +5,7 @@ import { doerChip, projectChip, countChip } from "../components/chip.js";
 import { nyCard, goalCard, projCard } from "../components/card.js";
 import { itemTableRows, itemTableColumns } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
+import { button } from "../components/button.js";
 import { fitClamps } from "../components/clamp.js";
 import { S, goalSel, inGoal, scope } from "../page.js";
 import { openAdd } from "./plan.js";
@@ -34,7 +35,7 @@ export function renderProjects() {
     return projCard(p, isClosed, `<div class="pcounts" title="${esc(meta.join(" · ") + (closedN ? ` · ${closedN} done` : "") + (backlog.length ? ` · ${backlog.length} in backlog` : ""))}">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${who.length ? `<span class="muted t-s">${who.map(esc).join(", ")}</span>` : ""}</div>
       <div class="pbody">
         <div class="pdesc t-s">${p.notes ? `<span class="muted" title="${esc(p.notes)}">${esc(clip(p.notes.split(/(?<=\.)\s|\n/)[0], 90))}</span> <span class="link" data-describe="${esc(p.name)}">edit</span>` : `<span class="link" data-describe="${esc(p.name)}">+ description</span>`}</div>
-        ${pg.length ? `<div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<span class="link t-s" style="align-self:center" data-addgoal="${esc(p.name)}">+ goal</span></div>` : ""}
+        ${pg.length ? `<div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<div class="gc-add">${button("+ goal", { cls: "plain", data: { addgoal: p.name } })}</div></div>` : ""}
         <div class="psec">${open.length} open${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}${pg.length ? "" : ` <span class="link t-s" data-addgoal="${esc(p.name)}">+ goal</span>`}</div>
         <div class="ptable" data-ptable="${esc(p.name)}"></div>
       </div>`);
