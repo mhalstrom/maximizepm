@@ -153,7 +153,8 @@ your type from your CLI's environment.
    With the setting `review` on, the deploy item first waits on one review
    of the whole release. `maxpm go` gives a ready review before new work
    (role REVIEWER; `--role reviewer` takes any), but never to an agent that
-   claimed or finished an item the release ships, and never to a session that
+   claimed or finished an item the release ships, cut the release or moved its
+   pin, or wrote a commit of it (its session link in the commit), and never to a session that
    held a task before: a review starts in a new session, with a clean context
    (`maxpm serve` starts one). After its review, a session takes any work.
    Follow the review process in

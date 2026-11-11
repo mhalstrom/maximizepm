@@ -321,8 +321,9 @@ DEFAULT_SETTINGS = {
     # for example git log --format=%B <last release>..<pinned commit>. Its environment has MAXPM_LAST_RELEASE (the
     # output of the target's last done deploy item), MAXPM_TARGET, and MAXPM_REVIEW. Every #<id> it prints is an
     # item of the release: whoever claimed or finished it does not review the release (release_authors), and a done
-    # one of a project with this target joins the release review and deploy item (maxpm serve). Empty: only the
-    # items sent with maxpm ship count.
+    # one of a project with this target joins the release review and deploy item (maxpm serve). Every session link
+    # it prints (a commit's Claude-Session trailer, so print the bodies: %B) names a session that wrote a commit of the
+    # release: that session does not review it either (#5385). Empty: only the items sent with maxpm ship count.
     "release_commits": "",
     # Releases move with no manager (maxpm serve, every notify_interval). auto_review on: a ready release review
     # that nobody holds or has reserved goes to a session that waits for work in a project the release ships and
@@ -11973,22 +11974,35 @@ def waiting_agent_for(conn, project, item_id=None, model=None):
 
 
 RELEASE_COMMITS_TTL = 120  # seconds a release_commits answer is reused (maxpm serve asks on every pass)
-_RELEASE_COMMITS = {}  # (review id, command) -> (monotonic time it runs out, item ids)
+_RELEASE_COMMITS = {}  # (review id, command) -> (monotonic time it runs out, item ids, session links)
+# The trailer that each commit of a Claude Code session carries: the link that agents.session_url holds (#5385).
+SESSION_LINK = r"https://claude\.ai/code/session_[A-Za-z0-9]+"
 
 
 def release_commit_items(conn, review):
     """The items that the commits of a release name (setting release_commits): every #<id> the command prints, of
     items that exist and are no review or deploy item. An empty set when the setting is empty or the command fails.
     The covered list of a review holds only what agents sent with maxpm ship; a commit can name more (#1236)."""
+    return set(_release_commits(conn, review)[0])
+
+
+def release_commit_sessions(conn, review):
+    """The session links (Claude-Session trailers) that the commits of a release print (setting release_commits,
+    with the commit bodies), as a set: the sessions that wrote them (#5385)."""
+    return set(_release_commits(conn, review)[1])
+
+
+def _release_commits(conn, review):
+    """(item ids, session links) of release_commits, asked at most once each RELEASE_COMMITS_TTL."""
     import subprocess
     import time
     cmd = (setting(conn, "release_commits", item_id=review["id"]) or "").strip()
     if not cmd or review["kind"] != "review":
-        return set()
+        return frozenset(), frozenset()
     key = (review["id"], cmd)
     hit = _RELEASE_COMMITS.get(key)
     if hit and hit[0] > time.monotonic():
-        return set(hit[1])
+        return hit[1], hit[2]
     review = dict(review)
     if "project" not in review:  # a row of items (_item) has the project id only
         review["project"] = conn.execute("SELECT name FROM projects WHERE id=?", (review["project_id"],)).fetchone()[0]
@@ -12001,15 +12015,16 @@ def release_commit_items(conn, review):
         r = subprocess.run(cmd, shell=True, cwd=os.path.expanduser(folder["path"]) if folder else None, env=env,
                            capture_output=True, text=True, timeout=60)
         named = {int(x) for x in re.findall(r"#(\d+)\b", r.stdout)} if r.returncode == 0 else set()
+        links = set(re.findall(SESSION_LINK, r.stdout)) if r.returncode == 0 else set()
     except (OSError, subprocess.SubprocessError):
-        named = set()
+        named, links = set(), set()
     ids = set()
     if named:
         marks = ",".join("?" * len(named))
         ids = {row["id"] for row in conn.execute(
             f"SELECT id FROM items WHERE id IN ({marks}) AND kind NOT IN ('review','deploy')", sorted(named))}
-    _RELEASE_COMMITS[key] = (time.monotonic() + RELEASE_COMMITS_TTL, frozenset(ids))
-    return ids
+    _RELEASE_COMMITS[key] = (time.monotonic() + RELEASE_COMMITS_TTL, frozenset(ids), frozenset(links))
+    return frozenset(ids), frozenset(links)
 
 
 def _prime_release_commits(conn, item_id=None):
@@ -12061,11 +12076,25 @@ def release_join_commits(conn, review_id, actor="maxpm"):
 def release_authors(conn, review_id):
     """The agents that worked on what a release review covers: whoever claimed or closed an item it ships, or an
     item that a commit of the release names (release_commits), and a reviewer that said it wrote commits of the
-    release (maxpm release <review> --author). A session started for the review is none of them."""
+    release (maxpm release <review> --author). Also (#5385: a toolscaledcore session prepared the pin and then got
+    the review) whoever cut the release or moved its pin (maxpm target cut), and the sessions whose link a commit
+    of the release carries (its Claude-Session trailer, in the output of release_commits). A session started for
+    the review is none of them; nor is a reviewer whose claim of the review cut the release."""
     review = _item(conn, review_id)
     # The reviewer's own word: the pin moved after the review went out, and holds its commits now (#1616).
     names = {r["actor"].split("@")[0] for r in conn.execute(  # name@relay: the command came through the relay
         "SELECT DISTINCT actor FROM events WHERE item_id=? AND change LIKE ?", (review_id, AUTHOR_RELEASE + "%"))}
+    # The pin: the cut of the deploy item that this review gates, and each move of its revision.
+    names |= {r["actor"].split("@")[0] for r in conn.execute(
+        "SELECT DISTINCT e.actor FROM events e JOIN deps d ON d.item_id=e.item_id JOIN items i ON i.id=d.item_id "
+        "WHERE d.blocked_by=? AND i.kind='deploy' AND e.actor IS NOT NULL AND e.actor<>'maxpm' "
+        "AND ((e.change LIKE 'release cut with%' AND e.change NOT LIKE '%took review #%') "
+        "OR e.change LIKE 'release revision moved%')", (review_id,))}
+    links = release_commit_sessions(conn, review)
+    if links:
+        marks = ",".join("?" * len(links))
+        names |= {r["name"] for r in conn.execute(f"SELECT name FROM agents WHERE session_url IN ({marks})",
+                                                    sorted(links))}
     ids = [r["blocked_by"] for r in conn.execute(
         "SELECT d.blocked_by FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND i.kind<>'review'",
         (review_id,))]

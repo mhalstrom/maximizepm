@@ -3835,6 +3835,38 @@ class ReleaseReview(Base):
         self.review = [i for i in self.deploy if core.item_show(self.c, i)["kind"] == "review"][0]
         self.deploy = [i for i in self.deploy if i != self.review][0]
 
+    def test_the_session_that_prepared_the_pin_or_wrote_a_commit_does_not_review(self):
+        # #5385: a toolscaledcore session prepared the pin and then got the review of that release.
+        core.register(self.c, "w9")
+        core.register(self.c, "w8")
+        core.register(self.c, "boss")
+        core._set_role_note(self.c, "boss", "manager", None)
+        core.target_cut(self.c, "web", rev="abc123", actor="ops")  # the owner cuts the release and pins abc123
+        self.assertIn("ops", core.release_authors(self.c, self.review))
+        core.target_cut(self.c, "web", rev="def456", actor="boss")  # the manager moves the pin
+        self.assertIn("boss", core.release_authors(self.c, self.review))
+        # A commit of the release carries the link of w8's session (its Claude-Session trailer).
+        link = "https://claude.ai/code/session_01AbCdEf"
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET session_url=? WHERE name='w8'", (link,))
+        core.config_set(self.c, "release_commits", f"printf 'Fix the form\\n\\nClaude-Session: {link}\\n'")
+        core._RELEASE_COMMITS.clear()
+        self.addCleanup(core._RELEASE_COMMITS.clear)
+        self.assertEqual(core.release_commit_sessions(self.c, core._item(self.c, self.review)), {link})
+        authors = core.release_authors(self.c, self.review)
+        self.assertTrue({"dev", "ops", "boss", "w8"} <= authors, authors)
+        self.assertNotIn("w9", authors)
+        self.assertIn("worked on what release review", core.author_refusal(self.c, core._item(self.c, self.review), "w8"))
+        # A reviewer whose claim cut the release is no author of it.
+        core.claim(self.c, self.review, "w9")
+        self.assertNotIn("w9", core.release_authors(self.c, self.review))
+
+    def test_a_reviewer_that_takes_the_review_cuts_the_release_but_is_no_author(self):
+        core.register(self.c, "w9")
+        core.claim(self.c, self.review, "w9")
+        self.assertTrue(core._item(self.c, self.deploy)["cut_at"])
+        self.assertNotIn("w9", core.release_authors(self.c, self.review))
+
     def test_fail_with_ask_waits_on_the_user_and_adds_only_approved_fixes(self):
         core.register(self.c, "mark", human=True)
         core.claim(self.c, self.review, "rev")
