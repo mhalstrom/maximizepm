@@ -4,8 +4,9 @@
 //   note, and ends; a session that waits for work ends at once. The optional reason goes to the session.
 // - an expert: maxpm expert end (op expert_end). It ends now; its notes stay, and its task goes back to the queue,
 //   or closes when the person says the talk is done.
-// - End now (op kill_agent): only for a session that does not answer, with a process on this computer. Its process
-//   ends at once, and MaximizePM releases its task, goals and targets. It needs a second confirm.
+// - End now (op kill_agent): only for a session that does not answer, with a process on this computer, or (a session
+//   that ran no maxpm command, #5278) a program in its own tmux pane. It ends at once, and MaximizePM releases its
+//   task, goals and targets. It needs a second confirm.
 // The row then shows 'ending' until the session is gone; then it leaves the list.
 import { esc, act } from "../lib.js";
 import { makeDialog } from "./dialog.js";
@@ -56,7 +57,7 @@ const taskList = (s) => (s.holds || []).map(h => `#${h.id} ${esc(h.title)}`).joi
 export function endHtml(s) {
   const name = esc(s.name), held = (s.holds || []).length;
   const reason = `<div class="form"><label>Why (optional; ${s.role === "expert" ? "the history keeps it" : "the session sees it"})<input data-end-reason placeholder="the plan changed"></label></div>`;
-  const now = s.can_kill ? `<div class="end-now hidden"><b>End ${name} now?</b> Its process (PID ${esc(s.pid)}) ends at once. Use this only
+  const now = s.can_kill ? `<div class="end-now hidden"><b>End ${name} now?</b> ${s.pid ? `Its process (PID ${esc(s.pid)})` : "The program in its tmux pane"} ends at once. Use this only
       when the session does not answer. Work that it did not commit stays in its folder, and nothing commits it. MaximizePM releases its
       task, goals and targets.<div class="actions">${button(`End ${name} now`, { kind: "warn", data: { "end-go": "kill" } })}</div></div>` : "";
   const nowBtn = s.can_kill ? button("End now…", { title: "Only for a session that does not answer", data: { "end-now-ask": "1" } }) : "";

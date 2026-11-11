@@ -1539,6 +1539,16 @@ class EndSession(Base):
             self.c.execute("UPDATE agents SET host='elsewhere' WHERE name='ag'")
         self.assertFalse(sessions.views(self.c, {"ag": "%1"}, self.root, self.croot)[0]["can_kill"])
 
+    def test_a_session_with_no_recorded_process_can_end_now_while_its_own_pane_runs(self):
+        """#5278: Aider runs no maxpm command, so it records no process; End now ends the program in its tmux pane."""
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL WHERE name='ag'")
+        views = lambda ended=(): sessions.views(self.c, {"ag": "%1"}, self.root, self.croot, ended_panes=ended)
+        card = views()[0]
+        self.assertEqual((card["can_kill"], card["pid"]), (True, None))
+        self.assertFalse(views(("%1",))[0]["can_kill"])  # its pane shows a shell: the program ended
+        self.assertFalse(sessions.views(self.c, {}, self.root, self.croot)[0]["can_kill"])  # no pane of its own
+
     def test_the_head_is_one_row_with_one_menu(self):
         """#5115, mark 2026-11-10: 'the grouping in the top corner of the session screen (Settings, End Items....) thats
         not a good layout'. The head is one row: the name, the agent id, the state dot and the item at the left; Items |

@@ -6230,9 +6230,12 @@ def set_process(conn, name, pid, cmd, host=None, env=None):
     return True
 
 
-def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None):
+def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None, pane=None):
     """Emergency only (the normal path is maxpm stop): end the agent's process on this host, then release
-    everything it held. Checks that the PID still runs the recorded command, so a reused PID is not killed."""
+    everything it held. Checks that the PID still runs the recorded command, so a reused PID is not killed.
+    pane: for an agent with no recorded process (it ran no maxpm command: Aider, a session that never connected), the
+    foreground process group of its tmux pane as maxpm serve found it ({"pid", "pgid", "cmd", "pane"},
+    server.pane_process); the whole group ends, a pipeline such as 'printf <prompt> | amp' too (#5278)."""
     import signal
     import subprocess
     import time
@@ -6243,9 +6246,11 @@ def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None):
     if why:
         raise RiverError(f"refused: a person or a manager kills an agent ({why})")
     ag = _agent(conn, agent)
+    if not ag["pid"] and pane:
+        return _kill_pane(conn, agent, reason, actor, pane, grace, sleep)
     if not ag["pid"]:
-        raise RiverError(f"{agent} has no recorded process (maxpm go records it); ask it to stop instead: "
-                         f"maxpm stop {agent} --reason \"...\"")
+        raise RiverError(f"{agent} has no recorded process (maxpm go records it) and no tmux pane of this queue runs "
+                         f"it; ask it to stop instead: maxpm stop {agent} --reason \"...\"")
     if ag["host"] != this_host():
         raise RiverError(f"{agent} runs on {ag['host']}, not on this host ({this_host()}); kill it there")
     killed = False
@@ -6269,6 +6274,44 @@ def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None):
             if pid_alive(ag["pid"]):
                 os.kill(ag["pid"], signal.SIGKILL)
         killed = True
+    return _killed(conn, agent, reason, actor, ag["pid"], killed)
+
+
+def _kill_pane(conn, agent, reason, actor, pane, grace, sleep):
+    """kill_agent for the foreground process group of the agent's tmux pane (pane: server.pane_process)."""
+    import signal
+    pid, group = int(pane["pid"]), int(pane["pgid"])
+    if os.name == "nt" or group <= 1 or group == os.getpgrp():
+        raise RiverError(f"refused: process group {group} is not one MaximizePM may end")
+    killed = False
+    if pid_alive(pid):
+        info = proc_info(pid)
+        if info is not None and pane.get("cmd") and info[2] != pane["cmd"]:
+            raise RiverError(f"refused: PID {pid} now runs another command ({info[2][:80]}), not {agent}'s; "
+                             f"nothing was killed")
+        try:
+            os.killpg(group, signal.SIGTERM)
+            waited = 0.0
+            while pid_alive(pid) and waited < grace:
+                sleep(0.2)
+                waited += 0.2
+                try:
+                    os.waitpid(pid, os.WNOHANG)  # a child of this process (tests): reap it
+                except (ChildProcessError, OSError):
+                    pass
+            if pid_alive(pid):
+                os.killpg(group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # it ended by itself in the meantime
+        killed = True
+    with tx(conn):
+        _event(conn, None, actor, f"{agent} had no recorded process: killed the foreground of its tmux pane "
+               f"{pane.get('pane', '?')} (PID {pid}: {str(pane.get('cmd') or '')[:80]})")
+    return {**_killed(conn, agent, reason, actor, pid, killed), "pane": pane.get("pane")}
+
+
+def _killed(conn, agent, reason, actor, pid, killed):
+    """The end of kill_agent: release everything the killed agent held, and mark it stopped."""
     with tx(conn):
         held = [dict(r) for r in conn.execute(
             "SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held')", (agent,))]
@@ -6291,7 +6334,7 @@ def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None):
         conn.execute("UPDATE agents SET stop_at=?, stop_by=?, stop_reason=?, role='stopped', note='killed' WHERE name=?",
                      (iso(now()), actor, "killed: " + reason.strip(), agent))
         _event(conn, None, actor, f"killed {agent} (by {actor}: {reason.strip()})")
-    return {"agent": agent, "pid": ag["pid"], "killed": killed, "released": held, "queued_back": queued,
+    return {"agent": agent, "pid": pid, "killed": killed, "released": held, "queued_back": queued,
             "warning": "Uncommitted work in the agent's folder is not saved: look at git status there."}
 
 

@@ -2206,7 +2206,8 @@ def dispatch(conn, a, actor):
         return server.tmux_view(a.layout, a.tidy, conn)
     if c == "stop":
         if a.kill:
-            return core.kill_agent(conn, a.agent, a.reason, actor)
+            from . import server
+            return server.kill_agent(conn, a.agent, a.reason, actor)  # also an agent with only a tmux pane (#5278)
         return core.stop_agent(conn, a.agent, a.reason, actor)
     if c == "queue":
         if a.qcmd == "add":

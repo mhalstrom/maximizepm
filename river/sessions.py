@@ -812,7 +812,11 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "owns": a.get("owns") or [], "state": key, "state_label": label,
                 # End (#5041): who asked it to stop and why, and End now for a process on this computer.
                 "stop_by": a.get("stop_by"), "stop_reason": a.get("stop_reason"), "pid": a.get("pid"),
-                "can_kill": bool(a.get("can_kill")),
+                # A session that ran no maxpm command records no process: End now ends the program in its own tmux
+                # pane while one runs there (#5278: Aider).
+                "can_kill": bool(a.get("can_kill")) or (
+                    not a.get("pid") and a.get("state") != "gone" and bool((terminals or {}).get(a["name"]))
+                    and (terminals or {}).get(a["name"]) not in (ended_panes or ())),
                 "session_url": a.get("session_url"), "terminal": bool((terminals or {}).get(a["name"])),
                 "transcript": kind if path else None, "last": tail["entries"],
                 "at": tail["entries"][-1]["at"] if tail["entries"] else a.get("last_seen")}

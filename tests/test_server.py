@@ -4336,3 +4336,60 @@ class CanvasOps(unittest.TestCase):
         op("canvas_delete", {"name": "plan"}, "ag")
         self.assertEqual(op("canvas_list", {}, "mark"), [])
         self.assertNotIn("canvas_save", server.OPS)  # writing a file stays with the command
+
+
+class KillPane(unittest.TestCase):
+    """End now for a session that ran no maxpm command, so it recorded no process (#5278: Aider): maxpm ends the
+    foreground process group of its tmux pane."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.addCleanup(os.environ.pop, "MAXPM_DB", None)
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        core.register(self.c, "aider-1")
+        core.register(self.c, "mark", human=True)
+        self.addCleanup(setattr, server, "TMUX_RUNNER", server.TMUX_RUNNER)
+        self.addCleanup(setattr, server, "FG_PS_RUNNER", server.FG_PS_RUNNER)
+        self.ps = {}
+
+        def tmux(a):
+            if a[0] != "list-panes":
+                return ""
+            return "\n".join(f"%7|@1||1|{run}|/dev/ttys042|{agent}||{server._queue_db()}|{agent}"
+                             for agent, run in (("aider-1", "Python"), ("other-2", "zsh")))
+        server.TMUX_RUNNER = tmux
+        server.FG_PS_RUNNER = lambda tty: self.ps.get(tty, "")
+
+    def test_the_pane_s_foreground_group_is_its_agent_and_a_shell_alone_is_none(self):
+        self.ps["ttys042"] = ("  501   501   777 -zsh\n  777   777   777 /usr/bin/python3 /Users/me/.local/bin/aider\n"
+                              "  790   777   777 git status\n")
+        self.assertEqual(server.pane_process(self.c, "aider-1"),
+                         {"pid": 777, "pgid": 777, "cmd": "/usr/bin/python3 /Users/me/.local/bin/aider", "pane": "%7"})
+        self.ps["ttys042"] = "  501   501   501 -zsh\n"
+        self.assertIsNone(server.pane_process(self.c, "aider-1"))  # the agent ended: only the shell is left
+        self.assertIsNone(server.pane_process(self.c, "other-2"))  # its pane ended
+        self.assertIsNone(server.pane_process(self.c, "nobody"))
+
+    def test_end_now_ends_the_pane_s_process_group_of_an_agent_with_no_recorded_process(self):
+        if os.name == "nt":
+            self.skipTest("no process groups and no tmux on Windows")
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
+        info = core.proc_info(p.pid)
+        if info is None:
+            self.skipTest("no ps on this system")
+        self.ps["ttys042"] = f"  501   501 {p.pid} -zsh\n {p.pid} {p.pid} {p.pid} {info[2]}\n"
+        item = core.item_add(self.c, core.project_add(self.c, "shop", path=self.dir.name)["name"], "x")["id"]
+        core.push(self.c, item, "aider-1", "from the page", "mark")
+        self.assertIsNone(core._agent(self.c, "aider-1")["pid"])
+        with self.assertRaisesRegex(RiverError, "no recorded process .* and no tmux pane"):
+            core.kill_agent(self.c, "aider-1", "stuck", "mark")  # core alone: as before, with the reason
+        r = server.OPS["kill_agent"](self.c, {"agent": "aider-1"}, "mark")
+        p.wait(10)
+        self.assertEqual((r["killed"], r["pid"], r["pane"]), (True, p.pid, "%7"))
+        self.assertIsNotNone(p.returncode)
+        self.assertEqual(core.agent_status(self.c, "aider-1")["state"], "stopped")
+        self.assertIsNone(core._item(self.c, item)["reserved_for"])

@@ -1595,6 +1595,48 @@ def _tty_lines(tty):
     return [x for x in (out or "").splitlines() if x.strip()]
 
 
+FG_PS_RUNNER = None  # tests: gets the tty (ttys003, pts/3), returns the lines "pid pgid tpgid args" of its processes
+
+
+def pane_process(conn, agent):
+    """The foreground process group of the tmux pane that runs `agent` (a pane of this queue tagged @maxpm_agent),
+    as kill_agent takes it for an agent with no recorded process (#5278): {"pid": the group's leader, "pgid", "cmd":
+    its command line, "pane"}; None when no such pane runs or only its shell is in the foreground (the agent ended)."""
+    import subprocess
+    if not core.tmux_path() and TMUX_RUNNER is None:
+        return None
+    try:
+        panes = _tmux_panes()
+    except RiverError:  # a sandbox that blocks the tmux socket: no pane to end
+        return None
+    pane = next((p for p in panes if p["agent"] == agent and _own_pane(p) and not p["ended"]), None)
+    if pane is None or not pane["tty"]:
+        return None
+    dev = pane["tty"][5:] if pane["tty"].startswith("/dev/") else pane["tty"]
+    try:
+        out = (FG_PS_RUNNER or (lambda t: subprocess.run(["ps", "-t", t, "-o", "pid=,pgid=,tpgid=,args="],
+                                                         capture_output=True, text=True, errors="replace",
+                                                         timeout=5).stdout))(dev)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    rows = []
+    for line in (out or "").splitlines():
+        f = line.split(None, 3)
+        if len(f) == 4 and all(x.lstrip("-").isdigit() for x in f[:3]):
+            rows.append((int(f[0]), int(f[1]), int(f[2]), f[3].strip()))
+    lead = next((r for r in rows if r[0] == r[1] == r[2]), None)  # the leader of the foreground group
+    if lead is None or os.path.basename(lead[3].split()[0]).lstrip("-") in TMUX_SHELLS:
+        return None
+    return {"pid": lead[0], "pgid": lead[1], "cmd": lead[3], "pane": pane["pane"]}
+
+
+def kill_agent(conn, agent, reason, actor=None):
+    """End now from the page: core.kill_agent, with the foreground of the agent's tmux pane for an agent that has no
+    recorded process (it ran no maxpm command: Aider, a session that never connected)."""
+    ag = core._agent(conn, agent)
+    return core.kill_agent(conn, agent, reason, actor, pane=None if ag["pid"] else pane_process(conn, agent))
+
+
 def _programs(lines):
     """The program names of command lines: for each one, the base name of its program and, for an interpreter, of
     the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node /opt/homebrew/bin/gemini'
@@ -3716,7 +3758,7 @@ OPS = {
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops from the page without a reason; the agent then reads who stopped it.
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
-    "kill_agent": lambda c, a, who: core.kill_agent(c, a["agent"], _page_reason(a, who), who),
+    "kill_agent": lambda c, a, who: kill_agent(c, a["agent"], _page_reason(a, who), who),
     "start_manager": lambda c, a, who: start_manager(c, agent=a.get("agent"), actor=who, **_launch_args(a)),
     "start_expert": lambda c, a, who: start_expert(c, a["name"], a.get("topic"), a.get("project"), bool(a.get("resume")),
                                                    agent=a.get("agent"), actor=who, item=a.get("item"),
