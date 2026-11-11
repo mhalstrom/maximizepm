@@ -1118,6 +1118,23 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual(core.focus_title(self.c, "needs:@mark"), "needs you")
         self.assertEqual(core.focus_title(self.c, "review:web"), "review web")
 
+    def test_a_new_queue_offers_every_registered_agent_in_the_start_dialog(self):
+        # #5234: launch_agents holds only 'Claude Code=@claude-code' on a new queue, and the Start an agent dialog
+        # listed only that, while the start paths took any registered agent (launch_entries, #5168).
+        st = core.state(self.c)
+        labels = [o["label"] for o in st["launch_options"]]
+        self.assertEqual(st["launch_agents"], labels)
+        self.assertEqual(labels[0], "Claude Code")  # the first entry stays the default
+        for t in core.agent_types():
+            self.assertIn(core.platform_spec(t)["label"], labels, t)
+        pi = next(o for o in st["launch_options"] if o["platform"] == "pi")
+        self.assertEqual((pi["family"], pi["takes_model"]), (None, True))  # a "provider/model" agent: no ladder
+        self.assertIn("xhigh", pi["efforts"])
+        # A start with that label works: the start paths read the same entries.
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.item_add(self.c, "shop", "work")
+        self.assertTrue(core.launch_target(self.c, agent="Pi")["command"].startswith("pi "))
+
     def test_windows_opens_a_console_window_with_the_env_set(self):
         core.project_add(self.c, "shop", path=self.dir.name)
         x = core.item_add(self.c, "shop", "work")["id"]
@@ -1155,7 +1172,8 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual((t["agent"], t["command"]), ("Codex", 'codex "run maxpm go and follow it"'))
         self.assertIn('codex "run maxpm go and follow it"', sent[-1])
         self.assertEqual(server.launch_agent(self.c, runner=sent.append)["agent"], "Claude Code")  # first is default
-        self.assertEqual(core.state(self.c)["launch_agents"], ["Claude Code", "Codex"])
+        # The entries first, in their order, then each other registered agent (#5234).
+        self.assertEqual(core.state(self.c)["launch_agents"][:2], ["Claude Code", "Codex"])
         with self.assertRaises(RiverError):
             server.launch_agent(self.c, runner=sent.append, agent="Nope")
         with self.assertRaises(RiverError):
@@ -3256,7 +3274,8 @@ class LaunchProfiles(unittest.TestCase):
         f = core.manager_findings(c)["uncovered"]
         self.assertEqual([(x["agent_type"], x["launch"], x["ready"]) for x in f], [("codex", "Codex", 2)])
         opts = {o["label"]: o["agent_type"] for o in core.state(c)["launch_options"]}
-        self.assertEqual(opts, {"Claude Code": "claude-code", "Codex": "codex"})
+        self.assertEqual({k: opts[k] for k in ("Claude Code", "Codex")}, {"Claude Code": "claude-code", "Codex": "codex"})
+        self.assertEqual(set(opts.values()), set(core.agent_types()))  # and each other registered agent (#5234)
         # With no entry for Codex, a Codex item starts with the implicit Codex profile (#5168): any registered agent
         # starts, with its default options.
         core.config_set(c, "launch_agents", "Claude Code=@claude-code")

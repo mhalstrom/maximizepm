@@ -290,8 +290,11 @@ def _same_queue(db):
 
 
 def _agent_for(conn, model):
-    """The launch_agents entry that runs this model: the first of its family, else the first of no known family."""
-    opts = core.launch_options(conn)
+    """The launch_agents entry that runs this model: the first of its family, else the first of no known family.
+    Only the entries the setting names: an agent that only the registry adds (launch_entries, #5234) starts when a
+    setting or a person names it, never by its family; else a deploy with no model started Pi ("multi")."""
+    named = {label for label, _ in core.parse_launch_agents(core.setting(conn, "launch_agents"))}
+    opts = [o for o in core.launch_options(conn) if o["label"] in named] or core.launch_options(conn)
     fam = core._family(core.parse_ladder(core.setting(conn, "model_ladder")), model)[0] if model else None
     pick = (next((o for o in opts if fam and o["family"] == fam), None)
             or next((o for o in opts if o["family"] is None), None) or opts[0])

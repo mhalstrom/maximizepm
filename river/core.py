@@ -11629,11 +11629,12 @@ def fill_launch_command(cmd, model, effort, name=None):
 
 
 def launch_options(conn):
-    """What the launch dialog offers for each launch_agents entry: its family, models, and effort levels."""
+    """What the launch dialog offers for each launch entry (launch_entries: the launch_agents entries, then each
+    registered agent that no entry runs, #5234): its family, models, and effort levels."""
     ladder = parse_ladder(setting(conn, "model_ladder"))
     levels = _levels(setting(conn, "effort_levels"))
     out = []
-    for label, cmd in parse_launch_agents(setting(conn, "launch_agents")):
+    for label, cmd in launch_entries(conn):
         prof = parse_profile(cmd)
         ad = _adapters().find(prof[0]) if prof else None
         # A custom command: the agent whose program it runs (its first word), for the family and the effort levels.
@@ -11704,7 +11705,8 @@ def state(conn, closed=True):
         "capacity": capacity(conn, ann),
         "targets": targets_view(conn, ann),
         "hook_events": dict(HOOK_EVENTS),  # the Targets tab offers a hook for each event
-        "launch_agents": [label for label, _ in parse_launch_agents(setting(conn, "launch_agents"))],
+        # The Start buttons' agents: every launch entry, so each registered agent can start from the page (#5234).
+        "launch_agents": [label for label, _ in launch_entries(conn)],
         "model_ladder": parse_ladder(setting(conn, "model_ladder")),
         "model_ids": model_ids(conn),
         "launch_options": launch_options(conn),
