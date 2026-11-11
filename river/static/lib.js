@@ -18,6 +18,16 @@ export async function act(op, args) {
   await hooks.refresh();
   return j.result;
 }
+// GET a JSON answer. An error says what a person can read (#5362): the server's own error, "the server answered 500"
+// for a body that is no JSON, or "MaximizePM does not answer" when no answer came; never a parser's text.
+export async function getJson(url) {
+  let r;
+  try { r = await fetch(url); } catch (e) { throw new Error("MaximizePM does not answer"); }
+  let j = null;
+  try { j = await r.json(); } catch (e) { /* not JSON: the status says it */ }
+  if (!r.ok || j === null) throw new Error((j && j.error) || `the server answered ${r.status}`);
+  return j;
+}
 export function ago(iso) {
   const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
   if (s < 60) return s + "s ago"; if (s < 3600) return Math.round(s / 60) + "m ago";

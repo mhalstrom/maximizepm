@@ -1316,7 +1316,8 @@ document.getElementById("out").textContent = "RESULT " + JSON.stringify({{row: r
 
 def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
     """Load the real page at /sessions/ag in headless Chrome with driver (a module) after app.js, and return what
-    the driver posts to /__result. Skips with no Chrome or no local port. size: the window, "1500,900" or a phone's
+    the driver posts to /__result. Skips with no Chrome or no local port. routes: {path: function}, the function
+    returns the body, or (status, body); a path without its query matches too. size: the window, "1500,900" or a phone's
     "390,844"."""
     import subprocess
     import threading
@@ -1333,8 +1334,10 @@ def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
                 return self._send(200, page, "text/html; charset=utf-8")
             if self.path == "/__drive.js":
                 return self._send(200, driver.encode(), "text/javascript; charset=utf-8")
-            if self.path in (routes or {}):
-                return self._send(200, routes[self.path]())
+            route = (routes or {}).get(self.path) or (routes or {}).get(self.path.split("?")[0])
+            if route:
+                got_ = route()  # a body, or (status, body) for an error
+                return self._send(*got_) if isinstance(got_, tuple) else self._send(200, got_)
             return super().do_GET()
 
         def do_POST(self):
@@ -1509,6 +1512,32 @@ try {
         self.assertEqual(result["by"], "ag")
         self.assertTrue(result["fits"])
 
+
+class LoadErrors(Base):
+    """#5362: when the state or the session list cannot load, the page says so in the warn color, with a gutter, and
+    with the HTTP status, not a JSON parser's text."""
+
+    def test_the_loading_line_and_the_list_error(self):
+        driver = DRIVE_HEAD + r'''
+try {
+  await until(() => /Could not load the queue/.test((q("#bootNote") || {}).textContent || ""), "the error of the state");
+  await until(() => /Could not read the sessions/.test(q("#sessions").textContent), "the error of the session list");
+  const boot = q("#bootNote"), err = q("#sessions .load-err");
+  const warn = getComputedStyle(document.documentElement).getPropertyValue("--warn").trim();
+  const probe = document.createElement("span"); probe.style.color = warn; document.body.append(probe);
+  post({ boot: boot.textContent, list: err.textContent, boot_x: boot.getBoundingClientRect().left + parseFloat(getComputedStyle(boot).paddingLeft),
+         boot_color: getComputedStyle(boot).color === getComputedStyle(probe).color,
+         list_color: getComputedStyle(err).color === getComputedStyle(probe).color });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        routes = {"/api/state": lambda: (500, b"boom"), "/api/sessions": lambda: (500, b"boom")}
+        for size in ("1500,900", "390,844"):
+            got = drive_page(self, driver, routes=routes, size=size)
+            self.assertEqual(got["boot"], "Could not load the queue (the server answered 500); the page asks again every "
+                                          "3 seconds.", size)
+            self.assertEqual(got["list"], "Could not read the sessions (the server answered 500); the page asks again.")
+            self.assertGreaterEqual(got["boot_x"], 14, f"a side gutter at {size}: {got}")
+            self.assertTrue(got["boot_color"] and got["list_color"], f"the warn color at {size}: {got}")
 
 class ExpertCache(Base):
     """#5023: an expert's prompt cache from its transcript: warm with the minutes left, or cold, and what the next

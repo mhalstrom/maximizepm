@@ -6,7 +6,7 @@
 // to the pane, then Enter. MaximizePM types nothing by itself.
 // Server: GET /api/sessions, GET /api/session?agent=<name>&cursor=<byte>, and the op session_send (with the
 // page's token: typeAction).
-import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle } from "../lib.js";
+import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle, getJson } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { appendEntries, prependEntries, agePending, wireCopy, plainText } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
@@ -301,15 +301,13 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     busy = true; again = false;
     try {
       await loadAgents();  // once: the rows ask it about each session's agent
-      const r = await fetch("api/sessions");
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || "failed");
+      const j = await getJson("api/sessions");
       list = j.sessions;
       proposals = j.proposals || [];
       forgetDrafts(list);
       draw();
     } catch (e) {
-      side.innerHTML = `<div class="muted">Could not read the sessions: ${esc(e.message)}</div>`;
+      side.innerHTML = `<div class="load-err" role="alert">Could not read the sessions (${esc(e.message)}); the page asks again.</div>`;
       delete side.dataset.empty;
     } finally { busy = false; if (again) refresh(); }
   }

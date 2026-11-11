@@ -1,4 +1,4 @@
-import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, left } from "./lib.js";
+import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, left, getJson } from "./lib.js";
 import { chip, prioNumChip, doerChip, projectChip, personChip } from "./components/chip.js";
 import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
@@ -240,7 +240,7 @@ function newCode(build, shape) {
 
 // The state comes as changes since the page's last version (state.js, #4709). Done and dropped items come only while
 // a view shows them: the Projects tab with "done" on, or the Graph with its done box on.
-const stateClient = makeStateClient(async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(`state: ${r.status}`); return r.json(); });
+const stateClient = makeStateClient(getJson);
 let stateClosed = false;
 function wantClosed() { return (planShown("items") && $("#showDone").checked) || (planShown("graph") && $("#graphDone").checked); }
 for (const box of ["#showDone", "#graphDone"]) $(box).addEventListener("change", () => refresh().catch(() => {}));
@@ -956,7 +956,8 @@ quiet++;
   }
 }
 refresh().finally(() => { quiet--; }).then(openFromUrl).then(maybeSetup).catch((e) => {
-  const boot = $("#bootNote"); if (boot) boot.textContent = `Could not load the queue (${e.message}); the page asks again every 3 seconds.`;
+  const boot = $("#bootNote");
+  if (boot) { boot.textContent = `Could not load the queue (${e.message}); the page asks again every 3 seconds.`; boot.className = "boot-note load-err"; boot.setAttribute("role", "alert"); }
 });
 setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
 // A hidden tab stops the full refresh but keeps asking what needs a person, so notifications still arrive.

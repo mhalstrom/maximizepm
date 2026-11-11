@@ -117,7 +117,11 @@ button.primary:hover { background: var(--accent); filter: brightness(1.08); }
 button.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }  /* a lapsed relay plan (#4759) */
 main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 /* Until the first state comes (#4888): through the relay on a phone it takes seconds. */
-.boot-note { font-size: 13px; padding: 4px 2px 12px; }
+.boot-note { font-size: var(--fs-m); padding: var(--sp-1) var(--sp-0) var(--sp-5); }
+/* #5362: the Sessions tab has no padding of its own (its panes reach the edges): the loading line keeps a gutter. */
+main:has(> #tab-sessions:not(.hidden)) > .boot-note { padding-inline: var(--sp-6); }
+/* A list or the page that could not load: in the warn color, so it does not read as an empty list. */
+.load-err { color: var(--warn); font-size: var(--fs-m); }
 .grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; }
 @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 /* An area is no box: it sits on the page, apart by space and one thin rule above it (#5043). */
