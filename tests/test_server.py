@@ -47,12 +47,12 @@ class LaunchAgent(unittest.TestCase):
         self.assertRegex(sent[0], r"MAXPM_DB=\S*q\.db'? MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ claude --name \S+ \S+ go")  # the path is quoted when it needs it
 
     def test_a_command_that_is_a_pipeline_gets_the_session_s_variables_too(self):
-        # Amp's command is 'printf <prompt> | amp': a variable put before it reached printf only (#5239).
+        # A variable put before a pipeline reached its first command only (#5239: Amp's 'printf <prompt> | amp').
         core.project_add(self.c, "shop", path=self.dir.name)
         core.item_add(self.c, "shop", "first")
-        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Amp=@amp")
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Piped=printf 'go' | amp --mode low")
         sent = []
-        t = server.launch_agent(self.c, runner=sent.append, agent="Amp", effort="low")
+        t = server.launch_agent(self.c, runner=sent.append, agent="Piped")
         self.assertRegex(sent[0], r" && export (MAXPM_DB=\S+ )?MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ && printf ")
         # The line runs in a shell, with a stand-in amp that writes what it got: the variables and its stdin.
         bin_dir, out = os.path.join(self.dir.name, "bin"), os.path.join(self.dir.name, "got.txt")
@@ -68,7 +68,7 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn(f"MAXPM_AGENT={t['session_name']}\n", got)
         self.assertRegex(got, r"MAXPM_FOCUS=item:\d+\n")
         self.assertIn(f"MAXPM_DB={core.db_path()}\n", got)
-        self.assertTrue(got.rstrip().endswith("follow the briefing"), got)  # the first prompt came on stdin
+        self.assertTrue(got.rstrip().endswith("go"), got)  # the pipe's text came on stdin
         # A command with no pipe keeps its form: the variables before the command.
         sent.clear()
         core.item_add(self.c, "shop", "second")

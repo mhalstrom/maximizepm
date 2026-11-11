@@ -115,12 +115,13 @@ def _on(v):
 
 
 def build_command(name, folder, model, effort, settings, prompt):
-    """[printf '%s\\n' <prompt> |] amp [--mode M] [--no-ide] [--no-notifications] [--fast] [--visibility V]
-    [--settings-file F] [args] [threads continue <id>]. The prompt goes on stdin, as Amp documents it. model: Amp
-    takes none (its mode picks one), so it is left out; name: Amp takes none."""
+    """amp [--mode M] [--no-ide] [--no-notifications] [--fast] [--visibility V] [--settings-file F] [args]
+    [threads continue <id>] [<<< <prompt>]. The prompt goes on stdin, as Amp documents it, as a here-string (zsh,
+    bash): with 'printf <prompt> | amp' the printf led the pipeline's process group and ended at once, so tmux named
+    the pane by its shell and MaximizePM took the session as ended (#5246). model: Amp takes none (its mode picks
+    one), so it is left out; name: Amp takes none."""
     s = settings or {}
-    words = [Raw(f"printf '%s\\n' {shlex.quote(prompt)} |")] if prompt else []
-    words.append("amp")
+    words = ["amp"]
     level = EFFORT["map"].get(effort, effort) if effort else None
     if level:
         words += [w.format(value=level) for w in EFFORT["flag"]]
@@ -136,6 +137,8 @@ def build_command(name, folder, model, effort, settings, prompt):
         words.append(Raw(s["args"].strip()))
     if s.get("resume"):
         words += ["threads", "continue", str(s["resume"])]
+    if prompt:
+        words.append(Raw(f"<<< {shlex.quote(prompt)}"))
     return words
 
 
@@ -149,11 +152,14 @@ def resume_command(session_ref, model, effort, settings, name=None):
 
 
 def parse_command(words):
-    """A hand-written amp command that a profile builds exactly: `echo <prompt> |` or `printf '%s\\n' <prompt> |`,
-    then amp with --mode {effort} and the flags of the toggles and visibility. Anything else (execute mode, a thread
-    to continue, another flag): None."""
+    """A hand-written amp command that a profile builds exactly: amp with --mode {effort} and the flags of the
+    toggles and visibility, and its prompt as `<<< <prompt>` at the end, or before it as `echo <prompt> |` or
+    `printf '%s\\n' <prompt> |` (the form before #5246). Anything else (execute mode, a thread to continue, another
+    flag): None."""
     words = list(words or ())
     prompt = None
+    if len(words) >= 3 and words[-2] == "<<<":
+        prompt, words = words[-1], words[:-2]
     if len(words) >= 4 and words[0] in ("echo", "printf") and "|" in words:
         bar = words.index("|")
         head = words[1:bar]

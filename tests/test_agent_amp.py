@@ -88,8 +88,8 @@ class Launch(Env):
                                     {"quiet": "on", "fast": "on", "visibility": "private",
                                      "settings_file": "/s.json", "args": "--log-level debug"}, "run maxpm go")
         self.assertEqual(core.shell_command(argv),
-                         "printf '%s\\n' 'run maxpm go' | amp --mode ultra --no-ide --no-notifications --fast "
-                         "--visibility private --settings-file /s.json --log-level debug")
+                         "amp --mode ultra --no-ide --no-notifications --fast --visibility private "
+                         "--settings-file /s.json --log-level debug <<< 'run maxpm go'")
         self.assertEqual(self.a.build_command(None, None, None, None, {}, None), ["amp", "--no-ide"])
         self.assertEqual(self.a.build_command(None, None, None, None, {"no_ide": "off"}, None), ["amp"])
 
@@ -103,7 +103,8 @@ class Launch(Env):
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         prompt = "say \"hi\" and it's\nfine"
         line = core.shell_command(self.a.build_command(None, None, None, "high", {}, prompt))
-        done = subprocess.run(["sh", "-c", line], capture_output=True, text=True, timeout=30,
+        # bash: a here-string is zsh's and bash's, the login shells of macOS and Linux (dash, a Linux sh, has none).
+        done = subprocess.run(["bash", "-c", line], capture_output=True, text=True, timeout=30,
                               env={**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin"})
         self.assertEqual(done.stdout, f"ARGS:--mode high --no-ide\n{prompt}\n")
 
@@ -111,11 +112,13 @@ class Launch(Env):
         self.assertEqual(self.a.resume_command(TOOLS_THREAD, None, None, {}),
                          ["amp", "--no-ide", "threads", "continue", TOOLS_THREAD])
         line = core.shell_command(self.a.resume_command(TOOLS_THREAD, None, "low", {"prompt": "go on"}))
-        self.assertEqual(line, f"printf '%s\\n' 'go on' | amp --mode low --no-ide threads continue {TOOLS_THREAD}")
+        self.assertEqual(line, f"amp --mode low --no-ide threads continue {TOOLS_THREAD} <<< 'go on'")
         for bad in (None, "", "abc", "T-1; rm -rf /"):
             self.assertIsNone(self.a.resume_command(bad, None, None, {}))
 
     def test_a_hand_written_command_is_read_back_only_when_a_profile_builds_it_exactly(self):
+        got = self.a.parse_command(shlex.split("amp --mode {effort} --no-ide --fast <<< 'run maxpm go'"))
+        self.assertEqual(got, {"settings": {"no_ide": "on", "fast": "on"}, "prompt": "run maxpm go"})
         got = self.a.parse_command(shlex.split('echo "run maxpm go" | amp --mode {effort} --no-ide --fast'))
         self.assertEqual(got, {"settings": {"no_ide": "on", "fast": "on"}, "prompt": "run maxpm go"})
         got = self.a.parse_command(shlex.split("printf '%s\\n' 'go' | amp --visibility workspace"))
