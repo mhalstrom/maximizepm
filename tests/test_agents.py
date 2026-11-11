@@ -557,3 +557,138 @@ class ChatLog(Env):
         self.assertEqual((cache["context"], cache["ttl_from"]), (1200, "setting"))
         reqs, fork = core._session_requests("p1")
         self.assertEqual((list(reqs), fork), (["r1"], False))
+
+
+GEM = """
+    DESCRIBE = {"id": "gem", "label": "Gem", "exe": "gem", "family": "multi", "model_ids": {"opus": "g/opus"}}
+    SETTINGS = [{"key": "sandbox", "label": "Sandbox", "kind": "toggle", "default": "on", "text": "run in a box",
+                 "flag": ["--sandbox"], "live": None, "read": None}]
+    LAUNCH = {}
+    def build_command(name, folder, model, effort, settings, prompt):
+        return ["gem"] + (["-m", model] if model else []) + (["--sandbox"] if settings.get("sandbox") == "on" else []) \\
+            + [prompt or ""]
+    def resume_command(ref, model, effort, settings, name=None):
+        return ["gem", "--resume", ref, "-m", model, settings["prompt"]]
+"""
+
+
+class RoleChoice(Env):
+    """#5168: agent_for.<role> at the item, project and global scopes, before default_agent; default_agent,
+    agent_rules, --agent and every start path take any registered adapter; expert and crash resume go through the
+    adapter's resume_command."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_module("gem", GEM)
+        self.folder = os.path.join(self.tmp.name, "shop")
+        os.mkdir(self.folder)
+        core.project_add(self.c, "shop", path=self.folder)
+        core.project_add(self.c, "docs", path=self.folder)
+        self.pid = core._project(self.c, "shop")["id"]
+
+    def test_any_registered_adapter_is_an_agent_type(self):
+        types = core.agent_types()  # the built-in adapters first, then the others by id
+        self.assertEqual(types[:2], ["claude-code", "codex"])
+        self.assertIn("gem", types)
+        x = core.item_add(self.c, "shop", "work", models={"agent": "gem"})["id"]
+        self.assertEqual(core._item(self.c, x)["agent"], "gem")
+        core.config_set(self.c, "default_agent", "gem")
+        core.config_set(self.c, "agent_rules", "gem: *.css")
+        self.assertEqual(core.parse_agent_rules("gem: *.css"), [("gem", ["*.css"])])
+        with self.assertRaisesRegex(RiverError, "one of claude-code, codex, .*gem"):
+            core.config_set(self.c, "agent_for.worker", "nope")
+        with self.assertRaisesRegex(RiverError, "unknown setting"):
+            core.config_set(self.c, "agent_for.janitor", "gem")
+        # An adapter with no launch part cannot be started, so it is no agent type.
+        self.user_module("half", "DESCRIBE = {'id': 'half', 'label': 'Half', 'exe': 'half', 'family': 'multi'}\n")
+        self.assertNotIn("half", core.agent_types())
+        with self.assertRaisesRegex(RiverError, "an agent type is one of"):
+            core.item_add(self.c, "shop", "other", models={"agent": "half"})
+        # A session that runs it declares it by hand.
+        self.assertEqual(core.agent_type_from_env({"MAXPM_AGENT_TYPE": "gem", "CLAUDECODE": "1"}), "gem")
+
+    def test_a_registered_adapter_starts_with_no_launch_agents_entry(self):
+        self.assertEqual(core.launch_entries(self.c)[-1], ("Gem", "@gem"))
+        self.assertEqual(core.launch_entries(self.c)[0][1], "@claude-code")  # the default start stays the first
+        x = core.item_add(self.c, "shop", "work", models={"agent": "gem"})["id"]
+        t = core.launch_target(self.c, item=x, model="opus")
+        self.assertEqual((t["agent"], t["platform"], t["command"].split()[:4]), ("Gem", "gem", ["gem", "-m", "g/opus", "--sandbox"]))
+        # A profile in launch_agents names it and its options, and the implicit entry goes.
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; My Gem=@gem sandbox=off")
+        self.assertNotIn(("Gem", "@gem"), core.launch_entries(self.c))
+        t = core.launch_target(self.c, item=x, model="opus")
+        self.assertEqual((t["agent"], "--sandbox" in t["command"]), ("My Gem", False))
+
+    def test_agent_for_a_role_comes_before_default_agent_of_its_scope(self):
+        w = core.item_add(self.c, "shop", "work")["id"]
+        r = core.item_add(self.c, "shop", "review it")["id"]
+        with core.tx(self.c):  # a release review comes from the review setting; its kind is what counts here
+            self.c.execute("UPDATE items SET kind='review' WHERE id=?", (r,))
+        core.config_set(self.c, "default_agent", "codex")
+        core.config_set(self.c, "agent_for.reviewer", "gem")
+        ann = core.annotate(self.c)
+        self.assertEqual((ann[w]["agent"], ann[r]["agent"]), ("codex", "gem"))
+        self.assertEqual(ann[r]["agent_from"], "global agent_for.reviewer")
+        # The most specific scope wins: a project's default_agent before the global agent_for.reviewer.
+        core.config_set(self.c, "default_agent", "claude-code", project="shop")
+        self.assertEqual(core.annotate(self.c)[r]["agent"], "claude-code")
+        # An item scope before both; the item's own --agent before every setting.
+        core.config_set(self.c, "agent_for.reviewer", "gem", item=r)
+        self.assertEqual(core.annotate(self.c)[r]["agent"], "gem")
+        core.item_edit(self.c, r, models={"agent": "codex"})
+        self.assertEqual(core.annotate(self.c)[r]["agent"], "codex")
+        # The role an item has: worker, reviewer, deployer, expert.
+        self.assertEqual([core.item_role(core._item(self.c, i)) for i in (w, r)], ["worker", "reviewer"])
+
+    def test_role_agent_for_a_session_without_an_item(self):
+        self.assertIsNone(core.role_agent(self.c, "manager"))  # nothing set: the first launch_agents entry
+        core.config_set(self.c, "default_agent", "codex")
+        self.assertEqual(core.role_agent(self.c, "manager"), "Codex")
+        core.config_set(self.c, "agent_for.manager", "gem")
+        self.assertEqual(core.role_agent(self.c, "manager", self.pid), "Gem")
+        core.config_set(self.c, "default_agent", "claude-code", project="shop")
+        self.assertEqual(core.role_agent(self.c, "manager", self.pid), "Claude Code")
+        self.assertEqual(core.role_agent(self.c, "manager", core._project(self.c, "docs")["id"]), "Gem")
+        with self.assertRaisesRegex(RiverError, "role 'janitor'"):
+            core.role_agent(self.c, "janitor")
+        # An expert for a work item: the expert's agent, not the worker's.
+        x = core.item_add(self.c, "docs", "talk")["id"]
+        core.config_set(self.c, "agent_for.expert", "gem")
+        self.assertEqual(core.role_agent(self.c, "expert", item_id=x), "Gem")
+        self.assertEqual(core.role_agent(self.c, "worker", item_id=x), "Codex")
+
+    def test_the_manager_and_an_expert_start_the_agent_of_their_role(self):
+        from river import server
+        core.config_set(self.c, "agent_for.manager", "gem")
+        sent = []
+        t = server.start_manager(self.c, runner=sent.append, model="opus")
+        self.assertEqual(t["agent"], "Gem")
+        self.assertTrue(t["command"].startswith("gem -m g/opus --sandbox"), t["command"])
+        core.config_set(self.c, "agent_for.expert", "codex")
+        t = server.start_expert(self.c, "fab", "a long talk", "shop", model="sol", runner=sent.append)
+        self.assertEqual(t["agent"], "Codex")
+        self.assertIn("codex", sent[-1])
+        # A focused start (Deploy now, Review and deploy, help, unblock): the agent of its role.
+        core.config_set(self.c, "agent_for.deployer", "gem")
+        t = server._open_focused(self.c, core._project(self.c, "shop"), "deploy:web", sent.append, None, "opus")
+        self.assertEqual(t["agent"], "Gem")
+        t = server._open_focused(self.c, core._project(self.c, "shop"), "review:web", sent.append, None, "opus")
+        self.assertEqual(t["agent"], "Claude Code")
+
+    def test_expert_resume_goes_through_the_adapter_it_ran_in(self):
+        from river import server
+        sent = []
+        t = server.start_expert(self.c, "fab", "a long talk", "shop", model="opus", runner=sent.append)
+        core.set_agent_type(self.c, "fab", "gem")
+        with core.tx(self.c):
+            self.c.execute("INSERT INTO agent_sessions(agent, session_id, first_seen) VALUES ('fab', 'sess-9', ?)",
+                           (core.iso(core.now()),))
+        core.expert_end(self.c, "fab", None, "pause")
+        t = server.start_expert(self.c, "fab", resume=True, runner=sent.append)
+        self.assertEqual(t.get("resumed"), "sess-9")
+        self.assertTrue(t["command"].startswith("gem --resume sess-9 -m g/opus"), t["command"])
+        # An agent that cannot resume starts fresh and reads its notes.
+        self.user_module("gem", GEM.replace("def resume_command", "def _no_resume"))
+        core.expert_end(self.c, "fab", None, "pause")
+        t = server.start_expert(self.c, "fab", resume=True, runner=sent.append)
+        self.assertIsNone(t.get("resumed"))

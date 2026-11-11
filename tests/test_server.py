@@ -3087,9 +3087,11 @@ class LaunchProfiles(unittest.TestCase):
         self.assertEqual([(x["agent_type"], x["launch"], x["ready"]) for x in f], [("codex", "Codex", 2)])
         opts = {o["label"]: o["agent_type"] for o in core.state(c)["launch_options"]}
         self.assertEqual(opts, {"Claude Code": "claude-code", "Codex": "codex"})
+        # With no entry for Codex, a Codex item starts with the implicit Codex profile (#5168): any registered agent
+        # starts, with its default options.
         core.config_set(c, "launch_agents", "Claude Code=@claude-code")
-        with self.assertRaisesRegex(RiverError, "no launch_agents entry runs it"):
-            core.launch_target(c, item=css)
+        t = core.launch_target(c, item=css)
+        self.assertEqual((t["agent"], t["platform"], t["command"].split()[0]), ("Codex", "codex", "codex"))
 
     def test_the_cli_gets_its_own_model_id_and_river_keeps_the_name(self):
         pid = core._project(self.c, "shop")["id"]

@@ -198,7 +198,7 @@ def _model_line(a):
     for f, label in (("model", ""), ("effort", "effort "), ("min_model", "min "), ("max_model", "max "), ("agent", "agent ")):
         if a.get(f):
             src = a.get(f + "_from")
-            parts.append(f"{label}{a[f]}" + (f" ({src})" if src == "agent_rules" else f" ({src} default)" if src and src != "item" else ""))
+            parts.append(f"{label}{a[f]}" + (f" ({src})" if src == "agent_rules" or "agent_for." in (src or "") else f" ({src} default)" if src and src != "item" else ""))
     return "; ".join(parts)
 
 

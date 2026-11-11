@@ -187,3 +187,24 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
   and #5169.
 - Checked: the old and the new readers give the same entries, turns, settings, titles, cache states, Artifacts hits
   and requests on 12 real logs (eight of Claude Code, four of Codex).
+
+## As built in #5168
+
+- `agent_for.<role>` is a setting for each role of `core.AGENT_ROLES` (worker, manager, reviewer, deployer, expert,
+  context). In each scope, from the most specific (item, kind, project, global), `agent_for.<role>` comes before
+  `default_agent`: a project's `default_agent` wins over a global `agent_for.<role>`. An item's own `--agent` and
+  `agent_rules` come first. The role of an item is `core.item_role`: reviewer for a review, deployer for a deploy
+  item, expert for an expert-tier task, else worker.
+- An agent type is any registered adapter with a launch part (`core.agent_types()`): `default_agent`,
+  `agent_for.<role>`, `agent_rules`, an item's `--agent`, `MAXPM_AGENT_TYPE` and a `@<id>` profile in
+  `launch_agents` take it. `core.platform_spec(type)` gives its label, exe, family, prefix and options (Claude Code
+  and Codex: `LAUNCH_PLATFORMS` until #5185; another adapter: its DESCRIBE and SETTINGS, plus a first prompt).
+- `core.launch_entries` is `launch_agents` plus one implicit profile (`<label>=@<id>`) for each agent type that no
+  entry runs, so an agent starts with no `launch_agents` entry. The first entry stays the default start.
+- `core.role_agent(conn, role, project_id, item_id)` gives the launch entry of a role. The manager, an expert, a
+  context session and the focused starts (deploy, review, help, unblock) use it; launch, Dispatch, serve's fresh
+  start and the deployer read the item's effective agent, which includes its role.
+- Expert resume uses the adapter of the agent type the expert ran in (`core.agent_type_of`: its row, else its
+  history), through `resume_command`; an adapter with no resume part starts a fresh expert that reads its notes.
+  Crash resume (`move_into_tmux`) finds the adapter of the chat's kind in the registry. A non-built-in adapter's
+  settings have no config keys yet (#5169): its profile options are the entry's own, else the spec's default.

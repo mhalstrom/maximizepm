@@ -334,13 +334,21 @@ DEFAULT_SETTINGS = {
     "default_effort": "",
     "default_min_model": "",
     "default_max_model": "",
-    # The agent type an item needs, when it names none (maxpm add --agent): a launch platform (codex,
-    # claude-code). agent_rules picks one from the item first: "codex: *.css, *.svg, image, logo" gives
-    # Codex the items that touch a .css or .svg file or have the word image or logo in the title.
-    # default_agent is the fallback; set it per project (--project) or kind (--kind).
+    # The agent type an item needs, when it names none (maxpm add --agent): any registered agent adapter
+    # (claude-code, codex, or a module in river/agents or <queue folder>/agents). agent_rules picks one from the
+    # item first: "codex: *.css, *.svg, image, logo" gives Codex the items that touch a .css or .svg file or have
+    # the word image or logo in the title. default_agent is the fallback; set it per project (--project) or kind
+    # (--kind).
     "agent_rules": "",
     "default_agent": "",
+    # The agent each role starts (#5168, docs/agent-adapters.md): agent_for.<role> at the item, project or global
+    # scope, before default_agent of the same scope. A worker takes a work item, a reviewer a release review, a
+    # deployer a deploy item, an expert an expert-tier task, a context session a goal's base; the manager has no item.
+    **{f"agent_for.{_role}": "" for _role in ("worker", "manager", "reviewer", "deployer", "expert", "context")},
 }
+
+# The roles that agent_for.<role> names (#5168).
+AGENT_ROLES = ("worker", "manager", "reviewer", "deployer", "expert", "context")
 
 # Agent platforms river can start from a launch profile ("Label=@claude-code" in launch_agents). Each option
 # maps to the CLI's own flags, as `claude --help` and `codex --help` name them. Codex has no Remote Control
@@ -1394,7 +1402,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         parse_ladder(value)
     elif key == "agent_rules":
         parse_agent_rules(value)
-    elif key == "default_agent" and value:
+    elif key in ("default_agent",) + tuple(f"agent_for.{r}" for r in AGENT_ROLES) and value:
         _check_agent_type(conn, value)
     elif key == "native_message":
         parse_native(value)
@@ -1519,16 +1527,49 @@ def _platform_of(adapter):
     return next((n for n in adapter.names() if n in LAUNCH_PLATFORMS), adapter.id) if adapter else None
 
 
+def _startable(adapter):
+    """Whether MaximizePM can start an adapter's agent: it has the launch part (build_command)."""
+    return adapter is not None and adapter.supports("launch")
+
+
+def agent_types():
+    """The agent types MaximizePM can start: the platform name of each registered adapter with a launch part
+    (claude-code, codex, then the others by id)."""
+    ag = _adapters()
+    got = ag.load()
+    return [_platform_of(got[i]) for i in ag.ids() if _startable(got[i])]
+
+
 def _agent_platform(value):
-    """A launch platform from an agent type: the id or an alias of a registered adapter that has a profile
-    ('codex', 'claude-code' or 'claude'); None when it is none of them."""
+    """An agent type from a name: the platform name (_platform_of) of the registered adapter that the id or an alias
+    names ('codex', 'claude-code', 'claude', or an adapter module's id), when it has a launch part; else None."""
     a = _adapters().find((value or "").strip().replace(" ", "-"))
-    p = _platform_of(a)
-    return p if p in LAUNCH_PLATFORMS else None
+    return _platform_of(a) if _startable(a) else None
+
+
+def platform_spec(platform):
+    """What MaximizePM knows of an agent type for a launch: {label, exe, family, prefix, options}. Claude Code and
+    Codex: their LAUNCH_PLATFORMS entry (until #5185). Any other registered adapter: from its DESCRIBE and its
+    SETTINGS specs (options: {key: {kind, choices, default, text}}). RiverError for no registered agent type."""
+    if platform in LAUNCH_PLATFORMS:
+        return LAUNCH_PLATFORMS[platform]
+    a = _adapters().find(platform or "")
+    if a is None:
+        raise RiverError(f"agent {platform!r} is not registered; the agent types are {', '.join(agent_types())}")
+    d = a.describe
+    opts = {s["key"]: {"kind": s.get("kind", "text"), "choices": list(s.get("choices") or ()),
+                       "default": s.get("default", ""), "text": s.get("text", "")} for s in a.settings}
+    # Every session starts with a first prompt that runs maxpm go (a manager's: manage, server.manage_command).
+    opts.setdefault("prompt", {"kind": "text", "default": FIRST_PROMPT, "text": "the first prompt"})
+    return {"label": a.label, "exe": d["exe"], "family": d["family"], "prefix": d["prefix"], "options": opts}
+
+
+# The first prompt of a session of an adapter with no prompt setting of its own (#5168), as Codex's default.
+FIRST_PROMPT = "run maxpm go in this folder and follow the briefing"
 
 
 def _check_agent_type(conn, value):
-    """An item's agent type: a platform, or a launch_agents label that runs one (Codex, Claude Code)."""
+    """An item's agent type: a registered agent that MaximizePM can start, or a launch_agents label that runs one."""
     p = _agent_platform(value)
     if p is None:
         for label, cmd in parse_launch_agents(setting(conn, "launch_agents")):
@@ -1536,7 +1577,7 @@ def _check_agent_type(conn, value):
                 prof = parse_profile(cmd)
                 p = prof[0] if prof else _exe_platform(cmd)
     if p is None:
-        raise RiverError(f"agent {value!r}: an agent type is one of {', '.join(LAUNCH_PLATFORMS)} "
+        raise RiverError(f"agent {value!r}: an agent type is one of {', '.join(agent_types())} "
                          f"(or a launch_agents label that runs one)")
     return p
 
@@ -1548,9 +1589,10 @@ def _exe_adapter(cmd):
 
 
 def _exe_platform(cmd):
-    """The platform a custom launch_agents command runs, by its program (claude-code for claude, codex for codex)."""
-    p = _platform_of(_exe_adapter(cmd))
-    return p if p in LAUNCH_PLATFORMS else None
+    """The agent type a custom launch_agents command runs, by its program (claude-code for claude, codex for codex,
+    an adapter's id for its exe)."""
+    a = _exe_adapter(cmd)
+    return _platform_of(a) if _startable(a) else None
 
 
 def parse_agent_rules(value):
@@ -1564,7 +1606,7 @@ def parse_agent_rules(value):
         p = _agent_platform(name)
         if not sep or p is None:
             raise RiverError(f"agent_rules: {part!r} needs the form <agent type>: pattern, pattern (agent type: "
-                             f"{', '.join(LAUNCH_PLATFORMS)}), for example \"codex: *.css, *.svg, image, logo\"")
+                             f"{', '.join(agent_types())}), for example \"codex: *.css, *.svg, image, logo\"")
         ps = [x.strip() for x in pats.split(",") if x.strip()]
         if not ps:
             raise RiverError(f"agent_rules: {name.strip()} lists no patterns")
@@ -1771,7 +1813,8 @@ def _model_defaults(conn):
     """The default_* settings by scope, read once for annotate."""
     rows = {}
     for r in conn.execute("SELECT scope, key, value FROM settings WHERE key IN "
-                          "('default_model','default_effort','default_min_model','default_max_model','default_agent')"):
+                          "('default_model','default_effort','default_min_model','default_max_model','default_agent') "
+                          "OR key LIKE 'agent\\_for.%' ESCAPE '\\'"):
         rows.setdefault(r["scope"], {})[r["key"]] = r["value"]
     try:
         rows["_rules"] = parse_agent_rules(setting(conn, "agent_rules"))
@@ -1788,10 +1831,20 @@ KIND_MODELS = {"operational": {"model": "sonnet", "effort": "medium"}}
 KIND_FIRST = ("operational",)
 
 
+def item_role(it):
+    """The role (AGENT_ROLES) of the session that takes an item: a review, a deploy, an expert-tier task, else work."""
+    keys = it.keys()
+    if "tier" in keys and it["tier"] == "expert":
+        return "expert"
+    return {"review": "reviewer", "deploy": "deployer"}.get(it["kind"] if "kind" in keys else None, "worker")
+
+
 def _item_models(it, project, defaults, ladder_text=DEFAULT_SETTINGS["model_ladder"]):
     """Effective model, effort, and limits of an item: its own, else the most specific default_* setting,
-    else the built-in default of its kind (KIND_MODELS)."""
+    else the built-in default of its kind (KIND_MODELS). The agent: its own, else agent_rules, else in each scope
+    from the most specific, agent_for.<role> (item_role) and then default_agent (#5168)."""
     scopes = [f"item:{it['id']}", f"kind:{it['kind']}", f"project:{project}", "global"]
+    role_key = f"agent_for.{item_role(it)}"
     out = {}
     for f in MODEL_FIELDS:
         own = it[f] if f in it.keys() else None
@@ -1807,6 +1860,9 @@ def _item_models(it, project, defaults, ladder_text=DEFAULT_SETTINGS["model_ladd
         for sc in scopes:
             if sc == f"project:{project}" and it["kind"] in KIND_FIRST and KIND_MODELS[it["kind"]].get(f):
                 out[f], out[f + "_from"] = KIND_MODELS[it["kind"]][f], f"kind:{it['kind']}"
+                break
+            if f == "agent" and defaults.get(sc, {}).get(role_key):
+                out[f], out[f + "_from"] = defaults[sc][role_key], f"{sc} {role_key}"
                 break
             v = defaults.get(sc, {}).get("default_" + f)
             if v is not None:
@@ -1840,8 +1896,8 @@ def agent_type_from_env(env):
     t = _agent_platform(env.get("MAXPM_AGENT_TYPE"))
     if t:
         return t
-    p = _platform_of(_adapters().from_env({k: v for k, v in env.items() if k != "MAXPM_AGENT_TYPE"}))
-    return p if p in LAUNCH_PLATFORMS else None
+    a = _adapters().from_env({k: v for k, v in env.items() if k != "MAXPM_AGENT_TYPE"})
+    return _platform_of(a) if _startable(a) else None
 
 
 def outside_tmux(env):
@@ -4026,8 +4082,8 @@ def _set_models(conn, it, models, actor):
     _check_limits(ladder, new["min_model"], new["max_model"])
     if new["agent"]:
         # Codex runs OpenAI models and Claude Code runs Claude models: the item's own model and limits must fit.
-        fam = LAUNCH_PLATFORMS[new["agent"]]["family"]
-        for f in ("model", "min_model", "max_model"):
+        fam = platform_spec(new["agent"])["family"]
+        for f in ("model", "min_model", "max_model") if fam in ladder else ():  # "multi": any provider/model text
             for m in _levels(new[f]):
                 mf, _ = _family(ladder, m)
                 if mf and mf != fam and (f == "model" or len(_levels(new[f])) == 1):
@@ -10473,8 +10529,10 @@ def parse_profile(cmd):
         words = shlex.split(cmd[1:])
     except ValueError as e:
         raise RiverError(f"launch profile {cmd!r}: {e}")
-    if not words or words[0] not in LAUNCH_PLATFORMS:
-        raise RiverError(f"launch profile {cmd!r}: the platform is one of {', '.join('@' + p for p in LAUNCH_PLATFORMS)}")
+    if words and words[0] not in LAUNCH_PLATFORMS and _agent_platform(words[0]) == words[0]:
+        pass  # a registered adapter with a launch part (#5168): @<its id>
+    elif not words or words[0] not in LAUNCH_PLATFORMS:
+        raise RiverError(f"launch profile {cmd!r}: the platform is one of {', '.join('@' + p for p in agent_types())}")
     opts = {}
     for w in words[1:]:
         k, sep, v = w.partition("=")
@@ -10494,9 +10552,9 @@ def _platform_setting(key):
 
 
 def _check_option(platform, opt, value):
-    spec = LAUNCH_PLATFORMS[platform]["options"].get(opt)
+    spec = platform_spec(platform)["options"].get(opt)
     if spec is None:
-        raise RiverError(f"{platform} has no option {opt!r}; it has {', '.join(LAUNCH_PLATFORMS[platform]['options'])}")
+        raise RiverError(f"{platform} has no option {opt!r}; it has {', '.join(platform_spec(platform)['options']) or 'none'}")
     if spec["kind"] == "toggle" and value not in ("on", "off"):
         raise RiverError(f"{platform} {opt} is on or off")
     if spec["kind"] == "choice" and value and value not in spec["choices"]:
@@ -10543,9 +10601,13 @@ def ladder_name(conn, model):
 
 
 def model_id(conn, platform, model, project_id=None, inline=None):
-    """The id a platform's CLI gets for a model_ladder name: its <prefix>model_ids entry, else the name."""
-    if not model or platform not in LAUNCH_PLATFORMS:
+    """The id a platform's CLI gets for a model_ladder name: its <prefix>model_ids entry, else the name. Another
+    registered adapter: its DESCRIBE['model_ids'] (#5168)."""
+    if not model:
         return model
+    if platform not in LAUNCH_PLATFORMS:
+        a = _adapters().find(platform or "")
+        return (a.describe["model_ids"] if a else {}).get(model.lower(), model)
     ids = (inline or {}).get("model_ids")
     if ids is None:
         ids = setting(conn, LAUNCH_PLATFORMS[platform]["prefix"] + "model_ids", project_id=project_id)
@@ -10618,16 +10680,20 @@ def river_dir():
 
 
 def profile_options(conn, platform, inline=None, project_id=None, chosen=None):
-    """A profile's option values: the launch dialog's choice, else the entry's own, else the settings."""
-    pl = LAUNCH_PLATFORMS[platform]
+    """A profile's option values: the launch dialog's choice, else the entry's own, else the settings. An adapter
+    outside LAUNCH_PLATFORMS has no config keys yet (#5169): the entry's own, else its spec's default."""
+    pl = platform_spec(platform)
     for k, v in (chosen or {}).items():
         spec = pl["options"].get(k)
         if spec is None or spec["kind"] == "text":
             raise RiverError(f"{pl['label']} has no option {k!r} to choose at launch; it has "
                              f"{', '.join(o for o, sp in pl['options'].items() if sp['kind'] != 'text')}")
         _check_option(platform, k, v)
-    return {k: (chosen or {}).get(k, (inline or {}).get(k, setting(conn, pl["prefix"] + k, project_id=project_id)))
-            for k in pl["options"]}
+    def default(k):
+        if platform not in LAUNCH_PLATFORMS:
+            return pl["options"][k]["default"]
+        return setting(conn, pl["prefix"] + k, project_id=project_id)
+    return {k: (chosen or {}).get(k, (inline or {}).get(k, default(k))) for k in pl["options"]}
 
 
 def _short_title(text, limit=48):
@@ -10789,7 +10855,7 @@ def entry_exe(cmd):
     """The program a launch_agents command starts (a profile's CLI, else the first word)."""
     prof = parse_profile(cmd)
     if prof:
-        return LAUNCH_PLATFORMS[prof[0]]["exe"]
+        return platform_spec(prof[0])["exe"]
     return cmd.split()[0] if cmd.split() else ""
 
 
@@ -11197,7 +11263,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         agent = agent_for_type(conn, top["agent"], p["id"])
         if agent is None:
             raise RiverError(f"#{top['id']} is for {top['agent']}, and no launch_agents entry runs it; add one: "
-                             f"maxpm config set launch_agents \"...; {LAUNCH_PLATFORMS[top['agent']]['label']}=@{top['agent']}\"")
+                             f"maxpm config set launch_agents \"...; {platform_spec(top['agent'])['label']}=@{top['agent']}\"")
     if model:
         ok, why = model_check(parse_ladder(setting(conn, "model_ladder")), model, top["min_model"], top["max_model"])
         if not ok:
@@ -11207,7 +11273,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
         # No model named: the item's own (#4961), of the agent's family, so the session declares it (MAXPM_MODEL)
         # and its limits hold. A default model is not forced on the CLI.
         plat = _launch_agent_cmd(conn, p["id"], agent, None, effort, options, None, prompt)["platform"]
-        model, model_why = session_model(conn, _item(conn, top["id"]), LAUNCH_PLATFORMS.get(plat, {}).get("family"),
+        model, model_why = session_model(conn, _item(conn, top["id"]), platform_spec(plat)["family"] if plat else None,
                                          defaults=False)
     name = session_title(top["goals"], top["id"], top["title"])
     cmd = _launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt)
@@ -11220,12 +11286,63 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
 
 
 def agent_for_type(conn, agent_type, project_id=None):
-    """The first launch_agents entry that runs this agent type (a profile of it, or a custom command of its CLI)."""
-    for label, cmd in parse_launch_agents(setting(conn, "launch_agents", project_id=project_id)):
+    """The first launch entry (launch_entries) that runs this agent type (a profile of it, or a custom command of
+    its CLI)."""
+    for label, cmd in launch_entries(conn, project_id):
         prof = parse_profile(cmd)
         if (prof[0] if prof else _exe_platform(cmd)) == agent_type:
             return label
     return None
+
+
+def launch_entries(conn, project_id=None):
+    """The launch_agents entries, then one implicit profile (label: the adapter's label, command: @<agent type>) for
+    each registered agent that MaximizePM can start and that no entry runs (#5168): agent_for.<role>, default_agent,
+    agent_rules or an item's --agent can name any registered agent, with no launch_agents entry for it. The first
+    entry stays the default of a start that names none."""
+    out = parse_launch_agents(setting(conn, "launch_agents", project_id=project_id))
+    runs = {(parse_profile(c) or (_exe_platform(c),))[0] for _, c in out}
+    labels = {lbl.lower() for lbl, _ in out}
+    for t in agent_types():
+        lbl = platform_spec(t)["label"]
+        if t not in runs and lbl.lower() not in labels:
+            out.append((lbl, f"@{t}"))
+    return out
+
+
+def role_agent(conn, role, project_id=None, item_id=None):
+    """The launch entry label that a session of this role starts (#5168): for an item, its effective agent
+    (_item_models: its own --agent, agent_rules, agent_for.<role>, default_agent); else agent_for.<role>, then
+    default_agent, of the most specific scope (item, project, global). None when nothing names one: the first
+    launch_agents entry."""
+    if role not in AGENT_ROLES:
+        raise RiverError(f"role {role!r}: one of {', '.join(AGENT_ROLES)}")
+    t = None
+    if item_id is not None:
+        it = _item(conn, item_id)
+        if role != item_role(it):  # the item is taken in another role (an expert for a work item): that role's agent
+            it = {**dict(it), "kind": {"reviewer": "review", "deployer": "deploy"}.get(role, "work"),
+                  "tier": "expert" if role == "expert" else None}
+        t = _item_models(it, _project_name(conn, it["project_id"]), _model_defaults(conn),
+                         setting(conn, "model_ladder"))["agent"]
+        project_id = it["project_id"] if project_id is None else project_id
+    else:  # the most specific scope wins: a project's default_agent comes before a global agent_for.<role>
+        scopes = ([f"project:{_project_name(conn, project_id)}"] if project_id is not None else []) + ["global"]
+        for sc in scopes:
+            rows = {r["key"]: r["value"] for r in conn.execute(
+                "SELECT key, value FROM settings WHERE scope=? AND key IN (?, 'default_agent')", (sc, f"agent_for.{role}"))}
+            t = rows.get(f"agent_for.{role}") or rows.get("default_agent")
+            if t:
+                break
+    if not t:
+        return None
+    t = _check_agent_type(conn, t)
+    label = agent_for_type(conn, t, project_id)
+    if label is None:
+        raise RiverError(f"the {role} runs {t}, and no launch entry runs it; add one: maxpm config set launch_agents "
+                         f"\"...; {platform_spec(t)['label']}=@{t}\"")
+    return label
+
 
 
 def _start_next(conn):
@@ -11244,7 +11361,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     filled in. The session also gets MAXPM_MODEL. prompt (maxpm launch --prompt) follows the profile's
     first prompt; a custom command has no prompt option to put it in. autocompact (tokens, the manager's
     manager_autocompact): claude --autocompact, unless the profile's args already name one."""
-    agents = parse_launch_agents(setting(conn, "launch_agents", project_id=project_id))
+    agents = launch_entries(conn, project_id)
     pick = agents[0] if agent is None else next((a for a in agents if a[0] == agent), None)
     if pick is None:
         raise RiverError(f"no agent {agent!r} in launch_agents; known: {', '.join(a for a, _ in agents)}")
@@ -11327,7 +11444,7 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     it refuses: a command with no model gets the CLI's default (#5064: the manager came back on Fable)."""
     ov = overrides or {}
     a = _agent(conn, agent)
-    agents = parse_launch_agents(setting(conn, "launch_agents", project_id=project_id))
+    agents = launch_entries(conn, project_id)
     pick = next((x for x in agents if (parse_profile(x[1]) or (None,))[0] == platform), None)
     if pick is None:
         raise RiverError(f"no {platform} profile in launch_agents (@{platform}): MaximizePM cannot resume {agent}")
@@ -11430,7 +11547,7 @@ def launch_options(conn):
     out = []
     for label, cmd in parse_launch_agents(setting(conn, "launch_agents")):
         prof = parse_profile(cmd)
-        fam = LAUNCH_PLATFORMS[prof[0]]["family"] if prof else AGENT_FAMILIES.get(Path(entry_exe(cmd)).name.lower())
+        fam = platform_spec(prof[0])["family"] if prof else AGENT_FAMILIES.get(Path(entry_exe(cmd)).name.lower())
         fam = fam if fam in ladder else None
         out.append({"label": label, "family": fam, "platform": prof[0] if prof else None,
                     "agent_type": prof[0] if prof else _exe_platform(cmd),
@@ -11446,7 +11563,7 @@ def launch_options(conn):
 
 def profile_option_list(conn, platform, inline=None, project_id=None, kinds=("toggle", "choice", "text")):
     """A platform's options with their values, for the page: [{name, setting, kind, choices, value, text}]."""
-    pl = LAUNCH_PLATFORMS[platform]
+    pl = platform_spec(platform)
     vals = profile_options(conn, platform, inline, project_id)
     return [{"name": k, "setting": pl["prefix"] + k, "kind": sp["kind"], "choices": sp.get("choices", []),
              "value": vals[k], "text": sp["text"], "fixed": k in (inline or {})}
@@ -11460,7 +11577,7 @@ def launch_profiles(conn):
         prof = parse_profile(cmd)
         if prof and prof[0] not in used:
             used.append(prof[0])
-    return [{"platform": p, "label": LAUNCH_PLATFORMS[p]["label"], "options": profile_option_list(conn, p)}
+    return [{"platform": p, "label": platform_spec(p)["label"], "options": profile_option_list(conn, p)}
             for p in used]
 
 
@@ -12619,6 +12736,17 @@ def expert_handover(conn, task_id, actor=None, summary=None, sources=(), canvase
                + (f" ({len(canvases)} canvas(es), {len(sessions)} session(s), {len(sources)} source(s))"
                   if canvases or sessions or sources else ""))
     return block
+
+
+def agent_type_of(conn, name):
+    """The agent type an agent ran in (agents.agent_type), also after it ended: its row, else its last history
+    line 'agent type <type>' (set_agent_type); None when neither says."""
+    r = conn.execute("SELECT agent_type FROM agents WHERE name=?", (name,)).fetchone()
+    if r and r["agent_type"]:
+        return r["agent_type"]
+    e = conn.execute("SELECT change FROM events WHERE item_id IS NULL AND actor=? AND change LIKE 'agent type %' "
+                     "ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+    return e["change"][len("agent type "):] if e else None
 
 
 def expert_topic_of(conn, name):

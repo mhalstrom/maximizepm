@@ -298,6 +298,10 @@ def _agent_for(conn, model):
     return pick["label"], pick
 
 
+# The role of a session that a focus starts (agent_for.<role>, #5168). A person's assistant (needs:) has no role yet.
+FOCUS_ROLES = {"deploy": "deployer", "review": "reviewer", "help": "worker", "unblock": "worker", "context": "context"}
+
+
 def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, options=None, agent_name=None):
     """Open the chosen agent in a project folder with MAXPM_FOCUS set; its maxpm go reads it. agent_name: the agent name
     it registers as (MAXPM_AGENT), when the caller registered one. Else river names the session (<project>-<hex>, the
@@ -305,6 +309,9 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
     once, so the page never shows 'This session runs outside tmux' for a pane that maxpm opened itself."""
     import secrets
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
+    kind = focus.split(":")[0]
+    if agent is None and kind in FOCUS_ROLES:  # agent_for.<role>, else default_agent (#5168)
+        agent = core.role_agent(conn, FOCUS_ROLES[kind], p["id"])
     title = core.focus_title(conn, focus)
     t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": title,
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, title)}
@@ -346,6 +353,8 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     if p is None:
         raise RiverError("no project has a folder, so MaximizePM cannot start a session: maxpm project path <name> <folder>")
     _can_open_terminal(runner, f"cd {p['path']} && claude manage")
+    if agent is None:  # agent_for.manager, else default_agent (#5168)
+        agent = core.role_agent(conn, "manager", p["id"])
     t = {"project": p["name"], "path": p["path"], "session_title": "maxpm manager",
          **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, "maxpm manager",
                                   autocompact=core.autocompact_tokens(core.setting(conn, "manager_autocompact")))}
@@ -430,7 +439,13 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
             raise RiverError(f"#{task['id']} names no model, so say which model the expert {name} runs: --model <name>")
     first = EXPERT_PROMPT.format(name=name, topic=topic)
     handed = core.expert_handover(conn, task["id"], actor, summary, sources, canvases, sessions)
-    sid = core.last_claude_session(conn, name) if resume else None
+    # Resume: the chat of the agent it ran in (agents.agent_type, Claude Code when not recorded), through that
+    # adapter's resume_command (#5168); an agent that cannot resume starts fresh and reads the notes.
+    platform = core.agent_type_of(conn, name) or "claude-code"
+    ad = core._adapters().find(platform)
+    sid = core.last_claude_session(conn, name) if resume and ad is not None and ad.supports("resume") else None
+    if agent is None and not sid:  # agent_for.expert, else default_agent, for the task (#5168)
+        agent = core.role_agent(conn, "expert", p["id"], task["id"])
     core.expert_make(conn, name, topic, p["name"], actor)
     if model:
         core.set_agent_model(conn, name, model)
@@ -438,8 +453,8 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     if core._item(conn, task["id"])["assignee"] != name:
         core.claim(conn, task["id"], name)
     if sid:
-        r = core.resume_command(conn, name, "claude-code", sid, p["id"], {"prompt": first, "model": model,
-                                                                          "effort": effort})
+        r = core.resume_command(conn, name, core._platform_of(ad), sid, p["id"], {"prompt": first, "model": model,
+                                                                                "effort": effort})
         t = {"command": r["command"], "env": r["env"], "agent": r["agent"], "resumed": sid}
     else:
         t = core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt=first)
@@ -1192,7 +1207,8 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
                         "ORDER BY id LIMIT 1", (name,)).fetchone()
     names = core.projects_for_dir(conn, cwd)
     project_id = held["project_id"] if held else core._project(conn, names[0])["id"] if names else None
-    t = core.resume_command(conn, name, sessions.PLATFORMS[kind], sid, project_id, overrides, transcript=path)
+    platform = core._platform_of(core._adapters().get(kind))  # the adapter of the chat's kind (#5168)
+    t = core.resume_command(conn, name, platform, sid, project_id, overrides, transcript=path)
     if not ended:  # ended: its process ended already (revive_sessions); a pid that came again is another's
         info = core.proc_info(pid)
         if info is not None and info[2] != a["pid_cmd"]:
@@ -1823,7 +1839,7 @@ def auto_context(conn, runner=None):
     for w in core.context_wanted(conn):
         p = core._project(conn, w["project"])
         try:
-            label = _agent_for(conn, w["model"])[0] if w["model"] else None
+            label = core.role_agent(conn, "context", p["id"]) or (_agent_for(conn, w["model"])[0] if w["model"] else None)
             t = _open_focused(conn, p, f"context:{w['goal']}", runner, label, w["model"])
         except RiverError as e:
             print(f"maxpm serve: no context session for goal {w['goal']}: {e}", flush=True)
