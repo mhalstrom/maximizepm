@@ -1277,3 +1277,34 @@ class DetectItem(unittest.TestCase):
         after = server._layout({"menu": "●", "item": r"\d+ \({mark}\)"})["mark"].match("  3 (●) Yes, proceed")
         self.assertEqual((after.group(1), after.group(2), after.group(3)), ("  ", "●", "Yes, proceed"))
         self.assertIsNone(server._layout({"menu": "●", "item": r"\d+ \({mark}\)"})["mark"].match("  ● Yes"))
+
+
+class FixedSettings(Env):
+    """#5285: a setting that neither a live command nor a restart changes (OpenCode keeps a session's model) shows in
+    the Settings dialog as its value only, and a change of it is refused, not reported as done."""
+
+    def test_the_opencode_model_is_fixed_and_says_how_to_change_it(self):
+        model = agents.get("opencode").session_specs()[0]
+        self.assertEqual((model["key"], model["fixed"]), ("model", True))
+        self.assertIn("/models", model["note"])
+        self.assertFalse(agents.get("claude").session_specs()[0]["fixed"])  # /model {value}
+        self.assertFalse(agents.get("codex").session_specs()[0]["fixed"])  # a restart applies it
+        hermes = {s["key"]: s["fixed"] for s in agents.get("hermes").session_specs()}  # fixed_on_resume
+        self.assertTrue(all(fixed for key, fixed in hermes.items()
+                            if not next(s for s in agents.get("hermes").session_specs() if s["key"] == key)["live"]))
+        core.register(self.c, "oc")
+        self.c.execute("UPDATE agents SET agent_type='opencode' WHERE name='oc'")
+        rows = {r["key"]: r for r in sessions.session_settings(self.c, "oc")["settings"]}
+        self.assertTrue(rows["model"]["fixed"])
+
+    def test_a_change_of_a_fixed_setting_is_refused(self):
+        from river import server
+        quiet = ({"pid": os.getpid(), "host": core.this_host(), "pid_cmd": "opencode --session ses_1",
+                  "agent_type": "opencode"}, None, None, {"cwd": self.tmp.name})
+        with mock.patch.object(server, "_quiet_session", lambda *a, **k: quiet):
+            with self.assertRaisesRegex(RiverError, "OpenCode keeps a session's model.*/models; nothing restarted"):
+                server.session_restart(self.c, "oc", {"model": "opencode/glm-5.3-flash-free"})
+            with self.assertRaisesRegex(RiverError, "OpenCode keeps a session's model"):
+                server.session_setting_live(self.c, "oc", "model", "opencode/glm-5.3-flash-free")
+        bad = module(DESCRIBE={**GOOD, "id": "x", "model_restart": "no"})
+        self.assertIn("DESCRIBE['model_restart'] is a str", " ".join(agents.check(bad, "x")))

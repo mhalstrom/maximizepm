@@ -60,6 +60,10 @@ FAMILIES = ("claude", "openai", "multi")
 #      "model_live":    the text typed into a running session to change its model ("/model {value}"), or None: a
 #                       restart applies it (the Settings dialog of a session, #5169),
 #      "model_read":    a regex whose group 1 reads the model back from the session's command line, or None,
+#      "model_restart": False when a restart (a resume of the same session) cannot change the model: the session keeps
+#                       the model it started with (OpenCode, #5285); True by default,
+#      "model_note":    a short line on how a person changes the model of a running session, when MaximizePM cannot
+#                       ("change it in its terminal with /models"), or None,
 #      "platform":      the name that settings, launch profiles (@claude-code) and a session's agent type store, when
 #                       it is not the id (Claude Code: "claude-code"); it must be the id or an alias (#5185),
 #    }
@@ -67,7 +71,8 @@ FAMILIES = ("claude", "openai", "multi")
 # ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands.
 DESCRIBE_KEYS = {"id": str, "label": str, "exe": str, "aliases": (list, tuple), "family": str,
                  "models": (list, tuple), "default_model": str, "model_ids": dict, "prefix": str,
-                 "model_live": (str, type(None)), "model_read": (str, type(None)), "platform": str}
+                 "model_live": (str, type(None)), "model_read": (str, type(None)), "platform": str,
+                 "model_restart": bool, "model_note": (str, type(None))}
 DESCRIBE_REQUIRED = ("id", "label", "exe", "family")
 
 # 2. Settings. SETTINGS = [{
@@ -625,10 +630,13 @@ class Adapter:
         """The Settings dialog of a running session: the model, the effort, then each setting with session True.
         Each spec says how the dialog reads the value from the command line ("cmd": a regex; "flag": a toggle's
         word), whether it changes in place ("live"), and how a restart applies it ("restart": model, effort, opt (a
-        profile option, with its config key in "default") or flag (a word added or taken out))."""
+        profile option, with its config key in "default") or flag (a word added or taken out)). "fixed": True for a
+        setting that neither a live command nor a restart changes (#5285: OpenCode's model; every setting with no live
+        command of an agent whose LAUNCH has fixed_on_resume, Hermes); the dialog shows its value only."""
         d = self.describe
         out = [{"key": "model", "label": "Model", "kind": "model", "live": d.get("model_live"), "restart": "model",
-                "cmd": d.get("model_read")}]
+                "cmd": d.get("model_read"), "note": d.get("model_note"),
+                "fixed": not d.get("model_live") and d.get("model_restart") is False}]
         if self.effort:
             out.append({"key": "effort", "label": self.effort.get("label") or "Effort", "kind": "choice",
                         "choices": self.effort_choices(), "live": self.effort.get("live"), "restart": "effort",
@@ -642,6 +650,8 @@ class Adapter:
                         "restart": "opt" if s["config"] else "flag",
                         "default": self.config_key(s["key"]) if s["config"] else None, "cmd": s["read"],
                         "flag": s["flag"][0] if toggle and s["flag"] else None, "note": s["note"]})
+        for spec in out:  # a resume that keeps every setting (Hermes): only a live command changes one
+            spec["fixed"] = bool(spec.get("fixed") or (self.launch.get("fixed_on_resume") and not spec.get("live")))
         return out
 
     def read_models(self):

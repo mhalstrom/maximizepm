@@ -1291,6 +1291,7 @@ def session_settings(conn, agent, root=None, croot=None):
         out.append({"key": spec["key"], "label": spec["label"], "kind": spec["kind"], "choices": spec.get("choices"),
                     **row,
                     "value": value, "source": source, "live": bool(spec.get("live")), "note": spec.get("note"),
+                    "fixed": bool(spec.get("fixed")),
                     "default_key": spec.get("default"),
                     "default_value": core.setting(conn, spec["default"]) if spec.get("default") else None})
     return {"agent": agent, "provider": prov, "settings": out, "transcript": kind if path else None}

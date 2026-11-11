@@ -55,6 +55,10 @@ DESCRIBE = {
     "default_model": "opencode/big-pickle",
     "model_ids": {},
     "prefix": "opencode_",
+    # A session keeps the model it started with: opencode --session <id> takes no model, and the config's model is for
+    # a new session only; /models in the TUI opens a picker and takes no argument, so no live text either (#5285).
+    "model_restart": False,
+    "model_note": "OpenCode keeps a session's model: change it in its terminal with /models",
 }
 
 SETTINGS = [

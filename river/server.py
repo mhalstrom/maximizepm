@@ -1361,6 +1361,8 @@ def session_setting_live(conn, agent, key, value, who=None):
     prov = sessions.provider(a.get("agent_type"), kind)["id"]
     spec = sessions.setting_spec(prov, key)
     if not spec.get("live"):
+        if spec.get("fixed"):
+            raise RiverError(spec.get("note") or f"{spec['label']} changes only in a new session")
         raise RiverError(f"{spec['label']} changes only with a restart: use Restart with these settings")
     value = sessions.check_value(spec, value, conn, prov)
     if pane_prompts(conn, {agent: _typing_pane(conn, agent, who)}).get(agent):
@@ -1393,6 +1395,8 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
     ov, done, defaults = {"opts": {}, "flags": [], "noflags": []}, [], []
     for key, value in changes.items():
         spec = sessions.setting_spec(prov, key)
+        if spec.get("fixed"):  # the resume would run the old value and report the new one (#5285)
+            raise RiverError(f"{spec.get('note') or spec['label'] + ' changes only in a new session'}; nothing restarted")
         value = sessions.check_value(spec, value, conn, prov)
         if spec["restart"] in ("model", "effort"):
             ov[spec["restart"]] = value
