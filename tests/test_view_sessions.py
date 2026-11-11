@@ -685,6 +685,25 @@ class Adopt(Base):
         self.assertIn(f"cd {os.path.realpath(self.dir.name)} && ", line)
         self.assertIn("--permission-mode plan", line)
 
+    def test_restart_takes_the_process_from_the_pane_when_none_is_recorded(self):
+        """#5300: after one restart the new process had run no maxpm command (its first turn failed: the Cursor account
+        refused the model), so no pid was recorded, and a second restart answered 'the process ... is not known'. The
+        foreground process of the agent's tmux pane is the agent, as End now takes it (#5278)."""
+        from unittest import mock
+        cmd = core.proc_info(self.proc.pid)[2]
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL WHERE name='ag'")
+        self.quiet()
+        with mock.patch.object(server, "pane_process", lambda c, a: None):
+            with self.assertRaisesRegex(core.RiverError, "the process of ag on this computer is not known"):
+                server.session_restart(self.c, "ag", {"effort": "low"})
+        fg = {"pid": self.proc.pid, "pgid": self.proc.pid, "cmd": cmd, "pane": "%9"}
+        with mock.patch.object(server, "pane_process", lambda c, a: fg if a == "ag" else None):
+            got = server.session_restart(self.c, "ag", {"effort": "low"})
+        self.assertEqual(got["changed"], ["Effort low"])
+        self.assertIsNotNone(self.proc.poll())  # the old process ended
+        self.assertIn("--effort low", self.tmux.panes[-1]["keys"][0])
+
     def test_a_process_in_a_tmux_pane_is_never_ended(self):
         """#5060: two agents had one pid (a command with --as for another agent wrote it), the map from pids to names
         kept one of them, and tmux_adopt took the other for a session outside tmux: it ended the manager in its pane.

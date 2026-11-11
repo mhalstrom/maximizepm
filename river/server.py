@@ -1402,7 +1402,13 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
         raise RiverError("no setting changed")
     a, kind, path, tail = _quiet_session(conn, agent, who)
     if not (a.get("pid") and a.get("host") == core.this_host() and a.get("pid_cmd") and core.pid_alive(a["pid"])):
-        raise RiverError(f"the process of {agent} on this computer is not known; restart it by hand")
+        # No recorded process: a session that ran no maxpm command since its start or its last restart (the Cursor
+        # test: a restart to a model the account refuses failed its first turn, so it could not be undone, #5300).
+        # The foreground process of its tmux pane is the agent, as End now takes it (#5278).
+        fg = pane_process(conn, agent)
+        if fg is None:
+            raise RiverError(f"the process of {agent} on this computer is not known; restart it by hand")
+        a = dict(a, pid=fg["pid"], pid_cmd=fg["cmd"], host=core.this_host())
     cwd = tail.get("cwd") or core.proc_cwd(a["pid"])  # Grok's and Copilot's logs name no folder (#5262)
     if not cwd:
         raise RiverError(f"the folder of {agent} is not known: its transcript does not name it, and its process does "
