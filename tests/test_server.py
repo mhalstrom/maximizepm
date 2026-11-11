@@ -46,6 +46,36 @@ class LaunchAgent(unittest.TestCase):
                 os.environ["MAXPM_DB"] = old
         self.assertRegex(sent[0], r"MAXPM_DB=\S*q\.db'? MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ claude --name \S+ \S+ go")  # the path is quoted when it needs it
 
+    def test_a_command_that_is_a_pipeline_gets_the_session_s_variables_too(self):
+        # Amp's command is 'printf <prompt> | amp': a variable put before it reached printf only (#5239).
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.item_add(self.c, "shop", "first")
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Amp=@amp")
+        sent = []
+        t = server.launch_agent(self.c, runner=sent.append, agent="Amp", effort="low")
+        self.assertRegex(sent[0], r" && export (MAXPM_DB=\S+ )?MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ && printf ")
+        # The line runs in a shell, with a stand-in amp that writes what it got: the variables and its stdin.
+        bin_dir, out = os.path.join(self.dir.name, "bin"), os.path.join(self.dir.name, "got.txt")
+        os.mkdir(bin_dir)
+        with open(os.path.join(bin_dir, "amp"), "w") as f:
+            f.write(f"#!/bin/sh\n{{ env | grep '^MAXPM_' | sort; cat; }} > {shlex.quote(out)}\n")
+        os.chmod(os.path.join(bin_dir, "amp"), 0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("MAXPM_")}
+        subprocess.run(["/bin/sh", "-c", sent[0]], env={**env, "PATH": bin_dir + os.pathsep + env["PATH"]},
+                       check=True, timeout=10)
+        with open(out) as f:
+            got = f.read()
+        self.assertIn(f"MAXPM_AGENT={t['session_name']}\n", got)
+        self.assertRegex(got, r"MAXPM_FOCUS=item:\d+\n")
+        self.assertIn(f"MAXPM_DB={core.db_path()}\n", got)
+        self.assertTrue(got.rstrip().endswith("follow the briefing"), got)  # the first prompt came on stdin
+        # A command with no pipe keeps its form: the variables before the command.
+        sent.clear()
+        core.item_add(self.c, "shop", "second")
+        server.launch_agent(self.c, runner=sent.append)
+        self.assertNotIn("export", sent[0])
+        self.assertRegex(sent[0], r"&& (MAXPM_DB=\S+ )?MAXPM_AGENT=\S+ MAXPM_FOCUS=item:\d+ claude ")
+
     def test_goal_context_session_builds_a_base_and_workers_start_as_forks(self):
         import json
         from river import cli

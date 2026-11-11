@@ -549,8 +549,13 @@ def _open_terminal(t, env, runner=None):
         except OSError as e:
             raise RiverError(f"could not open a console window in {t['path']}: {e}")
         return
-    line = (f"cd {shlex.quote(t['path'])} && " + "".join(f"{k}={shlex.quote(v)} " for k, v in env.items())
-            + t["command"])
+    assign = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    if "|" in t["command"] and assign:
+        # A variable before a pipeline goes to its first command only: Amp's 'printf <prompt> | amp' ran with no
+        # MAXPM_AGENT, MAXPM_FOCUS or MAXPM_DB (#5239). export reaches every command of the line.
+        line = f"cd {shlex.quote(t['path'])} && export {assign} && {t['command']}"
+    else:
+        line = f"cd {shlex.quote(t['path'])} && " + (f"{assign} " if assign else "") + t["command"]
     if runner:
         runner(line)
         return
