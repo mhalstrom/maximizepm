@@ -10,6 +10,7 @@ from unittest import mock
 from pathlib import Path
 
 from river import core, server, sessions
+from tests import proc_after_exec
 from river.agents import codex as codex_agent
 
 SID = "11111111-2222-3333-4444-555555555555"
@@ -480,7 +481,7 @@ class Adopt(Base):
         self.proc = subprocess.Popen(["sleep", "60"])  # the agent CLI in its Terminal tab
         self.addCleanup(self.proc.wait)
         self.addCleanup(self.proc.kill)
-        info = core.proc_info(self.proc.pid)
+        info = proc_after_exec(self.proc.pid, "sleep")
         if info is None:
             self.skipTest("no ps here (an agent sandbox)")
         with core.tx(self.c):
@@ -549,7 +550,7 @@ class Adopt(Base):
         core.register(self.c, "mgr")
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
-            self.c.execute("UPDATE agents SET pid_cmd=? WHERE name='ag'", (core.proc_info(self.proc.pid)[2],))
+            self.c.execute("UPDATE agents SET pid_cmd=? WHERE name='ag'", (proc_after_exec(self.proc.pid, "sleep")[2],))
         self.quiet()
         self.assertEqual(server.adopt_sessions(self.c), {})
         self.assertIsNone(self.proc.poll())  # still runs
@@ -655,7 +656,8 @@ class Adopt(Base):
         self.addCleanup(proc.wait)
         self.addCleanup(proc.kill)
         with core.tx(self.c):
-            self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'", (proc.pid, core.proc_info(proc.pid)[2]))
+            self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'",
+                           (proc.pid, proc_after_exec(proc.pid, "--remote-control")[2]))
         self.quiet()
         got = server.session_restart(self.c, "ag", {"effort": "low"})
         self.assertEqual(got["changed"], ["Effort low"])
@@ -674,7 +676,7 @@ class Adopt(Base):
         if core.proc_cwd(proc.pid) is None:
             self.skipTest("no lsof or /proc here")
         with core.tx(self.c):
-            self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'", (proc.pid, core.proc_info(proc.pid)[2]))
+            self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'", (proc.pid, proc_after_exec(proc.pid, "sleep")[2]))
         Path(self.path).write_text(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn"))  # no cwd
         self.quiet()
         got = server.session_restart(self.c, "ag", {"permission_mode": "plan"})
@@ -752,7 +754,7 @@ class Revive(Base):
         roots, core.transcripts_root = core.transcripts_root, lambda: self.root
         self.addCleanup(setattr, core, "transcripts_root", roots)
         proc = subprocess.Popen(["sleep", "60"])  # the agent CLI, which then ends with no stop (a crash)
-        info = core.proc_info(proc.pid)
+        info = proc_after_exec(proc.pid, "sleep")
         proc.kill()
         proc.wait(5)
         if info is None:
@@ -2350,7 +2352,7 @@ class AdapterFolder(Base):
         proc = subprocess.Popen(["sleep", "60"])  # the copilot CLI in its Terminal tab
         self.addCleanup(proc.wait)
         self.addCleanup(proc.kill)
-        info = core.proc_info(proc.pid)
+        info = proc_after_exec(proc.pid, "sleep")
         if info is None:
             self.skipTest("no ps here (an agent sandbox)")
         core.register(self.c, "cop")

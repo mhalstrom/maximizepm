@@ -4378,7 +4378,8 @@ class KillPane(unittest.TestCase):
             self.skipTest("no process groups and no tmux on Windows")
         p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
         self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
-        info = core.proc_info(p.pid)
+        from tests import proc_after_exec
+        info = proc_after_exec(p.pid, "time.sleep")
         if info is None:
             self.skipTest("no ps on this system")
         self.ps["ttys042"] = f"  501   501 {p.pid} -zsh\n {p.pid} {p.pid} {p.pid} {info[2]}\n"

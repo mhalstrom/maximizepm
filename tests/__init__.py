@@ -22,3 +22,21 @@ codex_adapter.CODEX_FLAGS = set()  # not the installed Codex: a test of its flag
 server.ENTER_PAUSE = server.COMMAND_LOOK = 0  # no waits for a CLI's paste window or a command's screen (#5220)
 from river.agents import opencode as opencode_adapter  # noqa: E402
 opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
+
+
+def proc_after_exec(pid, want, wait=5.0):
+    """core.proc_info(pid) once the new child's command line shows `want` (the program it starts) and stays the same
+    for 0.2 s, at most wait seconds (#5295). ps right after Popen can find the child before its exec (the test
+    runner's command line, or none), and Homebrew's framework Python execs a second time, from bin/python3.14 into
+    Python.app/Contents/MacOS/Python, with the same arguments: a pid_cmd read before that made a later check ('PID ...
+    now runs another command') fail under the load of the full suite. The last answer when it never settles."""
+    import time
+    end, last = time.time() + wait, None
+    while True:
+        info = core.proc_info(pid)
+        if info is not None and want in info[2] and last is not None and info[2] == last[2]:
+            return info
+        if time.time() > end:
+            return info
+        last = info if info is not None and want in info[2] else None
+        time.sleep(0.2)
