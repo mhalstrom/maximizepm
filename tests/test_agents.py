@@ -512,6 +512,7 @@ class PaneState(Env):
         core.item_add(self.c, "shop", "more")
         other = self.server.launch_agent(self.c)["session_name"]
         core.register(self.c, other)
+        self.c.execute("UPDATE agents SET agent_type=NULL WHERE name=?", (other,))  # a custom command: no type known
         p2 = self.server.TMUX_RUNNER.panes[-1]
         p2.update(running="goose", history=(fix / "pane_resumed.txt").read_text(), screen="( O)>")
         self.assertEqual(self.server.watch_prompts(self.c)["session_ids"].get(other), "20261111_1")
@@ -519,6 +520,21 @@ class PaneState(Env):
         core.config_set(self.c, "prompt_pattern", "")
         p2["history"] += "   \\____)    20261111_9 · /x\n"
         self.assertEqual(self.server.watch_prompts(self.c)["session_ids"].get(other), "20261111_9")
+
+    def test_a_started_session_knows_its_agent_and_its_prompt_before_its_first_command(self):
+        # #5269: goose in approve mode asked to approve a tool before it ran maxpm go; the page said 'not connected
+        # yet' with no agent and no answer. The start records the agent type, and the watcher's blocked report wins.
+        fix = Path(__file__).resolve().parent / "fixtures" / "goose"
+        core.config_set(self.c, "launch_agents", "Goose=@goose")
+        core.item_add(self.c, "shop", "work")
+        name = self.server.launch_agent(self.c)["session_name"]
+        self.assertEqual(core.state_adapter(self.c, name).id, "goose")
+        pane = self.server.TMUX_RUNNER.panes[-1]
+        pane.update(running="goose", screen=(fix / "pane_blocked_tool.txt").read_text())
+        self.assertEqual(self.server.watch_prompts(self.c)["reported"], {name: "blocked"})
+        card = next(c for c in sessions.views(self.c, self.server.agent_terminals(self.c), self.tmp.name,
+                                             self.tmp.name) if c["name"] == name)
+        self.assertEqual((card["state"], card["agent_type"]), ("prompt", "goose"))
 
     def test_a_claude_code_pane_gives_its_state_by_its_hooks_only(self):
         name, pane = self.start("claude-code")

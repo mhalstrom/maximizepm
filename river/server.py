@@ -189,6 +189,7 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
     try:
         core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
+        _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner)
     except Exception as e:
         _undo_start(conn, name, e, item_id=t["item"]["id"], actor=actor)
@@ -348,6 +349,7 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
             named = f"{p['name']}-{secrets.token_hex(2)}"
         core.register(conn, named, note=f"{core.STARTED_NOTE} {focus}")
     try:
+        _started(conn, named, t)
         _open_terminal(t, {"MAXPM_FOCUS": focus, "MAXPM_AGENT": named, **t["env"]}, runner)
     except Exception:
         if agent_name is None:  # no session started: no name of ours stays on the page
@@ -389,6 +391,7 @@ def start_manager(conn, runner=None, agent=None, actor=None, model=None, effort=
     core.register(conn, name, note="started from the page as the manager")
     core._set_role_note(conn, name, "manager", None)  # the next Start manager sees it at once
     try:
+        _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner)
     except Exception as e:
         _undo_start(conn, name, e, actor=actor)
@@ -485,11 +488,13 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
     if sid:
         r = core.resume_command(conn, name, core._platform_of(ad), sid, p["id"], {"prompt": first, "model": model,
                                                                                 "effort": effort})
-        t = {"command": r["command"], "env": r["env"], "agent": r["agent"], "resumed": sid}
+        t = {"command": r["command"], "env": r["env"], "agent": r["agent"], "resumed": sid,
+             "platform": core._platform_of(ad)}
     else:
         t = core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt=first)
         t = {**t, "env": {"MAXPM_AGENT": name, **t["env"]}}
     t.update(project=p["name"], path=p["path"], session_title=name, task=task["id"])
+    _started(conn, name, t)
     _open_terminal(t, t["env"], runner)
     with core.tx(conn):
         core._event(conn, task["id"], actor or "maxpm", f"expert {name} started" + (
@@ -554,6 +559,15 @@ def _fit_task_model(conn, task, name, model, actor):
         return
     lname = ladder[fam][pos]
     core.item_edit(conn, task["id"], actor=actor, models={"max_model" if "at most" in why else "min_model": lname})
+
+
+def _started(conn, name, t):
+    """Record the agent type of a session MaximizePM starts now (#5269): the profile's platform, else the adapter
+    whose exe the command runs. The page then shows its agent, and the pane watcher reads its pane with that agent's
+    rules (a blocked prompt), before the session's first maxpm command says the same."""
+    platform = t.get("platform") or core._exe_platform(t.get("command") or "")
+    if name and platform:
+        core.set_agent_type(conn, name, platform)
 
 
 def _open_terminal(t, env, runner=None):
@@ -2287,6 +2301,7 @@ def start_deployer(conn, target, dep_id, why, runner=None):
     with core.tx(conn):
         core.target_handoff(conn, target, name, why)
     try:
+        _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": focus, **t["env"]}, runner)
     except Exception as e:
         _undo_start(conn, name, e, item_id=dep_id, target=target)

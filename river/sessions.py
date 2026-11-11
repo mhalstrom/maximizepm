@@ -777,8 +777,10 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
         prompt = (prompts or {}).get(a["name"])
         if prompt and key != "stopping":
             key, label = "prompt", STATES["prompt"]
-        elif not path and not a.get("pid") and key not in ("stopping", "answer"):
+        elif not path and not a.get("pid") and key not in ("stopping", "answer", "prompt"):
             # It ran no maxpm command and wrote no transcript: not working (#4621). Its pane shows a shell: it ended.
+            # A prompt that the pane watcher reported (maxpm report --state blocked) waits on the person, also before
+            # its first maxpm command: it stays a prompt (#5269).
             key = "ended" if (terminals or {}).get(a["name"]) in (ended_panes or ()) else "starting"
             label = STATES[key]
         adopt = None if (terminals or {}).get(a["name"]) else adopt_check(
