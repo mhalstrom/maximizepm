@@ -2765,7 +2765,14 @@ class PaneProgram(unittest.TestCase):
         self.lines = {"ttys004": "-zsh\n/opt/homebrew/Cellar/python@3.14/Frameworks/Python.framework/Versions/3.14/"
                                  "Resources/Python.app/Contents/MacOS/Python /Users/x/.local/bin/aider --model sonnet\n",
                       "pts/3": "bash\npython3 -m aider\n",
-                      "ttys009": "-zsh\nruby /usr/local/bin/some-tool --watch\n"}
+                      "ttys009": "-zsh\nruby /usr/local/bin/some-tool --watch\n",
+                      # Hermes v0.22.7 as ps shows it (#5229): its launcher execs its own Python with a -c script,
+                      # and ps writes the script's newlines as \\012.
+                      "ttys011": "-zsh\n/Users/x/.hermes/tools/python-3.14.9+20261021-darwin-arm64/bin/python3 -I -c "
+                                 "import os, re, sys\\012import contextlib, hashlib, io, pathlib, shutil, subprocess"
+                                 "\\012os.environ.pop('PYTHONHOME', None)\\012sys.path.insert(0, "
+                                 "'/Users/x/.hermes/hermes-agent')\\012def _hermes_closure_repair():\n",
+                      "ttys012": "-zsh\npython3 -I -c import sys\\012sys.path.insert(0, '/opt/other-agent')\n"}
 
         def ps(tty):
             self.ps.append(tty)
@@ -2795,6 +2802,11 @@ class PaneProgram(unittest.TestCase):
         self.assertEqual(self.adapter("Python"), None)  # no terminal: no ps
         self.assertEqual(self.adapter("Python", "/dev/ttys666"), None)  # ps fails: none
         self.assertEqual(self.adapter("vim", "/dev/ttys009"), None)  # no adapter's program runs there
+
+    def test_a_launcher_that_shows_no_name_is_found_by_its_command_line(self):
+        self.assertEqual(server._tty_programs("/dev/ttys011"), ["zsh", "python3"])  # no name to match
+        self.assertEqual(self.adapter("python3.14", "/dev/ttys011"), "hermes")  # DETECT['process_args']
+        self.assertEqual(self.adapter("python3.14", "/dev/ttys012"), None)  # another -c script
 
     def test_a_name_that_tmux_shows_needs_no_ps_and_ps_runs_once_a_minute(self):
         self.assertEqual(self.adapter("claude", "/dev/ttys004"), "claude")

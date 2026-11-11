@@ -233,6 +233,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #    }
 # DETECT = {
 #      "process":      the process name of the agent in the pane,
+#      "process_args": optional: a regex that finds the agent in the command line (ps args) of a process on the
+#                      pane's terminal, for a CLI whose launcher shows neither its name nor a script (Hermes runs
+#                      'python3 -I -c <script>'); the pane watcher tries it after "process",
 #      "idle":         a regex of the pane when the agent waits at its prompt,
 #      "working":      a regex of the pane while it runs a turn ("esc to interrupt"),
 #      "blocked":      [regexes], one for each screen that waits for a person (a permission menu, a question, trust),
@@ -255,7 +258,7 @@ STATE_KEYS = {"state": str, "session_id": str}
 HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str, type(None)),
                     "message": (str, type(None)), "call": (dict, type(None)), "shows": bool,
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool}
-DETECT_KEYS = {"process": str, "idle": str, "working": str, "blocked": (list, tuple),
+DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "frame": str, "rule": str, "hint": str}
 DETECT_LAYOUT = {
@@ -443,7 +446,7 @@ def check(module, mid=None):
     if det is not None:
         out += _shape("DETECT", det, DETECT_KEYS, ("idle", "working", "blocked"))
         if isinstance(det, dict):
-            for k in ("idle", "working", "rule", "hint", "tell_instead"):
+            for k in ("idle", "working", "rule", "hint", "tell_instead", "process_args"):
                 if isinstance(det.get(k), str):
                     out += _regex(f"DETECT[{k!r}]", det[k])
             for i, p in enumerate(det.get("blocked") or ()):

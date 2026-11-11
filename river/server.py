@@ -1503,11 +1503,8 @@ _TTY_PROGRAMS = {}    # (tty, the pane's process name) -> (when, adapter id or N
 TTY_PROGRAMS_KEEP = 60
 
 
-def _tty_programs(tty):
-    """The program names that run on a terminal: for each process, the base name of its program and, for an
-    interpreter, of the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node
-    /opt/homebrew/bin/gemini' gives node and gemini; 'python3 -m aider' gives python3 and aider). [] when ps fails."""
-    import os
+def _tty_lines(tty):
+    """The command lines (ps args) of the processes that run on a terminal; [] when ps fails."""
     import subprocess
     dev = tty[5:] if tty.startswith("/dev/") else tty
     try:
@@ -1515,8 +1512,16 @@ def _tty_programs(tty):
                                                           text=True, errors="replace", timeout=5).stdout))(dev)
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
+    return [x for x in (out or "").splitlines() if x.strip()]
+
+
+def _programs(lines):
+    """The program names of command lines: for each one, the base name of its program and, for an interpreter, of
+    the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node /opt/homebrew/bin/gemini'
+    gives node and gemini; 'python3 -m aider' gives python3 and aider)."""
+    import os
     names = []
-    for line in (out or "").splitlines():
+    for line in lines:
         w = line.split()
         if not w:
             continue
@@ -1527,9 +1532,16 @@ def _tty_programs(tty):
     return names
 
 
+def _tty_programs(tty):
+    """The program names that run on a terminal (_programs of _tty_lines). [] when ps fails."""
+    return _programs(_tty_lines(tty))
+
+
 def _process_adapter(process, tty=None):
     """The adapter whose DETECT['process'] runs in a pane: tmux's name of the pane's process, else (a script CLI,
-    where tmux names the interpreter: Python, node) a program or script on the pane's terminal (#5223)."""
+    where tmux names the interpreter: Python, node) a program or script on the pane's terminal (#5223), else an
+    adapter whose DETECT['process_args'] finds it in a command line there (a launcher that shows neither: Hermes's
+    'python3 -I -c <script>', #5229)."""
     from . import agents
     ads = [a for a in agents.load().values() if (a.detect or {}).get("process")]
     ad = next((a for a in ads if a.detect["process"] == process), None)
@@ -1538,8 +1550,13 @@ def _process_adapter(process, tty=None):
     key, t = (tty, process), core.now().timestamp()
     seen = _TTY_PROGRAMS.get(key)
     if seen is None or t - seen[0] > TTY_PROGRAMS_KEEP:
-        names = set(_tty_programs(tty))
-        seen = _TTY_PROGRAMS[key] = (t, next((a.id for a in ads if a.detect["process"] in names), None))
+        lines = _tty_lines(tty)
+        names = set(_programs(lines))
+        got = next((a.id for a in ads if a.detect["process"] in names), None)
+        if got is None:
+            got = next((a.id for a in agents.load().values() if (a.detect or {}).get("process_args")
+                        and any(re.search(a.detect["process_args"], x) for x in lines)), None)
+        seen = _TTY_PROGRAMS[key] = (t, got)
     return agents.find(seen[1]) if seen[1] else None
 
 

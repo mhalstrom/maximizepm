@@ -150,6 +150,19 @@ class Detect(unittest.TestCase):
         self.assertIsNone(re.search(hermes.DETECT["tell_instead"], screen("pane_blocked_approval.txt")))
 
 
+class Process(unittest.TestCase):
+    def test_the_command_line_of_the_launcher_names_hermes(self):
+        # ps -t <tty> -o args= of a Hermes pane (v0.22.7, the home path made neutral); ps writes newlines as \\012.
+        line = ("/Users/x/.hermes/tools/python-3.14.9+20261021-darwin-arm64/bin/python3 -I -c import os, re, sys"
+                "\\012os.environ.pop('PYTHONPATH', None)\\012sys.path.insert(0, '/Users/x/.hermes/hermes-agent')"
+                "\\012def _hermes_closure_repair():")
+        rx = hermes.DETECT["process_args"]
+        self.assertTrue(re.search(rx, line))
+        self.assertTrue(re.search(rx, line.replace("/Users/x/.hermes", "/srv/hermes-home")))  # any HERMES_HOME
+        self.assertIsNone(re.search(rx, "python3 -I -c import sys\\012sys.path.insert(0, '/opt/tool')"))
+        self.assertIsNone(re.search(rx, "/usr/bin/python3 /Users/x/hermes-agent/run.py"))
+
+
 class Watcher(unittest.TestCase):
     """The pane watcher of maxpm serve (server.watch_prompts) reads each recorded screen with the adapter's DETECT:
     the state it reports, and the question and options it sends the person."""
