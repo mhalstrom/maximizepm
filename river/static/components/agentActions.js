@@ -1,9 +1,8 @@
-// The manager section, each agent's queue, and the Stop dialog (a page dialog, not a browser alert).
-// Actions go through the server ops start_manager, queue_add, queue_remove, stop_agent, kill_agent; Open session
-// shows the agent's session on the Sessions tab (#4687).
-import { $, esc, ago } from "../lib.js";
+// The manager section and each agent's queue. Actions go through the server ops start_manager, queue_add and
+// queue_remove; Open session shows the agent's session on the Sessions tab (#4687). A stop or an end of a session is
+// the End dialog (endSession.js, #5041); the Stop dialog that was here had no button left to open it (#5403).
+import { esc, ago } from "../lib.js";
 import { chip } from "./chip.js";
-import { makeDialog } from "./dialog.js";
 
 // The Manager section above Agents: none running (Start manager), or the one running with its last actions.
 export function managerHtml(S) {
@@ -36,55 +35,4 @@ export function hasSession(S, name) {
 }
 export function sessionButton(S, name) {
   return hasSession(S, name) ? `<button class="btn" data-session-go="${esc(name)}" title="Open the session of ${esc(name)} in the Sessions tab: its chat, its item, and what waits for you there">Open session</button>` : "";
-}
-
-// The buttons on an agent row: Open session, and Stop for a session that is not stopped.
-export function agentButtons(a, S) {
-  if (a.kind === "human") return "";
-  const b = sessionButton(S, a.name) + (a.state !== "stopped" ? `<button class="btn" data-stop-agent="${esc(a.name)}">Stop</button>` : "");
-  return b ? `<div class="actions" style="margin-top:4px">${b}</div>` : "";
-}
-
-let dlg = null, done = null;
-function el() {
-  let d = $("#stopDlg");
-  if (d) return d;
-  d = document.createElement("div");
-  d.id = "stopDlg"; d.className = "hidden";
-  d.setAttribute("role", "dialog"); d.setAttribute("aria-modal", "true");
-  d.innerHTML = '<div class="box"></div>';
-  document.body.appendChild(d);
-  dlg = makeDialog(d, { onClose: () => finish(null) });
-  d.addEventListener("click", (e) => {
-    const q = (s) => d.querySelector(s);
-    if (e.target === d) return;  // the overlay: makeDialog closes it (#5027)
-    if (e.target.closest("[data-stop-cancel]")) return dlg.close();
-    const reason = q("#stopReason").value.trim();
-    if (e.target.closest("[data-stop-go]")) { finish({ reason, kill: false }); return dlg.close(); }
-    if (e.target.closest("[data-kill-ask]")) { q("#killConfirm").classList.remove("hidden"); return; }
-    if (e.target.closest("[data-kill-go]")) { finish({ reason, kill: true }); return dlg.close(); }
-  });
-  return d;
-}
-function finish(v) { const r = done; done = null; if (r) r(v); }
-
-// Ask for the reason; resolves to {reason, kill} or null. Kill shows only for a session with a PID on this
-// host, and needs a second confirm.
-export function chooseStop(a) {
-  el();
-  $("#stopDlg .box").innerHTML = `
-    <h2 style="margin:0" title="A stop is a request: the agent commits finished work, releases its item, and ends. A waiting agent ends at once.">Stop ${esc(a.name)}</h2>
-    <div class="form"><label title="Optional; the agent sees it">Why<input id="stopReason" placeholder="the plan changed"></label></div>
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
-      <button class="btn" data-stop-cancel="1">Cancel</button>
-      ${a.can_kill ? `<button class="btn" data-kill-ask="1" title="Emergency only">Kill process…</button>` : ""}
-      <button class="btn primary" data-stop-go="1">Ask it to stop</button>
-    </div>
-    ${a.can_kill ? `<div id="killConfirm" class="hidden" style="margin-top:10px;padding:8px;border:1px solid var(--line);border-radius:8px">
-      <b>Kill PID ${esc(a.pid)} now?</b> Emergency only: uncommitted work in its folder is lost. MaximizePM releases its items, goals, and targets.
-      <div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="btn primary" data-kill-go="1">Kill ${esc(a.name)}</button></div></div>` : ""}`;
-  if (done) finish(null);
-  dlg.open();
-  $("#stopReason").focus();
-  return new Promise(r => { done = r; });
 }

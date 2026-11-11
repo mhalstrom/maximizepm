@@ -5,7 +5,6 @@ import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
 import { makeDialog, ASK_AGAIN_MS } from "./components/dialog.js";
 import { agentStart } from "./components/agentStart.js";
 import { chooseLaunch, launchArgs } from "./components/launchDialog.js";
-import { chooseStop } from "./components/agentActions.js";
 import { archiveProject, restoreProject } from "./components/archiveProject.js";
 import { openTerminal } from "./components/terminalDialog.js";
 import { GRAPH_LIMITS } from "./components/graphText.js";
@@ -278,14 +277,6 @@ document.addEventListener("click", async (e) => {
     try { const r = await act("start_manager", launchArgs(ch)); toast(`Started ${r.agent} as ${r.session_name}, the manager`); } catch (e) { /* toast shown */ }
     return; }
   if (t.dataset.terminal) return openTerminal(t.dataset.terminal);
-  if (t.dataset.stopAgent) {
-    if (!actor()) return toast("Choose your name in 'You are' first", true);
-    const a = S.agents.find(x => x.name === t.dataset.stopAgent); if (!a) return;
-    const ch = await chooseStop(a); if (!ch) return;
-    try { const r = await act(ch.kill ? "kill_agent" : "stop_agent", { agent: a.name, reason: ch.reason });
-      toast(ch.kill ? `Killed ${a.name}; released ${r.released.length} item(s). Check its folder for uncommitted work.` : `Asked ${a.name} to stop: it ends ${r.ends}`);
-    } catch (e) { /* toast shown */ }
-    return; }
   if (t.dataset.qremove) { await act("queue_remove", { agent: t.dataset.qremove, ref: t.dataset.ref }).catch(() => {}); return; }
   const la = t.closest("[data-launch]"); if (la) {
     if (la.dataset.busy) return; la.dataset.busy = "1"; setTimeout(() => delete la.dataset.busy, 4000);

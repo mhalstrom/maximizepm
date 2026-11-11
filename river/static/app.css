@@ -207,7 +207,6 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
   #setup .su-opt { display: flex; flex-wrap: wrap; margin: 4px 0 0; }
   #setup .su-opt > input:not([type=checkbox]), #setup .su-opt > select { flex: 1 1 100%; width: auto; }
 }
-#stopDlg { --dlg-z: 16; --dlg-w: var(--w-dlg-s); }
 #launchDlg { --dlg-z: 16; --dlg-w: var(--w-dlg-m); }
 /* The launch dialog (components/launchDialog.js): the profile's options under More, closed until a click. */
 .ld-warn { color: var(--warn); }

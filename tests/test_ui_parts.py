@@ -153,3 +153,11 @@ class TimeTexts(unittest.TestCase):
                for n, line in enumerate(p.read_text().splitlines(), 1)
                if re.search(r"\bago\([^`]*?\)\)?\}?\s*ago\b", line)]
         self.assertEqual(bad, [])
+
+
+class Dialogs(unittest.TestCase):
+    def test_every_dialog_of_the_part_is_a_modal_dialog(self):
+        # The page's keys and refreshes wait while a [role=dialog] shows; the End dialog had no role (#5403).
+        text = (STATIC / "components" / "dialog.js").read_text()
+        self.assertIn('if (!el.hasAttribute("role")) el.setAttribute("role", "dialog");', text)
+        self.assertIn('el.setAttribute("aria-modal", "true");', text)
