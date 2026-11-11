@@ -2171,6 +2171,24 @@ class LaunchInTmux(unittest.TestCase):
                          ("Do you want to proceed?", "cd ~/Projects/shop && grep -n wait cli.py", 3))
         self.assertEqual(server.watch_prompts(self.c)["waiting"], {name: "Do you want to proceed?"})
 
+    def test_the_lines_in_a_menus_box_under_the_menu_belong_to_the_prompt(self):
+        # #5213: Hermes's command approval has the reason under its options, inside the same box; the watcher took
+        # only a rule or a key hint under a menu, so the Hermes adapter had to call the reason line a rule.
+        import re
+        box = ["╭" + "─" * 40 + "╮", "│ ⚠️  Dangerous Command" + " " * 17 + "│", "│" + " " * 40 + "│",
+               "│ rm -rf /tmp/probe /etc/probe" + " " * 11 + "│", "│" + " " * 40 + "│",
+               "│ ❯ 1. Allow once" + " " * 24 + "│", "│   2. Deny" + " " * 30 + "│", "│" + " " * 40 + "│",
+               "│ delete in root path" + " " * 20 + "│", "╰" + "─" * 40 + "╯", "", "  ↑/↓ to select, Enter to confirm"]
+        rx = re.compile("Allow once")
+        p = server._prompt_found(box, rx)
+        self.assertEqual(p["options"], [("1. Allow once", True), ("2. Deny", False)])
+        self.assertEqual(p["frame_end"], 10)
+        self.assertIsNone(server._prompt_found(box + ["✢ Thinking… (3s · esc to interrupt)"], rx))  # more under the box
+        # With no box, text under the menu is no part of the prompt, as before.
+        bare = ["Dangerous Command", "❯ 1. Allow once", "  2. Deny", "", "delete in root path"]
+        self.assertIsNone(server._prompt_found(bare, rx))
+        self.assertIsNotNone(server._prompt_found(bare[:4], rx))
+
     def test_every_start_opens_a_tmux_pane_and_the_page_says_when_tmux_is_missing(self):
         from unittest import mock
         core.register(self.c, "mark", human=True)

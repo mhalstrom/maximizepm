@@ -1478,7 +1478,9 @@ def _prompt_parts(tail, layout=None):
     sentence that asks (up to its question mark), or None; "options": [(text, selected)]: a menu, with the line
     the marker (❯ or ›) is on selected; "hint": the line that names keys (Enter to confirm · Esc to cancel)}.
     A menu is the marked line and the lines next to it whose text starts in the same column (numbered or not:
-    Claude Code's trust question lists "No, exit" and "Yes, I trust this folder" with no numbers)."""
+    Claude Code's trust question lists "No, exit" and "Yes, I trust this folder" with no numbers). "frame_end": the
+    line after the box the menu is in (the menu's last line + 1 when no frame character starts its line): the lines
+    under the menu inside its box belong to the prompt (Hermes puts the reason of a command approval there, #5213)."""
     lay = layout or _layout()
     lines = [re.sub(f"^\\s*[{lay['box']}]", "", x).rstrip(f" {lay['frame']}") for x in tail]
     hint = next((m.group(0) for m in map(lay["hint"].search, lines) if m), None)
@@ -1500,20 +1502,25 @@ def _prompt_parts(tail, layout=None):
         while end < len(lines) and option(lines[end]):
             end += 1
         options = [(m.group(3).strip() if n == at else lines[n].strip(), n == at) for n in range(top, end)]
+        framed = re.compile(f"^\\s*[{lay['box']}]")
+        frame_end = end
+        if framed.match(tail[at]):
+            while frame_end < len(tail) and framed.match(tail[frame_end]):
+                frame_end += 1
     question, qat = None, None
     for n in range(top - 1, -1, -1):
         if "?" in lines[n]:
             question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
             break
     return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
-            "top": top, "end": end if options else None, "lines": lines,
+            "top": top, "end": end if options else None, "frame_end": frame_end if options else None, "lines": lines,
             **_prompt_command(lines[:qat] if qat is not None else [], lay)}
 
 
 def _prompt_found(tail, rx, layout=None):
     """The parts of the prompt (_prompt_parts) that a pane's last lines show, or None (#4943). A prompt is the last
-    thing on the screen: below its menu (or, with no menu, below the last line that matches prompt_pattern) come
-    only a key hint, a frame, or a rule. Claude Code and Codex hide the input box and the spinner while they ask.
+    thing on the screen: below its menu and the rest of the menu's box (or, with no menu, below the last line that
+    matches prompt_pattern) come only a key hint, a frame, or a rule. Claude Code and Codex hide the input box and the spinner while they ask.
     Before, a match anywhere in the last lines was a prompt: a working session whose reply ended in "Do you want
     to continue with ...?" waited at a prompt, and the person's queued message (marked ❯) and the tool call lines
     under it were its options; an answer would have typed a choice into the working session. Also no prompt: a
@@ -1525,10 +1532,12 @@ def _prompt_found(tail, rx, layout=None):
     parts = _prompt_parts(tail, lay)
     lines, top, end = parts["lines"], parts["top"], parts["end"]
     if end is None:
-        end = max(n for n, x in enumerate(tail) if rx.search(x)) + 1
+        end = under = max(n for n, x in enumerate(tail) if rx.search(x)) + 1
     elif top > 0 and lay["rule"].match(lines[top - 1]):
         return None  # the input box: a rule, then the marked line with what the person typed
-    if not all(_footer(x, lay) for x in lines[end:]):
+    else:
+        under = parts["frame_end"]  # the lines in the menu's box under it are the prompt's (#5213)
+    if not all(_footer(x, lay) for x in lines[under:]):
         return None  # more under it: the spinner, the input box, the status line, or the next tool call
     if not any(rx.search(x) for x in tail[min(parts["start"], end - 1):]):
         return None
