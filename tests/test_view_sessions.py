@@ -467,9 +467,14 @@ class Adopt(Base):
         import subprocess
         from tests.test_server import FakeTmux
         super().setUp()
-        self.platform, core.PLATFORM = core.PLATFORM, "linux"
+        # Restored by addCleanup: a skip below (no ps in an agent sandbox) raises in setUp, and then tearDown does not
+        # run, so the next test file found tmux at /usr/bin/tmux and the platform linux (#5292).
+        self.addCleanup(setattr, core, "PLATFORM", core.PLATFORM)
+        self.addCleanup(setattr, server, "TMUX_RUNNER", None)
+        self.addCleanup(setattr, core, "tmux_path", core.tmux_path)
+        core.PLATFORM = "linux"
         self.tmux = server.TMUX_RUNNER = FakeTmux()
-        self.tmux_path, core.tmux_path = core.tmux_path, lambda: "/usr/bin/tmux"
+        core.tmux_path = lambda: "/usr/bin/tmux"
         roots, core.transcripts_root = core.transcripts_root, lambda: self.root
         self.addCleanup(setattr, core, "transcripts_root", roots)
         self.proc = subprocess.Popen(["sleep", "60"])  # the agent CLI in its Terminal tab
@@ -483,7 +488,6 @@ class Adopt(Base):
         self.write(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn", cwd=self.dir.name))
 
     def tearDown(self):
-        core.PLATFORM, server.TMUX_RUNNER, core.tmux_path = self.platform, None, self.tmux_path
         server.ADOPT["failed"].clear()
         super().tearDown()
 
@@ -737,9 +741,14 @@ class Revive(Base):
         import subprocess
         from tests.test_server import FakeTmux
         super().setUp()
-        self.platform, core.PLATFORM = core.PLATFORM, "linux"
+        # Restored by addCleanup: a skip below (no ps in an agent sandbox) raises in setUp, and then tearDown does not
+        # run, so the next test file found tmux at /usr/bin/tmux and the platform linux (#5292).
+        self.addCleanup(setattr, core, "PLATFORM", core.PLATFORM)
+        self.addCleanup(setattr, server, "TMUX_RUNNER", None)
+        self.addCleanup(setattr, core, "tmux_path", core.tmux_path)
+        core.PLATFORM = "linux"
         self.tmux = server.TMUX_RUNNER = FakeTmux()
-        self.tmux_path, core.tmux_path = core.tmux_path, lambda: "/usr/bin/tmux"
+        core.tmux_path = lambda: "/usr/bin/tmux"
         roots, core.transcripts_root = core.transcripts_root, lambda: self.root
         self.addCleanup(setattr, core, "transcripts_root", roots)
         proc = subprocess.Popen(["sleep", "60"])  # the agent CLI, which then ends with no stop (a crash)
@@ -756,7 +765,6 @@ class Revive(Base):
         self.write(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn", cwd=self.dir.name))
 
     def tearDown(self):
-        core.PLATFORM, server.TMUX_RUNNER, core.tmux_path = self.platform, None, self.tmux_path
         server.REVIVE["at"].clear()
         super().tearDown()
 
