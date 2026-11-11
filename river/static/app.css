@@ -120,6 +120,10 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 /* A narrow screen: the controls of a heading go to a second line, not off screen (#4717, #4718). */
 .panel h2 { flex-wrap: wrap; row-gap: 6px; }
 .panel h2 > .btn, .panel h2 > label { white-space: nowrap; }
+/* A checkbox label in a heading is a filter, not a title: the size and weight of the other filters (#5313). */
+.panel h2 > label { font-size: var(--fs-m); font-weight: 400; color: var(--muted); }
+/* A checkbox and a radio take the page's accent in both themes, not the browser's blue (#5313). */
+input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
 .row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 6px; border-top: 1px solid var(--line); cursor: pointer; }
 .row:first-child { border-top: none; }
 .row:hover { background: var(--bg); }

@@ -32,7 +32,7 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
   /* !important: some views set a smaller size by an id (the drawer, the side panel, the table filters). */
   input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { font-size: 16px !important; }
   input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=hidden]), select { min-height: 40px; }
-  input[type=checkbox], input[type=radio] { width: 22px; height: 22px; }
+  input[type=checkbox], input[type=radio] { width: calc(var(--sp-6) + var(--sp-0)); height: calc(var(--sp-6) + var(--sp-0)); }
 
   /* The header: the logo and the tabs in one row (the tabs scroll sideways), then the search with a ⋯ button that
      shows the other controls (theme, relay, update, You are). "You are" shows by itself until a name is chosen. */
