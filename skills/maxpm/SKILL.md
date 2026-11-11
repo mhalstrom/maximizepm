@@ -629,7 +629,7 @@ person's own rules in this queue. Follow them like the rules of this guide.
 The user states a new rule for the sessions ("from now on ..."): add it as a
 policy, not as a note in your memory files, which no other agent reads:
 `maxpm policy add "<rule>" --reason "<why>" --source "<person> <date>"
-[--project P] [--role R] [--adds-to g<n>]`, and name it in your item's output
+[--project P | --folder F] [--role R] [--adds-to g<n>]`, and name it in your item's output
 (`done <id> --output "... policy p12"`). A rule that must hold every time
 becomes code or a setting: add a task for it.
 

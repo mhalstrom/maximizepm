@@ -8426,6 +8426,37 @@ class Policies(Base):
             cli.render_manage(m)
         self.assertIn("and 4 policy(ies) of projects or other roles", out.getvalue())
 
+    def test_a_folder_policy_reaches_every_project_of_the_folder(self):
+        # Several projects share one folder (#5376): a folder policy applies to each of their sessions, by the
+        # session's folder or by the folder of its item's project, and to no session elsewhere.
+        shared = os.path.join(self.dir.name, "repo")
+        os.makedirs(os.path.join(shared, "sub"))
+        core.project_add(self.c, "front", path=shared)
+        core.project_add(self.c, "back", path=shared)
+        f = core.policy_add(self.c, "Rule F", "reason F", folder=shared, role="worker")
+        self.assertEqual(f["folder"], os.path.realpath(shared))
+        self.assertTrue(f["scope"].startswith("user: folder ") and f["scope"].endswith("repo, worker"), f["scope"])
+        self.assertIn(f["pid"], self.ids(core.policies_for(self.c, ["back"], "worker")))
+        self.assertIn(f["pid"], self.ids(core.policies_for(self.c, [], "worker", cwd=os.path.join(shared, "sub"))))
+        self.assertNotIn(f["pid"], self.ids(core.policies_for(self.c, ["api", "web"], "worker")))
+        self.assertNotIn(f["pid"], self.ids(core.policies_for(self.c, ["front"], "expert")))
+        self.assertNotIn(f["pid"], self.ids(core.policies_for(self.c, role="manager")))  # no manager role
+        g = core.policy_add(self.c, "Rule FM", "reason", folder=shared, role="manager")
+        self.assertIn(g["pid"], self.ids(core.policies_for(self.c, role="manager")))
+        with self.assertRaisesRegex(RiverError, "not both"):
+            core.policy_add(self.c, "x", "y", project="web", folder=shared)
+        with self.assertRaisesRegex(RiverError, "no folder"):
+            core.policy_add(self.c, "x", "y", folder=os.path.join(self.dir.name, "nope"))
+        e = core.policy_edit(self.c, f["pid"], project="web")
+        self.assertEqual((e["folder"], e["scope"]), (None, "user: web, worker"))
+        e = core.policy_edit(self.c, f["pid"], folder=shared)
+        self.assertEqual((e["project"], e["folder"]), (None, os.path.realpath(shared)))
+        self.assertEqual(core.policy_edit(self.c, f["pid"], no_folder=True)["scope"], "user: worker")
+        # go passes its folder: a session in a subfolder of the shared repo gets the folder policy.
+        h = core.policy_add(self.c, "Rule FG", "reason", folder=shared)
+        b = core.go(self.c, os.path.join(shared, "sub"), "w2")
+        self.assertIn(h["pid"], self.ids(b["policies"]))
+
     def test_edit_and_retire(self):
         p = core.policy_edit(self.c, self.p["pid"], text="Rule P2", no_project=True, role="expert", items=[""],
                              adds_to="none")

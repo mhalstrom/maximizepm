@@ -856,6 +856,7 @@ CREATE INDEX IF NOT EXISTS sent_prompts_agent ON sent_prompts(agent, id);
 CREATE TABLE IF NOT EXISTS policies (
   id          INTEGER PRIMARY KEY,
   project_id  INTEGER REFERENCES projects(id),
+  folder      TEXT,                      -- a folder: every session whose folder is in it (#5376)
   role        TEXT,
   text        TEXT NOT NULL,
   source      TEXT NOT NULL,             -- who decided it, and when: 'mark 2026-11-11'
@@ -1128,8 +1129,11 @@ def _migrate(conn):
         conn.execute("ALTER TABLE projects ADD COLUMN path TEXT")
     if "target" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN target TEXT")
-    if "adds_to" not in {r["name"] for r in conn.execute("PRAGMA table_info(policies)")}:
+    pcols = {r["name"] for r in conn.execute("PRAGMA table_info(policies)")}
+    if "adds_to" not in pcols:
         conn.execute("ALTER TABLE policies ADD COLUMN adds_to TEXT")
+    if "folder" not in pcols:
+        conn.execute("ALTER TABLE policies ADD COLUMN folder TEXT")
     if "nudged_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN nudged_at TEXT")
     acols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
@@ -12657,7 +12661,7 @@ def global_policies():
     out = []
     for r in rows:
         roles = _global_roles(r.get("role"))
-        out.append({"id": r["id"], "pid": r["id"], "kind": "global", "project": None,
+        out.append({"id": r["id"], "pid": r["id"], "kind": "global", "project": None, "folder": None,
                     "role": ", ".join(roles) or None, "roles": roles,
                     "text": r["text"], "reason": r["reason"], "source": r["source"], "items": [], "adds_to": None,
                     "scope": "global: " + (", ".join(roles) or "queue"), "created_by": None, "created_at": None,
@@ -12725,9 +12729,29 @@ def _policy_items(conn, items):
     return " ".join(map(str, ids)) or None
 
 
+def _policy_folder(path):
+    """A policy's folder as it is kept: absolute, no link, no slash at the end; it must exist (#5376)."""
+    f = os.path.realpath(os.path.expanduser(str(path).strip()))
+    if not str(path).strip() or not os.path.isdir(f):
+        raise RiverError(f"no folder {path!r}; a policy names a folder that exists: --folder ~/Projects/<name>")
+    return _norm_path(f).rstrip("/") or "/"
+
+
+def _show_folder(f):
+    home = _norm_path(os.path.expanduser("~")).rstrip("/")
+    return "~" + f[len(home):] if f == home or f.startswith(home + "/") else f
+
+
+def _in_folder(path, folder):
+    """True when path is the folder or a path inside it."""
+    p = _norm_path(os.path.realpath(os.path.expanduser(path))).rstrip("/")
+    return p == folder or p.startswith(folder.rstrip("/") + "/")
+
+
 def policy_scope(p):
-    """The scope of a user policy in words: user: queue, the project, the role, or both."""
-    return "user: " + (", ".join(x for x in (p.get("project"), p.get("role")) if x) or "queue")
+    """The scope of a user policy in words: user: queue, the project or the folder, the role, or both."""
+    where = p.get("project") or ("folder " + _show_folder(p["folder"]) if p.get("folder") else None)
+    return "user: " + (", ".join(x for x in (where, p.get("role")) if x) or "queue")
 
 
 def _policy_view(conn, r):
@@ -12747,32 +12771,39 @@ def _adds_to(gid):
     return _global_policy(gid)["id"] if gid else None
 
 
-def policy_add(conn, text, reason, source=None, project=None, role=None, items=None, actor=None, adds_to=None):
+def policy_add(conn, text, reason, source=None, project=None, role=None, items=None, actor=None, adds_to=None,
+               folder=None):
     """Add a user policy. source says who decided it and when; with none, the actor and today's date. adds_to: the
-    global policy (g<n>) it adds to."""
+    global policy (g<n>) it adds to. folder: every session whose folder (or its projects' folder) is in it, for the
+    projects that share one folder (#5376); a policy names a project or a folder, not both."""
     text, reason = (text or "").strip(), (reason or "").strip()
     if not text:
         raise RiverError("say the rule: maxpm policy add \"<rule>\" --reason \"<why>\" --source \"<who, date>\"")
     if not reason:
         raise RiverError("say why the rule exists, so a session can judge a case it does not name: "
                          "maxpm policy add \"<rule>\" --reason \"<why>\"")
+    if project and folder:
+        raise RiverError("a policy names a project or a folder, not both: --project <name> or --folder <path>")
     pid = _project(conn, project)["id"] if project else None
+    folder = _policy_folder(folder) if folder else None
     role = _policy_role(role)
     source = (source or "").strip() or f"{actor or 'unknown'} {now().date().isoformat()}"
     adds_to = _adds_to(adds_to)
     with tx(conn):
-        cur = conn.execute("INSERT INTO policies(project_id, role, text, source, reason, items, adds_to, created_by, "
-                           "created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                           (pid, role, text, source, reason, _policy_items(conn, items), adds_to, actor, iso(now())))
+        cur = conn.execute("INSERT INTO policies(project_id, folder, role, text, source, reason, items, adds_to, "
+                           "created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (pid, folder, role, text, source, reason, _policy_items(conn, items), adds_to, actor,
+                            iso(now())))
         p = _policy_view(conn, _policy_row(conn, cur.lastrowid))
         _event(conn, None, actor, f"policy {p['pid']} added ({p['scope']}): {text}")
     return p
 
 
 def policy_edit(conn, pid, text=None, reason=None, source=None, project=None, no_project=False, role=None,
-                items=None, actor=None, adds_to=None):
-    """Change a policy: its text, reason, source, scope (project, role; role any clears it), or its item links
-    (items replaces them; an empty list clears them)."""
+                items=None, actor=None, adds_to=None, folder=None, no_folder=False):
+    """Change a policy: its text, reason, source, scope (project or folder, role; role any clears it), or its item
+    links (items replaces them; an empty list clears them). A project replaces the folder, and a folder the
+    project."""
     r = _policy_row(conn, pid)
     ch = {}
     for k, v in (("text", text), ("reason", reason), ("source", source)):
@@ -12782,10 +12813,20 @@ def policy_edit(conn, pid, text=None, reason=None, source=None, project=None, no
             ch[k] = v.strip()
     if project and no_project:
         raise RiverError("give --project <name> or --no-project, not both")
+    if folder and no_folder:
+        raise RiverError("give --folder <path> or --no-folder, not both")
+    if project and folder:
+        raise RiverError("a policy names a project or a folder, not both: --project <name> or --folder <path>")
     if project:
         ch["project_id"] = _project(conn, project)["id"]
+        ch["folder"] = None
     elif no_project:
         ch["project_id"] = None
+    if folder:
+        ch["folder"] = _policy_folder(folder)
+        ch["project_id"] = None
+    elif no_folder:
+        ch["folder"] = None
     if role is not None:
         ch["role"] = _policy_role(role)
     if items is not None:
@@ -12794,7 +12835,7 @@ def policy_edit(conn, pid, text=None, reason=None, source=None, project=None, no
         ch["adds_to"] = None if adds_to.strip().lower() in ("", "none") else _adds_to(adds_to)
     if not ch:
         raise RiverError(f"say what changes: maxpm policy edit p{r['id']} --text|--reason|--source|--project|"
-                         f"--no-project|--role|--item|--adds-to")
+                         f"--no-project|--folder|--no-folder|--role|--item|--adds-to")
     with tx(conn):
         conn.execute(f"UPDATE policies SET {', '.join(k + '=?' for k in ch)}, changed_at=? WHERE id=?",
                      (*ch.values(), iso(now()), r["id"]))
@@ -12836,21 +12877,29 @@ def policy_list(conn, project=None, role=None, kind=None):
         args.append(_policy_role(role))
     rows = conn.execute("SELECT x.*, p.name project FROM policies x LEFT JOIN projects p ON p.id=x.project_id "
                         + ("WHERE " + " AND ".join(q) if q else "")
-                        + " ORDER BY x.project_id IS NOT NULL, p.rank, p.name, x.role IS NOT NULL, x.role, x.id", args)
+                        + " ORDER BY x.project_id IS NOT NULL OR x.folder IS NOT NULL, x.folder, p.rank, p.name, "
+                          "x.role IS NOT NULL, x.role, x.id", args)
     return out + [_policy_view(conn, r) for r in rows]
 
 
-def policies_for(conn, projects=(), role=None):
-    """The policies that apply to a session, global ones first: the queue's, those of its projects, and those of its
-    role (also in its projects). A manager runs every project: it gets the queue's and every manager policy, and the
-    count of the project policies it does not see."""
+def policies_for(conn, projects=(), role=None, cwd=None):
+    """The policies that apply to a session, global ones first: the queue's, those of its projects and its folders
+    (cwd and the folders of its projects), and those of its role (also in its projects). A manager runs every
+    project: it gets the queue's and every manager policy, and the count of the project policies it does not see."""
     roles = _policy_roles(role)
+    folders = [cwd] if cwd else []
+    for name in projects:
+        r = conn.execute("SELECT path FROM projects WHERE name=?", (name,)).fetchone()
+        if r and r["path"]:
+            folders.append(r["path"])
     out = []
     for p in policy_list(conn):
         if role == "manager":
-            hit = "manager" in p["roles"] or (not p["roles"] and not p["project"])
+            hit = "manager" in p["roles"] or (not p["roles"] and not p["project"] and not p.get("folder"))
         else:
-            hit = (not p["project"] or p["project"] in projects) and (not p["roles"] or bool(roles & set(p["roles"])))
+            where = ((not p["project"] or p["project"] in projects)
+                     and (not p.get("folder") or any(_in_folder(f, p["folder"]) for f in folders)))
+            hit = where and (not p["roles"] or bool(roles & set(p["roles"])))
         if hit:
             out.append(p)
     return out
@@ -12905,7 +12954,7 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         names = list(brief.get("projects") or [])
         if it and it.get("project") and it["project"] not in names:
             names.append(it["project"])
-        brief["policies"] = policies_for(conn, names, brief["role"])
+        brief["policies"] = policies_for(conn, names, brief["role"], cwd)
     return brief
 
 

@@ -1300,7 +1300,7 @@ def build_parser():
     x = sts.add_parser("move", help="move a step within its project"); x.add_argument("id", type=int)
     x.add_argument("to", type=int, help="new position (1 is first)")
     po = sub.add_parser("policy", help="the rules sessions follow, each with its source and reason: global ones ship "
-                        "with MaximizePM, user ones are yours (queue, project, role); the briefings print the ones "
+                        "with MaximizePM, user ones are yours (queue, project or folder, role); the briefings print the ones "
                         "that apply")
     pos = po.add_subparsers(dest="polcmd", required=True)
     x = pos.add_parser("list", help="every policy, or those of one project or role")
@@ -1317,12 +1317,15 @@ def build_parser():
     x.add_argument("--reason", required=True, help="why the rule exists")
     x.add_argument("--source", help="who decided it, and when: 'mark 2026-11-11' (default: you, today)")
     x.add_argument("--project", help="only sessions in this project")
+    x.add_argument("--folder", help="only sessions in this folder: every project of it (in place of --project)")
     x.add_argument("--role", help="only this role: " + ", ".join(core.POLICY_ROLES))
     x.add_argument("--item", action="append", metavar="ID", help="an item the rule came from (repeatable)")
     x.add_argument("--adds-to", metavar="G", help="the global policy (g3) this rule adds to")
     x = pos.add_parser("edit", help="change a policy's text, reason, source, scope or items"); x.add_argument("id")
     x.add_argument("--text"); x.add_argument("--reason"); x.add_argument("--source")
     x.add_argument("--project"); x.add_argument("--no-project", action="store_true", help="every project")
+    x.add_argument("--folder", help="every session in this folder (replaces the project)")
+    x.add_argument("--no-folder", action="store_true", help="no longer only one folder")
     x.add_argument("--role", help="a role, or any")
     x.add_argument("--item", action="append", metavar="ID", help="replace the item links (--item '' clears them)")
     x.add_argument("--adds-to", metavar="G", help="the global policy it adds to (none: no longer)")
@@ -2552,10 +2555,11 @@ def dispatch(conn, a, actor):
         if a.polcmd == "show":
             return core.policy_show(conn, a.id)
         if a.polcmd == "add":
-            return core.policy_add(conn, a.text, a.reason, a.source, a.project, a.role, a.item, actor, a.adds_to)
+            return core.policy_add(conn, a.text, a.reason, a.source, a.project, a.role, a.item, actor, a.adds_to,
+                                   a.folder)
         if a.polcmd == "edit":
             return core.policy_edit(conn, a.id, a.text, a.reason, a.source, a.project, a.no_project, a.role,
-                                    a.item, actor, a.adds_to)
+                                    a.item, actor, a.adds_to, a.folder, a.no_folder)
         return core.policy_retire(conn, a.id, actor)
     if c == "release":
         if a.id is None:
@@ -4032,7 +4036,7 @@ def render(a, res):
         else:
             if not res:
                 print("(no policies: maxpm policy add \"<rule>\" --reason \"<why>\" --source \"<who, date>\" "
-                      "[--project P] [--role R] [--adds-to g<n>])")
+                      "[--project P | --folder F] [--role R] [--adds-to g<n>])")
             for p in res:
                 print(policy_line(p))
         return
