@@ -1,0 +1,40 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+                                                                                                                       ┃
+ ● Read notes.txt 1 line read                                                                                          ┃
+                                                                                                                       ┃
+ ❯ Thought for 2s                                                                                                      ┃
+                                                                                                                       ┃
+ $ Shell cat notes.txt 1 line…                                                                                         ┃
+   cat notes.txt                                                                                                       ┃
+                                                                                                                       ┃
+ ❯ Thought for 3s                                                                                                      ┃
+                                                                                                                       ┃
+ ● The file  notes.txt  contains the following content:                                                                ┃
+                                                                                                                       ┃
+   hello                                                                                                               ┃
+                                                                                                                       ┃
+   The command  cat notes.txt  was executed successfully, and the output is displayed. No further action is required.  ┃
+                                                                                                                       ┃
+ ❯ Use the bash tool to run: touch made.txt                                                                      23:47 ┃
+                                                                                                                       ┃
+ ❯ Thought for 5s                                                                                                      ┃
+                                                                                                                       ┃
+ ○ Shell touch made.txt                                                                                                ┃
+   touch made.txt                                                                                                      ┃
+                                                                                                                       ┃
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Running command                                                                                                      │
+│ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ touch made.txt                                                                                                   │ │
+│ ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│                                                                                                                      │
+│ Do you want to run this command?                                                                                     │
+│                                                                                                                      │
+│ ❯ 1. Yes                                                                                                             │
+│   2. Yes, and don't ask again for `touch` in this repo (/tmp/proj)                           │
+│   3. No, and tell Copilot what to do differently (Esc to stop)                                                       │
+│                                                                                                                      │
+│ ↑/↓ to navigate · enter to select · esc to cancel                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

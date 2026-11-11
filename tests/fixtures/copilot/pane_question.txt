@@ -1,0 +1,40 @@
+ [Current]  Sessions   Issues   Pull requests   Gists
+
+ ❯ Use the bash tool to run: touch made.txt                                                                      23:47 ┃
+                                                                                                                       ┃
+ ❯ Thought for 5s                                                                                                      ┃
+                                                                                                                       ┃
+ $ Shell touch made.txt No Content                                                                                     ┃
+   touch made.txt                                                                                                      ┃
+                                                                                                                       ┃
+ ❯ Thought for 5s                                                                                                      ┃
+                                                                                                                       ┃
+ ● The command  touch made.txt  was executed successfully. The file  made.txt  has been created in the current         ┃
+   directory.                                                                                                          ┃
+                                                                                                                       ┃
+ ❯ Call the ask_user tool now to ask me: which color do you like? Give the choices red and blue.                 23:48 ┃
+                                                                                                                       ┃
+ ❯ Thought for 4s                                                                                                      ┃
+                                                                                                                       ┃
+ ✗ Asked user Waiting for response "requestedSchema.properties": Required                                              ┃
+                                                                                                                       ┃
+ ❯ Thought for 4s                                                                                                      ┃
+                                                                                                                       ┃
+ ❯ Call ask_user with message "Which color?" and requestedSchema                                                 23:49 ┃
+   {"type":"object","properties":{"color":{"type":"string","enum":["red","blue"]}},"required":["color"]}               ┃
+                                                                                                                       ┃
+ ❯ Thought for 5s                                                                                                      ┃
+                                                                                                                       ┃
+ ○ Asking user Waiting for response                                                                                18s ┃
+                                                                                                                       ┃
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Copilot needs information.
+ Which color?
+
+ color:
+ ❯ red
+   blue
+   Other (type your answer)
+
+ ↑/↓ select · enter accept · ctrl+d decline · esc cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
