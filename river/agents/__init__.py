@@ -259,6 +259,8 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #                 when the input does not say (MaximizePM then looks at the processes below the session),
 #      "prompt":  working: the text that the person (or a session) typed, or None,
 #      "again":   idle: True when the agent ends its turn a second time after a hook kept it going (no reminder),
+#      "run":     the shell command that the agent is about to run (a hook before the tool call), or None: MaximizePM
+#                 may refuse it (core.push_guard, #5381); the hook records nothing else,
 #    }
 # DETECT = {
 #      "process":      the process name of the agent in the pane,
@@ -292,7 +294,7 @@ STATE_SOURCES = ("hook", "detect")
 STATE_KEYS = {"state": str, "session_id": str}
 HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str, type(None)),
                     "message": (str, type(None)), "call": (dict, type(None)), "shows": bool,
-                    "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool}
+                    "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool, "run": (str, type(None))}
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str}
@@ -796,7 +798,7 @@ class Adapter:
         if not got:
             return None
         return {"state": None, "event": "", "session_id": None, "message": None, "call": None, "shows": False,
-                "waits": None, "prompt": None, "again": False, **got}
+                "waits": None, "prompt": None, "again": False, "run": None, **got}
 
     def layout(self):
         """Its DETECT with the layout keys it leaves out (DETECT_LAYOUT): what the pane watcher reads a screen with."""

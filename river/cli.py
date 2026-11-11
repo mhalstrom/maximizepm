@@ -1571,6 +1571,10 @@ def activity_command(stdin=None, agent_id="claude"):
         res = core.hook_report(conn, agent_id, payload if isinstance(payload, dict) else {})
         if res["prompt"] or res["state"] == "idle":
             _record_hook_process(conn, res["agent"])
+        if res.get("deny"):
+            # A push or a launch while an alert is unread (#5381): Claude Code refuses the call and shows the reason.
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                     "permissionDecisionReason": res["deny"]}}))
         if res.get("remind"):
             # The Stop hook keeps the session for one more turn, to close its answered questions (#5001); Claude
             # Code sets stop_hook_active on the next Stop, so it reminds once.

@@ -581,6 +581,10 @@ answer the push expires and the item is open to everyone again.
 Every command ends with a line such as
 `[you: holds #12 20m left; inbox: 2 unread, 1 question to answer (maxpm --as you inbox)]`.
 When you see it, read your inbox before you continue.
+A push (`git push`, `gh pr merge`) or a `maxpm launch` waits while you have an
+unread alert or an item that someone blocked (setting `push_guard`): MaximizePM
+refuses the command and names the alert. Read it, do what it says, then run
+the command again only when it still applies.
 
 - `maxpm inbox`: unread messages and questions that wait for your answer.
   Add `--all` for read ones, `--peek` to leave them unread.

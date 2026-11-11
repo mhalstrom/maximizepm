@@ -4568,6 +4568,11 @@ class Models(Base):
 
     def setUp(self):
         super().setUp()
+        from unittest import mock
+        # A launch writes the Claude Code hook file beside the queue: the test's queue, never ~/.maximizepm (#5381).
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": self.path})
+        env.start()
+        self.addCleanup(env.stop)
         core.project_add(self.c, "a")
         core.project_path(self.c, "a", self.dir.name)
         for n in ("s1", "s2"):
@@ -8050,6 +8055,77 @@ class Activity(Base):
         row = self.c.execute("SELECT pid, pid_cmd, host FROM agents WHERE name='w'").fetchone()
         self.assertEqual((row["pid"], row["pid_cmd"], row["host"]), (4242, "claude --name w", core.this_host()))
         self.assertEqual(len(calls), 1)  # not on a tool call, and not again while that process runs
+
+
+class PushGuard(Base):
+    """#5381: the text rule 'read the inbox before a push' failed ten times. A push or a launch of a session waits
+    while it has an unread alert or a blocked item: the Claude Code hook before each Bash command refuses it."""
+    SID = Activity.SID
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "shop")
+        core.register(self.c, "boss")
+        core.register(self.c, "w")
+        self.item = self.add("shop", "Fix the build")
+        core.claim(self.c, self.item, "w")
+        core.record_claude_session(self.c, "w", self.SID)
+
+    def event(self, name, **more):
+        return core.activity_event(self.c, {"hook_event_name": name, "session_id": self.SID, **more}, env={})
+
+    def bash(self, command):
+        return self.event("PreToolUse", tool_name="Bash", tool_input={"command": command})
+
+    def test_a_push_waits_for_an_unread_alert(self):
+        before = self.c.execute("SELECT activity_at, activity_event FROM agents WHERE name='w'").fetchone()
+        self.assertIsNone(self.bash("git push origin main")["deny"])  # nothing unread
+        a = core.message(self.c, "alert", "Do not push: #12 must go first", to="w", actor="boss")[0]
+        r = self.bash("git -C ~/shop push origin main")
+        self.assertIn(f"alert #{a['id']} from boss: Do not push", r["deny"])
+        self.assertIn("maxpm --as w inbox", r["deny"])
+        self.assertIsNotNone(self.bash("maxpm launch --item 3")["deny"])
+        self.assertIsNotNone(self.bash("gh pr merge 7")["deny"])
+        # Other commands, a dry run, and the words in a message run.
+        for cmd in ("git status", "maxpm launch --item 3 --dry-run", 'git commit -m "fix the push"',
+                    'maxpm add "launch the site"', "maxpm --as w inbox"):
+            self.assertIsNone(self.bash(cmd)["deny"], cmd)
+        # The check records nothing: it runs before every Bash call.
+        self.assertEqual(tuple(self.c.execute("SELECT activity_at, activity_event FROM agents WHERE name='w'").fetchone()),
+                         tuple(before))
+        core.inbox(self.c, "w")
+        self.assertIsNone(self.bash("git push")["deny"])
+
+    def test_a_blocked_item_holds_a_push_and_the_setting_turns_it_off(self):
+        core.block(self.c, self.item, "waiting on the vendor", actor="w")
+        self.assertIsNone(self.bash("git push")["deny"])  # its own block: it pushes the parts that are done
+        core.block(self.c, self.item, "waiting on the vendor", actor="boss")
+        self.assertIn(f"#{self.item} is blocked: waiting on the vendor", self.bash("git push")["deny"])
+        core.message(self.c, "alert", "stop", to="w", actor="boss")
+        core.config_set(self.c, "push_guard", "")
+        self.assertIsNone(self.bash("git push")["deny"])
+        with self.assertRaisesRegex(RiverError, "push_guard is a regular expression"):
+            core.config_set(self.c, "push_guard", "(")
+
+    def test_the_hook_prints_claude_codes_deny(self):
+        import contextlib
+        import io
+        import json as _json
+        from unittest import mock
+        from river import agents, cli
+        hooks = core.activity_hook_settings()["hooks"]
+        self.assertEqual(hooks["PreToolUse"][0]["matcher"], "Bash")
+        core.message(self.c, "alert", "Do not push yet", to="w", actor="boss")
+        out = io.StringIO()
+        text = _json.dumps({"hook_event_name": "PreToolUse", "session_id": self.SID, "tool_name": "Bash",
+                            "tool_input": {"command": "git push"}})
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), mock.patch.object(sys, "stdin", io.StringIO(text)), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["report", "--hook", "claude"]), 0)
+        got = _json.loads(out.getvalue())["hookSpecificOutput"]
+        self.assertEqual((got["hookEventName"], got["permissionDecision"]), ("PreToolUse", "deny"))
+        self.assertIn("Do not push yet", got["permissionDecisionReason"])
+        self.assertEqual(set(agents.get("claude").read_hook({"hook_event_name": "PreToolUse"})), set(agents.HOOK_REPORT_KEYS))
 
 
 class ManagerWake(Base):

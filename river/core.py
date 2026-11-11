@@ -191,6 +191,12 @@ DEFAULT_SETTINGS = {
     # or on a background command, alerts the active manager; a permission prompt or a turn end with an item in
     # hand alerts it at once. 0s: no silence alert.
     "activity_silence": "10m",
+    # A shell command of a session that matches push_guard (a push, a merge of a pull request, a launch) is refused
+    # while the session has an unread alert or holds an item that someone blocked (#5381: the rule 'read the inbox
+    # before a push' in text failed ten times). The session reads its inbox, then runs the command again. Add a
+    # project's own writes (a test account) with a wider expression for that project. Empty: no check. Claude Code
+    # sessions that maxpm starts check it in a hook before each Bash command.
+    "push_guard": r"\bgit(\s+(-[Cc]\s+\S+|--?[\w-]+(=\S+)?))*\s+push\b|\bgh\s+pr\s+merge\b|\bmaxpm(\s+(--as\s+\S+|--?[\w-]+))*\s+launch\b(?![^|;&\n]*--dry-run)",
     # An agent that ended its turn at its CLI's prompt runs no river command. maxpm serve never types into its
     # pane (a stale session continues a large context), except the answer to a question it waits for there
     # (server.paste_answers, #5303); it starts fresh sessions instead. An agent is idle at its
@@ -1430,11 +1436,11 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             ok = False
         if not ok:
             raise RiverError("similar_min is a number above 0 and at most 1 (0.55), or off")
-    elif key == "prompt_pattern":
+    elif key in ("prompt_pattern", "push_guard"):
         try:
             re.compile(value)
         except re.error as e:
-            raise RiverError(f"prompt_pattern is a regular expression, and this one has an error: {e}")
+            raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
                  "max_sessions", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
@@ -8850,6 +8856,10 @@ def hook_report(conn, agent_id, payload, env=None):
     env = env if env is not None else os.environ
     rep = agents.get(agent_id).read_hook(payload)
     agent = activity_agent(conn, rep and rep["session_id"], env)
+    if rep and rep["run"] is not None:
+        # A hook before a shell command: a check only, nothing recorded (it runs before every Bash call).
+        return {"agent": agent, "event": rep["event"], "state": None, "prompt": False, "alert": None, "answered": [],
+                "remind": None, "deny": push_guard(conn, agent, rep["run"]) if agent else None}
     if not agent or not rep:
         return {"agent": agent, "event": rep["event"] if rep else str(payload.get("hook_event_name") or ""),
                 "state": None, "prompt": False, "alert": None, "answered": [], "remind": None}
@@ -8905,6 +8915,31 @@ def hook_report(conn, agent_id, payload, env=None):
         sync_needs_you(conn)  # the person's 'waits for you' of those questions closes now
     return {"agent": agent, "event": rep["event"], "state": state, "prompt": typed is not None, "alert": alert,
             "answered": answered, "remind": remind}
+
+
+def push_guard(conn, agent, command):
+    """Why MaximizePM refuses this shell command of the agent now, or None (#5381). A command that matches the setting
+    push_guard (a push, gh pr merge, a launch) waits while the agent has an unread alert (it may say 'stop', 'do not
+    push', or 'a prerequisite came first'), or holds an item that someone blocked. The text rule 'read the inbox
+    before a push' failed ten times; a refusal that names the alert does not."""
+    pat = setting(conn, "push_guard", agent=agent)
+    if not pat or not command or not re.search(pat, command):
+        return None
+    alerts = conn.execute(f"SELECT m.id, m.from_agent, m.body FROM messages m WHERE {_TO_ME} AND m.kind='alert' "
+                          "AND m.read_at IS NULL AND m.from_agent<>? ORDER BY m.id", (agent, agent, agent)).fetchall()
+    # A block that another agent or a person set: the agent's own block (it waits on an outside step) holds nothing.
+    blocked = conn.execute("SELECT id, blocked_reason FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                           "AND blocked_reason IS NOT NULL AND COALESCE(blocked_set_by, '')<>? ORDER BY id",
+                           (agent, agent)).fetchall()
+    if not alerts and not blocked:
+        return None
+    why = [f"alert #{m['id']} from {m['from_agent']}: {' '.join(m['body'].split())[:160]}" for m in alerts[:3]]
+    why += [f"#{b['id']} is blocked: {' '.join(b['blocked_reason'].split())[:120]}" for b in blocked[:2]]
+    more = len(alerts) + len(blocked) - len(why)
+    return ("MaximizePM holds this command (push_guard): " + "; ".join(why) + (f"; and {more} more" if more > 0 else "")
+            + f". Read it first: maxpm --as {agent} inbox"
+            + (f" (and maxpm --as {agent} show {blocked[0]['id']})" if blocked else "")
+            + ". Then do what it says, and run the command again only when it still applies.")
 
 
 def state_adapter(conn, agent):

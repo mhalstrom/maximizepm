@@ -112,7 +112,10 @@ def parse_command(words):
 
 # A tool call or a prompt says the session works; PermissionRequest names the tool call that waits on a permission
 # prompt, and the Notification permission_prompt says that the prompt shows; Stop says the turn ended (#4288).
-HOOK_EVENTS = ("PostToolUse", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop")
+# PreToolUse, for Bash only, passes the command before it runs: maxpm refuses a push or a launch while the session has
+# an unread alert or a blocked item (#5381).
+HOOK_EVENTS = ("PostToolUse", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop", "PreToolUse")
+MATCHERS = {"PostToolUse": "", "PermissionRequest": "", "PreToolUse": "Bash"}
 HOOK_FILE = "claude-hooks.json"  # beside the queue; claude --settings reads it
 
 STATE = {"state": "hook", "session_id": "hook"}
@@ -139,7 +142,7 @@ def hook_settings(report):
     import shlex
     run = [{"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--hook", "claude"]),
             "timeout": 10}]
-    return {"hooks": {ev: [{"matcher": "", "hooks": run}] if ev in ("PostToolUse", "PermissionRequest")
+    return {"hooks": {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
                       else [{"hooks": run}] for ev in HOOK_EVENTS}}
 
 
@@ -191,7 +194,11 @@ def read_hook(payload):
     ntype = str(payload.get("notification_type") or "")
     sid = payload.get("session_id")
     out = {"event": ev + (f":{ntype}" if ntype else ""), "session_id": sid if isinstance(sid, str) and sid else None}
-    if ev == "PostToolUse":
+    if ev == "PreToolUse":
+        inp = payload.get("tool_input")
+        cmd = inp.get("command") if isinstance(inp, dict) else None
+        out.update(state=None, run=cmd if isinstance(cmd, str) else "")
+    elif ev == "PostToolUse":
         out["state"] = "working"
     elif ev == "UserPromptSubmit":
         prompt = payload.get("prompt")
