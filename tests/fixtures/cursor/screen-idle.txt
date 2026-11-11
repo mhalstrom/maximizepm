@@ -1,0 +1,25 @@
+
+
+  Cursor Agent
+  v2026.11.11-043ef28
+  Tip: Use subagents to parallelize work and preserve context.
+
+
+  Run the shell command date, then tell me the year in one line.
+
+
+  I'll run date and report the year.
+
+  $ date 15s
+    Tue Nov 10 23:56:34 PST 2026
+
+  2026
+
+
+
+
+  → Add a follow-up
+
+
+  Auto · 6.1%
+  ~/work/app · main

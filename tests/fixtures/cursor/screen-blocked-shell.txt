@@ -1,0 +1,23 @@
+
+
+  Cursor Agent
+  v2026.11.11-043ef28
+  Tip: Use subagents to parallelize work and preserve context.
+
+
+  Run the shell command date, then tell me the year in one line.
+
+
+  I'll run date and report the year.
+
+  $ date Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  date in .
+
+ Run this command?
+ Not in allowlist: date
+  → Run (once) (y)
+    Add Shell(date) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)

@@ -1,0 +1,31 @@
+
+
+  Cursor Agent
+  v2026.11.11-043ef28
+  Tip: Use subagents to parallelize work and preserve context.
+
+
+  Run the shell command date, then tell me the year in one line.
+
+
+  I'll run date and report the year.
+
+  $ date 15s
+    Tue Nov 10 23:56:34 PST 2026
+
+  2026
+
+
+  Write the word ok into a new file named out.txt
+
+
+    Editing out.txt
+
+ ⠘⠆ Editing  57 tokens
+
+
+  → Write the word ok into a new file named out.txt
+
+
+  Auto · 6.2% · 1 file edited
+  ~/work/app · main

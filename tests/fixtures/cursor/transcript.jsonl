@@ -1,0 +1,22 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Nov 10, 2026, 11:56 PM (UTC-8)</timestamp>\n<user_query>\nRun the shell command date, then tell me the year in one line.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"I'll run `date` and report the year."},{"type":"tool_use","name":"Shell","input":{"command":"date","description":"Print current system date"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"2026"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"Your previous response was interrupted. Continue from where you left off."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"2026"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Nov 10, 2026, 11:57 PM (UTC-8)</timestamp>\n<user_query>\nWrite the word ok into a new file named out.txt\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"path":"/Users/person/work/app/out.txt","contents":"ok\n"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Wrote `ok` to `out.txt`."}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Nov 10, 2026, 11:58 PM (UTC-8)</timestamp>\n<user_query>\nWhat word did you write into out.txt? One line.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"/Users/person/work/app/out.txt"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"Your previous response was interrupted. Continue from where you left off."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Nov 10, 2026, 11:59 PM (UTC-8)</timestamp>\n<user_query>\nSay the word blue. Nothing else.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"blue"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"Your previous response was interrupted. Continue from where you left off."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"blue"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"Your previous response was interrupted. Continue from where you left off."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"blue"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"Your previous response was interrupted. Continue from where you left off."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"blue"}]}}
+{"type":"turn_ended","status":"success"}

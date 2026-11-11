@@ -1,0 +1,14 @@
+
+
+  Cursor Agent
+  v2026.11.11-043ef28
+  Tip: Use /debug to instrument and debug complex problems.
+
+
+
+
+  → Plan, search, build anything
+
+
+  Auto
+  ~/work/app · main
