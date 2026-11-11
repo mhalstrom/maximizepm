@@ -2926,22 +2926,42 @@ def pane_prompts(conn, terminals):
         out[agent] = {"question": parts["question"], "options": options,
                       "selected": next((n for n, o in enumerate(parts["options"]) if o[1]), 0),
                       "tool": parts["tool"], "command": parts["command"], "why": parts["why"],
-                      "lines": tail[parts["start"]:], "sig": sig, "tell": tell, "row": parts["row"]}
+                      "lines": tail[parts["start"]:], "sig": sig, "tell": tell, "row": parts["row"],
+                      "keys": hint_keys(parts["hint"]) if options else []}
     return out
 
 
-def _menu_keys(at, n, row=False):
+_HINT_KEY = re.compile(r"^(enter|return|[a-z])\s+(?:to\s+)?(\S.*)$", re.I)
+
+
+def hint_keys(hint):
+    """The keys that choose a menu's option, from its key line, when it has more than Enter (#5244): [{"key": "Enter"
+    or a letter, "label": what it does}]; [] when Enter is the only one. Claude Code's /model: 'Enter to set as
+    default · s to use this session only · Esc to cancel' gives Enter (set as default) and s (use this session only);
+    Codex's reasoning menu: 'enter default · s session · esc back'. Esc and the arrows are no choice."""
+    got = []
+    for part in (hint or "").split("·"):
+        m = _HINT_KEY.match(part.strip())
+        if m:
+            k = m.group(1)
+            got.append({"key": "Enter" if k.lower() in ("enter", "return") else k.lower(), "label": m.group(2).strip()})
+    return got if any(k["key"] != "Enter" for k in got) else []
+
+
+def _menu_keys(at, n, row=False, key="Enter"):
     """The keys that choose option n of a menu when option at is selected; row: a menu on one line (DETECT['row']),
-    where Right and Left move."""
+    where Right and Left move. key: the key that chooses it (Enter, or a letter of hint_keys)."""
     more, less = ("Right", "Left") if row else ("Down", "Up")
-    return [{"key": more if n > at else less}] * abs(n - at) + [{"key": "Enter"}]
+    last = {"key": "Enter"} if key == "Enter" else {"text": key}
+    return [{"key": more if n > at else less}] * abs(n - at) + [last]
 
 
-def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
+def prompt_answer(conn, agent, sig, pick=None, other=None, who=None, key=None):
     """The prompt dialog of the Sessions tab (#4607): a person's answer to the prompt that the agent's tmux pane
     shows. pick: the number of an option (0 is the first); other: the person's text, sent by the CLI's own way to
     tell the agent what to do instead (the option of its adapter's DETECT['tell_instead'], "No, and tell ... what to
-    do", else Escape), then Enter. Refused when the pane shows another prompt than the one the person read (sig)."""
+    do", else Escape), then Enter. key: the key that chooses the pick, one of the prompt's keys (hint_keys: 's' for
+    this session only), else Enter. Refused when the pane shows another prompt than the one the person read (sig)."""
     pane = _typing_pane(conn, agent, who)
     p = pane_prompts(conn, {agent: pane}).get(agent)
     if not p or p["sig"] != sig:
@@ -2959,8 +2979,10 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
         return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
     if not isinstance(pick, int) or not 0 <= pick < len(opts):
         raise RiverError("pick one of the prompt's options, or write what to do instead")
-    terminal_keys(conn, agent, _menu_keys(at, pick, p.get("row")), who)
-    return {"agent": agent, "pane": pane, "picked": opts[pick], "text": ""}
+    if key not in (None, "Enter") and key not in [k["key"] for k in p.get("keys") or ()]:
+        raise RiverError(f"{key!r} is no key of this menu: use {', '.join(k['key'] for k in p['keys']) or 'Enter'}")
+    terminal_keys(conn, agent, _menu_keys(at, pick, p.get("row"), key or "Enter"), who)
+    return {"agent": agent, "pane": pane, "picked": opts[pick], "text": "", "key": key or "Enter"}
 
 
 # The side panel of the Sessions tab (#4619) shows local files: read only, with the page's token, and only under

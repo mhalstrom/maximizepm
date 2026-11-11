@@ -186,6 +186,8 @@ button.srow-it { cursor: pointer; }
 .wopt input { margin-top: calc(var(--sp-0) + var(--hair)); }
 .wblock textarea { width: 100%; box-sizing: border-box; min-height: var(--h-text-min); resize: vertical; font: inherit; }
 .wblock .wgo { align-self: flex-end; }
+/* A menu's own keys (#5244): one send button for each, at the right. */
+.wkeys { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
 /* Images for a session (#4610): thumbnails in the message box, and in the person's turn. */
 .sess-files { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); }
 .sess-files.hidden { display: none; }

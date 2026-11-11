@@ -31,8 +31,19 @@ function promptBlock(w, n) {
       numbers): <span class="link" data-term="${esc(agent)}" tabindex="0" role="button">answer it in the terminal</span>.</div>`}
     ${own ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`}
     <textarea class="wother" placeholder="What the agent does instead" aria-label="What the agent does instead"></textarea>
-    <button class="btn primary wgo" type="submit">Send answer</button>
+    ${keyButtons(w)}
   </form>`;
+}
+
+// A menu whose key line names more keys than Enter (#5244: Claude Code's /model, 'Enter to set as default · s to use
+// this session only'): one send button for each, which chooses the picked option with that key. The first key that is
+// not Enter is the main one: Enter there saves the choice as the default of every new session.
+function keyButtons(w) {
+  const keys = w.keys || [];
+  if (!keys.length) return `<button class="btn primary wgo" type="submit">Send answer</button>`;
+  const main = keys.findIndex(k => k.key !== "Enter");
+  return `<div class="wkeys">${keys.map((k, i) => `<button class="btn${i === main ? " primary" : ""} wgo" type="submit"
+    data-key="${esc(k.key)}" title="Chooses the picked option with the key ${esc(k.key)}">${esc(k.label)} (${esc(k.key)})</button>`).join("")}</div>`;
 }
 
 // A question: the answer goes into the session's chat (its pane) as the person's turn, and closes the question in
@@ -75,7 +86,7 @@ $("#waitList").addEventListener("input", (e) => {  // a word in Other picks Othe
 });
 $("#waitList").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const form = e.target, btn = form.querySelector(".wgo");
+  const form = e.target, btn = e.submitter && e.submitter.matches(".wgo") ? e.submitter : form.querySelector(".wgo");
   if (btn.disabled) return;
   btn.disabled = true;
   try {
@@ -97,7 +108,7 @@ $("#waitList").addEventListener("submit", async (e) => {
       const own = pick.value === "other" && !other && form.dataset.tell != null;
       if (pick.value === "other" && !other && !own) { toast("Write what the agent does instead", true); return; }
       const r = await typeAction("prompt_answer", { agent, sig: form.dataset.sig,
-        ...(other ? { other } : { pick: own ? +form.dataset.tell : +pick.value }) });
+        ...(other ? { other } : { pick: own ? +form.dataset.tell : +pick.value, ...(btn.dataset.key ? { key: btn.dataset.key } : {}) }) });
       toast(`Sent: ${r.text || r.picked}`);
       if (onSent) onSent(r.text || r.picked);
     }

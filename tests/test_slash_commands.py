@@ -353,3 +353,34 @@ class ClaudeCommandLines(unittest.TestCase):
                                              "\x1b[38;5;244m⛀ \x1b[39m34k/700k</local-command-stdout>"))
         self.assertEqual([(e["role"], e["text"]) for e in got], [("output", "Context Usage\n⛀ 34k/700k")])
         self.assertEqual(claude.parse_chat_line(line("<local-command-stdout></local-command-stdout>"))[0], [])
+
+
+class MenuKeys(TmuxBase):
+    """#5244: a menu whose key line names more keys than Enter (Claude Code's /model: 'Enter to set as default · s to use
+    this session only') offers each; the answer chooses the picked option with the key the person chose."""
+
+    def setUp(self):
+        super().setUp()
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        self.pane["screen"] = screen("claude", "pane_menu_model.txt")
+        self.pane["keys"].clear()
+
+    def test_the_keys_of_the_key_line(self):
+        self.assertEqual(server.hint_keys("enter default · s session · esc back"),
+                         [{"key": "Enter", "label": "default"}, {"key": "s", "label": "session"}])
+        self.assertEqual(server.hint_keys("enter select · esc back"), [])  # Enter only: no choice to offer
+        self.assertEqual(server.hint_keys("Enter to confirm · Esc to cancel"), [])
+        p = server.pane_prompts(self.c, {"ag": self.pane["id"]})["ag"]
+        self.assertEqual(p["keys"], [{"key": "Enter", "label": "set as default"},
+                                     {"key": "s", "label": "use this session only"}])
+
+    def test_the_answer_chooses_with_the_key(self):
+        p = server.pane_prompts(self.c, {"ag": self.pane["id"]})["ag"]
+        r = server.OPS["prompt_answer"](self.c, {"agent": "ag", "sig": p["sig"], "pick": 1, "key": "s"}, "mark")
+        self.assertEqual((r["key"], self.pane["keys"]), ("s", ["Up", "Up", "s"]))  # from 4. Sonnet up to 2. Opus, then s
+        with self.assertRaisesRegex(RiverError, "'x' is no key of this menu: use Enter, s"):
+            server.prompt_answer(self.c, "ag", p["sig"], pick=1, who="mark", key="x")
+        self.pane["keys"].clear()
+        server.prompt_answer(self.c, "ag", p["sig"], pick=3, who="mark")  # no key: Enter, as before
+        self.assertEqual(self.pane["keys"], ["Enter"])

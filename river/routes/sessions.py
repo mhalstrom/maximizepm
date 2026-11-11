@@ -164,7 +164,7 @@ OPS = {
     "session_restart": lambda c, a, who: server.session_restart(c, a["agent"], a.get("changes"),
                                                                 bool(a.get("make_default")), who),
     "prompt_answer": lambda c, a, who: server.prompt_answer(c, a["agent"], a.get("sig", ""), a.get("pick"),
-                                                            a.get("other"), who),
+                                                            a.get("other"), who, a.get("key")),
     # The card of an expert proposal in the manager's chat (#4990): Continue in an expert, or Dismiss.
     "expert_accept": lambda c, a, who: server.accept_expert(c, a["id"], who),
     "expert_dismiss": lambda c, a, who: core.expert_proposal_end(c, a["id"], "dismissed", who, a.get("why")),
