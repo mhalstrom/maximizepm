@@ -353,17 +353,52 @@ class Database(Env):
         self.assertEqual((entries[-1]["text"], turn), ("one more", "working"))
         self.assertEqual(self.a.chat_path(str(p)), p)  # a path of such a file, as it is
 
+    def test_the_sessions_tab_finds_the_chat_by_the_agents_newest_session_id(self):
+        # #5267: sessions.transcript asks each adapter whose CHAT['ref'] is 'session' with the agent's newest id.
+        from river import sessions
+        self.make_db([("session.jsonl", SESSION_ID, None)])
+        conn = core.connect()
+        core.register(conn, "oc1")
+        conn.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('oc1', ?, '2026-11-11')",
+                     (SESSION_ID,))
+        conn.commit()
+        kind, path = sessions.transcript(conn, "oc1")
+        self.assertEqual((kind, Path(path).name), ("opencode", f"{SESSION_ID}.jsonl"))
+        self.assertEqual(self.a.chat_ref(), "session")
+
+    def test_an_id_of_another_agent_is_no_opencode_id_and_reads_nothing(self):
+        with mock.patch.object(opencode, "export_lines") as export:
+            for other in ("7f3c2a10-5b9e-4c1d-9a2f-0e6d4b8c1a21", "T-12345678", "ses_x"):
+                self.assertIsNone(self.a.chat_path(other))
+            export.assert_not_called()
+
+    def test_root_replaces_opencodes_own_database_folder(self):
+        db = self.make_db([("session.jsonl", SESSION_ID, None)])
+        moved = self.root / "elsewhere"
+        db.parent.rename(moved)
+        self.assertIsNone(self.a.chat_path(SESSION_ID))
+        self.assertTrue(self.a.chat_path(SESSION_ID, None, str(moved)).is_file())
+
+    def test_one_line_at_a_time_reads_as_the_whole_file(self):
+        rows = [json.loads(ln) for ln in lines()]
+        got = [e for r in rows for e in opencode.parse_chat_line(r)[0]]
+        self.assertEqual(got, self.a.parse_chat(lines())[0])
+        self.assertEqual(opencode.parse_chat_line(rows[0]), ([], None))  # the header
+        self.assertEqual(opencode.parse_chat_line(rows[-1])[1], "idle")
+        failed = [json.loads(ln) for ln in lines("failed.jsonl")]
+        self.assertEqual([e["role"] for r in failed for e in opencode.parse_chat_line(r)[0]], ["user", "event"])
+
     def test_an_unknown_session_or_no_database_has_no_file(self):
         self.assertIsNone(self.a.chat_path(SESSION_ID))
         self.make_db([("session.jsonl", SESSION_ID, None)])
-        self.assertIsNone(self.a.chat_path("ses_unknown"))
+        self.assertIsNone(self.a.chat_path("ses_unknown00000"))
         self.assertIsNone(self.a.chat_path("../x"))
         self.assertIsNone(self.a.chat_path(""))
 
     def test_the_chain_follows_forks_back_to_the_first_session(self):
-        self.make_db([("session.jsonl", SESSION_ID, None), ("failed.jsonl", "ses_fork1", SESSION_ID)])
-        p = self.a.chat_path("ses_fork1")
-        self.assertEqual([q.name for q in opencode.chat_chain(p)], [f"{SESSION_ID}.jsonl", "ses_fork1.jsonl"])
+        self.make_db([("session.jsonl", SESSION_ID, None), ("failed.jsonl", "ses_fork00000001", SESSION_ID)])
+        p = self.a.chat_path("ses_fork00000001")
+        self.assertEqual([q.name for q in opencode.chat_chain(p)], [f"{SESSION_ID}.jsonl", "ses_fork00000001.jsonl"])
 
 
 class State(Env):

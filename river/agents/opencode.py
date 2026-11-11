@@ -82,6 +82,9 @@ LAUNCH = {
     # autocompact, no background.
 }
 
+# A session id of OpenCode: ses_ and base62 (ses_e366d1e13ffe0SgSDgPP6MNKXx). --session <id> takes any such text.
+SESSION_ID = r"ses_[A-Za-z0-9]{8,64}"
+
 IDENTITY = {
     "source": "hook",  # the plugin reports the session that the pane shows, with --session-id
     "env": None,
@@ -89,9 +92,12 @@ IDENTITY = {
     "pane": None,
     "url": None,
     "inside_env": ["OPENCODE_SESSION_ID"],  # its shell tool sets it for each command
+    "id_pattern": SESSION_ID,
 }
 
-CHAT = {"compressed": False, "file_tools": ["write", "edit"]}
+# ref: the Sessions tab finds the chat by the agent's newest session id (the plugin reports it); cache_write False:
+# OpenCode's providers bill a call after the cache ran out at the input price (its rows count no cache writes).
+CHAT = {"compressed": False, "file_tools": ["write", "edit"], "ref": "session", "cache_write": False}
 
 STATE = {"state": "hook", "session_id": "hook"}
 
@@ -568,19 +574,21 @@ def _db_mtime(db):
     return got
 
 
-def chat_path(session_ref, folder=None):
+def chat_path(session_ref, folder=None, root=None):
     """The chat file of a session id (opencode/chats/<id>.jsonl beside the queue), written again from the database
     when the database changed after it; a path of such a file as it is. None when the session is not in the
-    database. folder: unused (a session id is unique in the database)."""
+    database, and at once for an id that is no OpenCode id (the Sessions tab asks each adapter with the newest id of
+    an agent of any kind). folder: unused (a session id is unique in the database). root: the folder of
+    opencode.db in place of OpenCode's own (a test)."""
     ref = str(session_ref or "").strip()
     if not ref:
         return None
     if ref.endswith(".jsonl") or os.sep in ref:
         p = Path(ref).expanduser()
         return p if p.is_file() else None
-    if not re.fullmatch(r"[\w-]+", ref):
+    if not re.fullmatch(SESSION_ID, ref):
         return None
-    db = db_path()
+    db = Path(root) / "opencode.db" if root else db_path()
     out = _own_dir() / "chats" / f"{ref}.jsonl"
     stamp = _db_mtime(db)
     try:
@@ -676,11 +684,10 @@ def _entries(row):
                 elif st.get("status") == "error":
                     out.append({"at": at, "role": "result", "text": (st.get("error") or {}).get("message", ""),
                                 "for": c.get("id", ""), "error": True})
-        err = d.get("error") or {}
-        if err.get("type") == "aborted":
+        # An interrupt ends the turn here. Any other error of a step shows on the idle row that closes the turn
+        # (outcome failed), once: the Sessions tab reads line by line, so it cannot drop a second copy.
+        if (d.get("error") or {}).get("type") == "aborted":
             out.append({"at": at, "role": "event", "text": "interrupted"})
-        elif err:
-            out.append({"at": at, "role": "event", "text": f"error: {err.get('message', err.get('type', ''))}"})
         return out
     if kind == "idle":
         if d.get("outcome") == "failed":
@@ -710,24 +717,26 @@ def _turn(rows):
     return "idle" if d.get("error") else "working"
 
 
+def parse_chat_line(d):
+    """(entries, turn) of one decoded line of a chat file; the header line gives none."""
+    if not isinstance(d, dict) or d.get("type") == "session":
+        return [], None
+    return _entries(d), _turn([d])
+
+
 def parse_chat(lines):
     """(entries, turn) of the lines of one chat file."""
     rows = [r for r in _rows(lines) if r.get("type") != "session"]
-    out = []
-    for e in (e for r in rows for e in _entries(r)):
-        # A failed turn says its error twice: on the assistant step and on the idle row after it.
-        if e["role"] == "event" and out and out[-1]["role"] == "event" and out[-1]["text"] == e["text"]:
-            continue
-        out.append(e)
-    return out, _turn(rows)
+    return [e for r in rows for e in _entries(r)], _turn(rows)
 
 
 def _header(lines):
     return next((r for r in _rows(list(lines)[:3]) if r.get("type") == "session"), None)
 
 
-def chat_chain(path):
-    """The chat files across forks, oldest first: each header's fork_session_id, back to the first."""
+def chat_chain(path, refs=None):
+    """The chat files across forks, oldest first: each header's fork_session_id, back to the first. refs: unused (a
+    resume goes on in the same session, and a fork names its parent)."""
     out, p = [], Path(path)
     while p is not None and p not in out:
         out.append(p)
