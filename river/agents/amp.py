@@ -76,7 +76,7 @@ SETTINGS = [
      "text": "faster serving for the models that have it, billed at a premium (--fast)",
      "flag": ["--fast"], "live": None, "read": None, "session": True},
     {"key": "visibility", "label": "Thread visibility", "kind": "choice",
-     "choices": ["", "private", "unlisted", "workspace", "group"], "default": "",
+     "choices": ["private", "unlisted", "workspace", "group"], "default": "",
      "text": "who can see the thread on ampcode.com; empty: Amp's own default",
      "flag": ["--visibility", "{value}"], "live": None, "read": r"--visibility[ =](private|unlisted|workspace|group)\b"},
     {"key": "settings_file", "label": "Settings file", "kind": "text", "choices": [], "default": "",
@@ -173,7 +173,7 @@ def parse_command(words):
         elif (t,) in flags:
             opts[flags[(t,)]] = "on"
             i += 1
-        elif t == "--visibility" and nxt in SETTINGS[3]["choices"][1:]:
+        elif t == "--visibility" and nxt in SETTINGS[3]["choices"]:
             opts["visibility"] = nxt
             i += 2
         else:

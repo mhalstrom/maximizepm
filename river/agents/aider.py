@@ -55,7 +55,7 @@ DESCRIBE = {
 # 2. Settings
 # ---------------------------------------------------------------------------------------------------------------
 
-EDIT_FORMATS = ["", "diff", "whole", "udiff", "diff-fenced", "architect", "ask"]
+EDIT_FORMATS = ["diff", "whole", "udiff", "diff-fenced", "architect", "ask"]
 
 SETTINGS = [
     {"key": "edit_format", "label": "Edit format", "kind": "choice", "choices": EDIT_FORMATS, "default": "",
@@ -183,7 +183,7 @@ def parse_command(words):
         t, nxt = words[i], (words[i + 1] if i + 1 < len(words) else None)
         if t == "--model" and nxt == "{model}" or t == "--reasoning-effort" and nxt == "{effort}":
             i += 2
-        elif t in ("--edit-format", "--chat-mode") and nxt in choices and nxt:
+        elif t in ("--edit-format", "--chat-mode") and nxt in choices:
             opts["edit_format"] = nxt
             i += 2
         elif t == "--weak-model" and nxt and not nxt.startswith("-"):

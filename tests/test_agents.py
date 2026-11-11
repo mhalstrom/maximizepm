@@ -917,6 +917,7 @@ class SettingsAndEffort(Env):
         bad = module(DESCRIBE={**GOOD, "id": "x"}, SETTINGS=[
             {"key": "a", "kind": "toggle", "default": "maybe"},
             {"key": "b", "kind": "choice", "choices": ["x"], "default": "y"},
+            {"key": "e", "kind": "choice", "choices": ["", "x"], "default": ""},
             {"key": "c", "kind": "text", "config": False, "session": True},
             {"key": "d", "kind": "toggle", "flag": ["--d"], "config": False},
             {"key": "model", "kind": "text"},
@@ -924,7 +925,8 @@ class SettingsAndEffort(Env):
         ])
         got = " | ".join(agents.check(bad, "x"))
         for part in ("a toggle is on or off", "not one of its choices", "such a setting is a toggle with a flag",
-                     "nothing shows it", "come from DESCRIBE and EFFORT", "the key 'a' twice"):
+                     "nothing shows it", "come from DESCRIBE and EFFORT", "the key 'a' twice",
+                     "SETTINGS[2]['choices'] holds ''"):
             self.assertIn(part, got)
 
 

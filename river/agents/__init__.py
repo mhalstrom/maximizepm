@@ -362,6 +362,10 @@ def _setting_problems(i, s):
         out.append(f"{where}['default'] is {default!r}, not one of its choices (or '' for the agent's own)")
     if kind == "choice" and not s.get("choices"):
         out.append(f"{where} is a choice with no choices")
+    if kind == "choice" and "" in (s.get("choices") or ()):
+        # The page puts 'the agent's own' (value '') first in each choice itself; a '' here shows a second, blank
+        # option (#5235). A default of '' means the agent's own.
+        out.append(f"{where}['choices'] holds ''; leave it out: the default '' means the agent's own")
     if s.get("config") is False and not (kind == "toggle" and s.get("flag")):
         out.append(f"{where} has config False: such a setting is a toggle with a flag")
     if s.get("config") is False and not s.get("session"):
