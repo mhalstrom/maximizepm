@@ -3605,7 +3605,11 @@ def target_cut(conn, name, rev=None, actor=None):
             raise RiverError(f"refused: the target owner ({tg['owner'] or 'nobody'}), the manager, or a person cuts a "
                              f"release of {name}" + ("" if tg["owner"] else f"; take the target first: maxpm target own {name}"))
         rev = (rev or "").strip() or None
-        cut = _item(conn, plan["running"]) if plan["running"] and (plan["deploy"] is None or not plan["ships"]) else None
+        # The running release is moved also while the next release collects ship requests: the move was skipped
+        # then, and the command tried to cut the next release, which the cadence refused (#5404). Only after
+        # release-now (the next release waits no more) does --rev cut the next release.
+        nxt = plan["deploy"] is not None and plan["ships"] and not plan["waits"]
+        cut = _item(conn, plan["running"]) if plan["running"] and not nxt else None
         if rev and cut and cut["status"] == "open" and cut["cut_at"]:
             # The release is cut and does not deploy yet: a new revision moves its pin (#5074; the pin of a failed
             # deploy stayed, and the manager rewrote the pin file by hand). The release-cut hook runs again with it.

@@ -318,6 +318,24 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "is cut already .* to move the revision it builds from: maxpm target cut web --rev"):
             core.target_cut(self.c, "web", actor="mark")
 
+    def test_target_cut_moves_the_revision_while_the_next_release_collects(self):
+        # #5404: with ship requests collected for the next release, --rev tried to cut that one; the cadence refused.
+        rv, dep = self._release(owner="ops")
+        core.register(self.c, "mark", human=True)
+        core.target_cadence(self.c, "web", "2h", actor="mark")
+        core.target_cut(self.c, "web", rev="aaa111", actor="mark")
+        b = core.item_add(self.c, "site", "later page")["id"]
+        core.claim(self.c, b, "dev")
+        nxt = core.done(self.c, b, "commit", "dev", ship_it=True)["shipped_in"]
+        self.assertNotEqual(nxt, dep)
+        plan = core.release_plan(self.c, "web")
+        self.assertEqual((plan["running"], plan["deploy"], plan["waits"]), (dep, nxt, True))
+        res = core.target_cut(self.c, "web", rev="bbb222", actor="mark")
+        self.assertEqual((res["moved"], core._item(self.c, dep)["cut_rev"]), ("bbb222", "bbb222"))
+        self.assertIsNone(core._item(self.c, nxt)["cut_at"])  # the next release still collects
+        with self.assertRaisesRegex(RiverError, "release-now"):  # a cut of the next release still waits
+            core.target_cut(self.c, "web", actor="mark")
+
     def test_a_deploy_hook_runs_while_the_deployer_is_off(self):
         # #5066: release #4912 waited 7 minutes: the deploy loop took only targets with deployer<>off.
         rv, dep = self._release(owner="ops")

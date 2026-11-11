@@ -4255,12 +4255,17 @@ class ReleaseReview(Base):
         core.done(self.c, c, "commit", "dev")
         nxt = core.ship(self.c, c, "dev")
         self.assertNotEqual(nxt["id"], self.deploy)
-        # The next release cannot be cut while this one runs; with a reason it can start sooner.
+        # The next release cannot be cut while this one runs; with a reason it can start sooner. A --rev meanwhile
+        # moves the commit of the running release (#5404).
         with self.assertRaisesRegex(RiverError, "runs now.*release-now web"):
-            core.target_cut(self.c, "web", "def5678", "ops")
+            core.target_cut(self.c, "web", None, "ops")
+        self.assertEqual(core.target_cut(self.c, "web", "abc9999", "ops")["moved"], "abc9999")
+        self.assertIsNone(core._item(self.c, nxt["id"])["cut_at"])
         r = core.release_now(self.c, "web", "a fix of a production defect", "mark")
         self.assertEqual((r["waits"], r["item"]["ready"]), (False, True))
-        self.assertTrue(core.target_cut(self.c, "web", "def5678", "mark")["cut"]["cut_at"])
+        res = core.target_cut(self.c, "web", "def5678", "mark")
+        self.assertEqual((res["cut"]["id"], res.get("moved"), core._item(self.c, self.deploy)["cut_rev"]),
+                         (nxt["id"], None, "abc9999"))
 
     def test_review_off_changes_nothing(self):
         core.config_set(self.c, "review", "off")
