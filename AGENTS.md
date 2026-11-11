@@ -3,7 +3,6 @@
 This project uses MaximizePM (`maxpm`) to track work and who is doing it.
 When the user says "go" (or asks you to take work from the queue), run
 `maxpm go` in this folder and follow the briefing it prints, to its end.
-When the user says "plan", run `maxpm plan` and follow its briefing.
 
 ## Working on MaximizePM itself
 
@@ -25,13 +24,14 @@ When the user says "plan", run `maxpm plan` and follow its briefing.
 `~/Projects/biggestriver` is the live maxpm: the `maxpm` command and `maxpm serve`
 run the code in that folder. One conflict marker there stops maxpm for every session.
 
-- Never run `git stash`, `merge`, `rebase` or `checkout` in the main tree, and never
-  edit a file there.
+- Never edit a file in the main tree, and never run `git stash`, `rebase` or `checkout`
+  there. The one git command that changes it is the fast-forward below: it moves `main`
+  to your commit and never makes a conflict. Run no other `git merge` there.
 - Work, rebase on `main`, and test in your own worktree:
   `git worktree add -b <branch> ../biggestriver-<branch> main`.
-- Move `main` forward only with `git -C ~/Projects/biggestriver merge --ff-only <branch>`.
-  When `--ff-only` refuses, rebase again in your worktree and test again. Never resolve
-  a conflict in the main tree.
+- Move `main` forward with `git -C ~/Projects/biggestriver merge --ff-only <branch>`.
+  When `--ff-only` refuses, `main` moved: rebase again in your worktree and test again.
+  Never resolve a conflict in the main tree.
 - Release: commit in your worktree, then `merge --ff-only` into the local `main`. Do not
-  push, and do not use `--ship`. Then run `maxpm done <id>` and
-  `maxpm alert <manager> "<branch> is on main" --item <id> --blocked`.
+  push, and do not use `--ship`: the manager pushes after mark's yes. Then run
+  `maxpm done <id>` and `maxpm alert <manager> "<branch> is on main" --item <id> --blocked`.

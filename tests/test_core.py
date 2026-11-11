@@ -3412,6 +3412,14 @@ class AgentBlock(unittest.TestCase):
             c.write_text("claude rules\n")
             cli.setup_instructions(d, move=False)  # keep apart
             self.assertEqual((c.read_text().count("## Work queue"), a.read_text()), (1, cli.AGENT_SNIPPET))
+        with tempfile.TemporaryDirectory() as d:
+            c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
+            c.write_text("@AGENTS.md\n")
+            a.write_text(cli.OLD_SNIPPET + "\n## Rules\n\nTest first.\n")  # an init before #4978: the 'maxpm plan' line
+            lines = cli.setup_instructions(d)  # init again: the old block becomes the current one, the rules stay
+            self.assertIn("AGENTS.md: the work queue block is current again", lines[0])
+            self.assertEqual(a.read_text(), cli.AGENT_SNIPPET + "\n## Rules\n\nTest first.\n")
+            self.assertEqual(cli.setup_instructions(d)[0], "AGENTS.md: already has the work queue block")
 
 
 class DeployNow(Base):

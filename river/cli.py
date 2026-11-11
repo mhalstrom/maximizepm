@@ -1822,6 +1822,9 @@ def _hint(a, res, actor):
 
 def _append_block(f):
     old = f.read_text() if f.exists() else ""
+    if OLD_SNIPPET in old:  # the block of a maxpm init before #4978: its 'maxpm plan' line names a gone role
+        f.write_text(old.replace(OLD_SNIPPET, AGENT_SNIPPET, 1))
+        return f"{f.name}: the work queue block is current again (the 'maxpm plan' line is gone)"
     if core.names_product(old):
         return f"{f.name}: already has the work queue block"
     f.write_text(old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + AGENT_SNIPPET)
