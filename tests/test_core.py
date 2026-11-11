@@ -8683,6 +8683,55 @@ class Health(Base):
         with self.assertRaises(core.RiverError):
             core.change_remove(self.c, old["id"], actor="mark")
 
+    def test_by_goal_compares_inside_each_project(self):
+        g = core.goal_add(self.c, "a", "g1", "an outcome", "done when")
+        gb = core.goal_add(self.c, "b", "g2", "an outcome", "done when")
+        mk = lambda p, days, goal, mins, eq, rework=0, ny=0: self._goal_item(p, days, goal, mins, eq, rework, ny)
+        # Project a: 2 goal items (slow, costly) and 3 without; project b: 1 with and 1 without; c: no goal items.
+        core.project_add(self.c, "c")
+        mk("a", 1, g, 60, 900, rework=1, ny=1)
+        mk("a", 2, g, 40, 700)
+        for d in (1, 2, 3):
+            mk("a", d, None, 10, 100)
+        mk("b", 1, gb, 30, 500)
+        mk("b", 2, None, 30, 300, ny=2)
+        mk("c", 1, None, 5, 50)
+        review = self.done_item("a", 1, kind="review", eq=10)  # not task work: left out
+        self.c.commit()
+        h = core.health(self.c, "7d", until=self.end, by="goal")
+        bg = h["by_goal"]
+        self.assertEqual([p["project"] for p in bg["projects"]], ["a", "b"])
+        a = bg["projects"][0]
+        self.assertEqual((a["goal"]["done"], a["none"]["done"]), (2, 3))
+        self.assertEqual(a["goal"]["median_minutes"], 50)
+        self.assertEqual(a["goal"]["rework_rate"], 0.5)
+        self.assertEqual(a["goal"]["person_load"], 50)
+        self.assertEqual(a["goal"]["median_eq"], 800)
+        self.assertTrue(a["goal"]["small"])
+        t = bg["total"]
+        self.assertEqual((t["goal"]["done"], t["none"]["done"]), (3, 4))
+        # Weights: a weighs 2 (its smaller group), b weighs 1.
+        self.assertAlmostEqual(t["goal"]["median_minutes"], (2 * 50 + 1 * 30) / 3)
+        self.assertAlmostEqual(t["none"]["median_eq"], (2 * 100 + 1 * 300) / 3)
+        self.assertAlmostEqual(t["none"]["person_load"], (2 * 0 + 1 * 200) / 3)
+        self.assertEqual(bg["left_out"], {"goal": 0, "none": 1})
+        self.assertIsNotNone(review)  # the review item is in neither group: 3 + 4 + 1 left out are the task items
+        with self.assertRaises(core.RiverError):
+            core.health(self.c, "7d", until=self.end, by="kind")
+
+    def _goal_item(self, project, days_ago, goal, minutes, eq, rework, ny):
+        i = self.done_item(project, days_ago, eq=eq)
+        closed = self.end - core.timedelta(days=days_ago)
+        self.c.execute("UPDATE items SET claimed_at=? WHERE id=?",
+                       (core.iso(closed - core.timedelta(minutes=minutes)), i))
+        if goal:
+            self.c.execute("INSERT INTO item_goals (item_id, goal_id) VALUES (?, ?)", (i, goal["id"]))
+        for _ in range(rework):
+            self.event(i, days_ago + 0.1, "reopened")
+        for _ in range(ny):
+            self.needs_you(i, days_ago + 0.1, days_ago)
+        return i
+
     def test_an_empty_queue_and_the_cli(self):
         h = core.health(self.c, "30d")
         self.assertIsNone(h["now"]["rework_rate"])
@@ -8712,3 +8761,7 @@ class Health(Base):
         self.assertIn("c1    2026-11-08T00:00  manager first  [mark]", text)
         self.assertIn("CHANGES in this time, before -> after (weak proof", text)
         self.assertIn("2026-11-08 manager first: person min/item ", text)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "", "health", "--until", "2026-11-11T00:00", "--by", "goal"])
+        self.assertIn("no project has done items of both kinds in this time", out.getvalue())

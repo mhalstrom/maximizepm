@@ -599,10 +599,35 @@ def render_health(res):
             print(f"  {ch['at'][:10]} {ch['name']}: person min/item {ba('person_minutes_per_item', '{:.2f}')}, "
                   f"done/day {ba('per_day', '{:.1f}')}, rework {ba('rework_rate', '{:.1%}')}  "
                   f"({_num(bf.get('days'), '{:g}d')} before, {_num(af.get('days'), '{:g}d')} after)")
-    if len(n["by_project"]) > 1:
+    if res.get("by_goal"):
+        _render_goal_split(res["by_goal"])
+    elif len(n["by_project"]) > 1:
         top = sorted(n["by_project"].items(), key=lambda kv: -kv[1])
         print("  done by project      " + ", ".join(f"{p} {c}" for p, c in top[:8])
               + (f", {len(top) - 8} more" if len(top) > 8 else ""))
+
+
+def _render_goal_split(g):
+    """maxpm health --by goal (#5355): goal against no goal, the weighted total first, then each project."""
+    def line(label, x):
+        small = f"  too few to read (under {g['min_group']})" if x["small"] else ""
+        return (f"  {label:<9} {x['done']:>5} done  {_num(x['median_minutes'], '{:.0f}'):>5} min claim to done  "
+                f"rework {_num(x['rework_rate'], '{:.1%}'):>6}  person load {_num(x['person_load'], '{:.0f}'):>4}  "
+                f"cost {_k(x['median_eq']) if x['median_eq'] is not None else '-':>6} eq{small}")
+    print("BY GOAL: agent task items with a goal tag against items without one, inside the projects that have both;")
+    print("  in the total each project weighs as its smaller group (a tag counts as it is now)")
+    if not g["projects"]:
+        print("  no project has done items of both kinds in this time")
+        return
+    print(line("goal", g["total"]["goal"]))
+    print(line("no goal", g["total"]["none"]))
+    for p in g["projects"]:
+        print(f"  [{p['project']}]")
+        print("  " + line("goal", p["goal"]))
+        print("  " + line("no goal", p["none"]))
+    lo = g["left_out"]
+    if lo["goal"] or lo["none"]:
+        print(f"  left out (their project has one kind only): {lo['goal']} with a goal, {lo['none']} without")
 
 
 def _handoff_lines(goal, h, due=None, indent="  "):
@@ -1062,6 +1087,7 @@ def build_parser():
                        "rework rate, the person's waits, session idle time and cost, against the time before")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; 30d; all)")
     x.add_argument("--until", help="the end of the time (default now)")
+    x.add_argument("--by", choices=["goal"], help="goal: items with a goal tag against items without one, per project")
     x = sub.add_parser("change", help="the change log of maxpm health: when a change to the way of work shipped")
     chs = x.add_subparsers(dest="chcmd", required=True)
     y = chs.add_parser("add", help="record a change (a person or the manager)")
@@ -2412,7 +2438,7 @@ def dispatch(conn, a, actor):
     if c == "usage":
         return core.usage_report(conn, a.project, a.since, a.measure)
     if c == "health":
-        return core.health(conn, a.since, a.until, a.project)
+        return core.health(conn, a.since, a.until, a.project, a.by)
     if c == "change":
         if a.chcmd == "add":
             return core.change_add(conn, a.name, a.at, a.note, actor)

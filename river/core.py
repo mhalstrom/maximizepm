@@ -11020,7 +11020,65 @@ def _change_effects(conn, t0, t1, pid, minutes):
     return out
 
 
-def health(conn, since="7d", until=None, project=None):
+# A group of the goal comparison with fewer done items than this is too small to read (#5355).
+HEALTH_MIN_GROUP = 20
+
+
+def _goal_split(conn, t0, t1, pid):
+    """maxpm health --by goal (#5355, decision 3 of does-maxpm-work): the agent task items done from t0 to t1 with
+    a goal tag against those without one, per project that has both, then a total in which each project weighs as
+    its smaller group, so neither the type of work of a project nor a group of two items decides it. Per group: done items,
+    median minutes from claim to done, rework per item (its reopens and lost claims), person load (needs-you rows
+    per 100 items) and the median cost. A tag counts as it is now (the queue keeps no history of tags)."""
+    a, b = iso(t0), iso(t1)
+    days = max((t1 - t0).total_seconds() / 86400, 1 / 24)
+    pw = " AND i.project_id=?" if pid is not None else ""
+    rows = conn.execute(
+        "SELECT i.id, i.claimed_at, i.closed_at, p.name AS project, "
+        "EXISTS (SELECT 1 FROM item_goals g WHERE g.item_id=i.id) AS goal, "
+        "(SELECT COUNT(*) FROM events e WHERE e.item_id=i.id AND (e.change LIKE 'reopened%' "
+        "  OR e.change LIKE 'lease expired%')) AS rework, "
+        "(SELECT COUNT(*) FROM needs_you n LEFT JOIN messages m ON m.id=n.message_id "
+        "  WHERE COALESCE(n.item_id, m.item_id)=i.id) AS ny "
+        "FROM items i JOIN projects p ON p.id=i.project_id WHERE i.status='done' AND i.closed_at>=? AND i.closed_at<? "
+        "AND COALESCE(i.kind, 'work') IN ('work', 'operational') AND i.doer IN ('ai', 'any')" + pw,
+        [a, b] + ([pid] if pid is not None else [])).fetchall()
+
+    def stats(items):
+        n = len(items)
+        mins = [(parse_iso(r["closed_at"]) - parse_iso(r["claimed_at"])).total_seconds() / 60
+                for r in items if r["claimed_at"] and r["closed_at"] >= r["claimed_at"]]
+        eqs = [u["eq"] for u in (item_usage(conn, r["id"]) for r in items) if u]
+        return {"done": n, "per_day": n / days, "small": n < HEALTH_MIN_GROUP,
+                "median_minutes": statistics.median(mins) if mins else None,
+                "rework_rate": sum(r["rework"] for r in items) / n if n else None,
+                "person_load": sum(r["ny"] for r in items) * 100 / n if n else None,
+                "median_eq": statistics.median(eqs) if eqs else None, "cost_measured": len(eqs)}
+    by_project = {}
+    for r in rows:
+        by_project.setdefault(r["project"], {True: [], False: []})[bool(r["goal"])].append(r)
+    projects = []
+    for name, g in sorted(by_project.items(), key=lambda kv: -len(kv[1][True]) - len(kv[1][False])):
+        if g[True] and g[False]:
+            projects.append({"project": name, "goal": stats(g[True]), "none": stats(g[False])})
+    keys = ("median_minutes", "rework_rate", "person_load", "median_eq")
+    total = {}
+    for side in ("goal", "none"):
+        t = {"done": sum(p[side]["done"] for p in projects)}
+        t["per_day"] = t["done"] / days
+        t["small"] = t["done"] < HEALTH_MIN_GROUP
+        for k in keys:
+            # Each project weighs as its smaller group: a project with 2 goal items and 350 others tells little
+            # about goals, and its 2-item median must not count as 352 items.
+            w = [(min(p["goal"]["done"], p["none"]["done"]), p[side][k]) for p in projects if p[side][k] is not None]
+            t[k] = sum(x * v for x, v in w) / sum(x for x, _ in w) if w else None
+        total[side] = t
+    one_sided = {"goal": sum(len(g[True]) for g in by_project.values() if not g[False]),
+                 "none": sum(len(g[False]) for g in by_project.values() if not g[True])}
+    return {"projects": projects, "total": total, "left_out": one_sided, "min_group": HEALTH_MIN_GROUP}
+
+
+def health(conn, since="7d", until=None, project=None, by=None):
     """maxpm health: does MaximizePM work? The measures of the canvas does-maxpm-work (decided 2026-11-11, #5338)
     for the time from since to until, and for the time of the same length before it, so a change shows. Headline:
     person minutes per done item (a proxy: needs-you rows x health_person_minutes / items done), with items done
@@ -11039,8 +11097,13 @@ def health(conn, since="7d", until=None, project=None):
     minutes = int(setting(conn, "health_person_minutes", project_id=pid))
     now_r = _health_range(conn, t0, t1, pid, minutes)
     before = _health_range(conn, t0 - (t1 - t0), t0, pid, minutes)
-    return {"project": project, "person_minutes": minutes, "now": now_r, "before": before,
-            "changes": _change_effects(conn, t0, t1, pid, minutes)}
+    res = {"project": project, "person_minutes": minutes, "now": now_r, "before": before,
+           "changes": _change_effects(conn, t0, t1, pid, minutes)}
+    if by == "goal":
+        res["by_goal"] = _goal_split(conn, t0, t1, pid)
+    elif by:
+        raise RiverError(f"maxpm health --by {by}: the one split is goal (maxpm health --by goal)")
+    return res
 
 
 # ---------------------------------------------------------------- capacity
