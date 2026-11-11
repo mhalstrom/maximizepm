@@ -52,6 +52,8 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
     background-repeat: no-repeat; background-position: right 10px center; }
   .sp-tab-l { min-height: 34px; }
   button.btn { min-height: 44px; padding: 6px 12px; }
+  /* The inset of a text button that starts a line (#5314) follows this padding: 12 px and the border (#5366). */
+  :root { --btn-inset: calc(-1 * (var(--sp-5) + var(--hair))); }
   a.btn { min-height: 44px; display: inline-flex; align-items: center; }
   .iconbtn { min-width: 44px; min-height: 44px; }
   .pz-tools .btn { min-width: 44px; }

@@ -4,3 +4,7 @@
 .policy { padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); display: flex; gap: var(--sp-3); align-items: flex-start; }
 .policy .policy-body { flex: 1; }
 .policy-form { margin-top: var(--sp-4); max-width: var(--w-form); }
+/* Settings at 390 px (#5366): the Help arrow and the Open setup guide label start on the left edge of the table
+   and the form under them, not 6 and 13 px right of it. */
+#tab-settings > .panel > details > summary { padding-left: 0; }
+#openSetup { margin-left: var(--btn-inset); }
