@@ -4408,6 +4408,31 @@ class CanvasOps(unittest.TestCase):
         self.assertNotIn("canvas_save", server.OPS)  # writing a file stays with the command
 
 
+class PolicyOps(unittest.TestCase):
+    """#5308: the Settings tab adds and retires policies through /api/action."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+        core.project_add(self.c, "web")
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def test_add_edit_retire(self):
+        op = lambda name, args: server.OPS[name](self.c, args, "mark")
+        # The page sends "" for "every project" and "every role".
+        p = op("policy_add", {"text": "Ask first", "reason": "public", "source": "", "project": "web", "role": ""})
+        self.assertEqual((p["scope"], p["created_by"]), ("web", "mark"))
+        p = op("policy_edit", {"id": p["id"], "role": "reviewer"})
+        self.assertEqual(p["scope"], "web, reviewer")
+        op("policy_retire", {"id": p["id"]})
+        self.assertEqual(core.state(self.c)["policies"], [])
+
+
 class KillPane(unittest.TestCase):
     """End now for a session that ran no maxpm command, so it recorded no process (#5278: Aider): maxpm ends the
     foreground process group of its tmux pane."""

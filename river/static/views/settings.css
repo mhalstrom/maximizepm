@@ -1,3 +1,6 @@
 /* The Settings tab. Its table is the shared Tabulator style of app.css; rules of this tab only go here. (#4656: each view has its own CSS file; app.css holds the frame and what views share.) */
 .person { padding: var(--sp-1) 0; }
 .people-form { margin-top: var(--sp-4); max-width: var(--w-form); }
+.policy { padding: var(--sp-2) 0; border-bottom: var(--hair) solid var(--line); display: flex; gap: var(--sp-3); align-items: flex-start; }
+.policy .policy-body { flex: 1; }
+.policy-form { margin-top: var(--sp-4); max-width: var(--w-form); }

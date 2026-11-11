@@ -20,6 +20,22 @@
       <button class="btn primary" id="setGo">Save setting</button>
     </div>
   </div>
+  <!-- Policies (#5308): the rules sessions follow, each with its scope, source and reason; maxpm go, manage and the
+       expert briefing print the ones that apply. -->
+  <div class="panel" id="policiesPanel">
+    <h2 title="Rules that sessions follow. Each session reads the ones that apply to it in its briefing (maxpm go, maxpm manage).">Policies</h2>
+    <div id="policies"></div>
+    <div class="form policy-form">
+      <label>Rule<textarea id="polText" rows="2" placeholder="Run the tests before each commit"></textarea></label>
+      <label>Reason<input id="polReason" placeholder="why the rule exists"></label>
+      <div class="two">
+        <label>Project<select id="polProject"></select></label>
+        <label>Role<select id="polRole"></select></label>
+      </div>
+      <label>Source<input id="polSource" placeholder="who decided it, and when (default: You are, today)"></label>
+      <button class="btn" id="polGo">Add policy</button>
+    </div>
+  </div>
   <!-- People (#5102, design #4657): the people of this queue, and Register a person (the Board's form). -->
   <div class="panel" id="peoplePanel">
     <h2 title="The people who answer, decide and do the person's items. Each one picks their name in You are.">People</h2>

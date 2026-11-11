@@ -1,7 +1,8 @@
-// The Settings tab (#4656): every key, its default and its overrides, and the form that sets one; and People (#5102):
-// the people of this queue and Register a person.
+// The Settings tab (#4656): every key, its default and its overrides, and the form that sets one; Policies (#5308):
+// the rules sessions follow, and Add policy; and People (#5102): the people of this queue and Register a person.
 import { $, esc, toast, act, ago, store, hooks } from "../lib.js";
 import { chip } from "../components/chip.js";
+import { iconButton } from "../components/button.js";
 import { makeTable } from "../components/table.js";
 import { S } from "../page.js";
 
@@ -22,6 +23,33 @@ export function renderSettings() {
   }));
 }
 
+// Policies: each rule with its scope, source and reason; ✕ retires it (deletes it: no tombstone).
+export function renderPolicies() {
+  const P = S.policies || [];
+  const html = P.map(p => `<div class="policy"><div class="policy-body">${chip("c-p", esc(p.pid))} ${chip("", esc(p.scope))} ${esc(p.text)}`
+    + `<div class="muted t-s">${esc(p.reason)} · ${esc(p.source)}${p.items.length ? " · " + p.items.map(i => "#" + i.id).join(" ") : ""}</div></div>`
+    + iconButton("✕", `Retire ${p.pid}`, { data: { retirePolicy: p.id } }) + `</div>`).join("")
+    || `<div class="muted">No policies yet. A policy is a rule for the sessions: maxpm policy add "&lt;rule&gt;" --reason "&lt;why&gt;".</div>`;
+  const el = $("#policies"); if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
+  const opts = (sel, list, first) => {
+    const el = $(sel), sig = list.join("|"); if (el.dataset.sig === sig) return;
+    const keep = el.value; el.innerHTML = `<option value="">${first}</option>` + list.map(x => `<option>${esc(x)}</option>`).join("");
+    el.value = keep; el.dataset.sig = sig;
+  };
+  opts("#polProject", (S.projects || []).map(p => p.name), "every project");
+  opts("#polRole", S.policy_roles || [], "every role");
+}
+$("#polGo").addEventListener("click", async () => {
+  const text = $("#polText").value.trim(), reason = $("#polReason").value.trim();
+  if (!text || !reason) return toast("Type the rule and its reason", true);
+  try {
+    const p = await act("policy_add", { text, reason, source: $("#polSource").value.trim(), project: $("#polProject").value,
+                                        role: $("#polRole").value });
+    $("#polText").value = ""; $("#polReason").value = ""; $("#polSource").value = "";
+    toast(`Added ${p.pid}: the briefings of ${p.scope === "queue" ? "every session" : p.scope} show it`);
+  } catch (e) { /* act showed the error */ }
+});
+
 // People: each person with their note and when they were last seen.
 export function renderPeople() {
   const P = (S.agents || []).filter(a => a.kind === "human");
@@ -38,6 +66,11 @@ $("#regGo").addEventListener("click", async () => {
 
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
+  if (t.dataset.retirePolicy) return run(async () => {
+    const p = (S.policies || []).find(x => x.id === +t.dataset.retirePolicy);
+    if (p && !confirm(`Retire ${p.pid}? It is deleted, and no briefing shows it again.\n${p.text}`)) return;
+    return act("policy_retire", { id: +t.dataset.retirePolicy }).then(() => toast("Retired")).catch(() => {});
+  });
   if (t.dataset.unset) return run(async () => {
     const sc = t.dataset.scope, [kind, name] = sc.includes(":") ? [sc.split(":")[0], sc.slice(sc.indexOf(":") + 1)] : ["global", null];
     const args = { key: t.dataset.unset }; if (kind !== "global") args[kind] = kind === "item" ? +name : name;

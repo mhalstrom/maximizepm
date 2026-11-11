@@ -508,6 +508,28 @@ one topic fills it, so an expert takes that talk.
   about it with one line that points to the expert. Its decisions come back as items
   and notes; you act on those.
 
+## Policies: where the rules live
+
+The rules that sessions follow live in the queue as policies, not in one
+agent's memory files or in a runbook. A memory file reaches only Claude Code
+sessions in one folder; a policy reaches every session it applies to (Claude
+Code, Codex, any other agent), and each briefing shows which rules applied.
+
+- A policy is a short rule with a scope (the whole queue, a project, a role, or
+  a role in a project), its source (who decided it, and when), and its reason:
+  `maxpm policy add "<rule>" --reason "<why>" --source "mark 2026-11-11"
+  [--project P] [--role worker|reviewer|deployer|owner|manager|expert] [--item <id>]`.
+- `maxpm go`, `maxpm manage`, and the expert briefing print the policies for the
+  session under POLICIES. Yours are the queue's and the manager's;
+  `maxpm policy list` shows all, `maxpm policy list --for worker --project P`
+  what a worker in P reads.
+- When the user states a rule for the sessions ("from now on ..."), add it as a
+  policy with the user's words as the source; do not write it into a memory
+  file. Change it with `maxpm policy edit`, and remove it with
+  `maxpm policy retire` (it is deleted).
+- A rule that must hold every time becomes code or a setting (a task), not a
+  policy: a policy is advice that the session reads, not a check.
+
 ## Rules
 
 - Every action you take shows in the history as "(by manager <you>)".

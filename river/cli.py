@@ -1203,6 +1203,27 @@ def build_parser():
     x = sts.add_parser("rm", help="remove a step"); x.add_argument("id", type=int)
     x = sts.add_parser("move", help="move a step within its project"); x.add_argument("id", type=int)
     x.add_argument("to", type=int, help="new position (1 is first)")
+    po = sub.add_parser("policy", help="the rules sessions follow (queue, project, role), each with its source and "
+                        "reason; the briefings print the ones that apply")
+    pos = po.add_subparsers(dest="polcmd", required=True)
+    x = pos.add_parser("list", help="every policy, or those of one project or role")
+    x.add_argument("--project"); x.add_argument("--role", help="worker, reviewer, deployer, owner, manager, expert")
+    x.add_argument("--for", dest="for_role", metavar="ROLE",
+                   help="what applies to a session of this role (with --project: in that project)")
+    x = pos.add_parser("show", help="one policy in full"); x.add_argument("id", help="p12 or 12")
+    x = pos.add_parser("add", help="add a rule: short text, its reason and source, and a scope (default: the whole queue)")
+    x.add_argument("text", help="the rule, in one or two plain sentences")
+    x.add_argument("--reason", required=True, help="why the rule exists")
+    x.add_argument("--source", help="who decided it, and when: 'mark 2026-11-11' (default: you, today)")
+    x.add_argument("--project", help="only sessions in this project")
+    x.add_argument("--role", help="only this role: " + ", ".join(core.POLICY_ROLES))
+    x.add_argument("--item", action="append", metavar="ID", help="an item the rule came from (repeatable)")
+    x = pos.add_parser("edit", help="change a policy's text, reason, source, scope or items"); x.add_argument("id")
+    x.add_argument("--text"); x.add_argument("--reason"); x.add_argument("--source")
+    x.add_argument("--project"); x.add_argument("--no-project", action="store_true", help="every project")
+    x.add_argument("--role", help="a role, or any")
+    x.add_argument("--item", action="append", metavar="ID", help="replace the item links (--item '' clears them)")
+    x = pos.add_parser("retire", help="delete a policy (no tombstone; the history keeps one line)"); x.add_argument("id")
     x = sub.add_parser("release", help="give a claimed item back; with no item, an agent's hook says that its session "
                        "ended (docs/agent-adapters.md)")
     x.add_argument("id", type=int, nargs="?", help="the item (none: the session of --as ended, and it is gone)")
@@ -2407,6 +2428,19 @@ def dispatch(conn, a, actor):
                 return core.review_step_remove(conn, a.id, actor)
             return core.review_step_move(conn, a.id, a.to, actor)
         return core.review_fail(conn, a.id, a.fixes, a.note, a.project, actor, a.ask)
+    if c == "policy":
+        if a.polcmd == "list":
+            if a.for_role:
+                return core.policies_for(conn, [a.project] if a.project else [], a.for_role)
+            return core.policy_list(conn, a.project, a.role)
+        if a.polcmd == "show":
+            return core.policy_show(conn, a.id)
+        if a.polcmd == "add":
+            return core.policy_add(conn, a.text, a.reason, a.source, a.project, a.role, a.item, actor)
+        if a.polcmd == "edit":
+            return core.policy_edit(conn, a.id, a.text, a.reason, a.source, a.project, a.no_project, a.role,
+                                    a.item, actor)
+        return core.policy_retire(conn, a.id, actor)
     if c == "release":
         if a.id is None:
             if a.note or a.author:
@@ -2721,6 +2755,33 @@ def _findings_lines(f, r):
     return out or ["  nothing needs you now"]
 
 
+def policy_line(p, width=200):
+    """A policy in one line, as a briefing shows it: id, scope, the rule (cut), and its source."""
+    t = " ".join(p["text"].split())
+    t = t if len(t) <= width else t[:width - 1].rstrip() + "…"
+    return f"  {p['pid']} [{p['scope']}] {t}  ({p['source']})"
+
+
+def policy_full(p):
+    out = [f"{p['pid']} [{p['scope']}] {p['text']}", f"  source: {p['source']}", f"  reason: {p['reason']}"]
+    if p.get("items"):
+        out.append("  items: " + "; ".join(f"#{i['id']} {i['title']} ({i['status']})" for i in p["items"]))
+    out.append(f"  added {core.show_time(p['created_at'])}" + (f" by {p['created_by']}" if p.get("created_by") else "")
+               + (f", changed {core.show_time(p['changed_at'])}" if p.get("changed_at") else ""))
+    return out
+
+
+def policy_lines(pols, other=0):
+    """The POLICIES block of a briefing: the rules that apply to this session, in short form."""
+    if not pols and not other:
+        return []
+    out = ["POLICIES (rules for this session; the full text and reason: maxpm policy show <id>):"]
+    out += [policy_line(p) for p in pols]
+    if other:
+        out.append(f"  and {other} policy(ies) of projects or other roles: maxpm policy list")
+    return out + [""]
+
+
 def render_manage(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
@@ -2752,7 +2813,8 @@ def render_manage(b):
     out += ["", "Projects: " + ", ".join(f"{p['project']} {p['ready']} ready/{p['open']} open"
                                           + (f" ({p['backlog']} in backlog)" if p.get("backlog") else "")
                                           for p in st["projects"][:12] if p.get("open")),
-            "", "NEEDS ATTENTION:"] + _findings_lines(b["findings"], r)
+            ""] + policy_lines(b.get("policies") or [], b.get("other_policies") or 0) + [
+            "NEEDS ATTENTION:"] + _findings_lines(b["findings"], r)
     out += ["",
             "Your job: plan with the user, and keep the other agents working together. You take no items.",
             f"  launch:  {r} launch [--project P | --item N] [--model M] [--effort E] [--dry-run]",
@@ -2969,6 +3031,7 @@ def render_go(b):
         if (b.get("trackers") or {}).get(n):
             out.append(f"  tracker: {b['trackers'][n]} (items link its issues with --ref)")
     out.append("")
+    out += policy_lines(b.get("policies") or [])
     if b.get("asked_open"):
         out.append("OPEN QUESTIONS YOU ASKED: " + core.asked_line(me, b["asked_open"]) + ".")
         out += [f"  #{q['id']} to {q['to_agent']}: {' '.join(q['body'].split())[:160]}" for q in b["asked_open"]] + [""]
@@ -3804,6 +3867,21 @@ def render(a, res):
                     print(f"  no items yet: maxpm add \"<title>\" --goal {g['name']}")
         if isinstance(res, dict) and res.get("goal_checks"):
             print("\n".join(_goal_check_lines(res["goal_checks"])))
+        return
+    if c == "policy":
+        if a.polcmd in ("show", "add", "edit"):
+            print(("added " if a.polcmd == "add" else "changed " if a.polcmd == "edit" else "")
+                  + "\n".join(policy_full(res)))
+            if a.polcmd == "add":
+                print(f"  Name it in your item's output (maxpm done <id> --output \"... policy {res['pid']}\").")
+        elif a.polcmd == "retire":
+            print(f"retired {res['pid']} ({res['scope']}): {res['text']}")
+        else:
+            if not res:
+                print("(no policies: maxpm policy add \"<rule>\" --reason \"<why>\" --source \"<who, date>\" "
+                      "[--project P] [--role R])")
+            for p in res:
+                print(policy_line(p))
         return
     if c == "review" and a.rcmd == "step":
         rows = [res] if isinstance(res, dict) else res

@@ -8116,3 +8116,92 @@ class ShortTitles(Base):
             core.agent_now(self.c, "ag", "Edits river/cli.py")
         with self.assertRaises(core.RiverError):
             core.agent_now(self.c, "ag", "")
+
+
+class Policies(Base):
+    """Policies (#5308): rules in the queue, with scope, source and reason, printed in the briefings they apply to."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "web", path=self.dir.name)
+        core.project_add(self.c, "api")
+        self.it = self.add("web", "Build the header")
+        self.q = core.policy_add(self.c, "Run the tests before each commit", "a broken main stops every session",
+                                 "mark 2026-11-11", actor="mark")
+        self.p = core.policy_add(self.c, "Ask before a push of public text", "the repo is public", "mark 2026-11-11",
+                                 project="web", items=[str(self.it)])
+        self.r = core.policy_add(self.c, "Never review a release you worked on", "a clean eye", role="reviewer",
+                                 actor="mark")
+        self.m = core.policy_add(self.c, "Tell the person in one line", "short", role="manager")
+        self.o = core.policy_add(self.c, "API keys stay out of logs", "secrets", project="api")
+        self.w = core.policy_add(self.c, "Name the item in commits", "cleanup finds it", project="web", role="worker")
+
+    def ids(self, rows):
+        return [p["id"] for p in rows]
+
+    def test_add_checks_and_defaults(self):
+        self.assertEqual(self.p["scope"], "web")
+        self.assertEqual(self.p["items"][0]["id"], self.it)
+        self.assertEqual(self.w["scope"], "web, worker")
+        self.assertTrue(self.r["source"].startswith("mark 20"))  # no source: the actor, today
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.policy_add(self.c, "x", "")
+        with self.assertRaisesRegex(RiverError, "no policy role"):
+            core.policy_add(self.c, "x", "y", role="boss")
+        with self.assertRaisesRegex(RiverError, "no item"):
+            core.policy_add(self.c, "x", "y", items=["9999"])
+        with self.assertRaisesRegex(RiverError, "no project"):
+            core.policy_add(self.c, "x", "y", project="nope")
+
+    def test_what_applies_to_each_role(self):
+        self.assertEqual(self.ids(core.policies_for(self.c, ["web"], "worker")), [self.q["id"], self.p["id"], self.w["id"]])
+        self.assertEqual(self.ids(core.policies_for(self.c, ["web"], "reviewer")),
+                         [self.q["id"], self.r["id"], self.p["id"], self.w["id"]])  # a reviewer is a worker too
+        self.assertEqual(self.ids(core.policies_for(self.c, ["api"], "expert")), [self.q["id"], self.o["id"]])
+        self.assertEqual(self.ids(core.policies_for(self.c, role="manager")), [self.q["id"], self.m["id"]])
+
+    def test_go_and_manage_briefings_print_them(self):
+        b = core.go(self.c, self.dir.name, "w1")
+        self.assertEqual(b["item"]["id"], self.it)
+        self.assertEqual(self.ids(b["policies"]), [self.q["id"], self.p["id"], self.w["id"]])
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn("POLICIES", out.getvalue())
+        self.assertIn(f"{self.p['pid']} [web] Ask before a push of public text  (mark 2026-11-11)", out.getvalue())
+        m = core.manage(self.c, self.dir.name, "boss")
+        self.assertEqual(self.ids(m["policies"]), [self.q["id"], self.m["id"]])
+        self.assertEqual(m["other_policies"], 4)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_manage(m)
+        self.assertIn("and 4 policy(ies) of projects or other roles", out.getvalue())
+
+    def test_edit_and_retire(self):
+        p = core.policy_edit(self.c, self.p["pid"], text="Ask first", no_project=True, role="expert", items=[""])
+        self.assertEqual((p["text"], p["scope"], p["items"]), ("Ask first", "expert", []))
+        self.assertTrue(p["changed_at"])
+        p = core.policy_edit(self.c, p["id"], project="api", role="any")
+        self.assertEqual(p["scope"], "api")
+        with self.assertRaisesRegex(RiverError, "say what changes"):
+            core.policy_edit(self.c, p["id"])
+        core.policy_retire(self.c, f"p{p['id']}", actor="mark")
+        with self.assertRaisesRegex(RiverError, "no policy"):
+            core.policy_show(self.c, p["id"])
+        self.assertNotIn(p["id"], self.ids(core.policy_list(self.c)))
+        self.assertIn("retired", core.recent_events(self.c)[0]["change"])  # the history keeps one line
+
+    def test_cli_and_state(self):
+        from river import cli
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["--as", "mark", "policy", "add", "Keep it short", "--reason", "people read it", "--role", "owner"])
+            cli.run(["policy", "list", "--for", "owner", "--project", "web"])
+        self.assertIn("added p7 [owner] Keep it short", out.getvalue())
+        self.assertIn("Name it in your item's output", out.getvalue())
+        self.assertIn("p7 [owner] Keep it short", out.getvalue().split("Name it")[1])
+        st = core.state(self.c)
+        self.assertEqual(len(st["policies"]), 7)
+        self.assertIn("reviewer", st["policy_roles"])

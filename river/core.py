@@ -832,6 +832,22 @@ CREATE TABLE IF NOT EXISTS sent_prompts (
 );
 CREATE INDEX IF NOT EXISTS sent_prompts_agent ON sent_prompts(agent, id);
 
+-- Policies (#5308): the rules that sessions follow, kept in the queue, so each agent (Claude Code, Codex, any other)
+-- reads the ones that apply to it in its briefing. Scope: the whole queue (no project, no role), a project, a role,
+-- or a role in a project. Retire deletes the row: no tombstones.
+CREATE TABLE IF NOT EXISTS policies (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER REFERENCES projects(id),
+  role        TEXT,
+  text        TEXT NOT NULL,
+  source      TEXT NOT NULL,             -- who decided it, and when: 'mark 2026-11-11'
+  reason      TEXT NOT NULL,
+  items       TEXT,                      -- linked item ids, separated by spaces
+  created_by  TEXT,
+  created_at  TEXT NOT NULL,
+  changed_at  TEXT
+);
+
 CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
@@ -11988,10 +12004,181 @@ def state(conn, closed=True):
         "events": recent_events(conn),
         "canvases": canvas_heads(conn),  # the page reloads an open canvas when its version changes (#4768)
         "takeovers": takeovers(conn),
+        "policies": policy_list(conn),  # the Settings tab's Policies list (#5308)
+        "policy_roles": list(POLICY_ROLES),
         "needs_you": [dict(r) for r in conn.execute(
             "SELECT id, kind, item_id, message_id, human, summary, opened_at FROM needs_you "
             "WHERE closed_at IS NULL ORDER BY id DESC")],
     }
+
+
+# ---------------------------------------------------------------- policies (#5308)
+# A policy is a rule that sessions follow, with its source and reason, kept in the queue instead of in one agent's
+# memory files: Claude Code memory reaches only Claude Code sessions in one folder, and nobody sees which rule applied.
+# maxpm go, manage and the expert briefing print the policies that apply to the session. No rule engine: a policy
+# that must be enforced becomes code or a setting.
+
+# The roles a policy can name. A worker policy applies to every session that takes queue work: a worker, a goal
+# owner, a reviewer, a deployer (they are workers with a kind of task). A manager or an expert gets only its own.
+POLICY_ROLES = ("worker", "reviewer", "deployer", "owner", "manager", "expert")
+
+
+def _policy_roles(role):
+    """The policy roles that apply to a session with this briefing role."""
+    if role in ("manager", "expert"):
+        return {role}
+    if role == "assistant":
+        return set()  # the assistant of a person takes no queue work: only the queue and project policies
+    return {"worker"} | ({role} if role in POLICY_ROLES else set())
+
+
+def _policy_id(pid):
+    s = str(pid).strip().lower().lstrip("p")
+    if not s.isdigit():
+        raise RiverError(f"no policy {pid!r}; a policy id is a number (p12 or 12): maxpm policy list")
+    return int(s)
+
+
+def _policy_row(conn, pid):
+    r = conn.execute("SELECT x.*, p.name project FROM policies x LEFT JOIN projects p ON p.id=x.project_id "
+                     "WHERE x.id=?", (_policy_id(pid),)).fetchone()
+    if not r:
+        raise RiverError(f"no policy p{_policy_id(pid)}; list them: maxpm policy list")
+    return r
+
+
+def _policy_role(role):
+    role = (role or "").strip().lower() or None
+    if role in (None, "any"):
+        return None
+    if role not in POLICY_ROLES:
+        raise RiverError(f"no policy role {role!r}; roles: {', '.join(POLICY_ROLES)} (or any)")
+    return role
+
+
+def _policy_items(conn, items):
+    """Item ids as the policy keeps them: each must exist."""
+    ids = []
+    for x in items or []:
+        for part in str(x).replace(",", " ").split():
+            i = int(part.lstrip("#")) if part.lstrip("#").isdigit() else None
+            if i is None or not conn.execute("SELECT 1 FROM items WHERE id=?", (i,)).fetchone():
+                raise RiverError(f"no item {part}; link a policy to items that exist: --item <id>")
+            if i not in ids:
+                ids.append(i)
+    return " ".join(map(str, ids)) or None
+
+
+def policy_scope(p):
+    """The scope of a policy in words: queue, the project, the role, or both."""
+    return ", ".join(x for x in (p.get("project"), p.get("role")) if x) or "queue"
+
+
+def _policy_view(conn, r):
+    p = dict(r)
+    p.pop("project_id", None)
+    p["pid"] = f"p{p['id']}"
+    p["scope"] = policy_scope(p)
+    ids = [int(i) for i in (p.get("items") or "").split()]
+    p["items"] = [{"id": i, "title": x["title"], "status": x["status"]} for i in ids
+                  for x in [conn.execute("SELECT title, status FROM items WHERE id=?", (i,)).fetchone()] if x]
+    return p
+
+
+def policy_add(conn, text, reason, source=None, project=None, role=None, items=None, actor=None):
+    """Add a policy. source says who decided it and when; with none, the actor and today's date."""
+    text, reason = (text or "").strip(), (reason or "").strip()
+    if not text:
+        raise RiverError("say the rule: maxpm policy add \"<rule>\" --reason \"<why>\" --source \"<who, date>\"")
+    if not reason:
+        raise RiverError("say why the rule exists, so a session can judge a case it does not name: "
+                         "maxpm policy add \"<rule>\" --reason \"<why>\"")
+    pid = _project(conn, project)["id"] if project else None
+    role = _policy_role(role)
+    source = (source or "").strip() or f"{actor or 'unknown'} {now().date().isoformat()}"
+    with tx(conn):
+        cur = conn.execute("INSERT INTO policies(project_id, role, text, source, reason, items, created_by, created_at) "
+                           "VALUES (?,?,?,?,?,?,?,?)", (pid, role, text, source, reason, _policy_items(conn, items),
+                                                       actor, iso(now())))
+        p = _policy_view(conn, _policy_row(conn, cur.lastrowid))
+        _event(conn, None, actor, f"policy {p['pid']} added ({p['scope']}): {text}")
+    return p
+
+
+def policy_edit(conn, pid, text=None, reason=None, source=None, project=None, no_project=False, role=None,
+                items=None, actor=None):
+    """Change a policy: its text, reason, source, scope (project, role; role any clears it), or its item links
+    (items replaces them; an empty list clears them)."""
+    r = _policy_row(conn, pid)
+    ch = {}
+    for k, v in (("text", text), ("reason", reason), ("source", source)):
+        if v is not None:
+            if not v.strip():
+                raise RiverError(f"the {k} of a policy cannot be empty; to remove the policy: maxpm policy retire p{r['id']}")
+            ch[k] = v.strip()
+    if project and no_project:
+        raise RiverError("give --project <name> or --no-project, not both")
+    if project:
+        ch["project_id"] = _project(conn, project)["id"]
+    elif no_project:
+        ch["project_id"] = None
+    if role is not None:
+        ch["role"] = _policy_role(role)
+    if items is not None:
+        ch["items"] = _policy_items(conn, items)
+    if not ch:
+        raise RiverError(f"say what changes: maxpm policy edit p{r['id']} --text|--reason|--source|--project|"
+                         f"--no-project|--role|--item")
+    with tx(conn):
+        conn.execute(f"UPDATE policies SET {', '.join(k + '=?' for k in ch)}, changed_at=? WHERE id=?",
+                     (*ch.values(), iso(now()), r["id"]))
+        p = _policy_view(conn, _policy_row(conn, r["id"]))
+        _event(conn, None, actor, f"policy {p['pid']} changed ({', '.join(k.replace('_id', '') for k in ch)})")
+    return p
+
+
+def policy_retire(conn, pid, actor=None):
+    """Delete a policy. No tombstone: the history keeps one line with its text."""
+    p = _policy_view(conn, _policy_row(conn, pid))
+    with tx(conn):
+        conn.execute("DELETE FROM policies WHERE id=?", (p["id"],))
+        _event(conn, None, actor, f"policy {p['pid']} retired ({p['scope']}): {p['text']}")
+    return p
+
+
+def policy_show(conn, pid):
+    return _policy_view(conn, _policy_row(conn, pid))
+
+
+def policy_list(conn, project=None, role=None):
+    """Every policy, or those of one project or role (a filter on the scope as written, not on what applies)."""
+    q, args = [], []
+    if project:
+        q.append("x.project_id=?")
+        args.append(_project(conn, project)["id"])
+    if role:
+        q.append("x.role IS ?")
+        args.append(_policy_role(role))
+    rows = conn.execute("SELECT x.*, p.name project FROM policies x LEFT JOIN projects p ON p.id=x.project_id "
+                        + ("WHERE " + " AND ".join(q) if q else "")
+                        + " ORDER BY x.project_id IS NOT NULL, p.rank, p.name, x.role IS NOT NULL, x.role, x.id", args)
+    return [_policy_view(conn, r) for r in rows]
+
+
+def policies_for(conn, projects=(), role=None):
+    """The policies that apply to a session: the queue's, those of its projects, and those of its role (also in
+    its projects). A manager runs every project: it gets the queue's and every manager policy, and the count of
+    the project policies it does not see."""
+    roles = _policy_roles(role)
+    out = []
+    for p in policy_list(conn):
+        if role == "manager":
+            hit = p["role"] == "manager" or (not p["role"] and not p["project"])
+        else:
+            hit = (not p["project"] or p["project"] in projects) and (not p["role"] or p["role"] in roles)
+        if hit:
+            out.append(p)
+    return out
 
 
 # ---------------------------------------------------------------- go
@@ -12036,7 +12223,19 @@ def _goal_brief(conn, name, actor):
 
 def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
        agent_type=None):
-    """One call for a fresh agent session; see _go."""
+    """One call for a fresh agent session; see _go. The briefing ends with the policies for the session (#5308)."""
+    brief = _go_brief(conn, cwd, actor, project, role, session, focus, model, chat, agent_type)
+    if brief.get("agent") and brief.get("role"):
+        it = brief.get("item")
+        names = list(brief.get("projects") or [])
+        if it and it.get("project") and it["project"] not in names:
+            names.append(it["project"])
+        brief["policies"] = policies_for(conn, names, brief["role"])
+    return brief
+
+
+def _go_brief(conn, cwd, actor=None, project=None, role=None, session=None, focus=None, model=None, chat=False,
+              agent_type=None):
     brief = _go(conn, cwd, actor, project, role, session, focus, model, chat, agent_type)
     brief["asked_open"] = asked_open(conn, brief.get("agent"))  # #5001: the asker closes what is answered or moot
     it = brief.get("item")
@@ -13542,7 +13741,9 @@ def manage(conn, cwd, actor=None, takeover=None):
     import json
     with tx(conn):  # what the manager has seen: manage --watch reports what is new after this
         conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(_finding_keys(f)), actor))
+    pol = policies_for(conn, role="manager")
     return {"agent": actor, "new_name": new_name, "role": "manager", "status": status(conn), "findings": f,
+            "policies": pol, "other_policies": conn.execute("SELECT COUNT(*) FROM policies").fetchone()[0] - len(pol),
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
             "wait_high": setting(conn, "manage_wait_high", agent=actor),
             "wait_low": setting(conn, "manage_wait_low", agent=actor),
