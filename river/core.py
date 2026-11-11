@@ -350,48 +350,8 @@ DEFAULT_SETTINGS = {
 # The roles that agent_for.<role> names (#5168).
 AGENT_ROLES = ("worker", "manager", "reviewer", "deployer", "expert", "context")
 
-# Agent platforms river can start from a launch profile ("Label=@claude-code" in launch_agents). Each option
-# maps to the CLI's own flags, as `claude --help` and `codex --help` name them. Codex has no Remote Control
-# flag for one session (codex remote-control runs a daemon), so it has no remote_control option. Each option
-# is also a setting, <prefix><option>, so a project can differ (most specific wins).
-LAUNCH_PLATFORMS = {
-    "claude-code": {"label": "Claude Code", "exe": "claude", "family": "claude", "prefix": "claude_", "options": {
-        "remote_control": {"kind": "toggle", "default": "on",
-                           "text": "Remote Control: the session gets a web link that notifications and Open chat use"},
-        "permission_mode": {"kind": "choice", "default": "",
-                            "choices": ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"],
-                            "text": "permission mode (--permission-mode); empty: Claude Code's own setting"},
-        "model_ids": {"kind": "text", "default": "",
-                      "text": "the id Claude Code gets for a model_ladder name (name=id, ...); a name with no "
-                              "entry goes as it is: claude --model takes haiku, sonnet, opus, and fable"},
-        "args": {"kind": "text", "default": "", "text": "more arguments, put before the prompt"},
-        "skill_prompt": {"kind": "toggle", "default": "on",
-                         "text": "the maxpm skill in the system prompt (--append-system-prompt-file, with the file "
-                                 "args names, if any): each session reads it from the prompt cache, and does not "
-                                 "load it again"},
-        "prompt": {"kind": "text", "default": "go", "text": "the first prompt"},
-        "activity_hooks": {"kind": "toggle", "default": "on",
-                           "text": "hooks that report the session's tool calls, permission prompts and turn ends to "
-                                   "MaximizePM (--settings with the hook file; maxpm report --hook claude), so the manager hears of a "
-                                   "session that stands still"},
-    }},
-    "codex": {"label": "Codex", "exe": "codex", "family": "openai", "prefix": "codex_", "options": {
-        "sandbox": {"kind": "choice", "default": "", "choices": ["read-only", "workspace-write", "danger-full-access"],
-                    "text": "sandbox (--sandbox); empty: Codex's own setting. MaximizePM adds --add-dir for the queue folder"},
-        "approval": {"kind": "choice", "default": "", "choices": ["on-request", "never"],
-                     "text": "when Codex asks before it runs a command (--ask-for-approval); empty: Codex's own setting"},
-        # Codex takes full ids, and they change with each OpenAI release: update this list then.
-        "model_ids": {"kind": "text", "default": "luna=gpt-6-luna, terra=gpt-5.6-terra, sol=gpt-6.1-sol, astra=gpt-6-astra",
-                      "text": "the id Codex gets (codex -m) for a model_ladder name (name=id, ...); "
-                              "a name with no entry goes as it is"},
-        "args": {"kind": "text", "default": "", "text": "more arguments, put before the prompt"},
-        "prompt": {"kind": "text", "default": "run maxpm go in this folder and follow the briefing",
-                   "text": "the first prompt (Codex does not read CLAUDE.md)"},
-    }},
-}
-for _pl in LAUNCH_PLATFORMS.values():
-    for _o, _spec in _pl["options"].items():
-        DEFAULT_SETTINGS[_pl["prefix"] + _o] = _spec["default"]
+# The launch platforms (LAUNCH_PLATFORMS) and their options come from the agent adapters (river/agents, #5169): see
+# the end of this module, where the built-in adapters are imported.
 
 SCHEMA = """
 -- One-time data changes that already ran (key: the change).
@@ -1321,8 +1281,7 @@ def _event(conn, item_id, actor, change):
 def setting(conn, key: str, item_id: int | None = None, agent: str | None = None,
             project_id: int | None = None, kind: str | None = None) -> str:
     """Most specific value wins: item, agent, item kind, project, global, built-in."""
-    if key not in DEFAULT_SETTINGS:
-        raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
+    default = DEFAULT_SETTINGS[key] if key in DEFAULT_SETTINGS else setting_default(key)
     if item_id is not None and (project_id is None or kind is None):
         r = conn.execute("SELECT project_id, kind FROM items WHERE id=?", (item_id,)).fetchone()
         if r:
@@ -1344,7 +1303,7 @@ def setting(conn, key: str, item_id: int | None = None, agent: str | None = None
         r = conn.execute("SELECT value FROM settings WHERE scope=? AND key=?", (sc, key)).fetchone()
         if r:
             return r["value"]
-    return DEFAULT_SETTINGS[key]
+    return default
 
 
 def _scope(conn, project=None, item=None, agent=None, kind=None) -> str:
@@ -1367,7 +1326,7 @@ def _scope(conn, project=None, item=None, agent=None, kind=None) -> str:
 
 def config_set(conn, key, value, project=None, item=None, agent=None, actor=None, kind=None):
     if key not in DEFAULT_SETTINGS:
-        raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
+        setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
             "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "tidy_every", "busy_max", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
@@ -1489,7 +1448,9 @@ def config_list(conn):
     rows = [dict(r) for r in conn.execute("SELECT scope,key,value FROM settings ORDER BY scope,key")]
     for r in rows:
         r["value"] = mask(r["key"], r["value"])
-    return {"defaults": DEFAULT_SETTINGS, "overrides": rows}
+    # The settings of the agents that are not built in (#5169) follow the built-in ones.
+    extra = {k: v for k, v in agent_setting_defaults().items() if k not in DEFAULT_SETTINGS}
+    return {"defaults": {**DEFAULT_SETTINGS, **extra} if extra else DEFAULT_SETTINGS, "overrides": rows}
 
 
 # ---------------------------------------------------------------- models
@@ -1548,20 +1509,17 @@ def _agent_platform(value):
 
 
 def platform_spec(platform):
-    """What MaximizePM knows of an agent type for a launch: {label, exe, family, prefix, options}. Claude Code and
-    Codex: their LAUNCH_PLATFORMS entry (until #5185). Any other registered adapter: from its DESCRIBE and its
-    SETTINGS specs (options: {key: {kind, choices, default, text}}). RiverError for no registered agent type."""
-    if platform in LAUNCH_PLATFORMS:
-        return LAUNCH_PLATFORMS[platform]
+    """What MaximizePM knows of an agent type for a launch: {label, exe, family, prefix, options}, from its adapter's
+    DESCRIBE and the setting specs that are config keys (options: {key: {kind, default, choices, text, label}},
+    #5169). An agent with no prompt setting gets one (#5168). RiverError for no registered agent type."""
     a = _adapters().find(platform or "")
     if a is None:
         raise RiverError(f"agent {platform!r} is not registered; the agent types are {', '.join(agent_types())}")
-    d = a.describe
-    opts = {s["key"]: {"kind": s.get("kind", "text"), "choices": list(s.get("choices") or ()),
-                       "default": s.get("default", ""), "text": s.get("text", "")} for s in a.settings}
+    entry = _platform_entry(a.describe, a.options())
     # Every session starts with a first prompt that runs maxpm go (a manager's: manage, server.manage_command).
-    opts.setdefault("prompt", {"kind": "text", "default": FIRST_PROMPT, "text": "the first prompt"})
-    return {"label": a.label, "exe": d["exe"], "family": d["family"], "prefix": d["prefix"], "options": opts}
+    entry["options"].setdefault("prompt", {"kind": "text", "default": FIRST_PROMPT, "choices": [],
+                                           "text": "the first prompt", "label": "Prompt"})
+    return entry
 
 
 # The first prompt of a session of an adapter with no prompt setting of its own (#5168), as Codex's default.
@@ -10529,10 +10487,9 @@ def parse_profile(cmd):
         words = shlex.split(cmd[1:])
     except ValueError as e:
         raise RiverError(f"launch profile {cmd!r}: {e}")
-    if words and words[0] not in LAUNCH_PLATFORMS and _agent_platform(words[0]) == words[0]:
-        pass  # a registered adapter with a launch part (#5168): @<its id>
-    elif not words or words[0] not in LAUNCH_PLATFORMS:
-        raise RiverError(f"launch profile {cmd!r}: the platform is one of {', '.join('@' + p for p in agent_types())}")
+    platforms = launch_platforms()
+    if not words or words[0] not in platforms:
+        raise RiverError(f"launch profile {cmd!r}: the platform is one of {', '.join('@' + p for p in platforms)}")
     opts = {}
     for w in words[1:]:
         k, sep, v = w.partition("=")
@@ -10545,16 +10502,15 @@ def parse_profile(cmd):
 
 def _platform_setting(key):
     """(platform, option) when the setting is a launch profile option, e.g. claude_remote_control."""
-    for name, pl in LAUNCH_PLATFORMS.items():
-        if key.startswith(pl["prefix"]) and key[len(pl["prefix"]):] in pl["options"]:
-            return name, key[len(pl["prefix"]):]
-    return None
+    got = _agent_option(key)
+    return got[:2] if got else None
 
 
 def _check_option(platform, opt, value):
-    spec = platform_spec(platform)["options"].get(opt)
+    options = platform_spec(platform)["options"]
+    spec = options.get(opt)
     if spec is None:
-        raise RiverError(f"{platform} has no option {opt!r}; it has {', '.join(platform_spec(platform)['options']) or 'none'}")
+        raise RiverError(f"{platform} has no option {opt!r}; it has {', '.join(options) or 'none'}")
     if spec["kind"] == "toggle" and value not in ("on", "off"):
         raise RiverError(f"{platform} {opt} is on or off")
     if spec["kind"] == "choice" and value and value not in spec["choices"]:
@@ -10583,7 +10539,9 @@ def parse_model_ids(value, platform="model_ids"):
 def model_ids(conn):
     """{platform: {ladder name: CLI id}} from the <prefix>model_ids settings (global)."""
     out = {}
-    for p, pl in LAUNCH_PLATFORMS.items():
+    for p, pl in launch_platforms().items():
+        if "model_ids" not in pl["options"]:
+            continue
         try:
             out[p] = parse_model_ids(setting(conn, pl["prefix"] + "model_ids"), p)
         except RiverError:
@@ -10601,24 +10559,32 @@ def ladder_name(conn, model):
 
 
 def model_id(conn, platform, model, project_id=None, inline=None):
-    """The id a platform's CLI gets for a model_ladder name: its <prefix>model_ids entry, else the name. Another
-    registered adapter: its DESCRIBE['model_ids'] (#5168)."""
+    """The id a platform's CLI gets for a model_ladder name: its <prefix>model_ids setting when it has that option,
+    else its adapter's DESCRIBE['model_ids'] (#5168), else the name."""
     if not model:
         return model
-    if platform not in LAUNCH_PLATFORMS:
-        a = _adapters().find(platform or "")
-        return (a.describe["model_ids"] if a else {}).get(model.lower(), model)
+    a = _adapters().find(platform or "")
+    if a is None or a.missing():
+        return model
+    pl = platform_spec(platform)
+    if "model_ids" not in pl["options"]:
+        return a.describe["model_ids"].get(model.lower(), model)
     ids = (inline or {}).get("model_ids")
     if ids is None:
-        ids = setting(conn, LAUNCH_PLATFORMS[platform]["prefix"] + "model_ids", project_id=project_id)
+        ids = setting(conn, pl["prefix"] + "model_ids", project_id=project_id)
     return parse_model_ids(ids, platform).get(model.lower(), model)
 
 
 def platform_models(conn, platform, project_id=None, inline=None):
     """The models a platform's sessions run, for the launch dialog and a session's Settings dialog (#4633), one
     source for both: the model_ladder names of its family, each with its note and the id its CLI gets."""
-    fam = LAUNCH_PLATFORMS.get(platform, {}).get("family")
+    fam = launch_platforms().get(platform, {}).get("family")
     ladder = parse_ladder(setting(conn, "model_ladder"))
+    if fam and fam not in ladder:
+        # A family with no ladder (a "multi" agent's provider/model texts, #5169): the adapter's own model list.
+        a = _adapters().find(platform)
+        return [{"name": m, "note": "", "family": fam, "id": a.describe["model_ids"].get(m, m)}
+                for m in (a.read_models() if a else [])]
     return [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": fam, "id": model_id(conn, platform, m, project_id, inline)}
             for m in ladder.get(fam, [])]
 
@@ -10680,8 +10646,8 @@ def river_dir():
 
 
 def profile_options(conn, platform, inline=None, project_id=None, chosen=None):
-    """A profile's option values: the launch dialog's choice, else the entry's own, else the settings. An adapter
-    outside LAUNCH_PLATFORMS has no config keys yet (#5169): the entry's own, else its spec's default."""
+    """A profile's option values: the launch dialog's choice, else the entry's own, else the settings (each option
+    of a registered agent is a config key, <prefix><option>, #5169)."""
     pl = platform_spec(platform)
     for k, v in (chosen or {}).items():
         spec = pl["options"].get(k)
@@ -10690,7 +10656,8 @@ def profile_options(conn, platform, inline=None, project_id=None, chosen=None):
                              f"{', '.join(o for o, sp in pl['options'].items() if sp['kind'] != 'text')}")
         _check_option(platform, k, v)
     def default(k):
-        if platform not in LAUNCH_PLATFORMS:
+        # An adapter with no prefix has no config keys: its spec's default.
+        if not pl["prefix"]:
             return pl["options"][k]["default"]
         return setting(conn, pl["prefix"] + k, project_id=project_id)
     return {k: (chosen or {}).get(k, (inline or {}).get(k, default(k))) for k in pl["options"]}
@@ -11510,6 +11477,59 @@ def _check_agent_effort(ad, mid, effort):
 from .agents import claude as _claude_adapter, codex as _codex_adapter  # noqa: E402
 AGENT_FAMILIES = {m.DESCRIBE["exe"]: m.DESCRIBE["family"] for m in (_claude_adapter, _codex_adapter)}
 PLATFORM_EFFORTS = {m.DESCRIBE["family"]: list(m.EFFORT["levels"]) for m in (_claude_adapter, _codex_adapter)}
+
+
+def _platform_entry(describe, specs):
+    """A launch platform from an adapter's DESCRIBE and its setting specs (Adapter.options()): {label, exe, family,
+    prefix, options: {key: {kind, default, choices, text, label}}}."""
+    return {"label": describe["label"], "exe": describe["exe"], "family": describe["family"],
+            "prefix": describe.get("prefix", ""),
+            "options": {k: {"kind": sp["kind"], "default": sp["default"], "choices": list(sp["choices"]),
+                            "text": sp["text"], "label": sp["label"]} for k, sp in specs.items()}}
+
+
+# Agent platforms river can start from a launch profile ("Label=@claude-code" in launch_agents), from the built-in
+# adapters' SETTINGS (#5169): each option maps to the CLI's own flags, and is also a setting, <prefix><option>, so a
+# project can differ (most specific wins). launch_platforms() adds every other registered agent; #5185 removes this
+# table.
+from .agents import Adapter as _Adapter  # noqa: E402
+LAUNCH_PLATFORMS = {name: _platform_entry(m.DESCRIBE, _Adapter(m, "builtin").options())
+                    for name, m in (("claude-code", _claude_adapter), ("codex", _codex_adapter))}
+for _pl in LAUNCH_PLATFORMS.values():
+    for _o, _spec in _pl["options"].items():
+        DEFAULT_SETTINGS[_pl["prefix"] + _o] = _spec["default"]
+
+
+def launch_platforms():
+    """{platform: entry} of every registered agent that MaximizePM can start (it has its launch part): the built-in
+    ones under their platform names (claude-code, codex), the others under their id, each with the options of its
+    setting specs (platform_spec, #5169)."""
+    return {_platform_of(a): platform_spec(_platform_of(a)) for a in _adapters().load().values() if not a.missing()}
+
+
+def _agent_option(key):
+    """(platform, option, entry) when `key` is the config key <prefix><option> of a registered agent's setting, or
+    None."""
+    for name, pl in launch_platforms().items():
+        if pl["prefix"] and key.startswith(pl["prefix"]) and key[len(pl["prefix"]):] in pl["options"]:
+            return name, key[len(pl["prefix"]):], pl
+    return None
+
+
+def setting_default(key):
+    """The built-in value of setting `key`: DEFAULT_SETTINGS, else the default of a registered agent's setting (an
+    adapter that is not built in, #5169); RiverError when no setting has that name."""
+    if key in DEFAULT_SETTINGS:
+        return DEFAULT_SETTINGS[key]
+    got = _agent_option(key)
+    if got:
+        return got[2]["options"][got[1]]["default"]
+    raise RiverError(f"unknown setting {key!r}; known: {', '.join(sorted(DEFAULT_SETTINGS))}")
+
+
+def agent_setting_defaults():
+    """{config key: default} of every registered agent's settings, the built-in ones included."""
+    return {pl["prefix"] + k: o["default"] for pl in launch_platforms().values() for k, o in pl["options"].items()}
 # One line per model in the launch dialog: when it fits.
 MODEL_NOTES = {
     "haiku": "quick, simple work: lookups, formatting, trivial edits",
@@ -11547,6 +11567,7 @@ def launch_options(conn):
     out = []
     for label, cmd in parse_launch_agents(setting(conn, "launch_agents")):
         prof = parse_profile(cmd)
+        ad = _adapters().find(prof[0]) if prof else None
         fam = platform_spec(prof[0])["family"] if prof else AGENT_FAMILIES.get(Path(entry_exe(cmd)).name.lower())
         fam = fam if fam in ladder else None
         out.append({"label": label, "family": fam, "platform": prof[0] if prof else None,
@@ -11554,18 +11575,20 @@ def launch_options(conn):
                     "models": (platform_models(conn, prof[0], inline=prof[1]) if prof else
                                [{"name": m, "note": MODEL_NOTES.get(m, ""), "family": f}
                                 for f, ms in ladder.items() if fam in (None, f) for m in ms]),
-                    "efforts": PLATFORM_EFFORTS.get(fam, levels),
-                    "takes_model": bool(prof) or "{model}" in cmd, "takes_effort": bool(prof) or "{effort}" in cmd,
+                    # A profile offers the efforts of its adapter (#5169); none when the agent has no effort.
+                    "efforts": ad.effort_choices() if ad else PLATFORM_EFFORTS.get(fam, levels),
+                    "takes_model": bool(prof) or "{model}" in cmd,
+                    "takes_effort": bool(ad.effort) if ad else "{effort}" in cmd,
                     # The options the dialog can change for one launch, preset from the entry and the settings.
                     "options": profile_option_list(conn, prof[0], prof[1], kinds=("toggle", "choice")) if prof else []})
     return out
 
 
 def profile_option_list(conn, platform, inline=None, project_id=None, kinds=("toggle", "choice", "text")):
-    """A platform's options with their values, for the page: [{name, setting, kind, choices, value, text}]."""
+    """A platform's options with their values, for the page: [{name, label, setting, kind, choices, value, text}]."""
     pl = platform_spec(platform)
     vals = profile_options(conn, platform, inline, project_id)
-    return [{"name": k, "setting": pl["prefix"] + k, "kind": sp["kind"], "choices": sp.get("choices", []),
+    return [{"name": k, "label": sp["label"], "setting": pl["prefix"] + k, "kind": sp["kind"], "choices": sp.get("choices", []),
              "value": vals[k], "text": sp["text"], "fixed": k in (inline or {})}
             for k, sp in pl["options"].items() if sp["kind"] in kinds]
 

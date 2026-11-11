@@ -622,7 +622,7 @@ function renderSetup(st) {
   const profs = st.launch_profiles || [];
   const howStart = profs.length && extra(true, `<span title="For every project; set one project apart in Settings (for example claude_remote_control with the project scope). The launch dialog can change the toggles for one start.">How agents start</span>`,
     profs.map(p => `<div style="margin:4px 0"><b>${esc(p.label)}</b> ${p.options.map(o => {
-      const name = o.name.replace(/_/g, " ");
+      const name = o.label || o.name.replace(/_/g, " ");
       return o.kind === "toggle"
         ? `<label class="su-opt" title="${esc(o.text)}"><input type="checkbox" data-su-opt="${esc(o.setting)}" ${o.value === "on" ? "checked" : ""}>${esc(name)}</label>`
         : o.kind === "choice"

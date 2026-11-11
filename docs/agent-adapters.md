@@ -207,4 +207,23 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
 - Expert resume uses the adapter of the agent type the expert ran in (`core.agent_type_of`: its row, else its
   history), through `resume_command`; an adapter with no resume part starts a fresh expert that reads its notes.
   Crash resume (`move_into_tmux`) finds the adapter of the chat's kind in the registry. A non-built-in adapter's
-  settings have no config keys yet (#5169): its profile options are the entry's own, else the spec's default.
+  settings are config keys since #5169 (<prefix><key>; an adapter with no prefix: the spec's default).
+
+## As built in #5169
+
+- `SETTINGS` holds each agent's launch options: Claude Code's remote_control, permission_mode, model_ids, args,
+  skill_prompt, prompt and activity_hooks, and Codex's sandbox, approval, model_ids, args and prompt moved there from
+  `core.LAUNCH_PLATFORMS`, which is now built from the built-in adapters (#5185 removes it). A spec has three more
+  keys: `config` (False: no config key, only a flag that a restart adds or takes out, as Codex's approve_for_me and
+  no_daemon), `session` (the Settings dialog of a running session shows it) and `note`. `DESCRIBE` has `model_live`
+  and `model_read`, and `EFFORT` has `label`. `check()` refuses a spec that cannot work (a toggle default other than
+  on or off, a choice default outside its choices, a config False setting that is no toggle with a flag, a key
+  `model` or `effort`, a key twice).
+- `Adapter.options()` gives the config settings, `Adapter.effort_choices()` the levels the dialogs offer (each MaximizePM level
+  whose name for the agent, through `EFFORT['map']`, is one of `EFFORT['levels']`), and `Adapter.session_specs()` the Settings dialog: the model, the
+  effort, then each session setting, each with how it is read from the command line, whether it changes in place,
+  and how a restart applies it. `sessions.PROVIDERS` keeps only the label and the voice text.
+- `core.launch_platforms()` lists every registered agent that can start, so `@<id> key=value` in launch_agents, the
+  launch dialog (models, efforts, options), Settings > Setup, `maxpm config set <prefix><key>` and the config list
+  take an agent that is not built in. An agent with no effort has no Effort field in the launch dialog; a "multi"
+  agent offers its own model list (`read_models`).

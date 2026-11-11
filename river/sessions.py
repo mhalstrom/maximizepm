@@ -28,44 +28,18 @@ PREVIEW = 4               # the lines a card shows
 ADOPT_QUIET = 120         # tmux_adopt: a session moves into tmux after its turn ended and it wrote nothing this long
 PLATFORMS = {"claude": "claude-code", "codex": "codex"}
 # The chat providers the Sessions tab knows (#4627): the label each session shows. A new provider is one more row
-# here (#4625 adds its settings); the page draws what it gets.
-# Each provider's settings (#4625): how the Settings dialog reads each one (from the session's transcript, else
-# its command line), whether it changes in place (a command typed into its pane while it is idle), and how a
-# restart applies it (model, effort, a profile option, or a flag). A new provider is one more table here.
-_CC = core.LAUNCH_PLATFORMS["claude-code"]["options"]
-_CX = core.LAUNCH_PLATFORMS["codex"]["options"]
+# here (#4625 adds its settings); the page draws what it gets. The settings of each provider's Settings dialog come
+# from its agent adapter (Adapter.session_specs, river/agents, #5169).
 # Voice (#4626): what each CLI's own voice mode does. Both CLIs record the microphone of the computer they run on and
 # take no audio from outside (checked in Claude Code 2.1.319 and Codex 0.159.1), so the page dictates for every
 # provider, as in every box that takes text (#5107): speech becomes text in the box, and the person sends it.
 PROVIDERS = {
     "claude-code": {"label": "Claude Code", "voice_cli": (
         "/voice [hold|tap|off] in its terminal: hold-to-talk dictation into its prompt; it records the microphone of "
-        "the computer it runs on (SoX) and needs a claude.ai login; it takes no audio from outside"), "settings": [
-        {"key": "model", "label": "Model", "kind": "model", "live": "/model {value}", "restart": "model",
-         "cmd": r"--model (\S+)"},
-        {"key": "effort", "label": "Effort", "kind": "choice", "choices": ["low", "medium", "high", "xhigh", "max"],
-         "live": "/effort {value}", "restart": "effort", "cmd": r"--effort (\S+)"},
-        {"key": "permission_mode", "label": "Permission mode", "kind": "choice", "choices": _CC["permission_mode"]["choices"],
-         "restart": "opt", "default": "claude_permission_mode", "cmd": r"--permission-mode (\S+)",
-         "note": "Shift+Tab in its terminal also cycles it"},
-        {"key": "remote_control", "label": "Remote Control", "kind": "choice", "choices": ["on", "off"],
-         "restart": "opt", "default": "claude_remote_control", "flag": "--remote-control"},
-    ]},
+        "the computer it runs on (SoX) and needs a claude.ai login; it takes no audio from outside")},
     "codex": {"label": "Codex", "voice_cli": (
         "/voice in its terminal: a spoken conversation (OpenAI realtime, the feature realtime_conversation) with the "
-        "microphone and speakers of the computer it runs on; it takes no audio from outside"), "settings": [
-        {"key": "model", "label": "Model", "kind": "model", "restart": "model", "cmd": r"(?:^|\s)-m (\S+)"},
-        {"key": "effort", "label": "Reasoning effort", "kind": "choice", "choices": core.PLATFORM_EFFORTS["openai"],
-         "restart": "effort", "cmd": r"model_reasoning_effort=(\S+)"},
-        {"key": "approval", "label": "Approval", "kind": "choice", "choices": _CX["approval"]["choices"] + ["untrusted"],
-         "restart": "opt", "default": "codex_approval", "cmd": r"--ask-for-approval (\S+)"},
-        {"key": "sandbox", "label": "Sandbox", "kind": "choice", "choices": _CX["sandbox"]["choices"],
-         "restart": "opt", "default": "codex_sandbox", "cmd": r"--sandbox (\S+)"},
-        {"key": "approve_for_me", "label": "Approve for me (auto)", "kind": "choice", "choices": ["on", "off"],
-         "restart": "flag", "flag": "--approve-for-me"},
-        {"key": "no_daemon", "label": "No shared background server", "kind": "choice", "choices": ["on", "off"],
-         "restart": "flag", "flag": "--no-daemon"},
-    ]},
+        "microphone and speakers of the computer it runs on; it takes no audio from outside")},
 }
 
 
@@ -1125,7 +1099,8 @@ def session_settings(conn, agent, root=None, croot=None):
     a = core.agent_status(conn, agent)
     kind, path = transcript(conn, agent, root, croot)
     prov = provider(a.get("agent_type"), kind)
-    if not prov or prov["id"] not in PROVIDERS or not PROVIDERS[prov["id"]].get("settings"):
+    ad = core._adapters().find(prov["id"]) if prov else None
+    if ad is None:
         raise core.RiverError(f"MaximizePM knows no settings of {agent}'s chat provider")
     seen = {}
     if path:
@@ -1134,9 +1109,9 @@ def session_settings(conn, agent, root=None, croot=None):
         except (OSError, ValueError, EOFError):
             seen = {}
     cmd = a.get("pid_cmd") or ""
-    models = core.platform_models(conn, prov["id"]) if prov["id"] in core.LAUNCH_PLATFORMS else []
+    models = core.platform_models(conn, prov["id"]) if prov["id"] in core.launch_platforms() else []
     out = []
-    for spec in PROVIDERS[prov["id"]]["settings"]:
+    for spec in ad.session_specs():
         value, source = seen.get(spec["key"]), "session"
         if value is None and spec.get("cmd"):
             m = _re.search(spec["cmd"], cmd)
@@ -1161,9 +1136,12 @@ def session_settings(conn, agent, root=None, croot=None):
 
 
 def setting_spec(provider_id, key):
-    spec = next((x for x in PROVIDERS.get(provider_id, {}).get("settings", []) if x["key"] == key), None)
+    """One spec of the Settings dialog of a session whose provider is provider_id (an agent's id or alias), from its
+    adapter (#5169)."""
+    ad = core._adapters().find(provider_id)
+    spec = next((x for x in ad.session_specs() if x["key"] == key), None) if ad else None
     if spec is None:
-        raise core.RiverError(f"{PROVIDERS.get(provider_id, {}).get('label', provider_id)} has no setting {key}")
+        raise core.RiverError(f"{ad.label if ad else provider_id} has no setting {key}")
     return spec
 
 

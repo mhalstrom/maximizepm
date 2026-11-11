@@ -258,3 +258,38 @@ def chat_texts(raw):
     if p.get("type") in ("function_call", "custom_tool_call"):
         return [(str(p.get("arguments") or p.get("input") or ""), at, "named")]
     return []
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Settings (#5169): the launch profile options (each also the config key codex_<key>), and the Settings dialog of a
+# running session. build_command reads them by key.
+# ---------------------------------------------------------------------------------------------------------------
+
+DESCRIBE["model_live"] = None
+DESCRIBE["model_read"] = r"(?:^|\s)-m (\S+)"
+EFFORT["label"] = "Reasoning effort"
+
+SETTINGS = [
+    {"key": "sandbox", "label": "Sandbox", "kind": "choice", "default": "",
+     "choices": ["read-only", "workspace-write", "danger-full-access"],
+     "text": "sandbox (--sandbox); empty: Codex's own setting. MaximizePM adds --add-dir for the queue folder",
+     "flag": ["--sandbox", "{value}"], "read": r"--sandbox (\S+)", "session": True},
+    {"key": "approval", "label": "Approval", "kind": "choice", "default": "",
+     "choices": ["on-request", "never", "untrusted"],
+     "text": "when Codex asks before it runs a command (--ask-for-approval); empty: Codex's own setting",
+     "flag": ["--ask-for-approval", "{value}"], "read": r"--ask-for-approval (\S+)", "session": True},
+    # Codex takes full ids, and they change with each OpenAI release: update this list then.
+    {"key": "model_ids", "label": "Model ids", "kind": "text",
+     "default": "luna=gpt-6-luna, terra=gpt-5.6-terra, sol=gpt-6.1-sol, astra=gpt-6-astra",
+     "text": "the id Codex gets (codex -m) for a model_ladder name (name=id, ...); a name with no entry goes as it is"},
+    {"key": "args", "label": "Arguments", "kind": "text", "default": "", "text": "more arguments, put before the prompt"},
+    {"key": "prompt", "label": "Prompt", "kind": "text", "default": "run maxpm go in this folder and follow the briefing",
+     "text": "the first prompt (Codex does not read CLAUDE.md)"},
+    # Flags of one session only: the Settings dialog adds or takes them out at a restart; no config key.
+    {"key": "approve_for_me", "label": "Approve for me (auto)", "kind": "toggle", "default": "off",
+     "text": "Codex approves its own requests (--approve-for-me)", "flag": ["--approve-for-me"], "config": False,
+     "session": True},
+    {"key": "no_daemon", "label": "No shared background server", "kind": "toggle", "default": "off",
+     "text": "Codex runs without its shared background server (--no-daemon; MaximizePM adds it when the installed "
+             "Codex has it)", "flag": ["--no-daemon"], "config": False, "session": True},
+]

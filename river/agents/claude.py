@@ -471,3 +471,34 @@ def chat_requests(session_ref, root=None):
         for sub in sorted(p.parent.glob(f"{session_ref}/subagents/*.jsonl")):
             reqs.update(read_transcript(sub)[0])
     return reqs, fork
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Settings (#5169): the launch profile options (each also the config key claude_<key>), and the Settings dialog of a
+# running session. build_command reads them by key.
+# ---------------------------------------------------------------------------------------------------------------
+
+DESCRIBE["model_live"] = "/model {value}"
+DESCRIBE["model_read"] = r"--model (\S+)"
+
+SETTINGS = [
+    {"key": "remote_control", "label": "Remote Control", "kind": "toggle", "default": "on",
+     "text": "Remote Control: the session gets a web link that notifications and Open chat use",
+     "flag": ["--remote-control"], "session": True},
+    {"key": "permission_mode", "label": "Permission mode", "kind": "choice", "default": "",
+     "choices": ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"],
+     "text": "permission mode (--permission-mode); empty: Claude Code's own setting",
+     "flag": ["--permission-mode", "{value}"], "read": r"--permission-mode (\S+)", "session": True,
+     "note": "Shift+Tab in its terminal also cycles it"},
+    {"key": "model_ids", "label": "Model ids", "kind": "text", "default": "",
+     "text": "the id Claude Code gets for a model_ladder name (name=id, ...); a name with no entry goes as it is: "
+             "claude --model takes haiku, sonnet, opus, and fable"},
+    {"key": "args", "label": "Arguments", "kind": "text", "default": "", "text": "more arguments, put before the prompt"},
+    {"key": "skill_prompt", "label": "Skill prompt", "kind": "toggle", "default": "on",
+     "text": "the maxpm skill in the system prompt (--append-system-prompt-file, with the file args names, if any): "
+             "each session reads it from the prompt cache, and does not load it again"},
+    {"key": "prompt", "label": "Prompt", "kind": "text", "default": "go", "text": "the first prompt"},
+    {"key": "activity_hooks", "label": "Activity hooks", "kind": "toggle", "default": "on",
+     "text": "hooks that report the session's tool calls, permission prompts and turn ends to MaximizePM (--settings "
+             "with the hook file; maxpm report --hook claude), so the manager hears of a session that stands still"},
+]

@@ -708,3 +708,121 @@ class RoleChoice(Env):
         core.expert_end(self.c, "fab", None, "pause")
         t = server.start_expert(self.c, "fab", resume=True, runner=sent.append)
         self.assertIsNone(t.get("resumed"))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Settings and effort from the adapter (#5169)
+# ---------------------------------------------------------------------------------------------------------------
+
+XYZ = '''
+    DESCRIBE = {"id": "xyz", "label": "Xyz CLI", "exe": "xyz", "family": "multi", "prefix": "xyz_",
+                "models": ["acme/small", "acme/large"], "model_live": "/model {value}", "model_read": r"--model (\\S+)"}
+    SETTINGS = [
+        {"key": "mode", "label": "Mode", "kind": "choice", "choices": ["fast", "careful"], "default": "",
+         "text": "how it works (--mode)", "flag": ["--mode", "{value}"], "read": r"--mode (\\S+)", "session": True},
+        {"key": "trust", "kind": "toggle", "default": "on", "text": "trust the folder", "flag": ["--trust"]},
+        {"key": "args", "kind": "text", "default": "", "text": "more arguments"},
+        {"key": "yolo", "label": "Yolo", "kind": "toggle", "default": "off", "flag": ["--yolo"], "config": False,
+         "session": True},
+    ]
+    EFFORT = {"levels": ["minimal", "deep"], "map": {"low": "minimal", "high": "deep", "max": "deep"},
+              "flag": ["--think", "{value}"], "live": None, "read": None, "label": "Thinking"}
+
+    def build_command(name, folder, model, effort, settings, prompt):
+        return ["xyz"] + (["--model", model] if model else []) + [prompt]
+'''
+
+
+class SettingsAndEffort(Env):
+    def test_the_built_in_launch_platforms_are_the_adapters_settings(self):
+        for platform, mid in (("claude-code", "claude"), ("codex", "codex")):
+            a = agents.get(mid)
+            self.assertEqual(list(core.LAUNCH_PLATFORMS[platform]["options"]), list(a.options()))
+            for key, spec in a.options().items():
+                self.assertEqual(core.DEFAULT_SETTINGS[a.config_key(key)], spec["default"])
+        self.assertEqual(core.setting(self.c, "claude_remote_control"), "on")
+        self.assertNotIn("codex_approve_for_me", core.DEFAULT_SETTINGS)  # a flag of one session, no config key
+
+    def test_the_settings_dialog_of_claude_code_and_codex_comes_from_the_adapter(self):
+        cc = {s["key"]: s for s in agents.get("claude-code").session_specs()}
+        self.assertEqual(list(cc), ["model", "effort", "remote_control", "permission_mode"])
+        self.assertEqual((cc["model"]["live"], cc["model"]["cmd"]), ("/model {value}", r"--model (\S+)"))
+        self.assertEqual((cc["effort"]["live"], cc["effort"]["restart"]), ("/effort {value}", "effort"))
+        self.assertEqual(cc["effort"]["choices"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual((cc["remote_control"]["restart"], cc["remote_control"]["default"], cc["remote_control"]["flag"]),
+                         ("opt", "claude_remote_control", "--remote-control"))
+        self.assertEqual(cc["permission_mode"]["note"], "Shift+Tab in its terminal also cycles it")
+        cx = {s["key"]: s for s in agents.get("codex").session_specs()}
+        self.assertEqual(sorted(cx), ["approval", "approve_for_me", "effort", "model", "no_daemon", "sandbox"])
+        self.assertIsNone(cx["model"]["live"])
+        self.assertEqual(cx["effort"]["label"], "Reasoning effort")
+        self.assertEqual((cx["no_daemon"]["restart"], cx["no_daemon"]["flag"], cx["no_daemon"]["default"]),
+                         ("flag", "--no-daemon", None))
+        self.assertIn("untrusted", cx["approval"]["choices"])
+        self.assertIs(sessions.setting_spec("codex", "sandbox")["restart"], "opt")
+        with self.assertRaisesRegex(RiverError, "Codex has no setting remote_control"):
+            sessions.setting_spec("codex", "remote_control")
+
+    def test_a_new_agent_s_settings_are_config_keys_launch_options_and_setup_rows(self):
+        self.user_module("xyz", XYZ)
+        self.assertEqual(core.setting(self.c, "xyz_trust"), "on")
+        core.config_set(self.c, "xyz_mode", "careful", actor="mark")
+        self.assertEqual(core.setting(self.c, "xyz_mode"), "careful")
+        with self.assertRaisesRegex(RiverError, "xyz mode is one of fast, careful"):
+            core.config_set(self.c, "xyz_mode", "slow", actor="mark")
+        with self.assertRaisesRegex(RiverError, "unknown setting 'xyz_yolo'"):
+            core.config_set(self.c, "xyz_yolo", "on", actor="mark")  # config False: no config key
+        self.assertEqual(core.config_list(self.c)["defaults"]["xyz_mode"], "")
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Xyz=@xyz trust=off", actor="mark")
+        opt = next(o for o in core.launch_options(self.c) if o["label"] == "Xyz")
+        self.assertEqual(opt["platform"], "xyz")
+        self.assertEqual([m["name"] for m in opt["models"]], ["acme/small", "acme/large"])
+        self.assertEqual(opt["efforts"], ["low", "high", "max"])  # the levels whose Xyz name is one of its levels
+        self.assertEqual(agents.get("pi").effort_choices(), list(agents.MAXPM_EFFORTS))  # map: only max -> xhigh
+        self.assertTrue(opt["takes_effort"])
+        self.assertEqual([(o["name"], o["label"], o["value"], o["fixed"]) for o in opt["options"]],
+                         [("mode", "Mode", "careful", False), ("trust", "Trust", "off", True)])
+        prof = next(p for p in core.launch_profiles(self.c) if p["platform"] == "xyz")
+        self.assertEqual((prof["label"], [o["name"] for o in prof["options"]]), ("Xyz CLI", ["mode", "trust", "args", "prompt"]))
+        self.assertEqual(core.setting(self.c, "xyz_prompt"), core.FIRST_PROMPT)  # #5168: every agent has a first prompt
+        self.assertEqual(core.profile_options(self.c, "xyz", {"trust": "off"}, chosen={"mode": "fast"}),
+                         {"mode": "fast", "trust": "off", "args": "", "prompt": core.FIRST_PROMPT})
+
+    def test_an_agent_with_no_effort_offers_none(self):
+        self.user_module("plain", '''
+            DESCRIBE = {"id": "plain", "label": "Plain", "exe": "plain", "family": "multi", "prefix": "plain_"}
+            def build_command(name, folder, model, effort, settings, prompt):
+                return ["plain", prompt]
+        ''')
+        core.config_set(self.c, "launch_agents", "Plain=@plain", actor="mark")
+        opt = core.launch_options(self.c)[0]
+        self.assertEqual((opt["efforts"], opt["takes_effort"], opt["options"]), ([], False, []))
+        self.assertEqual([s["key"] for s in agents.get("plain").session_specs()], ["model"])
+
+    def test_the_settings_dialog_of_a_new_agent_reads_its_command_line(self):
+        self.user_module("xyz", XYZ)
+        core.register(self.c, "x1")
+        self.c.execute("UPDATE agents SET agent_type='xyz', pid_cmd='xyz --model acme/large --mode fast --yolo' "
+                       "WHERE name='x1'")
+        got = {s["key"]: s for s in sessions.session_settings(self.c, "x1")["settings"]}
+        self.assertEqual(list(got), ["model", "effort", "mode", "yolo"])
+        self.assertEqual((got["model"]["value"], got["model"]["live"]), ("acme/large", True))
+        self.assertEqual((got["effort"]["label"], got["effort"]["choices"]), ("Thinking", ["low", "high", "max"]))
+        self.assertEqual((got["mode"]["value"], got["mode"]["source"], got["mode"]["default_key"]),
+                         ("fast", "command line", "xyz_mode"))
+        self.assertEqual((got["yolo"]["value"], got["yolo"]["default_key"]), ("on", None))
+        self.assertEqual(sessions.check_value(sessions.setting_spec("xyz", "mode"), "careful"), "careful")
+
+    def test_check_names_a_setting_spec_that_cannot_work(self):
+        bad = module(DESCRIBE={**GOOD, "id": "x"}, SETTINGS=[
+            {"key": "a", "kind": "toggle", "default": "maybe"},
+            {"key": "b", "kind": "choice", "choices": ["x"], "default": "y"},
+            {"key": "c", "kind": "text", "config": False, "session": True},
+            {"key": "d", "kind": "toggle", "flag": ["--d"], "config": False},
+            {"key": "model", "kind": "text"},
+            {"key": "a", "kind": "text"},
+        ])
+        got = " | ".join(agents.check(bad, "x"))
+        for part in ("a toggle is on or off", "not one of its choices", "such a setting is a toggle with a flag",
+                     "nothing shows it", "come from DESCRIBE and EFFORT", "the key 'a' twice"):
+            self.assertIn(part, got)

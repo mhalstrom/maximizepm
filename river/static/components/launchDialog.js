@@ -162,7 +162,7 @@ function draw(prev) {
     <div class="form ld-form">
       ${work}
       ${field("Agent", select({ id: "lAgent" }, opts.map(o => o.label), agent))}
-      ${two(field("Model", modelSel), field("Effort", select({ id: "lEffort" }, [["", "the agent's default"], ...opt.efforts.map(e => [e, e])], effort)))}
+      ${opt.efforts.length ? two(field("Model", modelSel), field("Effort", select({ id: "lEffort" }, [["", "the agent's default"], ...opt.efforts.map(e => [e, e])], effort))) : field("Model", modelSel)}
       ${note ? `<div class="muted t-s">${esc(note)}</div>` : ""}
       ${S.tmux === false ? `<div class="ld-warn t-s">Every agent starts in tmux, and tmux is not installed on this computer: ${esc(S.tmux_install || "brew install tmux")}</div>` : ""}
       ${more ? `<details class="ld-more"><summary>More</summary>${more}</details>` : ""}
@@ -178,7 +178,7 @@ function draw(prev) {
 export function optionFields(opt) {
   const os = (opt && opt.options) || [];
   if (!os.length) return "";
-  const name = (o) => o.name.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+  const name = (o) => o.label || o.name.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
   return `<div class="ld-opts">${os.map(o => o.kind === "toggle"
     ? `<label class="ld-opt" title="${esc(o.text)}"><input type="checkbox" data-lopt="${esc(o.name)}" ${o.value === "on" ? "checked" : ""}>${esc(name(o))}</label>`
     : `<label class="ld-opt" title="${esc(o.text)}">${esc(name(o))}<select data-lopt="${esc(o.name)}">

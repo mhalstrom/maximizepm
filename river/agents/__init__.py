@@ -57,11 +57,15 @@ FAMILIES = ("claude", "openai", "multi")
 #      "default_model": the model when nothing names one; "" lets the agent pick its own,
 #      "model_ids":     {model name: the id the CLI takes} for a name that the CLI does not take as it is,
 #      "prefix":        the prefix of its config keys: a setting spec "args" is the config key "<prefix>args",
+#      "model_live":    the text typed into a running session to change its model ("/model {value}"), or None: a
+#                       restart applies it (the Settings dialog of a session, #5169),
+#      "model_read":    a regex whose group 1 reads the model back from the session's command line, or None,
 #    }
 # read_models() -> [model name or CLI id] | None: an optional reader of the models the CLI knows now (Codex:
 # ~/.codex/models_cache.json); None when it cannot read them, and DESCRIBE["models"] stands.
 DESCRIBE_KEYS = {"id": str, "label": str, "exe": str, "aliases": (list, tuple), "family": str,
-                 "models": (list, tuple), "default_model": str, "model_ids": dict, "prefix": str}
+                 "models": (list, tuple), "default_model": str, "model_ids": dict, "prefix": str,
+                 "model_live": (str, type(None)), "model_read": (str, type(None))}
 DESCRIBE_REQUIRED = ("id", "label", "exe", "family")
 
 # 2. Settings. SETTINGS = [{
@@ -74,21 +78,34 @@ DESCRIBE_REQUIRED = ("id", "label", "exe", "family")
 #      "flag":    how the value goes on the command line: argv words with {value} ("--permission-mode", "{value}"),
 #                 for a toggle the words when it is on; [] when build_command uses it in its own way,
 #      "live":    the text typed into a running session to change it ("/model {value}"); None: a restart applies it,
-#      "read":    a regex whose group 1 reads the value back from the session's command line; None if it cannot,
+#      "read":    a regex whose group 1 reads the value back from the session's command line; None if it cannot
+#                 (a toggle with a "flag" reads as on when its first word is on the command line),
+#      "config":  True (the default): a config key that the Setup section, the launch dialog (a toggle or a choice)
+#                 and maxpm config set; False: no config key, only a flag that the Settings dialog of a running
+#                 session adds or takes out at a restart (a toggle with a "flag"),
+#      "session": True: the Settings dialog of a running session shows it (it needs "read", or a toggle's "flag", to
+#                 show the value the session runs with); False (the default): only the Setup section and the launch
+#                 dialog,
+#      "note":    a short line the Settings dialog shows under it, or None,
 #    }, ...]
 SETTING_KINDS = ("toggle", "choice", "text")
 SETTING_KEYS = {"key": str, "label": str, "kind": str, "choices": (list, tuple), "default": str, "text": str,
-                "flag": (list, tuple), "live": (str, type(None)), "read": (str, type(None))}
+                "flag": (list, tuple), "live": (str, type(None)), "read": (str, type(None)), "config": bool,
+                "session": bool, "note": (str, type(None))}
 
 # 3. Effort. EFFORT = None (the agent has no effort; the page hides it) or {
 #      "levels": the agent's own levels, or None when read_effort_levels(model) reads them from the CLI per model,
 #      "map":    {MaximizePM level: the agent's level}; a level with no entry goes as it is,
 #      "flag":   argv words with {value} ("--effort", "{value}"),
 #      "live":   the text typed into a running session ("/effort {value}"), or None,
-#      "read":   a regex whose group 1 reads the effort back from a chat log line, or None (or read_effort(entries)),
+#      "read":   a regex whose group 1 reads the effort back from a chat log line or the session's command line,
+#                or None (or read_effort(entries)),
+#      "label":  the name of the effort in the launch and Settings dialogs ("Reasoning effort"); "Effort" by default,
 #    }
+# The launch dialog and the Settings dialog offer MaximizePM's levels whose name for the agent is one of its "levels"
+# (Adapter.effort_choices); the adapter turns a level into its own name (Adapter.effort_name).
 EFFORT_KEYS = {"levels": (list, tuple, type(None)), "map": dict, "flag": (list, tuple),
-               "live": (str, type(None)), "read": (str, type(None))}
+               "live": (str, type(None)), "read": (str, type(None)), "label": str}
 
 # 4. Launch (required). build_command(name, folder, model, effort, settings, prompt) -> argv (a list of str):
 #    name: the session's MaximizePM name (None: no name); folder: where it runs (None when the caller does not say);
@@ -294,6 +311,28 @@ def _regex(where, text):
     return []
 
 
+def _setting_problems(i, s):
+    """The problems of one setting spec beyond its shape (#5169): a key that is no config key name or that the
+    Settings dialog uses itself, a default that its kind does not take, a flag-only setting that is no toggle."""
+    out, where, kind = [], f"SETTINGS[{i}]", s.get("kind")
+    if isinstance(s.get("key"), str) and not _ID.match(s["key"]):
+        out.append(f"{where}['key'] is {s['key']!r}; a key is a-z, 0-9 and _")
+    if s.get("key") in ("model", "effort"):
+        out.append(f"{where}['key'] is {s['key']!r}: the model and the effort come from DESCRIBE and EFFORT")
+    default = s.get("default", "off" if kind == "toggle" else "")
+    if kind == "toggle" and default not in ("on", "off"):
+        out.append(f"{where}['default'] is {default!r}; a toggle is on or off")
+    if kind == "choice" and default and default not in (s.get("choices") or ()):
+        out.append(f"{where}['default'] is {default!r}, not one of its choices (or '' for the agent's own)")
+    if kind == "choice" and not s.get("choices"):
+        out.append(f"{where} is a choice with no choices")
+    if s.get("config") is False and not (kind == "toggle" and s.get("flag")):
+        out.append(f"{where} has config False: such a setting is a toggle with a flag")
+    if s.get("config") is False and not s.get("session"):
+        out.append(f"{where} has config False and session False: nothing shows it")
+    return out
+
+
 def check(module, mid=None):
     """The problems of an adapter module against the contract above, as plain sentences; [] when it is valid. A
     missing required part other than DESCRIBE is no problem here: Adapter.missing() names it."""
@@ -314,6 +353,11 @@ def check(module, mid=None):
                 out.append(f"SETTINGS[{i}]['kind'] is {s.get('kind')!r}, not one of {', '.join(SETTING_KINDS)}")
             if s.get("read"):
                 out += _regex(f"SETTINGS[{i}]['read']", s["read"])
+            out += _setting_problems(i, s)
+    keys = [s.get("key") for s in getattr(module, "SETTINGS", None) or () if isinstance(s, dict)]
+    out += [f"SETTINGS has the key {k!r} twice" for k in sorted({k for k in keys if keys.count(k) > 1})]
+    if isinstance(d, dict) and d.get("model_read"):
+        out += _regex("DESCRIBE['model_read']", d["model_read"])
     e = getattr(module, "EFFORT", None)
     if e is not None:
         out += _shape("EFFORT", e, EFFORT_KEYS)
@@ -438,6 +482,59 @@ class Adapter:
         if not self.effort or not level:
             return None
         return (self.effort.get("map") or {}).get(level, level)
+
+    # -- Settings and effort (#5169): what the Setup section, the launch dialog and the Settings dialog of a running
+    # session draw. Each spec with the contract's defaults filled in.
+
+    def setting_specs(self):
+        """Its SETTINGS, each with every key of SETTING_KEYS (the contract's default where the module leaves one
+        out)."""
+        out = []
+        for s in self.settings:
+            kind = s["kind"]
+            out.append({"label": s["key"].replace("_", " ").capitalize(), "choices": [], "text": "", "flag": [],
+                        "live": None, "read": None, "config": True, "session": False, "note": None, **s,
+                        "default": s.get("default", "off" if kind == "toggle" else "")})
+        return out
+
+    def options(self):
+        """{key: spec} of the settings that are config keys (<prefix><key>): the options of a launch profile
+        (@<agent> key=value in launch_agents), the Setup section and the launch dialog."""
+        return {s["key"]: s for s in self.setting_specs() if s["config"]}
+
+    def effort_choices(self):
+        """The effort levels the launch dialog and the Settings dialog offer, as MaximizePM names them: each level of
+        MaximizePM whose name for the agent (EFFORT['map'], else the same name) is one of EFFORT['levels'], or every
+        level when the levels come from the CLI per model; [] when the agent has no effort."""
+        if not self.effort:
+            return []
+        levels = self.effort.get("levels")
+        if not levels:
+            return list(MAXPM_EFFORTS)
+        return [lv for lv in MAXPM_EFFORTS if self.effort_name(lv) in levels]
+
+    def session_specs(self):
+        """The Settings dialog of a running session: the model, the effort, then each setting with session True.
+        Each spec says how the dialog reads the value from the command line ("cmd": a regex; "flag": a toggle's
+        word), whether it changes in place ("live"), and how a restart applies it ("restart": model, effort, opt (a
+        profile option, with its config key in "default") or flag (a word added or taken out))."""
+        d = self.describe
+        out = [{"key": "model", "label": "Model", "kind": "model", "live": d.get("model_live"), "restart": "model",
+                "cmd": d.get("model_read")}]
+        if self.effort:
+            out.append({"key": "effort", "label": self.effort.get("label") or "Effort", "kind": "choice",
+                        "choices": self.effort_choices(), "live": self.effort.get("live"), "restart": "effort",
+                        "cmd": self.effort.get("read")})
+        for s in self.setting_specs():
+            if not s["session"]:
+                continue
+            toggle = s["kind"] == "toggle"
+            out.append({"key": s["key"], "label": s["label"], "kind": "choice" if toggle else s["kind"],
+                        "choices": ["on", "off"] if toggle else list(s["choices"]), "live": s["live"],
+                        "restart": "opt" if s["config"] else "flag",
+                        "default": self.config_key(s["key"]) if s["config"] else None, "cmd": s["read"],
+                        "flag": s["flag"][0] if toggle and s["flag"] else None, "note": s["note"]})
+        return out
 
     def read_models(self):
         f = self._fn("read_models")
