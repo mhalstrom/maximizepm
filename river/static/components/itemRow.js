@@ -52,10 +52,10 @@ export function itemTableColumns(why = () => "") {
     { title: "Status", field: "status", width: 130, filter: "select", html: (r) => statusChip(r.it) + replanChip(r.it) },
     { title: "P", field: "prio", width: 92, filter: "select", html: (r) => prioChip(r.it) },
     { title: "Who", field: "doer", width: 80, filter: "select", html: (r) => doerChip(r.it) || '<span class="muted">anyone</span>' },
-    { title: "Session", field: "session", width: 120, filter: "select", cssClass: "wrap", html: (r) => sessionCell(r.it) },
+    { title: "Session", field: "session", width: 120, filter: "select", html: (r) => sessionCell(r.it) },
     { title: "Model", field: "model", width: 110, filter: "select", html: (r) => modelChip(r.it) },
     { title: "Due", field: "due", width: 84, filter: false, html: (r) => dueChip(r.it) },
-    { title: "Waits on", field: "waits", width: 90, html: (r) => r.it.open_blockers.map(b => `<span class="link" data-open="${b}">#${b}</span>`).join(" ") },
+    { title: "Waits on", field: "waits", width: 112, html: (r) => r.it.open_blockers.map(b => `<span class="link" data-open="${b}">#${b}</span>`).join(" ") },
     { title: "Goals", field: "goals", minWidth: 110, widthGrow: 1, cssClass: "wrap", html: (r) => goalChips(r.it) },
   ];
 }

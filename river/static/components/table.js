@@ -17,7 +17,8 @@ function column({ filter = "text", html, ...c }) {
   const col = { headerSort: true, ...c };
   if (html) col.formatter = (cell) => html(cell.getData());
   if (filter === "select") Object.assign(col, { headerFilter: "list", headerFilterFunc: "=",
-    headerFilterParams: { valuesLookup: "active", clearable: true, sort: "asc" } });
+    headerFilterParams: { valuesLookup: "active", clearable: true, sort: "asc" },
+    headerFilterPlaceholder: "filter" });  // the same word in every filter field, a list or a text box (#5328)
   else if (filter === "text") Object.assign(col, { headerFilter: "input", headerFilterPlaceholder: "filter" });
   return col;
 }
