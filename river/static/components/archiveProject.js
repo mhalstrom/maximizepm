@@ -4,7 +4,7 @@
 // at the foot of Plan's left bar lists it, with Restore (op project_restore), which brings it back with its items.
 import { esc, act, toast } from "../lib.js";
 import { makeDialog } from "./dialog.js";
-import { button } from "./button.js";
+import { button, iconButton } from "./button.js";
 
 let dlg = null, box = null, done = null;
 function finish(v) { const r = done; done = null; if (r) r(v); }
@@ -18,7 +18,7 @@ function el() {
   dlg = makeDialog(d, { onClose: () => finish(false), draft: false });
   d.addEventListener("click", (e) => {
     if (e.target === d) return;  // the overlay: makeDialog closes it
-    if (e.target.closest("[data-arch-cancel]")) return dlg.close();
+    if (e.target.closest("[data-arch-cancel], [data-arch-close]")) return dlg.close();
     if (e.target.closest("[data-arch-go]")) { finish(true); dlg.close(); }
   });
 }
@@ -30,7 +30,8 @@ export function archiveHtml(name, items) {
   const open = items.filter(i => !["done", "dropped"].includes(i.status));
   const held = open.filter(i => ["in_progress", "held"].includes(i.status));
   const who = [...new Set(held.map(i => i.assignee).filter(Boolean))];
-  return `<h2 id="archTitle">Archive ${esc(name)}?</h2>
+  // The head of every dialog: the heading and a ✕ that closes it like Cancel (#5334).
+  return `<div class="dlg-head"><h2 id="archTitle">Archive ${esc(name)}?</h2>${iconButton("✕", "Close", { data: { "arch-close": "1" } })}</div>
     <p>${open.length ? `Its ${n(open.length, "open item leaves", "open items leave")} the queue: no session is offered ${open.length === 1 ? "it" : "them"},
       and the Plan tab and the lists no longer show ${open.length === 1 ? "it" : "them"}.` : "It has no open items."}
       The project leaves the projects list, and the other projects move up one rank.</p>

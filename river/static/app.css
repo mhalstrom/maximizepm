@@ -353,7 +353,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .end-now .actions { justify-content: flex-end; margin-top: var(--sp-2); }
 /* Archive a project (archiveProject.js, #5197): the same look as End. */
 #archDlg { --dlg-w: var(--w-dlg-s); }
-.arch-box h2 { margin: 0 0 var(--sp-3); font-size: var(--fs-l); overflow-wrap: anywhere; }
+.arch-box h2 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }  /* in .dlg-head, which gives the space under it */
 .arch-box p { margin: var(--sp-2) 0; font-size: var(--fs-m); }
 .arch-box > .actions { justify-content: flex-end; margin-top: var(--sp-5); }
 /* The message box of a chat (components/composer.js, #5078): a round + on the left, then one pill field that holds the
