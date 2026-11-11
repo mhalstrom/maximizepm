@@ -440,6 +440,7 @@ def loop(stop, interval_s=None):
             steps = (
                 server.watch_prompts,  # an agent that waits on a prompt in its tmux pane: tell the person
                 server.paste_first_prompts,  # an agent that takes no prompt on its command line: paste it (#5221)
+                server.paste_answers,  # an answer for an asker that waits at its prompt: type it there (#5303)
                 core.activity_watch,  # an agent whose hooks reported nothing for activity_silence: tell the manager
                 server.watch_busy,  # an agent that is busy with no river command keeps its leases
                 core.tell_watch_late,  # a manager that runs no watch while a message is due: tell the person

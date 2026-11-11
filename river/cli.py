@@ -4196,6 +4196,14 @@ def render(a, res):
         if res.get("native_status") in ("in the chat", "by the asker"):
             print(f"question #{res['reply_to']} is closed with the answer of {res['from_agent']} that you have")
             return
+        # #5303: an asker that waits at its prompt gets the answer in its session.
+        if res.get("native_status") == core.ANSWER_TO_PANE:
+            print(f"answered question #{res['reply_to']}: {res['to_agent']} waits at its prompt, and maxpm serve types "
+                  f"the answer into its terminal when its idle prompt shows")
+            return
+        if res.get("native_status") == "sent":
+            print(f"answered question #{res['reply_to']}: the answer went into the session of {res['to_agent']}")
+            return
     if c == "withdraw":
         print(f"question #{res['withdrawn']} is withdrawn: {res['note']}")
         return

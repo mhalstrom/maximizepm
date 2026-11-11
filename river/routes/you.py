@@ -69,7 +69,8 @@ OPS = {
     "next_claim": lambda c, a, who: core.next_item(c, a.get("project"), a.get("unblocks"), True, who, 1, a.get("near"),
                                                    bool(a.get("mine"))),
     "register": lambda c, a, who: core.register(c, a["name"], bool(a.get("human")), a.get("note", "")),
-    "answer": lambda c, a, who: core.answer(c, int(a["msg"]), a["body"], who),
+    # An asker that waits at its prompt gets the answer typed there at once, not at the next pass (#5303).
+    "answer": lambda c, a, who: (core.answer(c, int(a["msg"]), a["body"], who), server.paste_answers(c))[0],
     "message_read": lambda c, a, who: server._message_read(c, int(a["msg"])),
     "send": lambda c, a, who: core.send(c, a["kind"], a["body"], a.get("to"), a.get("item"), a.get("reply"), who,
                                         a.get("level"), bool(a.get("blocked"))),

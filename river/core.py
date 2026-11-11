@@ -191,7 +191,8 @@ DEFAULT_SETTINGS = {
     # hand alerts it at once. 0s: no silence alert.
     "activity_silence": "10m",
     # An agent that ended its turn at its CLI's prompt runs no river command. maxpm serve never types into its
-    # pane (a stale session continues a large context); it starts fresh sessions instead. An agent is idle at its
+    # pane (a stale session continues a large context), except the answer to a question it waits for there
+    # (server.paste_answers, #5303); it starts fresh sessions instead. An agent is idle at its
     # prompt when its tmux pane shows the agent CLI with the same screen and no prompt (prompt_pattern) for
     # idle_after, and it ran no river command for idle_after. An agent with an open question to a person (maxpm ask)
     # about an item it holds, or the deploy of a target it owns, is not idle: it waits on that person.
@@ -9562,6 +9563,9 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
         if q["from_agent"] == actor:
             raise RiverError(f"you asked question {msg_id}; add to it with: maxpm send note --reply {msg_id} \"...\"")
         t = iso(now())
+        # Before the question closes: the asker waits at its prompt for this answer (the guide says so), and runs
+        # no maxpm command that would read it.
+        waits = q["from_agent"] in waits_on_person(conn, [q["from_agent"]])
         mid = _send(conn, "answer", actor, body.strip(), to=q["from_agent"], item_id=q["item_id"], reply_to=q["id"])
         conn.execute("UPDATE messages SET state='answered', closed_at=?, read_at=COALESCE(read_at, ?), "
                      "to_agent=COALESCE(to_agent, ?) WHERE id=?", (t, t, actor, q["id"]))
@@ -9571,7 +9575,40 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
             if not conn.execute("SELECT 1 FROM agents WHERE name=?", (q["from_agent"],)).fetchone():
                 _want_fresh(conn, q["item_id"], f"[question #{q['id']} from {q['from_agent']}] {q['body']}\n"
                             f"[answer from {actor}] {body.strip()}")
+    if waits:
+        _deliver_answer(conn, q, mid, actor, body.strip())
     return message_show(conn, mid)
+
+
+# native_status of an answer that maxpm serve types into the asker's tmux pane when its idle prompt shows
+# (server.paste_answers, #5303); then 'typed into pane %<n>'.
+ANSWER_TO_PANE = "waits for the asker's idle prompt (maxpm serve types it there)"
+
+
+def answer_text(q, sender, body):
+    """The answer as the asker reads it in its session (#5303): it starts with '[maxpm ', so the asker's prompt hook
+    (_talk) does not take it for a person's answer to its other open questions."""
+    item = f" (#{q['item_id']})" if q["item_id"] is not None else ""
+    return (f"[maxpm answer from {sender} to your question #{q['id']}{item}] {body}\n"
+            f"Your question was: {' '.join(q['body'].split())[:300]}")
+
+
+def _deliver_answer(conn, q, mid, sender, body):
+    """An answer to a question whose asker waits at its prompt (waits_on_person) goes into its session, as an alert
+    does (#5303): the asker ran maxpm ask and ended its turn, so no maxpm command of its own reads the answer. The
+    manager answered markhalstrom-site-3a49's question with maxpm answer, and the session sat at its prompt for an
+    hour until the manager typed the answer into its tmux pane by hand. Through the platform's native_message when
+    the asker has one; else maxpm serve types it into the asker's tmux pane when its idle prompt shows
+    (server.paste_answers). An asker in no pane gets it in a fresh session (fresh_sessions), as other news."""
+    st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body))
+    how = "sent into its session" if st == "sent" else (
+        ("" if st.startswith("no native channel") else f"native {st}; ") + "maxpm serve types it into its pane")
+    if st != "sent":
+        st = ANSWER_TO_PANE
+    with tx(conn):
+        conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
+        if q["item_id"] is not None:
+            _event(conn, q["item_id"], "maxpm", f"answer #{mid} to {q['from_agent']}, which waits at its prompt: {how}")
 
 
 def _close_in_chat(conn, q, body, t, how="in the chat"):

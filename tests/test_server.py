@@ -2362,6 +2362,73 @@ class LaunchInTmux(unittest.TestCase):
         core.send(self.c, "question", "which header?", to="dev", item=x, actor=name)
         self.assertEqual(core.waits_on_person(self.c), {})
 
+    def test_an_answer_reaches_the_asker_that_waits_at_its_prompt(self):
+        """#5303: markhalstrom-site-3a49 asked mark a question and waited at its prompt; the manager answered with
+        maxpm answer, and the session sat there for an hour until the manager typed the answer into its pane by hand.
+        An answer from another agent (the CLI) or from the page now goes into the asker's pane on its idle prompt."""
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "boss")
+        core.register(self.c, "asker")
+        core.set_agent_type(self.c, "asker", "claude-code")
+        a = core.item_add(self.c, "shop", "page")["id"]
+        core.claim(self.c, a, "asker")
+        self.tmux.session = True
+        self.tmux._pane(name="asker")
+        pane = self.tmux.panes[-1]
+        pane["agent"] = "asker"
+        working = "⏺ Asking mark.\n\n✻ Thinking… (esc to interrupt)\n────\n❯ \n────"
+        idle = "⏺ I asked mark (#1) and wait for the answer.\n\n────\n❯ \n────"
+        q = core.send(self.c, "question", "Publish the page?", to="mark", item=a, actor="asker")["id"]
+        self.assertEqual(core.waits_on_person(self.c), {"asker": q})
+        m = core.answer(self.c, q, "yes, publish it", "boss")
+        self.assertEqual(m["native_status"], core.ANSWER_TO_PANE)
+        typed = lambda: [c[-1] for c in self.tmux.calls if c[0] == "set-buffer"]
+        # A running turn, a permission prompt, or a shell: nothing is typed; the answer waits.
+        pane["screen"] = working
+        self.assertEqual(server.paste_answers(self.c), {})
+        pane["screen"] = "Bash command\n  rm -rf build\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel"
+        self.assertEqual(server.paste_answers(self.c), {})
+        pane["screen"], pane["running"] = idle, "zsh"
+        self.assertEqual(server.paste_answers(self.c), {})
+        self.assertEqual(typed(), [])
+        # The idle prompt: the answer goes in once, then Enter, and the asker has read it.
+        pane["running"] = "claude"
+        self.assertEqual(server.paste_answers(self.c), {m["id"]: pane["id"]})
+        self.assertEqual(typed(), [f"[maxpm answer from boss to your question #{q} (#{a})] yes, publish it\n"
+                                   f"Your question was: Publish the page?"])
+        self.assertEqual(pane["keys"][-1], "Enter")
+        self.assertEqual(server.paste_answers(self.c), {})
+        got = core.message_show(self.c, m["id"])
+        self.assertEqual((got["state"], got["native_status"]), ("read", f"typed into pane {pane['id']}"))
+        self.assertEqual(core.inbox(self.c, "asker"), [])
+        self.assertTrue(any("typed into the pane of asker" in e["change"] for e in core.item_show(self.c, a)["events"]))
+        # The page: mark answers in Waits for you, and the answer is typed at once.
+        q2 = core.send(self.c, "question", "Which header?", to="mark", item=a, actor="asker")["id"]
+        server.OPS["answer"](self.c, {"msg": q2, "body": "the blue one"}, "mark")
+        self.assertEqual(typed()[-1], f"[maxpm answer from mark to your question #{q2} (#{a})] the blue one\n"
+                                      f"Your question was: Which header?")
+        # An asker that read the answer itself (maxpm inbox) gets nothing typed.
+        q3 = core.send(self.c, "question", "Push?", to="mark", item=a, actor="asker")["id"]
+        m3 = core.answer(self.c, q3, "no", "boss")
+        core.inbox(self.c, "asker")
+        self.assertEqual(server.paste_answers(self.c), {})
+        self.assertEqual(core.message_show(self.c, m3["id"])["native_status"], core.ANSWER_TO_PANE)
+        # A question about an item the asker does not hold is no wait at its prompt: its answer is an inbox message.
+        b = core.item_add(self.c, "shop", "other")["id"]
+        q4 = core.send(self.c, "question", "Later?", to="mark", item=b, actor="asker")["id"]
+        self.assertIsNone(core.answer(self.c, q4, "yes", "boss")["native_status"])
+        # A session with a native channel (Codex) gets the answer there, and nothing waits for its pane.
+        sent = []
+        core.NATIVE_RUNNER = lambda args: (sent.append(args), (0, ""))[1]
+        self.addCleanup(setattr, core, "NATIVE_RUNNER", None)
+        core.set_native(self.c, "asker", "Codex", "thread-1")
+        q5 = core.send(self.c, "question", "Ship?", to="mark", item=a, actor="asker")["id"]
+        sent.clear()
+        m5 = core.answer(self.c, q5, "ship it", "boss")
+        self.assertEqual(m5["native_status"], "sent")
+        self.assertIn(f"[maxpm answer from boss to your question #{q5} (#{a})] ship it Your question was: Ship?",
+                      sent[-1])
+
     def test_serve_keeps_the_last_lines_of_a_session_that_ended_before_it_connected(self):
         dep = self._deploy_ready()
         name = server.auto_release(self.c)["started"][dep]

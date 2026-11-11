@@ -655,6 +655,56 @@ def paste_first_prompts(conn):
     return done
 
 
+def paste_answers(conn):
+    """One look of maxpm serve (each pass, and at once after an answer on the page): type each answer that waits for
+    its asker's idle prompt (core.ANSWER_TO_PANE: the asker waited at its prompt for it, #5303) into the asker's tmux
+    pane, then Enter. Otherwise river never types into an idle session (fresh_sessions); this asker waits for exactly
+    this text, which a person would type there. Only on the agent CLI's idle prompt: not into a shell, a permission
+    prompt (a person answers that first), or a running turn. An answer the asker read (maxpm inbox) goes no more; one
+    whose asker has no pane waits, and fresh_sessions gives it to a fresh session as other news.
+    Returns {message id: pane} of what it typed."""
+    rows = conn.execute("SELECT m.id, m.from_agent, m.to_agent, m.body, m.reply_to FROM messages m JOIN agents a ON "
+                        "a.name=m.to_agent WHERE m.kind='answer' AND m.native_status=? AND m.read_at IS NULL ORDER BY m.id",
+                        (core.ANSWER_TO_PANE,)).fetchall()
+    if not rows or not core.tmux_path() and TMUX_RUNNER is None:
+        return {}
+    terminals, done = agent_terminals(conn), {}
+    for r in rows:
+        agent, pane = r["to_agent"], terminals.get(r["to_agent"])
+        if not pane or pane in done.values():
+            continue  # one answer for each pane in a pass: the next one waits for the idle prompt again
+        try:
+            screen = _pane_screen(agent, pane)
+        except RiverError:
+            continue  # the pane closed since the list
+        if screen["ended"]:
+            continue  # only a shell runs there: a text would run as a command (#5298)
+        rx, layout, ad = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
+        tail = _prompt_tail(_plain(screen["text"]))
+        if rx and _prompt_found(tail, rx, layout):
+            continue
+        if not (ad and ad.detect) or _screen_state(tail, ad.detect) != "idle":
+            continue
+        q = core._message(conn, r["reply_to"])
+        text = core.answer_text(q, r["from_agent"], r["body"])
+        with core.tx(conn):  # first, so an answer is never typed twice
+            if not conn.execute("UPDATE messages SET native_status=?, read_at=?, state='read' WHERE id=? AND "
+                                "native_status=? AND read_at IS NULL",
+                                (f"typed into pane {pane}", core.iso(core.now()), r["id"], core.ANSWER_TO_PANE)).rowcount:
+                continue  # another serve pass took it, or the asker read it
+            if q["item_id"] is not None:
+                core._event(conn, q["item_id"], "maxpm", f"answer #{r['id']} typed into the pane of {agent} ({pane}), "
+                            f"which waited at its prompt")
+        _tmux("set-buffer", "-b", "maxpm-send", "--", text)
+        _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
+        time.sleep(ENTER_PAUSE)
+        _tmux("send-keys", "-t", pane, "Enter")
+        core.typed_to(conn, agent)
+        turn_started(conn, agent, text)
+        done[r["id"]] = pane
+    return done
+
+
 # Each agent river starts is a pane of one tmux session, so one terminal shows them all
 # (maxpm view), over SSH too, and nothing needs AppleScript. TMUX_CMD (tests) is a tmux command line with a
 # server of its own; TMUX_RUNNER (tests) gets each argument list in its place and returns the output, or

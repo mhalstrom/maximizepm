@@ -60,7 +60,8 @@ ended" (do nothing for it), or END: no work came within `wait_max` (45m,
 counted again from a person's last prompt), MaximizePM unregistered you, and
 you stop. After each item, end in `maxpm wait`, never at your prompt. Stop also when you need the user (file a human item first; see
 below); then report everything you finished. A person turns this off with
-`maxpm config set auto_continue off` (`on`: any ready work after each task). MaximizePM never types into your terminal:
+`maxpm config set auto_continue off` (`on`: any ready work after each task). MaximizePM never types into your terminal
+(except the answer to a question you wait for at your prompt, below):
 when you sit idle at your prompt, `maxpm serve` gives new work or an answer for
 you to a fresh session, and ends you after `idle_end` (15m) with nothing in hand.
 
@@ -381,7 +382,9 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   `maxpm ask <person> "<what to approve>" --item <the item you hold>`. While the
   question is open, `maxpm serve` keeps your lease (and your deploy target),
   takes nothing back, starts no other session for your work, and alerts the
-  manager. The person answers in your terminal or with `maxpm answer`. A wait
+  manager. The person answers in your terminal or with `maxpm answer`; an
+  answer with `maxpm answer` (the person, the manager, or the page) comes into
+  your terminal as a prompt that starts `[maxpm answer from ...]`. A wait
   that you only say in chat looks idle: `maxpm serve` gives your work to others.
   Close each question you asked as soon as you have its answer, from any
   channel (your chat, a message, a canvas card), or the person keeps seeing it
