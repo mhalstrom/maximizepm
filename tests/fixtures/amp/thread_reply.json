@@ -1,0 +1,111 @@
+{
+ "v": 11,
+ "id": "T-01a1c9ac-dfba-7600-a580-8862cd749fcc",
+ "env": {
+  "initial": {
+   "trees": [
+    {
+     "uri": "file:///Users/me/proj",
+     "displayName": "ampprobe"
+    }
+   ],
+   "platform": {
+    "os": "darwin",
+    "client": "CLI",
+    "osVersion": "25.6.0",
+    "clientType": "cli",
+    "webBrowser": false,
+    "clientVersion": "0.0.1794369644-gb4be3c",
+    "cpuArchitecture": "arm64"
+   },
+   "runnerID": null,
+   "hasPortals": false,
+   "workingDirectory": "file:///Users/me/proj"
+  }
+ },
+ "meta": {
+  "features": [],
+  "executorType": "local-client",
+  "lastKnownAgentState": {
+   "state": "idle",
+   "messageID": "M-034vdDCGdUWpJrNKICrWbc",
+   "updatedAt": "2026-11-11T08:15:18.318Z"
+  },
+  "deleted": false,
+  "createdOnServer": false,
+  "lastUserMessageAt": "2026-11-11T08:15:14.613Z",
+  "workspaceID": null,
+  "projectID": null,
+  "visibility": "private",
+  "sharedGroupIDs": [],
+  "sharedUserIDs": [],
+  "agentMode": "low",
+  "usesDtw": true,
+  "usesThreadActors": true
+ },
+ "title": "Single-word reply",
+ "created": 1794384912314,
+ "messages": [
+  {
+   "meta": {
+    "sentAt": 1794384914613,
+    "fromExecutorClient": true
+   },
+   "role": "user",
+   "readAt": null,
+   "content": [
+    {
+     "text": "Reply with the single word: ok",
+     "type": "text"
+    }
+   ],
+   "createdAt": "2026-11-11T08:15:14.613Z",
+   "messageId": 1,
+   "userState": {
+    "timeZone": "UTC",
+    "currentlyVisibleFiles": []
+   },
+   "protocolMessageID": "M-034vdD6XJzDK49YAnbH0si",
+   "protocolMessageVersion": 0
+  },
+  {
+   "meta": {
+    "openAIResponsePhase": "final_answer"
+   },
+   "role": "assistant",
+   "state": {
+    "type": "complete",
+    "stopReason": "end_turn"
+   },
+   "usage": {
+    "model": "gpt-5.6-terra",
+    "features": [],
+    "timestamp": "2026-11-11T08:15:18.129Z",
+    "inputTokens": 0,
+    "outputTokens": 5,
+    "maxInputTokens": 272000,
+    "totalInputTokens": 33937,
+    "cacheReadInputTokens": 0,
+    "cacheCreationInputTokens": 33937
+   },
+   "readAt": "2026-11-11T08:15:18.378Z",
+   "content": [
+    {
+     "text": "ok",
+     "type": "text",
+     "finalTime": 1794384917939,
+     "startTime": 1794384917775,
+     "blockState": "complete"
+    }
+   ],
+   "createdAt": "2026-11-11T08:15:18.092Z",
+   "messageId": 2,
+   "protocolMessageID": "M-034vdDCGdUWpJrNKICrWbc",
+   "protocolMessageVersion": 2
+  }
+ ],
+ "agentMode": "low",
+ "pinned": false,
+ "multiplayerExpiresAt": null,
+ "updatedAt": "2026-11-11T08:15:24.200Z"
+}

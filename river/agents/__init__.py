@@ -294,7 +294,7 @@ PARTS = {
     "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config",)},
 }
 
-BUILTIN = ("claude", "codex", "pi", "copilot", "hermes", "gemini", "grok", "opencode", "goose", "aider")
+BUILTIN = ("claude", "codex", "pi", "copilot", "hermes", "gemini", "grok", "opencode", "goose", "aider", "amp")
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 

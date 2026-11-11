@@ -261,3 +261,20 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
   capabilities and its setup texts; `main` marks the first registered agent. The page reads it once
   (`static/components/agents.js`), and `views/sessions.js` tests no agent name. A session's `provider` has `agent`,
   the id of its adapter, and `voice_cli` comes from `SETUP["voice"]`.
+## As built in #5179 (Amp)
+
+- `river/agents/amp.py`, from Amp CLI 0.0.1794369644 on macOS. State comes from the screen (`STATE['state']` is
+  `detect`), as the design names it for Amp. Amp has a plugin API with turn events and a thread state stream, but it
+  loads plugins only from `~/.config/amp/plugins` (`$XDG_CONFIG_HOME/amp/plugins`) and a project's `.amp/plugins`:
+  no flag loads one for a single start, a plugin there runs in every later Amp session of the person, and a start
+  with its own `XDG_CONFIG_HOME` would move the config of every tool its shell commands run. The thread state stream
+  also gave no `awaiting-approval` while an approval waited.
+- `DETECT` reads the bottom edge of Amp's input box (an activity such as "≋ Running Tools" while it works, a plain
+  rule when it waits) and its framed menus marked with ‣ (Approval Required, Out of Credits). Its `rule` also takes
+  the lines Amp shows under an approval menu (the input box, "Up next (1)"), so the pane watcher finds the prompt.
+- The session id is the thread id in `AMP_CURRENT_THREAD_ID`, which Amp sets for each shell command
+  (`IDENTITY['source']` is `env`). Amp keeps the chat on its server: `chat_path` runs `amp threads export <id>` at
+  most every 5 seconds and appends each finished message once to `amp/threads/<id>.jsonl` beside the queue.
+- The effort is Amp's mode (`--mode low|medium|high|ultra`), which also picks the model, so DESCRIBE has no models. A
+  first prompt goes on stdin (`printf '%s\n' <prompt> | amp`). Amp has no slash commands: "/" opens its command
+  palette, and keys typed at once land in the wrong place, so the adapter has no COMMANDS.

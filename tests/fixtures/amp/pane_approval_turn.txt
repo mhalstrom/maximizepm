@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ┃ say hi
+
+ ┃ thread show cost/thread show cost
+
+ ⣏ Exploring 1 file, 1 search ▸
+╭─ Approval Required ──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                      │
+│ Bash:                                                                                                                │
+│   cat screen-cost.txt | head -60; grep -i cost palette-uniq.txt                                                      │
+│   Working directory: /Users/me/proj                                                                │
+│                                                                                                                      │
+│ Matches user permissions rule 0: ask shell_command                                                                   │
+│                                                                                                                      │
+│ ‣ Allow Once                                                                                                         │
+│   Reject with feedback                                                                                               │
+│   Allow All for This Session                                                                                         │
+│   Allow All for Every Session                                                                                        │
+│                                                                                                                      │
+╰─────────────────────────────────────────────────────────────────────────── ↑/↓/j/k move · Enter select · Esc cancel ─╯
+  Up next (1)
+  2. Approval Required  Bash: cat screen-cost.txt | head -60; grep -i cost palette-uniq.txt Working directory: /priva…
+╭───────────────────────────────────────────────────────────────────────────────────────────────────── $0.44 ─ medium ─╮
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰ ≋ Running Tools ─────────────────────────────────────── permissions: on ─ /Users/me/proj (master) ─╯

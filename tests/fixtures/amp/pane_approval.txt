@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ┃ say hi
+╭─ Approval Required ──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                      │
+│ Bash:                                                                                                                │
+│   env | grep -E "^(AMP|AGENT|CLAUDE|THREAD|MAXPM)" | cut -d= -f1 | sort                                              │
+│   Working directory: /Users/me/proj                                                                │
+│                                                                                                                      │
+│ Matches user permissions rule 0: ask shell_command                                                                   │
+│                                                                                                                      │
+│ ‣ Allow Once                                                                                                         │
+│   Reject with feedback                                                                                               │
+│   Allow All for This Session                                                                                         │
+│   Allow All for Every Session                                                                                        │
+│                                                                                                                      │
+╰─────────────────────────────────────────────────────────────────────────── ↑/↓/j/k move · Enter select · Esc cancel ─╯
+  Up next (1)
+  2. Approval Required  Bash: env | grep -E "^(AMP|AGENT|CLAUDE|THREAD|MAXPM)" | cut -d= -f1 | sort Working directory…
+╭───────────────────────────────────────────────────────────────────────────────────────────────────── $···· ─ medium ─╮
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────── permissions: on ─ /Users/me/proj (master) ─╯
