@@ -175,7 +175,13 @@ class Screens(unittest.TestCase):
         self.assertEqual(parts["question"], "◆  Are you sure you want to compact this conversation?")
         self.assertEqual(parts["options"][0][1], True)
 
-    @unittest.expectedFailure  # #5209: the watcher reads no cliclack menu yet (○ marks each other option)
+    def test_the_tool_approval_is_blocked_with_its_question_and_the_selected_option(self):
+        state, parts = watch(pane("blocked_tool"))
+        self.assertEqual(state, "blocked")
+        self.assertEqual(parts["question"], "◆  Goose would like to call the above tool, do you allow?")
+        self.assertEqual(parts["options"][0], ("Allow (Allow the tool call once)", True))
+
+    @unittest.expectedFailure  # #5209: the watcher lists no other option of a cliclack menu yet (each has ○)
     def test_the_tool_approval_is_blocked_with_its_options(self):
         state, parts = watch(pane("blocked_tool"))
         self.assertEqual(state, "blocked")
@@ -215,6 +221,19 @@ class Chat(Root):
         self.assertEqual((result["for"], result["error"]), ("call_zaozjzd0", False))
         self.assertEqual(entries[0]["at"], "2026-11-11T07:46:15Z")
         self.assertFalse(any("<turn-context>" in e["text"] for e in entries))
+
+    def test_a_real_chatgpt_codex_session_reads_the_same_way(self):
+        # Recorded with chatgpt_codex/gpt-5.6-terra (a ChatGPT sign-in), effort low, mode approve: the copy as
+        # chat_path wrote it.
+        lines = (FIX / "chatgpt_codex_copy.jsonl").read_text().splitlines()
+        entries, turn = goose.parse_chat(lines)
+        self.assertEqual([(e["role"], e.get("name") or e["text"][:22]) for e in entries], [
+            ("user", "Run the shell command:"), ("tool", "shell"), ("event", "Asks to approve shell"),
+            ("result", "recorded-goose"), ("assistant", "The command output was")])
+        self.assertEqual(turn, "idle")
+        self.assertEqual(goose.chat_settings(lines), {"mode": "approve"})
+        self.assertEqual(re.search(goose.EFFORT["read"], lines[0]).group(1), "low")
+        self.assertEqual(goose.chat_usage(lines)["output"], 39)
 
     def test_the_sessions_tab_reads_the_copy_line_by_line(self):
         lines = self.recorded_lines()
