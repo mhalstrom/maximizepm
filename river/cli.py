@@ -1487,10 +1487,13 @@ def _record_hook_process(conn, name):
     commands could not (a sandbox blocks ps, so agents.pid stays empty, #4293). maxpm serve then sees the commands
     that run below the session (busy_now) and keeps its leases. Only at a prompt or a turn end, and only when no
     live process of this host is recorded: the tool calls stay fast."""
+    terminal = bool(name) and core.process_on_terminal(conn, name)
+    if terminal:
+        core.drop_background_process(conn, name)
     r = name and conn.execute("SELECT pid, host FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone()
     if not r or (r["pid"] and r["host"] == core.this_host() and core.pid_alive(r["pid"])):
         return
-    pid, cmd = core.agent_process()
+    pid, cmd = core.agent_process(terminal=True) if terminal else core.agent_process()
     if pid:
         core.set_process(conn, name, pid, cmd)
 
@@ -1643,12 +1646,16 @@ def _run(args, conn):
 
 
 def _record_process(conn, name):
-    """The agent CLI process that runs this command (for maxpm who and maxpm stop --kill)."""
+    """The agent CLI process that runs this command (for maxpm who and maxpm stop --kill). An agent whose adapter
+    runs its tools in a shared background process (Hermes) records only a process on a terminal (#5247)."""
     if not name or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone():
         return
-    pid, cmd = core.agent_process()
+    terminal = core.process_on_terminal(conn, name)
+    pid, cmd = core.agent_process(terminal=True) if terminal else core.agent_process()
     if pid:
         core.set_process(conn, name, pid, cmd)
+    elif terminal:
+        core.drop_background_process(conn, name)
 
 
 def run_hooks(conn, actor=None):

@@ -1041,3 +1041,43 @@ class Setup(Env):
         js = (Path(cli.__file__).parent / "static" / "views" / "sessions.js").read_text(encoding="utf-8")
         for name in ("\"claude-code\"", "\"codex\"", "Open on claude.ai", "A Codex session"):
             self.assertNotIn(name, js)
+
+
+class SharedGateway(Env):
+    """#5247: a Hermes command runs under the background gateway that every Hermes session shares, so the session's
+    own process is the ancestor only when that one runs on a terminal."""
+
+    TREE = {100: (50, "zsh", "-zsh"), 50: (1, "python3", "python3 -I -c import os, re, sys")}
+
+    def test_an_ancestor_with_no_terminal_is_no_session_s_own_process(self):
+        with mock.patch.object(core, "proc_info", self.TREE.get):
+            with mock.patch.object(core, "proc_tty", lambda pid: ""):
+                self.assertEqual(core.agent_process(100, terminal=True), (None, None))
+                self.assertEqual(core.agent_process(100)[0], 50)  # every other agent: the ancestor, as before
+            with mock.patch.object(core, "proc_tty", lambda pid: "ttys030"):
+                self.assertEqual(core.agent_process(100, terminal=True)[0], 50)
+
+    def test_hermes_needs_a_terminal_and_the_others_do_not(self):
+        self.assertEqual(agents.get("hermes").identity["process"], "terminal")
+        self.assertTrue(core.process_on_terminal(self.c, "x", env={"HERMES_SESSION_ID": "20261111_0001"}))
+        self.assertFalse(core.process_on_terminal(self.c, "x", env={"CLAUDECODE": "1"}))
+        core.register(self.c, "h1")
+        self.c.execute("UPDATE agents SET agent_type='hermes' WHERE name='h1'")
+        self.assertTrue(core.process_on_terminal(self.c, "h1", env={}))  # by the agent's type
+        bad = module(DESCRIBE={**GOOD, "id": "x"}, IDENTITY={"source": "env", "process": "daemon"})
+        self.assertIn("IDENTITY['process'] is 'daemon'", " ".join(agents.check(bad, "x")))
+
+    def test_a_recorded_gateway_is_forgotten_and_not_recorded_again(self):
+        core.register(self.c, "h1")
+        self.c.execute("UPDATE agents SET agent_type='hermes', pid=4242, pid_cmd='python3 -I -c gateway', host=? "
+                       "WHERE name='h1'", (core.this_host(),))
+        gateway = lambda terminal=False: (None, None) if terminal else (4242, "python3 -I -c gateway")  # noqa: E731
+        env = {"MAXPM_AGENT": "h1", "HERMES_SESSION_ID": "20261111_0001"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(core, "agent_process", gateway), \
+                mock.patch.object(core, "proc_tty", lambda pid: ""):
+            cli._record_process(self.c, "h1")
+        row = self.c.execute("SELECT pid, pid_cmd FROM agents WHERE name='h1'").fetchone()
+        self.assertEqual((row["pid"], row["pid_cmd"]), (None, None))
+        with mock.patch.dict(os.environ, env), mock.patch.object(core, "proc_tty", lambda pid: "ttys030"):
+            self.c.execute("UPDATE agents SET pid=4243 WHERE name='h1'")
+            self.assertFalse(core.drop_background_process(self.c, "h1"))  # a process on a terminal stays

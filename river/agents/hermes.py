@@ -203,8 +203,11 @@ def parse_command(words):
 # (#5211) is no help: it passes names from the gateway's own environment, which never had MaximizePM's variables. So
 # MAXPM_AGENT, MAXPM_DB and the others reach maxpm only after `hermes config set terminal.client_env_passthrough ...`
 # (CLIENT_ENV); before it, every maxpm command of a Hermes session reads the default queue as an unnamed agent.
+# The first process above a maxpm command of a Hermes session is that shared gateway (a Python with no terminal,
+# started once for every session), not the CLI in the pane: MaximizePM records it only when it runs on a terminal, so
+# the busy checks and maxpm stop --kill never act on the gateway (#5247).
 IDENTITY = {"source": "env", "env": "HERMES_SESSION_ID", "log_glob": None, "pane": None, "url": None,
-            "inside_env": ["HERMES_SESSION_ID"]}
+            "inside_env": ["HERMES_SESSION_ID"], "process": "terminal"}
 
 # The variables of MaximizePM that a maxpm command inside Hermes needs, for terminal.client_env_passthrough. Hermes
 # lets a name travel unless it holds a credential word (KEY, TOKEN, SECRET, AUTH, ...) or starts with HERMES_.

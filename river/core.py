@@ -6128,10 +6128,47 @@ def _between(comm, args):
     return name in SHELLS
 
 
-def agent_process(start=None):
+def proc_tty(pid):
+    """The terminal of a process ('ttys030'); '' when it runs on none (a background process: ps shows ?? or ?);
+    None when ps cannot tell (no ps, no such process, or Windows)."""
+    import subprocess
+    if os.name == "nt":
+        return None
+    try:
+        out = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    t = out.stdout.strip()
+    if out.returncode or not t:
+        return None
+    return "" if not t.strip("?") else t
+
+
+def process_on_terminal(conn, name, env=None):
+    """Whether the session's own process of `name` must run on a terminal: its agent's adapter (the one this command
+    runs inside, else the agent's type) has IDENTITY['process'] 'terminal' (#5247: Hermes)."""
+    a = _adapters().from_env(os.environ if env is None else env) or state_adapter(conn, name)
+    return bool(a) and (a.identity or {}).get("process") == "terminal"
+
+
+def drop_background_process(conn, name):
+    """Forget the recorded process of `name` when it runs on no terminal (#5247): a Hermes gateway, shared by every
+    Hermes session, that an older MaximizePM recorded as the session's own. A process ps cannot read stays."""
+    r = conn.execute("SELECT pid, host FROM agents WHERE name=?", (name,)).fetchone()
+    if r and r["pid"] and r["host"] == this_host() and proc_tty(r["pid"]) == "":
+        with tx(conn):
+            conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL WHERE name=? AND pid=?", (name, r["pid"]))
+            _event(conn, None, name, f"{name}: process {r['pid']} runs on no terminal, so it is no session's own; "
+                                     f"forgotten")
+        return True
+    return False
+
+
+def agent_process(start=None, terminal=False):
     """The agent CLI process that runs this river command: the first ancestor above the shell(s) that is not
     a shell (SHELLS). Returns (pid, command line), or (None, None) when it finds none (no ps, or on Windows a
-    terminal that a person works in)."""
+    terminal that a person works in). terminal: that process counts only when it runs on a terminal
+    (process_on_terminal, #5247): a Hermes command runs under the gateway that every Hermes session shares."""
     pid = start or os.getppid()
     for _ in range(12):
         info = proc_info(pid)
@@ -6140,6 +6177,8 @@ def agent_process(start=None):
         ppid, comm, args = info
         if not _between(comm, args):
             if os.name == "nt" and re.sub(r"\.exe$", "", comm.lower()) in WIN_HOSTS:
+                return None, None
+            if terminal and os.name != "nt" and not proc_tty(pid):
                 return None, None
             return pid, args
         if ppid <= 1:

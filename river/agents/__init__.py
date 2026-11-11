@@ -156,12 +156,18 @@ FIRST_PROMPTS = ("argv", "paste")
 #                    this replaces core.agent_type_from_env,
 #      "id_pattern": a regex that the whole id must match, or None for SAFE_ID (#5212: an id from the environment
 #                    names a log file, so it never holds a path or a glob),
+#      "process":    which process is the session's own (agents.pid: maxpm who, the busy checks, maxpm stop --kill):
+#                    "ancestor" (the default), the first process above a maxpm command's shells; "terminal", that
+#                    process only when it runs on a terminal, else none (#5247: Hermes runs the tools of every
+#                    session in one background gateway with no terminal, so the ancestor is that shared gateway),
 #    }
 # With source "env" and CHAT["ref"] "session", each maxpm command records the id it finds in "env" for the acting
 # agent (core.session_from_env, agent_sessions): the Sessions tab then finds the agent's chat log by it (#5212).
 IDENTITY_SOURCES = ("hook", "env", "log", "pane")
 IDENTITY_KEYS = {"source": str, "env": (str, type(None)), "log_glob": (str, type(None)), "pane": (str, type(None)),
-                 "url": (str, type(None)), "inside_env": (list, tuple), "id_pattern": (str, type(None))}
+                 "url": (str, type(None)), "inside_env": (list, tuple), "id_pattern": (str, type(None)),
+                 "process": (str, type(None))}
+IDENTITY_PROCESS = ("ancestor", "terminal")
 SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 
 # 6. Chat log (#5182: river/sessions.py reads every chat log through this part, and core.measure_usage the usage).
@@ -426,6 +432,8 @@ def check(module, mid=None):
         out += _shape("IDENTITY", ident, IDENTITY_KEYS, ("source",))
         if isinstance(ident, dict) and ident.get("source") not in IDENTITY_SOURCES:
             out.append(f"IDENTITY['source'] is {ident.get('source')!r}, not one of {', '.join(IDENTITY_SOURCES)}")
+        if isinstance(ident, dict) and ident.get("process") not in (None,) + IDENTITY_PROCESS:
+            out.append(f"IDENTITY['process'] is {ident.get('process')!r}, not one of {', '.join(IDENTITY_PROCESS)}")
         if isinstance(ident, dict) and isinstance(ident.get("id_pattern"), str):
             out += _regex("IDENTITY['id_pattern']", ident["id_pattern"])
     if (getattr(module, "chat_path", None) is None) != (getattr(module, "parse_chat", None) is None):
