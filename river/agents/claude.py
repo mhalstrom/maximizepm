@@ -247,6 +247,8 @@ def parse_chat_line(d):
         return [{"at": d.get("timestamp"), "role": "divider", "kind": "compacted", "text": "Compacted"}], None
     if d.get("type") == "system" and d.get("subtype") == "local_command" and not d.get("isSidechain"):
         return _local_command(d), None
+    if d.get("type") == "attachment" and not d.get("isSidechain"):
+        return _queued_prompt(d), None
     if d.get("type") not in ("user", "assistant") or d.get("isSidechain") or d.get("isMeta"):
         return [], None
     m = d.get("message") if isinstance(d.get("message"), dict) else {}
@@ -279,6 +281,25 @@ def parse_chat_line(d):
         out.append(_s()._user_turn(at, text, sum(1 for x in content if isinstance(x, dict) and x.get("type") == "image")
                                  if isinstance(content, list) else 0))
     return out, "working"
+
+
+def _queued_prompt(d):
+    """The person's turn of a message they sent while the session worked (#5297). Claude Code writes no user line for
+    it: a queue-operation line 'enqueue' and one 'remove' (reason absorbed_mid_turn) with the text, then an attachment
+    'queued_command' with the prompt (a text, or text and image blocks) and its origin. The chat shows only the
+    attachment, and only a person's: a message of another session or a subagent (origin peer, coordinator) and a
+    background task's notice are no turn of the person, as at idle time. A message that waits until the turn ends
+    (queue-operation 'dequeue') comes as an ordinary user line instead."""
+    a = d.get("attachment") if isinstance(d.get("attachment"), dict) else {}
+    origin = a.get("origin") if isinstance(a.get("origin"), dict) else {}
+    if a.get("type") != "queued_command" or origin.get("kind") != "human" or a.get("commandMode") not in (None, "prompt"):
+        return []
+    p = a.get("prompt")
+    text = (p if isinstance(p, str) else _s()._parts_text(p, ("text",)) if isinstance(p, list) else "").strip()
+    images = sum(1 for x in p if isinstance(x, dict) and x.get("type") == "image") if isinstance(p, list) else 0
+    if not text and not images:
+        return []
+    return [_s()._user_turn(d.get("timestamp") or a.get("timestamp"), text, images)]
 
 
 def parse_chat(lines):
