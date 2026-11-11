@@ -1262,8 +1262,11 @@ class FakeTmux:
             return self._pane(name=opt("-n"))
         if cmd == "split-window":
             return None if self.full else self._pane(window=opt("-t"))
-        if cmd == "set-option" and "-p" in a:
-            pane[{"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started", "@maxpm_db": "db"}[a[-2]]] = a[-1]
+        opts = {"@maxpm_name": "name", "@maxpm_agent": "agent", "@maxpm_started": "started", "@maxpm_db": "db"}
+        if cmd == "set-option" and "-p" in a and "-u" in a:  # unset: the pane has the option no more
+            pane[opts[a[-1]]] = ""
+        elif cmd == "set-option" and "-p" in a:
+            pane[opts[a[-2]]] = a[-1]
         elif cmd == "set-option" and "-w" in a and "@maxpm_tile" in a:
             self.windows[opt("-t")]["tile"] = "" if "-u" in a else "1"
         elif cmd == "send-keys":

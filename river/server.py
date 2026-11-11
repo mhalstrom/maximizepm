@@ -1325,6 +1325,7 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
             raise RiverError(f"PID {pid} now runs another command ({info[2][:80]}); nothing moved")
         if not (end or _end_process)(pid):
             raise RiverError(f"its process {pid} did not end; nothing moved")
+    _untag_panes(name)
     with core.tx(conn):
         conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL, busy_at=NULL WHERE name=?", (name,))
         core._touch_agent(conn, name)
@@ -1334,6 +1335,21 @@ def move_into_tmux(conn, a, kind, path, cwd, runner=None, end=None, overrides=No
             "platform": t.get("platform"), "first_prompt": t.get("first_prompt")}
     _open_terminal(spec, t["env"], runner)
     return spec.get("tmux_pane")
+
+
+def _untag_panes(name):
+    """Remove the agent's name (@maxpm_agent) from this queue's panes that carry it: its process there ended, and its
+    chat goes on in a new pane. The old pane keeps its shell; until the new process ran a maxpm command, the page
+    found the agent by that name and typed into the shell (#5298)."""
+    if TMUX_RUNNER is None and not _tmux_cmd():
+        return
+    try:
+        panes = _tmux_panes(everywhere=True)
+    except RiverError:
+        return
+    for p in panes:
+        if p["agent"] == name and _own_pane(p):
+            _tmux("set-option", "-p", "-u", "-t", p["pane"], "@maxpm_agent", check=False)
 
 
 def _quiet_session(conn, agent, who):
@@ -1502,10 +1518,18 @@ def agent_terminals(conn):
             pane = by_tty.get(tty)
             for name in (pids.get(pid, ()) if pane else ()):
                 out[name] = pane
-    for p in panes:
-        if p["agent"] and p["pane"] not in out.values() and any(a["name"] == p["agent"] for a in agents):
-            out.setdefault(p["agent"], p["pane"])
+    # A restart (move_into_tmux) or a crash leaves the old pane at its shell with the same name: a live pane comes
+    # first, then the newest. The Cursor test typed a person's message into the old pane's zsh, which ran it (#5298).
+    named = [p for p in panes if p["agent"] and p["pane"] not in out.values()
+             and any(a["name"] == p["agent"] for a in agents)]
+    for p in sorted(named, key=lambda p: (p["ended"], -_pane_number(p["pane"]))):
+        out.setdefault(p["agent"], p["pane"])
     return out
+
+
+def _pane_number(pane):
+    """The number of a tmux pane id (%788 -> 788): tmux gives each new pane a higher one."""
+    return int(pane[1:]) if pane[1:].isdigit() else -1
 
 
 PS_RUNNER = None  # tests: gets the pids, returns the lines "pid tty"
@@ -2632,6 +2656,14 @@ def _typing_pane(conn, agent, who):
     pane = agent_terminals(conn).get(agent)
     if not pane:
         raise RiverError(f"{agent} does not run in a tmux pane on this computer")
+    try:
+        row = next((p for p in _tmux_panes(everywhere=True) if p["pane"] == pane), None)
+    except RiverError:
+        row = None
+    if row and row["ended"]:
+        # Only a shell runs there: the agent ended in that pane. A text sent there runs as a shell command (#5298).
+        raise RiverError(f"the terminal of {agent} shows only a shell: its agent ended there, so nothing was typed; "
+                         f"look at the terminal, then start the session again")
     return pane
 
 

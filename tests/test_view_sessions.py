@@ -2251,6 +2251,42 @@ class NotConnected(TmuxBase):
         self.assertNotIn("--no-daemon", core.build_command("codex", {"prompt": "go"}))
 
 
+class OldPane(TmuxBase):
+    """#5298: after a restart from the Settings dialog the old pane kept the agent's name with only its shell left, and
+    until the new process ran a maxpm command the message box typed a person's text into that shell, which ran it."""
+
+    def two_panes(self):
+        self.tmux.end(self.pane)  # the old pane: its agent ended, zsh is all that runs there
+        self.tmux._pane(name="ag")
+        new = self.tmux.panes[-1]
+        new.update(agent="ag", running="cursor-agent", screen="  → Add a follow-up\n")
+        return new
+
+    def test_the_live_pane_comes_before_the_old_shell(self):
+        new = self.two_panes()
+        self.assertEqual(server.agent_terminals(self.c), {"ag": new["id"]})
+        server.session_send(self.c, "ag", "Test 3: one word", who="mark")
+        self.assertEqual(self.pane["keys"], [])  # nothing reached the shell
+        self.assertIn("Test 3: one word", " ".join(map(str, new["keys"])))
+
+    def test_nothing_is_typed_into_a_pane_where_only_a_shell_runs(self):
+        self.tmux.end(self.pane)
+        self.assertEqual(server.agent_terminals(self.c), {"ag": self.pane["id"]})  # the page still shows the terminal
+        for send in (lambda: server.session_send(self.c, "ag", "Test 3: what was the first word?", who="mark"),
+                     lambda: server.terminal_keys(self.c, "ag", [{"text": "y"}], "mark")):
+            with self.assertRaisesRegex(core.RiverError, "shows only a shell"):
+                send()
+        self.assertEqual(self.pane["keys"], [])
+
+    def test_a_restart_takes_the_name_off_the_old_panes_of_this_queue(self):
+        self.tmux._pane(name="ag")
+        other = self.tmux.panes[-1]
+        other.update(agent="ag", db="/elsewhere/other.db")  # a pane of another queue keeps its tag
+        server._untag_panes("ag")
+        self.assertEqual((self.pane["agent"], other["agent"]), ("", "ag"))
+        self.assertNotIn("ag", {k: v for k, v in server.agent_terminals(self.c).items() if v == self.pane["id"]})
+
+
 class WindowsPaths(unittest.TestCase):
     def test_windows_artifacts_and_full_screen_paths(self):
         for path in (r"C:\Users\person\project\page.html", r"C:/Users/person/project/page.html",
