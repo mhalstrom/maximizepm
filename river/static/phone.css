@@ -119,7 +119,7 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
   .nyl .t { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
   .nyl .chips { justify-content: flex-start; }
   .nyl .chips > .btn:first-child { margin-left: var(--btn-inset); }  /* OK all under its line (#5314) */
-  .row { grid-template-columns: 36px minmax(0, 1fr); padding: 9px 4px; }
+  .row { grid-template-columns: var(--w-id) minmax(0, 1fr); padding: 9px 4px; }
   .row .chips { grid-column: 2; justify-content: flex-start; }
   .row .t .title { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 

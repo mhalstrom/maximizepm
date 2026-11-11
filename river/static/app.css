@@ -67,6 +67,7 @@
   --w-tab: 200px;      /* a tab of the side panel */
   --w-file: 240px;     /* a file in the message box */
   --w-label: 170px;    /* the name column of a settings row */
+  --w-id: 52px;        /* the id column of an item row: an id up to #99999 on one line (#5357) */
   --w-field-s: 100px; --w-field-m: 140px;  /* the base width of a field in a bar before it grows */
   --h-pre: 300px;      /* a tall box of text or a page: a tool's output, a frame, an editor */
   --h-text-min: 60px;  /* a text field of a few lines */
@@ -130,11 +131,11 @@ main > section > .panel:first-child { border-top: 0; padding-top: 0; }
 .panel h2 > label { font-size: var(--fs-m); font-weight: 400; color: var(--muted); }
 /* A checkbox and a radio take the page's accent in both themes, not the browser's blue (#5313). */
 input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
-.row { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 6px; border-top: 1px solid var(--line); cursor: pointer; }
+.row { display: grid; grid-template-columns: var(--w-id) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 6px; border-top: 1px solid var(--line); cursor: pointer; }
 .row:first-child { border-top: none; }
 .row:hover { background: var(--bg); }
-@media (max-width: 600px) { .row { grid-template-columns: 36px minmax(0, 1fr); } .row .chips { grid-column: 2; justify-content: flex-start; } }
-.row .id { color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) { .row { grid-template-columns: var(--w-id) minmax(0, 1fr); } .row .chips { grid-column: 2; justify-content: flex-start; } }
+.row .id { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .row .t { overflow: hidden; }
 .row .t .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .t .why { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
