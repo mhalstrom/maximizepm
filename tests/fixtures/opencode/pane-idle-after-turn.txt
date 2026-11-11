@@ -1,0 +1,99 @@
+   New session                     Summarize a.txt in one line   +
+
+  ┃                                                                                                 Summarize a.txt in one line
+  ┃  Read a.txt and tell me its content in one line.
+  ┃                                                                                                 Context
+                                                                                                    8,472 tokens
+     + Thought · 209ms                                                                              4% used
+
+     → Explored: 1 read
+
+     The content of a.txt is: hello
+
+     Build · Big Pickle · 7.3s · 8.2 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Big Pickle OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /private/tmp/claude-501/oc-try:master                               8.5K (4%)  ctrl+p commands    /private/tmp/claude-501/oc-try:master

@@ -1,0 +1,99 @@
+   New session                   ⠸ Summarize a.txt in one line   +
+
+  ┃                                                                                                 Summarize a.txt in one line
+  ┃  Read a.txt and tell me its content in one line.
+  ┃                                                                                                 Context
+                                                                                                    8,484 tokens
+     + Thought · 209ms                                                                              4% used
+
+     → Explored: 1 read
+
+     The content of a.txt is: hello
+
+     Build · Big Pickle · 7.3s · 8.2 tok/s
+
+  ┃
+  ┃  Read the file /private/tmp/claude-501/outside.txt with your read tool and quote it.
+  ┃
+
+     + Thought · 245ms
+
+     → Explored: 1 read
+
+     The content of /private/tmp/claude-501/outside.txt is: outside secret-free text
+
+     Build · Big Pickle · 14.2s · 6.2 tok/s
+
+  ┃
+  ┃  Read the file .env with your read tool and tell me the COLOR value.
+  ┃
+
+     + Thought · 1.1s
+
+     → Explored: 1 read
+
+     Build · Big Pickle · 15.5s · 23.0 tok/s · interrupted
+
+  ┃
+  ┃  Create a file b.txt that holds the word world, then change it to say world two.
+  ┃
+
+     + Thought · 501ms
+
+  ┃
+  ┃  # Wrote b.txt
+  ┃
+  ┃   1 world
+  ┃   2
+  ┃
+
+     + Thought · 454ms
+
+  ┃
+  ┃  ← Edit b.txt
+  ┃
+  ┃    1 - world
+  ┃    1 + world two
+  ┃
+
+     Done. b.txt was created with world, then updated — it now contains: world two
+
+     Build · Big Pickle · 1m 27s · 16.4 tok/s
+
+  ──────────────────────────────────────── ⠙ Compaction ────────────────────────────────────────
+
+     Objective
+
+     - Perform a series of small file read/write tasks in the working directory: read a.txt,
+       read `/private/t
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Big Pickle OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝■■■■■■⬝ esc interrupt                                             8.5K (4%)  ctrl+p commands    /private/tmp/claude-501/oc-try:master

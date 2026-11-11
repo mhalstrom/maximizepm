@@ -1,0 +1,99 @@
+   New session                   ! Summarize a.txt in one line   +
+
+  ┃                                                                                                 Summarize a.txt in one line
+  ┃  Read a.txt and tell me its content in one line.
+  ┃                                                                                                 Context
+                                                                                                    8,275 tokens
+     + Thought · 209ms                                                                              4% used
+
+     → Explored: 1 read
+
+     The content of a.txt is: hello
+
+     Build · Big Pickle · 7.3s · 8.2 tok/s
+
+  ┃
+  ┃  Read the file /private/tmp/claude-501/outside.txt with your read tool and quote it.
+  ┃
+
+     + Thought · 245ms
+
+     → Explored: 1 read
+
+     The content of /private/tmp/claude-501/outside.txt is: outside secret-free text
+
+     Build · Big Pickle · 14.2s · 6.2 tok/s
+
+  ┃
+  ┃  Read the file .env with your read tool and tell me the COLOR value.
+  ┃
+
+     + Thought · 1.1s
+
+     ⠼ Read .env
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃  △ Permission required
+  ┃    → Read .env
+  ┃
+  ┃  Path: .env
+  ┃
+  ┃
+  ┃   Allow once   Always allow   Reject           ctrl+f fullscreen  ⇆ select  enter confirm
+  ┃                                                                                                 /private/tmp/claude-501/oc-try:master

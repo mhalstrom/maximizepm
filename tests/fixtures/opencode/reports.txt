@@ -1,0 +1,6 @@
+--as oc1 report --state idle --seq 1794384324700 --session-id ses_e365c17cbffe7O4FB3OeQtl7r8 -- env OPENCODE_CLI_CONFIG_CONTENT={"plugins":["/QUEUE/opencode/maxpm-state"]} opencode --standalone --session ses_e365c17cbffe7O4FB3OeQtl7r8
+--as oc1 report --state working --seq 1794384324736 --session-id ses_e365c17cbffe7O4FB3OeQtl7r8 -- env OPENCODE_CLI_CONFIG_CONTENT={"plugins":["/QUEUE/opencode/maxpm-state"]} opencode --standalone --session ses_e365c17cbffe7O4FB3OeQtl7r8
+--as oc1 report --state blocked --seq 1794384334381 --message permission: read --session-id ses_e365c17cbffe7O4FB3OeQtl7r8 -- env OPENCODE_CLI_CONFIG_CONTENT={"plugins":["/QUEUE/opencode/maxpm-state"]} opencode --standalone --session ses_e365c17cbffe7O4FB3OeQtl7r8
+--as oc1 report --state working --seq 1794384337522 --session-id ses_e365c17cbffe7O4FB3OeQtl7r8 -- env OPENCODE_CLI_CONFIG_CONTENT={"plugins":["/QUEUE/opencode/maxpm-state"]} opencode --standalone --session ses_e365c17cbffe7O4FB3OeQtl7r8
+--as oc1 report --state idle --seq 1794384337524 --session-id ses_e365c17cbffe7O4FB3OeQtl7r8 -- env OPENCODE_CLI_CONFIG_CONTENT={"plugins":["/QUEUE/opencode/maxpm-state"]} opencode --standalone --session ses_e365c17cbffe7O4FB3OeQtl7r8
+--as oc1 release
