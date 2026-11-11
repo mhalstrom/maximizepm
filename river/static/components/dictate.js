@@ -206,7 +206,9 @@ export function installMics(state) {
     if (!field || !field.isConnected) { btn.classList.add("hidden"); note.classList.add("hidden"); return; }
     const r = field.getBoundingClientRect();
     const tall = field.tagName === "TEXTAREA" && r.height > 48;
-    btn.style.left = `${Math.round(r.right - 28)}px`;
+    // A tall box that the person can resize has its grip in the bottom right corner: the mic stands left of it (#5315).
+    const grip = tall && getComputedStyle(field).resize !== "none" ? 16 : 0;
+    btn.style.left = `${Math.round(r.right - 28 - grip)}px`;
     btn.style.top = `${Math.round(tall ? r.bottom - 28 : r.top + (r.height - 24) / 2)}px`;
     note.style.left = `${Math.round(Math.max(8, r.right - 280))}px`;
     note.style.top = `${Math.round(r.bottom + 4)}px`;

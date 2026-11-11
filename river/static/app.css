@@ -314,6 +314,11 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .refpop-t { overflow-wrap: anywhere; }
 .refpop-b { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .refpop-b .btn { font-size: 12px; }
+/* A field that has the focus shows a ring in the accent color, not the browser's blue (#5315). :where() keeps it
+   weak, so a box with a quiet focus of its own (the message box) keeps it. */
+:where(input:not([type=checkbox], [type=radio], [type=range], [type=hidden]), select, textarea):focus-visible {
+  outline: var(--hair-2) solid var(--accent); outline-offset: calc(-1 * var(--hair)); }
+:where(input[type=checkbox], input[type=radio]):focus-visible { outline: var(--hair-2) solid var(--accent); outline-offset: var(--hair); }
 .link.ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
 /* A link to a session's file or page (#4689): it opens in the side panel. A path the side panel cannot show is no
    link: dotted, and its title says why. */
