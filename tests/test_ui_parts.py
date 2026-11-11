@@ -144,3 +144,12 @@ class UiParts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimeTexts(unittest.TestCase):
+    def test_no_text_puts_ago_after_ago(self):
+        # lib.js ago() ends with 'ago' itself; an ended session's hover read 'ended 3h ago ago' (#5395).
+        bad = [f"{p.relative_to(STATIC)}:{n}" for p in sorted(STATIC.rglob("*.js")) if "vendor" not in p.parts
+               for n, line in enumerate(p.read_text().splitlines(), 1)
+               if re.search(r"\bago\([^`]*?\)\)?\}?\s*ago\b", line)]
+        self.assertEqual(bad, [])

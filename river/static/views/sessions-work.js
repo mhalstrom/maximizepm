@@ -42,7 +42,7 @@ export function renderFoot() {
   put(box, E.map(a => {
     const head = (S.session_names || {})[a.name] || a.name;
     return `<div class="srow ended" data-session="${esc(a.name)}" data-state="ended">
-      <div class="srow-main" tabindex="0" role="button" title="${esc(a.name)}: ended ${esc(ago(a.last_seen))} ago" aria-label="Open the ended session ${esc(head)}">
+      <div class="srow-main" tabindex="0" role="button" title="${esc(a.name)}: ended ${esc(ago(a.last_seen))}" aria-label="Open the ended session ${esc(head)}">
         <div class="srow-h"><b class="srow-t">${esc(head)}</b><span class="spacer"></span><span class="dot gone"></span><span class="sago">${ago(a.last_seen)}</span></div>
         <div class="sub">${esc(clip(a.note || "ended", 120))}</div></div></div>`;
   }).join(""));
