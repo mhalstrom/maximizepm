@@ -73,7 +73,9 @@ EFFORT = {
     "map": {},
     "flag": ["--reasoning-effort", "{value}"],
     "live": None,  # the /model picker changes it with the arrow keys; no typed command
-    "read": r'"reasoningEffort":\s*"([a-z]+)"',  # session.model_change in events.jsonl
+    # The effort on the session's command line (--reasoning-effort low; the Settings dialog reads it there, #5258),
+    # or in a session.model_change line of events.jsonl.
+    "read": r'(?:--reasoning-effort[= ]|"reasoningEffort":\s*")([a-z]+)',
 }
 
 # A session name only for a new session (--name); the queue folder as a folder it may use (--add-dir).

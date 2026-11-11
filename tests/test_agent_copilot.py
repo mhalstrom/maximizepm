@@ -115,10 +115,17 @@ class Launch(Env):
         self.assertIsNone(a.parse_command(["claude", "-i", "go"]))
 
     def test_the_effort_flag_and_its_read_back(self):
+        """The effort reads back from the session's command line (the Settings dialog, #5258) and from the log."""
         a = agents.get("copilot")
         self.assertEqual(a.effort_name("xhigh"), "xhigh")
         line = '{"type": "session.model_change", "data": {"newModel": "gpt-5.6-sol", "reasoningEffort": "high"}}'
         self.assertEqual(re.search(a.effort["read"], line).group(1), "high")
+        cmd = " ".join(a.build_command("w1", "/p", "auto", "low", {"permissions": "allow-all"}, "go"))
+        self.assertEqual(re.search(a.effort["read"], cmd).group(1), "low")
+        self.assertEqual(re.search(a.effort["read"], "copilot --reasoning-effort=xhigh -i go").group(1), "xhigh")
+        self.assertIsNone(re.search(a.effort["read"], "copilot --model auto -i go"))
+        # The recorded log has its model_change lines with no effort (null): nothing to read there.
+        self.assertIsNone(re.search(a.effort["read"], fixture("events.jsonl")))
 
 
 class Hooks(Env):
