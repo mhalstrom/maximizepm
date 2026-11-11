@@ -674,8 +674,11 @@ try {
         ids = [core.item_add(self.c, "site", f"Sign form {i}", doer="human")["id"] for i in range(106)]  # 1 message: the takeover note
         core.register(self.c, "helper")
         core.takeover(self.c, ids[0], "I fill it in myself", actor="helper")
+        # The inbox comes in a poll of its own, after the state: wait for its count in the line, not only for the
+        # badge (#5153: on a slow CI machine the line was read before ' · 1 message' came).
         driver = r'''try {
-  await until(() => window.__appReady && q("#sessYouRow .wbadge"), "the You row with its badge");
+  await until(() => window.__appReady && q("#sessYouRow .wbadge") && /message/.test(q("#sessYouRow .sub").textContent),
+              "the You row with its badge and the count of the inbox");
   const out = { badge: q("#sessYouRow .wbadge").textContent.trim(), line: q("#sessYouRow .sub").textContent.trim(),
                 // One line under the You row: its own, not also its group's (#5114: two lines with nothing between).
                 lines: [q("#sessYouRow").closest(".slist-mgr"), q("#sessYouRow .srow")].map(e => getComputedStyle(e).borderBottomWidth).join(" ") };

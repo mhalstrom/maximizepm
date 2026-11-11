@@ -32,7 +32,7 @@ def strip_comments(text, suffix):
 def counts(path):
     """{kind: count} of the raw elements in one view file."""
     suffix = path.suffix
-    text = strip_comments(path.read_text(), suffix)
+    text = strip_comments(path.read_text(encoding="utf-8"), suffix)
     c = {"button": 0, "dialog": 0, "color": 0, "px": 0}
     if suffix == ".js":
         c["button"] = len(re.findall(r"<button\b", text)) + len(re.findall(r"createElement\(\s*['\"]button['\"]", text))
@@ -81,7 +81,7 @@ LAYOUT = re.compile(r"(?:^|;)\s*(display|width|height|(?:min|max)-(?:width|heigh
 
 def hover_shifts(path):
     """[(selector, property)] of the :hover rules of one style sheet that size or place a box."""
-    text = strip_comments(path.read_text(), ".css")
+    text = strip_comments(path.read_text(encoding="utf-8"), ".css")
     out = []
     for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", text):
         sel, body = " ".join(m.group(1).split()), m.group(2)
