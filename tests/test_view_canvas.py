@@ -624,6 +624,73 @@ try {
         show = core.canvas_show(self.base.c, "relay")
         self.assertEqual((show["version"], show["agent"]), (2, "ag"))
 
+    def test_the_canvas_bar_is_one_row_on_a_phone(self):
+        # #5361: at 390 px the bar was three rows (about 150 px). Now it is one: Comment on the page and Edit sit under
+        # its ⋯; a choice, Esc, or a click outside closes the menu. On a wide screen they stand in the bar.
+        def put():
+            c = core.connect()
+            try:
+                return core.canvas_put(c, "relay", DOC, "ag", kind="md", title="Relay")["id"]
+            finally:
+                c.close()
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag", "the session ag");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  await sleep(400);
+  await fetch("/__doc");
+  await until(() => q(".sp-cbar [data-cv-edit]"), "the canvas bar");
+  const bar = q(".sp-cbar"), vis = s => { const e = q(s); return !!e && e.getClientRects().length > 0; };
+  const out = { wide: innerWidth > 759, height: bar.getBoundingClientRect().height, more: vis(".sp-cbar .cv-more"),
+                page: vis("[data-cv-page]"), edit: vis("[data-cv-edit]"), comment: vis("[data-cv-mode]"),
+                over: bar.scrollWidth - bar.clientWidth };
+  if (out.more) {
+    q(".sp-cbar .cv-more").click();
+    out.open = { page: vis("[data-cv-page]"), edit: vis("[data-cv-edit]"), expanded: q(".sp-cbar .cv-more").getAttribute("aria-expanded"),
+                 height: bar.getBoundingClientRect().height,
+                 inside: q(".cv-menu").getBoundingClientRect().right <= innerWidth };
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    out.esc = vis("[data-cv-page]");
+    q(".sp-cbar .cv-more").click();
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    out.outside = vis("[data-cv-page]");
+    q(".sp-cbar .cv-more").click(); q("[data-cv-edit]").click();
+    await until(() => q(".cv-edit textarea"), "the edit box");
+    out.after_edit = vis(".sp-cbar.more .cv-menu");
+  }
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        phone = self.tvs.drive_page(self.base, driver, routes={"/__doc": put}, size="390,844")
+        self.assertFalse(phone["wide"], phone)
+        self.assertLess(phone["height"], 70, f"one row (a 44 px tap target and the padding): {phone}")
+        self.assertLessEqual(phone["over"], 0, phone)
+        self.assertEqual((phone["more"], phone["comment"], phone["page"], phone["edit"]), (True, True, False, False))
+        self.assertEqual(phone["open"], {"page": True, "edit": True, "expanded": "true", "height": phone["height"],
+                                         "inside": True})
+        self.assertEqual((phone["esc"], phone["outside"], phone["after_edit"]), (False, False, False))
+
+    def test_the_canvas_bar_on_a_wide_screen(self):
+        def put():
+            c = core.connect()
+            try:
+                return core.canvas_put(c, "relay", DOC, "ag", kind="md", title="Relay")["id"]
+            finally:
+                c.close()
+        driver = self.tvs.DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag", "the session ag");
+  q("#actor").value = "mark"; q("#actor").dispatchEvent(new Event("change"));
+  await sleep(400);
+  await fetch("/__doc");
+  await until(() => q(".sp-cbar [data-cv-edit]"), "the canvas bar");
+  const vis = s => { const e = q(s); return !!e && e.getClientRects().length > 0; };
+  post({ more: vis(".sp-cbar .cv-more"), page: vis("[data-cv-page]"), edit: vis("[data-cv-edit]"), status: vis(".sp-cbar .cv-st") });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        wide = self.tvs.drive_page(self.base, driver, routes={"/__doc": put})
+        self.assertEqual(wide, {"more": False, "page": True, "edit": True, "status": True})
+
     def test_a_new_version_of_a_doc_changes_only_its_changed_sections(self):
         # #4844: no draw of the whole doc for a new version or an answer: the sections that stay keep their elements,
         # the words typed in a decision's box stay, and the place on screen stays.

@@ -1312,9 +1312,10 @@ document.getElementById("out").textContent = "RESULT " + JSON.stringify({{row: r
         self.assertLess(got["h"], 64, got)    # two lines in all
 
 
-def drive_page(test, driver, wait=40, routes=None):
+def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
     """Load the real page at /sessions/ag in headless Chrome with driver (a module) after app.js, and return what
-    the driver posts to /__result. Skips with no Chrome or no local port."""
+    the driver posts to /__result. Skips with no Chrome or no local port. size: the window, "1500,900" or a phone's
+    "390,844"."""
     import subprocess
     import threading
     from unittest.mock import patch
@@ -1350,7 +1351,7 @@ def drive_page(test, driver, wait=40, routes=None):
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         chrome = subprocess.Popen([
             _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", "--window-size=1500,900", f"--user-data-dir={test.dir.name}/browser",
+            "--disable-extensions", f"--window-size={size}", f"--user-data-dir={test.dir.name}/browser",
             f"http://127.0.0.1:{httpd.server_address[1]}/sessions/ag?as=mark"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

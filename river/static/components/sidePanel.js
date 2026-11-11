@@ -25,7 +25,7 @@ import { makeComments, pathIn } from "./canvasComments.js";
 import { decorateDoc, updateAnswers } from "./canvasDoc.js";
 import { findMark, findClear, findGo } from "./findText.js";
 import { queueHtml } from "./agentActions.js";
-import { button } from "./button.js";
+import { button, iconButton } from "./button.js";
 import { S } from "../page.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
@@ -266,11 +266,12 @@ function drawBar(t, meta) {
   t.barSig = sigNow;
   bar.innerHTML = `<select class="sp-cver" aria-label="Version of the canvas">${[...meta.versions].reverse().map(x =>
       `<option value="${x.version}"${x.version === v ? " selected" : ""}>v${x.version}${x.version === meta.version ? " (newest)" : ""} · ${esc(x.author || "")} · ${ago(x.created_at)}${x.note ? " · " + esc(clip(x.note, 40)) : ""}</option>`).join("")}</select>
-    <span class="muted">${t.pin ? `version ${t.pin} of ${meta.version} · <span class="link" data-cv-newest>show the newest</span>` : "shows each new version"}</span>
-    ${meta.item_id ? `<span class="link" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
+    <span class="muted cv-st">${t.pin ? `<span class="cv-st-of">version ${t.pin} of ${meta.version} · </span><span class="link" data-cv-newest>show the newest</span>` : "shows each new version"}</span>
+    ${meta.item_id ? `<span class="link cv-item" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
     <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Then click a part of the page, or select text, to comment on it">Comment</button>`}
-    <button class="btn" type="button" data-cv-page>Comment on the page</button>
-    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Change the text; it becomes a new version, and the session gets a note">Edit</button>` : ""}`;
+    <span class="cv-menu"><button class="btn" type="button" data-cv-page>Comment on the page</button>
+    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Change the text; it becomes a new version, and the session gets a note">Edit</button>` : ""}</span>
+    ${iconButton("⋯", "More: comment on the page, edit", { cls: "cv-more", data: { "cv-more": "" } })}`;
   bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
   const newest = bar.querySelector("[data-cv-newest]");
   if (newest) newest.onclick = () => { t.pin = null; show(t); };
@@ -279,7 +280,22 @@ function drawBar(t, meta) {
   bar.querySelector("[data-cv-page]").onclick = () => { setCommenting(t, false); t.comments.compose(null); t.side.scrollIntoView({ block: "nearest" }); };
   const edit = bar.querySelector("[data-cv-edit]");
   if (edit) edit.onclick = () => editCanvas(t, $("#spBody"), `canvas/${canvasOf(t.target)}/latest?${t.sig}`, t.side);
+  // #5361: on a phone the bar is one row; Comment on the page and Edit sit under its ⋯. A choice closes the menu, and
+  // so do Esc and a click outside the bar (barMenu, once for the page: the bar is drawn again often).
+  const more = bar.querySelector("[data-cv-more]");
+  more.setAttribute("aria-expanded", String(bar.classList.contains("more")));
+  more.onclick = () => barMenu(bar, !bar.classList.contains("more"));
+  bar.querySelector(".cv-menu").addEventListener("click", (e) => { if (e.target.closest("button")) barMenu(bar, false); });
 }
+
+function barMenu(bar, open) {
+  bar.classList.toggle("more", open);
+  const b = bar.querySelector("[data-cv-more]"); if (b) b.setAttribute("aria-expanded", String(open));
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") document.querySelectorAll(".sp-cbar.more").forEach(b => barMenu(b, false)); });
+document.addEventListener("pointerdown", (e) => {
+  for (const b of document.querySelectorAll(".sp-cbar.more")) if (!b.contains(e.target)) barMenu(b, false);
+});
 
 function canvasFrame(title, src) {
   const f = document.createElement("iframe");

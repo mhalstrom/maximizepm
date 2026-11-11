@@ -257,6 +257,9 @@ button.srow-it { cursor: pointer; }
 .sp-cbar .btn { font-size: var(--fs-s); padding: var(--sp-0) var(--sp-3); }
 .sp-cbar .btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .cv-sp { flex: 1; }
+/* #5361: Comment on the page and Edit stand in the bar on a wide screen; on a phone they sit under the bar's ⋯. */
+.cv-menu { display: contents; }
+.sp-cbar .cv-more { display: none; }
 /* The comments of a canvas (#4769), under the page. */
 .sp-cside { flex: none; border-top: var(--hair) solid var(--line); background: var(--panel); padding: var(--sp-3) var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-3); font-size: calc(var(--fs-s) + var(--hair) / 2); }
 .cv-head { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
@@ -308,6 +311,19 @@ button.srow-it { cursor: pointer; }
   .sess-layout.with-panel { grid-template-columns: minmax(0, 1fr); }
   .sess-panel { height: 70vh; }
   .sp-grip { display: none; }
+  /* #5361: the canvas bar is one row: the version select shrinks, the status words go (a pinned version keeps
+     'show the newest'), and the rest is under the ⋯. */
+  .sp-cbar { flex-wrap: nowrap; gap: var(--sp-2); }
+  .sp-cbar select { flex: 1 1 0; min-width: var(--w-xs); }
+  .sp-cbar .cv-st:not(:has([data-cv-newest])), .sp-cbar .cv-st-of { display: none; }
+  .sp-cbar .cv-st, .sp-cbar .cv-item, .sp-cbar .btn { flex: none; white-space: nowrap; }
+  .sp-cbar .cv-sp { display: none; }
+  .sp-cbar .cv-more { display: inline-flex; align-items: center; justify-content: center; flex: none; }
+  .sp-cbar .cv-menu { display: none; }
+  .sp-cbar.more .cv-menu { display: flex; flex-direction: column; gap: var(--sp-1); position: absolute; top: 100%; right: var(--sp-3);
+    z-index: 7; width: max-content; min-width: var(--w-m); margin-top: var(--sp-1); padding: var(--sp-2); background: var(--panel);
+    border: var(--hair) solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-pop); }
+  .sp-cbar.more .cv-menu .btn { min-height: var(--tap); font-size: var(--fs-base); }
 }
 /* The chat provider of a session (#4627). */
 .prov { flex: none; font-size: calc(var(--fs-xs) - var(--hair) / 2); font-weight: 600; border: var(--hair) solid var(--line); border-radius: var(--r-xs); padding: 0 calc(var(--sp-1) + var(--hair)); color: var(--muted); white-space: nowrap; }
