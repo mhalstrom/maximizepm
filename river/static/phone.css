@@ -138,9 +138,9 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
   .tabulator .tabulator-responsive-collapse table { font-size: 12.5px; }
   .tabulator .tabulator-responsive-collapse td { padding: 1px 8px 1px 0; vertical-align: top; overflow-wrap: anywhere; }
   .tabulator .tabulator-header .tabulator-col input { min-height: 36px; }
-  /* The + that opens a row's hidden columns stands beside the row's first line, not low in a tall row: the cells are
-     inline blocks aligned on their middle (#5389). */
-  .tabulator .tabulator-row .tabulator-cell.col-toggle { vertical-align: top; padding-top: var(--sp-3); }
+  /* The + that opens a row's hidden columns stands beside the row's first line, not low in a tall row: Tabulator
+     makes its cell a flex box as tall as the row, with the + in the middle (#5389). */
+  .tabulator .tabulator-row .tabulator-cell.col-toggle { align-items: flex-start; padding-top: var(--sp-3); }
 
   /* The drawer of an item takes the whole screen. */
   #drawer { width: 100vw; padding: calc(12px + env(safe-area-inset-top)) 12px calc(24px + env(safe-area-inset-bottom)); }
