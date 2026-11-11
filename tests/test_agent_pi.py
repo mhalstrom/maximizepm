@@ -127,8 +127,11 @@ class Chat(Env):
         self.assertTrue(user["text"].startswith("Run the shell command `echo hello` with the bash tool"))
         self.assertEqual(len(user["images"]), 1)
         self.assertTrue(user["images"][0].startswith("data:image/png;base64,iVBORw0KGgo"))
-        self.assertEqual(entries[3], {"at": "2026-11-11T08:12:00.482Z", "role": "tool", "text": "bash",
-                                      "id": "m7p3XwlbF", "name": "bash", "detail": "echo hello"})
+        # The tool line names what the call does, as Claude Code's do (#5255).
+        self.assertEqual({k: v for k, v in entries[3].items() if k != "plain"},
+                         {"at": "2026-11-11T08:12:00.482Z", "role": "tool", "text": "bash: echo hello",
+                          "id": "m7p3XwlbF", "name": "bash", "detail": "echo hello"})
+        self.assertEqual(entries[8]["text"], "read: missing.md")
         self.assertEqual((entries[4]["for"], entries[4]["error"], entries[4]["text"]), ("m7p3XwlbF", False, "hello\n"))
         self.assertTrue(entries[6]["text"].startswith("The user explored a different conversation branch"))
         self.assertEqual((entries[8]["detail"], entries[9]["error"]), ("missing.md", True))
@@ -184,6 +187,26 @@ class Chat(Env):
         self.assertIsNone(self.a.chat_path("../x", None))
         with mock.patch.dict(os.environ, {"PI_CODING_AGENT_SESSION_DIR": str(self.root / "none")}):
             self.assertIsNone(self.a.chat_path(SESSION_ID, "/work/demo"))
+
+    def test_the_sessions_tab_finds_the_log_by_the_session_id_the_extension_reported(self):
+        """#5255: with no CHAT['ref'] the Sessions tab never asked Pi for a log ('No transcript of <agent>')."""
+        from river import sessions
+        d = self.root / "pi-agent" / "sessions" / pi.folder_key("/work/demo")
+        d.mkdir(parents=True)
+        f = d / f"2026-11-11T08-00-00-000Z_{SESSION_ID}.jsonl"
+        shutil.copy(FIX / "session.jsonl", f)
+        self.assertEqual(self.a.chat, {"compressed": False, "file_tools": ["write", "edit"], "ref": "session",
+                                       "cache_write": True})
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "pi-1")
+        self.assertEqual(sessions.transcript(conn, "pi-1"), (None, None))
+        core.report(conn, "pi-1", "idle", session_id=SESSION_ID, seq=1)
+        self.assertEqual(sessions.transcript(conn, "pi-1"), ("pi", f))
+        got = sessions.view(conn, "pi-1")
+        self.assertEqual(got["transcript"], "pi")
+        self.assertIn("bash: echo hello", [e["text"] for e in got["entries"] if e["role"] == "tool"])
+        self.assertEqual(self.a.chat_path(SESSION_ID, None, root=d.parent), f)  # a root in place of Pi's folder
 
     def test_a_fork_holds_its_branch_so_the_chain_stops_at_it(self):
         # Pi 1.5.2 copies the branch into the fork with the same entry ids (#5204): the parent would show it twice.

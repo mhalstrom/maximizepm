@@ -94,7 +94,9 @@ IDENTITY = {
     "inside_env": ["PI_CODING_AGENT"],
 }
 
-CHAT = {"compressed": False, "file_tools": ["write", "edit"]}
+# The log is found by the newest session id that the extension reported (#5255: without "ref" the Sessions tab never
+# asked for it). Pi's usage counts cache writes apart (cacheWrite), so a call after the cache ran out pays that price.
+CHAT = {"compressed": False, "file_tools": ["write", "edit"], "ref": "session", "cache_write": True}
 
 STATE = {"state": "hook", "session_id": "hook"}
 
@@ -315,9 +317,10 @@ def resume_command(session_ref, model, effort, settings, name=None):
 # 6. Chat log
 # ---------------------------------------------------------------------------------------------------------------
 
-def chat_path(session_ref, folder=None):
+def chat_path(session_ref, folder=None, root=None):
     """The session file of a session id (or its first characters) or of a path: first in the folder's session
-    folder, then in every session folder; None when there is none."""
+    folder, then in every session folder (under root in place of Pi's sessions folder, when given); None when there
+    is none."""
     ref = str(session_ref or "").strip()
     if not ref:
         return None
@@ -326,7 +329,7 @@ def chat_path(session_ref, folder=None):
         return p if p.is_file() else None
     if not re.fullmatch(r"[0-9A-Za-z-]+", ref):
         return None
-    root = sessions_dir()
+    root = Path(root) if root else sessions_dir()
     for pattern in ([f"{folder_key(folder)}/*_{ref}*.jsonl"] if folder else []) + [f"*/*_{ref}*.jsonl"]:
         hits = sorted(root.glob(pattern))
         if hits:
@@ -381,6 +384,19 @@ TOOL_DETAIL = {"bash": "command", "read": "path", "edit": "path", "write": "path
                "ls": "path"}
 
 
+# Pi's tool names, as the names of the same tools that plain_tool knows: what a call does in plain words.
+_PLAIN_NAMES = {"bash": "Bash", "read": "Read", "edit": "Edit", "write": "Write", "grep": "Grep", "find": "Glob",
+                "ls": "LS"}
+
+
+def _tool(at, name, cid, args):
+    """The page line of one tool call: "<tool>: <what>" (the command, the path, the pattern), as for Claude Code."""
+    from .. import sessions
+    args = args if isinstance(args, dict) else {}
+    return {"at": at, "role": "tool", "text": sessions._tool_line(name, args), "id": cid, "name": name,
+            "plain": sessions.plain_tool(_PLAIN_NAMES.get(name, name), args), "detail": _detail(name, args)}
+
+
 def _detail(name, args):
     args = args if isinstance(args, dict) else {}
     key = TOOL_DETAIL.get(name)
@@ -406,8 +422,7 @@ def _entries(row):
                 if b.get("type") == "text" and b.get("text", "").strip():
                     out.append({"at": at, "role": "assistant", "text": b["text"]})
                 elif b.get("type") == "toolCall":
-                    out.append({"at": at, "role": "tool", "text": b.get("name", ""), "id": b.get("id", ""),
-                                "name": b.get("name", ""), "detail": _detail(b.get("name"), b.get("arguments"))})
+                    out.append(_tool(at, b.get("name", ""), b.get("id", ""), b.get("arguments")))
             if m.get("stopReason") == "error" and m.get("errorMessage"):
                 out.append({"at": at, "role": "event", "text": f"error: {m['errorMessage']}"})
             if m.get("stopReason") == "aborted":
@@ -418,8 +433,7 @@ def _entries(row):
                      "error": bool(m.get("isError"))}]
         if role == "bashExecution":  # a !command the person typed
             rid = row.get("id", "")
-            return [{"at": at, "role": "tool", "text": "bash", "id": rid, "name": "bash",
-                     "detail": m.get("command", "")},
+            return [_tool(at, "bash", rid, {"command": m.get("command", "")}),
                     {"at": at, "role": "result", "text": m.get("output", ""), "for": rid,
                      "error": bool(m.get("exitCode")) or bool(m.get("cancelled"))}]
         if role == "custom" and m.get("display"):
