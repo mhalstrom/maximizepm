@@ -66,6 +66,7 @@ OPS = {
     "push_cancel": lambda c, a, who: core.cancel_push(c, a["id"], who),
     "undo_takeover": lambda c, a, who: core.undo_takeover(c, a["id"], who),
     "takeover_seen": lambda c, a, who: core.takeover_seen(c, a["id"], who),
+    "takeovers_seen": lambda c, a, who: core.takeovers_seen(c, a["ids"], who),
     "next_claim": lambda c, a, who: core.next_item(c, a.get("project"), a.get("unblocks"), True, who, 1, a.get("near"),
                                                    bool(a.get("mine"))),
     "register": lambda c, a, who: core.register(c, a["name"], bool(a.get("human")), a.get("note", "")),

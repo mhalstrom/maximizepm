@@ -8566,6 +8566,20 @@ def takeover_seen(conn, item_id, actor=None):
     return {"id": int(item_id), "seen": True}
 
 
+def takeovers_seen(conn, ids, actor=None):
+    """OK all on the You view: mark every listed takeover seen in one transaction. The page sends the ids it
+    shows, so a takeover that came after the page drew the list stays on it. One request, not one per item:
+    811 requests in a row took minutes (#5365). Ids that are not a takeover are skipped."""
+    ids = sorted({int(i) for i in ids or []})
+    with tx(conn):
+        n = 0
+        for k in range(0, len(ids), 500):  # SQLite's limit of bound parameters
+            part = ids[k:k + 500]
+            n += conn.execute(f"UPDATE items SET takeover_seen=1 WHERE takeover_by IS NOT NULL AND takeover_seen=0 "
+                              f"AND id IN ({','.join('?' * len(part))})", part).rowcount
+    return {"seen": n}
+
+
 def takeovers(conn, include_seen=False):
     sql = ("SELECT i.id, i.title, i.status, i.takeover_by, i.takeover_kind, i.takeover_note, i.takeover_at, p.name project "
            "FROM items i JOIN projects p ON p.id=i.project_id WHERE i.takeover_by IS NOT NULL")

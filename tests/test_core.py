@@ -3095,6 +3095,21 @@ class Takeover(Base):
         core.done(self.c, self.h, "did it", "mark")  # a person needs no note
 
 
+    def test_ok_all_marks_many_takeovers_seen_in_one_call(self):
+        # 811 takeovers on the You view (#5365): OK all is one call, and it leaves a takeover it was not given.
+        with core.tx(self.c):
+            pid = self.c.execute("SELECT id FROM projects WHERE name='a'").fetchone()[0]
+            for i in range(811):
+                self.c.execute("INSERT INTO items (project_id, title, rank, doer, status, takeover_by, takeover_kind, takeover_at, "
+                               "created_at) VALUES (?, ?, 0, 'ai', 'done', 'ag', 'done', ?, ?)",
+                               (pid, f"t{i}", core.iso(core.now()), core.iso(core.now())))
+        ids = [t["id"] for t in core.takeovers(self.c)]
+        self.assertEqual(len(ids), 811)
+        core.takeover(self.c, self.h, "came after the page drew the list", "ag")
+        self.assertEqual(core.takeovers_seen(self.c, ids + [self.h * 1000, ids[0]], "mark"), {"seen": 811})
+        self.assertEqual([t["id"] for t in core.takeovers(self.c)], [self.h])
+        self.assertEqual(core.takeovers_seen(self.c, [], "mark"), {"seen": 0})
+
 class Prompts(Base):
     def test_prompt_for_item_and_all(self):
         core.project_add(self.c, "a", path=self.dir.name)

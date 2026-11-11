@@ -64,7 +64,8 @@ export function openTakeovers() { takeoversOpen = true; renderTakeovers(); }
 
 // A click on this view's controls; true when it was one (the frame then stops).
 export function onClick(t) {
-  if (t.dataset.takeoversOkall) return run(async () => { for (const x of S.takeovers || []) await act("takeover_seen", { id: x.id }).catch(() => {}); });
+  // One request for the whole list (#5365): one per item took minutes with 800 items.
+  if (t.dataset.takeoversOkall) return run(async () => { await act("takeovers_seen", { ids: (S.takeovers || []).map(x => x.id) }).catch(() => {}); });
   if (t.closest("[data-takeovers-toggle]") && !t.closest("button")) return run(async () => { takeoversOpen = !takeoversOpen; return renderTakeovers(); });
   if (t.dataset.undoTakeover) return run(async () => { await act("undo_takeover", { id: +t.dataset.undoTakeover }).then(() => toast("Back on your list")).catch(() => {}); });
   if (t.dataset.takeoverOk) return run(async () => { await act("takeover_seen", { id: +t.dataset.takeoverOk }).catch(() => {}); });
