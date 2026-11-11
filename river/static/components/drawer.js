@@ -114,7 +114,7 @@ export function itemDrawerHtml(it, { S, me }) {
         field("Effort", modelInput(it, "effort", "dEffort", (S.effort_levels || []).join(", ") || "low … max")))}
       ${two(field("Min model", modelInput(it, "min_model", "dMinModel", "weakest allowed, e.g. opus")),
         field("Max model", modelInput(it, "max_model", "dMaxModel", "strongest allowed, e.g. sonnet")))}
-      ${field("Agent type", modelInput(it, "agent", "dAgent", "codex or claude-code; empty: any agent"))}
+      ${field("Agent type", modelInput(it, "agent", "dAgent", "an agent: claude-code, codex, opencode, ...; empty: any agent"))}
       ${two(field("Priority (own)", select({ id: "dPrio" }, [0, 1, 2, 3, 4], it.priority)),
         field("Who can do it", select({ id: "dDoer" }, [["any", "anyone"], ["ai", "agent"], ["human", "human"]], it.doer)))}
       ${two(field("Project", select({ id: "dProject" }, S.projects.map(p => p.name), it.project)),

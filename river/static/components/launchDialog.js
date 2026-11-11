@@ -9,6 +9,17 @@ import { makeDialog } from "./dialog.js";
 import { button, iconButton } from "./button.js";
 import { field, two, select } from "./form.js";
 
+// The note under a custom launch_agents command that lacks {model} or {effort} (#5237). A profile (@<agent>) builds
+// its own command, so it has no note; an agent with no effort levels (OpenCode) has no {effort} to miss.
+export function placeholderNote(agent, opt) {
+  if (!opt || opt.platform) return "";
+  const missing = [!opt.takes_model && "{model}", !opt.takes_effort && (opt.efforts || []).length && "{effort}"].filter(Boolean);
+  if (!missing.length) return "";
+  return `The ${agent} command has no ${missing.join(" or ")} placeholder, so the agent starts with its own `
+    + `${!opt.takes_model ? "model" : "effort"} (MaximizePM still records the model you pick). Add it in Settings: `
+    + `launch_agents, or use the agent's profile (@ and its name, as @claude-code).`;
+}
+
 // Whether a model may take an item with limits lo/hi (comma lists), as core.model_check: a limit compares
 // only models of the same family, and a model outside the ladder is not limited.
 export function modelAllowed(ladder, m, lo, hi) {
@@ -141,8 +152,7 @@ function draw(prev) {
   const other = it && it.agent && opt.agent_type && opt.agent_type !== it.agent
     ? `#${it.id} is for ${it.agent}; ${agent} runs ${opt.agent_type}, and you start it anyway.` : "";
   const rec = it && (it.model || it.effort) ? `#${it.id} recommends ${[it.model, it.effort && it.effort + " effort"].filter(Boolean).join(", ")}.` : "";
-  const noPlace = !opt.takes_model || !opt.takes_effort
-    ? `The ${agent} command has no ${[!opt.takes_model && "{model}", !opt.takes_effort && "{effort}"].filter(Boolean).join(" or ")} placeholder, so the agent starts with its own ${!opt.takes_model ? "model" : "effort"} (MaximizePM still records the model you pick). Add it in Settings: launch_agents, or use a profile (@claude-code, @codex).` : "";
+  const noPlace = placeholderNote(agent, opt);
   const note = [other, rec, limits, noPlace].filter(Boolean).join(" ");
   const work = ctx.pickWork ? field("Work", `<select id="lWork">
           <option value="">${S.start_next ? `Next: #${S.start_next.id} ${esc(S.start_next.title)} (${esc(S.start_next.why || S.start_next.project)})` : "Nothing is ready"}</option>
