@@ -1174,8 +1174,10 @@ def session_settings(conn, agent, root=None, croot=None):
         if spec["kind"] == "model":
             # The models of the session's own provider (#4633), as the launch dialog lists them; the one it runs is
             # chosen, by its ladder name, else as it reports it.
+            # picks: the adapter's own models; the dialog lists them first when the list is long (OpenCode, #5242).
             row = {"kind": "choice", "choices": [m["name"] for m in models], "reported": value,
-                   "notes": {m["name"]: f"{m['id']}{' · ' + m['note'] if m['note'] else ''}" for m in models}}
+                   "notes": {m["name"]: f"{m['id']}{' · ' + m['note'] if m['note'] else ''}" for m in models},
+                   "picks": [m["name"] for m in models if m.get("pick")]}
             value = core.model_name_of(models, value) or value
         out.append({"key": spec["key"], "label": spec["label"], "kind": spec["kind"], "choices": spec.get("choices"),
                     **row,

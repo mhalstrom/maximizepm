@@ -8,6 +8,7 @@
 import { $, esc, toast, typeAction } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { viewOf, setView } from "./viewSettings.js";
+import { nameChoices, OTHER } from "./modelPick.js";
 
 const dlg = makeDialog($("#setDlg"));
 let cur = null, onDone = null;
@@ -15,8 +16,15 @@ const SRC = { session: "from the session", "command line": "from its command lin
 
 function field(s, i) {
   const val = s.value == null ? "" : s.value;
+  // A long model list (OpenCode: about 500) shows the adapter's own models and the current one; "Other model…" opens
+  // a field that finds the rest by typing, as the launch dialog does (#5242).
+  const { shown, all } = s.kind === "choice" ? nameChoices(s.choices, s.picks, val) : { shown: [], all: [] };
   const input = s.kind === "choice"
-    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${s.choices.map(c => `<option value="${esc(c)}"${c === val ? " selected" : ""}${s.notes && s.notes[c] ? ` title="${esc(s.notes[c])}"` : ""}>${esc(c)}${s.notes && s.notes[c] && s.notes[c].split(" · ")[0] !== c ? ` (${esc(s.notes[c].split(" · ")[0])})` : ""}</option>`).join("")}</select>`
+    ? `<select data-i="${i}" aria-label="${esc(s.label)}">${s.choices.includes(val) ? "" : `<option value="">${val ? esc(val) : "not known"}</option>`}${shown.map(c => `<option value="${esc(c)}"${c === val ? " selected" : ""}${s.notes && s.notes[c] ? ` title="${esc(s.notes[c])}"` : ""}>${esc(c)}${s.notes && s.notes[c] && s.notes[c].split(" · ")[0] !== c ? ` (${esc(s.notes[c].split(" · ")[0])})` : ""}</option>`).join("")}${
+      all.length ? `<option value="${OTHER}">Other model…</option>` : ""}</select>${all.length ? `
+      <input data-other="${i}" class="hidden" list="setAll${i}" autocomplete="off" spellcheck="false"
+        placeholder="Type to find one of ${all.length} models" aria-label="Other ${esc(s.label.toLowerCase())}">
+      <datalist id="setAll${i}">${all.map(c => `<option value="${esc(c)}"></option>`).join("")}</datalist>` : ""}`
     : `<input data-i="${i}" value="${esc(val)}" aria-label="${esc(s.label)}" spellcheck="false">`;
   const how = s.live ? `<button class="btn" type="button" data-live="${i}" title="Type the change into its terminal now">Change now</button>`
     : `<span class="muted" title="Its chat provider changes this only when the session starts">restart</span>`;
@@ -34,11 +42,19 @@ function pageSection(agent) {
       <div class="set-sub muted">The tool call lines (Bash, Write, ...) between the messages of its chat; kept for this session in this browser</div></div>`;
 }
 
+// The value of row i: its select or field, or the typed model of "Other model…" (#5242).
+function valueOf(i) {
+  const el = document.querySelector(`#setList [data-i="${i}"]`);
+  if (!el || el.value !== OTHER) return el ? el.value : "";
+  const o = document.querySelector(`#setList [data-other="${i}"]`);
+  return o ? o.value.trim() : "";
+}
+
 function changes() {
   const out = {};
   document.querySelectorAll("#setList [data-i]").forEach(el => {
-    const s = cur.settings[+el.dataset.i];
-    if (el.value && el.value !== (s.value || "")) out[s.key] = el.value;
+    const s = cur.settings[+el.dataset.i], v = valueOf(el.dataset.i);
+    if (v && v !== (s.value || "")) out[s.key] = v;
   });
   return out;
 }
@@ -70,11 +86,16 @@ $("#setList").addEventListener("input", sync);
 $("#setList").addEventListener("change", (e) => {
   const v = e.target.closest("[data-view]");
   if (v) return setView(v.dataset.agent, v.dataset.view, v.value === "on");
+  if (e.target.dataset.i != null) {  // "Other model…" shows its field
+    const o = document.querySelector(`#setList [data-other="${e.target.dataset.i}"]`);
+    if (o) { o.classList.toggle("hidden", e.target.value !== OTHER); if (e.target.value === OTHER) o.focus(); }
+  }
   sync();
 });
 $("#setList").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-live]"); if (!b || !cur) return;
-  const s = cur.settings[+b.dataset.live], v = document.querySelector(`#setList [data-i="${b.dataset.live}"]`).value;
+  const s = cur.settings[+b.dataset.live], v = valueOf(b.dataset.live);
+  if (!v) return toast(`${s.label}: pick or type a value first`, true);
   b.disabled = true;
   try {
     await typeAction("session_setting", { agent: cur.agent, key: s.key, value: v });

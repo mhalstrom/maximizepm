@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from river import agents, core
+from river import agents, core, sessions
 from river.agents import opencode
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "opencode"
@@ -129,6 +129,39 @@ class Describe(Env):
         self.assertEqual(got["current"], [list(picks) + ["openrouter/vendor/model-7"], len(ms)])
         self.assertEqual(got["short"], [[m["name"] for m in ms[:30]], 0])  # a short list: every model, no search
         self.assertEqual(got["nopick"][1], 0)  # no picks: the whole list as before
+
+    def test_the_settings_dialog_of_a_session_gets_the_picks_and_shortens_the_list(self):
+        # #5242: the Model row of a running OpenCode session lists the same picks first, as the launch dialog does.
+        picks = opencode.DESCRIBE["models"]
+        others = [f"openrouter/vendor/model-{n}" for n in range(60)]
+        mock.patch.object(opencode, "MODELS_RUNNER", lambda: "\n".join(others) + "\n").start()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
+        conn = core.connect()
+        self.addCleanup(conn.close)
+        core.register(conn, "oc1")
+        conn.execute("UPDATE agents SET agent_type='opencode', pid_cmd='opencode --model openrouter/vendor/model-7' "
+                     "WHERE name='oc1'")
+        row = next(s for s in sessions.session_settings(conn, "oc1")["settings"] if s["key"] == "model")
+        self.assertEqual((row["kind"], len(row["choices"])), ("choice", len(picks) + 60))
+        self.assertEqual(row["picks"], list(picks))
+        if not shutil.which("node"):
+            return
+        js = Path(__file__).resolve().parent.parent / "river" / "static" / "components" / "modelPick.js"
+        code = f"""
+            const {{ nameChoices }} = await import({json.dumps(js.as_uri())});
+            const r = {json.dumps(row)};
+            console.log(JSON.stringify([nameChoices(r.choices, r.picks, "openrouter/vendor/model-7"),
+                                        nameChoices(r.choices.slice(0, 5), r.picks, "")]));"""
+        r = subprocess.run(["node", "--input-type=module"], input=code, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        long, short = json.loads(r.stdout)
+        self.assertEqual(long["shown"], list(picks) + ["openrouter/vendor/model-7"])
+        self.assertEqual(len(long["all"]), len(row["choices"]))  # "Other model…" finds every model
+        self.assertEqual((short["shown"], short["all"]), (row["choices"][:5], []))
+        text = (js.parent / "settingsDialog.js").read_text(encoding="utf-8")
+        self.assertIn("nameChoices(s.choices, s.picks, val)", text)
+        self.assertIn("Other model…", text)
 
 
 class Launch(Env):

@@ -1,7 +1,8 @@
 // The Model choice of the launch dialog (#5238). An agent of the multi family (OpenCode, Pi) can know hundreds of
 // provider/model texts: OpenCode's `opencode models` lists about 500. A select that long is no choice. When the list
 // is long and the adapter names its own models (pick: true, from DESCRIBE['models']), the select offers those and the
-// current choice, and "Other model…" opens a field that finds any of the rest by typing.
+// current choice, and "Other model…" opens a field that finds any of the rest by typing. A session's Settings dialog
+// does the same with its Model row (#5242).
 
 export const LONG = 30;  // more models than this, with some marked pick: the short select and the search field
 export const OTHER = "__other__";  // the select value of "Other model…"
@@ -12,4 +13,12 @@ export function modelChoices(models, current) {
   const ms = models || [];
   if (ms.length <= LONG || !ms.some(m => m.pick)) return { shown: ms, all: [] };
   return { shown: ms.filter(m => m.pick || m.name === current), all: ms };
+}
+
+// modelChoices for a list of names and the names of the picks (a session's Settings dialog, #5242): {shown, all} of
+// names.
+export function nameChoices(names, picks, current) {
+  const ps = new Set(picks || []);
+  const { shown, all } = modelChoices((names || []).map(n => ({ name: n, pick: ps.has(n) })), current);
+  return { shown: shown.map(m => m.name), all: all.map(m => m.name) };
 }
