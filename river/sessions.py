@@ -344,10 +344,49 @@ def _first(offs, limit):
     return k
 
 
-def _parse(kind, raw, start):
+def _parse_text(ad, raw, start, cut):
+    """_parse of a log whose entries span several lines (CHAT format "text", #5222): parse_chat over each block of
+    lines (CHAT['block']: a run of lines that match it starts a block), each entry with the byte where its block
+    starts, an entry with no time with the time of the entry before it, and each call id with the block's byte. cut: the bytes start inside the log (the
+    tail, a page back), so the lines before the first block start belong to a block that began earlier: left out,
+    and "start" is where the first block starts."""
+    rx = re.compile(ad.chat["block"]) if (ad.chat or {}).get("block") else None
+    blocks, at, prev = [], start, False
+    for line in raw.splitlines(keepends=True):
+        text = line.decode("utf-8", "replace")
+        hit = bool(rx and rx.search(text.rstrip("\r\n")))
+        if hit and not prev or not blocks:
+            blocks.append([at, []])
+        prev = hit
+        blocks[-1][1].append(text)
+        at += len(line)
+    if cut and rx and blocks and not rx.search(blocks[0][1][0].rstrip("\r\n")):
+        blocks = blocks[1:]
+    out, offs, turn, last = [], [], None, None
+    for here, lines in blocks:
+        got, st = ad.parse_chat(lines)
+        for e in got:
+            if e.get("at"):
+                last = e["at"]
+            elif last:
+                e = {**e, "at": last}
+            # a call id is unique in its block only: the byte of the block makes it unique in the log, the same in
+            # every read
+            e = {**e, **{k: f"{here}:{e[k]}" for k in ("id", "for") if e.get(k) is not None}}
+            out.append(e)
+            offs.append(here)
+        turn = st or (None if got else turn)
+    return {"entries": out, "offs": offs, "turn": turn, "cwd": None,
+            "start": blocks[0][0] if blocks else start + len(raw)}
+
+
+def _parse(kind, raw, start, cut=False):
     """The page lines of the transcript bytes raw (complete lines; the first starts at byte start), with the byte
-    where the line of each one starts, the state of the last turn, and the folder the session runs in."""
+    where the line of each one starts, the state of the last turn, and the folder the session runs in. A text log
+    (CHAT format "text"): _parse_text, with cut."""
     ad = _adapter(kind)
+    if ad is not None and ad.chat_format() == "text":
+        return _parse_text(ad, raw, start, cut)
     out, offs, turn, cwd, at = [], [], None, None, start
     for line in raw.splitlines(keepends=True):
         here, at = at, at + len(line)
@@ -366,15 +405,15 @@ def _parse(kind, raw, start):
         turn = st or turn
         p = d.get("payload") if isinstance(d.get("payload"), dict) else d  # the folder the session runs in
         cwd = p.get("cwd") if isinstance(p.get("cwd"), str) else cwd
-    return {"entries": out, "offs": offs, "turn": turn, "cwd": cwd}
+    return {"entries": out, "offs": offs, "turn": turn, "cwd": cwd, "start": start}
 
 
 def _entries(kind, path, cursor, limit=LIMIT, tail=TAIL_BYTES):
     raw, start, end = _read_raw(path, cursor, tail)
-    r = _parse(kind, raw, start)
+    r = _parse(kind, raw, start, cut=cursor is None and start > 0)
     k = max(0, len(r["entries"]) - limit) if cursor is not None else 0
     return {"entries": r["entries"][k:], "offs": r["offs"][k:], "cursor": end, "turn": r["turn"], "cwd": r["cwd"],
-            "start": start}
+            "start": r["start"]}
 
 
 def _page_back(kind, path, before, limit=LIMIT):
@@ -390,12 +429,12 @@ def _page_back(kind, path, before, limit=LIMIT):
                 window *= 4
                 continue
             raw, start = raw[cut:], start + cut
-        r = _parse(kind, raw, start)
+        r = _parse(kind, raw, start, cut=start > 0)
         if len(r["entries"]) >= limit or start == 0:
             break
         window *= 4
     k = _first(r["offs"], limit)
-    return r["entries"][k:], (r["offs"][k] if k else start)
+    return r["entries"][k:], (r["offs"][k] if k else r["start"])
 
 
 def transcript_chain(conn, agent, kind, path):

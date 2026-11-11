@@ -173,6 +173,12 @@ SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 #                     the agent, agent_sessions) or "address" (its native_address, when the agent runs this CLI),
 #      "cache_write": bool: a call after the prompt cache ran out reads the context at the cache write price (Claude
 #                     Code); False: at the input price (Codex),
+#      "format":      one of CHAT_FORMATS: "jsonl" (the default: one JSON object per line, parse_chat_line) or "text"
+#                     (#5222: entries of several lines, Aider's Markdown; the Sessions tab calls parse_chat over each
+#                     block of lines, and each entry of a block scrolls with the byte where its block starts),
+#      "block":       for "text": a regex of a line that starts a block (a run of such lines starts one block: a prompt
+#                     of several lines); None: each read is one block. Cut where no entry spans the cut (Aider: at a
+#                     prompt, "^#### "); an entry with no time gets the time of the entry before it,
 #    }
 # Optional readers:
 #   parse_chat_line(d) -> (entries, turn) of one decoded log line (a dict): the Sessions tab parses line by line, to
@@ -198,7 +204,9 @@ SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 ENTRY_ROLES = ("assistant", "user", "tool", "result", "divider", "summary", "event")
 TURNS = ("working", "idle")
 CHAT_REFS = ("session", "address")
-CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache_write": bool}
+CHAT_FORMATS = ("jsonl", "text")
+CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache_write": bool, "format": str,
+             "block": (str, type(None))}
 
 # 7. State. STATE = {
 #      "state":      the one source of the state: "hook" (install_hooks puts a hook or plugin in place that calls
@@ -413,6 +421,10 @@ def check(module, mid=None):
     chat = getattr(module, "CHAT", None)
     if chat is not None:
         out += _shape("CHAT", chat, CHAT_KEYS)
+        if isinstance(chat, dict) and chat.get("format") is not None and chat.get("format") not in CHAT_FORMATS:
+            out.append(f"CHAT['format'] is {chat.get('format')!r}, not one of {', '.join(CHAT_FORMATS)}")
+        if isinstance(chat, dict) and isinstance(chat.get("block"), str):
+            out += _regex("CHAT['block']", chat["block"])
         if isinstance(chat, dict) and chat.get("ref") is not None and chat.get("ref") not in CHAT_REFS:
             out.append(f"CHAT['ref'] is {chat.get('ref')!r}, not one of {', '.join(CHAT_REFS)}")
     st = getattr(module, "STATE", None)
@@ -597,6 +609,10 @@ class Adapter:
     def has(self, name):
         """Whether the module has the function `name` (a chat log reader, for example)."""
         return callable(self._fn(name))
+
+    def chat_format(self):
+        """How its log is written (CHAT['format']): 'jsonl' (the default) or 'text'."""
+        return (self.chat or {}).get("format") or "jsonl"
 
     def chat_ref(self):
         """What finds the log of a session (CHAT['ref']): 'session', 'address', or None."""

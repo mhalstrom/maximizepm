@@ -223,7 +223,10 @@ IDENTITY = {
 
 # ref: the session id is the session name (IDENTITY), the stem of its log. cache_write: Aider caches a prompt only with
 # --cache-prompts and a provider that caches (Anthropic): a call after the cache ran out costs the input price.
-CHAT = {"compressed": False, "file_tools": ["edit"], "ref": "session", "cache_write": False}
+# A Markdown log (#5222): the Sessions tab parses it a block at a time, a block from each prompt ('#### ' lines) to
+# the next; a session's start line ends the block before it, where parse_chat makes it a 'Resumed' divider.
+CHAT = {"compressed": False, "file_tools": ["edit"], "ref": "session", "cache_write": False, "format": "text",
+        "block": r"^#### "}
 
 _START = re.compile(r"^# aider chat started at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s*$")
 _USER = re.compile(r"^#### ?(.*?)\s*$")

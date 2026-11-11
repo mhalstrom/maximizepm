@@ -272,6 +272,78 @@ class Chat(Env):
         self.assertEqual(self.a.chat_ref(), "session")
 
 
+class SessionsTab(Env):
+    """#5222: the Sessions tab reads Aider's Markdown log through parse_chat, a block (a prompt and what follows it)
+    at a time, and scrolls up through it by the byte where each block starts."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = self.root / "chat.history.md"
+        self.log.write_bytes((FIX / "chat.history.md").read_bytes())
+        sessions._TAIL_CACHE.clear()
+
+    def test_the_tab_shows_the_same_entries_as_parse_chat(self):
+        self.assertEqual(self.a.chat_format(), "text")
+        whole, _ = aider.parse_chat(chat_lines())
+        got = sessions.entries("aider", self.log)
+        plain = [{k: v for k, v in e.items() if k != "id"} for e in got["entries"]]
+        self.assertEqual(plain, [{k: v for k, v in e.items() if k != "id"} for e in whole])
+        ids = [e["id"] for e in got["entries"] if e["role"] == "tool"]
+        self.assertEqual(len(set(ids)), 3)  # a call id with the byte of its block: unique in the log
+        self.assertEqual((got["before"], got["turn"]), (0, None))
+        self.assertEqual(got["cursor"], self.log.stat().st_size)
+
+    def test_a_new_prompt_and_its_reply_come_after_the_cursor(self):
+        cur = sessions.entries("aider", self.log)["cursor"]
+        with open(self.log, "a") as f:
+            f.write("\n#### Explain hello.py  \n")
+        got = sessions.entries("aider", self.log, cur)
+        self.assertEqual([(e["role"], e["text"]) for e in got["entries"]], [("user", "Explain hello.py")])
+        self.assertEqual(got["turn"], "working")
+        with open(self.log, "a") as f:
+            f.write("\nIt prints a greeting.\n\nRun it with python3.\n")
+        got = sessions.entries("aider", self.log, got["cursor"])
+        self.assertEqual([(e["role"], e["text"]) for e in got["entries"]],
+                         [("assistant", "It prints a greeting.\n\nRun it with python3.")])
+
+    def test_scrolling_up_reads_whole_blocks_back_to_the_start(self):
+        whole, _ = aider.parse_chat(chat_lines())
+        size = self.log.stat().st_size
+        pages, before = [], size
+        while True:
+            got, before = sessions._page_back("aider", self.log, before, limit=4)
+            pages.insert(0, got)
+            self.assertTrue(got)
+            if before == 0:
+                break
+        self.assertGreater(len(pages), 2)
+        texts = [(e["role"], e["text"]) for p in pages for e in p]
+        self.assertEqual(texts, [(e["role"], e["text"]) for e in whole])  # each entry once, none cut in two
+        # Each page starts at a prompt: no reply or event is split across two pages.
+        data = self.log.read_bytes()
+        _, b = sessions._page_back("aider", self.log, size, limit=4)
+        self.assertTrue(data[b:].startswith(b"#### "), data[b:b + 20])
+
+    def test_the_tail_of_a_long_log_starts_at_a_block(self):
+        whole, _ = aider.parse_chat(chat_lines())
+        got = sessions.entries("aider", self.log, tail=600)
+        self.assertGreater(got["before"], 0)
+        self.assertTrue(self.log.read_bytes()[got["before"]:].startswith(b"#### "))
+        tail = [(e["role"], e["text"]) for e in got["entries"]]
+        self.assertEqual(tail, [(e["role"], e["text"]) for e in whole][-len(tail):])
+        # The resume divider sits in the block before the prompt after it, so a page back from there still has it.
+        older, _ = sessions._page_back("aider", self.log, got["before"], limit=1000)
+        self.assertEqual(len(older) + len(tail), len(whole))
+
+    def test_the_contract_checks_the_format_and_the_block(self):
+        import types
+        m = types.SimpleNamespace(DESCRIBE={"id": "x", "label": "X", "exe": "x", "family": "multi"},
+                                  CHAT={"format": "csv", "block": "("})
+        problems = agents.check(m)
+        self.assertTrue(any("CHAT['format']" in p for p in problems), problems)
+        self.assertTrue(any("CHAT['block']" in p for p in problems), problems)
+
+
 class Commands(Env):
     def test_the_built_in_commands_have_the_contracts_shape(self):
         names = [c["name"] for c in self.a.read_commands(str(self.root))]
