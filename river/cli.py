@@ -589,6 +589,16 @@ def render_health(res):
               f"{n['cost_measured']} of {n['done']} measured; by kind: {kinds}")
     else:
         print("  cost per done item   no measured items (maxpm usage)")
+    if res.get("changes"):
+        print("CHANGES in this time, before -> after (weak proof: other things change at the same time)")
+        for ch in res["changes"]:
+            bf, af = ch["before"] or {}, ch["after"] or {}
+
+            def ba(key, fmt):
+                return f"{_num(bf.get(key), fmt)} -> {_num(af.get(key), fmt)}"
+            print(f"  {ch['at'][:10]} {ch['name']}: person min/item {ba('person_minutes_per_item', '{:.2f}')}, "
+                  f"done/day {ba('per_day', '{:.1f}')}, rework {ba('rework_rate', '{:.1%}')}  "
+                  f"({_num(bf.get('days'), '{:g}d')} before, {_num(af.get('days'), '{:g}d')} after)")
     if len(n["by_project"]) > 1:
         top = sorted(n["by_project"].items(), key=lambda kv: -kv[1])
         print("  done by project      " + ", ".join(f"{p} {c}" for p, c in top[:8])
@@ -1052,6 +1062,14 @@ def build_parser():
                        "rework rate, the person's waits, session idle time and cost, against the time before")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; 30d; all)")
     x.add_argument("--until", help="the end of the time (default now)")
+    x = sub.add_parser("change", help="the change log of maxpm health: when a change to the way of work shipped")
+    chs = x.add_subparsers(dest="chcmd", required=True)
+    y = chs.add_parser("add", help="record a change (a person or the manager)")
+    y.add_argument("name"); y.add_argument("--at", help="when it shipped (default now): 2026-11-10, '2026-11-10 14:00'")
+    y.add_argument("--note", default="")
+    chs.add_parser("list", help="the change log, oldest first")
+    y = chs.add_parser("remove", help="take a wrong row out (a person or the manager)")
+    y.add_argument("id")
     x = sub.add_parser("log", help="completed work: done items with output, who, and when, by day")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
 
@@ -2395,6 +2413,12 @@ def dispatch(conn, a, actor):
         return core.usage_report(conn, a.project, a.since, a.measure)
     if c == "health":
         return core.health(conn, a.since, a.until, a.project)
+    if c == "change":
+        if a.chcmd == "add":
+            return core.change_add(conn, a.name, a.at, a.note, actor)
+        if a.chcmd == "remove":
+            return core.change_remove(conn, a.id, actor)
+        return core.change_list(conn)
     if c == "needs-you":
         return core.needs_you(conn, a.human, a.all)
     if c == "prompt":
@@ -3869,6 +3893,16 @@ def render(a, res):
         return render_usage(res, a.limit)
     if c == "health":
         return render_health(res)
+    if c == "change":
+        if a.chcmd == "list":
+            if not res:
+                print("(no changes; a person or the manager adds one: maxpm change add \"<what changed>\" --at <time>)")
+            for r in res:
+                print(f"  c{r['id']:<4} {r['at'][:16]}  {r['name']}" + (f"  ({r['note']})" if r["note"] else "")
+                      + f"  [{r['actor'] or '?'}]")
+        else:
+            print(f"{'removed' if a.chcmd == 'remove' else 'added'} c{res['id']}: {res['name']} at {res['at'][:16]}")
+        return
     if c == "show" and a.brief:
         return _print_brief(res)
     if c == "cleanup":

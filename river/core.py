@@ -869,6 +869,17 @@ CREATE TABLE IF NOT EXISTS policies (
 
 -- One row per live AI session per sample (#5352): what the session did at that time, so maxpm health can show
 -- the share of session time spent idle. secs: the time this row stands for (the gap since the sample before it).
+-- The change log of maxpm health (#5354): when a change to the way of work shipped (a feature, a setting, a rule),
+-- so maxpm health can show the measures before and after it. A person or the manager adds rows.
+CREATE TABLE IF NOT EXISTS changes (
+  id          INTEGER PRIMARY KEY,
+  at          TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  note        TEXT,
+  actor       TEXT,
+  created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS session_samples (
   id          INTEGER PRIMARY KEY,
   at          TEXT NOT NULL,
@@ -10884,7 +10895,7 @@ def _pct(values, q):
     return v[min(len(v) - 1, max(0, math.ceil(q * len(v)) - 1))]
 
 
-def _health_range(conn, t0, t1, pid, minutes):
+def _health_range(conn, t0, t1, pid, minutes, with_cost=True, sessions=True):
     """The measures of maxpm health for the time from t0 to t1 (pid: one project's id, or None)."""
     a, b = iso(t0), iso(t1)
     pw = " AND i.project_id=?" if pid is not None else ""
@@ -10915,7 +10926,7 @@ def _health_range(conn, t0, t1, pid, minutes):
         f"SELECT * FROM ({ny}) WHERE opened_at<? AND (closed_at IS NULL OR closed_at>=?)", pa + [b, b])]
     # Cost: the measured usage of the items done in the range, in input-token equivalents.
     cost, cost_kind = [], {}
-    for r in done:
+    for r in (done if with_cost else ()):
         u = item_usage(conn, r["id"])
         if u:
             cost.append(u["eq"])
@@ -10936,8 +10947,77 @@ def _health_range(conn, t0, t1, pid, minutes):
         "cost_mean_eq": statistics.fmean(cost) if cost else None,
         "cost_by_kind": {k: {"items": len(v), "median_eq": med(v)} for k, v in sorted(cost_kind.items())},
         "sessions": idle_share(conn, t0, t1, project=None if pid is None else
-                               conn.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()["name"]),
+                               conn.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()["name"])
+        if sessions else None,
     }
+
+
+def _may_log_change(conn, actor):
+    if not actor:
+        raise RiverError("name yourself: maxpm --as <name> change ...")
+    r = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone()
+    if not (r and (r["kind"] == "human" or r["role"] == "manager")):
+        raise RiverError(f"{actor} is an agent; a person or the manager keeps the change log. Ask the manager: "
+                         f"maxpm --as {actor} note <manager> \"change log: <name> at <time>\"")
+
+
+def change_add(conn, name, at=None, note="", actor=None):
+    """maxpm change add: record that a change to the way of work shipped at `at` (default now), so maxpm health
+    shows the measures before and after it."""
+    name = (name or "").strip()
+    if not name:
+        raise RiverError("a change needs a name: maxpm change add \"<what changed>\" [--at <time>]")
+    _may_log_change(conn, actor)
+    t = (parse_when(at) if isinstance(at, str) else at) if at else now()
+    if t > now() + timedelta(minutes=1):
+        raise RiverError(f"a change in the change log shipped already: {iso(t)} is in the future")
+    with tx(conn):
+        cid = conn.execute("INSERT INTO changes (at, name, note, actor, created_at) VALUES (?,?,?,?,?)",
+                           (iso(t), name, note or None, actor, iso(now()))).lastrowid
+        _event(conn, None, actor, f"change log: {name} at {iso(t)}")
+    return dict(conn.execute("SELECT * FROM changes WHERE id=?", (cid,)).fetchone())
+
+
+def change_list(conn):
+    """The change log, oldest first."""
+    return [dict(r) for r in conn.execute("SELECT * FROM changes ORDER BY at, id")]
+
+
+def change_remove(conn, change_id, actor=None):
+    """maxpm change remove: take a wrong row out of the change log."""
+    _may_log_change(conn, actor)
+    with tx(conn):
+        r = conn.execute("SELECT * FROM changes WHERE id=?", (int(str(change_id).lstrip("c")),)).fetchone()
+        if not r:
+            raise RiverError(f"no change {change_id} in the change log; see: maxpm change list")
+        conn.execute("DELETE FROM changes WHERE id=?", (r["id"],))
+        _event(conn, None, actor, f"change log: removed {r['name']} at {r['at']}")
+    return dict(r)
+
+
+def _change_effects(conn, t0, t1, pid, minutes):
+    """Each change in the change log from t0 to t1, with the headline, throughput and rework rate for the time of
+    the same length as t1 - t0 before and after it, each cut at the change next to it (and after it at t1)."""
+    span, end = t1 - t0, now()
+    rows = change_list(conn)
+    out = []
+    for i, c in enumerate(rows):
+        at = parse_iso(c["at"])
+        if not (t0 <= at <= t1):
+            continue
+        start = max(at - span, parse_iso(rows[i - 1]["at"])) if i else at - span
+        stop = min(at + span, parse_iso(rows[i + 1]["at"])) if i + 1 < len(rows) else at + span
+        stop = min(stop, end, t1)
+        sides = {}
+        for side, (a, b) in (("before", (start, at)), ("after", (at, stop))):
+            if b <= a:
+                sides[side] = None
+                continue
+            r = _health_range(conn, a, b, pid, minutes, with_cost=False, sessions=False)
+            sides[side] = {k: r[k] for k in ("since", "until", "days", "done", "per_day", "rework_rate",
+                                             "person_minutes_per_item")}
+        out.append({**c, **sides})
+    return out
 
 
 def health(conn, since="7d", until=None, project=None):
@@ -10959,7 +11039,8 @@ def health(conn, since="7d", until=None, project=None):
     minutes = int(setting(conn, "health_person_minutes", project_id=pid))
     now_r = _health_range(conn, t0, t1, pid, minutes)
     before = _health_range(conn, t0 - (t1 - t0), t0, pid, minutes)
-    return {"project": project, "person_minutes": minutes, "now": now_r, "before": before}
+    return {"project": project, "person_minutes": minutes, "now": now_r, "before": before,
+            "changes": _change_effects(conn, t0, t1, pid, minutes)}
 
 
 # ---------------------------------------------------------------- capacity

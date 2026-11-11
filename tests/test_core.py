@@ -8655,6 +8655,34 @@ class Health(Base):
         with self.assertRaises(core.RiverError):
             core.health(self.c, "7d", until=self.end, project="nope")
 
+    def test_the_change_log_shows_before_and_after(self):
+        self.seed()
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w")
+        with self.assertRaises(core.RiverError) as e:
+            core.change_add(self.c, "manager first", at=self.at(4), actor="w")
+        self.assertIn("a person or the manager keeps the change log", str(e.exception))
+        with self.assertRaises(core.RiverError):
+            core.change_add(self.c, "later", at=core.now() + core.timedelta(days=1), actor="mark")
+        c1 = core.change_add(self.c, "manager first", at=self.end - core.timedelta(days=4), actor="mark")
+        core.change_add(self.c, "goals", at=self.end - core.timedelta(days=2), actor="mark")
+        old = core.change_add(self.c, "long ago", at=self.end - core.timedelta(days=20), actor="mark")
+        self.assertEqual([c["name"] for c in core.change_list(self.c)], ["long ago", "manager first", "goals"])
+        h = core.health(self.c, "7d", until=self.end)
+        self.assertEqual([c["name"] for c in h["changes"]], ["manager first", "goals"])
+        first, second = h["changes"]
+        # Before the first: 7 days, back to no change (items closed 8 and 9 days ago); after: cut at the second.
+        self.assertEqual((first["before"]["done"], first["before"]["days"]), (2, 7))
+        self.assertEqual((first["after"]["done"], first["after"]["days"]), (2, 2))  # closed 4 and 3 days ago
+        self.assertEqual((second["before"]["done"], second["before"]["days"]), (2, 2))
+        self.assertEqual((second["after"]["done"], second["after"]["days"]), (4, 2))  # cut at until
+        self.assertAlmostEqual(second["after"]["per_day"], 2)
+        self.assertEqual(first["id"], c1["id"])
+        core.change_remove(self.c, f"c{old['id']}", actor="mark")
+        self.assertEqual(len(core.change_list(self.c)), 2)
+        with self.assertRaises(core.RiverError):
+            core.change_remove(self.c, old["id"], actor="mark")
+
     def test_an_empty_queue_and_the_cli(self):
         h = core.health(self.c, "30d")
         self.assertIsNone(h["now"]["rework_rate"])
@@ -8672,3 +8700,15 @@ class Health(Base):
         self.assertIn("a proxy: 3 min per needs-you row", text)
         self.assertIn("rework rate          50.0%", text)
         self.assertIn("session idle         no samples", text)
+        self.assertNotIn("CHANGES", text)
+        core.register(self.c, "mark", human=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "change", "add", "manager first", "--at", "2026-11-08T00:00Z"])
+            cli.run(["--as", "mark", "change", "list"])
+            cli.run(["--as", "", "health", "--until", "2026-11-11T00:00", "--since", "7d"])
+        text = out.getvalue()
+        self.assertIn("added c1: manager first at 2026-11-08T00:00", text)
+        self.assertIn("c1    2026-11-08T00:00  manager first  [mark]", text)
+        self.assertIn("CHANGES in this time, before -> after (weak proof", text)
+        self.assertIn("2026-11-08 manager first: person min/item ", text)
