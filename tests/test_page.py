@@ -1001,7 +1001,8 @@ try {
     location.href = "/artifacts/" + id + "?as=mark";
   } else if (step === "link") {
     await until(() => where() === "/sessions/ag/artifacts/" + id + "?as=mark", "an artifact link opens it beside its session: " + where());
-    check(q("#actor").value === "mark", "?as= picks the person");
+    // The picker fills from the state, which can come after the address is shown (#5276).
+    await until(() => q("#actor").value === "mark", "?as= picks the person: " + q("#actor").value);
     post({ ok: true });
   }
 } catch (e) { post({ error: step + ": " + String(e.stack || e) }); }

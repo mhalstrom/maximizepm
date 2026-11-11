@@ -44,6 +44,7 @@ const drawer = makeDrawer($("#drawer"));
 const header = document.querySelector("header");  // the page's header: on a phone one bar of 48 px (#4903)
 
 let actorPicked = false;
+let asWanted = null;  // a ?as= person that renderSelects picks once the picker has the people (#5276)
 
 
 
@@ -67,6 +68,11 @@ function renderSelects() {
   a.innerHTML = `<option value="">(choose your name)</option>` + people.map(x => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("");
   if (people.some(x => x.name === cur)) a.value = cur;
   else if (!a.value && people.length === 1 && !actorPicked) { a.value = people[0].name; actorPicked = true; store("river.actor", a.value); }
+  // ?as= of an address that the page read before its first state had the people (#5276): it picks the person now, once.
+  if (asWanted && people.some(x => x.name === asWanted)) {
+    if (a.value !== asWanted) { a.value = asWanted; store("river.actor", asWanted); inbox.actorChanged().catch(() => {}); }
+    asWanted = null;
+  }
   fillSelect("#setKey", Object.keys(S.settings.defaults), false);
   fillSelect("#goalProject", names, false);
   const openGoals = (S.goals || []).filter(g => g.status === "open");
@@ -754,6 +760,8 @@ async function openFromUrl() {
     asParam = r.as;
     if (r.as && r.as !== $("#actor").value && [...$("#actor").options].some(o => o.value === r.as)) {
       $("#actor").value = r.as; store("river.actor", r.as); await inbox.actorChanged().catch(() => {});
+    } else if (r.as && r.as !== $("#actor").value) {
+      asWanted = r.as;  // the people are not in the picker yet: renderSelects picks this one when they come (#5276)
     }
     if (r.terminal) openTerminal(r.terminal);
     if (r.pane === "arts" && r.art) return await openArtifact(null, r.art);
