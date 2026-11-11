@@ -26,7 +26,7 @@
 #addDlg .add-part { margin-top: var(--sp-3); }
 #addDlg .add-form { margin-top: var(--sp-3); }
 .plan-layout { display: grid; grid-template-columns: var(--w-side) minmax(0, 1fr); gap: var(--sp-6); align-items: start; }
-.plan-side { position: sticky; top: var(--sp-5); max-height: calc(100vh - var(--sp-7)); overflow-y: auto; padding: var(--sp-4); }
+.plan-side { border-top: 0; position: sticky; top: var(--sp-5); max-height: calc(100vh - var(--sp-7)); overflow-y: auto; padding: var(--sp-4); }
 .plan-side h2 { margin: var(--sp-0) var(--sp-1) var(--sp-3); }
 .gcard { background: var(--bg); border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-3); }
 .gcard:hover { border-color: var(--muted); }

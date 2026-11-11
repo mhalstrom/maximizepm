@@ -120,6 +120,8 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 @media (max-width: 1000px) { .grid { grid-template-columns: minmax(0, 1fr); } }
 /* An area is no box: it sits on the page, apart by space and one thin rule above it (#5043). */
 .panel { background: transparent; border: 0; border-top: 1px solid var(--line); border-radius: 0; box-shadow: none; padding: 14px 2px 6px; margin-bottom: 14px; }
+/* The first area of a tab has nothing above it but the header's own line: no rule and no strip over it (#5317). */
+main > section > .panel:first-child { border-top: 0; padding-top: 0; }
 .panel h2 { font-size: 15px; font-weight: 600; color: var(--ink); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
 /* A narrow screen: the controls of a heading go to a second line, not off screen (#4717, #4718). */
 .panel h2 { flex-wrap: wrap; row-gap: 6px; }

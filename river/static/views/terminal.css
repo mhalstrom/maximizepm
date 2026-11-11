@@ -4,4 +4,4 @@
 .sh-row { display: flex; gap: var(--sp-4); align-items: center; flex-wrap: wrap; border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-4); }
 .sh-row .sh-t { flex: 1 1 var(--w-col); min-width: 0; }
 .sh-row code { font-size: var(--fs-s); }
-.sh-note { font-size: var(--fs-s); }
+.sh-note { font-size: var(--fs-s); max-width: var(--w-form); }  /* a line one can read, not the full width (#5317) */
