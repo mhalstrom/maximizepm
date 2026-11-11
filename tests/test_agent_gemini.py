@@ -235,6 +235,10 @@ class Screen(unittest.TestCase):
     def read(self, name):
         return screen((FIX / name).read_text(encoding="utf-8"))
 
+    def test_the_process_is_the_cli_not_its_interpreter(self):
+        # 'node /opt/homebrew/bin/gemini' on the pane's terminal: the watcher matches the script's name (#5227).
+        self.assertEqual(gemini.DETECT["process"], "gemini")
+
     def test_each_screen_reads_as_its_state(self):
         for name, want in (("pane_idle.txt", "idle"), ("pane_idle_draft.txt", "idle"), ("pane_working.txt", "working"),
                            ("pane_blocked_shell.txt", "blocked"), ("pane_blocked_edit.txt", "blocked"),

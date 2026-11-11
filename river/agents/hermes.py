@@ -217,9 +217,11 @@ def env_passthrough_command():
 STATE = {"state": "detect", "session_id": "identity"}
 
 DETECT = {
-    # The hermes launcher is a shell script that execs the Python that Hermes installed for itself (3.14.9 in
-    # v0.22.7): tmux shows that process name.
-    "process": "python3.14",
+    # The CLI's own name (#5227): "python3.14", the process name tmux shows, would match every Python 3.14 program
+    # in a pane. The hermes launcher is a shell script that execs the Python that Hermes installed for itself (3.14.9
+    # in v0.22.7) as 'python3 -I -c <script>', so ps shows no script name either: the pane watcher finds a Hermes pane
+    # only by its agent's type, until the watcher reads such a launcher (#5229).
+    "process": "hermes",
     # At the prompt the status bar shows the idle timer (⏲ 59s); during a turn it shows ⏱.
     "idle": r"⏲ \d+(?:\.\d+)?[smh]\b",
     # During a turn the prompt line says that typed text redirects the turn.

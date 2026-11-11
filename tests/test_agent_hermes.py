@@ -123,6 +123,10 @@ class Launch(unittest.TestCase):
 
 
 class Detect(unittest.TestCase):
+    def test_the_process_is_the_cli_not_its_interpreter(self):
+        # python3.14 would match every Python 3.14 program in a pane whose agent type is not known (#5227).
+        self.assertEqual(hermes.DETECT["process"], "hermes")
+
     """The pane screens of the recorded session, each one read as the state it showed."""
 
     def test_each_recorded_screen_reads_as_its_state(self):

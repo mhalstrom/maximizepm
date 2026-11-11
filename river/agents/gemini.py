@@ -454,8 +454,11 @@ STATE = {"state": "detect", "session_id": "identity"}
 # trust and sign-in dialogs take the place of the input area. Else the watcher reads working, then idle: the input
 # line stays on the screen while Gemini works (a person can type the next prompt).
 DETECT = {
-    # The gemini command is a node script (#!/usr/bin/env node): tmux names the pane's process node.
-    "process": "node",
+    # The gemini command is a node script (#!/usr/bin/env node): tmux names the pane's process node, and ps shows
+    # 'node /opt/homebrew/bin/gemini' (and a child 'node --max-old-space-size=... /opt/homebrew/bin/gemini'). The
+    # pane watcher finds the script's name on the pane's terminal (#5223); "node" would match every node program
+    # (#5227).
+    "process": "gemini",
     # The prompt sign of the input line: > (or * in yolo mode, ! in shell mode), then the empty-box text or the
     # person's draft. Gemini shows each earlier prompt of the chat with "> " too, so this holds only after the
     # blocked and working rules found nothing: the input line is there whenever no dialog covers it.
