@@ -151,7 +151,7 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
   .slist .srow-it, .slist-mgr .srow-it { border-left: 0; border-top: 1px solid var(--line); }
   /* The keyboard is open (sessions.js fit, #4902): the tab covers the visible part of the page, its top and height
      set there, so the message box sits right above the keyboard. */
-  .sess-layout.phone-kb { position: fixed; left: 0; right: 0; z-index: 20; background: var(--panel); }
+  .sess-layout.phone-kb { position: fixed; left: 0; right: 0; z-index: 20; background: var(--bg); }
   .sess-layout.phone-kb > .sess-main { padding-bottom: 6px; }
   /* While the person types (#4903, point 4): the head line keeps the name, the tab pair and the ⋯; the state comes
      back when the keyboard closes. */
@@ -175,12 +175,13 @@ header.more .hdr-menu, header.no-actor .hdr-menu { display: flex; flex-direction
   .sess-lists .sess-tab { min-height: 36px; padding: 0 10px; font-size: 14px; }
   .sess-menu .sess-mi { min-height: 44px; justify-content: center; font-size: 15px; }
   .sess-menu .give-sel { font-size: 16px; }
-  .sess-head, .chat-foot { flex: none; position: relative; z-index: 1; background: var(--panel); }
+  /* The page's own background: no band of another gray behind the head or the message box (#5304). */
+  .sess-head, .chat-foot { flex: none; position: relative; z-index: 1; background: var(--bg); }
   .sess-main.head-more .sess-head { z-index: 8; }
   .sess-main .sbody { padding: 10px 2px 4px; overscroll-behavior: contain; }
   .msg { font-size: 15px; }
   /* The message box (#5078): larger round buttons, and 16 px text so iOS does not zoom into the field. */
-  .composer { --h-cmp: 40px; --h-cmp-in: 32px; }
+  .chat-foot, .composer { --h-cmp: 40px; --h-cmp-in: 32px; }
   .cmp-pill textarea { font-size: 16px; }
   .msg-user .bubble, .msg-files, .msg-imgs { max-width: 85%; }
   .msg-agent, .md, .md p, .md li { overflow-wrap: anywhere; min-width: 0; }

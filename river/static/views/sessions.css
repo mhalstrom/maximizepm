@@ -95,8 +95,9 @@ button.srow-it { cursor: pointer; }
    have the chat size be a bit wider. that is a frequent issue'): 90% of a wide pane, at least 48rem, at most 76rem. */
 .chat-col { max-width: clamp(48rem, 90%, 76rem); margin: 0 auto; width: 100%; box-sizing: border-box; }
 /* A message box with more lines reaches up over the chat (#5111): the foot's negative margin keeps the chat's frame, so
-   typing moves nothing in the chat; the foot has the panel's background, above the chat. */
-.chat-foot { flex: none; position: relative; z-index: 1; background: var(--panel);
+   typing moves nothing in the chat; the foot covers the chat with the page's own background, so it shows no band of its
+   own around the box (#5304, mark: 'see the box around the input? should that be that shape/ color?'). */
+.chat-foot { flex: none; position: relative; z-index: 1; background: var(--bg);
   margin-top: calc(-1 * var(--cmp-over, calc(0 * var(--hair)))); }
 .sl-none { padding: var(--sp-3) 0; }
 .msg { margin: 0 0 var(--sp-2); line-height: 1.5; font-size: calc(var(--fs-base) + var(--hair) / 2); }
@@ -188,10 +189,12 @@ button.srow-it { cursor: pointer; }
 .wblock .wgo { align-self: flex-end; }
 /* A menu's own keys (#5244): one send button for each, at the right. */
 .wkeys { display: flex; flex-wrap: wrap; gap: var(--sp-2); justify-content: flex-end; }
-/* Images for a session (#4610): thumbnails in the message box, and in the person's turn. */
-.sess-files { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); }
+/* Images for a session (#4610): thumbnails in the message box, and in the person's turn. The files of the message box
+   sit in a tray over the pill, as wide as the pill, with the radius and the color of a chat bubble (#5304). */
+.sess-files { display: flex; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); margin-left: calc(var(--h-cmp) + var(--sp-3));
+  padding: var(--sp-3); border-radius: var(--r-bubble); background: var(--bubble); }
 .sess-files.hidden { display: none; }
-.sess-file { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; max-width: var(--w-file); padding: var(--sp-2) var(--sp-3); border: var(--hair) solid var(--line); border-radius: var(--r-m); background: var(--bg); }
+.sess-file { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; max-width: var(--w-file); padding: var(--sp-2) var(--sp-3); border: var(--hair) solid var(--line); border-radius: var(--r-xl); background: var(--panel); }
 .sess-file img { width: calc(2 * var(--sp-7)); height: calc(2 * var(--sp-7)); object-fit: cover; border-radius: var(--r-xs); }
 .sess-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-file .iconbtn { flex-shrink: 0; }
