@@ -457,6 +457,7 @@ class PaneState(Env):
         server.TMUX_RUNNER = FakeTmux()
         self.addCleanup(setattr, server, "TMUX_RUNNER", None)
         self.addCleanup(server.PROMPTS.clear)
+        self.addCleanup(server.SENT_AT.clear)
         in_tmux = os.environ.pop("TMUX", None)
         if in_tmux is not None:
             self.addCleanup(os.environ.__setitem__, "TMUX", in_tmux)
@@ -490,6 +491,24 @@ class PaneState(Env):
                          ("report:blocked", {"message": "Would you like to run the following command?"}))
         self.assertEqual(sessions.state(self.c, dict(self.c.execute("SELECT * FROM agents WHERE name=?", (name,))
                                                      .fetchone()), None)[0], "prompt")
+
+    def test_a_message_from_the_page_marks_a_detect_agent_working_at_once(self):
+        # #5277: a short turn (Aider streams its reply after its spinner went) can start and end between two passes of
+        # the watcher; the message that starts it records working, and the watcher reports idle when the prompt is back.
+        core.register(self.c, "mark", human=True)
+        name, pane = self.start("codex")
+        pane["running"] = "codex"
+        pane["screen"] = "• Done.\n\n› Ask Codex to do anything\n\n  100% context left"
+        self.assertEqual(self.server.watch_prompts(self.c)["reported"], {name: "idle"})
+        self.server.session_send(self.c, name, "run the tests", who="mark")
+        self.assertEqual(self.event(name)["activity_event"], "report:working")
+        self.assertNotIn("reported", self.server.watch_prompts(self.c))  # just sent: the prompt still shows
+        self.server.SENT_AT[name] -= self.server.TURN_GRACE + 1  # later: the grace is over
+        self.assertEqual(self.server.watch_prompts(self.c)["reported"], {name: "idle"})  # the turn ended
+        self.server.session_send(self.c, name, "/status", who="mark")  # a slash command: the screen tells
+        self.assertEqual(self.event(name)["activity_event"], "report:idle")
+        other, _ = self.start("claude-code")  # its hooks report its state
+        self.assertFalse(self.server.turn_started(self.c, other, "hello"))
 
     def test_a_goose_pane_gives_its_session_id_from_its_header(self):
         # #5268: goose prints its session id in a header at each start and resume (IDENTITY source 'pane'); the watcher

@@ -647,6 +647,7 @@ def paste_first_prompts(conn):
         _tmux("set-buffer", "-b", "maxpm-send", "--", r["prompt"])
         _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", r["pane"])
         _tmux("send-keys", "-t", r["pane"], "Enter")
+        turn_started(conn, live[r["pane"]].get("agent"), r["prompt"])  # the first prompt starts a turn (#5277)
         done.append(r["pane"])
     return done
 
@@ -1970,13 +1971,15 @@ def _pane_reports(conn, states):
     screen also when its message changed). Returns {agent: state} of what it recorded."""
     out = {}
     for agent, (state, message) in sorted(states.items()):
-        r = conn.execute("SELECT activity_event, activity_prompt FROM agents WHERE name=? AND kind='ai'",
+        r = conn.execute("SELECT activity_event, activity_prompt, activity_at FROM agents WHERE name=? AND kind='ai'",
                          (agent,)).fetchone()
         if not r:
             continue
         said = json.dumps({"message": (message or "")[:400]}) if state == "blocked" else None
         if r["activity_event"] == f"report:{state}" and (state != "blocked" or r["activity_prompt"] == said):
             continue
+        if state == "idle" and time.monotonic() - SENT_AT.get(agent, -TURN_GRACE) < TURN_GRACE:
+            continue  # a message went in just now: the agent has not left its prompt yet (turn_started)
         try:
             core.report(conn, agent, state, message)
         except RiverError:
@@ -2670,6 +2673,30 @@ def _keep_prompt(conn, agent, text, who):
     from . import sessions
     sessions.record_prompt(conn, agent, text, who)
     core.typed_to(conn, agent)
+    turn_started(conn, agent, text)
+
+
+# After a message went into a pane, the pane watcher reports idle no sooner than this (seconds): a pass just after
+# it can still see the idle prompt that the agent has not left yet (#5277). SENT_AT: {agent: time.monotonic() of the
+# message}; the page's messages and the watcher both run in maxpm serve.
+TURN_GRACE = 10
+SENT_AT = {}
+
+
+def turn_started(conn, agent, text=None):
+    """A message that went into the pane of an agent whose state comes from its screen (STATE 'detect') starts a
+    turn: record working now (#5277). The pane watcher looks once a pass (notify_interval), and a short turn (Aider
+    shows its spinner only until the first token) can start and end between two passes, so the session never read as
+    working. The watcher reports idle when the idle prompt shows again (_pane_reports, after TURN_GRACE). A slash
+    command is left to the watcher: most of them run in the CLI and start no turn. Returns whether it recorded."""
+    if not agent or (text or "").lstrip().startswith("/") or core._state_source(conn, agent) != "detect":
+        return False
+    try:
+        core.report(conn, agent, "working")
+    except RiverError:
+        return False
+    SENT_AT[agent] = time.monotonic()
+    return True
 
 
 PROMPT_PAUSE = 0.4  # after a pick that leaves a prompt, before the text: the CLI draws its input box again (tests: 0)
