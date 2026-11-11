@@ -8703,19 +8703,45 @@ def report(conn, agent, state, message=None, session_id=None, seq=None, resume=N
     return {"agent": agent, "state": state, "stored": True, "seq": seq}
 
 
+# A --seq at or above this is a time (Pi, OpenCode and Copilot send milliseconds, Grok nanoseconds), not a count.
+SEQ_TIME_MIN = 10 ** 12
+
+
+def clock_ns():
+    """The time in nanoseconds: the release seq of an agent whose seq is a time (tests replace it)."""
+    import time
+    return time.time_ns()
+
+
+def _release_seq(seq):
+    """The last seq of an agent after maxpm release (#5231): when its seq is a time, the release's time in the same
+    unit (milliseconds, microseconds or nanoseconds, by the size of the seq), so a report that its plugin started
+    before the release and that reaches maxpm after it is late and changes nothing. A count stays as it is: its
+    unit is no time."""
+    if seq is None or seq < SEQ_TIME_MIN:
+        return seq
+    unit = 10 ** 6 if seq < 10 ** 15 else 10 ** 3 if seq < 10 ** 18 else 1
+    return max(seq, clock_ns() // unit)
+
+
 def report_release(conn, agent):
     """maxpm release with no item (docs/agent-adapters.md, #5167): the agent's session ended (its hook at the end of
     the session runs it). The agent is gone at once, as when its process ends (_agent_state); its next maxpm command
-    or report makes it present again. Its items, goals and targets free as for any gone session."""
+    or report makes it present again. Its items, goals and targets free as for any gone session.
+
+    Hook plugins (OpenCode, Copilot) start each maxpm command and do not wait for it, so a report that they started
+    before the release can reach maxpm after it (#5231). When the agent's --seq is a time, the release moves its last
+    seq to the release's time: such a late report of the same session changes nothing (report), and a report that
+    starts after the release, or one of another session, makes the agent present again."""
     if not agent:
         raise RiverError("maxpm release with no item ends the session of an agent: maxpm --as <agent> release; "
                          "to give an item back: maxpm release <id>")
     with tx(conn):
-        a = conn.execute("SELECT kind FROM agents WHERE name=?", (agent,)).fetchone()
+        a = conn.execute("SELECT kind, report_seq FROM agents WHERE name=?", (agent,)).fetchone()
         if not a or a["kind"] != "ai":
             raise RiverError(f"{agent} is no registered agent; to give an item back: maxpm release <id>")
-        conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=NULL, activity_waits=NULL "
-                     "WHERE name=?", (iso(now()), REPORT_GONE, agent))
+        conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=NULL, activity_waits=NULL, "
+                     "report_seq=? WHERE name=?", (iso(now()), REPORT_GONE, _release_seq(a["report_seq"]), agent))
         _event(conn, None, agent, f"agent {agent} reported that its session ended (maxpm release)")
     return {"agent": agent, "state": "gone"}
 

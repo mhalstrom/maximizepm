@@ -259,6 +259,33 @@ class Report(Env):
         core.activity(self.c, "w1")  # any later command of the session: it runs again
         self.assertEqual(core.agent_status(self.c, "w1")["state"], "active")
 
+    def test_a_report_started_before_the_release_does_not_undo_it(self):
+        # #5231: a plugin starts each maxpm command and does not wait, so its last report (seq: a time in ms) can reach
+        # maxpm after its release. 1_700_000_000_000 ms is 2023-11-14T22:13:20Z.
+        t_ms = 1_700_000_000_000
+        core.report(self.c, "w1", "working", session_id="s1", seq=t_ms)
+        with mock.patch.object(core, "clock_ns", return_value=(t_ms + 500) * 10 ** 6):
+            core.report_release(self.c, "w1")
+        late = core.report(self.c, "w1", "idle", session_id="s1", seq=t_ms + 200)  # started before the release
+        self.assertFalse(late["stored"])
+        self.assertEqual(core.agent_status(self.c, "w1")["state"], "gone")
+        again = core.report(self.c, "w1", "working", session_id="s1", seq=t_ms + 900)  # started after it: a resume
+        self.assertTrue(again["stored"])
+        self.assertNotEqual(core.agent_status(self.c, "w1")["state"], "gone")
+
+    def test_the_release_seq_keeps_the_unit_of_the_agent_s_seq(self):
+        ns = 1_700_000_000_123_456_789
+        with mock.patch.object(core, "clock_ns", return_value=ns):
+            self.assertEqual(core._release_seq(1_700_000_000_000), 1_700_000_000_123)  # ms (Pi, OpenCode)
+            self.assertEqual(core._release_seq(1_700_000_000_000_000), 1_700_000_000_123_456)  # µs
+            self.assertEqual(core._release_seq(1_700_000_000_000_000_000), ns)  # ns (Grok)
+            self.assertEqual(core._release_seq(1_800_000_000_000), 1_800_000_000_000)  # a later seq stays
+            self.assertEqual(core._release_seq(7), 7)  # a count: no time
+            self.assertIsNone(core._release_seq(None))
+        core.report(self.c, "w1", "working", session_id="s1", seq=3)
+        core.report_release(self.c, "w1")
+        self.assertTrue(core.report(self.c, "w1", "idle", session_id="s1", seq=4)["stored"])
+
     def test_the_cli_takes_report_and_release(self):
         code, out = run("--as", "w1", "report", "--state", "blocked", "--message", "trust this folder?", "--seq", "3",
                         "--session-id", "s9", "--", "claude", "--resume", "s9")
