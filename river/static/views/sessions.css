@@ -86,7 +86,8 @@ button.srow-it { cursor: pointer; }
   padding-bottom: calc(var(--sp-1) + var(--cmp-over, calc(0 * var(--hair)))); overflow-anchor: none; }
 .sess-main .sbar { margin-top: var(--sp-3); }
 .sess-main .sbar.hidden, .sess-main.hidden { display: none; }
-.sess-why { font-size: var(--fs-s); margin-top: var(--sp-3); }
+/* The note under the waits bar starts where the bar's text starts (#5321). */
+.sess-why { font-size: var(--fs-s); margin-top: var(--sp-3); padding: 0 var(--sp-4); }
 .sess-why.hidden { display: none; }
 @media (max-width: 759px) {
   .sess-layout { grid-template-columns: minmax(0, 1fr); }
@@ -122,9 +123,10 @@ button.srow-it { cursor: pointer; }
 .md h1, .md h2, .md h3, .md h4 { margin: var(--sp-6) 0 var(--sp-3); line-height: 1.3; color: var(--ink); text-transform: none; letter-spacing: 0; display: block; }
 .md h1 { font-size: 1.3em; } .md h2 { font-size: 1.15em; } .md h3, .md h4 { font-size: 1em; }
 .md a { color: var(--accent); }
-.md code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; background: var(--bubble); border-radius: var(--r-xs); padding: var(--hair) var(--sp-1); }
+/* Inline code: a thin frame and a narrow inside space, so a comma after it sits close and does not float (#5321). */
+.md code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; background: var(--bubble); border-radius: var(--r-xs); padding: var(--hair) var(--sp-0); box-shadow: inset 0 0 0 var(--hair) var(--line); }
 .md pre { position: relative; background: var(--bg); border: var(--hair) solid var(--line); border-radius: var(--r-m); padding: var(--sp-4) var(--sp-5); overflow-x: auto; }
-.md pre code { background: none; padding: 0; font-size: calc(var(--fs-s) + var(--hair) / 2); line-height: 1.5; }
+.md pre code { background: none; padding: 0; box-shadow: none; font-size: calc(var(--fs-s) + var(--hair) / 2); line-height: 1.5; }
 .md pre .copy { position: absolute; top: var(--sp-2); right: var(--sp-2); font-size: var(--fs-xs); padding: var(--sp-0) var(--sp-3); border-radius: var(--r-s); border: var(--hair) solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; opacity: 0; }
 .md pre:hover .copy, .md pre .copy:focus { opacity: 1; }
 .md blockquote { border-left: calc(var(--sp-0) + var(--hair)) solid var(--line); padding-left: var(--sp-4); color: var(--muted); }
