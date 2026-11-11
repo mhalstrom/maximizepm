@@ -300,13 +300,27 @@ def _agent_for(conn, model):
 
 def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, options=None, agent_name=None):
     """Open the chosen agent in a project folder with MAXPM_FOCUS set; its maxpm go reads it. agent_name: the agent name
-    it registers as (MAXPM_AGENT), when the caller chose one."""
+    it registers as (MAXPM_AGENT), when the caller registered one. Else river names the session (<project>-<hex>, the
+    name its maxpm go would choose) and registers it before it starts (#5201): the pane then carries @maxpm_agent at
+    once, so the page never shows 'This session runs outside tmux' for a pane that maxpm opened itself."""
+    import secrets
     _can_open_terminal(runner, f"cd {p['path']}, set MAXPM_FOCUS={focus}, then claude go")
-    name = core.focus_title(conn, focus)
-    t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": name,
-         **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name)}
-    _open_terminal(t, {"MAXPM_FOCUS": focus, **({"MAXPM_AGENT": agent_name} if agent_name else {}), **t["env"]}, runner)
-    return t
+    title = core.focus_title(conn, focus)
+    t = {"project": p["name"], "path": p["path"], "focus": focus, "session_title": title,
+         **core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, title)}
+    named = agent_name
+    if named is None:
+        named = f"{p['name']}-{secrets.token_hex(2)}"
+        while conn.execute("SELECT 1 FROM agents WHERE name=?", (named,)).fetchone():
+            named = f"{p['name']}-{secrets.token_hex(2)}"
+        core.register(conn, named, note=f"{core.STARTED_NOTE} {focus}")
+    try:
+        _open_terminal(t, {"MAXPM_FOCUS": focus, "MAXPM_AGENT": named, **t["env"]}, runner)
+    except Exception:
+        if agent_name is None:  # no session started: no name of ours stays on the page
+            core.unregister(conn, named)
+        raise
+    return {**t, "session_name": named}
 
 
 def manage_command(cmd):

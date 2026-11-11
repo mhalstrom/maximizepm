@@ -740,7 +740,8 @@ class LaunchAgent(unittest.TestCase):
         sent = []
         core.register(self.c, "mark", human=True)
         t = server.open_agent_on(self.c, h, runner=sent.append, person="mark")
-        self.assertIn(f"MAXPM_FOCUS=help:{h}@mark claude --name 'help #{h} sign the contract' go", sent[-1])
+        # Its name is chosen before it starts (#5201), as for Dispatch.
+        self.assertIn(f"MAXPM_FOCUS=help:{h}@mark MAXPM_AGENT={t['session_name']} claude --name 'help #{h} sign the contract' go", sent[-1])
         self.assertEqual(t["session_title"], f"help #{h} sign the contract")  # the tab title too (#562)
         b = core.go(self.c, self.dir.name, None, focus=t["focus"])
         self.assertEqual((b["role"], b["item"]), ("helper", None))
@@ -827,8 +828,9 @@ class LaunchAgent(unittest.TestCase):
         core.done(self.c, x, "commit", "dev", ship_it=True)
         sent = []
         r = server.deploy_now(self.c, "web", runner=sent.append)
-        self.assertIn("MAXPM_FOCUS=deploy:web claude --name 'deploy web' go --remote-control 'deploy web'", sent[-1])
-        b = core.go(self.c, self.dir.name, None, focus=r["focus"])
+        self.assertIn(f"MAXPM_FOCUS=deploy:web MAXPM_AGENT={r['session_name']} claude --name 'deploy web' go "
+                      f"--remote-control 'deploy web'", sent[-1])
+        b = core.go(self.c, self.dir.name, r["session_name"], focus=r["focus"])
         self.assertEqual((b["role"], b["item"]["id"]), ("deployer", r["deploy"]["id"]))
 
     def test_claim_next_by_a_person_opens_an_agent_that_helps(self):
@@ -838,7 +840,7 @@ class LaunchAgent(unittest.TestCase):
         core.claim(self.c, x, "mark")
         sent = []
         t = server.open_agent_on(self.c, x, runner=sent.append, person="mark")
-        self.assertIn(f"MAXPM_FOCUS=help:{x}@mark claude --name 'help #{x} write the copy' go", sent[-1])
+        self.assertIn(f"MAXPM_FOCUS=help:{x}@mark MAXPM_AGENT={t['session_name']} claude --name 'help #{x} write the copy' go", sent[-1])
         b = core.go(self.c, self.dir.name, None, focus=t["focus"])
         self.assertEqual(b["role"], "helper")
         self.assertIn("mark took it to do themselves", b["help_prompt"])
@@ -1240,6 +1242,31 @@ class LaunchInTmux(unittest.TestCase):
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
 
+    def test_claim_next_and_a_drawer_open_name_the_session_before_it_starts(self):
+        """#5201: Claim next started a session in a pane with no @maxpm_agent; until its maxpm go registered it and the
+        page found its pid, the page said 'This session runs outside tmux'. Each pane maxpm opens carries its name."""
+        core.register(self.c, "mark", human=True)
+        x = core.item_add(self.c, "shop", "write the copy")["id"]
+        core.claim(self.c, x, "mark")  # Claim next: the person took it, an agent helps
+        first = core.item_add(self.c, "shop", "draft it")["id"]
+        waits = core.item_add(self.c, "shop", "ship it", after=[first])["id"]  # a waiting item: unblock
+        for item in (x, waits):
+            t = server.open_agent_on(self.c, item, person="mark")
+            pane = next(p for p in self.tmux.panes if p["id"] == t["tmux_pane"])
+            name = t["session_name"]
+            self.assertTrue(name.startswith("shop-"))
+            self.assertEqual(pane["agent"], name)
+            self.assertIn(f"MAXPM_AGENT={name} ", pane["keys"][0])
+            self.assertTrue(core._agent(self.c, name)["note"].startswith(core.STARTED_NOTE))
+            b = core.go(self.c, self.dir.name, name, focus=t["focus"])
+            self.assertEqual(b["agent"], name)
+        # A start that fails leaves no name behind.
+        before = {r["name"] for r in self.c.execute("SELECT name FROM agents")}
+        with mock.patch.object(server, "_tmux_open", side_effect=RiverError("tmux failed")):
+            with self.assertRaisesRegex(RiverError, "tmux failed"):
+                server.open_agent_on(self.c, x, person="mark")
+        self.assertEqual({r["name"] for r in self.c.execute("SELECT name FROM agents")}, before)
+
     def test_an_expert_starts_in_a_pane_and_is_never_ended_as_an_idle_worker(self):
         """#4955: an expert idle at its prompt for hours, with nothing in hand and a note to read, stays; serve gives
         it no work; expert_idle_end ends it; --resume starts its last chat again with its topic from the history."""
@@ -1484,11 +1511,12 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual([c for c in self.tmux.calls if c[0] == "new-window"][0][:6],
                          ["new-window", "-d", "-t", "=maxpm:", "-n", f"#{y} second"])
         self.assertEqual(self.tmux.panes[1]["window"], "@1")
-        # A session for another purpose has no river name yet: its pane has the purpose only.
+        # A session for another purpose has its river name too (#5201); its pane is named for the purpose.
         core.register(self.c, "mark", human=True)
         z = core.item_add(self.c, "shop", "sign the form", doer="human")["id"]
         t = server.open_agent_on(self.c, z, person="mark")
-        self.assertEqual((self.tmux.panes[2]["name"], self.tmux.panes[2]["agent"]), (f"help #{z} sign the form", ""))
+        self.assertEqual((self.tmux.panes[2]["name"], self.tmux.panes[2]["agent"]),
+                         (f"help #{z} sign the form", t["session_name"]))
 
     def test_maxpm_view_puts_the_agents_side_by_side_and_back(self):
         with self.assertRaisesRegex(RiverError, "no agent runs in tmux"):
