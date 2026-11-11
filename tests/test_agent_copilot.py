@@ -86,9 +86,11 @@ class Launch(Env):
         self.assertEqual(a.resume_command("368ff8ca", None, None, {"prompt": "go on"}, name="w1"),
                          ["copilot", "--resume", "368ff8ca", "--add-dir", q, "-i", "go on"])
         self.assertIsNone(a.resume_command("", None, None, {}))
-        # The start paths of core build the shell command through the adapter (#5181), with the prompt setting.
+        # The start paths of core build the shell command through the adapter (#5181), with the prompt setting, and
+        # load the hook plugin that reports the state (#5214).
         self.assertEqual(core.build_command("copilot", {"prompt": "go", "permissions": "allow-all-tools"}, "auto"),
-                         f"copilot --model auto --allow-all-tools --add-dir {q} -i go")
+                         f"copilot --plugin-dir {Path(q) / 'copilot-plugin'} --model auto --allow-all-tools "
+                         f"--add-dir {q} -i go")
 
     def test_a_hand_written_command_is_read_back_only_when_a_profile_builds_it_exactly(self):
         a = agents.get("copilot")

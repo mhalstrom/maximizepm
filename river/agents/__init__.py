@@ -199,7 +199,8 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "session_id": the one source of the session id: "hook" (the report carries --session-id) or IDENTITY,
 #    }
 # No chain of fallbacks: each signal has one declared source.
-# install_hooks(folder, report) -> [argv words to add to the start] | None: puts the hooks in place; `report` is the
+# install_hooks(folder, report) -> [argv words to add to the start] | None: puts the hooks in place (core.with_hooks
+# puts words that start with env before the command, other words right after the program); `report` is the
 # maxpm report command (a list of argv words) that each hook runs with its --state.
 # read_hook(payload) -> a hook report (HOOK_REPORT_KEYS) | None: for a hook that passes its own input on stdin
 # (maxpm report --hook <id>; Claude Code's JSON), what that input says. None: the input is no event of this agent.

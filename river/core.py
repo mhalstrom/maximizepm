@@ -10805,14 +10805,37 @@ def shell_command(words):
     return " ".join(w if isinstance(w, raw) else _shell_quote(w) for w in words)
 
 
+def hook_words(ad, folder=None):
+    """The words that load an adapter's state hook or plugin (its install_hooks, which also writes the hook's files
+    beside the queue), for an agent whose STATE['state'] is 'hook': without them its session reports no state at all
+    (#5214, Grok: --agent <file>). [] for an agent whose state comes from the screen (DETECT), and for one that
+    takes MaximizePM's hooks file as a setting (LAUNCH['hooks_file']: Claude Code's --settings, behind its
+    activity_hooks setting)."""
+    if (ad.state or {}).get("state") != "hook" or ad.launch.get("hooks_file"):
+        return []
+    return [str(w) for w in ad.install_hooks(folder, report_command()) or ()]
+
+
+def with_hooks(ad, argv, folder=None):
+    """argv with hook_words: words that start with env are an env prefix and go first (OpenCode has no flag for a
+    plugin: env OPENCODE_CLI_CONFIG_CONTENT=...; an argv that starts with env itself stays valid after it); other
+    words are an option of the CLI and go right after the program (pi -e <file>, copilot --plugin-dir <dir>, grok
+    --agent <file>), before a subcommand or the prompt."""
+    words = hook_words(ad, folder)
+    if not words or not argv:
+        return argv
+    return words + argv if words[0] == "env" else argv[:1] + words + argv[1:]
+
+
 def build_command(platform, opts, model=None, effort=None, name=None):
-    """The command line that starts a platform's CLI with these options, by its adapter's build_command. name: the
-    session's name, for a CLI that takes one (claude --name, and the Remote Control session name); Codex has no flag
-    for it. opts may hold the MaximizePM keys of agents.LAUNCH_KEYS (fork, resume, hooks_file, ...)."""
+    """The command line that starts a platform's CLI with these options, by its adapter's build_command, with the
+    words of its state hook (with_hooks). name: the session's name, for a CLI that takes one (claude --name, and
+    the Remote Control session name); Codex has no flag for it. opts may hold the MaximizePM keys of
+    agents.LAUNCH_KEYS (fork, resume, hooks_file, ...)."""
     ad = _adapters().find(platform)
     if ad is None or not ad.supports("launch"):
         raise RiverError(f"no command builder for {platform}")
-    return shell_command(ad.build_command(name, None, model, effort, opts, opts.get("prompt")))
+    return shell_command(with_hooks(ad, ad.build_command(name, None, model, effort, opts, opts.get("prompt"))))
 
 
 # maxpm launch --prompt: a first instruction for one session. It follows the profile's prompt, so the session
@@ -11480,7 +11503,7 @@ def resume_command(conn, agent, platform, session_id, project_id=None, overrides
     argv = ad.resume_command(session_id, mid, effort, settings, name=a["session"] or agent)
     if not argv:
         raise RiverError(f"{ad.label} cannot resume a session: MaximizePM cannot resume {agent}")
-    cmd = shell_command(argv)
+    cmd = shell_command(with_hooks(ad, argv))
     return {"command": cmd, "agent": pick[0], "env": {"MAXPM_AGENT": agent, **({"MAXPM_MODEL": model} if model else {})}}
 
 

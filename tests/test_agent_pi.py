@@ -254,6 +254,23 @@ class State(Env):
         self.assertEqual(f.stat().st_mtime_ns, before)  # the same text is not written again
         self.assertFalse((self.root / "home" / ".pi").exists())  # nothing in the person's own Pi folder
 
+    def test_every_start_and_resume_loads_the_extension(self):
+        # #5214: the start paths added only Claude Code's hooks file, so a Pi session reported no state.
+        f = str(Path(core.river_dir()) / "pi" / pi.EXTENSION_NAME)
+        self.assertEqual(core.build_command("pi", {"prompt": "go"}, "opus"), f"pi -e {f} --model opus go")
+        self.assertEqual(core.with_hooks(self.a, ["pi", "--session", "7f3c"]), ["pi", "-e", f, "--session", "7f3c"])
+        self.assertIn("pi.on(\"agent_start\"", Path(f).read_text())
+        # Claude Code takes its hooks file as a setting (LAUNCH hooks_file), and Codex reads the screen: no words.
+        self.assertEqual(core.hook_words(agents.get("claude")), [])
+        self.assertEqual(core.hook_words(agents.get("codex")), [])
+        self.assertEqual(core.with_hooks(agents.get("codex"), ["codex", "go"]), ["codex", "go"])
+        # OpenCode's words are an env prefix: they go before the command, also before an env of its own.
+        oc = agents.get("opencode")
+        pre = core.hook_words(oc)
+        self.assertEqual(pre[0], "env")
+        self.assertEqual(core.with_hooks(oc, ["opencode", "--standalone"]), pre + ["opencode", "--standalone"])
+        self.assertEqual(core.with_hooks(oc, ["env", "A=1", "opencode"]), pre + ["env", "A=1", "opencode"])
+
     @unittest.skipUnless(shutil.which("node"), "no node")
     def test_the_extension_reports_each_state_in_order(self):
         """Run the extension in node with a stand-in for Pi's ExtensionAPI, and fire Pi's events at it."""
