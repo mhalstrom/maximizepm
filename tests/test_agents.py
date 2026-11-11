@@ -491,6 +491,35 @@ class PaneState(Env):
         self.assertEqual(sessions.state(self.c, dict(self.c.execute("SELECT * FROM agents WHERE name=?", (name,))
                                                      .fetchone()), None)[0], "prompt")
 
+    def test_a_goose_pane_gives_its_session_id_from_its_header(self):
+        # #5268: goose prints its session id in a header at each start and resume (IDENTITY source 'pane'); the watcher
+        # reads it from the pane's history and records it, so its chat and its resume find the session.
+        fix = Path(__file__).resolve().parent / "fixtures" / "goose"
+        name, pane = self.start("goose")
+        pane["running"] = "goose"
+        pane["history"] = (fix / "pane_idle.txt").read_text() + "\n" + "older line\n" * 50  # the header scrolled away
+        pane["screen"] = "( O)> Press Enter to send"
+        sids = lambda: [r[0] for r in self.c.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY rowid",
+                                                     (name,))]
+        self.assertEqual(self.server.watch_prompts(self.c)["session_ids"], {name: "20261111_1"})
+        self.assertEqual(sids(), ["20261111_1"])
+        self.server.watch_prompts(self.c)
+        self.assertEqual(sids(), ["20261111_1"])  # once per id
+        pane["history"] += "   \\____)    20261111_2 · /Users/me/work\n"  # a resume into a new session: the last wins
+        self.server.watch_prompts(self.c)
+        self.assertEqual(sids(), ["20261111_1", "20261111_2"])
+        # Before its first maxpm command its type is not known: the process in the pane names the adapter.
+        core.item_add(self.c, "shop", "more")
+        other = self.server.launch_agent(self.c)["session_name"]
+        core.register(self.c, other)
+        p2 = self.server.TMUX_RUNNER.panes[-1]
+        p2.update(running="goose", history=(fix / "pane_resumed.txt").read_text(), screen="( O)>")
+        self.assertEqual(self.server.watch_prompts(self.c)["session_ids"].get(other), "20261111_1")
+        # With the setting prompt_pattern empty (no prompt watch), the watcher still reads the ids.
+        core.config_set(self.c, "prompt_pattern", "")
+        p2["history"] += "   \\____)    20261111_9 · /x\n"
+        self.assertEqual(self.server.watch_prompts(self.c)["session_ids"].get(other), "20261111_9")
+
     def test_a_claude_code_pane_gives_its_state_by_its_hooks_only(self):
         name, pane = self.start("claude-code")
         pane["screen"] = "⏺ Read 3 files\n✻ Pondering… (12s · esc to interrupt)"

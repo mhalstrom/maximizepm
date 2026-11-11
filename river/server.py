@@ -1849,21 +1849,25 @@ def watch_prompts(conn):
     alerts once. Each pane is read with its agent's adapter (_pane_rule). The same look is the state source of an
     agent whose adapter's STATE['state'] is 'detect' (Codex): blocked, working or idle (_screen_state) goes to
     core.report as maxpm report does, when it changed (#5183). Returns {"waiting": {agent: question}, "told":
-    [agents], "closed": [message ids]}, and "reported": {agent: state} when it recorded a state."""
+    [agents], "closed": [message ids]}, "reported": {agent: state} when it recorded a state, and "session_ids":
+    {agent: id} when it read session ids from panes (_pane_session_id, #5268; also with prompt_pattern empty)."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting, states = {}, {}
-    if pattern:
-        stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
-        for agent, pane in sorted(agent_terminals(conn).items()):
-            if agent in stopped:
-                continue  # a stop request: an answer would only let it read the stop and end (#2713, alert #7392)
-            try:
-                screen = _pane_screen(agent, pane)
-            except RiverError:
-                continue  # the pane closed since the list
-            if screen["ended"]:
-                continue  # a shell: what the agent printed stays, and nobody waits there
-            rx, layout, ad = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
+    waiting, states, ids = {}, {}, {}
+    stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
+    for agent, pane in sorted(agent_terminals(conn).items()):
+        if agent in stopped:
+            continue  # a stop request: an answer would only let it read the stop and end (#2713, alert #7392)
+        try:
+            screen = _pane_screen(agent, pane)
+        except RiverError:
+            continue  # the pane closed since the list
+        if screen["ended"]:
+            continue  # a shell: what the agent printed stays, and nobody waits there
+        rx, layout, ad = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
+        sid = _pane_session_id(conn, agent, pane, ad)
+        if sid:
+            ids[agent] = sid
+        if pattern:
             tail = _prompt_tail(_plain(screen["text"]))
             parts = _prompt_found(tail, rx, layout)
             if parts:
@@ -1876,6 +1880,8 @@ def watch_prompts(conn):
                 if state:
                     states[agent] = (state, parts and parts["question"])
     reported = {"reported": got} if (got := _pane_reports(conn, states)) else {}
+    if ids:
+        reported["session_ids"] = ids
     t, wait = core.now(), core.parse_duration(core.setting(conn, "prompt_wait"))
     for agent in [a for a in PROMPTS if a not in waiting]:
         del PROMPTS[agent]
@@ -1913,6 +1919,26 @@ def watch_prompts(conn):
         if told or closed:
             core.sync_needs_you(conn)
     return {"waiting": {a: w[2] or w[0] for a, w in waiting.items()}, "told": told, "closed": closed, **reported}
+
+
+def _pane_session_id(conn, agent, pane, ad):
+    """The session id of an agent whose adapter reads it from the pane (IDENTITY source 'pane': Goose prints it in its
+    header at each start and resume), recorded as maxpm report --session-id does (core.record_session); None for
+    another adapter or when the pane shows none (#5268). The pane's history too: the header scrolls away. The last
+    id wins: a resume prints the header again."""
+    ident = (ad.identity or {}) if ad is not None else {}
+    if ident.get("source") != "pane" or not ident.get("pane"):
+        return None
+    try:
+        text = _tmux("capture-pane", "-p", "-J", "-S", "-5000", "-t", pane, check=False) or ""
+    except RiverError:
+        return None
+    rx = re.compile(ident["pane"])
+    found = [m.group(1) for m in map(rx.search, _plain(text).splitlines()) if m]
+    if not found:
+        return None
+    core.record_session(conn, agent, found[-1])
+    return found[-1]
 
 
 def _pane_reports(conn, states):
