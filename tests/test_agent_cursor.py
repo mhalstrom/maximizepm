@@ -256,6 +256,26 @@ class Commands(Env):
                                {"name": "tidy-up", "description": "Tidy", "hint": ""}])
         self.assertEqual(self.a.read_commands(ws)[-2:], got)  # ~ is HOME: the test's home
 
+    def test_the_slash_list_takes_the_folder_from_the_chats_meta_when_the_log_names_none(self):
+        # #5301: Cursor's transcript has no cwd; ~/.cursor/chats/<key>/<id>/meta.json has.
+        from river import sessions
+        ws = self.root / "ws"
+        (ws / ".cursor" / "commands").mkdir(parents=True)
+        (ws / ".cursor" / "commands" / "ship.md").write_text("---\ndescription: Ship it\n---\nBody")
+        chat = self.root / "home" / ".cursor" / "chats" / cursor.chats_key(ws) / CHAT_ID
+        chat.mkdir(parents=True)
+        (chat / "meta.json").write_text(json.dumps({"cwd": str(ws)}))
+        conn = core.connect()
+        core.register(conn, "cur1")
+        conn.execute("UPDATE agents SET agent_type='cursor' WHERE name='cur1'")
+        conn.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('cur1', ?, '2026-11-11')",
+                     (CHAT_ID,))
+        conn.commit()
+        with mock.patch.object(sessions, "transcript", return_value=("cursor", None)):
+            got = sessions.session_commands(conn, "cur1")
+        self.assertEqual((got["provider"], got["folder"]), ("cursor", str(ws)))
+        self.assertIn("ship", [c["name"] for c in got["commands"]])
+
 
 if __name__ == "__main__":
     unittest.main()

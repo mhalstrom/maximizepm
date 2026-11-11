@@ -1318,9 +1318,32 @@ def session_commands(conn, agent, root=None, croot=None):
             folder = last_cwd(path)
         except (OSError, ValueError, EOFError):
             folder = None
+    if not folder and adapter is not None:
+        folder = _folder_without_log(conn, agent, adapter, path)
     if adapter is None:
         return {"agent": agent, "provider": None, "folder": folder, "commands": []}
     return {"agent": agent, "provider": adapter.id, "folder": folder, "commands": adapter.read_commands(folder)}
+
+
+def _folder_without_log(conn, agent, adapter, path):
+    """The folder of a session whose chat log names none (#5301: Cursor, Grok, Copilot): the adapter's meta for the
+    session's ref (Cursor's meta.json has a cwd), else the working folder of the session's process (as #5262 does)."""
+    meta = getattr(adapter.module, "meta", None)
+    if meta is not None:
+        try:
+            refs = [session_ref(conn, agent, adapter, path)] if path else []
+            refs += [r["session_id"] for r in conn.execute(
+                "SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC", (agent,))]
+            for ref in refs:
+                got = meta(ref)
+                if isinstance(got, dict) and got.get("cwd"):
+                    return got["cwd"]
+        except Exception:  # noqa: BLE001 - an adapter's reader never breaks the list
+            pass
+    a = conn.execute("SELECT pid, host FROM agents WHERE name=?", (agent,)).fetchone()
+    if a and a["pid"] and a["host"] == core.this_host() and core.pid_alive(a["pid"]):
+        return core.proc_cwd(a["pid"])
+    return None
 
 
 def _transcript_settings(kind, path):
