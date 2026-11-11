@@ -296,3 +296,12 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
 - Kept on purpose: `core._PROFILE_MIGRATION` (the agents of the one-time change of launch_agents into profiles: fixed
   history), `server.KNOWN_AGENTS` (the commands that the setup guide offers), the Claude desktop and ChatGPT desktop
   writers of `maxpm setup-agent`, and the `root`/`croot` test folders of `sessions.transcript`.
+
+## Tests in maxpm (step 5)
+
+One row for each agent: its end-to-end test on this Mac, from a test serve on a queue of its own (`MAXPM_DB`) with
+its own tmux server, driven through the page's API (`/api/action`) and the page itself.
+
+| Agent (item) | Start from the page, with its settings | Chat on the Sessions page | Message box | State (working, idle, blocked) | / completion with Tab | Resume | Fix items |
+|---|---|---|---|---|---|---|---|
+| Pi 1.5.2 (#5187), openai-codex/gpt-6.1-sol | Works: `launch_agent` with model, effort `low` (`--thinking low`), Offline start on and `pi_args` `--provider openai-codex`; the state extension loads, Pi runs `maxpm go`, takes the item and closes it in 9 s. A `provider/model` text was refused then; #5236 fixed it. Pi needs it when several providers are signed in (a bare `gpt-6.1-sol` is ambiguous). | Fails: Pi's `CHAT` has no `ref`, so no log is found and the page says "No transcript". With `ref` `session` (checked in memory) the chat shows its 12 entries, the turn and the title. | Works: at its prompt Pi gets the text in 6 s; during its foreground `maxpm wait` the text waits ("Steering") until the wait returns after `wait_step` (9 min). | Works: `report:working` and `report:idle` in `--seq` order; `/quit` gives `report:gone` through `maxpm release`. Blocked: none, as designed (Pi has no permission questions). | Works: `/api/session-commands` gives its 25 built-in commands; on the page `/thi` and Tab give `/thinking `. Its folder is unknown without the chat log, so the folder's prompts and skills are missing. | Works: `core.resume_command` gives `pi -e <extension> --model … --session <id> --provider openai-codex`; Pi appends to the same session file, reports idle with the same session id, and remembers its earlier files. The Settings dialog restart refuses without the chat log. | #5255 (the chat and the tool rows), #5256 (a message during a foreground wait), #5257 (the "No transcript" note) |
