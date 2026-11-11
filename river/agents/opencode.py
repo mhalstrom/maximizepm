@@ -61,10 +61,10 @@ SETTINGS = [
     {"key": "standalone", "label": "Own server", "kind": "toggle", "choices": [], "default": "on",
      "text": "a private OpenCode server for this session (--standalone); the model applies only with it, as the "
              "shared background service keeps the config it started with",
-     "flag": ["--standalone"], "live": None, "read": r"(--standalone)\b"},
+     "flag": ["--standalone"], "live": None, "read": r"(--standalone)\b", "session": True},
     {"key": "auto", "label": "Approve permissions", "kind": "toggle", "choices": [], "default": "off",
      "text": "approve each permission that the config does not deny (--auto)",
-     "flag": ["--auto"], "live": None, "read": r"(--auto)\b"},
+     "flag": ["--auto"], "live": None, "read": r"(--auto)\b", "session": True},
     {"key": "args", "label": "More arguments", "kind": "text", "choices": [], "default": "",
      "text": "more arguments, put before the folder", "flag": [], "live": None, "read": None},
     {"key": "prompt", "label": "First prompt", "kind": "text", "choices": [],

@@ -90,6 +90,19 @@ class Describe(Env):
         self.assertEqual(self.a.read_models(), got)
         self.assertEqual(len(calls), 1)
 
+    def test_the_tests_never_run_the_installed_opencode(self):
+        # #5286: core.platform_models (the launch dialog, a launch) calls read_models; tests/__init__.py fakes it.
+        mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
+        self.addCleanup(mock.patch.stopall)
+        with mock.patch("subprocess.run", side_effect=AssertionError("ran a CLI")):
+            self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
+
+    def test_a_running_session_s_settings_dialog_offers_both_toggles(self):
+        # #5286: a restart applies them (flags), and the dialog reads them back from the command line.
+        got = {s["key"]: s for s in self.a.session_specs()}
+        self.assertEqual(set(got), {"model", "standalone", "auto"})
+        self.assertEqual((got["auto"]["restart"], got["auto"]["choices"]), ("opt", ["on", "off"]))
+
     def test_with_no_cli_answer_the_described_models_stand(self):
         mock.patch.object(opencode, "MODELS_RUNNER", lambda: "").start()
         self.addCleanup(mock.patch.stopall)
