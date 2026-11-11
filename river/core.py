@@ -12174,10 +12174,43 @@ def focus_role(focus):
     return {"deploy": "deployer", "review": "reviewer"}.get((focus or "").partition(":")[0])
 
 
-def _work_for(conn, actor, names, role=None):
+# A ready item wakes one waiting session first (_first_waiter); the other waiting sessions that could take it wake
+# for it only when it is still ready this long after their wait first saw it (#5205).
+WAIT_SHARE = timedelta(seconds=20)
+
+
+def _first_waiter(conn, item_id):
+    """The waiting session that a newly ready item wakes first: of the agents in maxpm wait for project work
+    (waiting_in names the item's project) whose next_item would give them the item (their tree, model and agent
+    type), the one that waits longest; None when no waiting session can take it. One ready item in a plan that many
+    sessions share (the tree of auto_continue tree follows links both ways) woke each of them, and all but the first
+    to run go got IDLE (#5205)."""
+    it = conn.execute("SELECT p.name FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=?",
+                      (item_id,)).fetchone()
+    if not it:
+        return None
+    for w in conn.execute("SELECT name, waiting_in FROM agents WHERE kind='ai' AND role='waiting' AND wait_token IS "
+                          "NOT NULL AND waiting_since IS NOT NULL AND waiting_in IS NOT NULL "
+                          "ORDER BY waiting_since, name"):
+        if it["name"] not in w["waiting_in"].split(","):
+            continue
+        try:
+            got = next_item(conn, w["waiting_in"], None, False, w["name"], 50, only=tree_mode(conn, w["name"]))
+        except RiverError:
+            continue
+        if any(a["id"] == item_id for a in got):
+            return w["name"]
+    return None
+
+
+def _work_for(conn, actor, names, role=None, seen=None):
     """Why this agent has something to do now, or None: a push to it, ready work it can take, or messages. With
     role (focus_role), only what maxpm go gives that role: a ready deploy item of a target the agent owns or
-    can own, or a ready release review; never a push or an item that go refuses to the role."""
+    can own, or a ready release review; never a push or an item that go refuses to the role.
+
+    seen (from maxpm wait): {item id: (when this wait first saw it ready, the session it wakes first)}. A ready item
+    that wakes another waiting session first (_first_waiter) is work here only WAIT_SHARE after this wait first saw
+    it, so that session takes it, and the others do not each wake for it and get IDLE from go (#5205)."""
     note = conn.execute("SELECT kind, body FROM queue_entries WHERE agent=? AND kind<>'item' AND delivered_at IS NULL "
                         "ORDER BY kind<>'stop', pos LIMIT 1", (actor,)).fetchone()
     if role:
@@ -12213,11 +12246,18 @@ def _work_for(conn, actor, names, role=None):
     if q:
         return f"#{q[0]['id']} in your queue is ready: {q[0]['title']}"
     try:
-        nxt = next_item(conn, ",".join(names) if names else None, None, False, actor, 1, only=tree_mode(conn, actor))
+        nxt = next_item(conn, ",".join(names) if names else None, None, False, actor, 1 if seen is None else 5,
+                        only=tree_mode(conn, actor))
     except RiverError:
         nxt = []
-    if nxt:
-        return f"#{nxt[0]['id']} is ready: {nxt[0]['title']}"
+    for a in nxt:
+        if seen is not None:
+            if a["id"] not in seen:
+                seen[a["id"]] = (now(), _first_waiter(conn, a["id"]))
+            first_at, first = seen[a["id"]]
+            if first not in (None, actor) and now() < first_at + WAIT_SHARE:
+                continue  # it wakes `first`; this wait takes it only if it is still ready after WAIT_SHARE
+        return f"#{a['id']} is ready: {a['title']}"
     u = unread(conn, actor)
     if u["unread"] or u["questions"]:
         return "you have messages (maxpm inbox)"
@@ -12271,6 +12311,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     limit = parse_duration(setting(conn, "wait_max", agent=actor))
     step = parse_duration(step or setting(conn, "wait_step", agent=actor))
     deadline = min(now() + step, since + limit)
+    seen = {}  # the ready items this wait saw, for _work_for: one waiting session wakes for each first (#5205)
 
     def left():
         """Why this wait has nothing more to do, or None: the agent ran go and took work (its wait ended), or a
@@ -12291,7 +12332,7 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
         gone = left()
         if gone:
             return {"result": "left", "agent": actor, "why": gone}
-        why = _work_for(conn, actor, names, role)
+        why = _work_for(conn, actor, names, role, seen)
         if why:
             return {"result": "work", "why": why, "agent": actor}
         if now() >= deadline:

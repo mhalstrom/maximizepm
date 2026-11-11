@@ -4456,6 +4456,47 @@ class Wait(Base):
         self.assertEqual((b["role"], b["wait_background"]), ("idle", True))
         self.assertFalse(core.go(self.c, self.dir.name, "w", agent_type="codex")["wait_background"])
 
+    def test_a_ready_item_wakes_the_session_that_waits_longest_first(self):
+        # #5205: one item got ready in a plan that several waiting sessions share (their trees, auto_continue tree);
+        # each wait printed WORK, the first go took the item, and every other session got IDLE from go.
+        from unittest import mock
+        clock = [core.now()]
+        p = mock.patch.object(core, "now", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        core.register(self.c, "v")
+        wait = lambda who, step="0s": core.wait(self.c, self.dir.name, who, step=step, sleep=tick)
+
+        def tick(_s):
+            clock[0] += core.timedelta(seconds=3)
+        self.assertEqual(wait("w")["result"], "again")  # w waits first
+        clock[0] += core.timedelta(seconds=5)
+        self.assertEqual(wait("v")["result"], "again")
+        i = self.add("a", "one item")
+        self.assertEqual(wait("v")["result"], "again")  # it wakes w, not v
+        self.assertEqual(wait("w")["why"], f"#{i} is ready: one item")
+        # w does not take it (its session is gone): v's wait takes it once it was ready for WAIT_SHARE.
+        start = clock[0]
+        res = wait("v", "1m")
+        self.assertEqual(res["why"], f"#{i} is ready: one item")
+        self.assertGreaterEqual(clock[0] - start, core.WAIT_SHARE)
+        self.assertLess(clock[0] - start, core.WAIT_SHARE + core.timedelta(seconds=4))
+        # w takes it: v's wait never wakes for it.
+        core.claim(self.c, i, "w")
+        self.assertEqual(wait("v", "1m")["result"], "again")
+
+    def test_a_waiting_session_that_cannot_take_the_item_does_not_hold_it_back(self):
+        core.register(self.c, "v")
+        core.config_set(self.c, "auto_continue", "tree")
+        own = self.add("a", "w's task")
+        core.claim(self.c, own, "w")
+        core.done(self.c, own, "o", "w")  # w's tree: what is linked to its task
+        self.assertEqual(self.wait()["result"], "again")  # w waits first
+        i = self.add("a", "not in w's tree")
+        res = core.wait(self.c, self.dir.name, "v", step="0s", sleep=lambda s: None)
+        self.assertEqual(res["why"], f"#{i} is ready: not in w's tree")  # w's go would not give it to w
+        self.assertIsNone(core._first_waiter(self.c, own))
+
     def test_capacity_still_warns_about_idle_sessions_that_do_not_wait(self):
         core.register(self.c, "idle1")
         self.wait()
