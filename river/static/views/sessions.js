@@ -93,7 +93,7 @@ function provTag(p) {
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
 function waitBadge(s) {
   const n = (s.waiting || []).length;
-  return n ? `<span class="wbadge" title="${n} thing(s) wait for you here: click to answer">! ${n}</span>` : "";
+  return n ? `<span class="wbadge" title="${n} thing(s) wait for you here: click to answer">! ${n}</span>` : `<span class="wbadge-slot" aria-hidden="true"></span>`;
 }
 
 // The pin of a worker row (#5007): a pinned session stays at the top of the worker sessions. The pin is the
@@ -139,7 +139,7 @@ export function sessionRow(s) {
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
-      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span>${s.at ? `<span class="sago" data-at="${esc(s.at)}">${ago(s.at)}</span>` : ""}${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</div>
+      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span>${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</div>
       <div class="sub">${esc(clip(line2, 120))}</div>
       ${s.role === "expert" && s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : ""}
     </div>
@@ -173,7 +173,7 @@ function renderList(el, list, picked, empty) {
       r.replaceWith(t.content.firstChild);
     });
   }
-  el.querySelectorAll(".sago").forEach(x => { x.textContent = ago(x.dataset.at); });
+  el.querySelectorAll(".sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
   el.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === picked));
 }
 

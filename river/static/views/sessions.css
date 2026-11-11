@@ -33,7 +33,10 @@ button.srow-it { cursor: pointer; }
 .srow-h b.srow-t { flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-base); }
 .srow-h .dot { flex: none; margin: 0 0 0 var(--sp-1); }
 .dot.needs { background: var(--warn); }
-.srow-h .sago { flex: none; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
+.srow-h .sago { flex: none; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; min-width: var(--w-tool); text-align: right; }
+/* The ! badge and the time have a slot of their own width: the dot and the time stand in the same column in every row, also
+   when the title is cut (#5320). */
+.srow-h .wbadge, .srow-h .wbadge-slot { flex: none; min-width: var(--w-tool); text-align: center; box-sizing: border-box; }
 .srow .srow-main > .sub { font-size: var(--fs-m); }
 .prov.prov-ic { font-size: var(--fs-xs); padding: 0 var(--sp-1); border-radius: var(--r-xs); line-height: 1.3; }
 .srow:not(:hover):not(:focus-within) .srow-pin:not(.on), .srow:not(:hover):not(:focus-within) .srow-end.iconbtn { visibility: hidden; }
@@ -207,7 +210,8 @@ button.srow-it { cursor: pointer; }
 /* A group (You, the manager, the experts): each row has its own line under it; the group draws one only when it has no
    row ('No manager running'). A line of the group under a row's line made two lines with nothing between (#5114). */
 .slist-mgr { display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-4); flex: none; }
-.slist-mgr:not(:has(.srow)) { padding-bottom: var(--sp-4); border-bottom: var(--hair) solid var(--line); }
+.slist-mgr:empty { display: none; }
+.slist-mgr:not(:has(.srow)):not(:empty) { padding-bottom: var(--sp-4); border-bottom: var(--hair) solid var(--line); }
 /* The manager's and an expert's title is a long sentence ('Manages the queue and ...'): two lines, then … (#5114). */
 .slist-mgr .srow-h b.srow-t { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .mgr-tag { flex: none; font-size: calc(var(--fs-xs) - var(--hair) / 2); font-weight: 700; text-transform: uppercase; letter-spacing: calc(var(--hair) / 2); color: var(--human); background: var(--human-bg); border-radius: var(--r-xs); padding: var(--hair) var(--sp-2); }
@@ -216,7 +220,7 @@ button.srow-it { cursor: pointer; }
 .slist-experts .slist-rows { display: flex; flex-direction: column; gap: var(--sp-2); }
 .expert-tag { color: var(--accent); background: transparent; box-shadow: inset 0 0 0 var(--hair) var(--accent); }
 .sid.expert-topic { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.mgr-none .srow-it { justify-content: center; align-items: center; }
+.mgr-none .srow-it { align-items: flex-start; }
 .mgr-none .srow-it .btn { font-size: var(--fs-s); }
 /* The side panel of the Sessions tab (#4619): left bar | chat | panel. */
 .sess-layout.with-panel { grid-template-columns: minmax(var(--w-sess-min), var(--w-sess-max)) minmax(0, 1fr) var(--sp-w, var(--w-panel)); }
