@@ -615,6 +615,9 @@ CREATE TABLE IF NOT EXISTS agents (
   activity_prompt TEXT,                      -- the tool call that waits on a permission prompt now (JSON), if any
   activity_told   TEXT,                      -- the activity_at of the last alert to the manager about it
   activity_waits  TEXT,                      -- at its last turn end: the background work that will wake it (JSON), if any
+  report_seq      INTEGER,                   -- the --seq of its last maxpm report, so a late one changes nothing
+  report_session  TEXT,                      -- the --session-id of that report
+  resume_argv     TEXT,                      -- the command that resumes its session, from maxpm report -- ... (JSON)
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
   host           TEXT,
   pid_cmd        TEXT,
@@ -1106,6 +1109,9 @@ def _migrate(conn):
     for col in ("activity_at", "activity_event", "activity_prompt", "activity_told", "activity_waits"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
+    for col, kind in (("report_seq", "INTEGER"), ("report_session", "TEXT"), ("resume_argv", "TEXT")):
+        if col not in acols:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
     if "session_url" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN session_url TEXT")
     if "via" not in acols:
@@ -6278,6 +6284,8 @@ def _touch_agent(conn, actor):
         return
     t = now()
     conn.execute("UPDATE agents SET last_seen=? WHERE name=?", (iso(t), actor))
+    # A command of a session that reported its end (maxpm release): it runs again (a resume), so it is not gone.
+    conn.execute("UPDATE agents SET activity_event=NULL WHERE name=? AND activity_event=?", (actor, REPORT_GONE))
     _renew(conn, actor, t)
 
 
@@ -6873,6 +6881,9 @@ def _agent_state(conn, a):
         return "stopped"
     # Its process on this host has ended: gone at once, not after gone_after.
     if "pid" in a.keys() and a["pid"] and a["host"] == this_host() and not pid_alive(a["pid"]):
+        return "gone"
+    # Its session reported its end (maxpm release, #5167): gone at once, as when its process ends.
+    if "activity_event" in a.keys() and a["activity_event"] == REPORT_GONE:
         return "gone"
     # An expert talks with a person and runs few maxpm commands: it is not away or gone by time. It ends after
     # expert_idle_end with no talk (end_quiet_experts), or when a person ends it (#4955). An assistant (#5110) goes
@@ -8545,6 +8556,63 @@ def activity_watch(conn):
                 told.append(r["name"])
             conn.execute("UPDATE agents SET activity_told=activity_at WHERE name=?", (r["name"],))
     return told
+
+
+REPORT_STATES = ("working", "idle", "blocked")  # maxpm report --state (river/agents STATES)
+REPORT_GONE = "report:gone"  # activity_event after maxpm release: the session ended
+
+
+def report(conn, agent, state, message=None, session_id=None, seq=None, resume=None):
+    """maxpm report (docs/agent-adapters.md, #5167): an agent's own hook, plugin or pane rule tells its state. It is
+    stored where the page reads the hooks' state now: activity_at, activity_event 'report:<state>', and for blocked
+    activity_prompt (a JSON {"message"}), so the Sessions tab shows a prompt; working and idle clear it. --session-id
+    records the agent's session id (agent_sessions), and the words after -- the command that resumes it
+    (agents.resume_argv, JSON). --seq: a report whose seq is not above the last one of the same session is late and
+    changes nothing (a newer report already holds). Returns {"agent", "state", "stored": bool, "seq"}."""
+    if state not in REPORT_STATES:
+        raise RiverError(f"maxpm report --state is one of {', '.join(REPORT_STATES)}, not {state!r}")
+    if not agent:
+        raise RiverError("maxpm report needs the agent: maxpm --as <agent> report ... (or MAXPM_AGENT)")
+    if seq is not None and seq < 0:
+        raise RiverError(f"maxpm report --seq is a whole number from 0, not {seq}")
+    t = iso(now())
+    with tx(conn):
+        a = conn.execute("SELECT kind, report_seq, report_session FROM agents WHERE name=?", (agent,)).fetchone()
+        if not a or a["kind"] != "ai":
+            raise RiverError(f"{agent} is no registered agent; maxpm report is for an agent's session: "
+                             f"maxpm register {agent} first")
+        same = session_id is None or session_id == a["report_session"]
+        if seq is not None and a["report_seq"] is not None and same and seq <= a["report_seq"]:
+            return {"agent": agent, "state": state, "stored": False, "seq": a["report_seq"],
+                    "why": f"seq {seq} is not above {a['report_seq']}, the last report of this session"}
+        prompt = json.dumps({"message": (message or "")[:400]}) if state == "blocked" else None
+        conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=?, activity_waits=NULL, "
+                     "report_seq=?, report_session=COALESCE(?, report_session) WHERE name=?",
+                     (t, f"report:{state}", prompt, seq if seq is not None else (a["report_seq"] if same else None),
+                      session_id, agent))
+        if session_id:
+            conn.execute("INSERT OR IGNORE INTO agent_sessions (agent, session_id, first_seen) VALUES (?,?,?)",
+                         (agent, session_id, t))
+        if resume:
+            conn.execute("UPDATE agents SET resume_argv=? WHERE name=?", (json.dumps(list(resume)), agent))
+    return {"agent": agent, "state": state, "stored": True, "seq": seq}
+
+
+def report_release(conn, agent):
+    """maxpm release with no item (docs/agent-adapters.md, #5167): the agent's session ended (its hook at the end of
+    the session runs it). The agent is gone at once, as when its process ends (_agent_state); its next maxpm command
+    or report makes it present again. Its items, goals and targets free as for any gone session."""
+    if not agent:
+        raise RiverError("maxpm release with no item ends the session of an agent: maxpm --as <agent> release; "
+                         "to give an item back: maxpm release <id>")
+    with tx(conn):
+        a = conn.execute("SELECT kind FROM agents WHERE name=?", (agent,)).fetchone()
+        if not a or a["kind"] != "ai":
+            raise RiverError(f"{agent} is no registered agent; to give an item back: maxpm release <id>")
+        conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=NULL, activity_waits=NULL "
+                     "WHERE name=?", (iso(now()), REPORT_GONE, agent))
+        _event(conn, None, agent, f"agent {agent} reported that its session ended (maxpm release)")
+    return {"agent": agent, "state": "gone"}
 
 
 def session_owner(conn, sid):

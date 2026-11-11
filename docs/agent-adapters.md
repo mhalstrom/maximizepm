@@ -1,0 +1,124 @@
+# Agent adapters: one interface for every coding agent
+
+Decided by mark, 2026-11-11 ("1-3 are good"):
+
+1. tmux stays the one terminal layer. Every agent runs its real CLI in a tmux window. There is no second backend and no fallback path (mark: "I don't want to have a fallback"). ACP, codex app-server and the Claude Agent SDK were rejected for now: Claude Code reaches them only through adapters that do not accept a claude.ai plan login, and the person loses the terminal. herdr was looked at: its ideas are copied (agent detection as data, one state report per agent), not the program.
+2. Every agent is one adapter. The adapters replace all platform tables and all name checks.
+3. WSL is the supported way to run maxpm on Windows (separate item).
+
+Multi-provider models (OpenCode, Pi, Goose and others): option A. The model of such an agent is a free "provider/model" text. An item's min-model and max-model limits apply only to the families maxpm knows (claude, openai).
+
+## Today (map of 2026-11-11, paths in river/)
+
+- Four platform tables with no shared key: `core.LAUNCH_PLATFORMS` (core.py:347), `core.AGENT_FAMILIES` and `PLATFORM_EFFORTS` (core.py:11366), `sessions.PLATFORMS` and `sessions.PROVIDERS` (sessions.py:28, :39), plus the `{"claude": "claude-code", "codex": "codex"}` map copied at core.py:1505, :1526, :10750, :11233.
+- About 30 functions test a platform name: `build_command` (core.py:10674), `_launch_agent_cmd` (:11217), `profile_from_command` (:10739), `resume_command` (:11294), `agent_type_from_env` (:1809), `fork_base` (:8931), `wait_background` (:11573), `start_expert` resume (server.py:352, :419), `move_into_tmux` (server.py:1164), the parsers `_claude`/`_codex` (sessions.py:297, :357), `transcript_chain`, `custom_title`, `_transcript_settings` (sessions.py:1237), `_cache_line`, `_line_hits`, usage measurement (core.py:8580-8760), the hook parser `activity_event` (core.py:8446), `background_work` (:8624), pane wording in `prompt_pattern` (core.py:183) and `_prompt_parts`/`_prompt_found` (server.py:1378-1470), the MCP config writers (cli.py:1382-1504), the instruction file names (cli.py:1944-2046), and the JS name checks in views/sessions.js:42-44, :82, :123.
+- Effort levels exist in four copies (the `effort_levels` default, `PLATFORM_EFFORTS`, sessions.py:45, Codex's models cache), and the flag forms, the resume regex (core.py:11336) and the live `/effort` command are Claude- or Codex-only.
+- `default_agent`, `agent_rules` and an item's `--agent` accept only `claude-code` or `codex` (`_agent_platform`, core.py:1503). No role has its own agent setting. `fresh_expert` takes the first entry; expert and crash resume work only for Claude Code and Codex.
+- Grok, OpenCode, Gemini and Pi exist only as plain custom commands in `server.KNOWN_AGENTS` (server.py:2822): no agent type, no settings, no chat on the page, no resume.
+
+## The adapter
+
+Interface agreed by mark, 2026-11-11 ("the interface is fine"):
+
+The contract as code: `river/agents/__init__.py` (the names and shapes of each part, `check`, the registry and the
+loader of the user's modules). The built-in adapters are `river/agents/claude.py` and `river/agents/codex.py`.
+
+- One Python module per agent, `river/agents/<id>.py`, registered in `river/agents/__init__.py`. Data is plain Python dicts (raw strings for regexes), with functions only where data cannot say it. No TOML or JSON file: no parser, no new package, and the tests import the dicts. A user module in `~/.maximizepm/agents/<id>.py` overrides the built-in one or adds a new agent, with no maxpm release.
+- Three states: `working` (the agent runs a turn), `idle` (it waits at its prompt), `blocked` (it waits for a person: a permission menu, a question, the trust question). Gone comes from `maxpm release` or the process exit.
+- One report command, from the agent side to maxpm, modelled on herdr's `pane report-agent`:
+
+  ```
+  maxpm report --state idle|working|blocked [--message "<why blocked>"]
+               [--session-id <id>] [--seq <n>] [-- <resume command>]
+  maxpm release
+  ```
+
+  `--seq` increases with each report, so a late report never replaces a newer one. A hook that knows the session id and the resume command reports them, so maxpm does not find them per agent.
+- One declared source for each signal (state, session id), fixed in the adapter, with no chain of fallbacks: either a hook or plugin that the adapter installs and that calls `maxpm report`, or screen rules in the adapter's `DETECT` dict that maxpm's pane watcher applies and that end in the same `maxpm report`.
+- `DETECT` holds the process name, the idle prompt pattern, the working pattern (for example "esc to interrupt"), the patterns of each blocked screen, the text of the "tell it instead" option, and the image paste rule.
+- herdr's integrations (Apache-2.0) are a starting point for each agent's hook or plugin, changed to call `maxpm report`. maxpm never runs herdr's scripts behind a fake `HERDR_*` environment.
+
+What each agent gives for state (herdr's integration docs, 2026-11-11): Claude Code, hooks for many events (maxpm uses them now); OpenCode, a JS plugin with full state and session id; Pi, a TS extension with full state; Codex, Copilot CLI, Cursor CLI, Grok CLI, hooks that give the session id, state from the screen; Hermes, a plugin that gives the session id, state from the screen; Gemini CLI and Amp, screen only; Goose and Aider, not checked.
+
+Each part below is optional unless marked required; the page shows only what an adapter supports.
+
+1. Describe (required): id, label, exe, aliases, model family (or "multi" for provider/model text), model ids and default, an optional model list reader (Codex: `~/.codex/models_cache.json`).
+2. Settings: a list of setting specs. Each spec: key, kind (toggle, choice, text), choices, default, how it goes on the command line, and how it changes in a running session (a live command such as `/model {value}`, or a restart). The Setup section, the launch dialog and the Settings dialog draw from these specs. Config keys stay `<prefix><key>`.
+3. Effort: the agent's levels (static, or read from the CLI per model), a map from maxpm's levels (low, medium, high, xhigh, max) to the agent's names, the flag form, a live command or none, and how to read the effort back from the chat log. An agent with no effort gives none, and the page hides effort for it.
+4. Launch (required): `build_command(name, folder, model, effort, settings, prompt)` returns the argv. Capabilities: session name, system prompt file, hooks file, extra dirs, fork. `parse_command(argv)` reads an old command back into a profile.
+5. Session identity: how maxpm learns the session's id after the start (an env var, a new log file in a known folder, or text in the pane), its web link if any, and the env vars that tell maxpm a command runs inside this agent (replaces `agent_type_from_env`).
+6. Chat log: where the log of a session is (by session id or address, compressed or not), `parse(lines)` to the shared entries (assistant, user with images, tool, result, divider, summary, turn state), and optionally: the chain of files across resumes, the title, the cwd, usage and cache, the settings read back, the tool names that write files (for Artifacts).
+7. State: one declared source per signal, as above: a hook installer whose hooks call `maxpm report`, or the `DETECT` dict (replaces the wording in `prompt_pattern` and the Claude layout code in `_prompt_parts`). Claude Code's hooks move from `maxpm activity` to `maxpm report` in step 1, with no change of behaviour. Also: whether the agent waits for background commands in the foreground.
+8. Input: tmux paste is the same for every agent. The adapter gives the image paste convention (Claude: "[Image #N]"), the text of the "tell it instead" option of a permission menu, and an optional native message command (Codex: `codex queue --thread`).
+9. Resume: `resume_command(session_ref, model, effort, settings)` or none.
+10. Commands (slash command completion, mark 2026-11-11): the agent's built-in slash commands, and a reader for its custom ones for a session folder (Claude: ~/.claude/commands, .claude/commands, the skills in ~/.claude/skills and .claude/skills, plugin commands; Codex: ~/.codex/prompts). Each entry: name, description, argument hint. The page: when the message box starts with "/", a list of matching commands opens above it; Tab completes; Up and Down move in the list while it is open (otherwise they recall messages as now); Esc closes it; the text is sent as now.
+11. Setup: the instruction file name (CLAUDE.md, AGENTS.md, GEMINI.md, ...), the skills folder, the MCP config writer, the voice text, the open-link text.
+
+## Agent choice for each role
+
+A new setting `agent_for.<role>` for the roles worker, manager, reviewer, deployer, expert and context, at the global, project and item scopes, falling back to `default_agent`. `default_agent`, `agent_rules`, an item's `--agent`, and every start path (launch, Dispatch, serve's fresh, operational, review and deployer starts, manager, expert and fresh_expert, auto_context, deploy_now) take any registered adapter. Expert resume and crash resume (adopt_sessions, revive_sessions, session_restart, move_into_tmux) go through the adapter's `resume_command`.
+
+## Work, in order
+
+1. Claude Code and Codex become adapters with no change of behaviour; every name check above becomes an adapter call; all four tables and the copied maps go. The whole test suite stays green. This design file goes into the repo as docs/agent-adapters.md in this step.
+2. Agent choice is generic: `agent_for.<role>`, `default_agent`, `agent_rules`, `--agent`, expert and crash resume through the adapter.
+3. Settings, effort and slash commands come from the adapter: the Setup section, the launch dialog, the Settings dialog of a running session, and the "/" list with Tab in the message box (Claude Code and Codex lists first).
+4. One adapter per new agent, in parallel after step 3: Pi, OpenCode, Grok CLI, Hermes, Gemini CLI, Cursor CLI, GitHub Copilot CLI, Aider, Goose, Amp. Each worker installs the CLI, reads its real flags, log files and hook or plugin system on this Mac, and writes the adapter: describe, settings, effort, launch, identity, state first; then the chat log; then resume and commands. herdr's detection files (Apache-2.0, github.com/herdrdev/herdr) may serve as a start for prompt patterns.
+5. Each agent's item ends with its test: it starts from the page with its settings; its chat shows on the Sessions page; the message box reaches it; the state moves between working and idle (and waiting, when it asks a permission); its slash commands complete; resume works if the adapter has it.
+
+## Parallel plan
+
+The queue items of this work, by the order in which they can start. An item starts when every item it waits on is done;
+the items of one row run in parallel.
+
+1. #5167 A: the adapter contract, the registry and the user override folder (`river/agents/__init__.py`), Claude Code
+   and Codex with their describe part only, the commands `maxpm report` and `maxpm release` (no item), and this file.
+   No call site moves. Waits on nothing.
+2. After #5167, in parallel:
+   - #5181 B1: launch, resume, profile and identity go through the adapter (the start paths of core.py and server.py).
+   - #5182 B2: the chat log readers and usage measurement go through the adapter (sessions.py, the usage of core.py).
+   - #5183 B3: state through `maxpm report` and `DETECT` (the hooks, `activity_event`, `prompt_pattern`,
+     `_prompt_parts`). Claude Code's hooks move from `maxpm activity` to `maxpm report`, with no change of behaviour.
+   - #5184 B4: setup and the page go through the adapter (the MCP config writers, the instruction files, the name
+     checks of sessions.js).
+   - #5186 C3: Tab completion of / commands in the Sessions message box, from the adapter's command list.
+   - One adapter module for each new agent, with tests from recorded fixtures: #5170 Pi, #5171 OpenCode, #5172 Grok
+     CLI, #5173 Hermes, #5174 Gemini CLI, #5175 Cursor CLI, #5176 GitHub Copilot CLI, #5177 Aider, #5178 Goose,
+     #5179 Amp. Each one adds only `river/agents/<id>.py`, its fixtures and its tests; it changes no shared file, so
+     they do not conflict with the B items. Each worker installs the CLI and reads its real flags, log files and hook
+     or plugin system on this Mac.
+3. After #5181: #5168 C1, any registered agent for each role (`agent_for.<role>`, `default_agent`, `agent_rules`,
+   `--agent`, expert and crash resume), and #5169 C2, settings and effort from the adapter's setting specs (the Setup
+   section, the launch dialog, the Settings dialog).
+4. After #5181, #5182, #5183 and #5184: #5185 B5 removes the old platform tables and the copied maps; the whole suite
+   stays green.
+5. The test of each new agent in maxpm, after #5168, #5169, #5185, #5186 and its adapter item: it starts from the page
+   with its settings, its chat shows on the Sessions page, the message box reaches it, its state moves between working
+   and idle (and blocked, when it asks a permission), its / commands complete, and resume works if the adapter has it.
+   #5187 Pi (after #5170), #5188 OpenCode (#5171), #5189 Grok CLI (#5172), #5190 Hermes (#5173), #5191 Gemini CLI
+   (#5174), #5192 Cursor CLI (#5175), #5193 GitHub Copilot CLI (#5176), #5194 Aider (#5177), #5195 Goose (#5178),
+   #5196 Amp (#5179).
+
+Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 3 above); it waits on none of these.
+
+## As built in #5167
+
+- An adapter is a module; its parts are module-level names: `DESCRIBE` (+ `read_models`), `SETTINGS`, `EFFORT`
+  (+ `read_effort_levels`, `read_effort`), `build_command` with `LAUNCH` (+ `parse_command`), `IDENTITY`,
+  `chat_path` with `parse_chat` and `CHAT` (+ `chat_chain`, `chat_title`, `chat_cwd`, `chat_usage`, `chat_settings`),
+  `STATE` with `DETECT` or `install_hooks`, `INPUT`, `resume_command`, `COMMANDS` (+ `read_commands`), `SETUP`
+  (+ `write_mcp_config`). The id is the file name (`claude`, `codex`); the old platform names are aliases
+  (`claude-code`).
+- `agents.load()` reads the built-in modules, then each `<id>.py` in the `agents` folder beside the queue
+  (`~/.maximizepm/agents` by default). A user module replaces the built-in module of its id or adds an agent. A user
+  module that does not import or does not pass `agents.check()` is left out, and `agents.errors()` names why; the
+  built-in module of that id stays. `agents.get(name)` finds an agent by id or alias.
+- The loader requires `DESCRIBE`. A module without `build_command` loads, but `Adapter.missing()` names the launch part
+  and `Adapter.build_command` refuses, so no start path can start it.
+- `maxpm report` stores the state where the Sessions tab reads the hooks' state now: `agents.activity_at`,
+  `activity_event` (`report:working`, `report:idle`, `report:blocked`), and for blocked `activity_prompt` (the
+  message), so the row shows a prompt. `--seq` is kept in `agents.report_seq` for each `--session-id`
+  (`report_session`): a report whose seq is not above the last one of the same session changes nothing. The session id
+  goes into `agent_sessions`, the resume command into `agents.resume_argv` (JSON).
+- `maxpm release` with no item sets `activity_event` to `report:gone`: the agent is gone at once, as when its process
+  ends. Its next maxpm command makes it present again. `maxpm release <id>` gives an item back, as before.

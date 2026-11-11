@@ -524,7 +524,7 @@ def state(conn, a, turn, waiting=None):
                                        and a["activity_at"] > a["wait_at"]):
         # A turn after the last maxpm wait started: a person talks with it while its wait runs in the background.
         return "idle", "idle: waits for work"
-    if turn == "idle" or (turn is None and (a.get("activity_event") == "Stop" or a.get("role") == "idle")):
+    if turn == "idle" or (turn is None and (a.get("activity_event") in ("Stop", "report:idle") or a.get("role") == "idle")):
         bg = core.background_work(conn, a["name"])  # its harness wakes it when this ends
         return "idle", f"idle: waits on {bg[0]['what'] or 'its background work'}" if bg else "idle: at its prompt"
     return "working", STATES["working"]

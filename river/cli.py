@@ -1200,7 +1200,10 @@ def build_parser():
     x = sts.add_parser("rm", help="remove a step"); x.add_argument("id", type=int)
     x = sts.add_parser("move", help="move a step within its project"); x.add_argument("id", type=int)
     x.add_argument("to", type=int, help="new position (1 is first)")
-    x = sub.add_parser("release", help="give a claimed item back"); x.add_argument("id", type=int); x.add_argument("--note")
+    x = sub.add_parser("release", help="give a claimed item back; with no item, an agent's hook says that its session "
+                       "ended (docs/agent-adapters.md)")
+    x.add_argument("id", type=int, nargs="?", help="the item (none: the session of --as ended, and it is gone)")
+    x.add_argument("--note")
     x.add_argument("--author", metavar="COMMITS", help="a release review only: you wrote commits of the release (say "
                    "which); maxpm go and maxpm serve give you this review no more, and another session takes it")
     x = sub.add_parser("drop", help="close an item without doing it"); x.add_argument("id", type=int)
@@ -1320,6 +1323,15 @@ def build_parser():
     x.add_argument("--all", action="store_true", help="also stopped and gone agents that hold nothing")
     x.add_argument("--file", help="only agents whose held items touch this file or directory")
     sub.add_parser("heartbeat", help="renew your leases")
+    x = sub.add_parser("report", help="for an agent's hook, plugin or pane rule: the session's state now "
+                                      "(docs/agent-adapters.md); maxpm release says that it ended")
+    x.add_argument("--state", required=True, choices=core.REPORT_STATES,
+                   help="working: it runs a turn; idle: it waits at its prompt; blocked: it waits for a person")
+    x.add_argument("--message", help="blocked: what it waits for (a permission menu, a question)")
+    x.add_argument("--session-id", dest="session_id", help="the agent's own id of the session")
+    x.add_argument("--seq", type=int, help="a number that grows with each report: a late report changes nothing")
+    x.add_argument("resume", nargs=argparse.REMAINDER, metavar="-- RESUME",
+                   help="after --: the command that resumes this session")
     sub.add_parser("capacity", help="how many agent sessions the graph can use now")
 
     c = sub.add_parser("config", help="settings")
@@ -1889,6 +1901,8 @@ def _hint(a, res, actor):
     if actor and c == "done":
         return (f"next: maxpm --as {actor} go   (now: keep going while go gives you items, unless auto_continue is off; "
                 f"with tree, go gives only the tasks of your own tree)")
+    if c == "report" or (c == "release" and a.id is None):
+        return None  # a hook runs it: no hint
     if actor and (c == "release" or c == "review"):
         return f"next: maxpm --as {actor} go"
     if actor and c == "goal" and a.gcmd == "done":
@@ -2448,7 +2462,17 @@ def dispatch(conn, a, actor):
             return core.review_step_move(conn, a.id, a.to, actor)
         return core.review_fail(conn, a.id, a.fixes, a.note, a.project, actor, a.ask)
     if c == "release":
+        if a.id is None:
+            if a.note or a.author:
+                raise core.RiverError("--note and --author go with an item: maxpm release <id> --note ...")
+            return core.report_release(conn, actor)
         return core.release(conn, a.id, a.note, actor, a.author)
+    if c == "report":
+        resume = a.resume[1:] if a.resume[:1] == ["--"] else a.resume
+        if resume and a.resume[:1] != ["--"]:
+            raise core.RiverError(f"unknown words {' '.join(resume)!r}; the resume command goes after --: "
+                                  f"maxpm report --state idle -- <command>")
+        return core.report(conn, actor, a.state, a.message, a.session_id, a.seq, resume or None)
     if c == "drop":
         return core.drop(conn, a.id, actor, a.note)
     if c == "takeover":
@@ -4291,6 +4315,12 @@ def render(a, res):
         return
     if c == "heartbeat":
         print("leases renewed")
+        return
+    if c == "report":
+        print(f"{res['agent']}: {res['state']}" if res["stored"] else f"{res['agent']}: not stored: {res['why']}")
+        return
+    if c == "release" and res.get("state") == "gone":
+        print(f"{res['agent']}: its session ended (gone)")
         return
     if isinstance(res, dict) and "id" in res and "title" in res:
         _print_show(res)
