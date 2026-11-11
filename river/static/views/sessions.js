@@ -471,7 +471,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // A session that waits on the person says so above the composer, with a link to the ! dialog that answers it.
   function waitLine(j) {
     const w = $("#sessWait"), waits = ((list.find(x => x.name === agent) || {}).waiting || []).map(x => x.kind);
-    const what = waits.includes("prompt") || j.state === "prompt" ? "It waits at a permission prompt in its terminal."
+    // A prompt in the terminal is a permission prompt or a question of the agent (Hermes's clarify tool, #5253).
+    const what = waits.includes("prompt") || j.state === "prompt" ? "It waits for your answer at a prompt in its terminal."
       : waits.includes("question") || j.state === "answer" ? "It waits for your answer to its question." : "";
     w.innerHTML = what ? `${esc(what)} <span class="link" data-wait-open="1" tabindex="0" role="button">Answer it</span>` : "";
     w.classList.toggle("hidden", !what);
@@ -759,7 +760,11 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
         ...(sent.length ? { files: sent.map(f => f.id ? { name: f.name, id: f.id } : { name: f.name, data: f.data }) } : {}) });
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
-        appendEntries(col, [{ role: "user", sent: true, track: !!r.text, text: r.text || (sent.length ? "" : "(Enter)"),
+        // A slash command to an agent whose chat log does not record one (CHAT['commands'], #5253: Hermes) never
+        // shows in the chat: the turn says "sent to its terminal" and does not wait to be taken.
+        const ag = agentOf(ex.provider || ex.agent_type);
+        const untracked = !!ag && ag.chat_commands === false && /^\//.test(String(r.text || "").trim());
+        appendEntries(col, [{ role: "user", sent: true, track: !!r.text && !untracked, text: r.text || (sent.length ? "" : "(Enter)"),
                               images: (r.images || []).map(p => p.split(/[\\/]/).slice(-2).join("/")),
                               files: (r.files || []).filter(p => !(r.images || []).includes(p)).map(p => ({
                                 path: p.split(/[\\/]/).slice(-2).join("/"), name: p.split(/[\\/]/).pop().replace(/^\d{8}-\d{6}-[a-f0-9]{8}-/, "") })) }]);

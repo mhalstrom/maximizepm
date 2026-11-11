@@ -53,6 +53,8 @@ DESCRIBE = {
     "prefix": "hermes_",
     # /model <id> switches the model of the running session (session-scoped); a resume cannot (#5252).
     "model_live": "/model {value}",
+    # The Settings dialog of a running session reads the model back from its command line (#5253).
+    "model_read": r"(?:^|\s)(?:-m|--model)[ =](\S+)",
 }
 
 
@@ -278,7 +280,9 @@ INPUT = {"native": None}
 # The chat of a session is rows of Hermes's database, not a file. The Sessions tab reads a chat log as a file, line by
 # line (sessions.py); so chat_path keeps a copy of the session's rows as JSON lines in <queue folder>/hermes/<session
 # id>.jsonl, and brings it up to date at each call. CHAT["ref"]: the session id that the agent's maxpm commands record.
-CHAT = {"compressed": False, "file_tools": ["write_file", "patch"], "ref": "session", "cache_write": False}
+# "commands": Hermes keeps no record of a local command (/reasoning show) in state.db (#5253).
+CHAT = {"compressed": False, "file_tools": ["write_file", "patch"], "ref": "session", "cache_write": False,
+        "commands": False}
 
 _SESSION_COLS = ("id", "source", "model", "model_config", "billing_provider", "cwd", "title", "parent_session_id",
                  "started_at", "ended_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",

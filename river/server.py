@@ -2623,7 +2623,8 @@ def pane_prompts(conn, terminals):
     """{agent: prompt} for the agents whose tmux pane shows a prompt now (prompt_pattern), with one tmux command
     for every pane (#4607). A prompt: {question, options (their text, as the CLI lists them), selected (the option
     the marker is on), tool, command, why, lines (the prompt's lines as the pane shows them), sig (what the page
-    sends back with an answer, so a prompt that changed gets no keys)}."""
+    sends back with an answer, so a prompt that changed gets no keys), tell (the number of the option that lets the
+    person type what to do instead, or None)}."""
     pattern = core.setting(conn, "prompt_pattern").strip()
     if not pattern or not terminals:
         return {}
@@ -2636,11 +2637,14 @@ def pane_prompts(conn, terminals):
         if not parts:
             continue
         options = [o[0] for o in parts["options"]]
+        # The option that lets the person type what to do instead (DETECT['tell_instead']): the page's Other is that
+        # option, so the card shows no second Other (#5253: Hermes's '3. Other (type your answer)').
+        tell = next((n for n, o in enumerate(options) if layout["tell"].search(o)), None)
         sig = "\x1f".join([parts["question"] or "", parts["command"] or "", *options])
         out[agent] = {"question": parts["question"], "options": options,
                       "selected": next((n for n, o in enumerate(parts["options"]) if o[1]), 0),
                       "tool": parts["tool"], "command": parts["command"], "why": parts["why"],
-                      "lines": tail[parts["start"]:], "sig": sig}
+                      "lines": tail[parts["start"]:], "sig": sig, "tell": tell}
     return out
 
 

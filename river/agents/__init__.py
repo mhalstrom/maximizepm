@@ -186,6 +186,9 @@ SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 #      "format":      one of CHAT_FORMATS: "jsonl" (the default: one JSON object per line, parse_chat_line) or "text"
 #                     (#5222: entries of several lines, Aider's Markdown; the Sessions tab calls parse_chat over each
 #                     block of lines, and each entry of a block scrolls with the byte where its block starts),
+#      "commands":    bool (default True): the log records a slash command that the person types (/reasoning show);
+#                     False (#5253: Hermes keeps no record of its local commands): the Sessions tab does not wait to
+#                     see a sent slash command in the chat,
 #      "block":       for "text": a regex of a line that starts a block (a run of such lines starts one block: a prompt
 #                     of several lines); None: each read is one block. Cut where no entry spans the cut (Aider: at a
 #                     prompt, "^#### "); an entry with no time gets the time of the entry before it,
@@ -216,6 +219,7 @@ TURNS = ("working", "idle")
 CHAT_REFS = ("session", "address")
 CHAT_FORMATS = ("jsonl", "text")
 CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache_write": bool, "format": str,
+             "commands": bool,
              "block": (str, type(None))}
 
 # 7. State. STATE = {
@@ -932,7 +936,8 @@ def page_list():
         out.append({"id": a.id, "label": a.label, "exe": d["exe"], "names": a.names(), "family": d["family"],
                     "models": list(d["models"]), "default_model": d["default_model"], "prefix": d["prefix"],
                     "parts": {p: a.supports(p) for p in PARTS}, "launch": dict(a.launch),
-                    "setup": dict(a.setup or {}), "main": i == 0})
+                    "setup": dict(a.setup or {}), "main": i == 0,
+                    "chat_commands": (a.chat or {}).get("commands", True)})
     return {"agents": out, "errors": errors()}
 
 

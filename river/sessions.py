@@ -1191,7 +1191,7 @@ def session_settings(conn, agent, root=None, croot=None):
             seen = _transcript_settings(kind, path)
         except (OSError, ValueError, EOFError):
             seen = {}
-    cmd = a.get("pid_cmd") or ""
+    cmd = a.get("pid_cmd") or pane_command(conn, agent, ad)
     models = core.platform_models(conn, prov["id"]) if prov["id"] in core.launch_platforms() else []
     out = []
     for spec in ad.session_specs():
@@ -1218,6 +1218,28 @@ def session_settings(conn, agent, root=None, croot=None):
                     "default_key": spec.get("default"),
                     "default_value": core.setting(conn, spec["default"]) if spec.get("default") else None})
     return {"agent": agent, "provider": prov, "settings": out, "transcript": kind if path else None}
+
+
+def pane_command(conn, agent, ad):
+    """The command line of the agent's CLI in the agent's tmux pane, or "" (#5253). For a session whose process
+    maxpm does not record: Hermes runs the tools of every session in one gateway with no terminal, so maxpm keeps no
+    process of a Hermes session (#5247), and the Settings dialog read no model or effort. The line on the pane's
+    terminal that the adapter's DETECT finds (process_args, else process as the program or script name)."""
+    from . import server
+    try:
+        pane = server.agent_terminals(conn).get(agent)
+        tty = pane and next((p["tty"] for p in server._tmux_panes(everywhere=True) if p["pane"] == pane), None)
+    except core.RiverError:
+        return ""
+    if not tty:
+        return ""
+    lines, d = server._tty_lines(tty), ad.detect or {}
+    if d.get("process_args"):
+        hit = next((x for x in lines if re.search(d["process_args"], x)), None)
+        if hit:
+            return hit
+    exe = d.get("process") or ad.describe.get("exe")
+    return next((x for x in lines if exe and exe in server._programs([x])), "")
 
 
 def setting_spec(provider_id, key):

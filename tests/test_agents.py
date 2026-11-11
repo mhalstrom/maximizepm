@@ -506,6 +506,38 @@ class PaneState(Env):
             got = self.server.prompt_answer(self.c, name, p["sig"], other="run make clean instead", who="mark")
         self.assertEqual(got["picked"], "2. No, and tell Codex what to do differently")
 
+    def test_a_hermes_question_has_one_other_and_its_settings_come_from_the_pane(self):
+        """#5253: the question box's own '3. Other (type your answer)' is the card's Other (tell), so the card adds
+        no second one; the Settings dialog reads -m and --reasoning from the CLI on the pane's terminal, because
+        maxpm records no process of a Hermes session (#5247)."""
+        from river import sessions
+        name, pane = self.start("hermes")
+        fix = Path(__file__).resolve().parent / "fixtures" / "hermes" / "pane_blocked_clarify.txt"
+        pane["screen"] = fix.read_text()
+        p = self.server.pane_prompts(self.c, {name: pane["id"]})[name]
+        self.assertEqual(p["options"][p["tell"]], "3. Other (type your answer)")
+        with mock.patch.object(self.server, "PROMPT_PAUSE", 0):
+            got = self.server.prompt_answer(self.c, name, p["sig"], other="green", who="mark")
+        self.assertEqual((got["picked"], got["text"]), ("3. Other (type your answer)", "green"))
+        launcher = ("/Users/x/.hermes/tools/python-3.14.9/bin/python3 -I -c import os, re, sys\\012"
+                    "sys.path.insert(0, '/Users/x/.hermes/hermes-agent')\\012main() -m gpt-6.1-terra --reasoning low")
+        ttys = []
+        self.server.TTY_PS_RUNNER = lambda t: ttys.append(t) or f"-zsh\n{launcher}\n"
+        self.addCleanup(setattr, self.server, "TTY_PS_RUNNER", None)
+        got = {s["key"]: s for s in sessions.session_settings(self.c, name)["settings"]}
+        self.assertEqual((got["model"]["value"], got["model"]["source"]), ("gpt-6.1-terra", "command line"))
+        self.assertEqual((got["effort"]["value"], got["effort"]["source"]), ("low", "command line"))
+        self.assertEqual(ttys[-1], "ttys00" + pane["id"][1:])
+        self.server.TTY_PS_RUNNER = lambda t: "-zsh\n"  # no Hermes on the terminal: nothing read
+        self.assertNotEqual(sessions.pane_command(self.c, name, agents.get("hermes")), launcher)
+        self.assertEqual(sessions.pane_command(self.c, name, agents.get("hermes")), "")
+
+    def test_the_page_knows_which_chat_logs_record_a_slash_command(self):
+        # #5253: Hermes keeps no record of /reasoning show, so the page does not wait to see it taken.
+        got = {a["id"]: a["chat_commands"] for a in agents.page_list()["agents"]}
+        self.assertIs(got["hermes"], False)
+        self.assertIs(got["claude"], True)
+
 
 class ImportOrder(unittest.TestCase):
     def test_each_module_imports_first_in_a_new_interpreter(self):

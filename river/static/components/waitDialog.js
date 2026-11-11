@@ -16,15 +16,18 @@ function promptBlock(w, n) {
     return `<div class="wblock"><div class="wkind">Prompt</div><div class="wq">${esc(w.question)}</div>
       <div class="muted">This session runs in no tmux pane here, so the page cannot answer it: use Open session, or its terminal.</div></div>`;
   }
-  const opts = w.options.map((o, i) => `<label class="wopt"><input type="radio" name="pick${n}" value="${i}"${i === w.selected ? " checked" : ""}> <span>${esc(o)}</span></label>`).join("");
-  return `<form class="wblock" data-kind="prompt" data-sig="${esc(w.sig)}">
+  // The CLI's own option to type what to do instead (w.tell) is the Other choice with the text box: no second
+  // Other under it (#5253).
+  const own = Number.isInteger(w.tell) && w.tell < w.options.length;
+  const opts = w.options.map((o, i) => `<label class="wopt"><input type="radio" name="pick${n}" value="${own && i === w.tell ? "other" : i}"${i === w.selected ? " checked" : ""}> <span>${esc(o)}</span></label>`).join("");
+  return `<form class="wblock" data-kind="prompt" data-sig="${esc(w.sig)}"${own ? ` data-tell="${w.tell}"` : ""}>
     <div class="wkind">Prompt in its terminal</div>
     <div class="wq">${esc(w.question || w.tool || "The terminal waits for an answer")}</div>
     ${w.command ? `<div class="wcmd">${esc(w.command)}</div>` : ""}
     ${w.why ? `<div class="muted" style="font-size:12px">${esc(w.why)}</div>` : ""}
     <details class="wlines"><summary>What the terminal shows</summary><pre>${esc((w.lines || []).join("\n"))}</pre></details>
     ${opts}
-    <label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>
+    ${own ? "" : `<label class="wopt"><input type="radio" name="pick${n}" value="other"${w.options.length ? "" : " checked"}> <span>Other: tell it what to do instead</span></label>`}
     <textarea class="wother" placeholder="What the agent does instead" aria-label="What the agent does instead"></textarea>
     <button class="btn primary wgo" type="submit">Send answer</button>
   </form>`;
@@ -88,8 +91,11 @@ $("#waitList").addEventListener("submit", async (e) => {
       const pick = form.querySelector("input[type=radio]:checked");
       if (!pick) { toast("Pick an option", true); return; }
       const other = pick.value === "other" ? form.querySelector(".wother").value.trim() : "";
-      if (pick.value === "other" && !other) { toast("Write what the agent does instead", true); return; }
-      const r = await typeAction("prompt_answer", { agent, sig: form.dataset.sig, ...(other ? { other } : { pick: +pick.value }) });
+      // The CLI's own Other with no text: pick it, and the CLI asks for the text in its terminal.
+      const own = pick.value === "other" && !other && form.dataset.tell != null;
+      if (pick.value === "other" && !other && !own) { toast("Write what the agent does instead", true); return; }
+      const r = await typeAction("prompt_answer", { agent, sig: form.dataset.sig,
+        ...(other ? { other } : { pick: own ? +form.dataset.tell : +pick.value }) });
       toast(`Sent: ${r.text || r.picked}`);
       if (onSent) onSent(r.text || r.picked);
     }
