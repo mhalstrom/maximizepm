@@ -348,16 +348,21 @@ class Setup(Env):
         f = Path(os.environ["COPILOT_HOME"]) / "mcp-config.json"
         f.parent.mkdir(parents=True)
         f.write_text(json.dumps({"mcpServers": {"other": {"type": "local", "command": "x"}}}))
-        self.assertEqual(copilot.write_mcp_config("http://127.0.0.1:8765/mcp"), [str(f)])
+        a = agents.get("copilot")
+        self.assertIn("added MaximizePM", a.write_mcp_config())
         data = json.loads(f.read_text())
-        self.assertEqual(data["mcpServers"]["maxpm"], {"type": "http", "url": "http://127.0.0.1:8765/mcp",
-                                                       "tools": ["*"]})
+        entry = data["mcpServers"]["maxpm"]
+        self.assertEqual((entry["type"], entry["tools"], entry["args"][-1]), ("local", ["*"], "mcp"))
+        self.assertNotIn("MAXPM_CHAT", entry["env"])
         self.assertIn("other", data["mcpServers"])
         self.assertTrue(f.with_name("mcp-config.json.bak").exists())
-        self.assertEqual(copilot.write_mcp_config("http://127.0.0.1:8765/mcp"), [])
+        self.assertIn("nothing changed", a.write_mcp_config())
+        self.assertIn("took MaximizePM out", a.write_mcp_config(remove=True))
+        self.assertEqual(list(json.loads(f.read_text())["mcpServers"]), ["other"])
         f.write_text("{not json")
         with self.assertRaises(core.RiverError):
-            copilot.write_mcp_config("http://127.0.0.1:8765/mcp")
+            a.write_mcp_config()
+        self.assertEqual(f.read_text(), "{not json")
 
 
 if __name__ == "__main__":

@@ -300,20 +300,30 @@ class Commands(Home):
 class Setup(Home):
     def test_the_mcp_server_goes_into_the_user_settings(self):
         path = self.home / ".gemini" / "settings.json"
-        self.assertEqual(gemini.write_mcp_config("http://127.0.0.1:8765/mcp"), [str(path)])
-        self.assertEqual(json.loads(path.read_text()), {"mcpServers": {"maxpm": {"type": "http", "url": "http://127.0.0.1:8765/mcp"}}})
-        self.assertEqual(gemini.write_mcp_config("http://127.0.0.1:8765/mcp"), [])
+        a = agents.get("gemini")
+        self.assertIn("added MaximizePM", a.write_mcp_config())
+        entry = json.loads(path.read_text())["mcpServers"]["maxpm"]
+        self.assertEqual(entry["args"][-1], "mcp")
+        self.assertEqual(entry["env"], {"MAXPM_DB": str(core.db_path().expanduser().resolve())})  # no MAXPM_CHAT
+        self.assertIn("nothing changed", a.write_mcp_config())
         path.write_text(json.dumps({"theme": "Dark", "mcpServers": {"other": {"command": "x"}}}))
-        gemini.write_mcp_config("http://127.0.0.1:9000/mcp")
-        self.assertEqual(json.loads(path.read_text()), {"theme": "Dark", "mcpServers": {
-            "other": {"command": "x"}, "maxpm": {"type": "http", "url": "http://127.0.0.1:9000/mcp"}}})
+        a.write_mcp_config()
+        data = json.loads(path.read_text())
+        self.assertEqual((data["theme"], data["mcpServers"]["other"]), ("Dark", {"command": "x"}))
+        self.assertTrue(path.with_name("settings.json.bak").exists())
+        self.assertIn("took MaximizePM out", a.write_mcp_config(remove=True))
+        self.assertEqual(json.loads(path.read_text())["mcpServers"], {"other": {"command": "x"}})
+        self.assertIn("nothing changed", a.write_mcp_config(remove=True))
+        other = self.home / "elsewhere.json"
+        a.write_mcp_config(other)
+        self.assertIn("maxpm", json.loads(other.read_text())["mcpServers"])
 
     def test_a_settings_file_with_comments_is_left_as_it_is(self):
         path = self.home / ".gemini" / "settings.json"
         path.parent.mkdir(parents=True)
         path.write_text('{\n  // mine\n  "theme": "Dark"\n}\n')
-        with self.assertRaisesRegex(RiverError, "gemini mcp add --scope user --transport http maxpm"):
-            gemini.write_mcp_config("http://127.0.0.1:8765/mcp")
+        with self.assertRaisesRegex(RiverError, "gemini mcp add --scope user -e MAXPM_DB=.* maxpm .* mcp"):
+            agents.get("gemini").write_mcp_config()
         self.assertIn("// mine", path.read_text())
 
     def test_the_setup_names_gemini_md(self):

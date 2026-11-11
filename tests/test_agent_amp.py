@@ -264,23 +264,29 @@ class Chat(Env):
 
 
 class Setup(Env):
-    def test_the_mcp_server_goes_into_amp_settings_as_amp_mcp_add_writes_it(self):
+    def test_the_mcp_server_goes_into_amp_settings(self):
         f = self.root / "config" / "amp" / "settings.json"
         f.parent.mkdir(parents=True)
         f.write_text(json.dumps({"amp.permissions": [{"tool": "shell_command", "action": "ask"}]}))
-        self.assertEqual(self.a.module.write_mcp_config("http://127.0.0.1:8765/mcp"), [str(f)])
+        a = agents.get("amp")
+        self.assertIn("added MaximizePM", a.write_mcp_config())
         data = json.loads(f.read_text())
-        self.assertEqual(data["amp.mcpServers"], {"maxpm": {"url": "http://127.0.0.1:8765/mcp"}})
+        entry = data["amp.mcpServers"]["maxpm"]
+        self.assertEqual(entry["args"][-1], "mcp")
+        self.assertNotIn("MAXPM_CHAT", entry["env"])
         self.assertEqual(data["amp.permissions"], [{"tool": "shell_command", "action": "ask"}])
         self.assertTrue(f.with_name("settings.json.bak").exists())
-        self.assertEqual(self.a.module.write_mcp_config("http://127.0.0.1:8765/mcp"), [])
+        self.assertIn("nothing changed", a.write_mcp_config())
+        self.assertIn("took MaximizePM out", a.write_mcp_config(remove=True))
+        self.assertEqual(json.loads(f.read_text())["amp.mcpServers"], {})
+        self.assertIn("nothing changed", a.write_mcp_config(remove=True))
 
     def test_a_settings_file_with_comments_is_not_rewritten(self):
         f = self.root / "config" / "amp" / "settings.json"
         f.parent.mkdir(parents=True)
         f.write_text('{\n  // mine\n  "amp.updates.mode": "auto"\n}\n')
-        with self.assertRaisesRegex(core.RiverError, "amp mcp add maxpm http://h/mcp"):
-            self.a.module.write_mcp_config("http://h/mcp")
+        with self.assertRaisesRegex(core.RiverError, "amp mcp add --env MAXPM_DB=.* maxpm -- .* mcp"):
+            agents.get("amp").write_mcp_config()
         self.assertIn("// mine", f.read_text())
 
     def test_amp_settings_file_moves_the_settings(self):

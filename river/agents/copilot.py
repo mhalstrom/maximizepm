@@ -539,13 +539,16 @@ SETUP = {
 }
 
 
-def write_mcp_config(url):
-    """Add MaximizePM's MCP server (an http server at url) to Copilot's own list, $COPILOT_HOME/mcp-config.json,
-    as 'maxpm'; other servers stay, and the old file is kept as mcp-config.json.bak. Returns the files it changed.
-    Copilot Free's policy turns third-party MCP servers off ("Third-party MCP servers are disabled by your
-    organization's Copilot policy"): on that plan the entry is kept but not used."""
+def write_mcp_config(path=None, remove=False):
+    """Add (or, with remove, take out) MaximizePM's MCP server in Copilot's own list, $COPILOT_HOME/mcp-config.json
+    (path: another file), as mcpServers.maxpm = {"type": "local", command, args, env, "tools": ["*"]}: setup_entry(),
+    the stdio server `maxpm mcp`, with no MAXPM_CHAT (a Copilot session runs in a project folder). Other servers
+    stay; the old file is kept as mcp-config.json.bak. Copilot Free's policy turns third-party MCP servers off
+    ("Third-party MCP servers are disabled by your organization's Copilot policy"): on that plan the entry is kept
+    but not used. Returns one text that says what changed."""
+    from . import setup_entry
     from ..core import RiverError
-    f = home() / "mcp-config.json"
+    f = Path(path).expanduser() if path else home() / "mcp-config.json"
     old = f.read_text() if f.exists() else ""
     try:
         data = json.loads(old) if old.strip() else {}
@@ -553,12 +556,23 @@ def write_mcp_config(url):
         raise RiverError(f"{f} is not valid JSON ({e}); fix it first, MaximizePM does not overwrite it")
     if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
         raise RiverError(f"{f}: expected an object with an mcpServers object; fix it first")
-    entry = {"type": "http", "url": url, "tools": ["*"]}
-    if data.get("mcpServers", {}).get("maxpm") == entry:
-        return []
-    data.setdefault("mcpServers", {})["maxpm"] = entry
-    f.parent.mkdir(parents=True, exist_ok=True)
+    servers = data.setdefault("mcpServers", {})
+    if remove:
+        if "maxpm" not in servers:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        del servers["maxpm"]
+    else:
+        server = setup_entry()
+        server["env"].pop("MAXPM_CHAT", None)
+        entry = {"type": "local", **server, "tools": ["*"]}
+        if servers.get("maxpm") == entry:
+            return f"MaximizePM is already in {f}; nothing changed"
+        servers["maxpm"] = entry
     if old:
         f.with_name(f.name + ".bak").write_text(old)
+    f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(data, indent=2) + "\n")
-    return [str(f)]
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). A new Copilot session has no maxpm tools."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") +
+            ". A new Copilot session has the maxpm tools (/mcp lists them).")

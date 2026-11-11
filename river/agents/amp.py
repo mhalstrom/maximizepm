@@ -510,27 +510,41 @@ def settings_file():
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "amp" / "settings.json"
 
 
-def write_mcp_config(url):
-    """Add MaximizePM's MCP server (an http server at url) to amp.mcpServers of Amp's settings file as 'maxpm', as
-    `amp mcp add maxpm <url>` writes it; other keys stay, and the old file is kept as settings.json.bak. Returns the
-    files it changed. A settings file with comments (JSONC) is not rewritten: the error names the amp command."""
+def write_mcp_config(path=None, remove=False):
+    """Add (or, with remove, take out) MaximizePM's MCP server in Amp's settings file (settings_file(); path: another
+    file), as amp.mcpServers.maxpm = {command, args, env}: setup_entry(), the stdio server `maxpm mcp`, with no
+    MAXPM_CHAT (an Amp session runs in a project folder). Other keys stay; the old file is kept as settings.json.bak.
+    A settings file with comments (JSONC) is not rewritten: the error names the amp command that adds it instead.
+    Returns one text that says what changed."""
+    from . import setup_entry
     from ..core import RiverError
-    f = settings_file()
+    f = Path(path).expanduser() if path else settings_file()
+    entry = setup_entry()
+    entry["env"].pop("MAXPM_CHAT", None)
     old = f.read_text() if f.exists() else ""
     try:
         data = json.loads(old) if old.strip() else {}
     except ValueError:
+        env = " ".join(f"--env {k}={shlex.quote(v)}" for k, v in entry["env"].items())
         raise RiverError(f"{f} is not plain JSON (Amp allows comments), so MaximizePM does not rewrite it; "
-                         f"run: amp mcp add maxpm {url}")
+                         f"run: amp mcp add {env} maxpm -- {shlex.join([entry['command'], *entry['args']])}") from None
     servers = data.get("amp.mcpServers", {}) if isinstance(data, dict) else None
     if not isinstance(servers, dict):
         raise RiverError(f"{f}: expected an object with an amp.mcpServers object; fix it first")
-    entry = {"url": url}
-    if servers.get("maxpm") == entry:
-        return []
-    data.setdefault("amp.mcpServers", {})["maxpm"] = entry
-    f.parent.mkdir(parents=True, exist_ok=True)
+    servers = data.setdefault("amp.mcpServers", {})
+    if remove:
+        if "maxpm" not in servers:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        del servers["maxpm"]
+    else:
+        if servers.get("maxpm") == entry:
+            return f"MaximizePM is already in {f}; nothing changed"
+        servers["maxpm"] = entry
     if old:
         f.with_name(f.name + ".bak").write_text(old)
+    f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(data, indent=2) + "\n")
-    return [str(f)]
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). A new Amp session has no maxpm tools."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") +
+            ". A new Amp session has the maxpm tools.")

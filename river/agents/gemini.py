@@ -583,28 +583,42 @@ SETUP = {
 }
 
 
-def write_mcp_config(url):
-    """Point Gemini at MaximizePM's MCP server: mcpServers.maxpm = {"type": "http", "url": url} in the user settings,
-    ~/.gemini/settings.json; the other keys stay. A settings file that is not plain JSON (Gemini allows comments)
-    is not rewritten: RiverError names it and the command that adds the server instead."""
+def write_mcp_config(path=None, remove=False):
+    """Add (or, with remove, take out) MaximizePM's MCP server in Gemini's user settings, ~/.gemini/settings.json
+    (path: another file), as mcpServers.maxpm = {command, args, env}: setup_entry(), the stdio server `maxpm mcp`,
+    with no MAXPM_CHAT (a Gemini session runs in a project folder). Other keys stay; the old file is kept as
+    settings.json.bak. A file that is not plain JSON (Gemini allows comments) is not rewritten: RiverError names the
+    gemini command that adds the server instead. Returns one text that says what changed."""
+    import shlex
+    from . import setup_entry
     from ..core import RiverError
-    path = gemini_dir() / "settings.json"
-    data = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8") or "{}")
-        except ValueError:
-            raise RiverError(f"{path} is not plain JSON (comments?), so MaximizePM does not rewrite it; run "
-                             f"`gemini mcp add --scope user --transport http maxpm {url}` instead") from None
-        if not isinstance(data, dict):
-            raise RiverError(f"{path} holds no JSON object; fix it, then run the setup again")
+    f = Path(path).expanduser() if path else gemini_dir() / "settings.json"
+    entry = setup_entry()
+    entry["env"].pop("MAXPM_CHAT", None)
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
+    try:
+        data = json.loads(old) if old.strip() else {}
+    except ValueError:
+        env = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in entry["env"].items())
+        raise RiverError(f"{f} is not plain JSON (comments?), so MaximizePM does not rewrite it; run "
+                         f"`gemini mcp add --scope user {env} maxpm {shlex.join([entry['command'], *entry['args']])}` "
+                         f"instead") from None
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        raise RiverError(f"{f}: expected an object with an mcpServers object; fix it first")
     servers = data.setdefault("mcpServers", {})
-    want = {"type": "http", "url": url}
-    if servers.get("maxpm") == want:
-        return []
-    servers["maxpm"] = want
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".maxpm-tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-    return [str(path)]
+    if remove:
+        if "maxpm" not in servers:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        del servers["maxpm"]
+    else:
+        if servers.get("maxpm") == entry:
+            return f"MaximizePM is already in {f}; nothing changed"
+        servers["maxpm"] = entry
+    if old:
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). A new Gemini session has no maxpm tools."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") +
+            ". A new Gemini session has the maxpm tools (/mcp lists them).")
