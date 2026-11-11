@@ -1,0 +1,40 @@
+Added .aider* to .gitignore
+Warning for openai/fake-model: Unknown context window size and costs, using sane defaults.
+You can skip this check with --no-show-model-warnings
+
+https://aider.chat/docs/llms/warnings.html
+Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]: n
+
+Aider v0.86.2
+Model: openai/fake-model with whole edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+
+
+https://aider.chat/HISTORY.html#release-notes
+Would you like to see what's new in this version? (Y)es/(N)o [Yes]: n
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> Add a script that prints a greeting
+
+I will add a small script.
+
+hello.py
+
+
+print('hello from aider')
+
+
+
+Tokens: 771 sent, 21 received.
+
+hello.py
+Create new file? (Y)es/(N)o [Yes]: y
+Applied edit to hello.py
+Commit 8274dc6 Add hello script
+You can use /undo to undo and discard each aider commit.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+hello.py
+>
+
+
+

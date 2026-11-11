@@ -1,0 +1,40 @@
+hello.py
+> /run echo hello
+
+hello
+Add 0.0k tokens of command output to the chat? (Y)es/(N)o [Yes]: y
+Added 1 line of output to the chat.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+hello.py
+> /chat-mode diff
+
+How do I run it?
+Aider v0.86.2
+Model: openai/fake-model with diff edit format
+Git repo: .git with 2 files
+Repo-map: using 1024 tokens, auto refresh
+Added hello.py to the chat.
+Restored previous conversation history.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+hello.py
+diff> How do I run it?
+
+The script prints a greeting. Nothing else to change.
+
+
+Tokens: 2.5k sent, 11 received.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+hello.py
+diff> How do I run it now?
+
+Run it with this command:
+
+
+python3 hello.py
+
+
+
+Tokens: 2.6k sent, 16 received.
+
+python3 hello.py
+Run shell command? (Y)es/(N)o/(D)on't ask again [Yes]:

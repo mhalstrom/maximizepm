@@ -1,0 +1,40 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Warning: openai/fake-model does not support 'reasoning_effort', ignoring.
+Use --no-check-model-accepts-settings to force the 'reasoning_effort' setting.
+Aider v0.86.2
+Model: openai/fake-model with whole edit format
+Git repo: .git with 2 files
+Repo-map: using 1024 tokens, auto refresh
+Restored previous conversation history.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

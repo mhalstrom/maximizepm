@@ -1,0 +1,40 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+You can skip this check with --no-gitignore
+Add .aider* to .gitignore (recommended)? (Y)es/(N)o [Yes]: y
+Added .aider* to .gitignore
+Warning for openai/fake-model: Unknown context window size and costs, using sane defaults.
+You can skip this check with --no-show-model-warnings
+
+https://aider.chat/docs/llms/warnings.html
+Open documentation url for more info? (Y)es/(N)o/(D)on't ask again [Yes]: n
+
+Aider v0.86.2
+Model: openai/fake-model with whole edit format
+Git repo: .git with 1 files
+Repo-map: using 1024 tokens, auto refresh
+
+
+https://aider.chat/HISTORY.html#release-notes
+Would you like to see what's new in this version? (Y)es/(N)o [Yes]: n
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> Add a script that prints a greeting
+
+    ░█     Waiting for openai/fake-model
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
