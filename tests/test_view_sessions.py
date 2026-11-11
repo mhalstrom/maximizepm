@@ -318,7 +318,9 @@ class Sessions(Base):
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM session_pins").fetchone()[0], 0)
         # The page: a pin button on worker rows only, and pinned workers first in their group.
         js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text()
-        self.assertIn('if (["manager", "expert", "assistant"].includes(s.role)) return "";', js)
+        # No pin on these rows, only an empty slot that keeps the dot and the time in one column (#5320, #5397).
+        self.assertIn('if (["manager", "expert", "assistant"].includes(s.role)) return `<span class="srow-pin-slot" '
+                      'aria-hidden="true"></span>`;', js)
         self.assertIn("workers.sort((a, b) => isPinned(b) - isPinned(a));", js)
 
     def test_the_state_names_a_prompt_a_question_and_a_wait_for_work(self):
