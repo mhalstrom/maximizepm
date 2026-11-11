@@ -951,6 +951,9 @@ setInterval(() => {
 }, 60 * 1000);
 // The tab in the address shows at once, before the state comes (#4888): Sessions, Artifacts, Done and Terminal read
 // their own data, and the others draw when the state is there. A first state that fails says so in the loading line.
+// Until openFromUrl has read the address, nothing that draws writes one: the session's side panel restored its saved
+// tabs, found the artifact of the address closed, and wrote /sessions/<s> before openFromUrl read it (#5399).
+quiet++;
 {
   const r = readUrl();
   firstPage = r.root && r.item == null;  // before the session list writes the address of the session it shows
@@ -959,7 +962,7 @@ setInterval(() => {
       if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
   }
 }
-refresh().then(openFromUrl).then(maybeSetup).catch((e) => {
+refresh().finally(() => { quiet--; }).then(openFromUrl).then(maybeSetup).catch((e) => {
   const boot = $("#bootNote"); if (boot) boot.textContent = `Could not load the queue (${e.message}); the page asks again every 3 seconds.`;
 });
 setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 3000);
