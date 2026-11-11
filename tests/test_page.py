@@ -729,11 +729,14 @@ try {
   await until(() => location.pathname === "/you" && shown(q("#sessYou")), "the You view at /you");
   await until(() => q("#needsYou").textContent.includes("Approve the logo") && q("#inboxTitle").textContent.includes("mark"), "Needs you and the inbox");
   out.you = !shown(q("#sessMain")) && q("#sessYouRow .srow").classList.contains("on") && !q("#sessions .srow.on");
+  // The session rows come from a poll of their own (api/sessions), which can end after the You view shows (#5272).
+  await until(() => q('#sessions .srow[data-session="ag"] .srow-main'), "the session row of ag");
   q('#sessions .srow[data-session="ag"] .srow-main').click();
   await until(() => location.pathname === "/sessions/ag" && shown(q("#sessMain")), "the chat of ag");
   out.chat = !shown(q("#sessYou")) && !q("#sessYouRow .srow").classList.contains("on");
   history.back();
   await until(() => location.pathname === "/you" && shown(q("#sessYou")), "Back shows You again");
+  await until(() => q("#sessArtsRow .srow-main"), "the Artifacts row");
   q("#sessArtsRow .srow-main").click();
   await until(() => location.pathname === "/artifacts" && shown(q("#sessArts")) && !shown(q("#sessYou")), "the Artifacts row: /artifacts");
   out.arts = q("#sessArtsRow .srow").classList.contains("on") && !q("#sessYouRow .srow").classList.contains("on")
