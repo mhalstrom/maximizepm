@@ -269,6 +269,9 @@ DEFAULT_SETTINGS = {
     # (#5352, decision 5 of the canvas does-maxpm-work). 0s: no samples. sample_keep: rows older than this go.
     "sample_every": "1m",
     "sample_keep": "90d",
+    # maxpm health (#5353): the person's minutes that one needs-you row stands for. The headline 'person minutes per
+    # done item' is needs-you rows x this / items done: a proxy, since MaximizePM cannot see the person's real time.
+    "health_person_minutes": "3",
     "manage_every": "30m",
     # maxpm manage --watch waits this long after the first new finding, and then returns all new findings at
     # once: they often come in groups (an agent ends, then its lease runs out), and each wake makes the manager
@@ -1418,7 +1421,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"prompt_pattern is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "canvas_max", "canvas_versions"):
+                 "max_sessions", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -10851,6 +10854,98 @@ def idle_share(conn, since="7d", until=None, project=None):
     return {"since": iso(t0), "until": iso(t1), "secs": by, "share": share, "total_secs": total,
             "sessions": sessions, "samples": sum(r["n"] for r in rows), "idle": share["waiting_work"],
             "first": first}
+
+
+# ---------------------------------------------------------------- health (#5353)
+
+# A done item of a review fail: review_fail adds each fix with this context (the rework a review found).
+REVIEW_FIX_CONTEXT = "Found in the review of release"
+
+
+def _pct(values, q):
+    """The q quantile (0..1) of a list of numbers, by the nearest rank; None for an empty list."""
+    if not values:
+        return None
+    v = sorted(values)
+    return v[min(len(v) - 1, max(0, math.ceil(q * len(v)) - 1))]
+
+
+def _health_range(conn, t0, t1, pid, minutes):
+    """The measures of maxpm health for the time from t0 to t1 (pid: one project's id, or None)."""
+    a, b = iso(t0), iso(t1)
+    pw = " AND i.project_id=?" if pid is not None else ""
+    pa = [pid] if pid is not None else []
+    days = max((t1 - t0).total_seconds() / 86400, 1 / 24)
+    done = conn.execute("SELECT i.id, i.kind, i.doer, p.name AS project FROM items i JOIN projects p ON p.id=i.project_id "
+                        "WHERE i.status='done' AND i.closed_at>=? AND i.closed_at<?" + pw, [a, b] + pa).fetchall()
+    n = len(done)
+    by_kind, by_project = {}, {}
+    for r in done:
+        by_kind[r["kind"] or "work"] = by_kind.get(r["kind"] or "work", 0) + 1
+        by_project[r["project"]] = by_project.get(r["project"], 0) + 1
+
+    def events(like):
+        return conn.execute("SELECT COUNT(*) AS n FROM events e JOIN items i ON i.id=e.item_id "
+                            "WHERE e.change LIKE ? AND e.at>=? AND e.at<?" + pw, [like, a, b] + pa).fetchone()["n"]
+    reopens = events("reopened%")
+    lost = events("lease expired%")
+    fixes = conn.execute("SELECT COUNT(*) AS n FROM items i WHERE i.context LIKE ? AND i.created_at>=? "
+                         "AND i.created_at<?" + pw, [REVIEW_FIX_CONTEXT + "%", a, b] + pa).fetchone()["n"]
+    # Needs-you rows: the person's part. A message row counts for the project of its message's item.
+    ny = ("SELECT n.opened_at, n.closed_at FROM needs_you n LEFT JOIN messages m ON m.id=n.message_id "
+          "LEFT JOIN items i ON i.id=COALESCE(n.item_id, m.item_id) WHERE 1=1" + pw)
+    opened = conn.execute(f"SELECT COUNT(*) AS n FROM ({ny}) WHERE opened_at>=? AND opened_at<?", pa + [a, b]).fetchone()["n"]
+    waits = [(parse_iso(r["closed_at"]) - parse_iso(r["opened_at"])).total_seconds() / 3600 for r in conn.execute(
+        f"SELECT * FROM ({ny}) WHERE closed_at>=? AND closed_at<?", pa + [a, b])]
+    open_ages = [(t1 - parse_iso(r["opened_at"])).total_seconds() / 3600 for r in conn.execute(
+        f"SELECT * FROM ({ny}) WHERE opened_at<? AND (closed_at IS NULL OR closed_at>=?)", pa + [b, b])]
+    # Cost: the measured usage of the items done in the range, in input-token equivalents.
+    cost, cost_kind = [], {}
+    for r in done:
+        u = item_usage(conn, r["id"])
+        if u:
+            cost.append(u["eq"])
+            cost_kind.setdefault(r["kind"] or "work", []).append(u["eq"])
+    med = (lambda xs: statistics.median(xs) if xs else None)
+    return {
+        "since": a, "until": b, "days": round(days, 2), "done": n,
+        "per_day": n / days, "by_kind": by_kind, "by_project": by_project,
+        "reopens": reopens, "lost_claims": lost, "review_fixes": fixes,
+        "rework_rate": (reopens + lost + fixes) / n if n else None,
+        "needs_you_opened": opened,
+        "person_load": opened * 100 / n if n else None,
+        "person_minutes_per_item": opened * minutes / n if n else None,
+        "wait_closed": len(waits),
+        "wait_mean_h": statistics.fmean(waits) if waits else None, "wait_p90_h": _pct(waits, 0.9),
+        "open_now": len(open_ages), "open_mean_age_h": statistics.fmean(open_ages) if open_ages else None,
+        "cost_measured": len(cost), "cost_median_eq": med(cost),
+        "cost_mean_eq": statistics.fmean(cost) if cost else None,
+        "cost_by_kind": {k: {"items": len(v), "median_eq": med(v)} for k, v in sorted(cost_kind.items())},
+        "sessions": idle_share(conn, t0, t1, project=None if pid is None else
+                               conn.execute("SELECT name FROM projects WHERE id=?", (pid,)).fetchone()["name"]),
+    }
+
+
+def health(conn, since="7d", until=None, project=None):
+    """maxpm health: does MaximizePM work? The measures of the canvas does-maxpm-work (decided 2026-11-11, #5338)
+    for the time from since to until, and for the time of the same length before it, so a change shows. Headline:
+    person minutes per done item (a proxy: needs-you rows x health_person_minutes / items done), with items done
+    per day and the rework rate beside it, so a fall in quality shows. Rework: reopens, lost claims (a lease ran
+    out) and the fix items of a failed review, per done item. Cost in input-token equivalents (maxpm usage)."""
+    t1 = until if isinstance(until, datetime) else (parse_when(until) if until else now())
+    if since == "all":
+        first = conn.execute("SELECT MIN(created_at) AS t FROM items").fetchone()["t"]
+        t0 = parse_iso(first) if first else t1
+    else:
+        t0 = since if isinstance(since, datetime) else (t1 - parse_duration(since) if _DURATION.match(since or "")
+                                                        else parse_when(since))
+    if t0 >= t1:
+        raise RiverError("maxpm health: since must be before until (for example --since 7d, or --since 30d)")
+    pid = _project(conn, project)["id"] if project else None
+    minutes = int(setting(conn, "health_person_minutes", project_id=pid))
+    now_r = _health_range(conn, t0, t1, pid, minutes)
+    before = _health_range(conn, t0 - (t1 - t0), t0, pid, minutes)
+    return {"project": project, "person_minutes": minutes, "now": now_r, "before": before}
 
 
 # ---------------------------------------------------------------- capacity

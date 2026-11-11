@@ -550,6 +550,51 @@ def render_usage(res, limit=20):
         print(f"  ... {len(res['items']) - limit} more (--limit {len(res['items'])})")
 
 
+def _num(v, fmt="{:.1f}", none="-"):
+    return none if v is None else fmt.format(v)
+
+
+def render_health(res):
+    """maxpm health (#5353): the headline first, then each measure with the value of the time before."""
+    n, b = res["now"], res["before"]
+
+    def pair(key, fmt="{:.1f}", unit=""):
+        return f"{_num(n[key], fmt + unit)}  (before {_num(b[key], fmt + unit)})"
+    days = f"{n['days']:g}d"
+    print(f"Does MaximizePM work?{' Project ' + res['project'] + ',' if res['project'] else ''} "
+          f"{n['since'][:16]} to {n['until'][:16]} UTC ({days}), against the {days} before")
+    print(f"HEADLINE  person minutes per done item: {pair('person_minutes_per_item', '{:.2f}')}")
+    print(f"          a proxy: {res['person_minutes']} min per needs-you row (health_person_minutes), not measured time")
+    print(f"  items done per day   {pair('per_day')}   {n['done']} done")
+    print(f"  rework rate          {pair('rework_rate', '{:.1%}')}   reopens {n['reopens']}, lost claims "
+          f"(lease ran out) {n['lost_claims']}, review fixes {n['review_fixes']}")
+    print(f"  person wait          mean {pair('wait_mean_h', '{:.1f}', 'h')}, p90 {_num(n['wait_p90_h'], '{:.1f}h')} "
+          f"({n['wait_closed']} closed); open at the end {n['open_now']}, mean age {_num(n['open_mean_age_h'], '{:.1f}h')}")
+    print(f"  person load          {pair('person_load')} needs-you rows per 100 done items "
+          f"({n['needs_you_opened']} opened)")
+    s = n["sessions"]
+    if s["total_secs"]:
+        names = {"waiting_work": "waiting for work", "waiting_person": "waiting on a person"}
+        parts = ", ".join(f"{names.get(k, k)} {v:.0%}" for k, v in s["share"].items() if v)
+        print(f"  session idle         {s['idle']:.0%} waiting for work  (before "
+              f"{_num(b['sessions']['idle'] if b['sessions']['total_secs'] else None, '{:.0%}')}); "
+              f"{parts}; {s['sessions']} sessions, {s['total_secs'] / 3600:.1f}h sampled")
+    else:
+        print(f"  session idle         no samples in this time (maxpm serve records them from "
+              f"{(s['first'] or 'its next start')[:16]})")
+    if n["cost_measured"]:
+        kinds = ", ".join(f"{k} {_k(v['median_eq'])} ({v['items']})" for k, v in n["cost_by_kind"].items())
+        print(f"  cost per done item   median {_k(n['cost_median_eq'])} eq  (before "
+              f"{_k(b['cost_median_eq']) if b['cost_median_eq'] is not None else '-'}), mean {_k(n['cost_mean_eq'])}; "
+              f"{n['cost_measured']} of {n['done']} measured; by kind: {kinds}")
+    else:
+        print("  cost per done item   no measured items (maxpm usage)")
+    if len(n["by_project"]) > 1:
+        top = sorted(n["by_project"].items(), key=lambda kv: -kv[1])
+        print("  done by project      " + ", ".join(f"{p} {c}" for p, c in top[:8])
+              + (f", {len(top) - 8} more" if len(top) > 8 else ""))
+
+
 def _handoff_lines(goal, h, due=None, indent="  "):
     """The handoff of a goal for goal show and the go briefing; and a line when its owner should renew it."""
     out = []
@@ -1003,6 +1048,10 @@ def build_parser():
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
     x.add_argument("--measure", type=int, metavar="ID", help="read this item's usage from the transcripts again first")
     x.add_argument("--limit", "-n", type=int, default=20, help="how many items to list (default 20)")
+    x = sub.add_parser("health", help="does MaximizePM work: person minutes per done item, items done per day, the "
+                       "rework rate, the person's waits, session idle time and cost, against the time before")
+    x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; 30d; all)")
+    x.add_argument("--until", help="the end of the time (default now)")
     x = sub.add_parser("log", help="completed work: done items with output, who, and when, by day")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
 
@@ -2344,6 +2393,8 @@ def dispatch(conn, a, actor):
         return {**core.status(conn, a.recent), "relay": relay.saved_status()}
     if c == "usage":
         return core.usage_report(conn, a.project, a.since, a.measure)
+    if c == "health":
+        return core.health(conn, a.since, a.until, a.project)
     if c == "needs-you":
         return core.needs_you(conn, a.human, a.all)
     if c == "prompt":
@@ -3816,6 +3867,8 @@ def render(a, res):
         return render_wait(res)
     if c == "usage":
         return render_usage(res, a.limit)
+    if c == "health":
+        return render_health(res)
     if c == "show" and a.brief:
         return _print_brief(res)
     if c == "cleanup":

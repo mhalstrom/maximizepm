@@ -302,6 +302,9 @@ Stop when the user tells you to, and tell the user what you did.
 - GOAL DONE? (a goal with no owner, no open item, and finished work): decide whether its done-when holds.
   Yes: `maxpm goal done <goal> --result "<one line>"`. No: add the items it still needs
   (`maxpm add "<title>" --goal <goal>`). Ask the user only when only they can tell.
+- `maxpm health [--since 7d|30d] [--project P]`: does MaximizePM work. Read it when the user asks, and give the
+  headline (person minutes per done item, a proxy), items done per day, and the rework rate, each against the time
+  before; then the person's waits, the share of session time idle, and the cost per done item.
 - Planning: the section Writing tasks below (add, dep, prio, edit, the backlog).
 
 ## Writing tasks

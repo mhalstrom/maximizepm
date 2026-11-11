@@ -8548,3 +8548,112 @@ class SessionSamples(Base):
         # since as a duration back from until: 1m before t0+2m holds only the last pass (t0+1m is at the edge)
         last = core.idle_share(self.c, "1m", until=self.t0 + core.timedelta(minutes=2, seconds=1))
         self.assertEqual(last["samples"], 5)
+
+
+class Health(Base):
+    """maxpm health: the measures of the canvas does-maxpm-work over a time and the time before (#5353)."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        core.project_add(self.c, "b")
+        self.end = core.parse_iso("2026-11-11T00:00:00Z")
+        self.ids = []
+
+    def at(self, days_ago):
+        return core.iso(self.end - core.timedelta(days=days_ago))
+
+    def done_item(self, project, days_ago, kind="work", eq=None, context=""):
+        i = self.add(project, f"item {len(self.ids)}")
+        self.c.execute("UPDATE items SET status='done', kind=?, created_at=?, closed_at=?, context=? WHERE id=?",
+                       (kind, self.at(days_ago + 0.5), self.at(days_ago), context, i))
+        if eq is not None:
+            self.c.execute("INSERT INTO item_usage VALUES (?, ?, 'w', 'fresh', 10, ?, 0, 0, 0, 100, 1000, ?)",
+                           (i, f"s{i}", eq, self.at(days_ago)))
+        self.ids.append(i)
+        return i
+
+    def needs_you(self, item, opened_days_ago, closed_days_ago=None):
+        self.c.execute("INSERT INTO needs_you (kind, item_id, human, summary, opened_at, closed_at) "
+                       "VALUES ('item', ?, 'mark', 's', ?, ?)",
+                       (item, self.at(opened_days_ago),
+                        None if closed_days_ago is None else self.at(closed_days_ago)))
+
+    def event(self, item, days_ago, change):
+        self.c.execute("INSERT INTO events (item_id, at, actor, change) VALUES (?, ?, 'w', ?)",
+                       (item, self.at(days_ago), change))
+
+    def seed(self):
+        # The last 7 days: four done items in a, two in b; the 7 days before: two in a.
+        x = [self.done_item("a", d, eq=e) for d, e in ((1, 100), (2, 300), (3, 200), (4, None))]
+        x += [self.done_item("b", 1, kind="review", eq=50), self.done_item("b", 2)]
+        self.done_item("a", 8, eq=1000)
+        self.done_item("a", 9, eq=3000)
+        self.event(x[0], 1, "reopened (was done)")
+        self.event(x[1], 2, "lease expired (was w); back to open")
+        self.event(x[1], 9, "lease expired (was w); back to open")
+        self.event(x[2], 3, "left the queue (claimed)")  # not rework: it left an agent's own queue
+        fix = self.add("a", "fix it")
+        self.c.execute("UPDATE items SET created_at=?, context=? WHERE id=?",
+                       (self.at(2), core.REVIEW_FIX_CONTEXT + " t (#1)", fix))
+        self.needs_you(x[0], 3, 1)        # waited 48h
+        self.needs_you(x[1], 2.5, 2)      # waited 12h
+        self.needs_you(x[4], 1)           # still open: 24h old at the end
+        self.needs_you(x[2], 9, 8.5)      # before: waited 12h
+        self.c.commit()
+
+    def test_the_measures_and_the_time_before(self):
+        self.seed()
+        h = core.health(self.c, "7d", until=self.end)
+        n, b = h["now"], h["before"]
+        self.assertEqual((n["done"], b["done"]), (6, 2))
+        self.assertAlmostEqual(n["per_day"], 6 / 7)
+        self.assertEqual(n["by_kind"], {"work": 5, "review": 1})
+        self.assertEqual(n["by_project"], {"a": 4, "b": 2})
+        self.assertEqual((n["reopens"], n["lost_claims"], n["review_fixes"]), (1, 1, 1))
+        self.assertAlmostEqual(n["rework_rate"], 3 / 6)
+        self.assertAlmostEqual(b["rework_rate"], 1 / 2)
+        self.assertEqual(n["needs_you_opened"], 3)
+        self.assertAlmostEqual(n["person_load"], 50)
+        self.assertAlmostEqual(n["person_minutes_per_item"], 3 * 3 / 6)
+        self.assertAlmostEqual(n["wait_mean_h"], 30)
+        self.assertEqual(n["wait_p90_h"], 48)
+        self.assertEqual(n["open_now"], 1)
+        self.assertAlmostEqual(n["open_mean_age_h"], 24)
+        self.assertEqual(b["wait_mean_h"], 12)
+        self.assertEqual(n["cost_measured"], 4)
+        self.assertEqual(n["cost_median_eq"], 150)
+        self.assertEqual(n["cost_by_kind"], {"review": {"items": 1, "median_eq": 50},
+                                             "work": {"items": 3, "median_eq": 200}})
+        self.assertEqual(b["cost_median_eq"], 2000)
+
+    def test_one_project_and_the_minutes_setting(self):
+        self.seed()
+        core.config_set(self.c, "health_person_minutes", "10")
+        h = core.health(self.c, "7d", until=self.end, project="b")
+        self.assertEqual(h["now"]["done"], 2)
+        self.assertEqual(h["now"]["needs_you_opened"], 1)
+        self.assertAlmostEqual(h["now"]["person_minutes_per_item"], 10 / 2)
+        self.assertEqual(h["now"]["rework_rate"], 0)
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "health_person_minutes", "a few")
+        with self.assertRaises(core.RiverError):
+            core.health(self.c, "7d", until=self.end, project="nope")
+
+    def test_an_empty_queue_and_the_cli(self):
+        h = core.health(self.c, "30d")
+        self.assertIsNone(h["now"]["rework_rate"])
+        self.assertIsNone(h["now"]["person_minutes_per_item"])
+        self.seed()
+        from river import cli
+        out = io.StringIO()
+        old = os.environ.get("MAXPM_DB")
+        os.environ["MAXPM_DB"] = self.path
+        self.addCleanup(lambda: os.environ.__setitem__("MAXPM_DB", old) if old else os.environ.pop("MAXPM_DB", None))
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "", "health", "--until", "2026-11-11T00:00", "--since", "7d"])
+        text = out.getvalue()
+        self.assertIn("HEADLINE  person minutes per done item: 1.50  (before 1.50)", text)
+        self.assertIn("a proxy: 3 min per needs-you row", text)
+        self.assertIn("rework rate          50.0%", text)
+        self.assertIn("session idle         no samples", text)
