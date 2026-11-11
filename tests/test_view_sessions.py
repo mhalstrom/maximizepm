@@ -1086,6 +1086,41 @@ try {
         drive_page(self, driver)
         self.assertEqual(sessions.sent_prompts(self.c, "ag")[0], "sent now")
 
+    def test_a_wrapped_line_counts_as_several_lines(self):
+        """#5146: on a long line that wraps, Up recalls only from its first visual line and Down only from its last."""
+        long = "many words " * 80
+        for t in ("short", long.strip()):
+            sessions.record_prompt(self.c, "ag", t, "mark")
+        driver = DRIVE_HEAD + r"""
+const box = () => q("#sessText");
+const key = (k, at) => {
+  if (at != null) box().setSelectionRange(at, at);
+  const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
+  box().dispatchEvent(e);
+  return e.defaultPrevented;
+};
+const up = at => key("ArrowUp", at), down = at => key("ArrowDown", at);
+const LONG = "LONGTEXT".trim();
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && !box().disabled, "the box of ag");
+  box().focus();
+  box().value = "typed " + LONG; box().dispatchEvent(new Event("input"));
+  check(!up(box().value.length) && box().value.startsWith("typed "), "Up at the end of a wrapped line moves the caret only");
+  check(!up(box().value.length >> 1) && box().value.startsWith("typed "), "Up on a middle visual line moves the caret only");
+  await until(() => up(3), "Up on the first visual line recalls");
+  check(box().value === LONG, "the newest prompt: " + box().value.slice(0, 20));
+  check(box().selectionStart === 0, "the caret goes to the start, on the first visual line: " + box().selectionStart);
+  check(up() && box().value === "short", "a second Up goes on");
+  check(down() && box().value === LONG, "Down goes forward");
+  check(box().selectionStart === LONG.length, "the caret at the end, on the last visual line");
+  check(!down(3) && box().value === LONG, "Down on the first visual line moves the caret only");
+  check(!down(LONG.length >> 1) && box().value === LONG, "Down on a middle visual line moves the caret only");
+  check(down(LONG.length) && box().value.startsWith("typed "), "Down on the last visual line: the draft again");
+  post({ ok: true });
+} catch (e) { post({ error: String(e.stack || e) }); }
+""".replace("LONGTEXT", long)
+        drive_page(self, driver)
+
 
 class RowLayout(unittest.TestCase):
     """#5086: a row is two lines: a long name of the work stays on one line (cut with …), and the dot and the time

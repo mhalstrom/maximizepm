@@ -537,8 +537,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   });
   // The earlier prompts (#4855), as in a shell: Up brings back the prompts sent to this session from this box,
   // newest first, one at a time; Down goes forward again, and past the newest one the box shows the text the person
-  // typed before the first Up (the draft), or nothing. Up acts only with the caret on the box's first line and Down
-  // only on its last line, else the caret moves as in any text box. The list comes from the server (every device,
+  // typed before the first Up (the draft), or nothing. Up acts only with the caret on the box's first visual line and
+  // Down only on its last visual line (a wrapped line counts as several), else the caret moves as in any text box. The list comes from the server (every device,
   // and the relay); files attached are not part of it.
   let prompts = [], recalled = -1, draft = "";
   function loadPrompts(name, again = false) {  // again: the box got the focus; a list in use stays as it is
@@ -548,19 +548,30 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       if (j && name === agent && recalled === -1) prompts = j.prompts || [];
     }).catch(() => {});
   }
+  // Is the caret at `at` on the box's first visual line (up) or its last (down)? A long line that wraps is several
+  // lines (#5146). The hidden copy measures the text up to the caret, with the rest of the caret's word: that word
+  // wraps with the caret, so the copy wraps where the box does.
+  const lines = (s) => { measure.style.width = text.clientWidth + "px"; measure.value = s || "x"; return measure.scrollHeight; };
+  const onEdge = (up, at) => {
+    const v = text.value, head = v.slice(0, at) + v.slice(at).match(/^\S*/)[0];
+    return up ? lines(head) <= lines("x") : lines(head) >= lines(v);
+  };
   function recall(step, e) {
     if (e.isComposing || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || text.disabled) return false;
     const v = text.value, at = step > 0 ? text.selectionStart : text.selectionEnd;
-    if (step > 0 ? v.slice(0, at).includes("\n") : v.slice(at).includes("\n")) return false;  // not the edge line
+    if (!onEdge(step > 0, at)) return false;  // not the edge line: the caret moves as in any text box
     const to = recalled + step;
     if (to < -1 || to >= prompts.length) return false;
     if (recalled === -1) draft = v;
     recalled = to;
     text.value = to === -1 ? draft : prompts[to];
-    // Up leaves the caret on the first line, so the next Up goes on; Down leaves it on the last line.
-    const end = step > 0 && text.value.includes("\n") ? text.value.indexOf("\n") : text.value.length;
+    // Up leaves the caret on the first line, so the next Up goes on: at the end of the first line, or at the start
+    // when that line wraps. Down leaves it at the end, on the last line.
+    grow();
+    let end = step > 0 && text.value.includes("\n") ? text.value.indexOf("\n") : text.value.length;
+    if (step > 0 && !onEdge(true, end)) end = 0;
     text.setSelectionRange(end, end);
-    grow(); sendState(); saveDraft();
+    sendState(); saveDraft();
     return true;
   }
   const sentPrompt = (to, t) => {
