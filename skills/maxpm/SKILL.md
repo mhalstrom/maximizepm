@@ -390,6 +390,11 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   it answers you itself (`[maxpm answer from <manager> for <person> ...]`), or
   sends the question on to the person (`maxpm forward`). The person gets it by
   itself after `question_hold` (10m). Your wait does not change.
+  The same holds for an alert to a person and for a person item (`--doer
+  human`: a "Look at", an approval): while a manager is active it sees them
+  first, does or closes them, or forwards them; the person gets what is left
+  after `question_hold`. Keep adding the item or alert as before; do not
+  message the person on the side. Items that a person added go to them at once.
   Close each question you asked as soon as you have its answer, from any
   channel (your chat, a message, a canvas card), or the person keeps seeing it
   in 'Waits for you': `maxpm answer <question-id> --self "<the answer>"`. When

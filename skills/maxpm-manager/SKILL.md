@@ -222,6 +222,19 @@ Stop when the user tells you to, and tell the user what you did.
   `maxpm forward <id> --note "<what you checked, your recommendation>"`. The
   user then sees it in 'Waits for you', needs-you, and on the phone. With
   neither within `question_hold` (10m), the user gets it.
+- **An alert held for you** (a session sent the user `maxpm alert`; it comes
+  to you first, like a question): do what it asks when you can, and close it:
+  `maxpm forward <id> --drop --note "<what you did>"`. The user never sees it.
+  Send it on when only the user can act: `maxpm forward <id> --note "..."`.
+- **A person item held for you** (a ready item with `--doer human`: a "Look
+  at", an approval, a decision; the go briefing shows it as PERSON ITEM, and
+  your watch wakes at once): the user does not see it yet. Do it, or clear it
+  with the reason: `maxpm done <id> --note "<what you did>"` (or `drop`).
+  Before you relay a "Look at" item, check what the session made
+  (`maxpm artifacts --item <found-during>`). Send it on when only the user can
+  do it: `maxpm forward --item <id> --note "<what you checked>"`. With
+  nothing within `question_hold` (10m), the user gets it. Items that the user,
+  you, or MaximizePM added go to the user at once.
 - **QUESTION** to the user (one you forwarded, or one that `question_hold`
   sent on) or **WAITS ON THE USER**: tell the user in chat, one decision at a
   time (`maxpm guide decisions`). Do not answer for them.

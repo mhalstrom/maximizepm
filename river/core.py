@@ -448,6 +448,8 @@ CREATE TABLE IF NOT EXISTS items (
   reserved_by       TEXT,
   hold_expires_at   TEXT,
   held_at           TEXT,
+  held_for          TEXT,  -- a person item (doer human) held for the active manager (#5311); NULL: not looked at yet; '': the person has it
+  held_until        TEXT,  -- then it goes to the person by itself (question_hold)
   replan            INTEGER NOT NULL DEFAULT 0,
   late_prereqs      INTEGER NOT NULL DEFAULT 0,
   due               TEXT,
@@ -1214,6 +1216,11 @@ def _migrate(conn):
         conn.execute("ALTER TABLE goals ADD COLUMN owner_lease TEXT")
     if "shared" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
+    if "held_for" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
+        conn.execute("ALTER TABLE items ADD COLUMN held_for TEXT")
+        conn.execute("ALTER TABLE items ADD COLUMN held_until TEXT")
+        # Person items that are ready now are the person's already: no hold for them (#5311).
+        conn.execute("UPDATE items SET held_for='' WHERE doer='human'")
     if "held_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN held_at TEXT")
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='aliases'").fetchone():
@@ -7001,16 +7008,17 @@ def sync_needs_you(conn):
     whose reason is gone (done, dropped, claimed, blocked again, answered, read).
     """
     humans = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human'")}
-    ann = annotate(conn)
-    want_items = {a["id"]: a for a in ann.values()
-                  if a["ready"] and a["doer"] == "human" and not a["project_archived"]}
-    want_msgs = {}
     _release_held(conn)
+    ann = annotate(conn)
+    _hold_items(conn, ann)
+    want_items = {a["id"]: a for a in ann.values()
+                  if a["ready"] and a["doer"] == "human" and not a["project_archived"] and not a["held_for"]}
+    want_msgs = {}
     if humans:
         # A question held for the manager (#5307) is not the person's yet.
         for r in conn.execute(
                 f"SELECT * FROM messages WHERE kind IN ('question','alert') AND to_agent IN ({','.join('?' * len(humans))}) "
-                "AND ((kind='question' AND state='open' AND held_for IS NULL) OR (kind='alert' AND read_at IS NULL))",
+                "AND held_for IS NULL AND ((kind='question' AND state='open') OR (kind='alert' AND read_at IS NULL))",
                 sorted(humans)):
             want_msgs[r["id"]] = r
     t = iso(now())
@@ -9546,7 +9554,7 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                                          and _item_stands(conn, actor, item) else None)
         mid = _send(conn, kind, actor, body.strip(), to=to, item_id=item, reply_to=reply_to,
                     level=level if level != DEFAULT_LEVEL else None, blocked=sign)
-        held = _hold_question(conn, mid) if kind == "question" else None
+        held = _hold_question(conn, mid) if kind in ("question", "alert") else None
         if reply_to is not None:
             # Replying to a message means the sender read it.
             if conn.execute(f"SELECT 1 FROM messages m WHERE m.id=? AND {_TO_ME}", (reply_to, actor, actor)).fetchone():
@@ -9596,13 +9604,20 @@ def _hold_question(conn, mid):
     person, about = q["to_agent"], (f" about #{q['item_id']}" if q["item_id"] is not None else "")
     conn.execute("UPDATE messages SET held_for=?, held_until=? WHERE id=?",
                  (boss, iso(now() + parse_duration(hold)), mid))
-    body = (f"{q['from_agent']} asks {person} (question #{mid}{about}): {' '.join(q['body'].split())[:600]}. "
-            f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: "
-            f"maxpm answer {mid} \"...\". Else send it on to {person}: maxpm forward {mid} [--note \"<what you add>\"]. "
-            f"With neither within {hold} (question_hold), {person} gets it.")
+    if q["kind"] == "alert":  # an alert has no answer: the manager acts on it, drops it, or sends it on (#5311)
+        body = (f"{q['from_agent']} alerts {person} (alert #{mid}{about}): {' '.join(q['body'].split())[:600]}. "
+                f"It comes to you first; {person} does not see it yet. Do what it asks when {person} is not needed, "
+                f"then close it: maxpm forward {mid} --drop --note \"<what you did>\". Else send it on to {person}: "
+                f"maxpm forward {mid} [--note \"<what you add>\"]. With neither within {hold} (question_hold), "
+                f"{person} gets it.")
+    else:
+        body = (f"{q['from_agent']} asks {person} (question #{mid}{about}): {' '.join(q['body'].split())[:600]}. "
+                f"It comes to you first; {person} does not see it yet. Answer it when {person} is not needed: "
+                f"maxpm answer {mid} \"...\". Else send it on to {person}: maxpm forward {mid} [--note \"<what you add>\"]. "
+                f"With neither within {hold} (question_hold), {person} gets it.")
     alert = _send(conn, "alert", "maxpm", body, to=boss, item_id=q["item_id"], reply_to=mid, blocked="sender")
     if q["item_id"] is not None:
-        _event(conn, q["item_id"], "maxpm", f"question #{mid} to {person} held for the manager {boss} ({hold})")
+        _event(conn, q["item_id"], "maxpm", f"{q['kind']} #{mid} to {person} held for the manager {boss} ({hold})")
     return {"manager": boss, "alert": alert, "body": body, "hold": hold}
 
 
@@ -9624,36 +9639,115 @@ def _release_held(conn):
     """Inside a tx (sync_needs_you). A held question goes to the person when its question_hold ended, or when the
     manager it waits for is no longer the active manager; a closed question is no longer held."""
     rows = conn.execute("SELECT * FROM messages WHERE held_for IS NOT NULL").fetchall()
-    if not rows:
+    if not rows and not conn.execute("SELECT 1 FROM items WHERE held_for<>'' LIMIT 1").fetchone():
         return
     boss, t = active_manager(conn), now()
     for q in rows:
-        if q["kind"] != "question" or q["state"] != "open":
+        if (q["kind"] == "question" and q["state"] != "open") or (q["kind"] == "alert" and q["read_at"]) \
+                or q["kind"] not in ("question", "alert"):
             _unhold_question(conn, q)
         elif not q["held_until"] or parse_iso(q["held_until"]) <= t:
             _unhold_question(conn, q, f"the manager {q['held_for']} did not answer or forward it within question_hold")
         elif q["held_for"] != boss:
             _unhold_question(conn, q, f"the manager {q['held_for']} is no longer active")
+    # Person items (#5311): the same ends.
+    for it in conn.execute("SELECT * FROM items WHERE held_for IS NOT NULL AND held_for<>''").fetchall():
+        why = (None if it["status"] not in OPEN_STATES or it["doer"] != "human" else
+               f"the manager {it['held_for']} did not do or forward it within question_hold"
+               if not it["held_until"] or parse_iso(it["held_until"]) <= t else
+               f"the manager {it['held_for']} is no longer active" if it["held_for"] != boss else "")
+        if why != "":
+            _unhold_item(conn, it, why)
 
 
-def forward(conn, msg_id, note=None, actor=None):
-    """maxpm forward <id> [--note]: the manager sends a question that it held (#5307) on to the person asked, who
-    then sees it (Waits for you, needs-you, phone). note: what the manager adds for the person, a note in the
-    question's thread."""
+def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False):
+    """maxpm forward <id> [--note] | forward --item <id>: the manager sends a question or alert that it held (#5307,
+    #5311), or a person item that it held, on to the person, who then sees it (Waits for you, needs-you, phone).
+    note: what the manager adds for the person, a note in the thread. drop: an alert that the manager dealt with
+    itself is closed, and the person never sees it."""
     if not actor:
         raise RiverError("forward needs an agent name: set MAXPM_AGENT or pass --as <name>")
+    if (msg_id is None) == (item is None):
+        raise RiverError("name what to forward: a held message (maxpm forward <message-id>) or a held person item "
+                         "(maxpm forward --item <item-id>)")
+    if not (_is_manager(conn, actor) or _is_person(conn, actor)):
+        raise RiverError(f"only the manager forwards what it holds for a person; the item or message waits for it")
+    note = note.strip() if note and note.strip() else None
     with tx(conn):
+        if item is not None:
+            it = _item(conn, item)
+            if not it["held_for"]:
+                raise RiverError(f"#{item} is with the person already; nothing to forward")
+            if drop:
+                raise RiverError(f"close #{item} with: maxpm done {item} --note \"<what you did>\" (or drop)")
+            _unhold_item(conn, it, f"forwarded by {actor}" + (f": {note}" if note else ""))
+            if note:
+                _event(conn, item, actor, f"note for the person: {note}")
+            return item_show(conn, item)
         q = _message(conn, msg_id)
-        if q["kind"] != "question" or q["state"] != "open":
-            raise RiverError(f"message {msg_id} is no open question; see: maxpm thread {msg_id}")
+        if q["kind"] not in ("question", "alert") or (q["kind"] == "question" and q["state"] != "open"):
+            raise RiverError(f"message {msg_id} is no open question or alert; see: maxpm thread {msg_id}")
         if not q["held_for"]:
-            raise RiverError(f"question {msg_id} is with {q['to_agent'] or 'its holder'} already; nothing to forward")
-        if not (_is_manager(conn, actor) or _is_person(conn, actor)):
-            raise RiverError(f"only the manager forwards a held question; answer it with: maxpm answer {msg_id} \"...\"")
-        _unhold_question(conn, q, f"forwarded by {actor}" + (f": {note.strip()}" if note and note.strip() else ""))
-        if note and note.strip():
-            _send(conn, "note", actor, note.strip(), to=q["to_agent"], item_id=q["item_id"], reply_to=q["id"])
+            raise RiverError(f"{q['kind']} {msg_id} is with {q['to_agent'] or 'its holder'} already; nothing to forward")
+        if drop:
+            if q["kind"] != "alert":
+                raise RiverError(f"answer question {msg_id} instead: maxpm answer {msg_id} \"...\"")
+            _unhold_question(conn, q)
+            conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state='read' WHERE id=?",
+                         (iso(now()), msg_id))
+            if q["item_id"] is not None:
+                _event(conn, q["item_id"], actor, f"closed alert #{msg_id} to {q['to_agent']} (the manager dealt with it)"
+                       + (f": {note}" if note else ""))
+            return message_show(conn, msg_id)
+        _unhold_question(conn, q, f"forwarded by {actor}" + (f": {note}" if note else ""))
+        if note:
+            _send(conn, "note", actor, note, to=q["to_agent"], item_id=q["item_id"], reply_to=q["id"])
     return message_show(conn, msg_id)
+
+
+def _unhold_item(conn, it, why):
+    """Inside a tx. Person item it goes to the person (#5311): the manager forwarded it, or its hold ended. The
+    manager's alert about it is read. '' marks the item as looked at, so it is not held a second time."""
+    conn.execute("UPDATE items SET held_for='', held_until=NULL WHERE id=?", (it["id"],))
+    conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state=CASE WHEN state='open' THEN 'read' ELSE state END "
+                 "WHERE item_id=? AND from_agent='maxpm' AND kind='alert' AND to_agent=? AND reply_to IS NULL",
+                 (iso(now()), it["id"], it["held_for"]))
+    if why:
+        _event(conn, it["id"], "maxpm", f"goes to the person: {why}")
+
+
+def _hold_items(conn, ann):
+    """Inside a tx (sync_needs_you). A person item (doer human: a 'Look at', an approval, a decision) that is ready
+    while a manager is active goes to the manager first (#5311), as a question does: it is held (items.held_for)
+    for question_hold, out of the person's needs-you, Waits for you, phone and lists. The manager gets a blocked alert,
+    so its watch wakes at once; it does the item (maxpm done|drop --note) or sends it on (maxpm forward --item).
+    ann: annotate(); a held item gets held_for there too. Exceptions, marked '' so they are looked at once: an item
+    that a person, the manager or maxpm added, and every item while no manager is active."""
+    todo = [a for a in ann.values() if a["ready"] and a["doer"] == "human" and a["held_for"] is None
+            and not a["project_archived"]]
+    if not todo:
+        return
+    boss = active_manager(conn)
+    for a in todo:
+        hold = setting(conn, "question_hold", item_id=a["id"], project_id=_project(conn, a["project"])["id"])
+        if not boss:
+            continue  # looked at again when a manager is active
+        by = conn.execute("SELECT actor FROM events WHERE item_id=? ORDER BY id LIMIT 1", (a["id"],)).fetchone()
+        by = by["actor"] if by else None
+        if (by and (by == "maxpm" or _is_person(conn, by) or _is_manager(conn, by))) or a["assignee"] \
+                or parse_duration(hold).total_seconds() <= 0:
+            conn.execute("UPDATE items SET held_for='' WHERE id=?", (a["id"],))
+            a["held_for"] = ""
+            continue
+        until = iso(now() + parse_duration(hold))
+        conn.execute("UPDATE items SET held_for=?, held_until=? WHERE id=?", (boss, until, a["id"]))
+        a["held_for"] = boss
+        body = (f"Person item #{a['id']} [{a['project']}] {a['title']} is ready; it waits on a person. It comes to you "
+                f"first; the person does not see it yet. Do it when the person is not needed: maxpm done {a['id']} "
+                f"--note \"<what you did>\" (or drop). Else send it on: maxpm forward --item {a['id']} "
+                f"[--note \"<what you add>\"]. With neither within {hold} (question_hold), the person gets it.")
+        _send(conn, "alert", "maxpm", body, to=boss, item_id=a["id"], blocked="sender")
+        _event(conn, a["id"], "maxpm", f"held for the manager {boss} ({hold}): it does the item or forwards it")
 
 
 def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
@@ -9843,6 +9937,8 @@ def inbox(conn, actor, include_read=False, mark_read=True):
         raise RiverError("the inbox needs an agent name: set MAXPM_AGENT or pass --as <name>")
     _agent(conn, actor)
     where = f"{_TO_ME} AND m.from_agent<>?"
+    if _is_person(conn, actor):
+        where += " AND m.held_for IS NULL"  # what the manager holds for the person is not theirs yet (#5311)
     if not include_read:
         where += " AND (m.read_at IS NULL OR (m.kind IN ('question','offer') AND m.state='open'))"
     with tx(conn):
@@ -10780,7 +10876,7 @@ def status(conn, recent=10):
         "ended": sum(1 for a in agents if ended(a)),
         "human_waiting": [{"id": a["id"], "title": a["title"], "project": a["project"]}
                           for a in sorted(ann.values(), key=lambda a: a["sort_key"])
-                          if a["ready"] and a["doer"] == "human" and not a["project_archived"]],
+                          if a["ready"] and a["doer"] == "human" and not a["project_archived"] and not a["held_for"]],
         "due": [{"id": a["id"], "title": a["title"], "project": a["project"], "due_text": a["due_text"],
                  "due_state": a["due_state"]} for a in sorted(ann.values(), key=lambda a: a["due"] or "")
                 if a["due"] and a["status"] in OPEN_STATES and not a["backlog"] and not a["project_archived"]],
@@ -10879,8 +10975,8 @@ def prompt_for_all(conn, person=None):
     """The whole needs-you list for a person as one prompt, most important first."""
     ann = annotate(conn)
     person = _person(conn, person)
-    items = sorted((a for a in ann.values() if a["ready"] and a["doer"] == "human" and not a["project_archived"]),
-                   key=lambda a: a["sort_key"])
+    items = sorted((a for a in ann.values() if a["ready"] and a["doer"] == "human" and not a["project_archived"]
+                    and not a["held_for"]), key=lambda a: a["sort_key"])
     qs = [dict(r) for r in conn.execute(
         "SELECT id, from_agent, body, item_id FROM messages WHERE kind='question' AND state='open' AND to_agent=? "
         "AND held_for IS NULL ORDER BY id",
@@ -13805,7 +13901,8 @@ def manager_findings(conn):
             "unneeded": unneeded, "goal_checks": goal_checks,
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "targets": targets, "questions": questions, "broken_rules": broken_rules(conn),
-            "human_ready": [{"id": x["id"], "title": x["title"], "found_during": x["found_during"]} for x in sorted(
+            "human_ready": [{"id": x["id"], "title": x["title"], "found_during": x["found_during"],
+                             "held_for": x["held_for"] or None, "held_until": x["held_until"]} for x in sorted(
                                (x for x in ann.values() if x["ready"] and x["doer"] == "human" and not x["project_archived"]),
                                key=lambda x: x["sort_key"])]}
 

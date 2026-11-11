@@ -5438,6 +5438,97 @@ class Kill(Base):
         self.assertEqual(core.agent_status(self.c, "ag")["state"], "gone")  # at once, not after gone_after
 
 
+class PersonHold(Base):
+    """#5311: the rest of #5307. An alert to a person and a person item (doer human) go to the active manager first,
+    as a question does; the manager does it, closes it, or forwards it; question_hold ends the wait."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a", path=self.dir.name)
+        core.register(self.c, "w1")
+        core.register(self.c, "mark", human=True)
+        self.x = self.add("a", "x")
+        core.claim(self.c, self.x, "w1")
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+
+    def sees(self, **kw):
+        with core.tx(self.c):
+            core.sync_needs_you(self.c)
+        key, val = next(iter(kw.items()))
+        return any(n.get(key) == val for n in core.needs_you(self.c, "mark"))
+
+    def worker_item(self, title="Look at the page"):
+        return core.item_add(self.c, "a", title, doer="human", found_during=self.x, actor="w1")["id"]
+
+    def test_an_alert_to_a_person_is_held_and_forwarded(self):
+        m = core.message(self.c, "alert", "Deploy waits for you", to="mark", item=self.x, actor="w1")[0]
+        self.assertEqual(m["held_for"], "boss")
+        self.assertFalse(self.sees(message_id=m["id"]))
+        self.assertEqual(core.inbox(self.c, "mark"), [])
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait"))
+        self.assertIn(f"maxpm forward {m['id']} --drop", w["messages"][0]["body"])
+        core.forward(self.c, m["id"], "check it", actor="boss")
+        self.assertTrue(self.sees(message_id=m["id"]))
+        self.assertEqual(len(core.inbox(self.c, "mark")), 2)  # the alert and the manager's note
+
+    def test_the_manager_closes_an_alert_with_drop(self):
+        m = core.message(self.c, "alert", "Need a push?", to="mark", item=self.x, actor="w1")[0]
+        core.forward(self.c, m["id"], "pushed it", actor="boss", drop=True)
+        self.assertFalse(self.sees(message_id=m["id"]))
+        self.assertEqual(core.unread(self.c, "boss")["unread"], 0)
+        self.assertEqual(core.inbox(self.c, "mark"), [])
+
+    def test_a_person_item_is_held_for_the_manager(self):
+        i = self.worker_item()
+        self.assertFalse(self.sees(item_id=i))
+        self.assertEqual(core.item_show(self.c, i)["held_for"], "boss")
+        self.assertNotIn("Look at the page", core.prompt_for_all(self.c, "mark"))
+        self.assertEqual([x for x in core.status(self.c)["human_waiting"] if x["id"] == i], [])
+        w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait"))
+        self.assertIn(f"maxpm forward --item {i}", w["messages"][0]["body"])
+        self.assertEqual(w["findings"]["human_ready"][0]["held_for"], "boss")
+        with self.assertRaisesRegex(RiverError, "only the manager"):
+            core.forward(self.c, item=i, actor="w1")
+        core.forward(self.c, item=i, note="I checked", actor="boss")
+        self.assertTrue(self.sees(item_id=i))
+        with self.assertRaisesRegex(RiverError, "with the person already"):
+            core.forward(self.c, item=i, actor="boss")
+        # Not held again.
+        self.assertTrue(self.sees(item_id=i))
+
+    def test_the_manager_does_a_person_item(self):
+        i = self.worker_item()
+        self.assertFalse(self.sees(item_id=i))
+        core.drop(self.c, i, "boss", "not needed")
+        self.assertFalse(self.sees(item_id=i))
+        self.assertEqual(core.item_show(self.c, i)["held_for"], "")
+
+    def test_a_person_item_goes_to_the_person_after_question_hold(self):
+        clock = [core.now()]
+        with mock.patch.object(core, "now", lambda: clock[0]):
+            i = self.worker_item()
+            self.assertFalse(self.sees(item_id=i))
+            clock[0] += timedelta(minutes=9)
+            self.assertFalse(self.sees(item_id=i))
+            clock[0] += timedelta(minutes=2)
+            self.assertTrue(self.sees(item_id=i))
+
+    def test_the_exceptions(self):
+        # A person's own item, an item the manager added, and every item while no manager is active.
+        mine = core.item_add(self.c, "a", "Mine", doer="human", actor="mark")["id"]
+        bosss = core.item_add(self.c, "a", "Boss", doer="human", actor="boss")["id"]
+        self.assertTrue(self.sees(item_id=mine))
+        self.assertTrue(self.sees(item_id=bosss))
+        core.unregister(self.c, "boss")
+        j = self.worker_item("Another")
+        self.assertTrue(self.sees(item_id=j))
+        core.config_set(self.c, "question_hold", "0s")
+        core.manage(self.c, self.dir.name, "boss2")
+        k = self.worker_item("Third")
+        self.assertTrue(self.sees(item_id=k))
+
+
 class QuestionHold(Base):
     """#5307: mark, 2026-11-11: worker questions that he had settled opened 'Waits for you' on his page; 'these sorts
     of questions should not come to me or block waiting for me'. A question from a session to a person goes to the
@@ -5944,6 +6035,7 @@ class Manager(Base):
     def test_a_low_finding_waits_and_another_finding_brings_it(self):
         core.manage(self.c, self.dir.name, "boss")
         core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        core.config_set(self.c, "question_hold", "0s")  # the person has the item at once, not the manager (#5311)
         h = self.add("a", "sign the contract", doer="human")  # an item that is ready for a person: low
         self.assertEqual(core._finding_keys(core.manager_findings(self.c)), [f"human:{h}"])
         w, minutes = self.watch_minutes(step="2h")

@@ -265,7 +265,8 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     if have:
         return {"session_name": have, "agent": have, "existing": True}
     ann = core.annotate(conn)
-    items = sorted((a for a in ann.values() if a["ready"] and a["doer"] == "human" and not a["project_archived"]),
+    items = sorted((a for a in ann.values() if a["ready"] and a["doer"] == "human" and not a["project_archived"]
+                    and not a["held_for"]),
                    key=lambda a: a["sort_key"])
     projects = [core._project(conn, a["project"]) for a in items] + [
         core._project(conn, p["name"]) for p in core.project_list(conn)]

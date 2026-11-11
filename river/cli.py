@@ -1314,8 +1314,10 @@ def build_parser():
                    "record their words as the answer and close the question")
     x.add_argument("--self", dest="self_answer", action="store_true", help="you asked it, and you have the answer "
                    "from any channel (a message, a canvas card, your chat): record it and close the question")
-    x = sub.add_parser("forward", help="the manager: send a question that waits for you on to the person it asks")
-    x.add_argument("id", type=int)
+    x = sub.add_parser("forward", help="the manager: send a question, alert or person item that waits for you on to the person")
+    x.add_argument("id", type=int, nargs="?", help="a held question or alert (message id)")
+    x.add_argument("--item", type=int, help="a held person item (item id) instead of a message")
+    x.add_argument("--drop", action="store_true", help="a held alert you dealt with yourself: close it, the person never sees it")
     x.add_argument("--note", help="what you add for the person (what you checked, your recommendation)")
     x = sub.add_parser("withdraw", help="close a question you asked that is moot now (the work answered it)")
     x.add_argument("id", type=int)
@@ -2538,7 +2540,7 @@ def dispatch(conn, a, actor):
     if c == "withdraw":
         return core.withdraw(conn, a.id, a.note, actor)
     if c == "forward":
-        return core.forward(conn, a.id, a.note, actor)
+        return core.forward(conn, a.id, a.note, actor, item=a.item, drop=a.drop)
     if c == "inbox":
         if a.wait:
             return core.inbox_wait(conn, actor, a.timeout)
@@ -2756,9 +2758,14 @@ def _findings_lines(f, r):
                    + (f"; the last one closed was #{last['id']} {_cut(last['title'], 40)}" if last else "")
                    + ". " + x["question"].replace("maxpm ", f"{r} ")
                    + ". Ask the user when only they can tell")
-    if f["human_ready"]:
-        out.append("  WAITS ON THE USER: " + ", ".join(f"#{x['id']} {_cut(x['title'], 40)}" for x in f["human_ready"][:6]))
-        looks = [x for x in f["human_ready"][:6] if x.get("found_during") and x["title"].lower().startswith("look at")]
+    for x in f["human_ready"]:
+        if x.get("held_for"):  # held for the manager (#5311): the person does not see it yet
+            out.append(f"  PERSON ITEM #{x['id']} {_cut(x['title'], 60)}: waits for you, not the person.  "
+                       f"{r} done {x['id']} --note \"<what you did>\" (or drop), or {r} forward --item {x['id']}")
+    sent = [x for x in f["human_ready"] if not x.get("held_for")]
+    if sent:
+        out.append("  WAITS ON THE USER: " + ", ".join(f"#{x['id']} {_cut(x['title'], 40)}" for x in sent[:6]))
+        looks = [x for x in sent[:6] if x.get("found_during") and x["title"].lower().startswith("look at")]
         if looks:  # #4838: check what the worker made before the person is asked to look at it
             out.append("  BEFORE YOU RELAY A LOOK AT ITEM, check what the session made: " + ", ".join(
                 f"#{x['id']}: maxpm artifacts --item {x['found_during']}" for x in looks))
@@ -4300,7 +4307,12 @@ def render(a, res):
         print(f"question #{res['withdrawn']} is withdrawn: {res['note']}")
         return
     if c == "forward":
-        print(f"question #{res['id']} went on to {res['to_agent']}: their Waits for you, needs-you and phone show it now")
+        if a.item is not None:
+            print(f"#{res['id']} {res['title']} went on to the person: their Waits for you, needs-you and phone show it now")
+        elif a.drop:
+            print(f"alert #{res['id']} is closed: {res['to_agent']} does not see it")
+        else:
+            print(f"{res['kind']} #{res['id']} went on to {res['to_agent']}: their Waits for you, needs-you and phone show it now")
         return
     if c == "inbox":
         if isinstance(res, dict):  # --wait
