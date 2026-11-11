@@ -3328,6 +3328,7 @@ def render_go(b):
         ] if b.get("wait_background") else [
             "  Run it in the foreground (give the shell command a 10-minute time limit), and never end your turn",
             "  at your prompt: a blocking wait costs no tokens, and MaximizePM ends an agent idle at its prompt.",
+            "  MESSAGE: a person typed to you while it ran: answer the text, then run wait again.",
         ])
         out += [
             "",
@@ -3397,6 +3398,8 @@ def render_wait(res):
         print(f"No work yet. Run again at once: {r} wait   (this session ends by itself in {res['left']} without work)")
     elif res["result"] == "left":
         print(f"This wait ended: {res['why']}. Nothing to do for it; continue what you do now.")
+    elif res["result"] == "message":  # a foreground wait (#5256)
+        print(f"MESSAGE: {res['why']}. Read the text and answer it now; then run again: {r} wait")
     else:
         print(f"END: no work came in {res['waited']}. MaximizePM "
               + ("kept your registration: " + res["kept"] if res.get("kept") else "released your goals and unregistered you")

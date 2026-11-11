@@ -4380,6 +4380,37 @@ class Wait(Base):
         with self.assertRaises(RiverError):
             self.wait()  # it holds an item now
 
+    def test_a_person_typing_ends_a_foreground_wait(self):
+        """#5256: Pi (and Codex) has no background commands, so it runs maxpm wait in the foreground, and its CLI
+        held a message from the Sessions message box until the wait returned after wait_step (9m). A person's text
+        typed into its pane (typed_to) ends such a wait at its next poll; a Claude Code wait runs in the
+        background, gets the text at once, and goes on."""
+        calls = []
+
+        def typing(_s):  # the person types while the wait sleeps between two polls
+            calls.append(1)
+            if len(calls) == 1:
+                core.typed_to(self.c, "w")
+            else:  # no end by the typing: a push ends this wait, and the test sees which came
+                core.push(self.c, self.add("a", "pushed"), "w", None, "t")
+        for agent_type, result in (("pi", "message"), ("codex", "message"), ("claude-code", "work")):
+            with core.tx(self.c):
+                self.c.execute("UPDATE agents SET agent_type=?, typed_at=NULL WHERE name='w'", (agent_type,))
+            calls.clear()
+            res = core.wait(self.c, self.dir.name, "w", step="1h", sleep=typing)
+            self.assertEqual(res["result"], result, agent_type)
+            if result == "message":
+                self.assertEqual((res["why"], len(calls)), ("a person typed to you in your terminal", 1))
+                self.assertEqual(core.agent_status(self.c, "w")["role"], "waiting")  # it waits again after its answer
+            else:
+                pushed = int(res["why"].split()[0][1:])
+                core.decline(self.c, pushed, None, "w")
+                core.drop(self.c, pushed, "t", "test")
+        # Text typed before this wait started was read at the prompt: it ends no later wait.
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='pi', typed_at='2026-01-01T00:00:00Z' WHERE name='w'")
+        self.assertEqual(self.wait()["result"], "again")
+
     def test_a_push_that_go_cannot_take_yet_is_no_work(self):
         # #4318: a pushed item that conflicts with another agent's item, or waits on an open prerequisite, made
         # wait return WORK at once while go gave IDLE. It waits now, and wakes when the item gets ready.

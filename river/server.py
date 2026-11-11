@@ -2611,9 +2611,11 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
 
 
 def _keep_prompt(conn, agent, text, who):
-    """The box's Up arrow brings the prompt back (#4855): the person's text, without the attached files."""
+    """After a message went into the pane: the box's Up arrow brings the prompt back (#4855): the person's text,
+    without the attached files; and a foreground maxpm wait of the agent ends, so it reads the text now (#5256)."""
     from . import sessions
     sessions.record_prompt(conn, agent, text, who)
+    core.typed_to(conn, agent)
 
 
 PROMPT_PAUSE = 0.4  # after a pick that leaves a prompt, before the text: the CLI draws its input box again (tests: 0)
@@ -2672,6 +2674,7 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
         terminal_keys(conn, agent, _menu_keys(at, n) if n is not None else [{"key": "Escape"}], who)
         time.sleep(PROMPT_PAUSE)
         terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)
+        core.typed_to(conn, agent)  # a foreground maxpm wait ends, so the agent reads the text now (#5256)
         return {"agent": agent, "pane": pane, "picked": opts[n] if n is not None else "Escape", "text": text}
     if not isinstance(pick, int) or not 0 <= pick < len(opts):
         raise RiverError("pick one of the prompt's options, or write what to do instead")

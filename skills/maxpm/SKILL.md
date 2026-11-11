@@ -52,8 +52,9 @@ it as a background command (`run_in_background`) and end your turn: a message
 that a person or a session types to you then reaches you at once, and the
 harness wakes you when the wait prints. After such a talk, end your turn with
 the wait running again (start it only when the last one ended). In a CLI with
-no background commands (Codex), run it in the foreground with a 10-minute
-limit. A blocking wait costs no tokens, and it keeps you available for new
+no background commands (Codex, Pi), run it in the foreground with a 10-minute
+limit; when a person types to you while it runs, it ends with MESSAGE: answer
+the text, then run wait again. A blocking wait costs no tokens, and it keeps you available for new
 work. It prints WORK (run go), no work yet (run wait again), "This wait
 ended" (do nothing for it), or END: no work came within `wait_max` (45m,
 counted again from a person's last prompt), MaximizePM unregistered you, and

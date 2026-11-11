@@ -1066,7 +1066,10 @@ class PromptHistory(TmuxBase):
     def test_the_server_keeps_each_sent_prompt_for_its_session(self):
         import base64
         send = lambda text, **kw: server.OPS["session_send"](self.c, {"agent": "ag", "text": text, **kw}, "mark")
+        self.assertIsNone(core.agent_status(self.c, "ag").get("typed_at"))
         send("first one")
+        typed = self.c.execute("SELECT typed_at FROM agents WHERE name='ag'").fetchone()["typed_at"]
+        self.assertTrue(typed)  # a foreground maxpm wait of the agent ends now (#5256)
         send("two\nlines")
         send("two\nlines")  # the same again: kept once
         send("", files=[{"name": "a.csv", "data": base64.b64encode(b"a,b").decode()}])  # files only: no prompt

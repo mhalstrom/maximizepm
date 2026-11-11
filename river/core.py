@@ -1081,6 +1081,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN wait_token TEXT")
     if "wait_at" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN wait_at TEXT")
+    if "typed_at" not in acols:  # a person typed into the session's pane (#5256): a foreground wait ends
+        conn.execute("ALTER TABLE agents ADD COLUMN typed_at TEXT")
     if "waiting_in" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN waiting_in TEXT")
     if "watch_seen" not in acols:
@@ -12490,7 +12492,11 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     Returns result work (run go), again (run wait again), or end: no work came within wait_max since the
     first wait, so river released the agent's goals and unregistered it, and the session should stop; or left: this
     wait has nothing more to do (the session took work, or a newer wait of it runs), and the session does nothing.
-    A Claude Code session runs it as a background command, so a typed message reaches the session at once (#4948)."""
+    A Claude Code session runs it as a background command, so a typed message reaches the session at once (#4948).
+    An agent with no background commands (its adapter's LAUNCH['background'] is false: Pi, Codex) runs it in the
+    foreground, and its CLI keeps a typed message until the command ends; so a person's text typed into its pane
+    (typed_to) ends the wait at its next poll with result message: the agent reads the text and answers it, then
+    waits again (#5256)."""
     import secrets
     import time
     sleep = sleep or time.sleep
@@ -12529,6 +12535,17 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     step = parse_duration(step or setting(conn, "wait_step", agent=actor))
     deadline = min(now() + step, since + limit)
     seen = {}  # the ready items this wait saw, for _work_for: one waiting session wakes for each first (#5205)
+    started = _agent(conn, actor)["wait_at"]
+    ad = _adapters().find(session_type(conn, actor) or "")
+    foreground = not (ad and ad.launch.get("background"))
+
+    def typed():
+        """A person typed into the pane since this wait started, and the agent's CLI holds the text until the
+        command ends (a foreground wait): end it, so the agent reads the text now."""
+        if not foreground:
+            return False
+        t = conn.execute("SELECT typed_at FROM agents WHERE name=?", (actor,)).fetchone()
+        return bool(t and t["typed_at"] and started and t["typed_at"] >= started)
 
     def left():
         """Why this wait has nothing more to do, or None: the agent ran go and took work (its wait ended), or a
@@ -12549,6 +12566,8 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
         gone = left()
         if gone:
             return {"result": "left", "agent": actor, "why": gone}
+        if typed():
+            return {"result": "message", "agent": actor, "why": "a person typed to you in your terminal"}
         why = _work_for(conn, actor, names, role, seen)
         if why:
             return {"result": "work", "why": why, "agent": actor}
@@ -12567,6 +12586,13 @@ def wait(conn, cwd, actor, project=None, step=None, sleep=None, poll=3.0, focus=
     except RiverError as e:  # it owns a deploy target: keep it registered, and say so
         return {"result": "end", "agent": actor, "waited": _short(limit), "kept": str(e)}
     return {"result": "end", "agent": actor, "waited": _short(limit)}
+
+
+def typed_to(conn, agent):
+    """A person typed text into the agent's pane (the Sessions message box, the text of a prompt answer): a
+    foreground maxpm wait of the agent ends at its next poll, so the agent reads the text at once (#5256)."""
+    with tx(conn):
+        conn.execute("UPDATE agents SET typed_at=? WHERE name=?", (iso(now()), agent))
 
 
 # ---------------------------------------------------------------- fresh sessions
