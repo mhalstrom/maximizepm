@@ -10,7 +10,7 @@
 // The row then shows 'ending' until the session is gone; then it leaves the list.
 import { esc, act } from "../lib.js";
 import { makeDialog } from "./dialog.js";
-import { button } from "./button.js";
+import { button, iconButton } from "./button.js";
 
 // The symbol of End on a row: a power sign.
 export const END_SVG = `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M8 1.8v5.4M4.6 3.9a5.2 5.2 0 1 0 6.8 0"/></svg>`;
@@ -41,7 +41,7 @@ function el() {
     const q = (s) => box.querySelector(s);
     const reason = (q("[data-end-reason]") || {}).value?.trim() || "";
     const closeTask = !!(q("[data-end-done]") || {}).checked;
-    if (e.target.closest("[data-end-cancel]")) return dlg.close();
+    if (e.target.closest("[data-end-cancel], [data-end-close]")) return dlg.close();
     if (e.target.closest("[data-end-go]")) { finish({ how: e.target.closest("[data-end-go]").dataset.endGo, reason, done: closeTask }); return dlg.close(); }
     if (e.target.closest("[data-end-now-ask]")) { q(".end-now").classList.remove("hidden"); q(".end-now button").focus(); }
   });
@@ -78,7 +78,8 @@ export function endHtml(s) {
       and ends. A session that waits for work ends at once.</p>`;
     go = button("End session", { kind: "primary", data: { "end-go": "stop" } });
   }
-  return `<h2>End ${esc(s.title && s.title !== s.name ? `${s.title} (${s.name})` : s.name)}</h2>${what}
+  // The head of the other dialogs: the heading and a ✕ that closes it like Cancel (#5363, as #5334).
+  return `<div class="dlg-head"><h2>End ${esc(s.title && s.title !== s.name ? `${s.title} (${s.name})` : s.name)}</h2>${iconButton("✕", "Close", { data: { "end-close": "1" } })}</div>${what}
     ${s.state === "stopping" ? "" : reason}
     <div class="actions">${button("Cancel", { data: { "end-cancel": "1" } })}${nowBtn}${go}</div>${now}`;
 }

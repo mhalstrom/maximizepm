@@ -1749,6 +1749,12 @@ try {
   await until(() => q("#endDlg") && !q("#endDlg").classList.contains("hidden"), "the dialog");
   const ask = q("#endDlg .box").textContent.replace(/\s+/g, " ");
   const picked = q("#sessTitle").textContent;
+  // #5363: a ✕ in the head, and the Why field has the size of the dialog's text.
+  const sizes = { why: getComputedStyle(q("#endDlg [data-end-reason]")).fontSize, text: getComputedStyle(q("#endDlg .box p")).fontSize };
+  q("#endDlg [data-end-close]").click();
+  await until(() => q("#endDlg").classList.contains("hidden"), "the ✕ closes it");
+  q('#sessions [data-session="ag"] .srow-end').click();
+  await until(() => !q("#endDlg").classList.contains("hidden"), "the dialog after the ✕");
   q("#endDlg [data-end-reason]").value = "the plan changed";
   q('#endDlg [data-end-go="stop"]').click();
   await until(() => q('#sessions [data-session="ag"]').dataset.state === "stopping", "the row shows ending");
@@ -1765,7 +1771,7 @@ try {
   const m = await import("/components/endSession.js");
   const ex = m.endHtml({ name: "fab", role: "expert", state: "expert", holds: [{ id: 7, title: "the pricing talk" }] });
   const none = m.endHtml({ name: "w", role: "worker", state: "idle", holds: [], can_kill: false });
-  post({ head, ask, picked, chip, again, nowHidden, nowShown, ex, none,
+  post({ head, ask, picked, chip, again, nowHidden, nowShown, ex, none, sizes,
          op: m.endOp({ name: "fab", role: "expert" }, { how: "expert", reason: "", done: true }) });
 } catch (e) { post({ error: String(e.stack || e) }); }
 """
@@ -1775,6 +1781,7 @@ try {
         self.assertIn("MaximizePM asks ag to stop. It commits its finished work, releases #%d header with a note" % self.it, r["ask"])
         self.assertIn("End now…", r["ask"])
         self.assertEqual(r["picked"], "ag")  # End on the row does not open another session
+        self.assertEqual(r["sizes"], {"why": "13px", "text": "13px"})
         self.assertEqual(r["chip"], "ending: asked to stop")
         self.assertEqual(core.stop_request(self.c, "ag")["stop_reason"], "the plan changed")
         self.assertIn("ag was asked to stop by mark: the plan changed", r["again"])
