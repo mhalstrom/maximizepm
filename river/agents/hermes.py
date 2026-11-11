@@ -17,8 +17,10 @@ it ran in tmux on 2026-11-10; tests/fixtures/hermes holds what that session prin
 - State comes from the screen (DETECT): a turn shows "type to redirect this turn" under the prompt; at the prompt the
   status bar shows the idle timer "⏲"; a question or a command approval shows a box and "↑/↓ to select".
 - The session id comes from the environment: Hermes gives each shell command of its terminal tool HERMES_SESSION_ID
-  (IDENTITY['env']), so a maxpm command that runs inside Hermes knows its session. Hermes passes no other variable of its own environment to those
-  commands unless its config lists the name (terminal.env_passthrough); see ENV_PASSTHROUGH.
+  (IDENTITY['env']), so a maxpm command that runs inside Hermes knows its session. The tools of every session run in
+  Hermes's one background gateway, not in the CLI of the pane: the CLI sends the gateway only an allowlist of its own
+  variables (PATH, a venv, nvm and the like), and MaximizePM's variables travel only when the config names them
+  (terminal.client_env_passthrough, #5241); see CLIENT_ENV.
 - Resume: hermes chat --resume <session id>. Hermes reads AGENTS.md, CLAUDE.md and .cursorrules of the folder.
 """
 
@@ -195,19 +197,24 @@ def parse_command(words):
 # ---------------------------------------------------------------------------------------------------------------
 
 # Hermes gives each shell command of its terminal tool the session's id in HERMES_SESSION_ID, so a maxpm command that
-# runs inside Hermes knows its session, as CODEX_THREAD_ID tells it for Codex. Hermes gives its shell commands no
-# other variable of its own environment unless Hermes's config lists it (terminal.env_passthrough): MAXPM_AGENT and
-# MAXPM_FOCUS reach maxpm only after `hermes config set terminal.env_passthrough ...` (ENV_PASSTHROUGH).
+# runs inside Hermes knows its session, as CODEX_THREAD_ID tells it for Codex. Those commands run in Hermes's gateway
+# (agent/session_client_env.py of Hermes 0.22.7): the CLI in the pane sends it, with session.create, only the
+# variables of its allowlist, and terminal.client_env_passthrough adds names to that list. terminal.env_passthrough
+# (#5211) is no help: it passes names from the gateway's own environment, which never had MaximizePM's variables. So
+# MAXPM_AGENT, MAXPM_DB and the others reach maxpm only after `hermes config set terminal.client_env_passthrough ...`
+# (CLIENT_ENV); before it, every maxpm command of a Hermes session reads the default queue as an unnamed agent.
 IDENTITY = {"source": "env", "env": "HERMES_SESSION_ID", "log_glob": None, "pane": None, "url": None,
             "inside_env": ["HERMES_SESSION_ID"]}
 
-# The variables of MaximizePM that a maxpm command inside Hermes needs, for terminal.env_passthrough.
-ENV_PASSTHROUGH = ["MAXPM_AGENT", "MAXPM_FOCUS", "MAXPM_DB", "MAXPM_MODEL", "MAXPM_AGENT_TYPE", "MAXPM_QUIET"]
+# The variables of MaximizePM that a maxpm command inside Hermes needs, for terminal.client_env_passthrough. Hermes
+# lets a name travel unless it holds a credential word (KEY, TOKEN, SECRET, AUTH, ...) or starts with HERMES_.
+CLIENT_ENV = ["MAXPM_AGENT", "MAXPM_FOCUS", "MAXPM_DB", "MAXPM_MODEL", "MAXPM_AGENT_TYPE", "MAXPM_QUIET"]
 
 
-def env_passthrough_command():
-    """The command that lets MaximizePM's variables reach the shell commands of Hermes (a person runs it once)."""
-    return ["hermes", "config", "set", "terminal.env_passthrough", "[" + ", ".join(ENV_PASSTHROUGH) + "]"]
+def client_env_command():
+    """The command that lets MaximizePM's variables reach the shell commands of Hermes (a person runs it once; it
+    applies to the sessions that start after it)."""
+    return ["hermes", "config", "set", "terminal.client_env_passthrough", "[" + ", ".join(CLIENT_ENV) + "]"]
 
 
 # ---------------------------------------------------------------------------------------------------------------

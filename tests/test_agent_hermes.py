@@ -421,11 +421,18 @@ class Models(HomeCase):
 
 
 class Setup(unittest.TestCase):
-    def test_the_passthrough_command_lists_maxpm_variables(self):
-        got = hermes.env_passthrough_command()
-        self.assertEqual(got[:4], ["hermes", "config", "set", "terminal.env_passthrough"])
+    def test_the_client_env_command_lists_maxpm_variables(self):
+        """The CLI sends the gateway only the names of terminal.client_env_passthrough (#5241); terminal.env_passthrough
+        passes names from the gateway's own environment, which never had them."""
+        got = hermes.client_env_command()
+        self.assertEqual(got[:4], ["hermes", "config", "set", "terminal.client_env_passthrough"])
         for name in ("MAXPM_AGENT", "MAXPM_FOCUS", "MAXPM_DB"):
             self.assertIn(name, got[4])
+        # Hermes 0.22.7 drops a name with a credential word or the HERMES_ prefix (agent/session_client_env._travels).
+        secret = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD", "AUTH", "DSN", "WEBHOOK", "CREDS",
+                  "BEARER", "APIKEY", "COOKIE")
+        for name in hermes.CLIENT_ENV:
+            self.assertFalse(any(s in name for s in secret) or name.startswith("HERMES_"), name)
         self.assertEqual(hermes.SETUP["instructions"], "AGENTS.md")
 
 
