@@ -210,7 +210,7 @@ PARTS = {
     "setup": {"data": ("SETUP", SETUP_KEYS), "functions": ("write_mcp_config",)},
 }
 
-BUILTIN = ("claude", "codex")
+BUILTIN = ("claude", "codex", "pi")
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 
 
@@ -532,14 +532,14 @@ def get(name):
 
 def from_env(env=None):
     """The adapter of the agent that a command runs inside (IDENTITY['inside_env']), or None. MAXPM_AGENT_TYPE names
-    it by hand (a name that no agent has counts as none). Non-built-in adapters first, then codex before claude: a Codex started from a Claude Code shell keeps
+    it by hand (a name that no agent has counts as none). Every other adapter first, then codex before claude: a Codex started from a Claude Code shell keeps
     CLAUDECODE (core.agent_type_from_env reads it the same way until #5181)."""
     env = os.environ if env is None else env
     named = find(env.get("MAXPM_AGENT_TYPE"))
     if named:
         return named
     got = load()
-    order = sorted(m for m in got if m not in BUILTIN) + [m for m in ("codex", "claude") if m in got]
+    order = sorted(m for m in got if m not in ("codex", "claude")) + [m for m in ("codex", "claude") if m in got]
     return next((got[m] for m in order if got[m].inside(env)), None)
 
 

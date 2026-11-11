@@ -1,0 +1,2 @@
+{"type":"session","version":3,"id":"9e1d0b22-0000-4a6b-8c3d-5f2e1a0b9c33","timestamp":"2026-11-11T09:00:00.000Z","cwd":"/work/demo","parentSession":"PARENT"}
+{"type":"message","id":"c0000001","parentId":null,"timestamp":"2026-11-11T09:00:01.000Z","message":{"role":"user","content":"go on","timestamp":1794403601000}}

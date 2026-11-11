@@ -138,15 +138,15 @@ class Contract(Env):
 
 class Overrides(Env):
     def test_a_user_module_adds_an_agent(self):
-        self.user_module("pi", """
-            DESCRIBE = {"id": "pi", "label": "Pi", "exe": "pi", "aliases": ["pi-agent"], "family": "multi"}
-            IDENTITY = {"source": "env", "inside_env": ["PI_SESSION"]}
+        self.user_module("toy", """
+            DESCRIBE = {"id": "toy", "label": "Toy", "exe": "toy", "aliases": ["toy-agent"], "family": "multi"}
+            IDENTITY = {"source": "env", "inside_env": ["TOY_SESSION"]}
         """)
-        a = agents.get("pi-agent")
-        self.assertEqual((a.id, a.source), ("pi", str(self.dir / "pi.py")))
-        self.assertEqual(agents.ids(), ["claude", "codex", "pi"])
-        self.assertIs(agents.from_env({"PI_SESSION": "1", "CLAUDECODE": "1"}), a)
-        self.assertIs(agents.from_env({"MAXPM_AGENT_TYPE": "codex", "PI_SESSION": "1"}), agents.get("codex"))
+        a = agents.get("toy-agent")
+        self.assertEqual((a.id, a.source), ("toy", str(self.dir / "toy.py")))
+        self.assertEqual(agents.ids(), list(agents.BUILTIN) + ["toy"])
+        self.assertIs(agents.from_env({"TOY_SESSION": "1", "CLAUDECODE": "1"}), a)
+        self.assertIs(agents.from_env({"MAXPM_AGENT_TYPE": "codex", "TOY_SESSION": "1"}), agents.get("codex"))
         self.assertIsNone(agents.from_env({}))
 
     def test_a_user_module_replaces_the_built_in_one_of_its_id(self):
@@ -177,14 +177,14 @@ class Overrides(Env):
         self.assertIn("also agent claude's", agents.errors()["cc"])
 
     def test_the_registry_reads_a_changed_file_again(self):
-        self.user_module("pi", "DESCRIBE = {'id': 'pi', 'label': 'Pi', 'exe': 'pi', 'family': 'multi'}\n")
-        self.assertEqual(agents.get("pi").label, "Pi")
-        f = self.dir / "pi.py"
-        f.write_text("DESCRIBE = {'id': 'pi', 'label': 'Pi 2', 'exe': 'pi', 'family': 'multi'}\n")
+        self.user_module("toy", "DESCRIBE = {'id': 'toy', 'label': 'Toy', 'exe': 'toy', 'family': 'multi'}\n")
+        self.assertEqual(agents.get("toy").label, "Toy")
+        f = self.dir / "toy.py"
+        f.write_text("DESCRIBE = {'id': 'toy', 'label': 'Toy 2', 'exe': 'toy', 'family': 'multi'}\n")
         os.utime(f, ns=(1, 1))
-        self.assertEqual(agents.get("pi").label, "Pi 2")
+        self.assertEqual(agents.get("toy").label, "Toy 2")
         f.unlink()
-        self.assertIsNone(agents.find("pi"))
+        self.assertIsNone(agents.find("toy"))
 
 
 def run(*words, env=None):
