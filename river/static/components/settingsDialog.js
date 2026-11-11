@@ -44,9 +44,9 @@ function pageSection(agent) {
   const v = viewOf(agent);
   return `<div class="muted set-head">This page</div>
     <div class="set-row"><label for="setTools">Show tool calls</label>
-      <select id="setTools" data-view="showTools" data-agent="${esc(agent)}"><option value="on"${v.showTools ? " selected" : ""}>on</option><option value="off"${v.showTools ? "" : " selected"}>off: a marker such as "12 tool calls" opens them</option></select>
+      <select id="setTools" data-view="showTools" data-agent="${esc(agent)}"><option value="on"${v.showTools ? " selected" : ""}>on</option><option value="off"${v.showTools ? "" : " selected"}>off</option></select>
       <span class="muted">now</span>
-      <div class="set-sub muted">The tool call lines (Bash, Write, ...) between the messages of its chat; kept for this session in this browser</div></div>`;
+      <div class="set-sub muted">The tool call lines (Bash, Write, ...) between the messages of its chat; off: a marker such as "12 tool calls" opens them. Kept for this session in this browser</div></div>`;
 }
 
 // The value of row i: its select or field, or the typed model of "Other model…" (#5242).
