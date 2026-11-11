@@ -188,6 +188,35 @@ class Launch(Env):
         self.assertEqual(aider.chat_file("a/b c").name, "a_b_c.chat.history.md")
 
 
+class StartRecordsTheSession(Env):
+    def test_a_start_records_the_session_id_it_chose_and_the_tab_finds_the_chat_at_once(self):
+        # #5280: Aider runs no maxpm command by itself, so its session id (the start's name, MAXPM_AIDER_SESSION)
+        # reached agent_sessions only from a maxpm command, and the Sessions tab said "No transcript" meanwhile.
+        from river import server
+        c = core.connect(os.environ["MAXPM_DB"])
+        self.addCleanup(c.close)
+        folder = self.root / "proj"
+        folder.mkdir()
+        core.project_add(c, "proj", path=str(folder))
+        core.item_add(c, "proj", "add a goodbye function")
+        sent = []
+        t = server.launch_agent(c, runner=sent.append, agent="Aider")
+        name = c.execute("SELECT name FROM agents WHERE kind='ai' ORDER BY rowid DESC LIMIT 1").fetchone()["name"]
+        sid = t["session_id"]
+        self.assertTrue(sid)
+        self.assertIn(f"MAXPM_AIDER_SESSION={sid}", sent[-1])
+        self.assertEqual([r["session_id"] for r in c.execute("SELECT session_id FROM agent_sessions WHERE agent=?",
+                                                              (name,))], [sid])
+        aider.chat_file(sid).parent.mkdir(parents=True, exist_ok=True)
+        aider.chat_file(sid).write_bytes((FIX / "chat.history.md").read_bytes())
+        v = sessions.view(c, name)
+        self.assertEqual(v["transcript"], "aider")
+        self.assertEqual(len(v["entries"]), len(aider.parse_chat(chat_lines())[0]))  # the chat, before any maxpm command
+        # A resume continues the same session: the same id.
+        self.assertEqual(self.a.start_session("other", {"resume": sid}), sid)
+        self.assertIsNone(agents.get("claude").start_session("w1", {}))  # Claude Code learns its id from its hooks
+
+
 class Detect(Env):
     """Each recorded screen, read as the pane watcher reads it."""
 

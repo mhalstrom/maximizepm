@@ -163,6 +163,9 @@ FIRST_PROMPTS = ("argv", "paste")
 #                    process only when it runs on a terminal, else none (#5247: Hermes runs the tools of every
 #                    session in one background gateway with no terminal, so the ancestor is that shared gateway),
 #    }
+# start_session(name, settings) -> the session id that a start chooses itself, or None: the arguments of build_command
+# (Aider names its log by the start's name). The start path records it at once (agent_sessions), so the Sessions tab
+# finds the chat before the session's first maxpm command (#5280).
 # With source "env" and CHAT["ref"] "session", each maxpm command records the id it finds in "env" for the acting
 # agent (core.session_from_env, agent_sessions): the Sessions tab then finds the agent's chat log by it (#5212).
 IDENTITY_SOURCES = ("hook", "env", "log", "pane")
@@ -321,7 +324,7 @@ PARTS = {
     "settings": {"data": ("SETTINGS", SETTING_KEYS), "functions": ()},
     "effort": {"data": ("EFFORT", EFFORT_KEYS), "functions": ("read_effort_levels", "read_effort")},
     "launch": {"data": ("LAUNCH", None), "functions": ("build_command", "parse_command"), "required": True},
-    "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ()},
+    "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ("start_session",)},
     "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "parse_chat_line", "chat_chain",
                                                         "chat_title", "chat_cwd", "chat_usage", "chat_requests",
                                                         "chat_settings", "chat_cache_line", "chat_texts")},
@@ -631,6 +634,12 @@ class Adapter:
     def parse_command(self, argv):
         f = self._fn("parse_command")
         return f(list(argv)) if f else None
+
+    def start_session(self, name, settings=None):
+        """The session id that a start with this name and these settings chooses (start_session), or None."""
+        f = self._fn("start_session")
+        got = f(name, dict(settings or {})) if f else None
+        return str(got) if got else None
 
     def resume_command(self, session_ref, model=None, effort=None, settings=None, name=None):
         f = self._fn("resume_command")

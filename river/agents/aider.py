@@ -196,6 +196,12 @@ def build_command(name, folder, model, effort, settings, prompt):
     return argv
 
 
+def start_session(name, settings):
+    """The session id a start chooses (agents part 5, #5280): the name that build_command gives the chat log and
+    MAXPM_AIDER_SESSION, or the session that a resume continues."""
+    return (settings or {}).get("resume") or name or None
+
+
 def parse_command(words):
     """A hand-written aider command that a profile builds exactly: --model {model}, --reasoning-effort {effort}, and
     the flags of SETTINGS. Aider takes no prompt on its command line, so the profile's prompt is None. Anything else

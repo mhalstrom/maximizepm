@@ -564,10 +564,13 @@ def _fit_task_model(conn, task, name, model, actor):
 def _started(conn, name, t):
     """Record the agent type of a session MaximizePM starts now (#5269): the profile's platform, else the adapter
     whose exe the command runs. The page then shows its agent, and the pane watcher reads its pane with that agent's
-    rules (a blocked prompt), before the session's first maxpm command says the same."""
+    rules (a blocked prompt), before the session's first maxpm command says the same. Also the session id that the
+    start chose (t['session_id'], the adapter's start_session): the page then finds the chat at once (#5280)."""
     platform = t.get("platform") or core._exe_platform(t.get("command") or "")
     if name and platform:
         core.set_agent_type(conn, name, platform)
+    if name and t.get("session_id"):
+        core.record_session(conn, name, t["session_id"])  # a start that chose its session's id (Aider, #5280)
 
 
 def _open_terminal(t, env, runner=None):

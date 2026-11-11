@@ -11555,6 +11555,7 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
         else:
             autocompact = None
         cmd = build_command(prof[0], built, mid, effort or None, name)
+        session_id = _adapters().get(prof[0]).start_session(name, built)  # a start that names its session (#5280)
         if _adapters().get(prof[0]).first_prompt == "paste":  # not on its command line: serve pastes it (#5221)
             first = opts.get("prompt")
     elif prompt:
@@ -11565,7 +11566,10 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
                          f"give it a profile in launch_agents (@claude-code or @codex) for them")
     else:
         opts, cmd, autocompact = {}, fill_launch_command(pick[1], mid, effort or None, name), None
+    if not prof:
+        session_id = None
     return {"agent": pick[0], "command": cmd, "platform": prof[0] if prof else None, "options": opts,
+            "session_id": session_id,
             "model": model, "model_id": mid, "effort": effort or None, "custom_prompt": prompt,
             "autocompact": autocompact, "first_prompt": first,
             "env": {"MAXPM_MODEL": model} if model else {}}
