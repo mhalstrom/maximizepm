@@ -104,7 +104,8 @@ export function isPinned(s) {
   return me ? by.includes(me) : by.length > 0;
 }
 function pinButton(s) {
-  if (["manager", "expert", "assistant"].includes(s.role)) return "";
+  // No pin, but its place: the dot and the time of every row stand in one column (#5320).
+  if (["manager", "expert", "assistant"].includes(s.role)) return `<span class="srow-pin-slot" aria-hidden="true"></span>`;
   const on = isPinned(s);
   return button(PIN_SVG, { kind: "icon", cls: "srow-pin", pressed: on, data: { pin: s.name },
     title: on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions", label: `${on ? "Unpin" : "Pin"} ${s.name}` });

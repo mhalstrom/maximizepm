@@ -33,14 +33,15 @@ button.srow-it { cursor: pointer; }
 .srow-h b.srow-t { flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-base); }
 .srow-h .dot { flex: none; margin: 0 0 0 var(--sp-1); }
 .dot.needs { background: var(--warn); }
-.srow-h .sago { flex: none; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; min-width: var(--w-tool); text-align: right; }
+.srow-h .sago { flex: none; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; min-width: calc(var(--w-tool) + var(--sp-6)); text-align: right; }
 /* The ! badge and the time have a slot of their own width: the dot and the time stand in the same column in every row, also
    when the title is cut (#5320). */
+.srow-h .srow-pin-slot { flex: none; width: var(--sp-7); }
 .srow-h .wbadge, .srow-h .wbadge-slot { flex: none; min-width: var(--w-tool); text-align: center; box-sizing: border-box; }
 .srow .srow-main > .sub { font-size: var(--fs-m); }
 .prov.prov-ic { font-size: var(--fs-xs); padding: 0 var(--sp-1); border-radius: var(--r-xs); line-height: 1.3; }
 .srow:not(:hover):not(:focus-within) .srow-pin:not(.on), .srow:not(:hover):not(:focus-within) .srow-end.iconbtn { visibility: hidden; }
-@media (hover: none) { .srow .srow-end.iconbtn, .srow .srow-pin:not(.on) { display: none; } }
+@media (hover: none) { .srow .srow-end.iconbtn, .srow .srow-pin:not(.on), .srow .srow-pin-slot { display: none; } }
 /* The head of a session (#5115): one row at every width. The name, the agent id, the state and the item give way
    (cut with …); the tab pair and the ⋯ keep their size. */
 .sess-head { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: nowrap; min-width: 0; padding-bottom: var(--sp-3); }
@@ -115,7 +116,8 @@ button.srow-it { cursor: pointer; }
 .msg-user.sent .bubble { opacity: .8; }
 .msg-note { font-size: var(--fs-xs); color: var(--muted); margin-top: var(--sp-0); }
 .msg-agent { overflow-wrap: anywhere; background: var(--bubble); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); width: fit-content; max-width: 85%; }
-.msg-agent code { background: var(--panel); }
+/* Higher than .md code, which comes later: the code stands apart from the gray bubble (#5321). */
+.msg-agent :not(pre) > code { background: var(--panel); }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
 .md p, .md ul, .md ol, .md blockquote, .md table, .md pre { margin: 0 0 var(--sp-4); }
@@ -214,7 +216,7 @@ button.srow-it { cursor: pointer; }
    row ('No manager running'). A line of the group under a row's line made two lines with nothing between (#5114). */
 .slist-mgr { display: flex; flex-direction: column; gap: var(--sp-2); margin-bottom: var(--sp-4); flex: none; }
 .slist-mgr:empty { display: none; }
-.slist-mgr:not(:has(.srow)):not(:empty) { padding-bottom: var(--sp-4); border-bottom: var(--hair) solid var(--line); }
+.slist-mgr:not(:has(.srow)):has(> :not(:empty)) { padding-bottom: var(--sp-4); border-bottom: var(--hair) solid var(--line); }
 /* The manager's and an expert's title is a long sentence ('Manages the queue and ...'): two lines, then … (#5114). */
 .slist-mgr .srow-h b.srow-t { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .mgr-tag { flex: none; font-size: calc(var(--fs-xs) - var(--hair) / 2); font-weight: 700; text-transform: uppercase; letter-spacing: calc(var(--hair) / 2); color: var(--human); background: var(--human-bg); border-radius: var(--r-xs); padding: var(--hair) var(--sp-2); }
