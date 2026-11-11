@@ -43,7 +43,8 @@ class FakeShellTmux:
             self.panes.remove(pane)
             return ""
         if cmd == "display-message":
-            return f"80|24|2|0|zsh|{terminal.SHELL_SESSION}:0.0|{pane['opts'].get('@maxpm_name', '')}" if pane else None
+            return (f"80|24|2|0|zsh|{terminal.SHELL_SESSION}:0.0|/dev/ttys00{pane['id'][1:]}|"
+                    f"{pane['opts'].get('@maxpm_name', '')}") if pane else None
         if cmd == "capture-pane":
             return "$ " + "".join(pane["keys"]) if pane else None
         return ""

@@ -1379,15 +1379,15 @@ def terminal_screen(conn, agent):
 def _pane_screen(agent, pane):
     out = _tmux("display-message", "-p", "-t", pane,
                 "#{pane_width}|#{pane_height}|#{cursor_x}|#{cursor_y}|#{pane_current_command}|"
-                "#{session_name}:#{window_index}.#{pane_index}|#{@maxpm_name}",
+                "#{session_name}:#{window_index}.#{pane_index}|#{pane_tty}|#{@maxpm_name}",
                 ";", "capture-pane", "-p", "-e", "-t", pane)
     head, _, text = out.partition("\n")
-    f = head.split("|", 6)
-    if len(f) != 7:
+    f = head.split("|", 7)
+    if len(f) != 8:
         raise RiverError(f"tmux gave no answer for pane {pane}")
     return {"agent": agent, "pane": pane, "width": int(f[0]), "height": int(f[1]), "cursor": [int(f[2]), int(f[3])],
-            "ended": f[4].lstrip("-") in TMUX_SHELLS, "running": f[4].lstrip("-"), "target": f[5], "name": f[6],
-            "text": text}
+            "ended": f[4].lstrip("-") in TMUX_SHELLS, "running": f[4].lstrip("-"), "target": f[5], "tty": f[6],
+            "name": f[7], "text": text}
 
 
 # An agent that waits on a prompt in its terminal (a permission prompt, a trust question) stops, and nobody
@@ -1441,17 +1441,60 @@ class _AnyOf:
 
 _WORDS = {}
 
+TTY_PS_RUNNER = None  # tests: gets the tty (ttys003, pts/3), returns the command lines of its processes
+_TTY_PROGRAMS = {}    # (tty, the pane's process name) -> (when, adapter id or None): ps once a minute, not each pass
+TTY_PROGRAMS_KEEP = 60
 
-def _pane_rule(conn, agent, process=None):
+
+def _tty_programs(tty):
+    """The program names that run on a terminal: for each process, the base name of its program and, for an
+    interpreter, of the script it runs ('Python /Users/x/.local/bin/aider' gives Python and aider; 'node
+    /opt/homebrew/bin/gemini' gives node and gemini; 'python3 -m aider' gives python3 and aider). [] when ps fails."""
+    import os
+    import subprocess
+    dev = tty[5:] if tty.startswith("/dev/") else tty
+    try:
+        out = (TTY_PS_RUNNER or (lambda t: subprocess.run(["ps", "-t", t, "-o", "args="], capture_output=True,
+                                                          text=True, errors="replace", timeout=5).stdout))(dev)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    names = []
+    for line in (out or "").splitlines():
+        w = line.split()
+        if not w:
+            continue
+        names.append(os.path.basename(w[0]).lstrip("-"))
+        rest = w[2:] if len(w) > 2 and w[1] == "-m" else w[1:]
+        if rest and not rest[0].startswith("-"):
+            names.append(os.path.basename(rest[0]))
+    return names
+
+
+def _process_adapter(process, tty=None):
+    """The adapter whose DETECT['process'] runs in a pane: tmux's name of the pane's process, else (a script CLI,
+    where tmux names the interpreter: Python, node) a program or script on the pane's terminal (#5223)."""
+    from . import agents
+    ads = [a for a in agents.load().values() if (a.detect or {}).get("process")]
+    ad = next((a for a in ads if a.detect["process"] == process), None)
+    if ad is not None or not tty:
+        return ad
+    key, t = (tty, process), core.now().timestamp()
+    seen = _TTY_PROGRAMS.get(key)
+    if seen is None or t - seen[0] > TTY_PROGRAMS_KEEP:
+        names = set(_tty_programs(tty))
+        seen = _TTY_PROGRAMS[key] = (t, next((a.id for a in ads if a.detect["process"] in names), None))
+    return agents.find(seen[1]) if seen[1] else None
+
+
+def _pane_rule(conn, agent, process=None, tty=None):
     """How maxpm serve reads the pane of `agent` (#5183): (rx, layout, adapter). rx: the words of a blocked screen,
     or None (no watch: prompt_pattern is empty). With the default prompt_pattern, each pane is read with the words
     of its agent's adapter (DETECT['blocked']); another value of the setting is read for every pane. The adapter is
     the one of the agent's CLI (core.state_adapter), else the one whose DETECT['process'] runs in the pane
-    (process), else None: the setting's words and DETECT_LAYOUT."""
-    from . import agents
+    (process, tty: _process_adapter), else None: the setting's words and DETECT_LAYOUT."""
     ad = core.state_adapter(conn, agent) if agent else None
     if ad is None and process:
-        ad = next((a for a in agents.load().values() if (a.detect or {}).get("process") == process), None)
+        ad = _process_adapter(process, tty)
     pattern = core.setting(conn, "prompt_pattern").strip()
     detect = ad.detect if ad is not None else None
     if not pattern:
@@ -1663,7 +1706,7 @@ def watch_prompts(conn):
                 continue  # the pane closed since the list
             if screen["ended"]:
                 continue  # a shell: what the agent printed stays, and nobody waits there
-            rx, layout, ad = _pane_rule(conn, agent, screen.get("running"))
+            rx, layout, ad = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
             tail = _prompt_tail(_plain(screen["text"]))
             parts = _prompt_found(tail, rx, layout)
             if parts:
@@ -1762,7 +1805,7 @@ def _idle_panes(conn, names, after):
         except RiverError:
             continue  # the pane closed since the list
         text = _plain(screen["text"])
-        rx, layout, _ = _pane_rule(conn, agent, screen.get("running"))
+        rx, layout, _ = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
         if screen["ended"] or (rx and _prompt_found(_prompt_tail(text), rx, layout)):
             IDLE.pop(agent, None)  # a shell, or a prompt that a person answers
             continue
@@ -1815,7 +1858,7 @@ def watch_busy(conn):
         if agent not in names:
             continue
         text = _plain(screen["text"])
-        rx, layout, _ = _pane_rule(conn, agent, screen.get("running"))
+        rx, layout, _ = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
         if (agent in BUSY and BUSY[agent] != text) or (rx and _prompt_found(_prompt_tail(text), rx, layout)):
             busy.add(agent)
         BUSY[agent] = text

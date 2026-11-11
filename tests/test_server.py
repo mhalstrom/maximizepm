@@ -1211,7 +1211,8 @@ class FakeTmux:
         elif cmd == "show-options":
             return "C-b"
         elif cmd == "display-message":  # terminal_screen: the pane's size and cursor; else the text as it is
-            return f"120|40|3|7|{pane['running']}|maxpm:{pane['window'][1:]}.0|{pane['name']}" if pane else a[-1]
+            return (f"120|40|3|7|{pane['running']}|maxpm:{pane['window'][1:]}.0|/dev/ttys00{pane['id'][1:]}|"
+                    f"{pane['name']}") if pane else a[-1]
         elif cmd == "capture-pane":  # what the pane shows: with -e the colours too
             if not pane:
                 return None
@@ -2747,6 +2748,76 @@ class TmuxOrphans(unittest.TestCase):
         core.config_set(self.c, "tidy_every", "20m")
         server.ORPHANS.update(at=None)
         self.assertEqual(server.auto_end_orphans(self.c), [])
+
+
+class PaneProgram(unittest.TestCase):
+    """The pane watcher finds the adapter of a pane whose agent's type is not known yet by DETECT['process']: tmux's
+    name of the pane's process, else (a script CLI, where tmux names the interpreter) a program or script on the
+    pane's terminal (#5223)."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        self.ps = []
+        self.lines = {"ttys004": "-zsh\n/opt/homebrew/Cellar/python@3.14/Frameworks/Python.framework/Versions/3.14/"
+                                 "Resources/Python.app/Contents/MacOS/Python /Users/x/.local/bin/aider --model sonnet\n",
+                      "pts/3": "bash\npython3 -m aider\n",
+                      "ttys009": "-zsh\nruby /usr/local/bin/some-tool --watch\n"}
+
+        def ps(tty):
+            self.ps.append(tty)
+            if tty == "ttys666":
+                raise OSError("no ps")
+            return self.lines.get(tty, "")
+        old = server.TTY_PS_RUNNER
+        server.TTY_PS_RUNNER = ps
+        self.addCleanup(setattr, server, "TTY_PS_RUNNER", old)
+        server._TTY_PROGRAMS.clear()
+        self.addCleanup(server._TTY_PROGRAMS.clear)
+
+    def adapter(self, process, tty=None):
+        return getattr(server._pane_rule(self.c, None, process, tty)[2], "id", None)
+
+    def test_the_programs_of_a_terminal(self):
+        self.assertEqual(server._tty_programs("/dev/ttys004"), ["zsh", "Python", "aider"])
+        self.assertEqual(server._tty_programs("/dev/pts/3"), ["bash", "python3", "aider"])
+        self.assertEqual(server._tty_programs("ttys666"), [])
+        self.assertEqual(self.ps, ["ttys004", "pts/3", "ttys666"])
+
+    def test_a_script_cli_is_found_by_its_script_on_the_pane_s_terminal(self):
+        self.assertEqual(self.adapter("Python", "/dev/ttys004"), "aider")
+        self.assertEqual(self.adapter("python3", "/dev/pts/3"), "aider")
+        rx = server._pane_rule(self.c, None, "Python", "/dev/ttys004")[0]
+        self.assertTrue(rx.search("Run shell command? (Y)es/(N)o/(D)on't ask again [Yes]:"))
+        self.assertEqual(self.adapter("Python"), None)  # no terminal: no ps
+        self.assertEqual(self.adapter("Python", "/dev/ttys666"), None)  # ps fails: none
+        self.assertEqual(self.adapter("vim", "/dev/ttys009"), None)  # no adapter's program runs there
+
+    def test_a_name_that_tmux_shows_needs_no_ps_and_ps_runs_once_a_minute(self):
+        self.assertEqual(self.adapter("claude", "/dev/ttys004"), "claude")
+        self.assertEqual(self.ps, [])
+        for _ in range(3):
+            self.assertEqual(self.adapter("Python", "/dev/ttys004"), "aider")
+        self.assertEqual(self.ps, ["ttys004"])
+        key = ("/dev/ttys004", "Python")
+        server._TTY_PROGRAMS[key] = (server._TTY_PROGRAMS[key][0] - server.TTY_PROGRAMS_KEEP - 1,
+                                     server._TTY_PROGRAMS[key][1])
+        self.lines["ttys004"] = "-zsh\n"  # aider ended
+        self.assertEqual(self.adapter("Python", "/dev/ttys004"), None)
+        self.assertEqual(self.ps, ["ttys004", "ttys004"])
+
+    def test_the_screen_of_a_pane_names_its_terminal(self):
+        fake = FakeTmux()
+        old = server.TMUX_RUNNER
+        server.TMUX_RUNNER = fake
+        self.addCleanup(setattr, server, "TMUX_RUNNER", old)
+        fake.session = True
+        pane = fake._pane()
+        got = server._pane_screen("w1", pane)
+        self.assertEqual((got["tty"], got["running"], got["target"]), (f"/dev/ttys00{pane[1:]}", "claude", "maxpm:0.0"))
 
 
 class Watched(unittest.TestCase):
