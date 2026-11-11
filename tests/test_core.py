@@ -6817,6 +6817,28 @@ class DeployHook(Base):
         self.assertIn("stopped at deploy_timeout (90m)", r[0]["result"])
         self.assertEqual(r[0]["deploy_end"], "failed")
 
+    def test_the_managers_watch_hears_of_the_start_and_of_a_failure_the_owner_has(self):
+        """#5382: the deploy hook's start comes with the watch's next wake (low); its failure wakes it at once, also
+        when the alert went to the target's owner."""
+        core.register(self.c, "boss")
+        core.manage(self.c, self.dir.name, "boss")
+        open(self.flag, "w").close()
+        self.pass_review("rev")
+        w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)  # the pass wakes it (#4289)
+        self.assertTrue(any("passed" in m["body"] for m in w["messages"]))
+        core.deploy_hook_start(self.c, self.deploy, "test-token")
+        t0, naps = core.now(), []
+        with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
+            w = core.manage_watch(self.c, "boss", step="2h", sleep=naps.append)
+        self.assertEqual((w["result"], len(naps)), ("messages", 30))  # manage_wait_low: the start alone does not wake it
+        self.assertIn(f"the deploy hook of target web started for deploy #{self.deploy}", w["messages"][0]["body"])
+        r = core.run_hooks(self.c, token="test-token")
+        self.assertEqual((r[0]["deploy_end"], r[0]["alerted"]), ("failed", "ops"))
+        w = core.manage_watch(self.c, "boss", step="2h", sleep=lambda s: self.fail("the failure wakes it at once"))
+        body = w["messages"][0]["body"]
+        self.assertIn(f"the deploy hook of target web failed (exit 4", body)
+        self.assertIn(f"ops has the alert. The release starts again: fix #{r[0]['fix']}, then a new review #{r[0]['review']}", body)
+
 
 
 class ReleaseGate(DeployHook):

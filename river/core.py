@@ -42,7 +42,7 @@ MESSAGE_STATES = ("open", "accepted", "declined", "answered", "read")
 # The level of a message says how soon it wakes the manager's watch (maxpm manage --watch, #1583, #1608): high
 # after manage_wait_high, low after manage_wait_low. A message is high unless the sender says low (--level) or
 # MaximizePM writes a low one (a ship request notice to an owner that is not the manager); MaximizePM's notice of
-# level now (WAKE_LEVEL: a ship request, a review passed, a deploy done) wakes it at once. A blocked message wakes the watch at once: the sender
+# level now (WAKE_LEVEL: a ship request, a review passed, a deploy done, a deploy hook failed) wakes it at once. A blocked message wakes the watch at once: the sender
 # says so (--blocked: its item cannot move until the answer), or MaximizePM sees it (BLOCKED_SIGNS). A person's
 # message always wakes it at once. On 2026-10-06 to 08, the sender went on with its item after 78 of 128 alerts
 # and questions to the manager (current_project/research/worker-stops.md, #1597).
@@ -288,7 +288,8 @@ DEFAULT_SETTINGS = {
     "manage_settle": "2m",
     # How long a message to the manager of the level high or low waits before it wakes maxpm manage --watch
     # (#1583, #1608). A message is high (also an alert and a question) unless the sender gives --level low; a
-    # ship request, a review passed and a deploy done wake it at once (#4289). A blocked message (--blocked, or MaximizePM sees that its item stands still)
+    # ship request, a review passed, a deploy done and a deploy hook that failed wake it at once (#4289, #5382); a
+    # deploy hook that started comes with the next wake. A blocked message (--blocked, or MaximizePM sees that its item stands still)
     # and a person's message wake the watch at once. The new findings "an agent waits" and "an item is ready
     # for a person" wait manage_wait_low; another finding waits manage_settle. A wake brings every message that
     # waits. On 2026-10-08, 141 of 181 wakes of the manager were for events that could wait. 0s: at once.
@@ -3301,6 +3302,9 @@ def deploy_hook_start(conn, dep_id, token=None):
             conn.execute("UPDATE hook_runs SET queued_by=? WHERE queued_by=? AND started_at IS NULL AND deploy_id=?",
                          (token, hook_token(), dep["id"]))
         _event(conn, dep["id"], "maxpm", f"deploy hook started by maxpm serve: {cmd}")
+        # The manager's watch prints the start with its next wake, at the latest with the end of the deploy (#5382).
+        _wake_manager(conn, "maxpm", f"the deploy hook of target {dep['target']} started for deploy #{dep['id']}: {cmd}",
+                      dep["id"], level="low")
         _hook(conn, "deploy", dep["target"], dep["id"], None, token=token)
         run = conn.execute("SELECT MAX(id) FROM hook_runs WHERE deploy_id=? AND event='deploy'", (dep["id"],)).fetchone()[0]
     return run
@@ -3371,6 +3375,10 @@ def _deploy_hook_end(conn, run, ok, result, tail, folder):
                                       + (f"; it takes in the later deploy item(s) {', '.join(f'#{m}' for m in merged)}"
                                          if merged else ""))
         to = tg["owner"] or active_manager(conn)
+        if to != active_manager(conn):  # the owner has the alert; the manager's watch wakes for it too (#5382)
+            _wake_manager(conn, "maxpm", f"the deploy hook of target {target} failed ({result}) for deploy #{dep_id}; "
+                          f"{to} has the alert. The release starts again: fix #{fix}"
+                          + (f", then a new review #{rv['id']}" if rv else ""), dep_id)
         if to:
             _send(conn, "alert", "maxpm", f"the deploy hook of target {target} failed ({result}) for deploy #{dep_id}: "
                   f"{cmd}" + (f"\n{tail[-1500:]}" if tail else "") + f"\nThe deploy item stays open, and the release "
@@ -8050,15 +8058,16 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synce
     return res
 
 
-def _wake_manager(conn, actor, text, item_id=None):
+def _wake_manager(conn, actor, text, item_id=None, level=WAKE_LEVEL):
     """Inside a tx: a notice to the active manager that wakes its watch at once (level now, which only river
-    sends): a ship request, a review that passed, a deploy that is done (#4289). Before, the manager heard of
-    them at its next wake, and a release waited on it (#4278 passed at 22:16Z, the manager saw it at 22:37Z).
-    Nothing when no manager is active or when the manager itself did it."""
+    sends): a ship request, a review that passed, a deploy that is done, a deploy hook that failed (#4289, #5382).
+    Before, the manager heard of them at its next wake, and a release waited on it (#4278 passed at 22:16Z, the
+    manager saw it at 22:37Z). level low: a line that comes with the next wake (a deploy hook started). Nothing
+    when no manager is active or when the manager itself did it."""
     manager = active_manager(conn)
     if not manager or manager == actor:
         return None
-    return _send(conn, "notice", actor or "maxpm", text, to=manager, item_id=item_id, level=WAKE_LEVEL)
+    return _send(conn, "notice", actor or "maxpm", text, to=manager, item_id=item_id, level=level)
 
 
 def ship(conn, item_id, actor=None):

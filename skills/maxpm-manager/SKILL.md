@@ -148,8 +148,11 @@ Stop when the user tells you to, and tell the user what you did.
   and no session takes the deploy item. Exit 0 closes the deploy item. A failure
   keeps it open, and the release starts again from its beginning: a fix item
   with the output, a new review of the fix, then the hook again. Nobody runs the
-  command again by hand or repairs production by hand. A target where a push
-  to main is the release needs no deploy hook. The hook replaces the deployer:
+  command again by hand or repairs production by hand. Your watch prints each
+  step: the review pass and a failure wake it at once (also when the target's
+  owner has the alert), the start of the hook comes with the next wake, and the
+  close of the deploy item wakes it. A target where a push to main is the
+  release needs no deploy hook. The hook replaces the deployer:
   it runs whatever `maxpm target deployer` says. To stop it:
   `maxpm target hook <t> deploy --clear`.
 - **A release review nobody takes** (serve does not run, auto_review is off, or a start failed):
