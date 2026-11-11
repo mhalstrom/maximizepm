@@ -58,6 +58,8 @@ class Contract(Env):
                 self.assertTrue(a.supports(part), (mid, part))
             if mid in ("claude", "codex"):
                 self.assertTrue(a.supports("commands"), mid)  # #5186
+            if mid in ("claude", "codex"):
+                self.assertTrue(a.supports("setup"), mid)  # #5184
         self.assertEqual(agents.ids()[:2], ["claude", "codex"])
 
     def test_a_module_with_no_launch_part_loads_but_cannot_start(self):
@@ -877,3 +879,67 @@ class SessionFromEnv(Env):
                          ["local-abc"])
         with mock.patch.dict(os.environ, {"HERMES_LOGS": str(logs)}):
             self.assertEqual(sessions.transcript(self.c, "w"), ("hermes", logs / "local-abc.jsonl"))
+
+
+class Setup(Env):
+    """#5184: the setup part. The MCP config writers, the instruction file names, the voice and the web link texts
+    are in the adapters, and the page reads them from GET /api/agents instead of testing agent names."""
+
+    def test_the_instruction_files_come_from_the_adapters(self):
+        self.assertEqual(agents.get("claude").setup["instructions"], "CLAUDE.md")
+        self.assertEqual(agents.get("codex").setup["instructions"], "AGENTS.md")
+        self.assertEqual(agents.instruction_files(), ("CLAUDE.md", "AGENTS.md", "@AGENTS.md", "Claude Code"))
+        self.assertEqual(agents.shared_readers()[0], "Codex")  # and the other agents that read AGENTS.md (Pi)
+        self.assertTrue(cli._imports_agents("# rules\n@AGENTS.md\n"))
+        self.assertIn("Codex and other agents read AGENTS.md", cli.move_hint())
+
+    def test_a_user_adapter_with_its_own_file_name_changes_what_init_writes(self):
+        # A user module that replaces claude with another file name: init and the layout follow it.
+        self.user_module("claude", """
+            DESCRIBE = {"id": "claude", "label": "Claude Code", "exe": "claude", "family": "claude"}
+            SETUP = {"instructions": "CLAUDE.local.md", "import": "@{file}"}
+        """)
+        d = Path(self.tmp.name, "proj")
+        d.mkdir()
+        lines = cli.setup_instructions(d)
+        self.assertEqual((d / "CLAUDE.local.md").read_text(), "@AGENTS.md\n")
+        self.assertFalse((d / "CLAUDE.md").exists())
+        self.assertTrue(any("CLAUDE.local.md: created" in x for x in lines))
+        self.assertEqual(cli.instructions_layout(d), "shared")
+
+    def test_the_voice_text_comes_from_the_adapter(self):
+        self.assertEqual(sessions.provider("claude-code")["voice_cli"], agents.get("claude").setup["voice"])
+        self.assertEqual(sessions.provider(None, "codex")["voice_cli"], agents.get("codex").setup["voice"])
+        self.assertEqual(sessions.provider(None, "codex")["agent"], "codex")
+        self.assertIsNone(sessions.provider("other-cli")["agent"])
+
+    def test_setup_agent_writes_the_mcp_config_through_the_adapter(self):
+        f = Path(self.tmp.name, "claude_desktop_config.json")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["setup-agent", "--claude-desktop", "--config", str(f)])
+        self.assertIn("added MaximizePM", out.getvalue())
+        self.assertEqual(json.loads(f.read_text())["mcpServers"]["maxpm"], agents.setup_entry())
+        self.assertFalse(hasattr(cli, "setup_claude_desktop"))  # moved, not copied
+        with self.assertRaisesRegex(RiverError, "no MCP config writer"):
+            agents.Adapter(module(DESCRIBE=GOOD), "builtin").write_mcp_config()
+
+    def test_the_page_reads_every_agent_from_one_endpoint(self):
+        from river import server
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.headers, out = "/api/agents", ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}, {}
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        h.do_GET()
+        self.assertEqual(out["code"], 200)
+        got = {a["id"]: a for a in out["body"]["agents"]}
+        self.assertEqual(list(got)[:2], ["claude", "codex"])
+        self.assertTrue(got["claude"]["main"])
+        self.assertFalse(got["codex"]["main"])
+        self.assertIn("claude-code", got["claude"]["names"])
+        self.assertEqual(got["claude"]["setup"]["open_link"], "Open on claude.ai")
+        self.assertIn("Codex session has no web link", got["codex"]["setup"]["no_link"])
+        self.assertTrue(got["codex"]["parts"]["setup"])
+
+    def test_the_sessions_view_tests_no_agent_name(self):
+        js = (Path(cli.__file__).parent / "static" / "views" / "sessions.js").read_text(encoding="utf-8")
+        for name in ("\"claude-code\"", "\"codex\"", "Open on claude.ai", "A Codex session"):
+            self.assertNotIn(name, js)

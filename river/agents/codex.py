@@ -349,3 +349,97 @@ def read_commands(folder):
     from . import slash
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     return slash.md_commands(home / "prompts", "prompts:", recursive=False)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 11. Setup (#5184)
+# ---------------------------------------------------------------------------------------------------------------
+
+SETUP = {
+    "instructions": "AGENTS.md",
+    "import": None,
+    "skills_dir": None,
+    # Voice (#4626): checked in Codex 0.159.1; it takes no audio from outside, so the page dictates (#5107).
+    "voice": ("/voice in its terminal: a spoken conversation (OpenAI realtime, the feature realtime_conversation) with "
+              "the microphone and speakers of the computer it runs on; it takes no audio from outside"),
+    "open_link": None,
+    "open_title": None,
+    "no_link": "A Codex session has no web link, and this one runs in no tmux pane here",
+}
+
+
+def _toml_block(entry):
+    """The [mcp_servers.maxpm] tables for an entry. A JSON string is also a valid TOML basic string."""
+    import json
+    lines = ["[mcp_servers.maxpm]", f"command = {json.dumps(entry['command'])}",
+             "args = [" + ", ".join(json.dumps(a) for a in entry["args"]) + "]", "", "[mcp_servers.maxpm.env]"]
+    lines += [f"{k} = {json.dumps(v)}" for k, v in entry["env"].items()]
+    return "\n".join(lines) + "\n"
+
+
+def _toml_without(text):
+    """The config text without its [mcp_servers.maxpm] table and subtables; every other line stays."""
+    import re
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$", line)
+        if m:
+            name = m.group(1).replace('"', "").replace("'", "").replace(" ", "")
+            skip = name == "mcp_servers.maxpm" or name.startswith("mcp_servers.maxpm.")
+        if not skip:
+            out.append(line)
+    return "".join(out)
+
+
+def _toml_load(text, f):
+    from ..core import RiverError
+    try:
+        import tomllib
+    except ImportError:  # Python before 3.11: MaximizePM cannot check the file, so it changes it only by lines
+        return None
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise RiverError(f"{f} is not valid TOML ({e}); fix it first, MaximizePM does not overwrite it")
+
+
+def write_mcp_config(path=None, remove=False):
+    """Add (or remove) MaximizePM in ~/.codex/config.toml (or $CODEX_HOME), which the ChatGPT desktop app shares with
+    the Codex CLI (maxpm setup-agent --chatgpt-desktop). Only the [mcp_servers.maxpm] tables change; the old file is
+    kept as config.toml.bak."""
+    import os
+    from pathlib import Path
+    from . import setup_entry
+    from ..core import RiverError
+    f = Path(path).expanduser() if path else Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "config.toml"
+    old = f.read_text() if f.exists() else ""
+    before = _toml_load(old, f)
+    had = before is not None and "maxpm" in (before.get("mcp_servers") or {}) or "[mcp_servers.maxpm]" in old
+    base = _toml_without(old)
+    if remove:
+        if not had:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        new = base
+    else:
+        entry = setup_entry()
+        if before is not None and (before.get("mcp_servers") or {}).get("maxpm") == entry:
+            return f"MaximizePM is already in {f}; nothing changed"
+        new = base.rstrip("\n") + ("\n\n" if base.strip() else "") + _toml_block(entry)
+    after = _toml_load(new, f)
+    if after is not None:
+        others = lambda d: {k: v for k, v in (d or {}).items() if k != "mcp_servers"}
+        servers = lambda d: {k: v for k, v in ((d or {}).get("mcp_servers") or {}).items() if k != "maxpm"}
+        if others(after) != others(before) or servers(after) != servers(before) or (
+                not remove and after["mcp_servers"]["maxpm"] != entry):
+            raise RiverError(f"MaximizePM could not add its entry to {f} without changing other settings; add it by hand: "
+                             f"codex mcp add maxpm --env MAXPM_CHAT=1 -- maxpm mcp")
+    if old:
+        f.with_name(f.name + ".bak").write_text(old)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(new)
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). Restart the ChatGPT desktop app."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") + ".\n"
+            "Restart the ChatGPT desktop app, then use Work or Codex mode (plain Chat mode does not reach servers "
+            "on this computer). Ask it, for example: \"plan my next work with MaximizePM\" or \"what waits on me in MaximizePM?\". "
+            "Codex CLI sessions see MaximizePM too; in a project folder they work as usual.")

@@ -2975,12 +2975,14 @@ def _shown_cmd(conn, cmd):
 
 
 def _block_state(path):
+    from . import agents
     from .cli import AGENT_SNIPPET, _imports_agents
     if not path.exists():
         return "missing"
     text = path.read_text(errors="replace")
-    if path.name == "CLAUDE.md" and _imports_agents(text):
-        return _block_state(path.with_name("AGENTS.md"))  # Claude Code reads AGENTS.md through the import
+    own, shared, _, _ = agents.instruction_files()
+    if path.name == own and _imports_agents(text):
+        return _block_state(path.with_name(shared))  # Claude Code reads AGENTS.md through the import
     return "current" if AGENT_SNIPPET in text else "old" if core.names_product(text) else "missing"
 
 
@@ -2988,12 +2990,14 @@ def setup_status(conn):
     """What the setup guide shows: each check, and whether it is done."""
     import shutil
     from . import notify
+    from . import agents as adapters
     from .cli import instructions_layout
+    own, shared, _, _ = adapters.instruction_files()
     folders = {}
     for p in core.project_list(conn):
         if p["path"]:
             folders.setdefault(p["path"], []).append(p["name"])
-    skills = Path("~/.claude/skills").expanduser()
+    skills = Path(adapters.get("claude").setup["skills_dir"]).expanduser()
     agents = core.parse_launch_agents(core.setting(conn, "launch_agents"))
     have = {label for label, _ in agents}
     # Agent programs as a new terminal finds them (the app itself has only Finder's short PATH).
@@ -3003,7 +3007,7 @@ def setup_status(conn):
     return {
         "done": core.setting(conn, "setup_done") == "on",
         "folders": [{"path": d, "projects": names, "exists": Path(d).is_dir(),
-                     "claude_md": _block_state(Path(d, "CLAUDE.md")), "agents_md": _block_state(Path(d, "AGENTS.md")),
+                     "claude_md": _block_state(Path(d, own)), "agents_md": _block_state(Path(d, shared)),
                      "layout": instructions_layout(d) if Path(d).is_dir() else None}
                     for d, names in folders.items()],
         "projects_without_folder": [p["name"] for p in core.project_list(conn) if not p["path"]],
@@ -3464,6 +3468,9 @@ class Handler(BaseHTTPRequestHandler):
                                         "stale": code_stale()})
             except RiverError as e:
                 return self._send(409, {"error": str(e)})
+        if path == "/api/agents":  # each agent's describe part, the parts it supports, and its setup texts (#5184)
+            from . import agents
+            return self._send(200, agents.page_list())
         if path == "/api/setup":
             conn = core.connect()
             try:

@@ -30,16 +30,10 @@ PLATFORMS = {"claude": "claude-code", "codex": "codex"}
 # The chat providers the Sessions tab knows (#4627): the label each session shows. A new provider is one more row
 # here (#4625 adds its settings); the page draws what it gets. The settings of each provider's Settings dialog come
 # from its agent adapter (Adapter.session_specs, river/agents, #5169).
-# Voice (#4626): what each CLI's own voice mode does. Both CLIs record the microphone of the computer they run on and
-# take no audio from outside (checked in Claude Code 2.1.319 and Codex 0.159.1), so the page dictates for every
-# provider, as in every box that takes text (#5107): speech becomes text in the box, and the person sends it.
+# Voice (#4626): what each CLI's own voice mode does is in its adapter, SETUP["voice"] (#5184).
 PROVIDERS = {
-    "claude-code": {"label": "Claude Code", "voice_cli": (
-        "/voice [hold|tap|off] in its terminal: hold-to-talk dictation into its prompt; it records the microphone of "
-        "the computer it runs on (SoX) and needs a claude.ai login; it takes no audio from outside")},
-    "codex": {"label": "Codex", "voice_cli": (
-        "/voice in its terminal: a spoken conversation (OpenAI realtime, the feature realtime_conversation) with the "
-        "microphone and speakers of the computer it runs on; it takes no audio from outside")},
+    "claude-code": {"label": "Claude Code"},
+    "codex": {"label": "Codex"},
 }
 
 
@@ -53,12 +47,15 @@ def _place(conn, item_id):
 
 
 def provider(agent_type, kind=None):
-    """{id, label} of a session's chat provider: its agent type, else the kind of its transcript."""
+    """{id, label, agent, voice_cli} of a session's chat provider: its agent type, else the kind of its transcript.
+    agent: the id of its adapter (GET /api/agents), or None; voice_cli: its adapter's SETUP["voice"]."""
+    from . import agents
     pid = agent_type or PLATFORMS.get(kind or "")
     if not pid:
         return None
-    return {"id": pid, "label": PROVIDERS.get(pid, {}).get("label") or pid,
-            "voice_cli": PROVIDERS.get(pid, {}).get("voice_cli")}
+    a = agents.find(pid)
+    return {"id": pid, "label": PROVIDERS.get(pid, {}).get("label") or pid, "agent": a.id if a else None,
+            "voice_cli": (a.setup or {}).get("voice") if a else None}
 STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits for an answer", "idle": "idle",
           "expert": "talks with you",
           "stopping": "ending: asked to stop", "starting": "not connected yet: it ran no maxpm command",

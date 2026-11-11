@@ -25,6 +25,7 @@ import { makeSlashList } from "../components/slashList.js";
 import { markYou } from "./you.js";
 import { S } from "../page.js";
 import { renderGive } from "./sessions-work.js";
+import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
 
 const PICKED = "river.session";
 // Fill a part of the head only when its HTML changed: a poll (2 s) then replaces no control under the pointer.
@@ -39,10 +40,13 @@ function headerOpen(s) {
   const set = s.provider ? button("Settings", { cls: MI, data: { settings: s.name }, title: "The settings this session runs with, and what you can change" }) : "";
   return headerOpenBtn(s) + set + (s.running ? endButton(s, { cls: MI + " sess-mi-end" }) : "");
 }
+// The texts of the web link and of why there is none come from the session's agent (components/agents.js, #5184);
+// a session of no known agent takes the main agent's.
 function headerOpenBtn(s) {
-  if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn ${MI}" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="Open this session on claude.ai/code">Open on claude.ai</a>`;
+  const setup = (agentOf(s.provider || s.agent_type) || mainAgent() || {}).setup || {};
+  if (/^https:\/\//.test(s.session_url || "")) return `<a class="btn ${MI}" href="${esc(s.session_url)}" target="_blank" rel="noopener" title="${esc(setup.open_title || "Open this session's web page")}">${esc(setup.open_link || "Open session")}</a>`;
   if (s.terminal) return button("Open in terminal", { cls: MI, data: { term: s.name }, title: "Open its tmux pane in the terminal view" });
-  const why = s.agent_type === "codex" ? "A Codex session has no web link, and this one runs in no tmux pane here" : "This session has no Remote Control link and runs in no tmux pane here";
+  const why = setup.no_link || "This session has no web link and runs in no tmux pane here";
   return button(`Open session<span class="muted sess-noopen">${esc(why)}</span>`, { cls: MI, disabled: true, title: why });
 }
 // The targets a session owns: entries are {name, owner_expires_at} (or a name), shown by name (#4686).
@@ -78,9 +82,11 @@ function stateDot(s) {
   return `<span class="sess-stw" title="${esc(tip || "")}"><span class="dot ${DOT[s.state] || "away"}"></span>${esc(s.state_label || "")}</span>`;
 }
 
-// The chat provider of a session (#4627): a small label from the server's provider table.
+// The chat provider of a session (#4627): a small label from the server's provider table, only when its agent is
+// not the main one (components/agents.js).
+const tagged = (p) => p && !(agentOf(p) || {}).main;
 function provTag(p) {
-  return p && p.id !== "claude-code" ? `<span class="prov prov-${esc(p.id)}" title="Runs in ${esc(p.label)}">${esc(p.label)}</span>` : "";
+  return tagged(p) ? `<span class="prov prov-${esc(p.id)}" title="Runs in ${esc(p.label)}">${esc(p.label)}</span>` : "";
 }
 
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
@@ -119,9 +125,9 @@ function rowHover(s) {
     h ? `#${h.id} ${h.title}` : "", ownNames(s).length ? "Owns target " + ownNames(s).join(", ") : "",
     lastText ? "Last: " + clip(lastText, 300) : ""].filter(Boolean).join("\n");
 }
-// The kind of agent, only when it is not Claude Code: a small letter mark (Codex: C).
+// The kind of agent, only when it is not the main one (Claude Code): a small letter mark (Codex: C).
 function provIcon(p) {
-  return p && p.id !== "claude-code" ? `<span class="prov prov-ic prov-${esc(p.id)}" title="Runs in ${esc(p.label)}" aria-label="${esc(p.label)}">${esc(p.label.slice(0, 1))}</span>` : "";
+  return tagged(p) ? `<span class="prov prov-ic prov-${esc(p.id)}" title="Runs in ${esc(p.label)}" aria-label="${esc(p.label)}">${esc(p.label.slice(0, 1))}</span>` : "";
 }
 export function sessionRow(s) {
   // The assistant (#5110) goes through what waits on the person: its tag names its job, as the manager's does.
@@ -278,6 +284,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (busy) { again = true; return; }
     busy = true; again = false;
     try {
+      await loadAgents();  // once: the rows ask it about each session's agent
       const r = await fetch("api/sessions");
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "failed");
@@ -316,6 +323,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (!agent) return;
     if (document.hidden || !isShown()) { timer = setTimeout(poll, 3000); return; }
     try {
+      await loadAgents();  // the head asks it about the session's agent
       const r = await fetch(`api/session?agent=${encodeURIComponent(agent)}${cursor != null ? "&cursor=" + cursor : ""}`);
       const j = await r.json();
       if (mine !== gen) return;

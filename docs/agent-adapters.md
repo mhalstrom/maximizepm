@@ -247,3 +247,17 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
   it. Enter sends the text as typed; after Up or Down chose a row, Enter completes that row first and then sends.
   A click on a row completes it.
 
+## As built in #5184 (setup and the page)
+
+- `SETUP` holds `instructions`, `import` (the line with `{file}` by which the agent's instruction file imports
+  another: Claude Code's `@{file}`), `skills_dir`, `voice`, `open_link` (the label of the page's button that opens a
+  session's web link), `open_title` (its tooltip) and `no_link` (why a session that runs in no tmux pane here cannot
+  open). `write_mcp_config(path=None, remove=False)` adds MaximizePM's MCP server (`agents.setup_entry()`) to the
+  agent's config file, or takes it out, and returns what changed: `claude` writes the Claude desktop app's config,
+  `codex` writes `~/.codex/config.toml` (`maxpm setup-agent --claude-desktop|--chatgpt-desktop`).
+- `agents.SHARED_INSTRUCTIONS` is `AGENTS.md`. `agents.instruction_files()` gives the file of the agent that imports
+  it (CLAUDE.md), and `maxpm init`, the setup guide and the Projects folder form take the names from there.
+- `GET /api/agents` (`agents.page_list()`) gives each agent's describe part, the parts it supports, its launch
+  capabilities and its setup texts; `main` marks the first registered agent. The page reads it once
+  (`static/components/agents.js`), and `views/sessions.js` tests no agent name. A session's `provider` has `agent`,
+  the id of its adapter, and `voice_cli` comes from `SETUP["voice"]`.

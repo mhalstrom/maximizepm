@@ -164,12 +164,12 @@ class ChatApp(unittest.TestCase):
         self.call(srv, "maxpm", {"args": ["needs-you"]})  # runs as the manager go named
 
     def test_setup_merges_into_the_claude_desktop_config(self):
-        from river import cli
+        from river import agents  # the MCP config writers are in the adapters' setup part (#5184)
         f = os.path.join(self.dir.name, "Claude", "claude_desktop_config.json")
         os.makedirs(os.path.dirname(f))
         with open(f, "w") as fh:
             json.dump({"mcpServers": {"other": {"command": "x"}}, "theme": "dark"}, fh)
-        self.assertIn("added MaximizePM", cli.setup_claude_desktop(f))
+        self.assertIn("added MaximizePM", agents.get("claude").write_mcp_config(f))
         data = load(f)
         self.assertEqual(data["mcpServers"]["other"], {"command": "x"})
         self.assertEqual(data["theme"], "dark")
@@ -178,27 +178,27 @@ class ChatApp(unittest.TestCase):
         self.assertTrue(os.path.isabs(river["command"]))
         self.assertEqual(river["env"], {"MAXPM_DB": str(core.db_path().resolve()), "MAXPM_CHAT": "1"})
         self.assertTrue(os.path.exists(f + ".bak"))
-        self.assertIn("nothing changed", cli.setup_claude_desktop(f))
-        self.assertIn("took MaximizePM out", cli.setup_claude_desktop(f, remove=True))
+        self.assertIn("nothing changed", agents.get("claude").write_mcp_config(f))
+        self.assertIn("took MaximizePM out", agents.get("claude").write_mcp_config(f, remove=True))
         self.assertEqual(load(f)["mcpServers"], {"other": {"command": "x"}})
         with open(f, "w") as fh:
             fh.write("{broken")
         with self.assertRaisesRegex(core.RiverError, "not valid JSON"):
-            cli.setup_claude_desktop(f)
+            agents.get("claude").write_mcp_config(f)
         new = os.path.join(self.dir.name, "fresh", "claude_desktop_config.json")
-        cli.setup_claude_desktop(new)
+        agents.get("claude").write_mcp_config(new)
         self.assertEqual(list(load(new)["mcpServers"]), ["maxpm"])
 
     @unittest.skipUnless(sys.version_info >= (3, 11), "tomllib is new in Python 3.11")
     def test_setup_merges_into_the_codex_config_that_chatgpt_shares(self):
-        from river import cli
+        from river import agents
         f = os.path.join(self.dir.name, ".codex", "config.toml")
         os.makedirs(os.path.dirname(f))
         old = ('model = "sol"\n\n[mcp_servers.node_repl]\ncommand = "/x/node"\nargs = []\n\n'
                '[mcp_servers.node_repl.env]\nA = "1"\n\n[apps.x.tools."y.z"]\napproval_mode = "approve"\n')
         with open(f, "w") as fh:
             fh.write(old)
-        self.assertIn("Work or Codex mode", cli.setup_codex_config(f))
+        self.assertIn("Work or Codex mode", agents.get("codex").write_mcp_config(f))
         with open(f) as fh:
             text = fh.read()
         self.assertTrue(text.startswith(old.rstrip("\n")))  # every other line stays as it was
@@ -207,23 +207,23 @@ class ChatApp(unittest.TestCase):
         self.assertEqual(data["mcp_servers"]["node_repl"]["env"], {"A": "1"})
         self.assertEqual(data["mcp_servers"]["maxpm"]["env"], {"MAXPM_DB": str(core.db_path().resolve()), "MAXPM_CHAT": "1"})
         self.assertEqual(data["mcp_servers"]["maxpm"]["args"][-1], "mcp")
-        self.assertIn("nothing changed", cli.setup_codex_config(f))
+        self.assertIn("nothing changed", agents.get("codex").write_mcp_config(f))
         # A changed river entry is replaced, not doubled.
         with open(f, "w") as fh:
             fh.write(text.replace('"MAXPM_CHAT" = "1"', "").replace("MAXPM_CHAT = \"1\"", 'MAXPM_CHAT = "0"'))
-        cli.setup_codex_config(f)
+        agents.get("codex").write_mcp_config(f)
         with open(f) as fh:
             text = fh.read()
         self.assertEqual(text.count("[mcp_servers.maxpm]"), 1)
         self.assertIn('MAXPM_CHAT = "1"', text)
-        self.assertIn("took MaximizePM out", cli.setup_codex_config(f, remove=True))
+        self.assertIn("took MaximizePM out", agents.get("codex").write_mcp_config(f, remove=True))
         with open(f) as fh:
             self.assertEqual(fh.read().rstrip("\n"), old.rstrip("\n"))
-        self.assertIn("nothing changed", cli.setup_codex_config(f, remove=True))
+        self.assertIn("nothing changed", agents.get("codex").write_mcp_config(f, remove=True))
         with open(f, "w") as fh:
             fh.write("[broken")
         with self.assertRaisesRegex(core.RiverError, "not valid TOML"):
-            cli.setup_codex_config(f)
+            agents.get("codex").write_mcp_config(f)
 
     def test_a_session_in_a_project_folder_is_not_a_chat(self):
         # The Codex CLI reads the same config: its maxpm mcp runs with MAXPM_CHAT=1 in the project folder.

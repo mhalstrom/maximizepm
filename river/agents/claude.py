@@ -643,3 +643,72 @@ def read_commands(folder):
     got += _plugin_commands(dirs)
     built_in = {c["name"] for c in COMMANDS}
     return slash.unique(e for e in got if e["name"] not in built_in)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 11. Setup (#5184)
+# ---------------------------------------------------------------------------------------------------------------
+
+SETUP = {
+    "instructions": "CLAUDE.md",
+    # CLAUDE.md that holds the one line @AGENTS.md imports it: Claude Code reads the same rules as other agents.
+    "import": "@{file}",
+    "skills_dir": "~/.claude/skills",
+    # Voice (#4626): Claude Code records the microphone of the computer it runs on and takes no audio from outside
+    # (checked in Claude Code 2.1.319), so the page dictates into its message box as for every agent (#5107).
+    "voice": ("/voice [hold|tap|off] in its terminal: hold-to-talk dictation into its prompt; it records the microphone "
+              "of the computer it runs on (SoX) and needs a claude.ai login; it takes no audio from outside"),
+    "open_link": "Open on claude.ai",
+    "open_title": "Open this session on claude.ai/code",
+    "no_link": "This session has no Remote Control link and runs in no tmux pane here",
+}
+
+
+def desktop_config_path():
+    """Where the Claude desktop app keeps its MCP servers."""
+    import os
+    import sys
+    from pathlib import Path
+    if sys.platform == "darwin":
+        return Path("~/Library/Application Support/Claude/claude_desktop_config.json").expanduser()
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA") or Path("~/AppData/Roaming").expanduser(), "Claude",
+                    "claude_desktop_config.json")
+    return Path("~/.config/Claude/claude_desktop_config.json").expanduser()
+
+
+def write_mcp_config(path=None, remove=False):
+    """Add (or remove) the MaximizePM entry in the Claude desktop app's config (maxpm setup-agent --claude-desktop);
+    other servers and settings stay. The old file is kept as <name>.bak when it changes."""
+    import json
+    from pathlib import Path
+    from . import setup_entry
+    from ..core import RiverError
+    f = Path(path).expanduser() if path else desktop_config_path()
+    old = f.read_text() if f.exists() else ""
+    try:
+        data = json.loads(old) if old.strip() else {}
+    except ValueError as e:
+        raise RiverError(f"{f} is not valid JSON ({e}); fix it first, MaximizePM does not overwrite it")
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        raise RiverError(f"{f}: expected an object with an mcpServers object; fix it first")
+    servers = data.setdefault("mcpServers", {})
+    if remove:
+        if "maxpm" not in servers:
+            return f"{f} has no MaximizePM entry; nothing changed"
+        del servers["maxpm"]
+    else:
+        entry = setup_entry()
+        if servers.get("maxpm") == entry:
+            return f"MaximizePM is already in {f}; nothing changed"
+        servers["maxpm"] = entry
+    new = json.dumps(data, indent=2) + "\n"
+    if old:
+        f.with_name(f.name + ".bak").write_text(old)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(new)
+    if remove:
+        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). Quit and reopen the Claude desktop app."
+    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") + ".\n"
+            "Quit and reopen the Claude desktop app. Then ask it, for example: \"plan my next work with MaximizePM\", "
+            "\"what waits on me in MaximizePM?\", or \"take a writing item from MaximizePM\".")

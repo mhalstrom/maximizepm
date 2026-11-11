@@ -260,15 +260,21 @@ INPUT_KEYS = {"native": (list, tuple, type(None))}
 # folder (Claude: ~/.claude/commands, .claude/commands, the skills, plugin commands; Codex: ~/.codex/prompts).
 COMMAND_KEYS = {"name": str, "description": str, "hint": str}
 
-# 11. Setup. SETUP = {
+# 11. Setup (#5184). SETUP = {
 #      "instructions": the instruction file it reads in a project folder (CLAUDE.md, AGENTS.md, GEMINI.md),
+#      "import":       the line with {file} by which its instruction file imports another one ("@{file}"), or None;
+#                      an agent whose file is not SHARED_INSTRUCTIONS and that has it reads AGENTS.md through it,
 #      "skills_dir":   the folder of its skills (~ expands), or None,
 #      "voice":        what its own voice mode does, one sentence, or None,
-#      "open_link":    how a person opens a link it prints, one sentence, or None,
+#      "open_link":    the label of the page's button that opens a session's web link (IDENTITY["url"]), or None,
+#      "open_title":   that button's tooltip, or None,
+#      "no_link":      why the page cannot open a session of it that runs in no tmux pane here, or None,
 #    }
-# write_mcp_config(url) -> [the files it changed]: points the agent at MaximizePM's MCP server.
-SETUP_KEYS = {"instructions": str, "skills_dir": (str, type(None)), "voice": (str, type(None)),
-              "open_link": (str, type(None))}
+# write_mcp_config(path=None, remove=False) -> one text that says what changed: adds MaximizePM's MCP server (maxpm
+# mcp, setup_entry()) to the agent's config file (path: another file than its own), or takes it out again.
+SETUP_KEYS = {"instructions": str, "import": (str, type(None)), "skills_dir": (str, type(None)),
+              "voice": (str, type(None)), "open_link": (str, type(None)), "open_title": (str, type(None)),
+              "no_link": (str, type(None))}
 
 # Each part: the module names that make it up, and the dict whose keys check (name, shape).
 PARTS = {
@@ -644,6 +650,12 @@ class Adapter:
         """Its DETECT with the layout keys it leaves out (DETECT_LAYOUT): what the pane watcher reads a screen with."""
         return {**DETECT_LAYOUT, **(self.detect or {})}
 
+    def write_mcp_config(self, path=None, remove=False):
+        f = self._fn("write_mcp_config")
+        if f is None:
+            raise RiverError(f"agent {self.id} has no MCP config writer (write_mcp_config); add it to {self._file()}")
+        return f(path, remove)
+
     def inside(self, env):
         """Whether a command with environment `env` runs inside this agent (IDENTITY['inside_env'])."""
         return any(env.get(v) for v in (self.identity or {}).get("inside_env") or ())
@@ -771,8 +783,70 @@ def from_env(env=None):
     return next((got[m] for m in order if got[m].inside(env)), None)
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Setup (#5184): the instruction files of a project folder, the MCP server entry, and what the page reads
+# ---------------------------------------------------------------------------------------------------------------
+
+# The instruction file that most agents read in a project folder (Codex, OpenCode, Amp and others). An agent with its
+# own file and an import line (SETUP["import"]) reads it through that line: Claude Code's CLAUDE.md is "@AGENTS.md".
+SHARED_INSTRUCTIONS = "AGENTS.md"
+
+
+def instruction_files():
+    """(own, shared, line, label): the instruction file of the first agent that imports the shared file, the shared
+    file, the import line that its own file holds, and that agent's label; ('CLAUDE.md', 'AGENTS.md', '@AGENTS.md',
+    'Claude Code') with the built-in agents."""
+    for m in ids():
+        a = load()[m]
+        st = a.setup or {}
+        if st.get("import") and st.get("instructions") not in (None, SHARED_INSTRUCTIONS):
+            return st["instructions"], SHARED_INSTRUCTIONS, st["import"].format(file=SHARED_INSTRUCTIONS), a.label
+    raise RiverError("no registered agent imports " + SHARED_INSTRUCTIONS)  # a defect: claude.py has it
+
+
+def shared_readers():
+    """The labels of the agents that read SHARED_INSTRUCTIONS itself ('Codex' with the built-in agents)."""
+    got = load()
+    return [got[m].label for m in ids() if (got[m].setup or {}).get("instructions") == SHARED_INSTRUCTIONS]
+
+
+def setup_entry():
+    """The MCP server entry {command, args, env} that a chat app or an agent CLI runs: this Python and this MaximizePM
+    by full path (an app does not have the shell's PATH), the queue this command uses, and MAXPM_CHAT=1 (a chat has
+    no folder)."""
+    import shutil
+    import sys
+    from .. import core
+    script = Path(__file__).resolve().parent.parent.parent / "bin" / "maxpm"
+    if script.is_file():
+        cmd, args = sys.executable, [str(script), "mcp"]
+    elif shutil.which("maxpm"):
+        cmd, args = str(Path(shutil.which("maxpm")).resolve()), ["mcp"]
+    else:
+        raise RiverError("cannot find the maxpm program to give the Claude desktop app; install MaximizePM first")
+    return {"command": cmd, "args": args,
+            "env": {"MAXPM_DB": str(core.db_path().expanduser().resolve()), "MAXPM_CHAT": "1"}}
+
+
+def page_list():
+    """What the page reads of each agent (GET /api/agents), so that it tests no agent name: its describe part, the
+    parts it supports, its launch capabilities and its setup texts. "main": the first registered agent (Claude Code),
+    whose sessions carry no agent tag on the Sessions tab."""
+    got = load()
+    out = []
+    for i, m in enumerate(ids()):
+        a = got[m]
+        d = a.describe
+        out.append({"id": a.id, "label": a.label, "exe": d["exe"], "names": a.names(), "family": d["family"],
+                    "models": list(d["models"]), "default_model": d["default_model"], "prefix": d["prefix"],
+                    "parts": {p: a.supports(p) for p in PARTS}, "launch": dict(a.launch),
+                    "setup": dict(a.setup or {}), "main": i == 0})
+    return {"agents": out, "errors": errors()}
+
+
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
-           "find", "get", "from_env", "override_dir"]
+           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "instruction_files", "shared_readers",
+           "setup_entry", "page_list"]
 
 
 # Last, after every name above: core imports the built-in adapters while it loads (PLATFORM_EFFORTS), and they import

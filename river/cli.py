@@ -1396,134 +1396,6 @@ def build_parser():
     return p
 
 
-def claude_desktop_config_path():
-    """Where the Claude desktop app keeps its MCP servers."""
-    if sys.platform == "darwin":
-        return Path("~/Library/Application Support/Claude/claude_desktop_config.json").expanduser()
-    if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA") or Path("~/AppData/Roaming").expanduser(), "Claude",
-                    "claude_desktop_config.json")
-    return Path("~/.config/Claude/claude_desktop_config.json").expanduser()
-
-
-def _toml_river_block(entry):
-    """The [mcp_servers.maxpm] tables for an entry. A JSON string is also a valid TOML basic string."""
-    lines = ["[mcp_servers.maxpm]", f"command = {json.dumps(entry['command'])}",
-             "args = [" + ", ".join(json.dumps(a) for a in entry["args"]) + "]", "", "[mcp_servers.maxpm.env]"]
-    lines += [f"{k} = {json.dumps(v)}" for k, v in entry["env"].items()]
-    return "\n".join(lines) + "\n"
-
-
-def _toml_without_river(text):
-    """The config text without its [mcp_servers.maxpm] table and subtables; every other line stays."""
-    import re
-    out, skip = [], False
-    for line in text.splitlines(keepends=True):
-        m = re.match(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$", line)
-        if m:
-            name = m.group(1).replace('"', "").replace("'", "").replace(" ", "")
-            skip = name == "mcp_servers.maxpm" or name.startswith("mcp_servers.maxpm.")
-        if not skip:
-            out.append(line)
-    return "".join(out)
-
-
-def _toml_load(text, f):
-    try:
-        import tomllib
-    except ImportError:  # Python before 3.11: river cannot check the file, so it changes it only by lines
-        return None
-    try:
-        return tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise RiverError(f"{f} is not valid TOML ({e}); fix it first, MaximizePM does not overwrite it")
-
-
-def setup_codex_config(path=None, remove=False):
-    """Add (or remove) river in ~/.codex/config.toml, which the ChatGPT desktop app shares with the Codex CLI.
-    Only the [mcp_servers.maxpm] tables change; the old file is kept as config.toml.bak."""
-    f = Path(path).expanduser() if path else Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "config.toml"
-    old = f.read_text() if f.exists() else ""
-    before = _toml_load(old, f)
-    had = before is not None and "maxpm" in (before.get("mcp_servers") or {}) or "[mcp_servers.maxpm]" in old
-    base = _toml_without_river(old)
-    if remove:
-        if not had:
-            return f"{f} has no MaximizePM entry; nothing changed"
-        new = base
-    else:
-        entry = claude_desktop_entry()
-        if before is not None and (before.get("mcp_servers") or {}).get("maxpm") == entry:
-            return f"MaximizePM is already in {f}; nothing changed"
-        new = base.rstrip("\n") + ("\n\n" if base.strip() else "") + _toml_river_block(entry)
-    after = _toml_load(new, f)
-    if after is not None:
-        others = lambda d: {k: v for k, v in (d or {}).items() if k != "mcp_servers"}
-        servers = lambda d: {k: v for k, v in ((d or {}).get("mcp_servers") or {}).items() if k != "maxpm"}
-        if others(after) != others(before) or servers(after) != servers(before) or (
-                not remove and after["mcp_servers"]["maxpm"] != entry):
-            raise RiverError(f"MaximizePM could not add its entry to {f} without changing other settings; add it by hand: "
-                             f"codex mcp add maxpm --env MAXPM_CHAT=1 -- maxpm mcp")
-    if old:
-        f.with_name(f.name + ".bak").write_text(old)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(new)
-    if remove:
-        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). Restart the ChatGPT desktop app."
-    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") + ".\n"
-            "Restart the ChatGPT desktop app, then use Work or Codex mode (plain Chat mode does not reach servers "
-            "on this computer). Ask it, for example: \"plan my next work with MaximizePM\" or \"what waits on me in MaximizePM?\". "
-            "Codex CLI sessions see MaximizePM too; in a project folder they work as usual.")
-
-
-def claude_desktop_entry():
-    """The mcpServers entry: this Python and this river by full path (the app does not have the shell's
-    PATH), the queue this command uses, and MAXPM_CHAT=1 (a chat has no folder)."""
-    import shutil
-    script = Path(__file__).resolve().parent.parent / "bin" / "maxpm"
-    if script.is_file():
-        cmd, args = sys.executable, [str(script), "mcp"]
-    elif shutil.which("maxpm"):
-        cmd, args = str(Path(shutil.which("maxpm")).resolve()), ["mcp"]
-    else:
-        raise RiverError("cannot find the maxpm program to give the Claude desktop app; install MaximizePM first")
-    return {"command": cmd, "args": args,
-            "env": {"MAXPM_DB": str(core.db_path().expanduser().resolve()), "MAXPM_CHAT": "1"}}
-
-
-def setup_claude_desktop(path=None, remove=False):
-    """Add (or remove) the river entry in the app's config; other servers and settings stay. The old file
-    is kept as <name>.bak when it changes."""
-    f = Path(path).expanduser() if path else claude_desktop_config_path()
-    old = f.read_text() if f.exists() else ""
-    try:
-        data = json.loads(old) if old.strip() else {}
-    except ValueError as e:
-        raise RiverError(f"{f} is not valid JSON ({e}); fix it first, MaximizePM does not overwrite it")
-    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
-        raise RiverError(f"{f}: expected an object with an mcpServers object; fix it first")
-    servers = data.setdefault("mcpServers", {})
-    if remove:
-        if "maxpm" not in servers:
-            return f"{f} has no MaximizePM entry; nothing changed"
-        del servers["maxpm"]
-    else:
-        entry = claude_desktop_entry()
-        if servers.get("maxpm") == entry:
-            return f"MaximizePM is already in {f}; nothing changed"
-        servers["maxpm"] = entry
-    new = json.dumps(data, indent=2) + "\n"
-    if old:
-        f.with_name(f.name + ".bak").write_text(old)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(new)
-    if remove:
-        return f"took MaximizePM out of {f} (the old file: {f.name}.bak). Quit and reopen the Claude desktop app."
-    return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") + ".\n"
-            "Quit and reopen the Claude desktop app. Then ask it, for example: \"plan my next work with MaximizePM\", "
-            "\"what waits on me in MaximizePM?\", or \"take a writing item from MaximizePM\".")
-
-
 def install_skills(dest, copy=False, force=False):
     """Link (or copy) the packaged guides into a skills folder. Returns one line per skill."""
     import shutil
@@ -1662,10 +1534,12 @@ def run(argv=None):
         if args.claude_desktop and args.codex:
             raise RiverError("one app at a time: --claude-desktop or --chatgpt-desktop")
         if args.claude_desktop:
-            print(setup_claude_desktop(args.config, args.remove))
+            from . import agents
+            print(agents.get("claude").write_mcp_config(args.config, args.remove))
             return 0
         if args.codex:
-            print(setup_codex_config(args.config, args.remove))
+            from . import agents
+            print(agents.get("codex").write_mcp_config(args.config, args.remove))
             return 0
         if args.remove or args.config:
             raise RiverError("--remove and --config go with --claude-desktop or --chatgpt-desktop")
@@ -1955,8 +1829,11 @@ def _append_block(f):
 
 
 def _imports_agents(text):
-    """CLAUDE.md that imports AGENTS.md (a line @AGENTS.md): Claude Code reads the same rules as other agents."""
-    return any(line.strip() == "@AGENTS.md" for line in text.splitlines())
+    """An instruction file that imports AGENTS.md (Claude Code: a line @AGENTS.md in CLAUDE.md), so its agent reads
+    the same rules as other agents. The file names and the line come from the adapters (agents.instruction_files)."""
+    from . import agents
+    line = agents.instruction_files()[2]
+    return any(x.strip() == line for x in text.splitlines())
 
 
 def _only_block(text):
@@ -1964,12 +1841,15 @@ def _only_block(text):
 
 
 def instructions_layout(folder):
-    """How a folder's agent instructions are laid out:
+    """How a folder's agent instructions are laid out (the names of the built-in agents; the adapters give them:
+    agents.instruction_files):
     shared: CLAUDE.md imports AGENTS.md, so every agent reads one file.
     none: no rules (no file, or only the work queue block).  agents_only: the rules are in AGENTS.md.
     claude_only: the rules are in CLAUDE.md, and AGENTS.md is missing or holds only the work queue block.
     both: each file holds its own rules."""
-    c, a = Path(folder, "CLAUDE.md"), Path(folder, "AGENTS.md")
+    from . import agents
+    own, shared, _, _ = agents.instruction_files()
+    c, a = Path(folder, own), Path(folder, shared)
     ct = c.read_text(errors="replace") if c.exists() else None
     at = a.read_text(errors="replace") if a.exists() else None
     if ct is not None and _imports_agents(ct):
@@ -1979,42 +1859,50 @@ def instructions_layout(folder):
     return "both" if c_rules and a_rules else "claude_only" if c_rules else "agents_only" if a_rules else "none"
 
 
-MOVE_HINT = ("CLAUDE.md holds this folder's rules, but Codex and other agents read AGENTS.md and miss them. "
-             "To give every agent one file: maxpm init --move (the text of CLAUDE.md goes to AGENTS.md, and "
-             "CLAUDE.md becomes the one line @AGENTS.md, which Claude Code reads as an import)")
+def move_hint():
+    """The choice that maxpm init names when only CLAUDE.md holds a folder's rules."""
+    from . import agents
+    own, shared, line, label = agents.instruction_files()
+    readers = (agents.shared_readers() or ["Other agents"])[0]  # the first one (Codex): the line stays short
+    return (f"{own} holds this folder's rules, but {readers} and other agents read {shared} and miss them. "
+            f"To give every agent one file: maxpm init --move (the text of {own} goes to {shared}, and "
+            f"{own} becomes the one line {line}, which {label} reads as an import)")
 
 
 def setup_instructions(folder, move=None):
     """Add the work queue block so that every agent reads it, and, when asked, one set of rules for all.
 
-    AGENTS.md holds the rules and the block; CLAUDE.md imports it with @AGENTS.md. move=True moves the
-    rules from CLAUDE.md into AGENTS.md; move=False keeps both files as they are (the block goes in each);
-    move=None does what needs no choice and says the choice. Returns one line per change."""
+    AGENTS.md holds the rules and the block; CLAUDE.md imports it with @AGENTS.md (the names come from the adapters:
+    agents.instruction_files). move=True moves the rules from CLAUDE.md into AGENTS.md; move=False keeps both files
+    as they are (the block goes in each); move=None does what needs no choice and says the choice. Returns one line
+    per change."""
+    from . import agents
+    own, shared, line, label = agents.instruction_files()
     folder = Path(folder)
-    c, a = folder / "CLAUDE.md", folder / "AGENTS.md"
+    c, a = folder / own, folder / shared
     layout = instructions_layout(folder)
     out = []
     if layout == "claude_only" and move:
         a.write_text(c.read_text())
-        out += ["AGENTS.md: now holds the rules from CLAUDE.md", _append_block(a)]
-        c.write_text("@AGENTS.md\n")
-        out.append("CLAUDE.md: now the one line @AGENTS.md, so Claude Code and every other agent read the same rules")
+        out += [f"{shared}: now holds the rules from {own}", _append_block(a)]
+        c.write_text(line + "\n")
+        out.append(f"{own}: now the one line {line}, so {label} and every other agent read the same rules")
         return out
     if layout in ("none", "agents_only", "shared"):
         if layout != "shared" and c.exists():  # CLAUDE.md holds only the block: AGENTS.md has it now
-            c.write_text("@AGENTS.md\n")
-            out.append("CLAUDE.md: now the one line @AGENTS.md (it held only the work queue block)")
+            c.write_text(line + "\n")
+            out.append(f"{own}: now the one line {line} (it held only the work queue block)")
         out.append(_append_block(a))
         if not c.exists():
-            c.write_text("@AGENTS.md\n")
-            out.append("CLAUDE.md: created as the one line @AGENTS.md, so Claude Code reads AGENTS.md too")
+            c.write_text(line + "\n")
+            out.append(f"{own}: created as the one line {line}, so {label} reads {shared} too")
         return out
     out += [_append_block(c), _append_block(a)]
     if layout == "claude_only":
-        out.append(MOVE_HINT if move is None else "AGENTS.md: kept apart from CLAUDE.md; it holds only the work queue block")
+        out.append(move_hint() if move is None else f"{shared}: kept apart from {own}; it holds only the work queue block")
     else:
-        out.append("CLAUDE.md and AGENTS.md hold different rules, and each agent reads only one of them. To share "
-                   "them: move the rules from CLAUDE.md into AGENTS.md and make CLAUDE.md the one line @AGENTS.md")
+        out.append(f"{own} and {shared} hold different rules, and each agent reads only one of them. To share "
+                   f"them: move the rules from {own} into {shared} and make {own} the one line {line}")
     return out
 
 
@@ -2066,8 +1954,11 @@ def init_folder(args):
     else:
         move = args.move
         if move is None and instructions_layout(here) == "claude_only" and sys.stdin.isatty():
-            ans = input("CLAUDE.md holds this folder's rules; Codex and other agents read AGENTS.md. Move the rules "
-                        "to AGENTS.md and make CLAUDE.md import it (@AGENTS.md), so every agent reads them? [Y/n] ")
+            from . import agents
+            own, shared, line, _ = agents.instruction_files()
+            readers = (agents.shared_readers() or ["Other agents"])[0]  # the first one (Codex): the line stays short
+            ans = input(f"{own} holds this folder's rules; {readers} and other agents read {shared}. Move the rules "
+                        f"to {shared} and make {own} import it ({line}), so every agent reads them? [Y/n] ")
             move = ans.strip().lower() in ("", "y", "yes")
         lines += setup_instructions(here, move)
     shown = name or linked_here[0]
