@@ -316,5 +316,36 @@ class Setup(Home):
         self.assertEqual(gemini.SETUP["instructions"], "GEMINI.md")
 
 
+
+class InitFile(unittest.TestCase):
+    """#5218: maxpm init makes GEMINI.md the one line @AGENTS.md (Gemini's own import), so a Gemini CLI session reads
+    the work queue block and the rules of AGENTS.md, as Claude Code reads them through CLAUDE.md."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d)
+
+    def test_init_writes_gemini_md_as_an_import_of_agents_md(self):
+        from river import cli
+        self.assertEqual(gemini.SETUP["import"].format(file="AGENTS.md"), "@AGENTS.md")
+        self.assertIn(("GEMINI.md", "@AGENTS.md", "Gemini CLI"), agents.import_files())
+        lines = cli.setup_instructions(self.d)
+        g = self.d / "GEMINI.md"
+        self.assertEqual(g.read_text(), "@AGENTS.md\n")
+        self.assertIn("GEMINI.md: created as the one line @AGENTS.md, so Gemini CLI reads AGENTS.md too", lines)
+        self.assertEqual(cli.setup_instructions(self.d), ["AGENTS.md: already has the work queue block"])
+
+    def test_a_gemini_md_with_rules_keeps_them_and_gets_the_block(self):
+        from river import cli
+        g = self.d / "GEMINI.md"
+        g.write_text("# Gemini rules\n")
+        cli.setup_instructions(self.d)
+        self.assertTrue(g.read_text().startswith("# Gemini rules\n"))
+        self.assertEqual(g.read_text().count("## Work queue"), 1)
+        g.write_text(cli.AGENT_SNIPPET)  # only the block, from an older init: it becomes the import
+        cli.setup_instructions(self.d)
+        self.assertEqual(g.read_text(), "@AGENTS.md\n")
+
+
 if __name__ == "__main__":
     unittest.main()

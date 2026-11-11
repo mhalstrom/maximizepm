@@ -804,6 +804,21 @@ def instruction_files():
     raise RiverError("no registered agent imports " + SHARED_INSTRUCTIONS)  # a defect: claude.py has it
 
 
+def import_files():
+    """[(own, line, label)] for every agent whose own instruction file reads SHARED_INSTRUCTIONS through an import line
+    (SETUP["import"]), one entry per file, in registry order: ('CLAUDE.md', '@AGENTS.md', 'Claude Code') first, then
+    ('GEMINI.md', '@AGENTS.md', 'Gemini CLI') and any other (#5218). maxpm init writes each of them."""
+    out, seen = [], set()
+    for m in ids():
+        a = load()[m]
+        st = a.setup or {}
+        own = st.get("instructions")
+        if st.get("import") and own not in (None, SHARED_INSTRUCTIONS) and own not in seen:
+            seen.add(own)
+            out.append((own, st["import"].format(file=SHARED_INSTRUCTIONS), a.label))
+    return out
+
+
 def shared_readers():
     """The labels of the agents that read SHARED_INSTRUCTIONS itself ('Codex' with the built-in agents)."""
     got = load()
@@ -845,7 +860,7 @@ def page_list():
 
 
 __all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
-           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "instruction_files", "shared_readers",
+           "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "instruction_files", "import_files", "shared_readers",
            "setup_entry", "page_list"]
 
 

@@ -1870,6 +1870,36 @@ def move_hint():
 
 
 def setup_instructions(folder, move=None):
+    """_setup_shared, and the instruction file of every other agent that imports AGENTS.md (_setup_importers), whose
+    lines come before the advice that ends the lines of a folder whose rules are in CLAUDE.md (claude_only, both)."""
+    layout = instructions_layout(folder)
+    main, more = _setup_shared(folder, move), _setup_importers(folder)
+    if layout == "both" or (layout == "claude_only" and not move):
+        return main[:-1] + more + main[-1:]
+    return main + more
+
+
+def _setup_importers(folder):
+    """The own instruction file of each agent after the first that imports AGENTS.md (Gemini CLI: GEMINI.md, #5218):
+    missing, or holding only the work queue block, it becomes the one import line; holding its own rules, it gets the
+    work queue block, and nothing else of it changes. Returns one line per change."""
+    from . import agents
+    out = []
+    for own, line, label in agents.import_files()[1:]:
+        f = Path(folder) / own
+        text = f.read_text(errors="replace") if f.exists() else None
+        if text is not None and any(x.strip() == line for x in text.splitlines()):
+            continue
+        if text is None or _only_block(text):
+            f.write_text(line + "\n")
+            out.append(f"{own}: {'created as' if text is None else 'now'} the one line {line}, so {label} reads "
+                       f"{agents.SHARED_INSTRUCTIONS} too")
+        else:
+            out.append(_append_block(f))
+    return out
+
+
+def _setup_shared(folder, move=None):
     """Add the work queue block so that every agent reads it, and, when asked, one set of rules for all.
 
     AGENTS.md holds the rules and the block; CLAUDE.md imports it with @AGENTS.md (the names come from the adapters:
