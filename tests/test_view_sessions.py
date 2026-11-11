@@ -1684,7 +1684,29 @@ try {
         menu = r.pop("open")
         self.assertEqual(r, {"oneRow": True, "closed": True, "sameHead": True, "outside": True, "pair": "false",
                              "noItem": False})
-        self.assertEqual(menu, ["Open on claude.ai", "Settings", "End", "Plan: site"])
+        self.assertEqual(menu, ["Open on claude.ai", "Pin to the top", "Settings", "End", "Plan: site"])
+
+    def test_the_menu_pins_a_worker_and_the_row_moves_at_once(self):
+        """#5400: a phone shows no pin on the row (no hover), so the ⋯ menu has Pin to the top and Unpin; the row
+        shows the pin at once, not at the next read of the sessions (about 5 s later)."""
+        driver = DRIVE_HEAD + r"""
+try {
+  await until(() => q('#sessOpen [data-pin-to="on"]'), "Pin to the top in the menu");
+  await until(() => q("#actor") && q("#actor").value === "mark", "the page knows the person");
+  q("#sessMore").click();
+  const t0 = Date.now();
+  q('#sessOpen [data-pin-to="on"]').click();
+  await until(() => q('#sessions [data-session="ag"]').classList.contains("pinned"), "the row is pinned");
+  const ms = Date.now() - t0;
+  await until(() => q('#sessOpen [data-pin-to="off"]'), "Unpin in the menu");
+  const label = q('#sessOpen [data-pin-to="off"]').textContent.trim();
+  post({ fast: ms < 1000, label });
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+        r = drive_page(self, driver)
+        self.assertNotIn("error", r, r.get("error"))
+        self.assertEqual(r, {"fast": True, "label": "Unpin"})
+        self.assertEqual(core.agent_status(self.c, "ag")["pinned_by"], ["mark"])
 
     def test_end_on_the_row_asks_then_the_row_shows_ending(self):
         driver = DRIVE_HEAD + r"""
