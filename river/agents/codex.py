@@ -106,3 +106,25 @@ def parse_command(words):
         else:
             return None
     return {"settings": opts, "prompt": prompt} if prompt is not None else None
+
+
+# ---------------------------------------------------------------------------------------------------------------
+
+STATE = {"state": "detect", "session_id": "identity"}
+
+# The words of its blocked screens: an approval ("Would you like to run the following command?"), the trust question,
+# "Press enter to confirm or esc to cancel", a numbered menu with its marker (›). The same words as Claude Code's:
+# the default of the prompt_pattern setting was one pattern for both.
+BLOCKED = [r"Do you (want to|trust)", r"Would you like to", r"[Ee]nter to confirm", r"[❯›]\s*\d+\.\s"]
+
+DETECT = {
+    "process": "codex",
+    "idle": r"^\s*›(\s|$)",  # the marker of its input box
+    "working": r"(?i)\besc to interrupt\b",
+    "blocked": BLOCKED,
+    "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Codex what to do differently"
+    "image_paste": None,  # not read yet: an image path is pasted alone, as for every agent
+}
+
+# Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
+INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{text}"]}

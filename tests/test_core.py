@@ -7467,7 +7467,7 @@ class Activity(Base):
         self.assertEqual(self.event("PostToolUse", tool_name="Read")["alert"], None)
         a = core.agent_status(self.c, "w")
         row = self.c.execute("SELECT activity_at, activity_event FROM agents WHERE name='w'").fetchone()
-        self.assertEqual((row["activity_event"], a["name"]), ("PostToolUse", "w"))
+        self.assertEqual((row["activity_event"], a["name"]), ("report:working", "w"))
         # The permission request names the call; the notice that the prompt shows alerts the manager, blocked.
         self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "git push  origin main", "timeout": 5})
         mid = self.event("Notification", notification_type="permission_prompt",
@@ -7630,10 +7630,11 @@ class Activity(Base):
         import json as _json
         from pathlib import Path
         from unittest import mock
-        from river import cli
+        from river import agents, cli
         settings = core.activity_hook_settings()
-        self.assertEqual(sorted(settings["hooks"]), sorted(core.ACTIVITY_EVENTS))
-        self.assertTrue(all(h["hooks"][0]["command"].endswith(" activity") for hs in settings["hooks"].values() for h in hs))
+        self.assertEqual(sorted(settings["hooks"]), sorted(agents.get("claude").module.HOOK_EVENTS))
+        self.assertTrue(all(h["hooks"][0]["command"].endswith(" report --hook claude")
+                            for hs in settings["hooks"].values() for h in hs))
         with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}):
             f = core.activity_hook_file()
             self.assertEqual(_json.loads(Path(f).read_text()), settings)
@@ -7643,7 +7644,7 @@ class Activity(Base):
                         mock.patch.object(core, "agent_process", lambda: (None, None)):
                     self.assertEqual(cli.run(["activity"]), 0)  # never fails the session, prints nothing
             self.assertEqual(out.getvalue(), "")
-        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w'").fetchone()[0], "Stop")
+        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w'").fetchone()[0], "report:idle")
 
     def test_a_turn_end_that_waits_on_its_own_background_work_alerts_nobody(self):
         """#4293: build-loop-513a ended its turn to wait on its background gate run, and the manager heard that it

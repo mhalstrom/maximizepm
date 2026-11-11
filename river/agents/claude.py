@@ -104,3 +104,105 @@ def parse_command(words):
         else:
             return None
     return {"settings": opts, "prompt": prompt} if prompt is not None else None
+
+
+# ---------------------------------------------------------------------------------------------------------------
+
+# A tool call or a prompt says the session works; PermissionRequest names the tool call that waits on a permission
+# prompt, and the Notification permission_prompt says that the prompt shows; Stop says the turn ended (#4288).
+HOOK_EVENTS = ("PostToolUse", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop")
+HOOK_FILE = "claude-hooks.json"  # beside the queue; claude --settings reads it
+
+STATE = {"state": "hook", "session_id": "hook"}
+
+# The words of its blocked screens: a permission menu ("Do you want to proceed?"), the trust question ("Do you trust
+# the files in this folder?"), the end of plan mode ("Would you like to proceed?"), a numbered menu with its marker.
+BLOCKED = [r"Do you (want to|trust)", r"Would you like to", r"[Ee]nter to confirm", r"[❯›]\s*\d+\.\s"]
+
+DETECT = {
+    "process": "claude",
+    "idle": r"^\s*❯(\s|$)",  # the marker of its input box, under a rule
+    "working": r"(?i)\besc to interrupt\b",
+    "blocked": BLOCKED,
+    "tell_instead": r"(?i)\bno\b.*\btell\b",  # "No, and tell Claude what to do differently"
+    "image_paste": "[Image #{n}]",  # an image path pasted alone becomes this in its prompt (#4618)
+}
+
+INPUT = {"native": None}  # messages reach it by tmux paste (or its Unix socket inbox: core.native_message)
+
+
+def hook_settings(report):
+    """The Claude Code settings (claude --settings) with MaximizePM's hooks: each event runs `report --hook claude`,
+    which reads the hook's JSON on stdin. report: the maxpm report command (argv words)."""
+    import shlex
+    run = [{"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--hook", "claude"]),
+            "timeout": 10}]
+    return {"hooks": {ev: [{"matcher": "", "hooks": run}] if ev in ("PostToolUse", "PermissionRequest")
+                      else [{"hooks": run}] for ev in HOOK_EVENTS}}
+
+
+def install_hooks(folder, report):
+    """Write the hook file beside the queue when its text changes; the start adds --settings <file>."""
+    import json
+    from pathlib import Path
+    from ..core import RiverError, river_dir
+    f = Path(river_dir()) / HOOK_FILE
+    text = json.dumps(hook_settings(report), indent=2) + "\n"
+    try:
+        if not f.exists() or f.read_text() != text:
+            f.write_text(text)
+    except OSError as e:
+        raise RiverError(f"cannot write the activity hook file {f}: {e}; turn the hooks off: "
+                         f"maxpm config set claude_activity_hooks off")
+    return ["--settings", str(f)]
+
+
+_TASK_ENDED = {"completed", "failed", "killed", "stopped", "cancelled", "canceled", "done", "error"}
+
+
+def _waits(payload):
+    """The background work that will wake a session whose turn ended, from the Stop hook's input (Claude Code 2.1 and
+    later): background_tasks (a Bash command with run_in_background, a background subagent, a monitor or workflow)
+    that has not ended, and session_crons (ScheduleWakeup, CronCreate, /loop). A list of short texts
+    ('local_bash: make check'), empty when nothing will wake it; None when the input has neither field (an older
+    Claude Code), so MaximizePM looks at the processes instead (#4293)."""
+    tasks, crons = payload.get("background_tasks"), payload.get("session_crons")
+    if not isinstance(tasks, list) and not isinstance(crons, list):
+        return None
+    out = []
+    for t in tasks if isinstance(tasks, list) else ():
+        if not isinstance(t, dict) or str(t.get("status") or "").lower() in _TASK_ENDED:
+            continue
+        what = next((str(t[k]) for k in ("command", "agent_type", "name", "tool", "description") if t.get(k)), "")
+        out.append(f"{t.get('type') or 'task'}: {' '.join(what.split())[:120]}" if what else str(t.get("type") or "task"))
+    for c in crons if isinstance(crons, list) else ():
+        if isinstance(c, dict):
+            out.append(f"wakeup {c.get('schedule') or ''}".strip())
+    return out
+
+
+def read_hook(payload):
+    """A Claude Code hook's JSON input as a hook report (river/agents HOOK_REPORT_KEYS), or None for another event."""
+    ev = str(payload.get("hook_event_name") or "")
+    if ev not in HOOK_EVENTS:
+        return None
+    ntype = str(payload.get("notification_type") or "")
+    sid = payload.get("session_id")
+    out = {"event": ev + (f":{ntype}" if ntype else ""), "session_id": sid if isinstance(sid, str) and sid else None}
+    if ev == "PostToolUse":
+        out["state"] = "working"
+    elif ev == "UserPromptSubmit":
+        prompt = payload.get("prompt")
+        out.update(state="working", prompt=prompt if isinstance(prompt, str) else "")
+    elif ev == "PermissionRequest":
+        inp = payload.get("tool_input")
+        inp = {k: v[:400] for k, v in inp.items() if isinstance(v, str)} if isinstance(inp, dict) else {}
+        out.update(state="blocked", call={"tool": str(payload.get("tool_name") or ""), "input": inp})
+    elif ev == "Notification":
+        if ntype == "permission_prompt":
+            out.update(state="blocked", shows=True, message=str(payload.get("message") or "")[:160])
+        else:
+            out["state"] = None  # idle_prompt, auth_success, ...: only the time
+    else:  # Stop
+        out.update(state="idle", waits=_waits(payload), again=bool(payload.get("stop_hook_active")))
+    return out

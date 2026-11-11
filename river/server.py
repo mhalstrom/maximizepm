@@ -758,9 +758,10 @@ def _done_panes(conn, panes, terminals=None):
             maybe[p["pane"]] = why
     pattern = core.setting(conn, "prompt_pattern").strip()
     texts = _pane_texts(sorted(set(maybe) - stopped)) if pattern else dict.fromkeys(maybe, "")
-    rx = re.compile(pattern) if pattern else None
+    agent_of = {p["pane"]: (here.get(p["pane"]) or [p["agent"]])[0] for p in panes}
     for pane, why in maybe.items():
-        if pane in stopped or (pane in texts and not (rx and _prompt_found(_prompt_tail(texts[pane]), rx))):
+        rx, layout, _ = _pane_rule(conn, agent_of.get(pane)) if pattern else (None, None, None)
+        if pane in stopped or (pane in texts and not (rx and _prompt_found(_prompt_tail(texts[pane]), rx, layout))):
             done[pane] = why
     return done
 
@@ -1366,7 +1367,8 @@ def _pane_screen(agent, pane):
     if len(f) != 7:
         raise RiverError(f"tmux gave no answer for pane {pane}")
     return {"agent": agent, "pane": pane, "width": int(f[0]), "height": int(f[1]), "cursor": [int(f[2]), int(f[3])],
-            "ended": f[4].lstrip("-") in TMUX_SHELLS, "target": f[5], "name": f[6], "text": text}
+            "ended": f[4].lstrip("-") in TMUX_SHELLS, "running": f[4].lstrip("-"), "target": f[5], "name": f[6],
+            "text": text}
 
 
 # An agent that waits on a prompt in its terminal (a permission prompt, a trust question) stops, and nobody
@@ -1385,22 +1387,83 @@ def _plain(text):
     return _ESCAPES.sub("", text)
 
 
-_BOX = "│┃╭╮╰╯┌┐└┘"  # the frame some CLIs draw around a prompt
-_HINT = None
+# The layout of a blocked screen (the menu marker, the frame, the rule, the key hint) and its words are an agent's
+# adapter's DETECT (river/agents, #5183); river/agents DETECT_LAYOUT holds the layout of an agent whose adapter
+# leaves it out, and of a pane whose agent has no adapter.
+_LAYOUTS = {}
 
 
-def _prompt_parts(tail):
+def _layout(detect=None):
+    """The compiled layout of a blocked screen: {"box", "mark", "rule", "hint", "tell"}, from an adapter's DETECT
+    (or None: river/agents DETECT_LAYOUT)."""
+    from . import agents
+    d = {**agents.DETECT_LAYOUT, **{k: v for k, v in (detect or {}).items() if k in agents.DETECT_LAYOUT}}
+    tell = (detect or {}).get("tell_instead") or r"(?i)\bno\b.*\btell\b"
+    key = (*sorted(d.items()), tell)
+    got = _LAYOUTS.get(key)
+    if got is None:
+        got = _LAYOUTS[key] = {"box": re.escape(d["frame"]), "frame": d["frame"],
+                               "mark": re.compile(f"^(\\s*)([{re.escape(d['menu'])}])\\s*(\\S.*)$"),
+                               "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
+                               "tell": re.compile(tell)}
+    return got
+
+
+class _AnyOf:
+    """The words of an adapter's blocked screens (DETECT['blocked']): a match of any one of its patterns."""
+
+    def __init__(self, patterns):
+        self.rxs = [re.compile(x) for x in patterns]
+
+    def search(self, text):
+        return next((m for m in (r.search(text) for r in self.rxs) if m), None)
+
+
+_WORDS = {}
+
+
+def _pane_rule(conn, agent, process=None):
+    """How maxpm serve reads the pane of `agent` (#5183): (rx, layout, adapter). rx: the words of a blocked screen,
+    or None (no watch: prompt_pattern is empty). With the default prompt_pattern, each pane is read with the words
+    of its agent's adapter (DETECT['blocked']); another value of the setting is read for every pane. The adapter is
+    the one of the agent's CLI (core.state_adapter), else the one whose DETECT['process'] runs in the pane
+    (process), else None: the setting's words and DETECT_LAYOUT."""
+    from . import agents
+    ad = core.state_adapter(conn, agent) if agent else None
+    if ad is None and process:
+        ad = next((a for a in agents.load().values() if (a.detect or {}).get("process") == process), None)
+    pattern = core.setting(conn, "prompt_pattern").strip()
+    detect = ad.detect if ad is not None else None
+    if not pattern:
+        return None, _layout(detect), ad
+    if detect and pattern == core.DEFAULT_SETTINGS["prompt_pattern"]:
+        words = tuple(detect["blocked"])
+        rx = _WORDS.get(words) or _WORDS.setdefault(words, _AnyOf(words))
+    else:
+        rx = re.compile(pattern)
+    return rx, _layout(detect), ad
+
+
+def _screen_state(tail, detect):
+    """working or idle, from a pane's last lines and an adapter's DETECT, or None when the screen says neither (a
+    blocked screen is _prompt_found). Working first: the input box shows while the agent runs a turn."""
+    if any(re.search(detect["working"], x) for x in tail):
+        return "working"
+    if any(re.search(detect["idle"], x) for x in tail):
+        return "idle"
+    return None
+
+
+def _prompt_parts(tail, layout=None):
     """What a person needs to answer a prompt, read from a pane's last lines (_prompt_tail): {"question": the
     sentence that asks (up to its question mark), or None; "options": [(text, selected)]: a menu, with the line
     the marker (❯ or ›) is on selected; "hint": the line that names keys (Enter to confirm · Esc to cancel)}.
     A menu is the marked line and the lines next to it whose text starts in the same column (numbered or not:
     Claude Code's trust question lists "No, exit" and "Yes, I trust this folder" with no numbers)."""
-    import re
-    global _HINT
-    _HINT = _HINT or re.compile(r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]", re.I)
-    lines = [re.sub(f"^\\s*[{_BOX}]", "", x).rstrip(f" {_BOX}") for x in tail]
-    hint = next((m.group(0) for m in map(_HINT.search, lines) if m), None)
-    mark = re.compile(r"^(\s*)([❯›])\s*(\S.*)$")
+    lay = layout or _layout()
+    lines = [re.sub(f"^\\s*[{lay['box']}]", "", x).rstrip(f" {lay['frame']}") for x in tail]
+    hint = next((m.group(0) for m in map(lay["hint"].search, lines) if m), None)
+    mark = lay["mark"]
     # The last marked line: the lines above a prompt can show what the person typed before ("❯ run the tests"),
     # and with the first one river found no question in a real Claude Code prompt (#4280).
     at = next((n for n in range(len(lines) - 1, -1, -1) if mark.match(lines[n])), None)
@@ -1410,7 +1473,7 @@ def _prompt_parts(tail):
         col = len(lines[at]) - len(m.group(3))
 
         def option(x):
-            return len(x) - len(x.lstrip()) == col and not _HINT.search(x)
+            return len(x) - len(x.lstrip()) == col and not lay["hint"].search(x)
         top = at
         while top > 0 and option(lines[top - 1]):
             top -= 1
@@ -1425,10 +1488,10 @@ def _prompt_parts(tail):
             break
     return {"question": question, "options": options, "hint": hint, "start": top if qat is None else qat,
             "top": top, "end": end if options else None, "lines": lines,
-            **_prompt_command(lines[:qat] if qat is not None else [])}
+            **_prompt_command(lines[:qat] if qat is not None else [], lay)}
 
 
-def _prompt_found(tail, rx):
+def _prompt_found(tail, rx, layout=None):
     """The parts of the prompt (_prompt_parts) that a pane's last lines show, or None (#4943). A prompt is the last
     thing on the screen: below its menu (or, with no menu, below the last line that matches prompt_pattern) come
     only a key hint, a frame, or a rule. Claude Code and Codex hide the input box and the spinner while they ask.
@@ -1439,33 +1502,32 @@ def _prompt_found(tail, rx):
     the prompt's question or menu (the reply text)."""
     if not any(rx.search(x) for x in tail):
         return None
-    parts = _prompt_parts(tail)
+    lay = layout or _layout()
+    parts = _prompt_parts(tail, lay)
     lines, top, end = parts["lines"], parts["top"], parts["end"]
     if end is None:
         end = max(n for n, x in enumerate(tail) if rx.search(x)) + 1
-    elif top > 0 and _RULE.match(lines[top - 1]):
+    elif top > 0 and lay["rule"].match(lines[top - 1]):
         return None  # the input box: a rule, then the marked line with what the person typed
-    if not all(_footer(x) for x in lines[end:]):
+    if not all(_footer(x, lay) for x in lines[end:]):
         return None  # more under it: the spinner, the input box, the status line, or the next tool call
     if not any(rx.search(x) for x in tail[min(parts["start"], end - 1):]):
         return None
     return parts
 
 
-def _footer(line):
+def _footer(line, layout=None):
     """A line that may come under a prompt's menu: empty after its frame, a rule, or a key hint."""
-    return not line.strip() or bool(_RULE.match(line) or _HINT.search(line))
+    lay = layout or _layout()
+    return not line.strip() or bool(lay["rule"].match(line) or lay["hint"].search(line))
 
 
-_RULE = re.compile(r"^\s*[─━╌╍┄┅═-]{8,}\s*$")  # a dashed rule: Claude Code's input box and its command box
-
-
-def _prompt_command(lines):
+def _prompt_command(lines, layout=None):
     """What a permission prompt asks to run, from the lines above its question: {"tool": the header ("Bash
     command (unsandboxed)"), "command": the command's first line, "why": a line that says why it asks (auto
     mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
     Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it."""
-    import re
+    rule = (layout or _layout())["rule"]
     why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
     head = next((n for n in range(len(lines) - 1, -1, -1)
                  if re.match(r"^\s*(\w+ )?(command|file|edit|fetch|tool)\b", lines[n].strip(), re.I)
@@ -1473,8 +1535,8 @@ def _prompt_command(lines):
     if head is None:
         return {"tool": None, "command": None, "why": why}
     below = lines[head + 1:]
-    rules = [n for n, x in enumerate(below) if _RULE.match(x)]
-    body = below[rules[0] + 1:rules[1]] if len(rules) >= 2 else [x for x in below if not _RULE.match(x)]
+    rules = [n for n, x in enumerate(below) if rule.match(x)]
+    body = below[rules[0] + 1:rules[1]] if len(rules) >= 2 else [x for x in below if not rule.match(x)]
     body = [x.strip() for x in body if x.strip() and x.strip() != why and not x.strip().startswith("Tip:")]
     cmd = body[0] if body else None
     if cmd and len(body) > 1 and len(rules) >= 2:
@@ -1494,15 +1556,15 @@ def _keys_for(n, at):
 PROMPT_ANSWER = "Answer it in its session on the Sessions tab of MaximizePM"
 
 
-def prompt_alert(agent, target, tail, pane=None, item=None):
+def prompt_alert(agent, target, tail, pane=None, item=None, layout=None):
     """The alert text for an agent that waits on a prompt: core.PROMPT_NOTE, the agent, its tmux window and pane,
     the item it holds, the command the prompt asks to run and why auto mode asks, the question, the options with
     the selected one, the keys that choose each, and where to answer (#2713, #4280). Before, the alert gave only
     the first line that matched prompt_pattern ("Enter to confirm · Esc to cancel"), and a person could do
     nothing with it. item: {"id", "title"} or None. Returns (text, question, sig): question is None when the
     lines hold no question; sig is the prompt's own lines, which stay the same while it waits (the lines above
-    it can change: a spinner, a timer, the dot that blinks)."""
-    parts = _prompt_parts(tail)
+    it can change: a spinner, a timer, the dot that blinks). layout: the agent's (_pane_rule)."""
+    parts = _prompt_parts(tail, layout)
     q = parts["question"]
     where = f"{core.PROMPT_NOTE}: {agent} in tmux {target}" + (f" (pane {pane})" if pane else "")
     if item:
@@ -1549,12 +1611,13 @@ def watch_prompts(conn):
     can read go to the active manager instead, which looks at the screen (the person, when no manager is active).
     An agent with a stop request gets no alert: nobody needs its answer. When the prompt is gone (answered, or
     the agent ended), river marks the alert read, which closes the event. A prompt that stays on the screen
-    alerts once. Returns {"waiting": {agent: question}, "told": [agents], "closed": [message ids]}."""
-    import re
+    alerts once. Each pane is read with its agent's adapter (_pane_rule). The same look is the state source of an
+    agent whose adapter's STATE['state'] is 'detect' (Codex): blocked, working or idle (_screen_state) goes to
+    core.report as maxpm report does, when it changed (#5183). Returns {"waiting": {agent: question}, "told":
+    [agents], "closed": [message ids]}, and "reported": {agent: state} when it recorded a state."""
     pattern = core.setting(conn, "prompt_pattern").strip()
-    waiting = {}
+    waiting, states = {}, {}
     if pattern:
-        rx = re.compile(pattern)
         stopped = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE stop_at IS NOT NULL")}
         for agent, pane in sorted(agent_terminals(conn).items()):
             if agent in stopped:
@@ -1565,12 +1628,19 @@ def watch_prompts(conn):
                 continue  # the pane closed since the list
             if screen["ended"]:
                 continue  # a shell: what the agent printed stays, and nobody waits there
+            rx, layout, ad = _pane_rule(conn, agent, screen.get("running"))
             tail = _prompt_tail(_plain(screen["text"]))
-            if _prompt_found(tail, rx):
+            parts = _prompt_found(tail, rx, layout)
+            if parts:
                 held = conn.execute("SELECT id, title FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                                     "ORDER BY id", (agent,)).fetchone()
-                body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held))
+                body, q, sig = prompt_alert(agent, screen["target"], tail, pane, held and dict(held), layout)
                 waiting[agent] = (body, sig, q, held and held["id"], pane)
+            if ad is not None and (ad.state or {}).get("state") == "detect" and ad.detect:
+                state = "blocked" if parts else _screen_state(tail, ad.detect)
+                if state:
+                    states[agent] = (state, parts and parts["question"])
+    reported = {"reported": got} if (got := _pane_reports(conn, states)) else {}
     t, wait = core.now(), core.parse_duration(core.setting(conn, "prompt_wait"))
     for agent in [a for a in PROMPTS if a not in waiting]:
         del PROMPTS[agent]
@@ -1580,7 +1650,7 @@ def watch_prompts(conn):
         (core.PROMPT_NOTE + "%",))]
     closed = [m["id"] for m in alerts if waiting.get(m["from_agent"], ("",))[0] != m["body"]]
     if not waiting and not closed:
-        return {"waiting": {}, "told": [], "closed": []}  # the usual pass: nothing to write
+        return {"waiting": {}, "told": [], "closed": [], **reported}  # the usual pass: nothing to write
     with core.tx(conn):
         core._mark_read(conn, closed)
         people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
@@ -1607,7 +1677,28 @@ def watch_prompts(conn):
                 told.append(agent)
         if told or closed:
             core.sync_needs_you(conn)
-    return {"waiting": {a: w[2] or w[0] for a, w in waiting.items()}, "told": told, "closed": closed}
+    return {"waiting": {a: w[2] or w[0] for a, w in waiting.items()}, "told": told, "closed": closed, **reported}
+
+
+def _pane_reports(conn, states):
+    """The generic pane watcher's last step (#5183): for each agent whose pane gave a state ({agent: (state,
+    message)}), the same record as maxpm report --state, when the state changed since the last report (a blocked
+    screen also when its message changed). Returns {agent: state} of what it recorded."""
+    out = {}
+    for agent, (state, message) in sorted(states.items()):
+        r = conn.execute("SELECT activity_event, activity_prompt FROM agents WHERE name=? AND kind='ai'",
+                         (agent,)).fetchone()
+        if not r:
+            continue
+        said = json.dumps({"message": (message or "")[:400]}) if state == "blocked" else None
+        if r["activity_event"] == f"report:{state}" and (state != "blocked" or r["activity_prompt"] == said):
+            continue
+        try:
+            core.report(conn, agent, state, message)
+        except RiverError:
+            continue
+        out[agent] = state
+    return out
 
 
 # An agent idle at its prompt runs no river command, and river never types into its pane: a stale session would
@@ -1625,8 +1716,6 @@ def _idle_panes(conn, names, after):
     if not names:
         return {}  # the usual pass: no tmux command at all
     terminals = agent_terminals(conn)
-    pattern = core.setting(conn, "prompt_pattern").strip()
-    rx = re.compile(pattern) if pattern else None
     t, out = core.now(), {}
     for agent in sorted(names):
         pane = terminals.get(agent)
@@ -1638,7 +1727,8 @@ def _idle_panes(conn, names, after):
         except RiverError:
             continue  # the pane closed since the list
         text = _plain(screen["text"])
-        if screen["ended"] or (rx and _prompt_found(_prompt_tail(text), rx)):
+        rx, layout, _ = _pane_rule(conn, agent, screen.get("running"))
+        if screen["ended"] or (rx and _prompt_found(_prompt_tail(text), rx, layout)):
             IDLE.pop(agent, None)  # a shell, or a prompt that a person answers
             continue
         st = IDLE.get(agent)
@@ -1674,8 +1764,6 @@ def watch_busy(conn):
         return []  # the usual pass with no agent at work: no ps and no tmux command
     busy = core.busy_now(conn, names) if names else set()
     terminals = agent_terminals(conn) if TMUX_RUNNER is not None or _tmux_cmd() else {}
-    pattern = core.setting(conn, "prompt_pattern").strip()
-    rx = re.compile(pattern) if pattern else None
     for agent in sorted(names | set(waiting)):
         pane = terminals.get(agent)
         if not pane:
@@ -1692,7 +1780,8 @@ def watch_busy(conn):
         if agent not in names:
             continue
         text = _plain(screen["text"])
-        if (agent in BUSY and BUSY[agent] != text) or (rx and _prompt_found(_prompt_tail(text), rx)):
+        rx, layout, _ = _pane_rule(conn, agent, screen.get("running"))
+        if (agent in BUSY and BUSY[agent] != text) or (rx and _prompt_found(_prompt_tail(text), rx, layout)):
             busy.add(agent)
         BUSY[agent] = text
     for agent in sorted(names - busy):
@@ -2281,15 +2370,15 @@ def pane_prompts(conn, terminals):
     for every pane (#4607). A prompt: {question, options (their text, as the CLI lists them), selected (the option
     the marker is on), tool, command, why, lines (the prompt's lines as the pane shows them), sig (what the page
     sends back with an answer, so a prompt that changed gets no keys)}."""
-    import re
     pattern = core.setting(conn, "prompt_pattern").strip()
     if not pattern or not terminals:
         return {}
-    rx, out = re.compile(pattern), {}
+    out = {}
     texts = _pane_texts(sorted(set(terminals.values())))
     for agent, pane in terminals.items():
         tail = _prompt_tail(_plain(texts.get(pane) or ""))
-        parts = _prompt_found(tail, rx)
+        rx, layout, _ = _pane_rule(conn, agent)
+        parts = _prompt_found(tail, rx, layout)
         if not parts:
             continue
         options = [o[0] for o in parts["options"]]
@@ -2309,9 +2398,8 @@ def _menu_keys(at, n):
 def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
     """The prompt dialog of the Sessions tab (#4607): a person's answer to the prompt that the agent's tmux pane
     shows. pick: the number of an option (0 is the first); other: the person's text, sent by the CLI's own way to
-    tell the agent what to do instead (the option "No, and tell ... what to do", else Escape), then Enter. Refused
-    when the pane shows another prompt than the one the person read (sig)."""
-    import re
+    tell the agent what to do instead (the option of its adapter's DETECT['tell_instead'], "No, and tell ... what to
+    do", else Escape), then Enter. Refused when the pane shows another prompt than the one the person read (sig)."""
     pane = _typing_pane(conn, agent, who)
     p = pane_prompts(conn, {agent: pane}).get(agent)
     if not p or p["sig"] != sig:
@@ -2321,7 +2409,8 @@ def prompt_answer(conn, agent, sig, pick=None, other=None, who=None):
     if text:
         if len(text) > 4000:
             raise RiverError("text is at most 4000 characters")
-        n = next((i for i, o in enumerate(opts) if re.search(r"\bno\b.*\btell\b", o, re.I)), None)
+        tell = _pane_rule(conn, agent)[1]["tell"]
+        n = next((i for i, o in enumerate(opts) if tell.search(o)), None)
         terminal_keys(conn, agent, _menu_keys(at, n) if n is not None else [{"key": "Escape"}], who)
         time.sleep(PROMPT_PAUSE)
         terminal_keys(conn, agent, [{"text": text}, {"key": "Enter"}], who)

@@ -177,13 +177,15 @@ DEFAULT_SETTINGS = {
     # maxpm serve reads each agent's pane every notify_interval. When one of the last lines on the screen
     # matches prompt_pattern (a regular expression; empty: no watch) and those lines stay the same for
     # prompt_wait, each person gets an alert, with the agent's Terminal on the page. The words are those of
-    # Claude Code and Codex; add the words of another CLI or a new version with | (maxpm config set).
+    # Claude Code and Codex (the "blocked" words of their adapters' DETECT, river/agents): add the words of another
+    # CLI or a new version with | (maxpm config set). With this default, each agent's pane is read with its own
+    # adapter's words; another value is read for every pane.
     # A match is a prompt only at the end of the screen: under the menu come only a key hint, a frame, or a
     # rule (#4943); reply text that asks a question, and the input box, are no prompt.
     "prompt_pattern": r"Do you (want to|trust)|Would you like to|[Ee]nter to confirm|[❯›]\s*\d+\.\s",
     "prompt_wait": "20s",
     # A Claude Code session that river starts gets hooks (the launch option claude_activity_hooks) that report
-    # each tool call, prompt, permission prompt and turn end to river (maxpm activity, #4288). A session that holds
+    # each tool call, prompt, permission prompt and turn end to river (maxpm report --hook claude, #4288). A session that holds
     # an item and reported nothing for activity_silence, and does not wait in maxpm wait, on a person's answer,
     # or on a background command, alerts the active manager; a permission prompt or a turn end with an item in
     # hand alerts it at once. 0s: no silence alert.
@@ -362,7 +364,7 @@ LAUNCH_PLATFORMS = {
         "prompt": {"kind": "text", "default": "go", "text": "the first prompt"},
         "activity_hooks": {"kind": "toggle", "default": "on",
                            "text": "hooks that report the session's tool calls, permission prompts and turn ends to "
-                                   "MaximizePM (--settings with the hook file; maxpm activity), so the manager hears of a "
+                                   "MaximizePM (--settings with the hook file; maxpm report --hook claude), so the manager hears of a "
                                    "session that stands still"},
     }},
     "codex": {"label": "Codex", "exe": "codex", "family": "openai", "prefix": "codex_", "options": {
@@ -610,8 +612,8 @@ CREATE TABLE IF NOT EXISTS agents (
   manage_seen    TEXT,                       -- the manager's findings it has seen (maxpm manage --watch)
   watch_seen     TEXT,                       -- the last poll or return of the manager's watch (maxpm manage --watch)
   busy_at        TEXT,                       -- when maxpm serve last saw the session busy without a maxpm command (keep_busy)
-  activity_at     TEXT,                      -- the last event its Claude Code hooks reported (maxpm activity)
-  activity_event  TEXT,                      -- that event (PostToolUse, Stop, Notification:permission_prompt, ...)
+  activity_at     TEXT,                      -- the last state report (maxpm report: its hooks or its pane)
+  activity_event  TEXT,                      -- that state: report:working, report:idle, report:blocked, report:gone
   activity_prompt TEXT,                      -- the tool call that waits on a permission prompt now (JSON), if any
   activity_told   TEXT,                      -- the activity_at of the last alert to the manager about it
   activity_waits  TEXT,                      -- at its last turn end: the background work that will wake it (JSON), if any
@@ -8406,35 +8408,30 @@ def claude_session_from_env(env=None):
 
 # ---------------------------------------------------------------- activity hooks
 
-# Claude Code runs these hooks of a session that river started (launch option claude_activity_hooks): each one
-# runs `maxpm activity`, which reads the hook's JSON on stdin and records the event (#4288). A tool call or a prompt
-# says the session works; PermissionRequest names the tool call that waits on a permission prompt, and the
-# Notification permission_prompt says that the prompt shows; Stop says the turn ended.
-ACTIVITY_EVENTS = ("PostToolUse", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop")
-ACTIVITY_HOOK_FILE = "claude-hooks.json"
+# Claude Code runs the hooks of its adapter (river/agents/claude.py) in a session that river started (launch option
+# claude_activity_hooks): each one runs `maxpm report --hook claude`, which reads the hook's JSON on stdin; the
+# adapter's read_hook says what it means (a hook report), and hook_report records it (#4288, #5183).
 ACTIVITY_NOTE = "stands still"  # the alerts of the hooks to the manager start with "<agent> stands still"
 
 
-def activity_hook_settings():
-    """The Claude Code settings (claude --settings) with river's hooks: each event runs maxpm activity. The command
-    is the maxpm on PATH when there is one, so the hook finds the same queue as the session's own commands."""
+def report_command():
+    """The maxpm report command that an agent's hooks run (argv words): the maxpm on PATH when there is one, so the
+    hook finds the same queue as the session's own commands."""
     import shutil
-    exe = shutil.which("maxpm") or "maxpm"
-    run = [{"type": "command", "command": f"{_shell_quote(exe)} activity", "timeout": 10}]
-    return {"hooks": {ev: [{"matcher": "", "hooks": run}] if ev in ("PostToolUse", "PermissionRequest")
-                      else [{"hooks": run}] for ev in ACTIVITY_EVENTS}}
+    return [shutil.which("maxpm") or "maxpm", "report"]
+
+
+def activity_hook_settings():
+    """The Claude Code settings (claude --settings) with river's hooks (the claude adapter's hook_settings)."""
+    from . import agents
+    return agents.get("claude").module.hook_settings(report_command())
 
 
 def activity_hook_file():
-    """The file beside the queue that claude --settings reads: written when its text changes."""
-    f = Path(river_dir()) / ACTIVITY_HOOK_FILE
-    text = json.dumps(activity_hook_settings(), indent=2) + "\n"
-    try:
-        if not f.exists() or f.read_text() != text:
-            f.write_text(text)
-    except OSError as e:
-        raise RiverError(f"cannot write the activity hook file {f}: {e}; turn the hooks off: maxpm config set claude_activity_hooks off")
-    return str(f)
+    """The file beside the queue that claude --settings reads (the claude adapter's install_hooks writes it when its
+    text changes)."""
+    from . import agents
+    return agents.get("claude").install_hooks(None, report_command())[-1]
 
 
 def activity_agent(conn, sid=None, env=None):
@@ -8481,30 +8478,6 @@ def _activity_alert(conn, agent, item, text):
     return _send(conn, "alert", agent, body, to=manager, item_id=item, blocked="waits")
 
 
-_TASK_ENDED = {"completed", "failed", "killed", "stopped", "cancelled", "canceled", "done", "error"}
-
-
-def _activity_waits(payload):
-    """The background work that will wake a session whose turn ended, from the Stop hook's input (Claude Code
-    2.1 and later): background_tasks (a Bash command with run_in_background, a background subagent, a monitor
-    or workflow) that has not ended, and session_crons (ScheduleWakeup, CronCreate, /loop). A list of short
-    texts ('local_bash: make check'), empty when nothing will wake it; None when the input has neither field
-    (an older Claude Code), so the caller looks at the processes instead (#4293)."""
-    tasks, crons = payload.get("background_tasks"), payload.get("session_crons")
-    if not isinstance(tasks, list) and not isinstance(crons, list):
-        return None
-    out = []
-    for t in tasks if isinstance(tasks, list) else ():
-        if not isinstance(t, dict) or str(t.get("status") or "").lower() in _TASK_ENDED:
-            continue
-        what = next((str(t[k]) for k in ("command", "agent_type", "name", "tool", "description") if t.get(k)), "")
-        out.append(f"{t.get('type') or 'task'}: {' '.join(what.split())[:120]}" if what else str(t.get("type") or "task"))
-    for c in crons if isinstance(crons, list) else ():
-        if isinstance(c, dict):
-            out.append(f"wakeup {c.get('schedule') or ''}".strip())
-    return out
-
-
 def _talk(prompt):
     """True for a prompt that someone typed or sent: not the harness's own wake for a background task that ended
     (a task notification), and not a message that MaximizePM delivered ([maxpm ...]; maxpm wait wakes on those)."""
@@ -8518,60 +8491,69 @@ def _activity_item(conn, agent):
 
 
 def activity_event(conn, payload, env=None):
-    """Record one hook event of a Claude Code session (maxpm activity): the agent's activity_at and activity_event, and
-    for a PermissionRequest the tool call that waits (activity_prompt; a tool call or a prompt clears it). A
-    permission prompt that shows, or a turn that ends, while the agent holds an item alerts the active manager
-    at once (_activity_alert): not a turn end while the agent waits on a person's answer (maxpm ask), has a stop
-    request, or waits on its own background work (_activity_waits: a background command or subagent, a wakeup;
-    recorded in activity_waits until its next tool call or prompt, #4293). That work wakes the session, and its
-    next turn end is judged again. Returns {"agent", "event", "alert": message id or None}."""
+    """Record one Claude Code hook event (its JSON input): hook_report with the claude adapter."""
+    return hook_report(conn, "claude", payload, env)
+
+
+def hook_report(conn, agent_id, payload, env=None):
+    """maxpm report --hook <agent>: an agent's hook passes its own input on stdin, and the adapter's read_hook says
+    what it means (a hook report: river/agents HOOK_REPORT_KEYS). Stored as maxpm report stores a state:
+    activity_at, activity_event 'report:<state>' (a report with no state keeps only the time), and for a blocked
+    call the tool call that waits (activity_prompt; working clears it). A permission prompt that shows, or a turn
+    that ends, while the agent holds an item alerts the active manager at once (_activity_alert): not a turn end
+    while the agent waits on a person's answer (maxpm ask), has a stop request, or waits on its own background
+    work (the report's waits: a background command or subagent, a wakeup; recorded in activity_waits until its
+    next working report, #4293). That work wakes the session, and its next turn end is judged again. A prompt that
+    a person typed (working with a prompt) closes the questions it answers and moves the clock of maxpm wait.
+    Returns {"agent", "event", "state", "prompt": bool, "alert": message id or None, "answered", "remind"}."""
+    from . import agents
     env = env if env is not None else os.environ
-    ev = str(payload.get("hook_event_name") or "")
-    agent = activity_agent(conn, payload.get("session_id"), env)
-    if not agent or ev not in ACTIVITY_EVENTS:
-        return {"agent": agent, "event": ev, "alert": None, "answered": [], "remind": None}
+    rep = agents.get(agent_id).read_hook(payload)
+    agent = activity_agent(conn, rep and rep["session_id"], env)
+    if not agent or not rep:
+        return {"agent": agent, "event": rep["event"] if rep else str(payload.get("hook_event_name") or ""),
+                "state": None, "prompt": False, "alert": None, "answered": [], "remind": None}
     record_session_url(conn, agent, session_url_from_env(env))
-    ntype = str(payload.get("notification_type") or "")
+    state, typed = rep["state"], rep["prompt"]
     t, alert, answered, remind = iso(now()), None, [], None
     with tx(conn):
-        a = conn.execute("SELECT activity_prompt, activity_waits, stop_at, role FROM agents WHERE name=?", (agent,)).fetchone()
+        a = conn.execute("SELECT activity_prompt, activity_waits, activity_event, stop_at, role FROM agents WHERE name=?",
+                         (agent,)).fetchone()
         prompt, waits = a["activity_prompt"], a["activity_waits"]
-        if ev == "PermissionRequest":
-            inp = payload.get("tool_input")
-            inp = {k: v for k, v in inp.items() if isinstance(v, str)} if isinstance(inp, dict) else {}
-            prompt = json.dumps({"tool": str(payload.get("tool_name") or ""), "input": {k: v[:400] for k, v in inp.items()}})
-        elif ev in ("PostToolUse", "UserPromptSubmit"):
+        if state == "blocked" and rep["call"]:
+            prompt = json.dumps(rep["call"])
+        elif state == "working":
             prompt = waits = None
-        if ev == "UserPromptSubmit" and _talk(payload.get("prompt")):
+        if typed is not None and _talk(typed):
             conn.execute("UPDATE agents SET talked_at=? WHERE name=? AND role='expert'", (t, agent))
-            if not payload["prompt"].strip().startswith("<"):  # tags: a message of another session, not a person
-                answered = answered_in_chat(conn, agent, payload["prompt"].strip(), t)
+            if not typed.strip().startswith("<"):  # tags: a message of another session, not a person
+                answered = answered_in_chat(conn, agent, typed.strip(), t)
             # A person (or another session) talks with a session that waits for work: wait_max counts from the
             # talk, so maxpm wait does not end the session during it or soon after (#4948).
             conn.execute("UPDATE agents SET waiting_since=? WHERE name=? AND waiting_since IS NOT NULL", (t, agent))
-        if ev == "Stop":
-            found = _activity_waits(payload)
-            if found is None:  # an older Claude Code: a process below the session, not this hook (busy_now)
+        if state == "idle":
+            found = rep["waits"]
+            if found is None:  # the input does not say: a process below the session, not this hook (busy_now)
                 found = ["a process"] if agent in busy_now(conn, [agent], skip={os.getpid(), os.getppid()}) else []
             waits = json.dumps(found) if found else None
         conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=?, activity_waits=? WHERE name=?",
-                     (t, ev + (f":{ntype}" if ntype else ""), prompt, waits, agent))
+                     (t, f"report:{state}" if state else a["activity_event"], prompt, waits, agent))
         # An expert sits at its prompt with the person: its turn ends and prompts are no news for the manager.
         held = _activity_item(conn, agent) if a["role"] != "expert" else None
-        if held and ev == "Notification" and ntype == "permission_prompt":
+        if held and state == "blocked" and rep["shows"]:
             call = _activity_call(prompt)
             alert = _activity_alert(conn, agent, held["id"],
                                 f"it waits on a permission prompt in its terminal on #{held['id']} {held['title'][:80]}"
                                 + (f"; it asks to run {call}" if call else "")
-                                + f" ({str(payload.get('message') or '')[:160]}). Answer it in its terminal or "
+                                + f" ({(rep['message'] or '')[:160]}). Answer it in its terminal or "
                                   f"its session, or tell the person.")
-        elif held and ev == "Stop" and not waits and not a["stop_at"] and agent not in waits_on_person(conn, [agent]):
+        elif held and state == "idle" and not waits and not a["stop_at"] and agent not in waits_on_person(conn, [agent]):
             alert = _activity_alert(conn, agent, held["id"],
                                 f"it ended its turn while it holds #{held['id']} {held['title'][:80]}: it sits at its "
                                 f"prompt and runs no maxpm wait. Look at its terminal or session.")
         if alert:
             conn.execute("UPDATE agents SET activity_told=? WHERE name=?", (t, agent))
-        if ev == "Stop" and not payload.get("stop_hook_active"):
+        if state == "idle" and not rep["again"]:
             # The asker closes its own questions (#5001): once for each question, at a turn end after it.
             due = [q for q in asked_open(conn, agent) if not q["asker_reminded"]
                    and now() - parse_iso(q["created_at"]) >= ASKER_REMIND_AFTER]
@@ -8581,7 +8563,22 @@ def activity_event(conn, payload, env=None):
                 remind = "MaximizePM: " + asked_line(agent, due) + ". If it still waits for the person, end your turn again."
     if answered:
         sync_needs_you(conn)  # the person's 'waits for you' of those questions closes now
-    return {"agent": agent, "event": ev, "alert": alert, "answered": answered, "remind": remind}
+    return {"agent": agent, "event": rep["event"], "state": state, "prompt": typed is not None, "alert": alert,
+            "answered": answered, "remind": remind}
+
+
+def state_adapter(conn, agent):
+    """The adapter of the agent CLI that `agent` runs in (agents.agent_type: claude-code, codex), or None when it is
+    not known (a custom command, or no command of it ran yet)."""
+    from . import agents
+    r = conn.execute("SELECT agent_type FROM agents WHERE name=?", (agent,)).fetchone()
+    return agents.find(r["agent_type"]) if r and r["agent_type"] else None
+
+
+def _state_source(conn, agent):
+    """Where the agent's state comes from: its adapter's STATE['state'] ('hook' or 'detect'), or None."""
+    a = state_adapter(conn, agent)
+    return (a.state or {}).get("state") if a else None
 
 
 def activity_watch(conn):
@@ -8601,6 +8598,9 @@ def activity_watch(conn):
             if r["activity_told"] != r["activity_at"]
             and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit
             and not (r["activity_waits"] and t - parse_iso(r["activity_at"]) < bg)]
+    # The silence of an agent whose state its pane gives (STATE 'detect'): the pane watcher reports a change of
+    # state only, so a long turn is no silence; this watch is for the hooks.
+    rows = [r for r in rows if _state_source(conn, r["name"]) != "detect"]
     if not rows:
         return []
     waiting = waits_on_person(conn, [r["name"] for r in rows])
@@ -8834,7 +8834,11 @@ def background_work(conn, agent, root=None):
     subagent that the harness started and that has not ended, at most busy_max old. Such a session is not idle:
     the harness wakes it when the task ends, and it reads its news then. Not a river wait (maxpm wait,
     inbox --wait, manage --watch) and not a loop that only renews the lease: these are waits, not work. An
-    empty list with no transcript on this computer (another agent CLI) or with busy_max 0s."""
+    empty list with no transcript on this computer (another agent CLI) or with busy_max 0s, and for an agent whose
+    adapter has no background commands (LAUNCH['background'] false: Codex)."""
+    ad = state_adapter(conn, agent)
+    if ad and not ad.launch.get("background"):
+        return []
     limit = parse_duration(setting(conn, "busy_max"))
     r = conn.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY first_seen DESC, rowid DESC LIMIT 1",
                      (agent,)).fetchone()

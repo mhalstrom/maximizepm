@@ -157,18 +157,50 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple)}
 # No chain of fallbacks: each signal has one declared source.
 # install_hooks(folder, report) -> [argv words to add to the start] | None: puts the hooks in place; `report` is the
 # maxpm report command (a list of argv words) that each hook runs with its --state.
+# read_hook(payload) -> a hook report (HOOK_REPORT_KEYS) | None: for a hook that passes its own input on stdin
+# (maxpm report --hook <id>; Claude Code's JSON), what that input says. None: the input is no event of this agent.
+# A hook report = {
+#      "state":   one of STATES, or None (the event says nothing of the state; only the time is kept),
+#      "event":   the agent's own name of the event ("Stop", "Notification:permission_prompt"), for the history,
+#      "session_id": the agent's id of the session, or None,
+#      "message": blocked: what it waits for, or None,
+#      "call":    blocked by a permission: {"tool": name, "input": {key: text}} of the call that waits, or None,
+#      "shows":   blocked: True when the person sees the question now (the manager hears of it at once),
+#      "waits":   idle: [short texts] of the agent's own background work that will wake it; [] for none; None
+#                 when the input does not say (MaximizePM then looks at the processes below the session),
+#      "prompt":  working: the text that the person (or a session) typed, or None,
+#      "again":   idle: True when the agent ends its turn a second time after a hook kept it going (no reminder),
+#    }
 # DETECT = {
 #      "process":      the process name of the agent in the pane,
 #      "idle":         a regex of the pane when the agent waits at its prompt,
 #      "working":      a regex of the pane while it runs a turn ("esc to interrupt"),
 #      "blocked":      [regexes], one for each screen that waits for a person (a permission menu, a question, trust),
-#      "tell_instead": the text of the menu option that lets the person type an answer instead, or None,
+#      "tell_instead": a regex of the menu option that lets the person type an answer instead, or None,
 #      "image_paste":  how a pasted image shows in its prompt, with {n} ("[Image #{n}]"), or None,
+#      and the layout of a blocked screen, each optional (DETECT_LAYOUT holds the values of a key left out):
+#      "menu":         the characters that mark the selected option of a menu ("❯›"),
+#      "frame":        the characters of the frame some CLIs draw around a prompt,
+#      "rule":         a regex of a dashed rule (the input box's edge),
+#      "hint":         a regex of the line that names keys ("Enter to confirm · Esc to cancel"),
 #    }
+# The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
+# alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
+# "detect" it also reports the state (blocked, working, idle) as maxpm report does.
 STATE_SOURCES = ("hook", "detect")
 STATE_KEYS = {"state": str, "session_id": str}
+HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str, type(None)),
+                    "message": (str, type(None)), "call": (dict, type(None)), "shows": bool,
+                    "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool}
 DETECT_KEYS = {"process": str, "idle": str, "working": str, "blocked": (list, tuple),
-               "tell_instead": (str, type(None)), "image_paste": (str, type(None))}
+               "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
+               "menu": str, "frame": str, "rule": str, "hint": str}
+DETECT_LAYOUT = {
+    "menu": "❯›",
+    "frame": "│┃╭╮╰╯┌┐└┘",
+    "rule": r"^\s*[─━╌╍┄┅═-]{8,}\s*$",
+    "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]",
+}
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in
 # DETECT. INPUT = {"native": argv words with {address} and {text} for a native message command (Codex:
@@ -202,7 +234,7 @@ PARTS = {
     "identity": {"data": ("IDENTITY", IDENTITY_KEYS), "functions": ()},
     "chat": {"data": ("CHAT", CHAT_KEYS), "functions": ("chat_path", "parse_chat", "chat_chain", "chat_title",
                                                         "chat_cwd", "chat_usage", "chat_settings")},
-    "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks",)},
+    "state": {"data": ("STATE", STATE_KEYS), "functions": ("install_hooks", "read_hook")},
     "detect": {"data": ("DETECT", DETECT_KEYS), "functions": ()},
     "input": {"data": ("INPUT", INPUT_KEYS), "functions": ()},
     "resume": {"data": None, "functions": ("resume_command",)},
@@ -297,7 +329,7 @@ def check(module, mid=None):
     if det is not None:
         out += _shape("DETECT", det, DETECT_KEYS, ("idle", "working", "blocked"))
         if isinstance(det, dict):
-            for k in ("idle", "working"):
+            for k in ("idle", "working", "rule", "hint", "tell_instead"):
                 if isinstance(det.get(k), str):
                     out += _regex(f"DETECT[{k!r}]", det[k])
             for i, p in enumerate(det.get("blocked") or ()):
@@ -415,6 +447,20 @@ class Adapter:
     def install_hooks(self, folder, report):
         f = self._fn("install_hooks")
         return f(folder, list(report)) if f else None
+
+    def read_hook(self, payload):
+        """What a hook's own input says (a hook report, HOOK_REPORT_KEYS, with a default for each key left out), or
+        None when the agent has no read_hook or the input is no event of it."""
+        f = self._fn("read_hook")
+        got = f(payload if isinstance(payload, dict) else {}) if f else None
+        if not got:
+            return None
+        return {"state": None, "event": "", "session_id": None, "message": None, "call": None, "shows": False,
+                "waits": None, "prompt": None, "again": False, **got}
+
+    def layout(self):
+        """Its DETECT with the layout keys it leaves out (DETECT_LAYOUT): what the pane watcher reads a screen with."""
+        return {**DETECT_LAYOUT, **(self.detect or {})}
 
     def inside(self, env):
         """Whether a command with environment `env` runs inside this agent (IDENTITY['inside_env'])."""
@@ -543,5 +589,5 @@ def from_env(env=None):
     return next((got[m] for m in order if got[m].inside(env)), None)
 
 
-__all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
+__all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir"]

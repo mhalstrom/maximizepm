@@ -54,6 +54,8 @@ class Contract(Env):
             self.assertEqual(a.missing(), [])
             for part in ("describe", "effort", "launch", "identity", "resume"):
                 self.assertTrue(a.supports(part), (mid, part))
+            for part in ("state", "detect", "input") if mid in ("claude", "codex") else ():  # #5183
+                self.assertTrue(a.supports(part), (mid, part))
         self.assertEqual(agents.ids()[:2], ["claude", "codex"])
 
     def test_a_module_with_no_launch_part_loads_but_cannot_start(self):
@@ -337,6 +339,132 @@ class StartPaths(Env):
         self.assertEqual(core.agent_web_url(self.c, "cx"), core.CODEX_WEB)
         self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='cx'")
         self.assertIsNone(core.agent_web_url(self.c, "cx"))
+
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# State through maxpm report and DETECT (#5183)
+# ---------------------------------------------------------------------------------------------------------------
+
+class HookState(Env):
+    """Claude Code's hooks run maxpm report --hook claude; the adapter's read_hook says what each event means."""
+
+    def setUp(self):
+        super().setUp()
+        core.register(self.c, "w1")
+
+    def test_each_claude_code_event_is_a_hook_report(self):
+        a = agents.get("claude")
+        self.assertEqual(a.state["state"], "hook")
+        self.assertIsNone(a.read_hook({"hook_event_name": "SessionStart"}))
+        got = {ev: a.read_hook({"hook_event_name": ev, "session_id": "s1", **more}) for ev, more in [
+            ("PostToolUse", {}), ("UserPromptSubmit", {"prompt": "go"}),
+            ("PermissionRequest", {"tool_name": "Bash", "tool_input": {"command": "rm -rf build", "timeout": 5}}),
+            ("Notification", {"notification_type": "permission_prompt", "message": "Claude needs your permission"}),
+            ("Notification", {"notification_type": "idle_prompt"}),
+            ("Stop", {"background_tasks": [{"type": "local_bash", "status": "running", "command": "make check"}],
+                      "stop_hook_active": True})]}
+        self.assertEqual({k: v["state"] for k, v in got.items()},
+                         {"PostToolUse": "working", "UserPromptSubmit": "working", "PermissionRequest": "blocked",
+                          "Notification": None, "Stop": "idle"})
+        self.assertEqual(got["UserPromptSubmit"]["prompt"], "go")
+        self.assertEqual(got["PermissionRequest"]["call"], {"tool": "Bash", "input": {"command": "rm -rf build"}})
+        self.assertEqual((got["Stop"]["waits"], got["Stop"]["again"]), (["local_bash: make check"], True))
+        self.assertIsNone(a.read_hook({"hook_event_name": "Stop"})["waits"])  # an older Claude Code: not said
+        shows = a.read_hook({"hook_event_name": "Notification", "notification_type": "permission_prompt"})
+        self.assertEqual((shows["state"], shows["shows"], shows["event"]), ("blocked", True, "Notification:permission_prompt"))
+        self.assertTrue(all(set(r) == set(agents.HOOK_REPORT_KEYS) for r in got.values()))
+
+    def test_the_hook_command_records_the_report_and_never_fails(self):
+        hook = core.activity_hook_settings()["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.assertTrue(hook.endswith(" report --hook claude"), hook)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MAXPM_AGENT": "w1"}), mock.patch.object(core, "agent_process", lambda: (None, None)):
+            for text in ('{"hook_event_name": "UserPromptSubmit", "prompt": "hi"}', "not json", ""):
+                with mock.patch("sys.stdin", io.StringIO(text)), contextlib.redirect_stdout(out):
+                    self.assertEqual(cli.run(["report", "--hook", "claude"]), 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w1'").fetchone()[0], "report:working")
+        # Another event that says no state keeps the state and moves only the time.
+        core.hook_report(self.c, "claude", {"hook_event_name": "Notification", "notification_type": "auth_success"},
+                         {"MAXPM_AGENT": "w1"})
+        self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w1'").fetchone()[0], "report:working")
+        with self.assertRaisesRegex(RiverError, "--state working"):
+            cli.run(["--as", "w1", "report"])
+
+    def test_the_defaults_are_the_adapters_data(self):
+        """The prompt_pattern default reads the same screens as the built-in adapters' blocked words, and the
+        native_message default is Codex's INPUT; B5 (#5185) removes the copies in the settings."""
+        words = {w for m in ("claude", "codex") for w in agents.get(m).detect["blocked"]}
+        self.assertEqual(set(core.DEFAULT_SETTINGS["prompt_pattern"].split("|")) - {"Do you (want to", "trust)"},
+                         words - {"Do you (want to|trust)"})
+        native = " ".join(agents.get("codex").input["native"]).replace("{text}", "{message}")
+        self.assertTrue(core.DEFAULT_SETTINGS["native_message"].endswith(": " + native))
+        self.assertEqual(agents.get("claude").detect["image_paste"].format(n=1), "[Image #1]")
+
+
+class PaneState(Env):
+    """The generic pane watcher reads each pane with its agent's DETECT; for an agent whose STATE is detect (Codex),
+    it reports the state as maxpm report does (#5183)."""
+
+    def setUp(self):
+        super().setUp()
+        from river import server
+        from tests.test_server import FakeTmux
+        self.server = server
+        platform, core.PLATFORM = core.PLATFORM, "linux"
+        self.addCleanup(setattr, core, "PLATFORM", platform)
+        server.TMUX_RUNNER = FakeTmux()
+        self.addCleanup(setattr, server, "TMUX_RUNNER", None)
+        self.addCleanup(server.PROMPTS.clear)
+        in_tmux = os.environ.pop("TMUX", None)
+        if in_tmux is not None:
+            self.addCleanup(os.environ.__setitem__, "TMUX", in_tmux)
+        core.project_add(self.c, "shop", path=self.tmp.name)
+
+    def start(self, agent_type):
+        core.item_add(self.c, "shop", "work")
+        name = self.server.launch_agent(self.c)["session_name"]
+        core.register(self.c, name)
+        core.set_agent_type(self.c, name, agent_type)
+        return name, self.server.TMUX_RUNNER.panes[-1]
+
+    def event(self, name):
+        return self.c.execute("SELECT activity_event, activity_prompt FROM agents WHERE name=?", (name,)).fetchone()
+
+    def test_a_codex_pane_reports_working_idle_and_blocked(self):
+        name, pane = self.start("codex")
+        pane["running"] = "codex"
+        pane["screen"] = "• Running the tests\n\n◦ Working (12s • esc to interrupt)\n\n› Ask Codex to do anything"
+        self.assertEqual(self.server.watch_prompts(self.c)["reported"], {name: "working"})
+        self.assertNotIn("reported", self.server.watch_prompts(self.c))  # no change: nothing written
+        pane["screen"] = "• Done.\n\n› Ask Codex to do anything\n\n  100% context left"
+        self.assertEqual(self.server.watch_prompts(self.c)["reported"], {name: "idle"})
+        pane["screen"] = ("Would you like to run the following command?\n\n  $ rm -rf build\n\n› 1. Yes, proceed\n"
+                          "  2. No, and tell Codex what to do differently\n\n  Press enter to confirm or esc to cancel")
+        got = self.server.watch_prompts(self.c)
+        self.assertEqual((got["reported"], got["waiting"]),
+                         ({name: "blocked"}, {name: "Would you like to run the following command?"}))
+        r = self.event(name)
+        self.assertEqual((r["activity_event"], json.loads(r["activity_prompt"])),
+                         ("report:blocked", {"message": "Would you like to run the following command?"}))
+        self.assertEqual(sessions.state(self.c, dict(self.c.execute("SELECT * FROM agents WHERE name=?", (name,))
+                                                     .fetchone()), None)[0], "prompt")
+
+    def test_a_claude_code_pane_gives_its_state_by_its_hooks_only(self):
+        name, pane = self.start("claude-code")
+        pane["screen"] = "⏺ Read 3 files\n✻ Pondering… (12s · esc to interrupt)"
+        self.assertNotIn("reported", self.server.watch_prompts(self.c))
+        self.assertIsNone(self.event(name)["activity_event"])
+
+    def test_the_tell_instead_option_comes_from_the_adapter(self):
+        name, pane = self.start("codex")
+        pane["screen"] = ("Would you like to run the following command?\n\n  $ rm -rf build\n\n› 1. Yes, proceed\n"
+                          "  2. No, and tell Codex what to do differently\n\n  Press enter to confirm or esc to cancel")
+        p = self.server.pane_prompts(self.c, {name: pane["id"]})[name]
+        with mock.patch.object(self.server, "PROMPT_PAUSE", 0):
+            got = self.server.prompt_answer(self.c, name, p["sig"], other="run make clean instead", who="mark")
+        self.assertEqual(got["picked"], "2. No, and tell Codex what to do differently")
 
 
 if __name__ == "__main__":

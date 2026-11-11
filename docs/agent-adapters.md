@@ -139,3 +139,26 @@ Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 
 - Left for the next items: the transcript readers of `_ran_model` and the session id of `move_into_tmux` (#5182, by
   the chat part), the Claude-only expert resume of `start_expert` (#5168), the settings of `LAUNCH_PLATFORMS` and
   `sessions.PROVIDERS` (#5169).
+
+## As built in #5183 (state through maxpm report and DETECT)
+
+- Claude Code's hooks are the claude adapter's: `HOOK_EVENTS`, `hook_settings(report)` and `install_hooks` (the file
+  `claude-hooks.json` beside the queue, passed with `--settings`). Each hook runs `maxpm report --hook claude`, which
+  reads the hook's JSON on stdin with the fast path that `maxpm activity` had; `maxpm activity` stays as its old name
+  for the hook files of sessions that started before.
+- A new optional function of the state part, `read_hook(payload)`, turns an agent's own hook input into a hook report
+  (`HOOK_REPORT_KEYS`: state, event, session id, message, the call that waits, whether the question shows, the
+  background work at a turn end, the typed prompt). `core.hook_report` records it as `maxpm report` records a state
+  (`activity_event` is `report:<state>` now, not the hook's event name) and keeps every rule of `activity_event`:
+  the manager's alerts, the answered questions, the reminder at a turn end, the wait clock.
+- `DETECT` has four more optional layout keys (`menu`, `frame`, `rule`, `hint`); `DETECT_LAYOUT` holds their values
+  for an adapter that leaves them out. `server._pane_rule` reads each pane with its agent's adapter: with the
+  default `prompt_pattern`, the adapter's `blocked` words; another value of the setting is read for every pane, and
+  an empty one turns the watch off, as before. The "tell it instead" option of a prompt answer is the adapter's
+  `tell_instead`.
+- The pane watcher (`server.watch_prompts`) reports the state of an agent whose `STATE['state']` is `detect` (Codex):
+  blocked (a prompt), working (`DETECT['working']`), or idle (`DETECT['idle']`), through `core.report`, only when it
+  changed. The silence alert of `activity_watch` stays for agents with hooks, and `background_work` returns nothing
+  for an adapter whose `STATE['background']` is false.
+- Copies left for #5185: the default of `prompt_pattern` (the built-in adapters' blocked words) and of
+  `native_message` (Codex's `INPUT['native']`); a test checks that they match the adapters.

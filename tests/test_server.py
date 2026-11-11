@@ -2984,13 +2984,14 @@ class LaunchProfiles(unittest.TestCase):
                           "claude_skill_prompt", "claude_prompt", "claude_activity_hooks"])
 
     def test_a_started_claude_code_session_reports_its_activity(self):
+        from river import agents
         pid = core._project(self.c, "shop")["id"]
         core.config_unset(self.c, "claude_activity_hooks")  # the default: on
         cmd = core._launch_agent_cmd(self.c, pid, None)["command"]
         m = re.search(r"^claude --settings (\S+) go --remote-control$", cmd)
         self.assertIsNotNone(m, cmd)
         f = Path(m.group(1).strip("'"))
-        self.assertEqual(f, Path(core.river_dir()) / core.ACTIVITY_HOOK_FILE)
+        self.assertEqual(f, Path(core.river_dir()) / agents.get("claude").module.HOOK_FILE)
         self.assertEqual(json.loads(f.read_text()), core.activity_hook_settings())
         # A person's own --settings in claude_args wins: river adds no second one.
         core.config_set(self.c, "claude_args", "--settings /x/mine.json")

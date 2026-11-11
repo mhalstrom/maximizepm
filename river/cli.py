@@ -1328,8 +1328,10 @@ def build_parser():
     sub.add_parser("heartbeat", help="renew your leases")
     x = sub.add_parser("report", help="for an agent's hook, plugin or pane rule: the session's state now "
                                       "(docs/agent-adapters.md); maxpm release says that it ended")
-    x.add_argument("--state", required=True, choices=core.REPORT_STATES,
+    x.add_argument("--state", choices=core.REPORT_STATES,
                    help="working: it runs a turn; idle: it waits at its prompt; blocked: it waits for a person")
+    x.add_argument("--hook", metavar="AGENT", help="for an agent's hook that passes its own input on stdin (Claude "
+                   "Code's JSON): the adapter of AGENT reads it; in place of --state")
     x.add_argument("--message", help="blocked: what it waits for (a permission menu, a question)")
     x.add_argument("--session-id", dest="session_id", help="the agent's own id of the session")
     x.add_argument("--seq", type=int, help="a number that grows with each report: a late report changes nothing")
@@ -1365,8 +1367,8 @@ def build_parser():
     x.add_argument("--dir", default="~/.claude/skills", help="skills folder (default ~/.claude/skills)")
     x.add_argument("--copy", action="store_true", help="copy the files instead of linking them")
     x.add_argument("--force", action="store_true", help="replace a folder that is not a link (your edits there are lost)")
-    sub.add_parser("activity", help="for Claude Code hooks: record the session event on stdin (sessions that "
-                                    "maxpm starts run it)")
+    sub.add_parser("activity", help="the old name of maxpm report --hook claude (the hook files of sessions that "
+                                    "started before #5183 run it)")
     db = sub.add_parser("db", help="where the queue database is")
     dbs = db.add_subparsers(dest="dcmd", required=True)
     dbs.add_parser("path", help="print the database file MaximizePM uses")
@@ -1551,17 +1553,19 @@ def install_skills(dest, copy=False, force=False):
     return out
 
 
-def activity_command(stdin=None):
-    """maxpm activity: a Claude Code hook (core.activity_hook_settings) passes its event as JSON on stdin. It prints nothing
-    (but the Stop hook's reminder to close answered questions, #5001), waits at most two seconds for the queue, and always exits 0: a failed record never stops the session (#4288)."""
+def activity_command(stdin=None, agent_id="claude"):
+    """maxpm report --hook <agent> (and its old name maxpm activity, for claude): an agent's hook passes its event on
+    stdin (Claude Code: JSON; the adapter's read_hook reads it, core.hook_report records it). It prints nothing (but
+    the Stop hook's reminder to close answered questions, #5001), waits at most two seconds for the queue, and
+    always exits 0: a failed record never stops the session (#4288)."""
     import json
     conn = None
     try:
         payload = json.loads((stdin or sys.stdin).read() or "{}")
         conn = core.connect()
         conn.execute("PRAGMA busy_timeout=2000")
-        res = core.activity_event(conn, payload if isinstance(payload, dict) else {})
-        if res["event"] in ("UserPromptSubmit", "Stop"):
+        res = core.hook_report(conn, agent_id, payload if isinstance(payload, dict) else {})
+        if res["prompt"] or res["state"] == "idle":
             _record_hook_process(conn, res["agent"])
         if res.get("remind"):
             # The Stop hook keeps the session for one more turn, to close its answered questions (#5001); Claude
@@ -1620,8 +1624,11 @@ def _record_hook_process(conn, name):
 
 
 def run(argv=None):
-    if (sys.argv[1:] if argv is None else list(argv))[:1] == ["activity"]:
+    words = sys.argv[1:] if argv is None else list(argv)
+    if words[:1] == ["activity"]:
         return activity_command()  # first: a hook runs on every tool call, so it skips the parser and the briefing
+    if words[:2] == ["report", "--hook"] and len(words) == 3:
+        return activity_command(agent_id=words[2])
     args = build_parser().parse_args(argv)
     if args.cmd is None:
         print(QUICKSTART)
@@ -2475,6 +2482,9 @@ def dispatch(conn, a, actor):
             return core.report_release(conn, actor)
         return core.release(conn, a.id, a.note, actor, a.author)
     if c == "report":
+        if a.hook or not a.state:
+            raise core.RiverError("maxpm report takes --state working|idle|blocked; --hook <agent> goes alone "
+                                  "(maxpm report --hook claude, with the hook's input on stdin)")
         resume = a.resume[1:] if a.resume[:1] == ["--"] else a.resume
         if resume and a.resume[:1] != ["--"]:
             raise core.RiverError(f"unknown words {' '.join(resume)!r}; the resume command goes after --: "
