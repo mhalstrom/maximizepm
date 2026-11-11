@@ -17,3 +17,4 @@
 .proj .goals { margin: 0 0 var(--sp-1); }
 .proj .goals > .gc-add { flex: 1 1 100%; padding-top: 0; }  /* + goal on its own line under the goals, as on the Goals view (#5329) */
 .proj.closed .pbody { display: none; }
+.pnotes { white-space: pre-wrap; }

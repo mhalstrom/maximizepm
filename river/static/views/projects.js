@@ -6,10 +6,19 @@ import { nyCard, goalCard, projCard } from "../components/card.js";
 import { itemTableRows, itemTableColumns } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
 import { button } from "../components/button.js";
-import { fitClamps } from "../components/clamp.js";
 import { S, goalSel, inGoal, scope } from "../page.js";
 import { openAdd } from "./plan.js";
 import { nav } from "../page.js";
+
+// A project's notes show their first sentence (#5082: only what a person acts on). The rest was a hover only, which
+// a phone cannot show (#5401): when the notes are longer, "more" shows them in full in place, and "less" folds them.
+const notesOpen = new Set();
+function noteLine(p) {
+  const first = clip(p.notes.split(/(?<=\.)\s|\n/)[0], 90), longer = first !== p.notes.trim(), open = longer && notesOpen.has(p.name);
+  const text = open ? `<span class="muted pnotes">${esc(p.notes.trim())}</span>` : `<span class="muted" title="${esc(p.notes)}">${esc(first)}</span>`;
+  return text + (longer ? ` <span class="link" data-pnotes="${esc(p.name)}">${open ? "less" : "more"}</span>` : "")
+    + ` <span class="link" data-describe="${esc(p.name)}">edit</span>`;
+}
 
 // Projects folded closed on the Projects tab, remembered in this browser.
 function projClosed() { try { return JSON.parse(store("river.projClosed") || "[]"); } catch (e) { return []; } }
@@ -34,7 +43,7 @@ export function renderProjects() {
     const me = actor();
     return projCard(p, isClosed, `<div class="pcounts" title="${esc(meta.join(" · ") + (closedN ? ` · ${closedN} done` : "") + (backlog.length ? ` · ${backlog.length} in backlog` : ""))}">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${who.length ? `<span class="muted t-s">${who.map(esc).join(", ")}</span>` : ""}</div>
       <div class="pbody">
-        <div class="pdesc t-s">${p.notes ? `<span class="muted" title="${esc(p.notes)}">${esc(clip(p.notes.split(/(?<=\.)\s|\n/)[0], 90))}</span> <span class="link" data-describe="${esc(p.name)}">edit</span>` : `<span class="link" data-describe="${esc(p.name)}">+ description</span>`}</div>
+        <div class="pdesc t-s">${p.notes ? noteLine(p) : `<span class="link" data-describe="${esc(p.name)}">+ description</span>`}</div>
         ${pg.length ? `<div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<div class="gc-add">${button("+ goal", { cls: "plain", data: { addgoal: p.name } })}</div></div>` : ""}
         <div class="psec">${open.length} open${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}${pg.length ? "" : ` <span class="link t-s" data-addgoal="${esc(p.name)}">+ goal</span>`}</div>
         <div class="ptable" data-ptable="${esc(p.name)}"></div>
@@ -44,7 +53,6 @@ export function renderProjects() {
   const box = $("#projects"), full = html || `<div class="muted">No projects yet.</div>`;
   if (box.dataset.sig !== full) {
     box.innerHTML = full; box.dataset.sig = full;
-    fitClamps(box);
     box.querySelectorAll("[data-ptable]").forEach(ph => {
       const name = ph.dataset.ptable, known = projTables.get(name);
       if (known) ph.replaceWith(known.el);
@@ -105,6 +113,9 @@ export function onClick(t) {
     openAdd("goal", { project: t.dataset.addgoal, parent: t.dataset.parent || "" });
   });
   if (t.dataset.goalAct) return run(() => goalAction(t.dataset.goalAct, t.dataset.g));
+  if (t.dataset.pnotes) return run(() => {
+    const n = t.dataset.pnotes; if (!notesOpen.delete(n)) notesOpen.add(n); return renderProjects();
+  });
   if (t.dataset.describe) return run(async () => {
     const p = S.projects.find(x => x.name === t.dataset.describe); const text = prompt(`What does "${p.name}" cover, and what context helps an agent work on it?`, p.notes || ""); if (text !== null) await act("project_describe", { name: p.name, text }).catch(() => {});
   });

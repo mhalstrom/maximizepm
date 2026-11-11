@@ -335,17 +335,6 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 /* The work name of a session, and its agent id in small text (#4695): Sessions tab and the Board's Agents. */
 .sid { color: var(--muted); font-size: 11.5px; font-weight: 400; overflow-wrap: anywhere; }
 
-/* Long text on a phone (#4889, components/clamp.js): its first four lines, then More. On a wider screen the text
-   shows in full and More stays hidden, so the desktop layout does not change. */
-.clamp-more { display: none; }
-@media (max-width: 759px) {
-  .clamp { display: block; }
-  .clamp .clamp-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-  .clamp.open .clamp-text { display: block; }
-  .clamp:not(.short) .clamp-more { display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px 0 0;
-    background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; }
-}
-
 /* A Markdown canvas (#4983): its pictures (put inline) and its ```mermaid diagrams (drawn as pictures). */
 .md img { max-width: 100%; height: auto; border-radius: 6px; }
 .md img:not([src]) { display: none; }  /* a picture from the network: the canvas loads nothing */
