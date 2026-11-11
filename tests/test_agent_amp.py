@@ -108,6 +108,13 @@ class Launch(Env):
                               env={**os.environ, "PATH": f"{bin_dir}:/usr/bin:/bin"})
         self.assertEqual(done.stdout, f"ARGS:--mode high --no-ide\n{prompt}\n")
 
+    def test_the_settings_of_a_running_command_read_back(self):
+        """#5274: a restart keeps what the running command line shows (core.command_settings)."""
+        got = core.command_settings(self.a, "amp --mode low --no-ide --visibility private --settings-file /x/s.json "
+                                            "threads continue T-1")
+        self.assertEqual(got, {"no_ide": "on", "quiet": "off", "fast": "off", "visibility": "private",
+                               "settings_file": "/x/s.json"})
+
     def test_resume_continues_the_thread_and_keeps_its_mode_when_none_is_given(self):
         self.assertEqual(self.a.resume_command(TOOLS_THREAD, None, None, {}),
                          ["amp", "--no-ide", "threads", "continue", TOOLS_THREAD])

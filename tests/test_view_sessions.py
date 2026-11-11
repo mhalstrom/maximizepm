@@ -589,6 +589,29 @@ class Adopt(Base):
         server.session_setting_live(self.c, "ag", "model", "sonnet")
         self.assertIn("/model sonnet", " ".join(str(k) for k in self.tmux.panes[0]["keys"]))
 
+    def test_restart_keeps_the_settings_the_session_runs_with(self):
+        """#5274: a restart took the profile's defaults for every setting the person did not change (Amp started with
+        --visibility private came back without it). Now it keeps what the running command line shows, and changes
+        only what the person changed."""
+        import subprocess
+        import sys
+        core.config_set(self.c, "claude_permission_mode", "manual")
+        core.config_set(self.c, "claude_remote_control", "off")
+        # The agent CLI, as its command line shows it: Remote Control on and acceptEdits, unlike the defaults.
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--remote-control",
+                                 "--permission-mode", "acceptEdits"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'", (proc.pid, core.proc_info(proc.pid)[2]))
+        self.quiet()
+        got = server.session_restart(self.c, "ag", {"effort": "low"})
+        self.assertEqual(got["changed"], ["Effort low"])
+        line = self.tmux.panes[0]["keys"][0]
+        self.assertIn("--effort low", line)
+        self.assertIn("--permission-mode acceptEdits", line)  # kept, not the default
+        self.assertIn("--remote-control", line)  # kept, not the default off
+
     def test_restart_takes_the_folder_from_the_process_when_the_transcript_names_none(self):
         # #5262: Grok's and Copilot's logs have no cwd field, and Restart answered 'the transcript of ag does not name
         # its folder'. The folder of the agent's own process is the session's folder.

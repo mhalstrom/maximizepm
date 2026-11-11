@@ -11656,6 +11656,32 @@ def _ran_model(pid_cmd, platform, session_id, transcript=None):
         return None
 
 
+def command_settings(ad, cmd):
+    """{key: value} of the adapter's launch settings that a running command line shows (#5274): a choice or a text by
+    its "read" rule (group 1), a toggle by its flag (on when the flag's first word is on the line, else off). A
+    setting with no flag and no rule (built by build_command in its own way), and the prompt and args, are not read:
+    the line does not say them."""
+    import shlex
+    try:
+        words = shlex.split(cmd or "")
+    except ValueError:
+        words = (cmd or "").split()
+    out = {}
+    for spec in (ad.settings if ad else ()):
+        key = spec["key"]
+        if key in ("prompt", "args", "model_ids"):
+            continue
+        if spec["kind"] == "toggle":
+            if spec.get("flag"):
+                out[key] = "on" if spec["flag"][0] in words else "off"
+            continue
+        if spec.get("read"):
+            m = re.search(spec["read"], cmd or "")
+            if m:
+                out[key] = m.group(1)
+    return out
+
+
 def resume_command(conn, agent, platform, session_id, project_id=None, overrides=None, transcript=None):
     """The command that resumes an agent's chat in a new process (tmux_adopt, #4598): the first launch_agents
     profile of its platform, its model, `claude --resume <session id>` or `codex resume <thread id>`, and

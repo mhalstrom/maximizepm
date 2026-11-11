@@ -1403,6 +1403,7 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
         done.append(f"{spec['label']} {value}")
         if make_default and spec.get("default"):
             defaults.append((spec["default"], value))
+    keep_running_settings(conn, agent, a, prov, changes, ov)
     ov["prompt"] = (f"MaximizePM restarted this session with new settings ({'; '.join(done)}); your name, items and "
                     f"context are the same. Start again any background command you had running, then continue where "
                     f"you stopped: run maxpm --as {agent} go if you are not sure.")
@@ -1410,6 +1411,34 @@ def session_restart(conn, agent, changes, make_default=False, who=None, runner=N
     for k, v in defaults:
         core.config_set(conn, k, v)
     return {"agent": agent, "pane": pane, "changed": done, "defaults": [k for k, _ in defaults]}
+
+
+def keep_running_settings(conn, agent, a, prov, changes, ov):
+    """A restart changes only what the person changed (#5274): Amp started with --visibility private came back without
+    it, because the resume took the profile's defaults. Each launch setting that the running command line shows
+    (core.command_settings), and each that the session's transcript shows now (a permission mode changed in the
+    session), goes into the overrides ov, unless the person changed it. A setting that is no config key (a flag that
+    only a restart adds) goes in as its flag."""
+    from . import sessions
+    ad = core._adapters().find(prov)
+    if ad is None:
+        return
+    kept = core.command_settings(ad, a.get("pid_cmd"))
+    try:
+        rows = sessions.session_settings(conn, agent)["settings"]
+    except RiverError:
+        rows = []
+    kept.update({r["key"]: r["value"] for r in rows if r["source"] == "session" and r["value"] is not None
+                 and r["key"] not in ("model", "effort")})
+    specs = {s["key"]: s for s in ad.settings}
+    for key, value in kept.items():
+        spec = specs.get(key)
+        if key in changes or spec is None:
+            continue
+        if spec.get("config", True):
+            ov["opts"].setdefault(key, value)
+        elif value == "on" and spec.get("flag") and spec["flag"][0] not in ov["flags"]:
+            ov["flags"].append(spec["flag"][0])
 
 
 def fixed_on_resume(provider_id, changes):
