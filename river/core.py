@@ -4291,6 +4291,12 @@ def add_plan(conn, project, text, actor=None, priority=2, doer="any", dry_run=Fa
     return {"project": project, "dry_run": False, "items": rows}
 
 
+def _changed(col, old):
+    """The history line of a replaced text: it keeps the old text, so an edit that drops a person's words can be
+    undone from maxpm show (#5384; notes were once recovered only from the database's WAL file)."""
+    return f"{col} changed; the old {col}: {old}" if (old or "").strip() else f"{col} changed"
+
+
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
               context=None, touches=None, check=None, due=None, goals=None, untag=None, refs=None, unref=None,
               models=None, tier=None, kind=None, short=None):
@@ -4340,7 +4346,7 @@ def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, ac
             _event(conn, it["id"], actor, "title changed")
         if notes is not None and notes != it["notes"]:
             conn.execute("UPDATE items SET notes=? WHERE id=?", (notes, it["id"]))
-            _event(conn, it["id"], actor, "notes changed")
+            _event(conn, it["id"], actor, _changed("notes", it["notes"]))
         if doer is not None and doer != it["doer"]:
             if doer not in DOERS:
                 raise RiverError(f"doer is one of {', '.join(DOERS)}")
@@ -4353,7 +4359,7 @@ def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, ac
         for col, val in (("context", context), ("touches", _touches(touches)), ("check", check)):
             if val is not None and val != it[col]:
                 conn.execute(f'UPDATE items SET "{col}"=? WHERE id=?', (val, it["id"]))
-                _event(conn, it["id"], actor, f"{col} changed")
+                _event(conn, it["id"], actor, _changed(col, it[col]) if col in ("context", "check") else f"{col} changed")
                 if col == "touches":
                     _sync_conflicts(conn, it["id"], actor)
     return item_show(conn, item_id)

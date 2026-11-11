@@ -8566,6 +8566,20 @@ class Policies(Base):
         self.assertIn("reviewer", st["policy_roles"])
 
 
+class EditKeepsOldText(Base):
+    """maxpm edit --notes or --context replaces the text; the history keeps the old one (#5384)."""
+
+    def test_the_history_keeps_the_old_notes_and_context(self):
+        core.project_add(self.c, "web")
+        i = self.add("web", "Build the header")
+        core.item_edit(self.c, i, notes="first notes", context="first context", actor="a")
+        core.item_edit(self.c, i, notes="second", context="second context", actor="a")
+        ev = [e["change"] for e in core.item_show(self.c, i)["events"]]
+        self.assertIn("notes changed; the old notes: first notes", ev)
+        self.assertIn("context changed; the old context: first context", ev)
+        self.assertIn("notes changed", ev)  # the first text replaced nothing: no old text to keep
+
+
 class ShippedPolicies(unittest.TestCase):
     """The global policies file that ships with MaximizePM (#5308) loads, and each entry is whole."""
 
