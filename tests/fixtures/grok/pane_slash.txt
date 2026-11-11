@@ -1,0 +1,36 @@
+
+  master /work/repo [Click here to Upgrade]                                           18K / 256K │ [Dashboard]
+
+
+     ❯ Create a file named notes.txt that contains the word hello, then run: git add notes.txt              11:54 PM
+
+
+     ◆ Thought for 10.6s
+
+     I'll create notes.txt with the word hello, then stage it with git add.                                 11:55 PM
+
+     ◈ Created notes.txt, ran 1 command +1
+
+     Created notes.txt with the word hello and staged it. git status shows it as a new staged file (A       11:55 PM
+     notes.txt).                                                                                                       █
+                                                                                                                       █
+     DONE                                                                                                              █
+                                                                                                                       █
+     Worked for 18s                                                                                                    █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+                                                                                                                       █
+
+  Help improve Grok                                                                                 [Opt out] [Opt in]
+  Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g., prompts, traces, & metrics,
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────1─
+    ❯ /auto Toggle Auto-review (classifier approves safe tools)
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ /auto                                                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────── Grok 4.7 (high) ─╯
+
+  Enter:send  │  Opt+Enter:newline  │  Shift+Tab:mode  │  Ctrl+x:shortcuts
+
