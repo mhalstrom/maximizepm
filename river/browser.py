@@ -933,7 +933,8 @@ def mcp_config_file(conn, project_id, agent):
 CDP_NEVER = {"Browser.close", "Browser.crash", "Browser.crashGpuProcess", "Target.setRemoteLocations",
              "Target.exposeDevToolsProtocol", "Network.setBlockedURLs"}
 # What changes the page (navigation, input, scripts, tabs): the controller rule holds for it, as for the actions of
-# maxpm browser (routes.CHANGES). Reads (a screenshot, the DOM, the accessibility tree) pass while another controls.
+# maxpm browser (routes.CHANGES). Reads (a screenshot, the DOM, the accessibility tree, a script of an isolated world:
+# CDP_SCRIPTS) pass while another controls.
 CDP_CHANGES = {"Page.navigate", "Page.navigateToHistoryEntry", "Page.reload", "Page.close", "Page.stopLoading",
                "Page.setDocumentContent", "Page.bringToFront", "Runtime.evaluate", "Runtime.callFunctionOn",
                "Runtime.compileScript", "Runtime.runScript", "Target.createTarget", "Target.closeTarget",
@@ -941,6 +942,52 @@ CDP_CHANGES = {"Page.navigate", "Page.navigateToHistoryEntry", "Page.reload", "P
                "DOM.setNodeValue", "DOM.setNodeName", "DOM.removeNode", "DOM.removeAttribute", "DOM.moveTo",
                "DOM.setFileInputFiles", "DOM.focus"}
 CDP_SCHEMES = ("http", "https", "about", "data", "blob")
+# The script calls of CDP_CHANGES. In an isolated world they are reads (#5460): Playwright (its world
+# __playwright_utility_world__) and Puppeteer run every read there (the accessibility snapshot, text, locators), and a
+# refusal makes Playwright wait 30 s, then fail. In the page's own world (a session's page.evaluate) they wait for
+# control. The rule is for sessions that work together, not a wall: a script of an isolated world can change the DOM.
+CDP_SCRIPTS = {"Runtime.evaluate", "Runtime.callFunctionOn", "Runtime.compileScript", "Runtime.runScript"}
+
+
+def _context_of(p):
+    """The execution context id that a script call names: contextId, executionContextId, or the context part of an
+    objectId (V8 writes '<isolate>.<context>.<n>', older Chrome {"injectedScriptId": <context>, ...}), or 'u:' and a
+    uniqueContextId; None: the page's own world."""
+    for k in ("contextId", "executionContextId"):
+        if isinstance(p.get(k), int):
+            return p[k]
+    if isinstance(p.get("uniqueContextId"), str):
+        return "u:" + p["uniqueContextId"]
+    oid = p.get("objectId")
+    if not isinstance(oid, str):
+        return None
+    parts = oid.split(".")
+    if len(parts) == 3 and parts[1].lstrip("-").isdigit():
+        return int(parts[1])
+    try:
+        j = json.loads(oid)
+    except ValueError:
+        return None
+    return j.get("injectedScriptId") if isinstance(j, dict) and isinstance(j.get("injectedScriptId"), int) else None
+
+
+def track_worlds(worlds, msg):
+    """Keep worlds (a set of (sessionId, context id)) up to date with one message from Chrome: an isolated world
+    comes with Runtime.executionContextCreated and goes with Destroyed or Cleared."""
+    method, p, sid = msg.get("method"), msg.get("params") or {}, msg.get("sessionId")
+    if method == "Runtime.executionContextCreated":
+        c = p.get("context") or {}
+        if (c.get("auxData") or {}).get("type") == "isolated" and isinstance(c.get("id"), int):
+            worlds.add((sid, c["id"]))
+            if c.get("uniqueId"):
+                worlds.add((sid, "u:" + str(c["uniqueId"])))
+    elif method == "Runtime.executionContextDestroyed":
+        worlds.discard((sid, p.get("executionContextId")))
+        if p.get("executionContextUniqueId"):
+            worlds.discard((sid, "u:" + str(p["executionContextUniqueId"])))
+    elif method == "Runtime.executionContextsCleared":
+        for w in [w for w in worlds if w[0] == sid]:
+            worlds.discard(w)
 
 
 def _upload_ok(conn, b, f):
@@ -954,9 +1001,10 @@ def _upload_ok(conn, b, f):
     return any(real == root.resolve() or root.resolve() in real.parents for root in roots)
 
 
-def cdp_refusal(conn, b, agent, msg):
+def cdp_refusal(conn, b, agent, msg, worlds=()):
     """Why one CDP message of a session must not reach Chrome, or None. It may change msg: a download path becomes
-    the project's downloads folder."""
+    the project's downloads folder. worlds: the isolated worlds of this connection (track_worlds), where a script
+    call is a read."""
     method = msg.get("method") if isinstance(msg.get("method"), str) else ""
     p = msg.get("params") if isinstance(msg.get("params"), dict) else {}
     if method in CDP_NEVER or method.startswith("Tethering."):
@@ -971,6 +1019,8 @@ def cdp_refusal(conn, b, agent, msg):
         bad = [f for f in p.get("files") or [] if not _upload_ok(conn, b, f)]
         if bad:
             return f"an upload takes a file from the project folder or the browser's downloads only, not {bad[0]}"
+    if method in CDP_SCRIPTS and (msg.get("sessionId"), _context_of(p)) in worlds:
+        return None
     if method in CDP_CHANGES or method.startswith("Input."):
         try:
             may_change(conn, b, agent, False)
@@ -983,7 +1033,7 @@ def cdp_session(conn, b, agent, rfile, sock, upstream):
     """Relay one session's CDP connection until either side closes it. rfile and sock: the session's WebSocket (the
     server side: frames out are not masked); upstream: a WS to Chrome of this connection only, so the ids and events
     of two sessions never mix. A refused message gets a CDP error from serve and never reaches Chrome."""
-    wlock = threading.Lock()
+    wlock, worlds = threading.Lock(), set()
 
     def out(op, data):
         with wlock:
@@ -992,7 +1042,13 @@ def cdp_session(conn, b, agent, rfile, sock, upstream):
     def pump():
         try:
             while True:
-                out(0x1, upstream.recv().encode())
+                text = upstream.recv()
+                if '"Runtime.executionContext' in text:  # the isolated worlds, where scripts are reads (#5460)
+                    try:
+                        track_worlds(worlds, json.loads(text))
+                    except (ValueError, AttributeError):
+                        pass
+                out(0x1, text.encode())
         except (EOFError, OSError):
             pass
         for step in (lambda: out(0x8, b""), lambda: sock.shutdown(socket.SHUT_RDWR)):
@@ -1022,7 +1078,7 @@ def cdp_session(conn, b, agent, rfile, sock, upstream):
                 msg = json.loads(text)
             except ValueError:
                 msg = None
-            why = cdp_refusal(conn, b, agent, msg) if isinstance(msg, dict) else "a CDP message is one JSON object"
+            why = cdp_refusal(conn, b, agent, msg, worlds) if isinstance(msg, dict) else "a CDP message is one JSON object"
             if why:
                 reply = {"id": msg.get("id") if isinstance(msg, dict) else None,
                          "error": {"code": -32000, "message": f"maxpm: {why}"}}

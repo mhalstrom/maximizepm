@@ -490,7 +490,8 @@ and uses it in the side panel of your session (Browser), and you drive the same 
 - One controller at a time. `maxpm browser control` takes it for your session; `maxpm browser give <label>` says
   that your subagent (for example `browser`) drives it now; `maxpm browser release` gives it up. While the user
   holds it (Take control in the panel), commands that change the page are refused: wait, and read
-  `maxpm browser status`. Reads (text, html, screenshot) always work.
+  `maxpm browser status`. Reads (text, html, screenshot) always work. With the Playwright tools, `browser_snapshot`
+  works then too, and a click, typing or `browser_evaluate` fails as a timeout or "Execution context was destroyed".
 - The browser opens no loopback or private address (your dev server, a test database): the user allows one for
   the project with `maxpm config set browser_allow "localhost:5173" --project <name>`. Only the user signs in;
   never type a password. A site that refuses a headless browser: the user presses Open as a window.

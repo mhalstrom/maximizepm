@@ -439,6 +439,37 @@ class CdpAddress(Base):
         self.assertIsNone(no("Input.dispatchKeyEvent"))
         self.assertIn("controlled by ag1", no("Page.navigate", {"url": "https://example.com"}, who="ag2"))
 
+    def test_scripts_in_an_isolated_world_are_reads(self):
+        # #5460: Playwright runs its reads (browser_snapshot) as scripts in its utility world; while the person
+        # controls they pass, and a script in the page's own world (page.evaluate) still waits for control.
+        core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
+        b = browser.get("web")
+        worlds = set()
+        for m in ({"method": "Runtime.executionContextCreated", "sessionId": "S", "params": {"context": {
+                      "id": 7, "uniqueId": "u7", "name": "__playwright_utility_world__", "auxData": {"type": "isolated"}}}},
+                  {"method": "Runtime.executionContextCreated", "sessionId": "S", "params": {"context": {
+                      "id": 1, "name": "", "auxData": {"type": "default", "isDefault": True}}}}):
+            browser.track_worlds(worlds, m)
+        self.assertEqual(worlds, {("S", 7), ("S", "u:u7")})
+        no = lambda m, p, sid="S": browser.cdp_refusal(self.c, b, "ag1", {"id": 1, "method": m, "params": p, "sessionId": sid}, worlds)
+        browser.take(self.c, b, "mark")
+        self.assertIsNone(no("Runtime.callFunctionOn", {"executionContextId": 7, "functionDeclaration": "() => 1"}))
+        self.assertIsNone(no("Runtime.evaluate", {"contextId": 7, "expression": "1"}))
+        self.assertIsNone(no("Runtime.evaluate", {"uniqueContextId": "u7", "expression": "1"}))
+        self.assertIsNone(no("Runtime.callFunctionOn", {"objectId": "-4211.7.12", "functionDeclaration": "() => 1"}))
+        self.assertIsNone(no("Runtime.callFunctionOn", {"objectId": '{"injectedScriptId":7,"id":3}'}))
+        for p in ({"expression": "1"}, {"contextId": 1, "expression": "1"}, {"objectId": "-4211.1.12"}, {"objectId": "x"}):
+            self.assertIn("the person (mark) controls", no("Runtime.evaluate", p), p)
+        self.assertIn("the person (mark) controls", no("Runtime.evaluate", {"contextId": 7}, sid="T"), "another target")
+        self.assertIn("the person (mark) controls", no("Input.dispatchMouseEvent", {"type": "mousePressed"}))
+        browser.track_worlds(worlds, {"method": "Runtime.executionContextDestroyed", "sessionId": "S",
+                                      "params": {"executionContextId": 7, "executionContextUniqueId": "u7"}})
+        self.assertIn("the person (mark) controls", no("Runtime.evaluate", {"contextId": 7}))
+        browser.track_worlds(worlds, {"method": "Runtime.executionContextCreated", "sessionId": "S", "params": {
+            "context": {"id": 9, "auxData": {"type": "isolated"}}}})
+        browser.track_worlds(worlds, {"method": "Runtime.executionContextsCleared", "sessionId": "S", "params": {}})
+        self.assertEqual(worlds, set())
+
     def test_the_relay_passes_what_is_allowed_and_answers_a_refusal_itself(self):
         import queue
         b = browser.get("web")
@@ -537,3 +568,44 @@ class CdpAddress(Base):
             got = json.loads(ws.recv())
         self.assertTrue(any(t["type"] == "page" for t in got["result"]["targetInfos"]))
         self.assertTrue(b.running())  # Browser.close never reached Chrome
+
+    def test_a_real_chrome_runs_reads_of_an_isolated_world_while_the_person_controls(self):
+        # #5460: what Playwright does for browser_snapshot, by hand: an isolated world of the page, then scripts.
+        if not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "serve_port", str(srv.server_address[1]))
+        core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        ws = browser.WS(browser.cdp_url(self.c, "web", "ag1"))
+        self.addCleanup(ws.close)
+        n = iter(range(1, 100))
+
+        def call(method, params=None, sid=None):
+            i = next(n)
+            ws.send(json.dumps({"id": i, "method": method, "params": params or {}, **({"sessionId": sid} if sid else {})}))
+            while True:
+                got = json.loads(ws.recv())
+                if got.get("id") == i:
+                    return got
+        page = next(t for t in call("Target.getTargets")["result"]["targetInfos"] if t["type"] == "page")
+        sid = call("Target.attachToTarget", {"targetId": page["targetId"], "flatten": True})["result"]["sessionId"]
+        call("Runtime.enable", sid=sid)
+        frame = call("Page.getFrameTree", sid=sid)["result"]["frameTree"]["frame"]["id"]
+        iso = call("Page.createIsolatedWorld", {"frameId": frame, "worldName": "__playwright_utility_world__"},
+                   sid=sid)["result"]["executionContextId"]
+        browser.take(self.c, b, "mark")
+        got = call("Runtime.evaluate", {"contextId": iso, "expression": "document.title.length + 2", "returnByValue": True}, sid=sid)
+        self.assertEqual(got.get("result", {}).get("result", {}).get("value"), 2, got)
+        handle = call("Runtime.evaluate", {"contextId": iso, "expression": "({a: 1})"}, sid=sid)["result"]["result"]["objectId"]
+        got = call("Runtime.callFunctionOn", {"objectId": handle, "functionDeclaration": "function () { return this.a; }",
+                                              "returnByValue": True}, sid=sid)
+        self.assertEqual(got.get("result", {}).get("result", {}).get("value"), 1, f"an objectId of the world: {handle} {got}")
+        got = call("Runtime.evaluate", {"expression": "1"}, sid=sid)
+        self.assertIn("the person (mark) controls", got["error"]["message"])
