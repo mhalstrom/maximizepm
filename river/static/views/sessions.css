@@ -366,16 +366,16 @@ button.srow-it { cursor: pointer; }
 #setDlg > .box { width: min(var(--w-dlg-m), calc(100vw - 2 * var(--sp-6))); }
 .set-head { margin: var(--sp-3) 0; }
 /* The third column has one width in every row (Change now, restart, now, fixed), so each field ends at the same x (#5322). */
-.set-row { display: grid; grid-template-columns: var(--w-label) minmax(0, 1fr) var(--w-input-s); gap: var(--sp-1) var(--sp-4); align-items: center; padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
+.set-row { display: grid; grid-template-columns: var(--w-label) minmax(0, 1fr) var(--w-s); gap: var(--sp-1) var(--sp-4); align-items: center; padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
 .set-row select, .set-row input { font: inherit; background: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); min-width: 0; width: 100%; box-sizing: border-box; }
-.set-row > .btn, .set-row > span.muted { justify-self: start; }
+.set-row > .btn, .set-row > span.muted { justify-self: start; white-space: nowrap; }
 .set-row [data-other] { grid-column: 2; }
 .set-sub { grid-column: 2 / 4; font-size: var(--fs-s); }
 .set-foot { display: flex; gap: var(--sp-4); align-items: center; margin-top: calc(var(--sp-5) + var(--sp-0)); flex-wrap: wrap; }
 /* The row that a slash command opened the dialog for (#5220: /model, /effort from the message box). */
 .set-row.on > label { color: var(--accent); font-weight: 600; }
 /* A phone: the name on its own line; the field, then Change now (or the word) on the line under it, at the left. */
-@media (max-width: 560px) { .set-row { grid-template-columns: minmax(0, 1fr) auto; } .set-row > label, .set-sub { grid-column: 1 / -1; } .set-row [data-other] { grid-column: 1; } }
+@media (max-width: 560px) { .set-row { grid-template-columns: minmax(0, 1fr) var(--w-s); } .set-row > label, .set-sub { grid-column: 1 / -1; } .set-row [data-other] { grid-column: 1; } }
 /* Side panel tabs (#4632): the kind of each, and a button to reach it from the keyboard. */
 .sp-tab .sp-tab-l { background: none; border: 0; color: inherit; font: inherit; padding: 0; cursor: pointer; max-width: calc(var(--w-tab) - var(--sp-6) - var(--sp-1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sp-k { opacity: .75; font-size: var(--fs-xs); }
