@@ -16,7 +16,9 @@
 #graph .pz-stage .node :is(rect, path, polygon, circle) { fill: var(--wait-bg); stroke: var(--wait); }
 #graph .pz-stage .node.ready :is(rect, path, polygon, circle) { fill: var(--ready-bg); stroke: var(--ready); }
 #graph .pz-stage .node.prog :is(rect, path, polygon, circle) { fill: var(--prog-bg); stroke: var(--prog); }
-#graph .pz-stage .node.done :is(rect, path, polygon, circle) { fill: var(--done-bg); stroke: var(--line); }
+/* A done node: quieter than open work, but its box stays visible on its cluster also in dark, where --done-bg and
+   --line are almost the cluster's --panel (#5470). */
+#graph .pz-stage .node.done :is(rect, path, polygon, circle) { fill: var(--done-bg); stroke: color-mix(in srgb, var(--done) 50%, var(--line)); }
 #graph .pz-stage .node.human :is(rect, path, polygon, circle) { stroke: var(--human); }
 #graph .pz-stage .node :is(.nodeLabel, .label, span, p) { color: var(--ink); }
 #graph .pz-stage .node text { fill: var(--ink); }
