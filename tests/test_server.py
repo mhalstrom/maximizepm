@@ -4198,6 +4198,41 @@ class StateCache(unittest.TestCase):
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
 
+    def test_an_action_and_the_next_build_read_only_the_items_that_changed(self):
+        """#5574: each action read the whole item graph two times (item_show, then sync_needs_you), and each page build
+        after it once more: 31 ms of the action's 50 and 22 ms of the build's 80 on a copy of the live queue. Now the
+        action and the build keep the graph (graph_share) and read again only the changed items."""
+        core.register(self.c, "mark", human=True)
+        ids = [core.item_add(self.c, "web", f"work {n}")["id"] for n in range(3)]
+        mock.patch.dict(server._kept_graph, clear=True).start()
+        reads = []
+        real = core._graph_read
+        mock.patch.object(core, "_graph_read", lambda conn, closed: reads.append(closed) or real(conn, closed)).start()
+
+        def post(op, args):
+            data = json.dumps({"op": op, "args": args, "actor": "mark"}).encode()
+            h = server.Handler.__new__(server.Handler)
+            h.path, h.client_address, h.rfile = "/api/action", ("127.0.0.1", 5555), io.BytesIO(data)
+            h.headers = {"Host": "127.0.0.1:8765", "Content-Length": str(len(data))}
+            got = []
+            h._send = lambda code, body, ctype=None: got.append((code, body))
+            h.do_POST()
+            return got[0]
+
+        server.page_state(False)
+        self.assertEqual(reads, [False])
+        code, body = post("item_edit", {"id": ids[1], "title": "work one, renamed"})
+        self.assertEqual((code, body["result"]["title"]), (200, "work one, renamed"))
+        code, _ = post("item_add", {"project": "web", "title": "work three", "new": "a test"})
+        self.assertEqual(code, 200)
+        server.state_changed()
+        st = server.page_state(False)
+        self.assertEqual(reads, [False])  # the actions and the build read only the changed items
+        titles = {i["id"]: i["title"] for i in st["items"]}
+        self.assertEqual(titles[ids[1]], "work one, renamed")
+        self.assertIn("work three", titles.values())
+        self.assertTrue(next(i for i in st["items"] if i["title"] == "work three")["ready"])
+
     def test_pages_share_one_build_until_an_action(self):
         built = []
         real = core.state

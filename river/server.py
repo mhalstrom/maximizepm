@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import os
@@ -4296,6 +4297,27 @@ STATE_TTL = 2.0
 _state_cache = {}
 _state_build = threading.Lock()
 _state_gen = [0]
+_kept_graph = {}  # the newest item graph that a page build or an action read: ANN_SHARE's ("graph", closed) entries
+_GRAPH_KEYS = (("graph", True), ("graph", False))
+
+
+@contextlib.contextmanager
+def graph_share():
+    """An ANN_SHARE for one page build or one action, as a maxpm command has (#5574): its calls of annotate read the
+    item graph once, from the graph that the last build or action kept, and read again only the items that changed
+    since (graph_changes, #5577). An action read the whole graph two times (item_show, then sync_needs_you): 31 ms of
+    its 50. Only the graph lives on: the other entries are keyed by a connection, and each request has its own. A
+    kept graph is never changed in place (_graph_changed makes a new one), so threads share it."""
+    tok = core.ANN_SHARE.set(dict(_kept_graph))
+    try:
+        yield
+    finally:
+        got = core.ANN_SHARE.get()
+        for k in _GRAPH_KEYS:
+            g, old = got.get(k), _kept_graph.get(k)
+            if g is not None and (old is None or g.get("n", 0) >= old.get("n", 0)):
+                _kept_graph[k] = g
+        core.ANN_SHARE.reset(tok)
 
 
 def state_changed():
@@ -4337,7 +4359,10 @@ def page_state(closed):
             return hit
         gen = _state_gen[0]  # an action during the build makes this build old at once
         conn = core.connect()
-        share = core.ANN_SHARE.set({})  # the build reads the item graph once (#5465)
+        # The build reads the item graph once (#5465), and only the items that changed since the last build or
+        # action (graph_share, #5574: the whole read was 22 ms of the 80 ms build after each action).
+        share = graph_share()
+        share.__enter__()
         memo = core.BUILD_MEMO.set({})  # and each agent's status and the launch platforms once (#5524)
         _ask_tmux_early(core.BUILD_MEMO.get())
         try:
@@ -4368,7 +4393,7 @@ def page_state(closed):
             return st
         finally:
             core.BUILD_MEMO.reset(memo)
-            core.ANN_SHARE.reset(share)
+            share.__exit__(None, None, None)
             conn.close()
 
 
@@ -4605,6 +4630,8 @@ class Handler(BaseHTTPRequestHandler):
             # The page shown through the relay (relay.handle_page): its actions are recorded as <name>@relay.
             via = core.EVENT_VIA.set("relay" if relay.page_request(self.headers) else None)
             typing = body.get("op") in TYPING_OPS
+            share = graph_share()  # the item graph once for the action, as a command has it (#5574)
+            share.__enter__()
             try:
                 # sync=False: the needs-you rows are synced once, after the action (#5522; each sync built the graph
                 # of the whole queue, and another session's write in between made the second one build it again).
@@ -4620,6 +4647,7 @@ class Handler(BaseHTTPRequestHandler):
                 core.sync_needs_you_now(conn)
                 return self._send(200, {"ok": True, "result": result})
             finally:
+                share.__exit__(None, None, None)
                 core.EVENT_VIA.reset(via)
                 conn.close()
                 state_changed()
