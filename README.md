@@ -295,7 +295,7 @@ agent chooses, ready items sort by:
 removes a value. Set a value globally or for one project, agent, or item; the
 most specific value wins. Each setting reads only the scopes that make sense
 for it: `max_leases` reads the agent, and the `default_*` model settings also
-read the item kind (`--kind work|deploy|review|monitor`).
+read the item kind (`--kind work|deploy|review|operational`).
 
 ```sh
 maxpm config set lease_ttl 45m
@@ -314,7 +314,7 @@ An item can recommend a model and an effort level, and it can set hard limits:
 ```sh
 maxpm add "Rewrite the scheduler" --model fable --effort high --min-model opus
 maxpm edit 12 --max-model sonnet                 # a small task: no strong model needed
-maxpm config set default_model sonnet --project monitors
+maxpm config set default_model sonnet --project docs
 maxpm config set default_effort low --kind deploy
 MAXPM_MODEL=sonnet maxpm go                      # or: maxpm go --model sonnet
 ```
@@ -328,8 +328,8 @@ There is no order across families: a limit applies only to sessions of its
 own family, so give one model per family to limit both (`--min-model opus,sol`).
 A model that is not in `model_ladder` has no limits. `default_min_model` and
 `default_max_model` set limits per project or kind. `effort_levels` lists the
-effort levels, lowest first. A monitor item gets sonnet, low effort, and at
-most sonnet, unless a setting says otherwise.
+effort levels, lowest first. An operational item gets sonnet, medium effort,
+unless a setting says otherwise.
 
 An item can need one agent type: `maxpm add "Draw the logo" --agent codex`
 (or `claude-code`). A session of another type skips it; MaximizePM reads a
@@ -384,7 +384,7 @@ A Claude Code session that MaximizePM starts for an item gets a name (`claude
 else `#<id> <title>`, at most 48 characters. Its tmux pane (a console window
 on Windows) gets the same title. A session for another purpose gets that purpose
 as its name: `maxpm manager`, `help #7 <title>`, `unblock #7 <title>`,
-`monitor #7 <title>`, `deploy web`, `review web`, `needs you` (your assistant,
+`deploy web`, `review web`, `needs you` (your assistant,
 an agent named `you-<id>`).
 
 The model and effort go in as `--model`/`--effort` (Claude Code) and
@@ -511,7 +511,7 @@ A chat has no folder and no shell, so MaximizePM runs it as a chat session
   agent in a terminal on the same computer.
 - What waits on you: `needs-you`, then `prompt --all` to go through it.
 - Work: `go` looks in every project and takes only items that need no folder:
-  an item with `--touches`, a `--check`, or a deploy or monitor stays for a
+  an item with `--touches`, a `--check`, or a deploy stays for a
   coding agent. The result goes into the queue: a short one in
   `done --output`, a long one in the item's notes first.
 
@@ -750,11 +750,10 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   manager`, section Writing tasks), deploy targets (`maxpm target add`,
   `describe`, `own`, `release`, `give`, `show`, `list`, `cadence`, `cut`,
   `release-now`), `maxpm ship`.
-- Deploy monitoring: `maxpm target monitor <target> "<what to watch, for how
-  long>"`. Watching the release is part of the deploy task: after the deploy,
-  the deploy session watches as the text says, then finishes the item, or
-  alerts the manager and adds a person's item with the evidence and a proposed
-  rollback.
+- Release watch: after each deploy, the checks of the target and of its
+  projects (`maxpm ops add`) run at once, then every minute for a few runs. A
+  fault opens its own item, found during the deploy item. A fix that names its
+  check (`--check ops:<scope>:<check>`) opens again when that check fails.
 - Review before release (`maxpm config set review on`): each release gets one
   review item that waits on everything it ships, and the deploy waits on the
   review. `review_prompt` holds your review process (for example
