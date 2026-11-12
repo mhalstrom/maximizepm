@@ -905,6 +905,46 @@ try {
                                "list": True, "again": True})
         self.assertLess(got["width"], 760)
 
+    def test_the_session_list_folds_and_the_page_keeps_it(self):
+        """#5626 (mark: 'we need to be able to collape the running session left panel'): the button at the top of the
+        list folds it to a strip, the chat and the open side panel take its width, a reload keeps it folded, and
+        Cmd+\\ opens it again. On a phone the list is a view of its own and has no such button."""
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  if (innerWidth < 760) {
+    q('nav button[data-tab="sessions"]').click();
+    await until(() => q("#sessTitle").textContent === "ag", "session ag shown");
+    q("#sessBack").click();
+    post({ phone: q("#sessFold").getBoundingClientRect().width === 0 });
+  } else {
+    const step = sessionStorage.getItem("step") || "fold";
+    const w = (s) => Math.round(q(s).getBoundingClientRect().width);
+    await until(() => q("#sessTitle").textContent === "ag", "session ag shown");
+    const { openInPanel } = await import("./components/sidePanel.js");
+    if (step === "fold") {
+      openInPanel("http://127.0.0.1:9/other");
+      await until(() => w("#sessPanel") > 0, "the side panel");
+      const side = w(".sess-side"), chat = w("#sessMain"), panel = w("#sessPanel");
+      q("#sessFold").click();
+      const out = { open: side >= 280, strip: w(".sess-side") < 60, wider: w("#sessMain") - chat >= side - 60,
+                    panel: w("#sessPanel") === panel, rows: q("#sessions").getBoundingClientRect().width === 0,
+                    label: q("#sessFold").getAttribute("aria-label") };
+      sessionStorage.setItem("out", JSON.stringify(out)); sessionStorage.setItem("step", "reload");
+      location.reload();
+    } else {
+      const out = JSON.parse(sessionStorage.getItem("out"));
+      out.kept = w(".sess-side") < 60;
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "\\", metaKey: true, bubbles: true }));
+      out.key = w(".sess-side") >= 280 && q("#sessFold").getAttribute("aria-expanded") === "true";
+      post(out);
+    }
+  }
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        self.assertEqual(self.drive(driver, "/sessions/ag", size="1280,900"),
+                         {"open": True, "strip": True, "wider": True, "panel": True, "rows": True,
+                          "label": "Show the session list", "kept": True, "key": True})
+        self.assertEqual(self.drive(driver, "/sessions/ag", size="390,844"), {"phone": True})
+
     def test_the_you_row_opens_what_waits_on_you(self):
         """#5102 steps 1 and 3 (design #4657): the You row at the top of the Sessions list has a ! badge with what waits on
         the person, and opens the You view (Needs you, the inbox) at /you in place of a session's chat; a session row

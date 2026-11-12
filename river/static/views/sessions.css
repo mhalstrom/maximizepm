@@ -6,6 +6,21 @@ main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
 .sess-layout > .panel { margin-bottom: 0; min-height: 0; display: flex; flex-direction: column; border-radius: 0; box-shadow: none; border-width: 0; }
 .sess-layout > .sess-side { border-right-width: var(--hair); padding: var(--sp-5); }
 .sess-layout > .sess-main { padding: var(--sp-5) calc(var(--sp-6) + var(--sp-1)) calc(var(--sp-5) + var(--sp-0)); }
+/* The list folds to a strip with only its button (#5626; sessions.js wireFold). From 760 px only: a phone shows the list
+   or the chat. The strip keeps the button's width, and the chat and the side panel take the rest. */
+.sess-side h2 { flex-wrap: nowrap; }
+.sess-fold { margin-left: auto; flex: none; }
+@media (max-width: 759px) { .sess-fold { display: none; } }
+@media (min-width: 760px) {
+  .sess-layout.side-folded, .sess-layout.side-folded.with-panel { grid-template-columns: calc(var(--w-tool) + 2 * var(--sp-1) + var(--hair)) minmax(0, 1fr); }
+  .sess-layout.side-folded > .sess-side { padding: var(--sp-5) var(--sp-1); }
+  .sess-layout.side-folded > .sess-side > :not(h2), .sess-layout.side-folded .sess-side-t { display: none; }
+  .sess-layout.side-folded .sess-fold { margin: 0 auto; }
+}
+/* From 1024 px the side panel is a third column; below it, a drawer over the chat (phone.css). */
+@media (min-width: 1024px) {
+  .sess-layout.side-folded.with-panel { grid-template-columns: calc(var(--w-tool) + 2 * var(--sp-1) + var(--hair)) minmax(0, 1fr) var(--sp-w, var(--w-panel)); }
+}
 .sess-side .slist { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--sp-2); }
 /* flex: none: in the list (a flex column of fixed height) a row keeps its whole height and the list scrolls (#4723). */
 .srow { flex: none; border: 0; border-bottom: var(--hair) solid var(--line); border-left: var(--hair-2) solid transparent; border-radius: 0; background: none; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; overflow: hidden; }

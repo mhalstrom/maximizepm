@@ -31,6 +31,31 @@ import { renderGive } from "./sessions-work.js";
 import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
 
 const PICKED = "river.session";
+const FOLD = "river.sessFold";  // "1": the person folded the list of sessions (#5626)
+
+// The list of sessions folds to a thin strip, so the chat and the side panel get its width (#5626, mark: 'we need to be
+// able to collape the running session left panel'). The button at the list's top, or Cmd+\ (Ctrl+\ off a Mac), folds
+// it and opens it again; this browser keeps the choice. Under 760 px (phone.css) the tab shows the list or the chat, and
+// the strip does not apply (sessions.css sets it only from 760 px).
+function wireFold() {
+  const lay = $("#sessLayout"), btn = $("#sessFold");
+  const key = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "Cmd+\\" : "Ctrl+\\";
+  const set = (folded, keep) => {
+    lay.classList.toggle("side-folded", folded);
+    btn.textContent = folded ? "›" : "‹";
+    btn.title = (folded ? "Show list" : "Hide list") + ` (${key})`;
+    btn.setAttribute("aria-label", folded ? "Show the session list" : "Hide the session list");
+    btn.setAttribute("aria-expanded", folded ? "false" : "true");
+    if (keep) store(FOLD, folded ? "1" : "0");
+  };
+  set(store(FOLD) === "1", false);
+  btn.addEventListener("click", () => set(!lay.classList.contains("side-folded"), true));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "\\" || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+    if ($("#tab-sessions").classList.contains("hidden") || window.innerWidth < 760) return;
+    e.preventDefault(); set(!lay.classList.contains("side-folded"), true);
+  });
+}
 // Fill a part of the head only when its HTML changed: a poll (2 s) then replaces no control under the pointer.
 const putHtml = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };  // the session the person chose last
 
@@ -228,6 +253,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
   wirePanel();
+  wireFold();
   // The width of the chat's scrollbar when it takes room (Linux, Windows, a Mac with a mouse: 15 px; CI's Chrome showed
   // it, #5584): sessions.css moves it into the pane's side padding, so the chat keeps the width of its foot (#5555).
   new ResizeObserver(() => main.style.setProperty("--sb-w", (body.offsetWidth - body.clientWidth) + "px")).observe(body);

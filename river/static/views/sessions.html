@@ -2,7 +2,10 @@
 <section id="tab-sessions" class="hidden">
   <div class="sess-layout" id="sessLayout">
     <aside class="panel sess-side" aria-label="Running sessions">
-      <h2 title="Read from each session's transcript">Running sessions</h2>
+      <!-- The list folds to a thin strip beside the chat (#5626): the button, or Cmd+\ (Ctrl+\); the page keeps the
+           choice. A phone shows the list or the chat, and has no button. -->
+      <h2><span class="sess-side-t" title="Read from each session's transcript">Running sessions</span>
+        <button class="iconbtn sess-fold" type="button" id="sessFold" aria-controls="sessLayout" aria-expanded="true" title="Hide list" aria-label="Hide the session list">‹</button></h2>
       <!-- Start an agent and the open session slots (#5102 step 2): here, where the new session shows. -->
       <div id="sessStart" class="sess-start"></div>
       <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. Under it, the session
