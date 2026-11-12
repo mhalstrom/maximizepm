@@ -10670,6 +10670,33 @@ class Ops(Base):
         last = json.loads(core.ops_history(self.c, "site", "queues", 1)["runs"][0]["subjects"])
         self.assertEqual(last, {"sms": {"status": "ok", "text": ""}})
 
+    def test_a_run_that_a_restart_of_serve_cut_runs_again_and_opens_no_fault(self):
+        """#5627: serve --restart (execv: the same pid, a new start) cut running log checks, and each became a
+        'the run never ended' fault. A cut run goes, runs again at once, and only a second cut in a row is a fault."""
+        core.ops_add(self.c, "site", "logs", "cmd", {"command": "check_logs", "every": "5m", "fail_after": 1},
+                     actor="boss")
+        t = core.now() - timedelta(minutes=20)
+        self.run_at("site", "logs", t, self.proc(0, "LOGS OK\n"))
+        c = core.ops_find(self.c, "site", "logs")
+        run = core.ops_start(self.c, c, at=t + timedelta(minutes=10))
+        self.assertFalse(core._ops_cut(core.OPS_PROCESS))  # this process runs it
+        with mock.patch.object(core, "OPS_PROCESS", f"{os.getpid()}:restarted"):  # serve started again
+            cut = core.ops_close_lost(self.c, at=core.now())
+            self.assertEqual([(x["status"], x["run"]) for x in cut], [("cut", run["id"])])
+            self.assertIsNone(self.c.execute("SELECT 1 FROM ops_runs WHERE id=?", (run["id"],)).fetchone())
+            self.assertEqual(self.state("site", "logs"), "healthy")
+            self.assertEqual([x["name"] for x in core.ops_due(self.c, core.now())], ["logs"])  # at once
+            self.assertIn("a stop of the process that ran it cut its run",
+                          self.c.execute("SELECT change FROM events ORDER BY id DESC LIMIT 1").fetchone()[0])
+            again = core.ops_start(self.c, c, at=core.now())
+        # Its run is cut again before any run of it finished: lost at once, a fault.
+        with mock.patch.object(core, "OPS_PROCESS", f"{os.getpid()}:restarted-twice"):
+            lost = core.ops_close_lost(self.c, at=core.now())
+        self.assertEqual([(x["status"], x["run"]) for x in lost], [("unknown", again["id"])])
+        self.assertEqual(self.state("site", "logs"), "fault")
+        self.assertTrue(core._ops_cut("999999999:gone"))  # another process that ended
+        self.assertFalse(core._ops_cut(None))  # a run of before #5627: the timeout rule holds
+
     def test_a_due_check_waits_for_its_every_a_pause_ends_by_itself_and_a_lost_run_counts_as_unknown(self):
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/", "every": "5m", "fail_after": 1},
                      actor="dev")

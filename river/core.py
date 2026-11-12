@@ -1134,7 +1134,8 @@ CREATE TABLE IF NOT EXISTS ops_runs (
   output      TEXT,                      -- the last lines
   subjects    TEXT,                      -- subject on: each subject's status in this run, as JSON
   missed      TEXT,                      -- after a stop: {"count", "since", "until"}: the times due that ran once (#5506)
-  confirms    INTEGER                    -- the run whose new fault this run confirms (ops_confirm, #5505)
+  confirms    INTEGER,                   -- the run whose new fault this run confirms (ops_confirm, #5505)
+  runner      TEXT                       -- <pid>:<token> of the process that runs it (OPS_PROCESS, #5627)
 );
 
 -- One row for each change of the state of a check, or of one subject of it (#5336 reads it: faults per week, the
@@ -1680,6 +1681,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE checks ADD COLUMN errors TEXT NOT NULL DEFAULT 'runs'")
     if "confirms" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
         conn.execute("ALTER TABLE ops_runs ADD COLUMN confirms INTEGER")
+    # The process that runs an ops run (#5627): a run whose process ended or started again was cut, not lost.
+    if "runner" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
+        conn.execute("ALTER TABLE ops_runs ADD COLUMN runner TEXT")
     if "backlog_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN backlog_at TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN backlog_note TEXT")
@@ -4298,6 +4302,19 @@ OPS_RUNNER = None  # a test hook: (command, folder, limit, env) -> a result like
 OPS_HTTP = None  # a test hook: (url, timeout) -> (status, body); raises OSError when no answer came
 OPS_TAIL = 40  # the last lines of a run's output that ops_runs keeps
 OPS_LOST_GRACE = 60  # seconds after its timeout when a run that never ended counts as lost (serve stopped)
+# The process that runs an ops run (#5627): its pid and a token of this start of it, because a restart of maxpm serve
+# (execv) keeps the pid. A run whose process ended or started again was cut by that stop: it runs again at once.
+OPS_PROCESS = f"{os.getpid()}:{os.urandom(4).hex()}"
+
+
+def _ops_cut(runner):
+    """Whether the process that ran an ops run is gone: it ended, or it is this process started again."""
+    pid, _, token = (runner or "").partition(":")
+    if not pid.isdigit():
+        return False  # a run of before #5627: the timeout rule (ops_close_lost) holds for it
+    if int(pid) == os.getpid():
+        return f"{pid}:{token}" != OPS_PROCESS
+    return not pid_alive(int(pid))
 _OPS_SUBJECT_LINE = re.compile(r"^\s*([^\s:{]+):\s*(.*)$")
 _OPS_STATUS_WORD = re.compile(r"^(OK|WARNING|CRITICAL|UNKNOWN)\b[:\s-]*(.*)$", re.I)
 
@@ -4949,8 +4966,8 @@ def ops_start(conn, c, at=None, actor=None):
         if conn.execute("SELECT 1 FROM ops_runs WHERE check_id=? AND ended_at IS NULL", (c["id"],)).fetchone():
             return None
         m = c.get("missed")
-        cur = conn.execute("INSERT INTO ops_runs(check_id,key,started_at,missed) VALUES (?,?,?,?)",
-                           (c["id"], c["key"], iso(at), json.dumps(m) if m else None))
+        cur = conn.execute("INSERT INTO ops_runs(check_id,key,started_at,missed,runner) VALUES (?,?,?,?,?)",
+                           (c["id"], c["key"], iso(at), json.dumps(m) if m else None, OPS_PROCESS))
         if m and m.get("release"):
             _event(conn, m["release"], "maxpm", f"release watch: {c['scope']}/{c['name']} runs late for the watch time "
                                                 f"{m['time']} ({m['count']} time(s) passed since {show_time(m['since'])} "
@@ -6348,15 +6365,33 @@ def _ops_after_dependency(conn, dep, at):
 def ops_close_lost(conn, running=(), at=None, outside=None):
     """Runs that never ended (maxpm serve stopped while they ran) count as unknown once their timeout and
     OPS_LOST_GRACE have passed. running: the ids that a thread of this serve still runs. outside: True only the
-    runs of the watchdog's checks, False only serve's, None all."""
+    runs of the watchdog's checks, False only serve's, None all.
+    A run whose process ended or started again (a restart of maxpm serve, #5627) was cut, not lost: its row goes, a
+    line in the history says so, and ops_due starts the check again in the same pass. It opens no fault. A second
+    cut in a row of the same check (no run of it finished since the last cut) is lost at once, so a check whose run
+    stops its own process still shows as a fault."""
     at = at or now()
     out = []
     only = "" if outside is None else f" AND c.outside={int(bool(outside))}"
-    for r in conn.execute("SELECT r.id, r.started_at, c.timeout FROM ops_runs r JOIN checks c ON c.id=r.check_id "
-                          "WHERE r.ended_at IS NULL" + only).fetchall():
+    for r in conn.execute("SELECT r.id, r.check_id, r.started_at, r.runner, c.timeout, c.scope, c.name FROM ops_runs r "
+                          "JOIN checks c ON c.id=r.check_id WHERE r.ended_at IS NULL" + only).fetchall():
         if r["id"] in running:
             continue
-        if at - parse_iso(r["started_at"]) < parse_duration(r["timeout"]) + timedelta(seconds=OPS_LOST_GRACE):
+        cut = _ops_cut(r["runner"])
+        if cut:
+            mark = f"ops check {r['scope']}/{r['name']}: a stop of the process that ran it cut its run"
+            done = conn.execute("SELECT MAX(ended_at) t FROM ops_runs WHERE check_id=? AND ended_at IS NOT NULL",
+                                (r["check_id"],)).fetchone()["t"]
+            again = conn.execute("SELECT 1 FROM events WHERE item_id IS NULL AND actor='maxpm' AND change LIKE ? "
+                                 "AND at>=?", (mark + "%", done or "")).fetchone()
+            if not again:
+                with tx(conn):
+                    if conn.execute("DELETE FROM ops_runs WHERE id=? AND ended_at IS NULL", (r["id"],)).rowcount:
+                        _event(conn, None, "maxpm", f"{mark} of {show_time(r['started_at'])}; it runs again now and "
+                                                    f"opens no fault (#5627)")
+                out.append({"key": _ops_key(r), "run": r["id"], "status": "cut", "items": []})
+                continue
+        elif at - parse_iso(r["started_at"]) < parse_duration(r["timeout"]) + timedelta(seconds=OPS_LOST_GRACE):
             continue
         row = conn.execute("SELECT * FROM checks c WHERE c.id=(SELECT check_id FROM ops_runs WHERE id=?)",
                            (r["id"],)).fetchone()

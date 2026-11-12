@@ -1258,7 +1258,9 @@ def ops_start_now(conn, c, actor=None):
 def ops_watch(conn):
     """One pass of the loop of maxpm serve (step ops_watch): close the runs that a stopped serve left open, then
     start each check that is due (core.ops_due), at most OPS_MAX_RUNNING at the same time. Returns the run ids."""
-    core.ops_close_lost(conn, running=set(OPS_RUNNING))
+    for r in core.ops_close_lost(conn, running=set(OPS_RUNNING)):
+        if r.get("status") == "cut":  # a restart of serve cut it (#5627): it runs again below, with no fault
+            print(f"ops {r['key']}: a stop of maxpm serve cut run {r['run']}; it runs again now", flush=True)
     started = []
     for c in core.ops_due(conn):
         if c["form"] != "beat" and len(OPS_RUNNING) >= OPS_MAX_RUNNING:
