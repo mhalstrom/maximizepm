@@ -376,6 +376,13 @@ button.srow-it { cursor: pointer; }
 .set-row.on > label { color: var(--accent); font-weight: 600; }
 /* A phone: the name on its own line; the field, then Change now (or the word) on the line under it, at the left. */
 @media (max-width: 560px) { .set-row { grid-template-columns: minmax(0, 1fr) var(--w-s); } .set-row > label, .set-sub { grid-column: 1 / -1; } .set-row [data-other] { grid-column: 1; } }
+/* A phone (#5422): the list of settings is taller than the screen, so its foot (the default box and Restart) stays at
+   the bottom of the screen while the list scrolls under it; at the end of the list it sits under the last row. */
+@media (max-width: 759px) {
+  .set-foot { position: sticky; bottom: 0; z-index: 1; background: var(--panel); border-top: var(--hair) solid var(--line);
+    margin: var(--sp-5) calc(-1 * var(--sp-5)) calc(-1 * (var(--sp-5) + var(--sp-0)));
+    padding: var(--sp-4) var(--sp-5) calc(var(--sp-4) + env(safe-area-inset-bottom)); }
+}
 /* Side panel tabs (#4632): the kind of each, and a button to reach it from the keyboard. */
 .sp-tab .sp-tab-l { background: none; border: 0; color: inherit; font: inherit; padding: 0; cursor: pointer; max-width: calc(var(--w-tab) - var(--sp-6) - var(--sp-1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sp-k { opacity: .75; font-size: var(--fs-xs); }
