@@ -274,9 +274,11 @@ button.srow-it { cursor: pointer; }
 .br-tabs { max-width: var(--w-m); font-size: var(--fs-s); }
 .br-sp { flex: 1; }
 .br .hidden { display: none; }
-.br-stage { position: relative; flex: 1 1 0; min-height: var(--h-pre); overflow: hidden; background: var(--frame-bg); outline: none; }
+/* The page fills the stage when the browser is headless (it takes the stage's size); a window keeps its own shape, so
+   its frame fits inside the stage, in the middle, on the page's background (#5480: a white strip under it in dark). */
+.br-stage { position: relative; flex: 1 1 0; min-height: var(--h-pre); overflow: hidden; background: var(--bg); outline: none; }
 .br-stage:focus-within { box-shadow: inset 0 0 0 var(--hair-2) var(--accent); }
-.br-img { display: block; width: 100%; height: auto; user-select: none; cursor: default; }
+.br-img { display: block; max-width: 100%; max-height: 100%; margin: 0 auto; user-select: none; cursor: default; }
 .br-locked .br-img { cursor: not-allowed; opacity: .85; }
 .br-keys { position: absolute; left: 0; top: 0; width: var(--hair); height: var(--hair); opacity: 0; border: 0; padding: 0; resize: none; }
 .br-msg { position: absolute; inset: 0; display: flex; gap: var(--sp-3); align-items: center; justify-content: center; padding: var(--sp-6); text-align: center; background: var(--bg); }
