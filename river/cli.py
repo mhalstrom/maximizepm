@@ -1143,6 +1143,28 @@ def build_parser(only=None):
     x = ops.add_parser("history", help="the last runs of a check and its changes of state, also of its subjects")
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("-n", type=int, default=20, help="how many runs and changes (default 20)")
+    x = ops.add_parser("system", help="the system description of a project: the facts of its code, its "
+                       "infrastructure and its own rules that the kinds of problems and the evidence pack read. Kept "
+                       "here, never in a repository; an agent's change is proposed until a person or the manager "
+                       "accepts it")
+    sys_ = x.add_subparsers(dest="oscmd", required=True)
+    y = sys_.add_parser("show", help="the description in force, its versions and an open proposal")
+    y.add_argument("project")
+    y.add_argument("--version", type=int, help="that version (1 is the first one written)")
+    y.add_argument("--proposed", action="store_true", help="show the open proposal")
+    y = sys_.add_parser("edit", help="a new version: the one in force with your changes")
+    y.add_argument("project")
+    y.add_argument("--set", action="append", default=[], metavar="PART.FIELD=TEXT", dest="sets",
+                   help="one field, for example code.test=\"make test\"; an empty text removes it. The fields: "
+                   + ", ".join(f"{p}.{f}" for p in core.OPS_SYSTEM_FIELDS for f in core.OPS_SYSTEM_FIELDS[p]))
+    y.add_argument("--file", help="the whole description as JSON ({\"code\": {...}, \"infra\": {...}, "
+                   "\"rules\": {...}}), or - for stdin")
+    y.add_argument("--why", help="why it changes (an agent must say: the fact that was missing, and the fault "
+                   "that showed it)")
+    y = sys_.add_parser("accept", help="a person or the manager: the proposed version is in force")
+    y.add_argument("project"); y.add_argument("--note")
+    y = sys_.add_parser("reject", help="a person or the manager: the proposal ends; nothing changes")
+    y.add_argument("project"); y.add_argument("--note", required=True)
     x = ops.add_parser("profile", help="every check of a project or a deploy target, and its ops_* settings, as one "
                        "JSON file: export it, keep it in the project's repository, apply it on another machine")
     pps = x.add_subparsers(dest="opcmd", required=True)
@@ -2795,6 +2817,31 @@ def _dispatch_ops(conn, a, actor):
     if a.ocmd == "run":
         core.ops_find(conn, a.scope, a.name)  # a wrong name says so here, not after a trip to maxpm serve
         return ask_server(conn, "ops_run", {"scope": a.scope, "name": a.name}, actor)
+    if a.ocmd == "system":
+        if a.oscmd == "show":
+            return core.ops_system_show(conn, a.project, a.version)
+        if a.oscmd == "edit":
+            sets = {}
+            for kv in a.sets:
+                k, eq, v = kv.partition("=")
+                if not eq:
+                    raise RiverError(f"--set takes PART.FIELD=TEXT, not {kv!r}")
+                sets[k.strip()] = v
+            body = None
+            if a.file:
+                text = sys.stdin.read() if a.file == "-" else Path(a.file).read_text()
+                try:
+                    body = json.loads(text)
+                except ValueError as e:
+                    raise RiverError(f"{a.file} is not JSON: {e}")
+            if body is None and not sets:
+                raise RiverError("give the changes: --set PART.FIELD=TEXT (repeat it), or --file <description.json>")
+            if body is not None and sets:
+                raise RiverError("give --set or --file, not both")
+            return core.ops_system_edit(conn, a.project, sets, body, a.why, actor)
+        if a.oscmd == "accept":
+            return core.ops_system_accept(conn, a.project, actor, a.note)
+        return core.ops_system_reject(conn, a.project, actor, a.note)
     if a.ocmd == "profile" and a.opcmd == "export":
         res = core.ops_profile_export(conn, a.scope)
         if a.out:
@@ -4674,7 +4721,38 @@ def visual_show_lines(res):
     return out
 
 
+def render_ops_system(a, res):
+    if a.oscmd in ("edit", "accept", "reject"):
+        what = {"accepted": "is in force", "proposed": "is proposed: a person or the manager accepts it (maxpm ops "
+                "system accept " + res["project"] + ")", "rejected": "is rejected"}[res["state"]]
+        print(f"system description of {res['project']}: "
+              + (f"changed {', '.join(res['changed'])}; " if res.get("changed") else "") + f"the new version {what}")
+        return
+    shown = res["proposed"] if getattr(a, "proposed", False) else res["shown"]
+    if getattr(a, "proposed", False) and not shown:
+        print(f"{res['project']} has no proposed system description")
+        return
+    if not shown:
+        print(f"{res['project']} has no system description yet. Write it: maxpm ops system edit {res['project']} "
+              f"--set code.test=\"<the test command>\" ...   (maxpm ops system edit --help lists the fields)")
+        return
+    print(f"{res['project']}: system description, version {shown['version']} ({shown['state']}, by {shown['written_by'] or 'a person'} "
+          f"{shown['written_at']})" + (f"; why: {shown['why']}" if shown.get("why") else ""))
+    names = {"code": "The code", "infra": "The infrastructure", "rules": "The project's own rules"}
+    for part, fields in res["fields"].items():
+        print(f"\n{names[part]}")
+        for f, help_ in fields.items():
+            v = (shown["body"].get(part) or {}).get(f)
+            print(f"  {part}.{f}: " + (v.replace("\n", "\n    ") if v else f"(none: {help_})"))
+    if res["proposed"] and not getattr(a, "proposed", False):
+        p = res["proposed"]
+        print(f"\nA change by {p['written_by']} is proposed ({p['written_at']}; why: {p['why']}): maxpm ops system "
+              f"show {res['project']} --proposed")
+
+
 def render_ops(a, res):
+    if a.ocmd == "system":
+        return render_ops_system(a, res)
     if a.ocmd == "profile":
         return render_ops_profile(a, res)
     if a.ocmd == "setup":

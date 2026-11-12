@@ -9415,6 +9415,84 @@ class LaunchWaitingModel(Base):
         self.assertIsNone(json.loads(out.getvalue())["would_push_to"])
 
 
+class OpsSystem(Base):
+    """The system description of a project (#5503): one per project, in the queue, never in a repository; a person or
+    the manager writes it in force, an agent proposes and a person or the manager accepts."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "shop")
+        core.register(self.c, "dev")
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        core.register(self.c, "mark", human=True)
+
+    def body(self):
+        return core.ops_system_show(self.c, "shop")["shown"]["body"]
+
+    def test_a_person_writes_it_in_force_and_an_agent_proposes(self):
+        self.assertIsNone(core.ops_system_show(self.c, "shop")["shown"])
+        r = core.ops_system_edit(self.c, "shop", {"code.test": "make test", "rules.release_window": "2h"}, actor="mark")
+        self.assertEqual((r["state"], r["changed"]), ("accepted", ["code.test", "rules.release_window"]))
+        self.assertEqual(self.body(), {"code": {"test": "make test"}, "rules": {"release_window": "2h"}})
+        with self.assertRaisesRegex(RiverError, "no field 'code.nope'.*code.repo"):
+            core.ops_system_edit(self.c, "shop", {"code.nope": "x"}, actor="mark")
+        with self.assertRaisesRegex(RiverError, "like this already"):
+            core.ops_system_edit(self.c, "shop", {"code.test": "make test"}, actor="mark")
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.ops_system_edit(self.c, "shop", {"infra.hosts": "web1"}, actor="dev")
+        r = core.ops_system_edit(self.c, "shop", {"infra.hosts": "web1: nginx, app"}, why="fault #9 had no hosts",
+                                 actor="dev")
+        self.assertEqual(r["state"], "proposed")
+        self.assertNotIn("infra", self.body())  # not in force yet
+        self.assertEqual(r["proposed"]["body"]["infra"], {"hosts": "web1: nginx, app"})
+        self.assertTrue([m for m in core.inbox(self.c, "boss") if "proposes a change of the system description of "
+                         "shop (infra.hosts)" in m["body"]])
+        with self.assertRaisesRegex(RiverError, "only a person or the manager accepts a proposed system description"):
+            core.ops_system_accept(self.c, "shop", actor="dev")
+        # A person changes another field after the proposal: accepting it keeps that change.
+        core.ops_system_edit(self.c, "shop", {"code.test": "make check"}, actor="mark")
+        r = core.ops_system_accept(self.c, "shop", actor="boss")
+        self.assertEqual(self.body(), {"code": {"test": "make check"}, "infra": {"hosts": "web1: nginx, app"},
+                                       "rules": {"release_window": "2h"}})
+        self.assertEqual([v["state"] for v in r["versions"]], ["accepted", "accepted", "accepted"])
+        self.assertTrue([m for m in core.inbox(self.c, "dev") if "boss accepted your change" in m["body"]])
+        hist = [x[0] for x in self.c.execute("SELECT change FROM events WHERE change LIKE 'ops system shop%' ORDER BY id")]
+        self.assertEqual(hist[0], "ops system shop changed: code.test, rules.release_window")
+        self.assertIn("ops system shop proposed: infra.hosts; why: fault #9 had no hosts", hist)
+
+    def test_a_rejected_proposal_changes_nothing_and_an_empty_text_removes_a_field(self):
+        core.ops_system_edit(self.c, "shop", body={"code": {"test": "make test", "build": "make"}}, actor="mark")
+        core.ops_system_edit(self.c, "shop", {"code.build": "make all"}, why="the build changed", actor="dev")
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.ops_system_reject(self.c, "shop", actor="mark")
+        core.ops_system_reject(self.c, "shop", actor="mark", note="make is right")
+        self.assertEqual(self.body(), {"code": {"build": "make", "test": "make test"}})
+        self.assertIsNone(core.ops_system_show(self.c, "shop")["proposed"])
+        core.ops_system_edit(self.c, "shop", {"code.build": ""}, actor="mark")
+        self.assertEqual(self.body(), {"code": {"test": "make test"}})
+        self.assertEqual(core.ops_system_show(self.c, "shop", version=1)["shown"]["body"]["code"]["build"], "make")
+
+    def test_it_follows_a_rename_and_stays_out_of_the_ops_profile(self):
+        core.ops_system_edit(self.c, "shop", {"infra.rollback": "deploy.sh --rollback"}, actor="mark")
+        core.project_rename(self.c, "shop", "store", actor="mark")
+        self.assertEqual(core.ops_system_show(self.c, "store")["shown"]["body"],
+                         {"infra": {"rollback": "deploy.sh --rollback"}})
+        self.assertNotIn("rollback", json.dumps(core.ops_profile_export(self.c, "store")))
+
+    def test_the_cli_shows_and_edits_it(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "-q", "ops", "system", "edit", "shop", "--set", "code.test=make test"])
+            cli.run(["--as", "mark", "-q", "ops", "system", "show", "shop"])
+        text = out.getvalue()
+        self.assertIn("system description of shop: changed code.test; the new version is in force", text)
+        self.assertIn("  code.test: make test", text)
+        self.assertIn("  infra.hosts: (none: the hosts and the services on each", text)
+
+
 class Ops(Base):
     """Operations checks of a project or a deploy target (#5429): the record, the rights, and the commands."""
 

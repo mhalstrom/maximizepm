@@ -1047,6 +1047,26 @@ CREATE TABLE IF NOT EXISTS ops_proposals (
 );
 CREATE INDEX IF NOT EXISTS ops_proposals_open ON ops_proposals(state, scope_kind, scope, name);
 
+-- The system description of a project (#5503): the facts of its code, its infrastructure and its own rules that the
+-- kinds of problems and the evidence pack read. One row for each version; the newest accepted one is in force. An
+-- agent's version is proposed until a person or the manager accepts it. It lives here, never in a repository.
+CREATE TABLE IF NOT EXISTS ops_systems (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  body        TEXT NOT NULL,             -- the fields as JSON: {"code": {...}, "infra": {...}, "rules": {...}}
+  why         TEXT,
+  item_id     INTEGER,                   -- the item the writer held (a fault that lacked a fact)
+  written_by  TEXT,
+  written_at  TEXT NOT NULL,
+  state       TEXT NOT NULL,             -- accepted, proposed, rejected, replaced
+  seq         INTEGER,                   -- accepted: the order of acceptance; the highest one is in force
+  base_seq    INTEGER,                   -- proposed: the seq of the version in force when it was written
+  decided_by  TEXT,
+  decided_at  TEXT,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS ops_systems_project ON ops_systems(project_id, state, id);
+
 CREATE TABLE IF NOT EXISTS session_samples (
   id          INTEGER PRIMARY KEY,
   at          TEXT NOT NULL,
@@ -4201,7 +4221,7 @@ def _ops_project(conn, c):
     return r["name"] if r else f"deploy-{c['scope']}"
 
 
-def _ops_evidence(c, key, res, at, since=None):
+def _ops_evidence(c, key, res, at, since=None, project=None):
     lines = (res.get("output") or "").splitlines()[-15:]
     return (f"The operations check {c['scope']}/{c['name']} ({c['form']}) is in fault"
             + (f" since {show_time(iso(since))}" if since else "") + f": {res.get('summary') or res.get('status')}.\n"
@@ -4214,7 +4234,9 @@ def _ops_evidence(c, key, res, at, since=None):
             + f"Runbook: {c.get('runbook') or 'none'}\n"
             f"Find the cause, fix it or add the items it needs, then close this item with the cause (maxpm done <id> "
             f"--output \"<cause>\"). The check's runs and changes: maxpm ops history {c['scope']} {c['name']}. "
-            f"A recovery adds a note here and leaves the item open: you close it.")
+            f"A recovery adds a note here and leaves the item open: you close it. A fact about the system that you "
+            f"lacked goes into its description: maxpm ops system edit {project or c['scope']} --set <part.field>=\"...\" "
+            f"--why \"<the fact, and this fault>\" (maxpm ops system show {project or c['scope']}).")
 
 
 def _ops_note(conn, item_id, text, at, force=False):
@@ -4283,7 +4305,7 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None):
         _ops_tell_manager(conn, "alert", f"{len(keys)} checks of {c['scope']} fail at once: #{r['id']}", r["id"])
         return {"key": key, "item": r["id"], "action": "storm"}
     since = conn.execute("SELECT MAX(at) t FROM ops_events WHERE key=? AND state='fault'", (key,)).fetchone()["t"]
-    ctx = _ops_evidence(c, key, res, at, parse_iso(since) if since else at)
+    ctx = _ops_evidence(c, key, res, at, parse_iso(since) if since else at, _ops_project(conn, c))
     if watch:
         ctx = (f"The fault came in the watch of release #{watch['deploy']} to {watch['target']} (done "
                f"{show_time(watch['released_at'])}, run {watch['n']} since): that release is the first suspect.\n" + ctx)
@@ -4756,6 +4778,192 @@ def ops_reject(conn, scope, name, actor=None, note=None):
                f" rejected ({note})")
     _ops_tell_proposer(conn, p, actor, f"{actor or 'a person'} rejected your proposed check {p['scope']}/{name}: {note}")
     return {"changed": "rejected", "proposal": dict(p, state="rejected", decided_by=actor, note=note)}
+
+
+# ---- the system description of a project (#5503, canvas problem-kinds v3, section 'What each project brings'). Each
+# field is plain text that a person, an agent and the evidence pack read; nothing about one project is in this code.
+OPS_SYSTEM_FIELDS = {
+    "code": {
+        "repo": "the repository and the folder",
+        "languages": "the languages",
+        "build": "the build command",
+        "test": "the test command",
+        "logs": "where errors are logged",
+        "log_format": "the log format: JSON or text, and which field names the module, the user, the workspace, "
+                      "the request and the integration",
+        "source_maps": "how a minified bundle maps back to the source (the command that builds the source maps)",
+        "integrations": "the integrations, and how an error names one (a field, an address, a text)",
+    },
+    "infra": {
+        "hosts": "the hosts and the services on each (a web server, the app, the database, a cache)",
+        "log_commands": "the read-only command that reads each service's log",
+        "limits": "the disks and the databases, and their limits",
+        "dependencies": "each dependency: the vendor, its status page and its addresses",
+        "release": "how a release goes out",
+        "rollback": "how to roll a release back (for production, only a person sets the command)",
+        "normal": "what is normal: the usual error rate per hour, the usual traffic, planned jobs and their times",
+    },
+    "rules": {
+        "known_messages": "known messages: an error text and its kind",
+        "noise": "noise rules: what is not a problem, and why",
+        "release_window": "the time after a release in which a new error counts as a release regression (e.g. 2h)",
+    },
+}
+
+
+def _ops_system_project(conn, project):
+    r = conn.execute("SELECT id, name FROM projects WHERE name=?", (project,)).fetchone()
+    if r is None:
+        raise RiverError(f"no project {project!r} (maxpm project list)")
+    return r
+
+
+def _ops_system_row(r):
+    d = dict(r)
+    d["body"] = json.loads(d["body"])
+    return d
+
+
+def _ops_system_versions(conn, pid):
+    return [_ops_system_row(r) for r in conn.execute("SELECT * FROM ops_systems WHERE project_id=? ORDER BY id", (pid,))]
+
+
+def _ops_system_set(body, sets):
+    """body with the changes of sets ({"part.field": text}; an empty text removes the field). Refuses a field that the
+    description does not have, with the list of fields."""
+    out = {part: dict(body.get(part) or {}) for part in OPS_SYSTEM_FIELDS}
+    for key, value in sets.items():
+        part, _, field = key.partition(".")
+        if part not in OPS_SYSTEM_FIELDS or field not in OPS_SYSTEM_FIELDS[part]:
+            raise RiverError(f"no field {key!r} in a system description; the fields: "
+                             + ", ".join(f"{p}.{f}" for p in OPS_SYSTEM_FIELDS for f in OPS_SYSTEM_FIELDS[p]))
+        text = str(value or "").strip()
+        if text:
+            out[part][field] = text
+        else:
+            out[part].pop(field, None)
+    return {part: fields for part, fields in out.items() if fields}
+
+
+def ops_system_show(conn, project, version=None):
+    """The description in force of a project (the newest accepted version), the open proposal, and the field list.
+    version: that version (1 is the first one written, of any state)."""
+    pr = _ops_system_project(conn, project)
+    rows = _ops_system_versions(conn, pr["id"])
+    for n, r in enumerate(rows, 1):
+        r["version"] = n
+    # In force: the version accepted last (an older proposal can be accepted after a newer edit).
+    current = max((r for r in rows if r["state"] == "accepted"), key=lambda r: r["seq"] or 0, default=None)
+    shown = current
+    if version is not None:
+        if not 1 <= version <= len(rows):
+            raise RiverError(f"{pr['name']} has {len(rows)} version(s) of its system description")
+        shown = rows[version - 1]
+    return {"project": pr["name"], "shown": shown, "current": current["version"] if current else None,
+            "proposed": next((r for r in rows if r["state"] == "proposed"), None),
+            "versions": [{k: r[k] for k in ("version", "state", "written_by", "written_at", "why", "decided_by",
+                                            "note")} for r in rows],
+            "fields": OPS_SYSTEM_FIELDS}
+
+
+def ops_system_edit(conn, project, sets=None, body=None, why=None, actor=None, item_id=None):
+    """maxpm ops system edit: a new version of a project's system description, from the version in force with the
+    changes of sets ({"part.field": text}), or a whole body. A person or the manager writes it in force at once. An
+    agent's version is proposed (decision 2 C of #5380: checks that come from it run outside the sandbox): it
+    replaces the agent's open proposal, and the manager gets a note to accept or reject it."""
+    why = (why or "").strip()
+    with tx(conn):
+        pr = _ops_system_project(conn, project)
+        cur = conn.execute("SELECT body, seq FROM ops_systems WHERE project_id=? AND state='accepted' ORDER BY seq DESC "
+                           "LIMIT 1", (pr["id"],)).fetchone()
+        base = json.loads(cur["body"]) if cur else {}
+        if body is not None:
+            if not isinstance(body, dict) or any(not isinstance(v, dict) for v in body.values()):
+                raise RiverError('the description is a JSON object of parts: {"code": {...}, "infra": {...}, '
+                                 '"rules": {...}} (maxpm ops system show <project> --json shows the form)')
+            new = _ops_system_set({}, {f"{p}.{f}": v for p, fields in body.items() for f, v in fields.items()})
+            if body and not new:
+                raise RiverError("the description has no text in any field")
+        else:
+            new = _ops_system_set(base, sets or {})
+        if new == base:
+            raise RiverError(f"the system description of {pr['name']} is like this already: nothing changed")
+        decider = not actor or _is_person(conn, actor) or _is_manager(conn, actor)
+        if not decider and not why:
+            raise RiverError('say why: --why "<the fact that was missing, and the fault or the item that showed it>"')
+        if item_id is None and actor:
+            held = _held_item(conn, actor)
+            item_id = held["id"] if held else None
+        if not decider:
+            conn.execute("UPDATE ops_systems SET state='replaced', decided_by=?, decided_at=? WHERE project_id=? AND "
+                         "state='proposed'", (actor, iso(now()), pr["id"]))
+        state = "accepted" if decider else "proposed"
+        seq = (cur["seq"] or 0) if cur else 0
+        conn.execute("INSERT INTO ops_systems(project_id,body,why,item_id,written_by,written_at,state,seq,base_seq,"
+                     "decided_by,decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     (pr["id"], json.dumps(new, sort_keys=True), why or None, item_id, actor, iso(now()), state,
+                      seq + 1 if decider else None, None if decider else seq, actor if decider else None,
+                      iso(now()) if decider else None))
+        changed = sorted({f"{p}.{f}" for p in OPS_SYSTEM_FIELDS for f in OPS_SYSTEM_FIELDS[p]
+                          if (new.get(p) or {}).get(f) != (base.get(p) or {}).get(f)})
+        _event(conn, item_id, actor, f"ops system {pr['name']} {'changed' if decider else 'proposed'}: "
+               + ", ".join(changed) + (f"; why: {why}" if why else ""))
+    if not decider:
+        _ops_tell_manager(conn, "note", f"{actor} proposes a change of the system description of {pr['name']} "
+                          f"({', '.join(changed)}). Why: {why}. Read: maxpm ops system show {pr['name']} --proposed   "
+                          f"accept: maxpm ops system accept {pr['name']}   reject: maxpm ops system reject {pr['name']} "
+                          f"--note \"<why>\"", item_id)
+    return dict(ops_system_show(conn, pr["name"]), changed=changed, state=state)
+
+
+def _ops_system_decide(conn, project, actor, note, accept):
+    if actor and not _is_person(conn, actor) and not _is_manager(conn, actor):
+        raise RiverError(f"{actor} is an agent; only a person or the manager {'accepts' if accept else 'rejects'} a "
+                         f"proposed system description. It waits for them: maxpm ops system show {project} --proposed")
+    note = (note or "").strip()
+    if not accept and not note:
+        raise RiverError('say why: --note "<why the change is not wanted>"')
+    with tx(conn):
+        pr = _ops_system_project(conn, project)
+        r = conn.execute("SELECT * FROM ops_systems WHERE project_id=? AND state='proposed' ORDER BY id DESC LIMIT 1",
+                         (pr["id"],)).fetchone()
+        if r is None:
+            raise RiverError(f"{pr['name']} has no proposed system description (maxpm ops system show {pr['name']})")
+        if accept:
+            # Only the fields that the proposal changed apply: a version that a person wrote after it stays.
+            base = conn.execute("SELECT body FROM ops_systems WHERE project_id=? AND state='accepted' AND seq=?",
+                                (pr["id"], r["base_seq"])).fetchone()
+            cur = conn.execute("SELECT body, seq FROM ops_systems WHERE project_id=? AND state='accepted' ORDER BY "
+                               "seq DESC LIMIT 1", (pr["id"],)).fetchone()
+            top = cur["seq"] if cur else 0
+            base, cur, mine = (json.loads(base["body"]) if base else {}), (json.loads(cur["body"]) if cur else {}), \
+                json.loads(r["body"])
+            sets = {f"{p}.{f}": (mine.get(p) or {}).get(f, "") for p in OPS_SYSTEM_FIELDS for f in OPS_SYSTEM_FIELDS[p]
+                    if (mine.get(p) or {}).get(f) != (base.get(p) or {}).get(f)}
+            conn.execute("UPDATE ops_systems SET body=?, seq=? WHERE id=?",
+                         (json.dumps(_ops_system_set(cur, sets), sort_keys=True), (top or 0) + 1, r["id"]))
+        conn.execute("UPDATE ops_systems SET state=?, decided_by=?, decided_at=?, note=? WHERE id=?",
+                     ("accepted" if accept else "rejected", actor, iso(now()), note or None, r["id"]))
+        _event(conn, r["item_id"], actor, f"ops system {pr['name']}: the proposal of {r['written_by']} "
+               + ("accepted" if accept else "rejected") + (f" ({note})" if note else ""))
+    who = r["written_by"]
+    if who and who != actor and conn.execute("SELECT 1 FROM agents WHERE name=?", (who,)).fetchone():
+        with tx(conn):
+            _send(conn, "note", actor or "maxpm", f"{actor or 'a person'} "
+                  + (f"accepted your change of the system description of {pr['name']}" if accept else
+                     f"rejected your change of the system description of {pr['name']}: {note}"),
+                  to=who, item_id=r["item_id"])
+    return dict(ops_system_show(conn, pr["name"]), state="accepted" if accept else "rejected")
+
+
+def ops_system_accept(conn, project, actor=None, note=None):
+    """A person or the manager: the proposed version is in force."""
+    return _ops_system_decide(conn, project, actor, note, True)
+
+
+def ops_system_reject(conn, project, actor=None, note=None):
+    """A person or the manager: the proposed version ends with the reason; nothing changes."""
+    return _ops_system_decide(conn, project, actor, note, False)
 
 
 # The guided start (maxpm ops setup, #5437): the four forms in plain questions. The CLI asks them one at a time;
