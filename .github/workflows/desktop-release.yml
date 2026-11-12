@@ -1,6 +1,9 @@
 # The desktop app: on a version tag (v0.1.0), build the macOS .dmg files (Apple silicon and Intel) and attach
-# them to a GitHub Release for that tag, with the code archive and manifest.json that the app's Update reads (#5601). Not signed or notarized yet (item #249 adds that): the first open
-# needs Open Anyway in System Settings (macOS 15+) or right-click, Open (older macOS).
+# them to a GitHub Release for that tag, with the code archive and manifest.json that the app's Update reads (#5601).
+# With the five signing secrets (#5615: APPLE_CERT_P12, APPLE_CERT_PASSWORD, APPLE_API_KEY_P8, APPLE_API_KEY_ID,
+# APPLE_API_ISSUER; desktop/scripts/signing-secrets.sh sets them) the apps are signed with the Developer ID and the
+# hardened runtime, notarized and stapled, and so are the .dmg files. With none of them the apps are signed ad hoc as
+# before, and the first open needs Open Anyway in System Settings.
 name: desktop-release
 on:
   push:
@@ -74,13 +77,48 @@ jobs:
           lipo -create "$RUNNER_TEMP/dictate-arm64" "$RUNNER_TEMP/dictate-x64" -output river/bin/maxpm-dictate
           codesign --force --sign - river/bin/maxpm-dictate
           lipo -info river/bin/maxpm-dictate
-      - name: Build the .dmg files (unsigned)
+      - name: Build the .dmg files (signed and notarized with the signing secrets, else signed ad hoc)
         working-directory: desktop
-        run: npm run dist
-      - name: The apps are signed (ad hoc) as a whole; a broken signature makes macOS call the app damaged
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          n=0
+          for v in APPLE_CERT_P12 APPLE_CERT_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER; do [ -n "${!v}" ] && n=$((n+1)); done
+          if [ "$n" = 0 ]; then
+            echo "no signing secrets: the apps are signed ad hoc"
+            echo "SIGNED=0" >> "$GITHUB_ENV"
+            npm run dist
+            exit 0
+          fi
+          [ "$n" = 5 ] || { echo "only $n of the 5 signing secrets are set: set all of them (desktop/scripts/signing-secrets.sh) or none"; exit 1; }
+          echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "SIGNED=1" >> "$GITHUB_ENV"
+          # electron-builder imports the certificate into a keychain of its own, signs, notarizes and staples.
+          CSC_LINK="$RUNNER_TEMP/cert.p12" CSC_KEY_PASSWORD="$APPLE_CERT_PASSWORD" CSC_IDENTITY_AUTO_DISCOVERY=true \
+            APPLE_API_KEY="$RUNNER_TEMP/AuthKey.p8" npm run dist:signed
+          # The .dmg files too, so a person who opens one sees no warning before the app.
+          for d in out/*.dmg; do
+            xcrun notarytool submit "$d" --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait --timeout 30m
+            xcrun stapler staple "$d"
+          done
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/AuthKey.p8"
+      - name: The apps are signed as a whole (a broken signature makes macOS call the app damaged); signed ones pass Gatekeeper
         working-directory: desktop
         run: |
-          for a in out/mac*/"MaximizePM.app"; do codesign --verify --deep --strict "$a" && echo "signature OK: $a"; done
+          for a in out/mac*/"MaximizePM.app"; do
+            codesign --verify --deep --strict "$a" && echo "signature OK: $a"
+            if [ "$SIGNED" = 1 ]; then
+              codesign -dv "$a" 2>&1 | grep -q "^Authority=Developer ID Application" || { echo "not signed with the Developer ID: $a"; exit 1; }
+              xcrun stapler validate "$a"
+              spctl --assess --type execute -vv "$a"
+            fi
+          done
+          if [ "$SIGNED" = 1 ]; then for d in out/*.dmg; do xcrun stapler validate "$d"; spctl --assess --type open --context context:primary-signature -vv "$d"; done; fi
       - name: The app starts MaximizePM from its own bundle, with its own Python
         working-directory: desktop
         run: |
@@ -89,16 +127,18 @@ jobs:
             // find: () => null proves the app does not fall back to a Python on the runner.
             startRiver({ riverRoot: process.argv[1], find: () => null }).then(async (r) => { console.log("MaximizePM answers on", r.url, "with", r.child.spawnargs[0]); await r.stop(); })
               .catch((e) => { console.error(e.message); process.exit(1); });' "$PWD/out/mac-arm64/MaximizePM.app/Contents/Resources/river-app"
-      # The Update of the app (#5601, river/release.py) downloads this archive: the same bin and river as the app
-      # carries, with the dictation helper. manifest.json names it with its sha256 and the shell id of these apps.
+      # The Update of the app (#5601, river/release.py) downloads this archive: the bin and river that the app carries,
+      # taken from the built app, so the dictation helper in it is signed as the app's is (#5615). manifest.json names
+      # it with its sha256 and the shell id of these apps.
       - name: The code archive and manifest.json for the app's Update
         run: |
           v="${TAG#v}"
           grep -qx "__version__ = \"$v\"" river/__init__.py || { echo "river/__init__.py does not say version $v"; exit 1; }
           d="$RUNNER_TEMP/code/maximizepm-$v"
           mkdir -p "$d"
-          cp -R bin "$d/bin"
-          rsync -a --exclude '__pycache__' --exclude '*.pyc' river "$d/"
+          app=desktop/out/mac-arm64/MaximizePM.app/Contents/Resources/river-app
+          cp -R "$app/bin" "$d/bin"
+          rsync -a --exclude '__pycache__' --exclude '*.pyc' "$app/river" "$d/"
           [ -x "$d/river/bin/maxpm-dictate" ] || { echo "the dictation helper is missing"; exit 1; }
           tar -C "$RUNNER_TEMP/code" -czf "desktop/out/MaximizePM-$v-code.tar.gz" "maximizepm-$v"
           node desktop/scripts/manifest.js "$v" "desktop/out/MaximizePM-$v-code.tar.gz" > desktop/out/manifest.json
@@ -148,6 +188,9 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/app" ../dmg/*-x64.dmg
           app="$RUNNER_TEMP/app/MaximizePM.app"
           codesign --verify --deep --strict "$app" && echo "signature OK"
+          if codesign -dv "$app" 2>&1 | grep -q "^Authority=Developer ID Application"; then
+            xcrun stapler validate "$app" && spctl --assess --type execute -vv "$app"
+          fi
           file "$app/Contents/MacOS/MaximizePM" "$app/Contents/Resources/river-app/python/bin/python3"
           MAXPM_DB="$RUNNER_TEMP/q.db" node -e '
             const { startRiver } = require("./server");

@@ -12,7 +12,9 @@
     "dist": "electron-builder --mac dmg --arm64 --x64 --publish never",
     "python": "node scripts/fetch-python.js",
     "predist": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/shell-id.js --write",
-    "icon": "electron scripts/make-icon.js"
+    "icon": "electron scripts/make-icon.js",
+    "dist:signed": "electron-builder --config signed.config.js --mac dmg --arm64 --x64 --publish never",
+    "predist:signed": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/shell-id.js --write"
   },
   "devDependencies": {
     "electron": "^38.0.0",
@@ -59,7 +61,12 @@
       "identity": "-",
       "target": "dmg",
       "icon": "icon.png",
-      "hardenedRuntime": false
+      "hardenedRuntime": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "MaximizePM uses the microphone when you dictate a message."
+      }
     },
     "dmg": {
       "artifactName": "MaximizePM-${version}-${arch}.${ext}"

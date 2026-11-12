@@ -58,10 +58,36 @@ puts the Python for each chip type in `build/python/<os>-<arch>/` (`mac-arm64`,
 runs `.github/workflows/desktop-release.yml`, which builds the `.dmg` files on
 macOS, checks that each app starts MaximizePM from its own copy, and attaches
 both to the GitHub Release for that tag, with `release-notes.md` as its notes.
-The app is not signed with a Developer ID or notarized yet, so macOS says it
-"could not verify" the app. `release-notes.md` tells people how to open it:
-Open Anyway in System Settings > Privacy & Security (or the `xattr` command,
-which also stops the slow check before each start).
+Until the signing secrets are set, the app is signed ad hoc only, so macOS
+says it "could not verify" the app. `release-notes.md` tells people how to open
+it: Open Anyway in System Settings > Privacy & Security (or the `xattr`
+command, which also stops the slow check before each start).
+
+## Signing and notarizing
+
+With the five secrets `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD`,
+`APPLE_API_KEY_P8`, `APPLE_API_KEY_ID` and `APPLE_API_ISSUER` in the GitHub
+repository, the release builds with `npm run dist:signed`
+(`signed.config.js`): electron-builder signs every program of the app (the
+Electron files, the bundled Python and its libraries, the dictation helper)
+with the Developer ID and the hardened runtime, with the exceptions in
+`entitlements.mac.plist`, then sends the app to Apple's notary service and
+staples the ticket. The workflow then notarizes and staples the `.dmg` files,
+and checks each app and `.dmg` with `spctl`. With none of the secrets, it
+builds as before (`npm run dist`, signed ad hoc); with only some, it stops.
+
+To set the secrets:
+
+1. The certificate request is `~/.maximizepm/signing/developer-id.csr`; its
+   private key (`developer-id.key`, mode 600) stays on this Mac. At
+   developer.apple.com, Certificates, make a Developer ID Application
+   certificate from the request, and download the `.cer` file.
+2. In App Store Connect, Users and Access, Integrations, Team Keys, make an API
+   key with the Developer role. Download its `.p8` file, and note its key id
+   and the issuer id.
+3. Run `desktop/scripts/signing-secrets.sh <the .cer> <the .p8> <key id>
+   <issuer id>`. It makes a `.p12` with a new password, sets the five secrets
+   with `gh secret set`, and prints only their names.
 
 The desktop app is for macOS. On Windows, install WSL 2 and run MaximizePM
 there: see [Windows](../README.md#windows) in the main README.
