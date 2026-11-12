@@ -175,8 +175,8 @@ export function makeDictation({ button, input, status, changed }) {
       const how = engine();
       button.classList.toggle("hidden", !how);
       button.disabled = !enabled;
-      button.title = how === "mac" ? "Dictate: this Mac turns speech into text in the box (on the device), and you send it."
-        : how ? "Dictate: the browser turns speech into text in the box, and you send it." : "";
+      button.title = how ? "Dictate" : "";  // one word (#5481)
+      if (how) button.setAttribute("aria-label", "Dictate");
       if (!enabled || !how) stop();
     },
   };
@@ -216,7 +216,7 @@ export function installMics(state) {
   const say = (t) => { note.textContent = t; note.classList.toggle("hidden", !t); place(); };
   function show(el) {
     field = el;
-    btn.title = engine() === "mac" ? "Dictate: this Mac turns speech into text here (on the device)" : "Dictate: the browser turns speech into text here";
+    btn.title = "Dictate";
     btn.classList.remove("hidden");
     place();
   }
