@@ -236,6 +236,8 @@ DEFAULT_SETTINGS = {
     # / window); release-loop: an item released or reopened ops_release_loop times. stuck-session reads
     # activity_silence.
     "ops_idle_work": "10m",
+    # The serve probe (#5442): serve's loop is late after this many passes of notify_interval (at least 1 minute).
+    "ops_serve_late": "3",
     # A fault of an operations check opens one operational item for its key (#5431). A run that keeps failing adds its
     # evidence to that item at most every ops_note_every; a fault that comes back within ops_reopen_within opens the
     # same item again; more than ops_storm_count keys of one project or target that fail within ops_storm_window share
@@ -1842,7 +1844,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_storm_count", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -3659,6 +3661,22 @@ def ops_profile_export(conn, scope):
     return out
 
 
+OPS_BUILTIN_DIR = Path(__file__).resolve().parent / "ops"  # the profiles that ship with MaximizePM (#5442)
+
+
+def ops_builtin_profiles():
+    """The names of the profiles that ship with MaximizePM (river/ops/<name>.json)."""
+    return sorted(p.stem for p in OPS_BUILTIN_DIR.glob("*.json"))
+
+
+def ops_builtin_profile(name):
+    """A profile that ships with MaximizePM, by name, or None."""
+    path = OPS_BUILTIN_DIR / f"{name}.json"
+    if not re.match(r"^[a-z0-9][a-z0-9_-]*$", name or "") or not path.is_file():
+        return None
+    return json.loads(path.read_text())
+
+
 def _ops_profile_read(profile):
     if not isinstance(profile, dict) or profile.get("maxpm_ops_profile") != OPS_PROFILE_VERSION:
         raise RiverError(f"not an ops profile: the file needs \"maxpm_ops_profile\": {OPS_PROFILE_VERSION} "
@@ -3821,6 +3839,10 @@ OPS_PROBES = {
     "stuck-session": "a session that holds an item and reported nothing for activity_silence (10m)",
     "lease-loop": "an item whose lease ran out ops_lease_loop times (3 in 6h)",
     "release-loop": "an item released or reopened ops_release_loop times (4 in 24h)",
+    "serve": "maxpm serve gives no answer on serve_port, or its loop passed no pass for ops_serve_late passes",
+    "relay": "relay.json is set and the relay is not connected (a warning while maxpm serve does not run: the serve "
+             "probe reports that)",
+    "notices": "a notice channel whose newest attempt failed (a subject for each channel)",
 }
 
 
@@ -3850,6 +3872,21 @@ def ops_probe(conn, name):
         bad = bool(ready) and live == 0 and (quiet is None or quiet >= limit)
         summary = (f"{len(ready)} ready agent item(s) and no live session for {_short(quiet) if quiet else 'ever'}"
                    if bad else f"{len(ready)} ready agent item(s), {live} live session(s)")
+    elif name == "serve":
+        bad, summary, perf = _probe_serve(conn)
+    elif name == "relay":
+        bad, summary, perf = _probe_relay()
+        if bad is None:
+            return {"name": name, "status": "warning", "summary": summary, "perf": perf, "subjects": {}}
+    elif name == "notices":
+        for r in conn.execute("SELECT n.channel, n.state, n.last_error, n.created_at FROM notifications n WHERE n.id IN "
+                              "(SELECT MAX(id) FROM notifications WHERE attempts>0 GROUP BY channel) ORDER BY channel"):
+            if r["state"] != "sent" and r["last_error"]:
+                subjects[r["channel"]] = f"the newest notice ({show_time(r['created_at'])}) failed: {' '.join(r['last_error'].split())[:200]}"
+        perf = {"failing": len(subjects)}
+        summary = (f"{len(subjects)} notice channel(s) fail: {', '.join(subjects)}" if subjects
+                   else "the newest notice of each channel went out")
+        bad = bool(subjects)
     elif name == "stuck-session":
         for s in silent_holders(conn, told_too=True):
             subjects[s["row"]["name"]] = (f"nothing for {_short(s['quiet'])} while it holds #{s['held']['id']} "
@@ -3872,6 +3909,54 @@ def ops_probe(conn, name):
         bad = bool(subjects)
     return {"name": name, "status": "critical" if bad else "ok", "summary": summary, "perf": perf,
             "subjects": subjects}
+
+
+OPS_PROBE_EXIT = {"ok": 0, "warning": 1, "critical": 2, "unknown": 3}
+
+
+def _probe_serve(conn):
+    """(bad, summary, perf) of the serve probe: an HTTP GET of the page on serve_port, and the age of the loop's last
+    pass in serve-loop.json against ops_serve_late passes of notify_interval (at least one minute)."""
+    import urllib.request
+    import time
+    port = int(setting(conn, "serve_port"))
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/",
+                                                           headers={"User-Agent": "maxpm-ops"}), timeout=10) as r:
+            code = r.status
+    except Exception as e:  # no answer, a refusal, a timeout: serve is down for the person
+        return True, f"maxpm serve gives no answer on port {port}: {getattr(e, 'reason', e)}", {"port": port}
+    ms = int((time.monotonic() - t0) * 1000)
+    loop = serve_loop(conn)
+    if loop is None:
+        return True, f"port {port} answers (HTTP {code}), but no maxpm serve loop of this queue runs " \
+                     f"(serve-loop.json is missing or names a process that is gone)", {"answer_ms": ms}
+    since = parse_iso(loop.get("last_pass") or loop["started"])
+    age = now() - since
+    late = max(parse_duration(setting(conn, "notify_interval")) * int(setting(conn, "ops_serve_late")),
+               timedelta(minutes=1))
+    perf = {"answer_ms": ms, "loop_age_s": int(age.total_seconds())}
+    if age > late:
+        return True, f"maxpm serve answers on port {port}, but its loop passed no pass for {_short(age)} " \
+                     f"(late after {_short(late)})" + (f"; last error: {loop['error']}" if loop.get("error") else ""), perf
+    return False, f"maxpm serve answers on port {port} in {ms} ms; its last pass {_short(age)} ago", perf
+
+
+def _probe_relay():
+    """(bad, summary, perf) of the relay probe; bad None (a warning) while no maxpm serve runs, because the relay
+    runs inside serve and the serve probe reports that."""
+    from . import relay
+    st = relay.saved_status()
+    if not st["configured"]:
+        return False, "no relay is set on this computer (maxpm connect sets one)", {}
+    state = st.get("state") or "off"
+    if state == "serve not running":
+        return None, f"the relay {st.get('url')} waits for maxpm serve, which does not run", {}
+    if state == "connected":
+        return False, f"connected to {st.get('url')} since {show_time(st['since']) if st.get('since') else '?'}", {}
+    return True, f"the relay {st.get('url')} is {state}" + (f": {st['error']}" if st.get("error") else "") + \
+        (f" since {show_time(st['since'])}" if st.get("since") else ""), {}
 
 
 def ops_probe_lines(res):
@@ -4431,7 +4516,7 @@ def ops_execute(run, at=None):
         # MAXPM_NOISE: the patterns of the check's noise rules, one a line; a plugin leaves out the lines that match
         # (maxpm ops logs does), as the log form does here (#5504).
         env = {**os.environ, "MAXPM_CHECK": c["name"], "MAXPM_SCOPE": c["scope"], "MAXPM_CHECK_KEY": c["key"],
-               "MAXPM_NOISE": "\n".join(run.get("noise") or [])}
+               "MAXPM_NOISE": "\n".join(run.get("noise") or []), "MAXPM_QUEUE_DIR": str(db_path().parent)}
         try:
             if run["folder"] and not os.path.isdir(run["folder"]):
                 raise OSError(f"the folder {run['folder']} does not exist")
@@ -4782,7 +4867,7 @@ def ops_repair_run(conn, c, item, actor=None):
     timeout, and put the result on the fault item. Returns {"exit_code", "timed_out", "ok", "output"}."""
     limit = parse_duration(c["timeout"]).total_seconds()
     env = {**os.environ, "MAXPM_CHECK": c["name"], "MAXPM_SCOPE": c["scope"], "MAXPM_CHECK_KEY": c["key"],
-           "MAXPM_ITEM": str(item["id"]) if item else ""}
+           "MAXPM_ITEM": str(item["id"]) if item else "", "MAXPM_QUEUE_DIR": str(db_path().parent)}
     folder = _ops_folder(conn, c)
     try:
         if folder and not os.path.isdir(folder):

@@ -9049,6 +9049,131 @@ class OpsProbes(Base):
         self.assertEqual(len(lines), 5)  # no footer, no hint
 
 
+class OpsSelf(Base):
+    """MaximizePM watches itself (#5442): the probes serve, relay and notices, and the profile maximizepm that ships
+    in river/ops and that maxpm ops setup offers."""
+
+    class Answer:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def serve(self, answers=True, loop=None):
+        import urllib.request
+
+        def urlopen(req, timeout=None):
+            if not answers:
+                raise OSError("Connection refused")
+            return self.Answer()
+        return (mock.patch.object(urllib.request, "urlopen", urlopen),
+                mock.patch.object(core, "serve_loop", lambda conn: loop))
+
+    def probe(self, name):
+        return core.ops_probe(self.c, name)
+
+    def test_serve_needs_an_answer_and_a_loop_that_is_not_late(self):
+        a, b = self.serve(answers=False)
+        with a, b:
+            r = self.probe("serve")
+        self.assertEqual(r["status"], "critical")
+        self.assertIn("gives no answer on port", r["summary"])
+        a, b = self.serve(loop=None)
+        with a, b:
+            self.assertIn("no maxpm serve loop of this queue runs", self.probe("serve")["summary"])
+        late = {"started": core.iso(core.now() - timedelta(minutes=9)), "last_pass": core.iso(core.now() - timedelta(minutes=4)),
+                "error": "boom"}
+        a, b = self.serve(loop=late)
+        with a, b:
+            r = self.probe("serve")
+        self.assertEqual(r["status"], "critical")  # notify_interval 30s x ops_serve_late 3, at least 1m
+        self.assertIn("its loop passed no pass for 4m", r["summary"])
+        self.assertIn("last error: boom", r["summary"])
+        fresh = dict(late, last_pass=core.iso(core.now() - timedelta(seconds=20)))
+        a, b = self.serve(loop=fresh)
+        with a, b:
+            r = self.probe("serve")
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("loop_age_s", r["perf"])
+
+    def test_relay_is_a_warning_while_serve_does_not_run(self):
+        from river import relay
+
+        def st(**kw):
+            return mock.patch.object(relay, "saved_status", lambda: {"configured": True, "url": "https://r", **kw})
+        with mock.patch.object(relay, "saved_status", lambda: {"configured": False}):
+            self.assertEqual(self.probe("relay")["status"], "ok")
+        with st(state="connected", since=core.iso(core.now())):
+            self.assertEqual(self.probe("relay")["status"], "ok")
+        with st(state="serve not running"):
+            self.assertEqual(self.probe("relay")["status"], "warning")
+        with st(state="waiting", error="timed out"):
+            r = self.probe("relay")
+        self.assertEqual((r["status"], r["summary"]), ("critical", "the relay https://r is waiting: timed out"))
+        self.assertEqual(core.OPS_PROBE_EXIT["warning"], 1)
+
+    def test_notices_names_each_channel_whose_newest_attempt_failed(self):
+        t = core.iso(core.now())
+        eid = self.c.execute("INSERT INTO needs_you(kind,summary,opened_at) VALUES ('item','x',?)", (t,)).lastrowid
+        eid2 = self.c.execute("INSERT INTO needs_you(kind,summary,opened_at) VALUES ('item','y',?)", (t,)).lastrowid
+        rows = [(eid, "mac", "failed", 5, "OSError: off.\nEnable them"), (eid, "ntfy", "failed", 1, "down"),
+                (eid2, "ntfy", "sent", 1, None), (eid2, "log", "pending", 0, None)]
+        for r in rows:
+            self.c.execute("INSERT INTO notifications(event_id,channel,state,attempts,last_error,created_at) "
+                           "VALUES (?,?,?,?,?,?)", (*r, t))
+        self.c.commit()
+        r = self.probe("notices")
+        self.assertEqual(r["status"], "critical")
+        self.assertEqual(list(r["subjects"]), ["mac"])  # ntfy's newest went out
+        self.assertIn("failed: OSError: off. Enable them", r["subjects"]["mac"])
+
+    def test_the_shipped_profile_applies_to_its_own_project_and_watches_serve_from_outside(self):
+        self.assertIn("maximizepm", core.ops_builtin_profiles())
+        self.assertIsNone(core.ops_builtin_profile("../maximizepm"))
+        prof = core.ops_builtin_profile("maximizepm")
+        from river import cli
+        out = io.StringIO()
+        core.register(self.c, "mark", human=True)
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["--as", "mark", "ops", "setup", "--profile", "maximizepm", "--yes"]), 0)
+        self.assertIn(f"profile applied to project maximizepm: {len(prof['checks'])} added", out.getvalue())
+        checks = {c["name"]: c for c in core.ops_list(self.c, "maximizepm")["checks"]}
+        self.assertEqual(set(checks), {c["name"] for c in prof["checks"]})
+        self.assertEqual(sorted(n for n, c in checks.items() if c["outside"]), ["relay", "serve"])
+        self.assertEqual({checks[n]["severity"] for n in ("serve", "relay")}, {"page"})
+        for c in checks.values():
+            self.assertTrue(c["runbook"], c["name"])
+            if c["outside"]:
+                self.assertTrue(c["repair"], c["name"])
+        # Each probe it runs exists, and the same apply again changes nothing.
+        for c in checks.values():
+            words = c["config"]["command"].split()
+            if words[:3] == ["maxpm", "ops", "probe"]:
+                self.assertIn(words[3], core.OPS_PROBES)
+        self.assertEqual(sorted(core.ops_profile_apply(self.c, prof, yes=True)["same"]), sorted(checks))
+
+    def test_setup_offers_maximizepm_itself_first_while_its_project_has_no_check(self):
+        from river import cli
+        core.register(self.c, "mark", human=True)
+        core.project_add(self.c, "web")
+        asked, replies = [], iter(["0", "", "n", ""])  # the project, no more checks, no phone, no outside switch
+
+        def ask(q):
+            asked.append(q)
+            return next(replies)
+        out = io.StringIO()
+        with mock.patch.object(cli, "SETUP_ASK", ask), contextlib.redirect_stdout(out):
+            cli.run(["--as", "mark", "ops", "setup"])
+        text = out.getvalue()
+        self.assertIn("  0. MaximizePM itself: 9 checks", text)
+        self.assertIn("added 9 checks to the project maximizepm", text)
+        self.assertIn("What should MaximizePM watch in maximizepm?", text)  # then more checks, as for any project
+        self.assertEqual(len(core.ops_list(self.c, "maximizepm")["checks"]), 9)
+
+
 class EditKeepsOldText(Base):
     """maxpm edit --notes or --context replaces the text; the history keeps the old one (#5384)."""
 

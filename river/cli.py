@@ -1078,6 +1078,8 @@ def build_parser(only=None):
     x.add_argument("--test-notice", dest="test_notice", action="store_true", help="send one test notice to the phone")
     x.add_argument("--deadman-url", dest="deadman_url", help="the ping address of a heartbeat service outside this "
                    "computer (ops_deadman_url); setup sends one beat to it at once")
+    x.add_argument("--profile", help="apply a profile: a file, or the name of one that ships with MaximizePM "
+                   "(maximizepm: MaximizePM watches itself, in the project of that name, which setup adds)")
     x.add_argument("--yes", action="store_true", help="ask nothing: do only what the options say")
     x = ops.add_parser("edit", help="change the settings of a check")
     x.add_argument("scope"); x.add_argument("name")
@@ -1210,7 +1212,8 @@ def build_parser(only=None):
     y = pps.add_parser("apply", help="make the checks of the scope what the file says: it shows the checks it adds, "
                        "changes and removes, and writes them only with --yes. Each check keeps the rights of "
                        "maxpm ops add")
-    y.add_argument("file", help="the profile file, or - to read it from stdin")
+    y.add_argument("file", help="the profile file, - to read it from stdin, or the name of a profile that ships "
+                   "with MaximizePM: " + ", ".join(core.ops_builtin_profiles()))
     y.add_argument("--scope", help="apply it to this project or target instead of the one the file names")
     y.add_argument("--yes", action="store_true", help="write the change")
 
@@ -2015,7 +2018,7 @@ def run(argv=None):
         finally:
             conn.close()
         print(json.dumps(res) if args.json else "\n".join(core.ops_probe_lines(res)))
-        return 0 if res["status"] == "ok" else 2
+        return core.OPS_PROBE_EXIT[res["status"]]
     if args.cmd == "setup-agent":
         if args.claude_desktop and args.codex:
             raise RiverError("one app at a time: --claude-desktop or --chatgpt-desktop")
@@ -2664,6 +2667,12 @@ _OPS_FIELDS = ("url", "statuses", "body", "command", "pattern", "limit", "window
 
 
 def _ops_profile_file(path):
+    """A profile file, - for stdin, or the name of a profile that ships with MaximizePM (maxpm ops profile apply
+    maximizepm) when no file has that name."""
+    if path != "-" and not Path(path).exists():
+        builtin = core.ops_builtin_profile(path)
+        if builtin is not None:
+            return builtin
     try:
         text = sys.stdin.read() if path == "-" else Path(path).read_text()
     except OSError as e:
@@ -2773,7 +2782,7 @@ def ops_setup(conn, a, actor):
     phone, the outside switch."""
     from . import notify
     asking = not a.yes and (SETUP_ASK is not None or sys.stdin.isatty())
-    done = {"scope": None, "checks": [], "notice": None, "deadman": None, "asked": asking}
+    done = {"scope": None, "checks": [], "notice": None, "deadman": None, "profile": None, "asked": asking}
 
     def say(text=""):
         print(text, flush=True)
@@ -2795,6 +2804,10 @@ def ops_setup(conn, a, actor):
     fields["outside"] = None if a.outside is None else a.outside == "on"
     form = _setup_form(a)
     if not asking:
+        if a.profile:
+            done["profile"] = _setup_profile(conn, a.profile, a.scope, actor)
+            if not (form or a.test_notice or a.deadman_url):
+                return {"setup": done}
         if not a.scope:
             raise RiverError("name the project or the deploy target: maxpm ops setup <scope> --yes ... (in a "
                              "terminal it asks)")
@@ -2813,15 +2826,34 @@ def ops_setup(conn, a, actor):
 
     say("MaximizePM can watch a project's production and tell you when something breaks.")
     say("Enter takes the answer in [brackets].")
+    if a.profile:
+        done["profile"] = _setup_profile(conn, a.profile, a.scope, actor)
+    # MaximizePM itself, by the profile that ships with it (#5442): offered first while its project has no check.
+    own = core.ops_builtin_profile("maximizepm")
+    own_project = own["scope"].split(":", 1)[1] if own else None
+    if own and conn.execute("SELECT 1 FROM checks WHERE scope_kind='project' AND scope=?", (own_project,)).fetchone():
+        own = None
     scope = a.scope
     while True:
         if not scope:
             names = ([f"project:{r['name']}" for r in conn.execute(
                 "SELECT name FROM projects WHERE archived=0 AND name NOT LIKE 'deploy-%' ORDER BY rank, name")]
                 + [f"target:{r['name']}" for r in conn.execute("SELECT name FROM targets ORDER BY name")])
+            if own:
+                say(f"  0. MaximizePM itself: {len(own['checks'])} checks of maxpm serve, the relay, sessions that "
+                    f"stop, notices that fail and errors in its log (the profile maximizepm)")
             for i, n in enumerate(names, 1):
                 say(f"  {i}. {n.replace(':', ' ', 1)}")
             pick = ask("Which project or deploy target should MaximizePM watch? (a number or a name)")
+            if own and pick == "0":
+                try:
+                    done["profile"] = _setup_profile(conn, "maximizepm", None, actor)
+                    say(f"  added {len(done['profile']['add'])} checks to the project {own_project}")
+                    pick = f"project:{own_project}"
+                except RiverError as e:
+                    say(f"  {e}")
+                    pick = ""
+                own = None
             scope = names[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(names) else pick
         try:
             done["scope"] = "{}:{}".format(*core._ops_scope(conn, scope))
@@ -2871,6 +2903,21 @@ def ops_setup(conn, a, actor):
                 f"  the first beat failed ({d.get('error') or 'HTTP ' + str(d.get('status'))}); maxpm serve tries "
                 f"again each minute")
     return {"setup": done}
+
+
+def _setup_profile(conn, name, scope, actor):
+    """Apply a profile in maxpm ops setup. A profile that ships with MaximizePM names its own project: setup adds
+    that project when the queue has none of that name."""
+    prof = _ops_profile_file(name)
+    target = scope or prof.get("scope") or ""
+    kind, _, pname = target.partition(":") if target.startswith(("project:", "target:")) else ("project", "", target)
+    if kind == "project" and pname and core.ops_builtin_profile(name) is not None and not conn.execute(
+            "SELECT 1 FROM projects WHERE name=?", (pname,)).fetchone():
+        core.project_add(conn, pname, notes="MaximizePM on this computer: the checks that watch it "
+                         f"(maxpm ops profile apply {name})", actor=actor)
+    res = core.ops_profile_apply(conn, prof, scope, True, actor)
+    res["outside"] = sum(1 for c in prof.get("checks", []) if c.get("outside"))
+    return res
 
 
 def _dispatch_ops(conn, a, actor):
@@ -4768,6 +4815,16 @@ def ops_line_text(project, o):
 
 def render_ops_setup(res):
     d = res["setup"]
+    p = d.get("profile")
+    if p:
+        pscope = p["scope"].split(":", 1)[1]
+        print(f"profile applied to {p['scope'].replace(':', ' ', 1)}: {len(p['add'])} added, {len(p['change'])} "
+              f"changed, {len(p['remove'])} removed, {len(p['same'])} the same (maxpm ops list {pscope})")
+        if p.get("outside"):
+            print("  checks marked outside run in the watchdog: maxpm serve --install-watchdog (and --install-login, "
+                  "so its repair can restart serve)")
+    if not d["scope"]:
+        return
     scope = d["scope"].split(":", 1)[1]
     print(f"ops setup of {d['scope'].replace(':', ' ', 1)}:")
     if not d["checks"] and d["asked"]:

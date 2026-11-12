@@ -1,0 +1,73 @@
+{
+  "maxpm_ops_profile": 1,
+  "scope": "project:maximizepm",
+  "checks": [
+    {
+      "name": "serve",
+      "form": "plugin",
+      "command": "maxpm ops probe serve",
+      "every": "1m", "fail_after": 2, "recover_after": 2, "timeout": "30s", "severity": "page",
+      "outside": true,
+      "repair": "launchctl kickstart -k gui/$(id -u)/com.maximizepm.serve",
+      "runbook": "maxpm serve runs the page, the relay, every pass of the loop (sessions, reviews, deploys, notices) and the other checks; when it is down, no session starts. The watchdog runs this check with no serve, and its repair restarts serve through its launchd agent (maxpm serve --install-login must be installed). Read $MAXPM_QUEUE_DIR/serve.log (launchd's output of serve) and serve-loop.json (the last pass and its error). A loop that is late with a port that answers: a pass hangs; read locked.log for a lock held long."
+    },
+    {
+      "name": "relay",
+      "form": "plugin",
+      "command": "maxpm ops probe relay",
+      "every": "1m", "fail_after": 5, "recover_after": 2, "timeout": "30s", "severity": "page",
+      "outside": true,
+      "repair": "launchctl kickstart -k gui/$(id -u)/com.maximizepm.serve",
+      "runbook": "The relay carries the page to the person's phone. It runs inside maxpm serve and reconnects by itself; this check fails after 5 minutes not connected. relay-state.json beside the queue has the state and the last error. An error that names the token or the plan needs the person (maxpm connect, the account page); a network error heals by itself, and the repair restarts serve once the fault holds."
+    },
+    {
+      "name": "idle-work",
+      "form": "plugin",
+      "command": "maxpm ops probe idle-work",
+      "every": "5m", "fail_after": 1, "recover_after": 1, "timeout": "30s", "severity": "item",
+      "runbook": "Ready agent work and no live session for ops_idle_work. Read maxpm capacity, maxpm who and the setting max_sessions; a launch that fails shows in the serve log and in the agent's pane."
+    },
+    {
+      "name": "stuck-session",
+      "form": "plugin",
+      "command": "maxpm ops probe stuck-session",
+      "every": "5m", "fail_after": 1, "recover_after": 1, "timeout": "30s", "severity": "item", "subject": true,
+      "runbook": "A session holds an item and reported nothing for activity_silence. Read its pane (maxpm view), its last commands (maxpm show <item>), and whether it waits on a prompt or a permission."
+    },
+    {
+      "name": "lease-loop",
+      "form": "plugin",
+      "command": "maxpm ops probe lease-loop",
+      "every": "15m", "fail_after": 1, "recover_after": 1, "timeout": "30s", "severity": "item", "subject": true,
+      "runbook": "An item whose lease ran out ops_lease_loop times: sessions take it and stop. Read its history (maxpm show <item>) and the panes of the sessions that held it; the item may need a split or a person."
+    },
+    {
+      "name": "release-loop",
+      "form": "plugin",
+      "command": "maxpm ops probe release-loop",
+      "every": "15m", "fail_after": 1, "recover_after": 1, "timeout": "30s", "severity": "item", "subject": true,
+      "runbook": "An item released or reopened ops_release_loop times: each session finds the same blocker. Read the release notes in its history and link the blocker (maxpm dep) or ask the person."
+    },
+    {
+      "name": "notices",
+      "form": "plugin",
+      "command": "maxpm ops probe notices",
+      "every": "15m", "fail_after": 1, "recover_after": 1, "timeout": "30s", "severity": "item", "subject": true,
+      "runbook": "The newest notice of a channel failed, so the person gets nothing on it. maxpm notify status shows each channel and its last error; maxpm notify test <channel> sends one. A Mac channel with 'Notifications are turned off' needs the person's setting."
+    },
+    {
+      "name": "serve-errors",
+      "form": "plugin",
+      "command": "maxpm ops logs --file \"$MAXPM_QUEUE_DIR/serve.log\" --pattern '^[A-Za-z_][\\w.]*(Error|Exception)\\b' --ignore '^(BrokenPipeError|ConnectionResetError)\\b' --warning 1 --critical 5",
+      "every": "15m", "fail_after": 1, "recover_after": 1, "timeout": "1m", "severity": "item",
+      "runbook": "New exceptions in serve.log (the last line of each traceback). A page that closed its connection (BrokenPipeError, ConnectionResetError) does not count. 'database is locked' is a write that waited too long: locked.log names the holder."
+    },
+    {
+      "name": "locked",
+      "form": "plugin",
+      "command": "maxpm ops logs --file \"$MAXPM_QUEUE_DIR/locked.log\" --pattern ' tries=' --warning 1 --critical 5",
+      "every": "15m", "fail_after": 1, "recover_after": 1, "timeout": "1m", "severity": "item",
+      "runbook": "Commands that gave up on the queue's write lock ('database is locked'). The held= lines of locked.log name the transactions that held the lock 2 s or longer: find the function that holds it long."
+    }
+  ]
+}

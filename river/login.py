@@ -32,9 +32,10 @@ def plist_path(label: str = LABEL) -> Path:
 
 
 def _env() -> dict:
-    """The environment of a launchd job: a PATH with Homebrew and this Python, and the queue of this command."""
+    """The environment of a launchd job: a PATH with this maxpm (the checks run maxpm ops probe), Homebrew and this
+    Python, and the queue of this command."""
     env = {"PATH": os.pathsep.join(dict.fromkeys(
-        [os.path.dirname(sys.executable), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin",
+        [os.path.dirname(_maxpm()), os.path.dirname(sys.executable), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin",
          "/sbin"]))}
     if os.environ.get("MAXPM_DB"):
         env["MAXPM_DB"] = os.environ["MAXPM_DB"]
