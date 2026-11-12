@@ -15,7 +15,7 @@ def needs_you(h, path):
     q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
     conn = core.connect()
     try:
-        return h._send(200, {"events": server.needs_you_view(conn, q.get("human"))})
+        return h._send(200, {"events": server.needs_you_view(conn, q.get("human"), sync=False)})
     finally:
         conn.close()
 

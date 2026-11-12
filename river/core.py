@@ -7254,15 +7254,18 @@ def forward_note(conn, q):
     return r["body"] if r else None
 
 
-def needs_you(conn, human=None, include_closed=False, limit=100):
+def needs_you(conn, human=None, include_closed=False, limit=100, sync=True):
     """Needs-you events for one person (theirs and the ones for anyone), most important first.
 
     Open events come before closed ones. Among open events, questions and alerts come
     first, oldest first, because an agent waits on the answer now; then items in
     queue order (effective priority, project rank, what they unblock). Closed
     events follow, newest first. Each item event carries its effective priority,
-    where that priority comes from, and how many open items it unblocks."""
-    sync_needs_you_now(conn)
+    where that priority comes from, and how many open items it unblocks.
+    sync=False: read the rows as they are. The page asks every few seconds, and each maxpm command and each pass
+    of maxpm serve sync them already; its own sync held the write lock 2-11 s on a busy machine (#5396)."""
+    if sync:
+        sync_needs_you_now(conn)
     sql = ("SELECT n.*, i.title item_title, p.name project, m.kind message_kind, m.from_agent, m.body "
            "FROM needs_you n LEFT JOIN items i ON i.id=n.item_id LEFT JOIN projects p ON p.id=i.project_id "
            "LEFT JOIN messages m ON m.id=n.message_id WHERE 1=1")

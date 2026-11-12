@@ -3987,9 +3987,10 @@ def _message_read(conn, msg_id):
     return core.message_show(conn, msg_id)
 
 
-def needs_you_view(conn, human=None):
-    """Open needs-you events with what a person needs to act: the item's context and notes, the message's id."""
-    rows = core.needs_you(conn, human or None)
+def needs_you_view(conn, human=None, sync=True):
+    """Open needs-you events with what a person needs to act: the item's context and notes, the message's id.
+    sync=False for the page's poll: core.needs_you reads the rows as they are (#5396)."""
+    rows = core.needs_you(conn, human or None, sync=sync)
     for r in rows:
         if r["item_id"] is not None:
             it = conn.execute("SELECT context, notes, status FROM items WHERE id=?", (r["item_id"],)).fetchone()

@@ -845,6 +845,24 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaises(RiverError):
             server.open_agent_on(self.c, blocker, runner=sent.append)  # held now: message the holder
 
+    def test_the_page_poll_of_needs_you_reads_without_a_sync(self):
+        """#5396: GET /api/needs-you ran sync_needs_you in a write transaction on every poll and held the lock
+        2-11 s on a busy machine. Each command and each serve pass sync; the poll only reads."""
+        from unittest import mock
+        from river.routes import you
+        core.project_add(self.c, "shop")
+        core.item_add(self.c, "shop", "sign the contract", doer="human")
+        core.register(self.c, "mark", human=True)
+        core.sync_needs_you_now(self.c)  # as each command does at its end
+        h, out = server.Handler.__new__(server.Handler), {}
+        h.path = "/api/needs-you?human=mark"
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        with mock.patch.object(core, "sync_needs_you_now", side_effect=AssertionError("the poll synced")):
+            you.needs_you(h, h.path)
+        self.assertEqual(out["code"], 200)
+        self.assertEqual(len(out["body"]["events"]), 1)
+        self.assertIn("sign the contract", out["body"]["events"][0]["summary"])
+
     def test_the_needs_you_agent_is_the_persons_assistant(self):
         """#5110: the session that goes through what waits on the person is its own type: one per person, long-lived,
         no queue work, no worker slot; only the person ends it."""
