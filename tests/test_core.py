@@ -9333,3 +9333,163 @@ class Ops(Base):
         code, out = run("ops", "rm", "site", "errors", env={"CLAUDECODE": "1"})
         self.assertEqual(code, 2)
         self.assertIn("name yourself", out)
+
+    # ---- running the checks (#5430)
+
+    def run_at(self, scope, name, at, runner=None, http=None):
+        """Start and finish one run of a check at a time, with a fake command runner or HTTP answer."""
+        c = core.ops_find(self.c, scope, name)
+        with mock.patch.object(core, "OPS_RUNNER", runner), mock.patch.object(core, "OPS_HTTP", http):
+            run = core.ops_start(self.c, c, at=at)
+            return core.ops_finish(self.c, run, at=at)
+
+    @staticmethod
+    def proc(code, out="", timed_out=False):
+        def runner(cmd, folder, limit, env):
+            r = subprocess.CompletedProcess(cmd, code, out, "")
+            r.timed_out = timed_out
+            return r
+        return runner
+
+    def state(self, scope, name):
+        return core.ops_show(self.c, scope, name)["state"]
+
+    def events(self, scope, name):
+        return [(e["key"], e["state"]) for e in reversed(core.ops_history(self.c, scope, name)["events"])]
+
+    def test_the_state_follows_fail_after_and_recover_after_and_a_warning_counts_toward_neither(self):
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 2, "recover_after": 2},
+                     actor="boss")
+        t = core.now()
+        seq = [(0, "healthy"), (1, "healthy"), (2, "failing"), (1, "failing"), (3, "fault"), (0, "fault"),
+               (1, "fault"), (0, "recovered"), (0, "healthy"), (2, "failing"), (0, "healthy")]
+        for i, (code, want) in enumerate(seq):
+            r = self.run_at("site", "job", t + timedelta(minutes=5 * i), self.proc(code, f"JOB {code}|age=3s\n"))
+            self.assertEqual(self.state("site", "job"), want, (i, code))
+        self.assertEqual([s for _, s in self.events("site", "job")],
+                         ["healthy", "failing", "fault", "recovered", "healthy", "failing", "healthy"])
+        last = core.ops_history(self.c, "site", "job", 1)["runs"][0]
+        self.assertEqual((last["status"], last["summary"], last["perfdata"], last["exit_code"]),
+                         ("ok", "JOB 0", "age=3s", 0))
+        self.assertEqual(r["status"], "ok")
+
+    def test_a_plugin_keeps_its_evidence_and_an_exit_outside_the_api_or_a_timeout_is_unknown(self):
+        core.ops_add(self.c, "site", "disk", "plugin", {"command": "check_disk", "fail_after": 1}, actor="boss")
+        t = core.now()
+        self.run_at("site", "disk", t, self.proc(2, 'DISK CRITICAL - 3% free|free=3%\n{"mount": "/", "free": 3}\n'))
+        run = core.ops_history(self.c, "site", "disk", 1)["runs"][0]
+        self.assertEqual((run["status"], json.loads(run["evidence"])), ("critical", {"mount": "/", "free": 3}))
+        self.assertEqual(self.state("site", "disk"), "fault")
+        self.run_at("site", "disk", t + timedelta(minutes=5), self.proc(7, "odd\n"))
+        self.assertEqual(core.ops_history(self.c, "site", "disk", 1)["runs"][0]["status"], "unknown")
+        self.run_at("site", "disk", t + timedelta(minutes=10), self.proc(None, "", timed_out=True))
+        run = core.ops_history(self.c, "site", "disk", 1)["runs"][0]
+        self.assertEqual((run["status"], run["timed_out"]), ("unknown", 1))
+        self.assertIn("timeout 30s", run["summary"])
+
+    def test_a_real_command_past_its_timeout_stops_and_counts_as_unknown(self):
+        core.ops_add(self.c, "site", "slow", "cmd", {"command": f"{sys.executable} -c 'import time; time.sleep(30)'",
+                                                    "timeout": "1s", "every": "1m", "fail_after": 1}, actor="boss")
+        t0 = time.monotonic()
+        self.run_at("site", "slow", core.now())
+        self.assertLess(time.monotonic() - t0, 20)
+        run = core.ops_history(self.c, "site", "slow", 1)["runs"][0]
+        self.assertEqual((run["status"], run["timed_out"]), ("unknown", 1))
+        self.assertEqual(self.state("site", "slow"), "fault")
+
+    def test_a_url_check_reads_the_status_and_the_body(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/", "body": "Welcome", "fail_after": 1},
+                     actor="dev")
+        t = core.now()
+        self.run_at("site", "home", t, http=lambda url, limit: (200, "<h1>Welcome</h1>"))
+        self.assertEqual(self.state("site", "home"), "healthy")
+        self.run_at("site", "home", t + timedelta(minutes=5), http=lambda url, limit: (200, "maintenance"))
+        run = core.ops_history(self.c, "site", "home", 1)["runs"][0]
+        self.assertEqual((run["status"], run["summary"]), ("critical", "HTTP 200, but the answer lacks 'Welcome'"))
+
+        def down(url, limit):
+            raise OSError("connection refused")
+        self.run_at("site", "home", t + timedelta(minutes=10), http=down)
+        self.assertEqual(core.ops_history(self.c, "site", "home", 1)["runs"][0]["summary"], "no answer: connection refused")
+        self.run_at("site", "home", t + timedelta(minutes=15), http=lambda url, limit: (503, ""))
+        self.assertEqual(core.ops_history(self.c, "site", "home", 1)["runs"][0]["summary"], "HTTP 503, not in 200-399")
+        self.assertEqual(self.state("site", "home"), "fault")
+
+    def test_a_beat_check_fails_when_no_beat_came_within_its_period(self):
+        core.ops_add(self.c, "prod", "nightly", "beat", {"period": "1h", "every": "5m", "fail_after": 1}, actor="dev")
+        t = core.now()
+        self.run_at("prod", "nightly", t)
+        self.assertEqual(self.state("prod", "nightly"), "healthy")
+        self.run_at("prod", "nightly", t + timedelta(hours=2))
+        self.assertEqual(self.state("prod", "nightly"), "fault")
+        self.assertIn("no beat since the check was added", core.ops_history(self.c, "prod", "nightly", 1)["runs"][0]["summary"])
+        with mock.patch.object(core, "now", lambda: t + timedelta(hours=2, minutes=1)):
+            self.assertEqual(core.ops_beat(self.c, "nightly")["check"], "prod/nightly")
+        self.run_at("prod", "nightly", t + timedelta(hours=2, minutes=5))
+        self.run_at("prod", "nightly", t + timedelta(hours=2, minutes=10))
+        self.assertEqual(self.state("prod", "nightly"), "recovered")
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
+        with self.assertRaisesRegex(RiverError, "only a beat check takes a beat"):
+            core.ops_beat(self.c, "site", "home")
+
+    def test_a_log_check_counts_the_matching_lines_of_its_window(self):
+        core.ops_add(self.c, "site", "errors", "log", {"command": "tail_new", "pattern": "ERROR", "limit": 3,
+                                                      "window": "15m", "every": "5m", "fail_after": 1}, actor="boss")
+        t = core.now()
+        self.run_at("site", "errors", t, self.proc(0, "INFO a\nERROR b\nERROR c\n"))
+        self.assertEqual(self.state("site", "errors"), "healthy")
+        self.run_at("site", "errors", t + timedelta(minutes=5), self.proc(0, "ERROR d\n"))
+        run = core.ops_history(self.c, "site", "errors", 1)["runs"][0]
+        self.assertEqual((run["status"], run["summary"]), ("critical", "3 lines match in 15m (limit 3)"))
+        self.assertEqual(json.loads(run["evidence"])["lines"], ["ERROR d"])
+        # 20 minutes later the first two lines left the window.
+        self.run_at("site", "errors", t + timedelta(minutes=20), self.proc(0, "ERROR e\n"))
+        self.assertEqual(core.ops_history(self.c, "site", "errors", 1)["runs"][0]["summary"],
+                         "2 lines match in 15m (limit 3)")
+        self.run_at("site", "errors", t + timedelta(minutes=25), self.proc(1, ""))
+        self.assertIn("could not run", core.ops_history(self.c, "site", "errors", 1)["runs"][0]["summary"])
+
+    def test_with_subject_on_each_line_of_the_output_has_its_own_state(self):
+        core.ops_add(self.c, "site", "queues", "cmd", {"command": "check_queues", "subject": True, "fail_after": 2},
+                     actor="boss")
+        t = core.now()
+        # The form of maxpm ops probe: the status line, then '<subject>: <text>' (a status word is optional; with
+        # none the subject has the run's status), then one JSON object of evidence.
+        self.run_at("site", "queues", t, self.proc(1, "QUEUES CRITICAL - 1 late|late=1\nmail: CRITICAL 900 waiting\n"
+                                                      "sms: OK 0 waiting\n"))
+        self.run_at("site", "queues", t + timedelta(minutes=5),
+                    self.proc(1, 'QUEUES CRITICAL - 1 late|late=1\nmail: 950 waiting\n{"subjects": {"mail": "950"}}\n'))
+        run = core.ops_history(self.c, "site", "queues", 1)["runs"][0]
+        self.assertEqual((run["summary"], run["perfdata"], json.loads(run["evidence"])),
+                         ("QUEUES CRITICAL - 1 late", "late=1", {"subjects": {"mail": "950"}}))
+        self.assertEqual(json.loads(run["subjects"]), {"mail": {"status": "critical", "text": "950 waiting"}})
+        self.run_at("site", "queues", t + timedelta(minutes=10), self.proc(0, "QUEUES OK\n"))
+        self.run_at("site", "queues", t + timedelta(minutes=15), self.proc(0, "QUEUES OK\nsms: OK\n"))
+        self.assertEqual(self.events("site", "queues"),
+                         [("ops:site:queues", "failing"), ("ops:site:queues:mail", "failing"),
+                          ("ops:site:queues", "fault"), ("ops:site:queues:mail", "fault"),
+                          ("ops:site:queues", "recovered"), ("ops:site:queues:mail", "recovered")])
+        last = json.loads(core.ops_history(self.c, "site", "queues", 1)["runs"][0]["subjects"])
+        self.assertEqual(last, {"sms": {"status": "ok", "text": ""}})
+
+    def test_a_due_check_waits_for_its_every_a_pause_ends_by_itself_and_a_lost_run_counts_as_unknown(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/", "every": "5m", "fail_after": 1},
+                     actor="dev")
+        t = core.now()
+        self.assertEqual([c["name"] for c in core.ops_due(self.c, t)], ["home"])
+        c = core.ops_find(self.c, "site", "home")
+        run = core.ops_start(self.c, c, at=t)
+        self.assertIsNone(core.ops_start(self.c, c, at=t))  # one run at a time
+        self.assertEqual(core.ops_due(self.c, t + timedelta(minutes=10)), [])  # a run is open
+        self.assertEqual(core.ops_close_lost(self.c, running={run["id"]}, at=t + timedelta(minutes=10)), [])
+        lost = core.ops_close_lost(self.c, at=t + timedelta(minutes=10))
+        self.assertEqual([x["status"] for x in lost], ["unknown"])
+        self.assertEqual(self.state("site", "home"), "fault")
+        self.assertEqual(core.ops_due(self.c, t + timedelta(minutes=4)), [])
+        self.assertEqual([c["name"] for c in core.ops_due(self.c, t + timedelta(minutes=5))], ["home"])
+        with mock.patch.object(core, "now", lambda: t):
+            core.ops_pause(self.c, "site", "home", until="1h", actor="dev")
+        self.assertEqual(core.ops_due(self.c, t + timedelta(minutes=30)), [])
+        self.assertEqual([c["name"] for c in core.ops_due(self.c, t + timedelta(hours=1))], ["home"])
+        self.assertEqual(self.state("site", "home"), "new")
+        self.assertEqual(self.events("site", "home")[-2:], [("ops:site:home", "paused"), ("ops:site:home", "resumed")])

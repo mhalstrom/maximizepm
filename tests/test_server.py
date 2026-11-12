@@ -4664,3 +4664,67 @@ class HealthApi(unittest.TestCase):
         code, body = self.get("/api/health?since=7d&project=nope")
         self.assertEqual(code, 400)
         self.assertIn("no project 'nope'", body["error"])
+
+
+class Ops(unittest.TestCase):
+    """maxpm serve runs the operations checks (#5430): step ops_watch, and the ops ops_run and ops_beat."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "t.db")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        core.project_add(self.c, "site", path=self.dir.name)
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        server.OPS_RUNNING.clear()
+
+    def wait_runs(self, n, timeout=20):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            done = self.c.execute("SELECT COUNT(*) FROM ops_runs WHERE ended_at IS NOT NULL").fetchone()[0]
+            if done >= n and not server.OPS_RUNNING:
+                return
+            time.sleep(0.05)
+        self.fail(f"fewer than {n} runs ended")
+
+    def test_the_loop_step_starts_each_due_check_in_a_thread_and_never_waits_for_it(self):
+        slow = f"{sys.executable} -c 'import time; time.sleep(1); print(\"SLOW OK\")'"
+        core.ops_add(self.c, "site", "slow", "cmd", {"command": slow, "timeout": "10s"}, actor="boss")
+        core.ops_add(self.c, "site", "nightly", "beat", {"period": "1h"}, actor="boss")
+        t0 = time.monotonic()
+        started = server.ops_watch(self.c)
+        self.assertLess(time.monotonic() - t0, 0.9)  # the slow command runs in its thread
+        self.assertEqual(len(started), 2)
+        self.assertEqual(server.ops_watch(self.c), [])  # nothing is due again
+        self.wait_runs(2)
+        runs = {r["key"]: dict(r) for r in self.c.execute("SELECT * FROM ops_runs")}
+        self.assertEqual((runs["ops:site:slow"]["status"], runs["ops:site:slow"]["summary"]), ("ok", "SLOW OK"))
+        self.assertEqual(runs["ops:site:nightly"]["status"], "ok")
+        self.assertEqual({c["name"]: c["state"] for c in core.ops_list(self.c)["checks"]},
+                         {"slow": "healthy", "nightly": "healthy"})
+        self.assertIn(server.ops_watch, self.loop_steps())
+
+    def loop_steps(self):
+        import inspect
+        from river import notify
+        return [getattr(server, n) for n in ("ops_watch",) if f"server.{n}," in inspect.getsource(notify.loop)]
+
+    def test_ops_run_runs_a_check_now_and_ops_beat_records_a_beat(self):
+        core.ops_add(self.c, "site", "nightly", "beat", {"period": "1h", "every": "1h"}, actor="boss")
+        r = server.OPS["ops_run"](self.c, {"scope": "nightly"}, "boss")
+        self.assertEqual((r["check"], r["form"]), ("site/nightly", "beat"))
+        self.assertEqual(core.ops_show(self.c, "site", "nightly")["state"], "healthy")
+        r = server.OPS["ops_beat"](self.c, {"scope": "site", "name": "nightly"}, None)
+        self.assertEqual(r["check"], "site/nightly")
+        self.assertIsNotNone(core.ops_show(self.c, "site", "nightly")["last_beat"])
+        hang = f"{sys.executable} -c 'import time; time.sleep(2)'"
+        core.ops_add(self.c, "site", "hang", "cmd", {"command": hang, "timeout": "10s"}, actor="boss")
+        server.OPS["ops_run"](self.c, {"scope": "site", "name": "hang"}, "boss")
+        with self.assertRaisesRegex(RiverError, "runs now"):
+            server.OPS["ops_run"](self.c, {"scope": "site", "name": "hang"}, "boss")
+        self.wait_runs(2)
