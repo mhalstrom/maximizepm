@@ -406,6 +406,44 @@ try {
         self.assertGreater(got["colw"], 0.85 * got["panew"], got)
         self.assertEqual((got["wraps"], got["pageSide"], got["ownScroll"], got["inBubble"]), (True, 0, True, True), got)
 
+    def test_the_message_bar_and_the_bubbles_share_one_column(self):
+        """#5555 (mark, a 2520 px window: the bar's right edge ran about 225 px past the bubbles'): a long agent turn,
+        a person's turn and the message bar end at the same left and right edges, at every width, with the side
+        panel closed and open."""
+        long = " ".join(["the release went out after the review passed and the monitor saw no new errors"] * 8)
+        self.write(claude_line("user", "please check the release " + long)
+                   + claude_line("assistant", [{"type": "text", "text": long}], "end_turn"))
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessCol .msg-agent") && q("#sessCol .msg-user .bubble") && q("#sessBar"), "the chat and its bar");
+  await sleep(300);
+  const edges = () => {
+    const r = s => [...document.querySelectorAll(s)].pop().getBoundingClientRect();  // the long turns come last
+    const a = r("#sessCol .msg-agent"), u = r("#sessCol .msg-user .bubble"), b = r("#sessBar");
+    return { agent: [Math.round(a.left), Math.round(a.right)], user: Math.round(u.right), bar: [Math.round(b.left), Math.round(b.right)] };
+  };
+  const out = { closed: edges() };
+  const open = q('.sess-lists [data-sp-open="items"]');
+  if (open && open.offsetParent) {
+    open.click();
+    await until(() => !q("#sessPanel").classList.contains("hidden"), "the side panel");
+    await sleep(300);
+    out.open = edges();
+  }
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        for size in ("2520,1400", "1280,900", "390,844"):
+            got = self.drive(driver, "/sessions/ag", size=size)
+            if size != "390,844":
+                self.assertIn("open", got, "the side panel did not open at " + size)
+            for state in ("closed", "open"):
+                e = got.get(state)
+                if not e:
+                    continue
+                with self.subTest(size=size, panel=state):
+                    self.assertLessEqual(abs(e["agent"][0] - e["bar"][0]), 1, got)
+                    self.assertLessEqual(abs(e["agent"][1] - e["bar"][1]), 1, got)
+                    self.assertLessEqual(abs(e["user"] - e["bar"][1]), 1, got)
+
     def test_typing_in_the_message_box_moves_nothing_at_desktop_width(self):
         """#5111: typing in the message box moves nothing in the chat above it, replaces nothing, scrolls nothing."""
         self.type_in_the_box("1240,900")

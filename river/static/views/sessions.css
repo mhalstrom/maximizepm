@@ -98,7 +98,7 @@ button.srow-it { cursor: pointer; }
 .sess-menu .sess-mi:disabled { color: var(--muted); }
 .sess-menu .sess-mi-end { color: var(--warn); }
 .sess-menu .sess-noopen { margin: 0; white-space: normal; }
-.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) var(--sp-1) var(--sp-1);
+.sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) 0 var(--sp-1);
   padding-bottom: calc(var(--sp-1) + var(--cmp-over, calc(0 * var(--hair)))); overflow-anchor: none; }
 .sess-main .sbar { margin-top: var(--sp-3); }
 .sess-main .sbar.hidden, .sess-main.hidden { display: none; }
@@ -112,8 +112,10 @@ button.srow-it { cursor: pointer; }
   .sess-main { height: 75vh; }
 }
 /* The chat view of a session (#4604): a middle column of readable width. It grows with the pane (#5155, mark: 'we need
-   have the chat size be a bit wider. that is a frequent issue'): 90% of a wide pane, at least 48rem, at most 76rem. */
-.chat-col { max-width: clamp(48rem, 90%, 76rem); margin: 0 auto; width: 100%; box-sizing: border-box; }
+   have the chat size be a bit wider. that is a frequent issue'): 90% of a wide pane, at least 48rem, at most 76rem.
+   The messages and the message bar are each a .chat-col of the same pane width, and the column holds the side space
+   (not .sbody), so the bar and the bubbles have one width at every pane width (#5555). */
+.chat-col { max-width: clamp(48rem, 90%, 76rem); margin: 0 auto; width: 100%; box-sizing: border-box; padding-inline: var(--sp-1); }
 /* A message box with more lines reaches up over the chat (#5111): the foot's negative margin keeps the chat's frame, so
    typing moves nothing in the chat; the foot covers the chat with the page's own background, so it shows no band of its
    own around the box (#5304, mark: 'see the box around the input? should that be that shape/ color?'). */
@@ -123,14 +125,15 @@ button.srow-it { cursor: pointer; }
 .msg { margin: 0 0 var(--sp-2); line-height: 1.5; font-size: calc(var(--fs-base) + var(--hair) / 2); }
 .msg-user { display: flex; flex-direction: column; align-items: flex-end; }
 /* The chat in the form of iMessage (#5043, mark: 'for the chat more along the lines of imessage'): the person's turns on the
-   right in an accent bubble, the agent's on the left in a gray one; no border; close together. */
+   right in an accent bubble, the agent's on the left in a gray one; no border; close together. A long agent turn fills
+   the column, so its right edge is the message bar's right edge (#5555: at 85% it stopped about 225 px short). */
 .msg-user .bubble { background: var(--accent); color: var(--accent-ink); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); max-width: 80%; overflow-wrap: anywhere; }
 .msg-user .bubble a { color: inherit; text-decoration: underline; }
 .msg-user .bubble code { background: var(--panel); color: var(--ink); }
 .msg-user .bubble.md pre { background: var(--panel); }
 .msg-user.sent .bubble { opacity: .8; }
 .msg-note { font-size: var(--fs-xs); color: var(--muted); margin-top: var(--sp-0); }
-.msg-agent { overflow-wrap: anywhere; background: var(--bubble); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); width: fit-content; max-width: 85%; }
+.msg-agent { overflow-wrap: anywhere; background: var(--bubble); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); width: fit-content; max-width: 100%; }
 /* Higher than .md code, which comes later: the code stands apart from the gray bubble (#5321). */
 .msg-agent :not(pre) > code { background: var(--panel); }
 .md > :first-child { margin-top: 0; }

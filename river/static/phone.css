@@ -196,7 +196,8 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   /* The page's own background: no band of another gray behind the head or the message box (#5304). */
   .sess-head, .chat-foot { flex: none; position: relative; z-index: 1; background: var(--bg); }
   .sess-main.head-more .sess-head { z-index: 8; }
-  .sess-main .sbody { padding: 10px 2px 4px; overscroll-behavior: contain; }
+  .sess-main .sbody { padding: 10px 0 4px; overscroll-behavior: contain; }
+  .chat-col { padding-inline: 2px; }
   .msg { font-size: 15px; }
   /* The message box (#5078): larger round buttons, and 16 px text so iOS does not zoom into the field. */
   .chat-foot, .composer { --h-cmp: 40px; --h-cmp-in: 32px; }
