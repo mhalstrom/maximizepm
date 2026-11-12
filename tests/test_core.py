@@ -325,6 +325,23 @@ class ContinueTree(Base):
         self.assertEqual(b["item"]["id"], self.e)  # on: the most important ready work
         self.assertEqual(b["continue_mode"], "on")
 
+    def test_the_tree_reaches_two_links_from_a_task_the_session_held(self):
+        """#5573: with no bound, tasks with many links joined the parts of the graph, and most sessions' trees held
+        over 100 open tasks of many projects. The tree now reaches TREE_STEPS (2) links from each task it held."""
+        hub = core.item_add(self.c, "p", "Hub that many tasks wait on", priority=2)["id"]
+        near = core.item_add(self.c, "p", "Waits on the hub", priority=2, after=[hub])["id"]
+        far = core.item_add(self.c, "p", "Found during the one that waits on the hub", priority=2,
+                            found_during=near)["id"]
+        core.dep_add(self.c, hub, [self.a])
+        core.claim(self.c, self.a, "w1")
+        core.done(self.c, self.a, "did A", "w1")
+        tree = core.session_tree(self.c, "w1")
+        self.assertTrue({self.b, hub, near, self.d} <= tree)  # one link, two links, and the goal's task
+        self.assertNotIn(far, tree)  # three links away
+        self.assertNotIn(self.e, tree)
+        core.claim(self.c, hub, "w1")  # a task it takes is a new start: the chain goes on
+        self.assertIn(far, core.session_tree(self.c, "w1"))
+
     def test_a_goal_owners_tree_is_its_goal(self):
         core.goal_add(self.c, "p", "own", outcome="o", done_when="d")
         f = core.item_add(self.c, "p", "F of the owned goal", priority=3, goals=["own"])["id"]

@@ -10090,10 +10090,16 @@ def _prereq_closure(ann, root):
     return seen
 
 
+TREE_STEPS = 2  # a session's tree reaches this many links from a task it held (#5573)
+
+
 def session_tree(conn, actor, ann=None):
-    """The tree of a session (auto_continue tree, #4994): the open tasks linked to what it held since it registered,
-    over waits-on and blocks links and found-during links in both directions, and the tasks of the goals of those
-    tasks and of the goal it owns. None when the session held no task yet: it may take any work."""
+    """The tree of a session (auto_continue tree, #4994): the open tasks at most TREE_STEPS links from what it held
+    since it registered, over waits-on and blocks links and found-during links in both directions, and the tasks of
+    the goals of those tasks and of the goal it owns. None when the session held no task yet: it may take any work.
+    With no bound, tasks with many links (#141: 36) joined the parts of the graph, and the tree of 16 of 37 recent
+    sessions held 100 to 209 open tasks of up to 17 projects (#5573); within two links, 8 at most. A chain of tasks
+    goes on: each task the session takes is a new start."""
     if not actor:
         return None
     start = conn.execute("SELECT MAX(id) FROM events WHERE item_id IS NULL AND actor=? AND change LIKE 'registered as%'",
@@ -10113,7 +10119,7 @@ def session_tree(conn, actor, ann=None):
     goals = {g for i in held if i in ann for g in ann[i]["goals"]}
     goals |= {r["name"] for r in conn.execute("SELECT name FROM goals WHERE owner=? AND status='open'", (actor,))}
     tree, frontier = set(held), list(held)
-    while frontier:
+    for _ in range(TREE_STEPS):
         nxt = []
         for x in frontier:
             near = (ann[x]["waits_on"] + ann[x]["unblocks"] if x in ann else []) + list(found.get(x, ()))
@@ -10140,8 +10146,8 @@ def tree_mode(conn, actor):
 
 # The work line of a task's session (#5571, design #5560, mark 2026-11-12; canvas task-context v2): a person clicks a
 # task in any chat and sees it in the work of the session that owns it: what that session did, does and will do.
-# Not session_tree: through hub tasks it reaches about 216 open tasks for 25 of 40 recent sessions; the line reads only
-# the owner's own events (index events_actor) and the few items they name, so it answers in a few milliseconds.
+# Not session_tree: the line reads only the owner's own events (index events_actor) and the few items they name, so it
+# answers in a few milliseconds.
 LINE_END = ("done", "dropped", "released", "given to")  # an own event that ends a session's turn on a task
 
 
