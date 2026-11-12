@@ -2025,6 +2025,26 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual({k for k in env if k.startswith(("MAXPM_", "CLAUDE", "CODEX_"))}, {"CLAUDE_CONFIG_DIR", "CODEX_HOME"})
         self.assertEqual(env["PATH"], os.environ["PATH"])
 
+    def test_a_page_action_syncs_the_needs_you_rows_once_after_it(self):
+        """#5522: a page action ran sync_needs_you before it (in activity) and after it; each built the graph of the
+        whole queue. Now once, after the action, and the person's item that the action made ready is there."""
+        import io
+        core.register(self.c, "mark", human=True)
+        x = core.item_add(self.c, "shop", "Approve the header", doer="human")["id"]
+        core.block(self.c, x, "waits on the designer", actor="mark")
+        calls = []
+        real = core.sync_needs_you_now
+        core.sync_needs_you_now = lambda *a, **k: calls.append(1) or real(*a, **k)
+        self.addCleanup(setattr, core, "sync_needs_you_now", real)
+        data = json.dumps({"op": "unblock", "args": {"id": x}, "actor": "mark"}).encode()
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.rfile, out = "/api/action", ("127.0.0.1", 5555), io.BytesIO(data), {}
+        h.headers = {"Host": "127.0.0.1:8765", "Content-Length": str(len(data))}
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        h.do_POST()
+        self.assertEqual((out["code"], len(calls)), (200, 1), out)
+        self.assertIn(x, [r["item_id"] for r in self.c.execute("SELECT item_id FROM needs_you WHERE closed_at IS NULL")])
+
     def test_stop_and_send_now_end_the_turn_then_type(self):
         """#5547: Stop types the agent's own interrupt key into its pane (Claude Code: Esc), records who stopped it
         and that it waits at its prompt; Send now does the same, then types the message and Enter."""

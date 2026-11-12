@@ -4545,7 +4545,9 @@ class Handler(BaseHTTPRequestHandler):
             # The page shown through the relay (relay.handle_page): its actions are recorded as <name>@relay.
             via = core.EVENT_VIA.set("relay" if relay.page_request(self.headers) else None)
             try:
-                core.activity(conn, actor)
+                # sync=False: the needs-you rows are synced once, after the action (#5522; each sync built the graph
+                # of the whole queue, and another session's write in between made the second one build it again).
+                core.activity(conn, actor, sync=False)
                 try:
                     result = op(conn, body.get("args", {}), actor)
                 finally:
