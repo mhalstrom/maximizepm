@@ -537,6 +537,7 @@ def loop(stop, interval_s=None):
                 server.auto_context,  # goal_context on: a goal with ready work gets a context session (a base)
                 server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
+                server.browser_sweep,  # a session's Chrome whose session ended or that idled browser_idle_end (#5636)
                 server.hooks_soon,  # a hook whose command ended before it ran it
                 server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
                 core.schedule_due,  # a scheduled task whose time, less its lead, has come adds its item (#5507)

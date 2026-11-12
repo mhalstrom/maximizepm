@@ -430,8 +430,8 @@ class Watch(Base):
     """#5616: the panel draws the driving session's pointer and keys; a click glides and a text goes key by key while
     someone watches; a secret field shows dots; the person hands the browser to a session."""
 
-    def fake(self, watched=True):
-        b = browser.get("web")
+    def fake(self, watched=True, owner=None):
+        b = browser.get("web", owner)
         b.target = "T1"
         sent = []
         b.page = lambda method, params=None, timeout=None: sent.append((method, params or {})) or {}
@@ -593,7 +593,7 @@ class Watch(Base):
     def test_hand_to_a_session_gives_it_control_and_tells_its_chat(self):
         core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
         self.assertIn("browser_hand", server.TYPING_OPS)
-        b, _ = self.fake()
+        b, _ = self.fake(owner="ag1")  # the browser of ag1's panel (#5636)
         b.running = lambda: True
         browser.control(self.c, b, "ag1")
         browser.take(self.c, b, "mark")
@@ -639,6 +639,82 @@ class FakeHandler:
 
     def _send(self, code, body, *a, **k):
         self.sent = (code, body)
+
+
+class SessionBrowsers(Base):
+    """#5636 (mark 2026-11-12: 'I think it should be session specific'): each session drives a Chrome of its own."""
+
+    def test_each_session_has_its_own_browser_and_folder(self):
+        core.register(self.c, "ag1"); core.register(self.c, "ag2")
+        a = routes.act(self.c, {"action": "status", "project": "web"}, "ag1")
+        b = routes.act(self.c, {"action": "status", "project": "web"}, "ag2")
+        p = routes.act(self.c, {"action": "status", "project": "web", "session": "ag1"}, None)  # the person, ag1's panel
+        self.assertEqual((a["owner"], b["owner"], p["owner"]), ("ag1", "ag2", "ag1"))
+        self.assertIs(browser.BROWSERS[("web", "ag1")], browser.get("web", "ag1"))
+        self.assertEqual(browser.get("web", "ag1").dir, browser.browser_dir("web") / "sessions" / "ag1")
+        self.assertEqual(browser.get("web").dir, browser.browser_dir("web"))  # the project's own, for page walks
+        with mock.patch.object(browser, "walk", lambda b, pages, settle, timeout: {"owner": b.owner}):
+            self.assertEqual(routes.act(self.c, {"action": "walk", "project": "web", "pages": ["a.test"]}, "ag1"),
+                             {"owner": None})
+        core.config_set(self.c, "browser_source", "cdp:9339", project="web")  # an attached Chrome: shared (#5634)
+        self.assertIsNone(browser.get("web", "ag2", self.c).owner)
+
+    def test_the_first_start_copies_the_sign_ins_and_no_caches(self):
+        src = browser.browser_dir("web") / "profile"
+        for rel in ("Local State", "Default/Cookies", "Default/Cookies-journal", "Default/Network/Cookies",
+                    "Default/Login Data", "Default/Local Storage/leveldb/000003.log", "Default/History",
+                    "Default/Cache/Cache_Data/data_0"):
+            (src / rel).parent.mkdir(parents=True, exist_ok=True)
+            (src / rel).write_text(rel)
+        dst = browser.session_dir("web", "ag1") / "profile"
+        browser.copy_profile(src, dst)
+        got = sorted(str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file())
+        self.assertEqual(got, ["Default/Cookies", "Default/Cookies-journal", "Default/Local Storage/leveldb/000003.log",
+                               "Default/Login Data", "Default/Network/Cookies", "Local State"])
+        browser.copy_profile(browser.browser_dir("none") / "profile", browser.session_dir("none", "ag1") / "profile")
+        self.assertTrue((browser.session_dir("none", "ag1") / "profile").is_dir())  # no project profile yet: empty
+
+    def test_the_sweep_stops_a_gone_or_idle_session_browser(self):
+        core.register(self.c, "ag1"); core.register(self.c, "ag2"); core.register(self.c, "ag3")
+        closed = []
+        bs = {}
+        for name in ("ag1", "ag2", "ag3"):
+            b = bs[name] = browser.get("web", name)
+            b.running = lambda: True
+            b.close = lambda name=name: closed.append(name)
+        project_b = browser.get("web")
+        project_b.running = lambda: True
+        project_b.close = lambda: closed.append("project")
+        core.unregister(self.c, "ag1")  # its session ended
+        bs["ag2"].used -= 31 * 60  # nobody used it for browser_idle_end (30m)
+        bs["ag3"].used -= 31 * 60
+        bs["ag3"].watching = 1  # a panel waits for its frames: in use
+        self.assertEqual(sorted(browser.sweep(self.c)), [("web", "ag1"), ("web", "ag2")])
+        self.assertEqual(sorted(closed), ["ag1", "ag2"])  # never the project's own browser
+        self.assertNotIn(("web", "ag1"), browser.BROWSERS)  # a gone session's browser goes
+        self.assertIn(("web", "ag2"), browser.BROWSERS)  # an idle one starts again at its next use
+
+    def test_the_sweep_stops_a_chrome_an_earlier_serve_left_for_a_gone_session(self):
+        d = browser.session_dir("web", "old")
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({"project": "web", "owner": "old", "pid": 4242}))
+        closed = []
+        with mock.patch.object(core, "pid_alive", lambda pid: pid == 4242), \
+                mock.patch.object(browser.Browser, "close", lambda b: closed.append((b.project, b.owner))):
+            self.assertEqual(browser.sweep(self.c), [("web", "old")])
+        self.assertEqual(closed, [("web", "old")])
+        self.assertEqual(browser.sweep(self.c), [])  # its Chrome ended (pid 4242 is not alive here)
+
+    def test_the_panel_s_frames_come_from_its_session_s_browser(self):
+        browser.get("web", "ag1").seq = 7
+        h = FakeHandler(f"/api/browser/frame?project=web&session=ag2&after=0&token={server.PAGE_TOKEN}")
+        routes.frame(h, "/api/browser/frame")
+        self.assertEqual(h.sent[1]["seq"], 0)  # ag2 has no browser yet: not ag1's
+        self.assertIsNone(browser.find("web", "ag2"))
+        self.assertIs(browser.find("web", "ag1"), browser.get("web", "ag1"))
+        core.config_set(self.c, "browser_idle_end", "10m")
+        with self.assertRaises(RiverError):
+            core.config_set(self.c, "browser_idle_end", "soon")
 
 
 class NoChrome(Base):
@@ -699,8 +775,12 @@ class Routes(Base):
         self.assertEqual((st["project"], st["running"]), ("web", False))
         server.OPS["browser"](self.c, {"action": "control", "project": "web"}, "ag1")
         core.register(self.c, "ag2")
-        with self.assertRaisesRegex(RiverError, "controlled by ag1"):
-            server.OPS["browser"](self.c, {"action": "open", "project": "web", "url": "example.com"}, "ag2")
+        # Each session has a browser of its own (#5636): ag1's control holds in ag1's browser, not in ag2's.
+        st2 = server.OPS["browser"](self.c, {"action": "status", "project": "web"}, "ag2")
+        self.assertEqual((st2["owner"], st2["controller"]), ("ag2", None))
+        with self.assertRaisesRegex(RiverError, "ag1 controls the browser of web"):
+            server.OPS["browser"](self.c, {"action": "open", "project": "web", "session": "ag1", "url": "example.com"},
+                                  None)  # the person, in ag1's panel
         with self.assertRaisesRegex(RiverError, "not running"):
             server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "text", "text": "x"}}, None)
 
@@ -1152,7 +1232,7 @@ class CdpAddress(Base):
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
         core.config_set(self.c, "serve_port", str(srv.server_address[1]))
-        b = browser.get("web")
+        b = browser.get("web", "ag1")  # the CDP address of ag1 reaches ag1's own browser (#5636)
         self.addCleanup(b.close)
         with self.assertRaisesRegex(OSError, "403"):
             browser.WS(browser.cdp_url(self.c, "web", "ag1").replace("token=", "token=x"))
@@ -1181,7 +1261,7 @@ class CdpAddress(Base):
         self.addCleanup(srv.shutdown)
         core.config_set(self.c, "serve_port", str(srv.server_address[1]))
         core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
-        b = browser.get("web")
+        b = browser.get("web", "ag1")
         self.addCleanup(b.close)
         ws = browser.WS(browser.cdp_url(self.c, "web", "ag1"), timeout=WS_WAIT)
         self.addCleanup(ws.close)

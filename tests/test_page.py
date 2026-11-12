@@ -951,7 +951,7 @@ try {
         from unittest import mock
         from river import browser
         project = browser.project_of(self.c, agent="ag")
-        b = browser.get(project)
+        b = browser.get(project, "ag")  # the browser of the panel's session (#5636)
         self.addCleanup(browser.BROWSERS.clear)
         browser.note_visit(b, "https://news.ycombinator.com/", "Hacker News")
         browser.note_visit(b, "https://example.com/news", "Example news")

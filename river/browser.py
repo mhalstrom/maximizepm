@@ -1,8 +1,12 @@
-"""The browser of a project (#4631, design #4641): a Google Chrome that maxpm serve starts for each project, which
-the person sees and uses in the side panel of the Sessions tab, and which a session drives with maxpm browser.
+"""The browser of a session (#4631, design #4641; #5636): a Google Chrome that maxpm serve starts for each session of a
+project, which the person sees and uses in the side panel of that session, and which the session drives with maxpm
+browser and its Playwright tools.
 
-- One browser for each project (decision 2), with its own profile under <queue folder>/browsers/<project>/, never
-  the person's own Chrome profile. Sign-ins stay in that profile; only the person signs in, in the panel.
+- One browser for each session (#5636, mark 2026-11-12: 'I think it should be session specific'; it was one for each
+  project, decision 2), with its own profile under <queue folder>/browsers/<project>/sessions/<session>/. Its first
+  start copies the sign-ins of the project's profile (<queue folder>/browsers/<project>/profile), never the person's
+  own Chrome profile. serve stops it when the session ends, and after browser_idle_end with no use (sweep). The
+  project's own browser (no session) stays for the page walk checks. Only the person signs in, in the panel.
 - Headless (decision 3): no window and no focus taken. "Open as a window" starts the same profile as a normal
   window, for a site that refuses a headless browser (a Google sign-in); "Back to the panel" goes headless again.
 - The debugging port listens on 127.0.0.1 and only serve uses it: the panel and the sessions reach the browser
@@ -146,6 +150,37 @@ def browser_dir(project):
     so a test queue in a temporary folder has its browsers there too."""
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", project).strip("._") or "project"
     return core.db_path().parent / "browsers" / safe
+
+
+def session_dir(project, owner):
+    """The folder of one session's browser of a project (#5636): its own profile, downloads and state.json."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", owner).strip("._") or "session"
+    return browser_dir(project) / "sessions" / safe
+
+
+# What a session's profile copies from the project's profile at its first start (#5636): the sign-ins (cookies, the
+# pages' local storage, saved passwords) and Local State, which holds the key of the saved passwords on Linux and
+# Windows. No caches, no history. Each SQLite file goes with its journal and WAL.
+PROFILE_COPY = ("Local State", "Default/Cookies", "Default/Network/Cookies", "Default/Login Data",
+                "Default/Local Storage")
+
+
+def copy_profile(src, dst):
+    """Copy the sign-ins of the project's profile into a new session profile. A project with no profile yet gives an
+    empty one. Chrome may run on src: each file is copied as it is now (Chrome writes a cookie at once)."""
+    import shutil
+    dst.mkdir(parents=True, exist_ok=True)
+    for rel in PROFILE_COPY:
+        for name in (rel, rel + "-journal", rel + "-wal"):
+            s, d = src / name, dst / name
+            try:
+                if s.is_dir():
+                    shutil.copytree(s, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns("LOCK"))
+                elif s.is_file():
+                    d.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(s, d)
+            except OSError:
+                pass  # a file Chrome replaced while we read it: the session signs in again there
 
 
 # ---------------------------------------------------------------- WebSocket (RFC 6455), the client side
@@ -462,9 +497,11 @@ def key_events(key, mods=None):
 # ---------------------------------------------------------------- one project's browser
 
 class Browser:
-    def __init__(self, project):
+    def __init__(self, project, owner=None):
         self.project = project
-        self.dir = browser_dir(project)
+        self.owner = owner   # the session whose browser this is (#5636); None: the project's own (page walks)
+        self.dir = session_dir(project, owner) if owner else browser_dir(project)
+        self.used = time.time()  # the last frame poll or command: browser_idle_end counts from it (sweep)
         self.lock = threading.RLock()
         self.cond = threading.Condition()
         self.ws = None
@@ -500,6 +537,8 @@ class Browser:
         self.visits = {}     # url -> {url, title, n, at}: the pages its tabs showed, for the address bar (#5635)
         self.history = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's History in memory
         self.state = self._load()
+        if owner:  # the sweep of a later serve finds a Chrome of this session that still runs (#5636)
+            self.state.update(project=project, owner=owner)
 
     # state.json: the controller, the window mode, Chrome's pid and the proxy port (to attach after a restart)
     def _load(self):
@@ -607,6 +646,8 @@ class Browser:
             raise RiverError(no_chrome())
         profile = self.dir / "profile"
         (self.dir / "downloads").mkdir(parents=True, exist_ok=True)
+        if self.owner and not profile.exists():  # a session's first start: the project's sign-ins (#5636)
+            copy_profile(browser_dir(self.project) / "profile", profile)
         profile.mkdir(parents=True, exist_ok=True)
         try:
             (profile / "DevToolsActivePort").unlink()
@@ -937,7 +978,7 @@ class Browser:
         c = self.state.get("controller") or {}
         before = self.state.get("before") or {}
         url = cur.get("url", "")
-        return {"project": self.project, "running": self.running(), "window": self._windowed(),
+        return {"project": self.project, "owner": self.owner, "running": self.running(), "window": self._windowed(),
                 "source": f"cdp:{self.attached}" if self.attached else None,
                 "modes": not self.attached or self.modes,  # the panel offers Open as a window and Back to the panel
                 "refused": any(r.match(url) for r in REFUSED),  # the site refuses a browser with no window
@@ -1494,12 +1535,74 @@ def setting_of(project, key, parse=None):
     return parse(v) if parse else v
 
 
-def get(project):
+def get(project, owner=None, conn=None):
+    """The browser of one session in a project (#5636), or the project's own with no session (page walks). A project
+    with browser_source (a Chrome that serve did not start) keeps one browser for every session (#5634 decides that
+    case). Each call counts as a use for browser_idle_end."""
+    if owner:
+        if conn is not None:
+            r = conn.execute("SELECT id FROM projects WHERE name=?", (project,)).fetchone()
+            src = core.setting(conn, "browser_source", project_id=r[0] if r else None)
+        else:
+            src = setting_of(project, "browser_source")
+        if core.browser_cdp_port(src):
+            owner = None
     with _lock:
-        b = BROWSERS.get(project)
+        b = BROWSERS.get((project, owner))
         if b is None:
-            b = BROWSERS[project] = Browser(project)
+            b = BROWSERS[(project, owner)] = Browser(project, owner)
+        b.used = time.time()
         return b
+
+
+def find(project, owner=None):
+    """The browser that a panel shows, if serve has it: the session's, else (an attached Chrome) the project's."""
+    b = BROWSERS.get((project, owner or None))
+    if b is None and owner:
+        b = BROWSERS.get((project, None))
+        b = b if b is not None and b.attached else None
+    if b is not None:
+        b.used = time.time()
+    return b
+
+
+def sweep(conn, at=None):
+    """A pass of maxpm serve (#5636): stop each session's browser whose session is gone (unregistered), or that nobody
+    used for browser_idle_end. A stopped browser starts again at its next use. Returns the (project, session) pairs
+    that it stopped."""
+    at = at or time.time()
+    out = []
+    for (project, owner), b in list(BROWSERS.items()):
+        if not owner:
+            continue
+        gone = not conn.execute("SELECT 1 FROM agents WHERE name=?", (owner,)).fetchone()
+        r = conn.execute("SELECT id FROM projects WHERE name=?", (project,)).fetchone()
+        idle = core.parse_duration(core.setting(conn, "browser_idle_end", project_id=r[0] if r else None)).total_seconds()
+        if not gone and (b.watching or at - b.used < idle):
+            continue
+        if b.running() or b.proxy is not None:
+            b.close()
+            out.append((project, owner))
+        if gone:
+            with _lock:
+                BROWSERS.pop((project, owner), None)
+    # A Chrome that an earlier serve started for a session, and that nobody used since this serve started.
+    for f in core.db_path().parent.glob("browsers/*/sessions/*/state.json"):
+        try:
+            st = json.loads(f.read_text(encoding="utf-8"))
+            idle_for = at - f.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+        project, owner, pid = st.get("project"), st.get("owner"), st.get("pid")
+        if not (project and owner and pid) or (project, owner) in BROWSERS or not core.pid_alive(pid):
+            continue
+        gone = not conn.execute("SELECT 1 FROM agents WHERE name=?", (owner,)).fetchone()
+        r = conn.execute("SELECT id FROM projects WHERE name=?", (project,)).fetchone()
+        idle = core.parse_duration(core.setting(conn, "browser_idle_end", project_id=r[0] if r else None)).total_seconds()
+        if gone or idle_for >= idle:
+            Browser(project, owner).close()
+            out.append((project, owner))
+    return out
 
 
 def project_of(conn, project=None, agent=None, cwd=None):

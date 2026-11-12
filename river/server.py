@@ -1255,6 +1255,14 @@ def ops_start_now(conn, c, actor=None):
     return run["id"]
 
 
+def browser_sweep(conn):
+    """One pass of the loop (#5636): stop the Chrome of each session that ended, or that nobody used for
+    browser_idle_end. It starts again, with its own profile, at its next use."""
+    from . import browser
+    for project, owner in browser.sweep(conn):
+        print(f"browser {project}/{owner}: stopped (its session ended, or nobody used it)", flush=True)
+
+
 def ops_watch(conn):
     """One pass of the loop of maxpm serve (step ops_watch): close the runs that a stopped serve left open, then
     start each check that is due (core.ops_due), at most OPS_MAX_RUNNING at the same time. Returns the run ids."""

@@ -51,7 +51,7 @@ def frame(h, path):
     if not hmac.compare_digest(q.get("token", ""), server.PAGE_TOKEN):
         return h._send(403, {"error": "this needs the page's token: reload the page"})
     project = q.get("project", "")
-    b = browser.BROWSERS.get(project)
+    b = browser.find(project, q.get("session"))  # the browser of the panel's session (#5636)
     if b is None:
         return h._send(200, {"project": project, "running": False, "seq": 0, "tabs": [], "controller": None})
     try:
@@ -76,9 +76,12 @@ def act(conn, a, who):
     """One browser action. a: action, and project, or agent (its item's project), or cwd (the project of the folder);
     then url, selector, x, y, text, key, js, full, sub, target, w, h, window as the action needs."""
     action = a.get("action") or "status"
-    project = browser.project_of(conn, a.get("project"), a.get("agent") or (None if _person(conn, who) else who), a.get("cwd"))
-    b = browser.get(project)
     person = _person(conn, who)
+    project = browser.project_of(conn, a.get("project"), a.get("agent") or (None if person else who), a.get("cwd"))
+    # Whose browser (#5636): a session's own (maxpm browser, its Playwright); the person's panel names the session it
+    # shows; a page walk uses the project's own browser, so a check never starts a Chrome for a session.
+    owner = None if action == "walk" else (a.get("session") or a.get("agent") or None) if person else who
+    b = browser.get(project, owner, conn)
     if action in CHANGES:
         browser.may_change(conn, b, who, person)
         if person:
@@ -175,7 +178,7 @@ def act(conn, a, who):
 
 def person_input(conn, a, who):
     """The person's mouse and keys in the panel (needs the page's token)."""
-    b = browser.BROWSERS.get(a.get("project") or "")
+    b = browser.find(a.get("project") or "", a.get("session"))
     if b is None or not b.running():
         raise RiverError("the browser is not running: open a page first")
     browser.may_change(conn, b, who, True)
@@ -202,7 +205,7 @@ def hand(conn, a, who):
         raise RiverError(f"no session {to}: pick a session that runs now")
     if not _person(conn, who):
         raise RiverError("only a person hands the browser on; a session takes it with maxpm browser control")
-    b = browser.BROWSERS.get(project)
+    b = browser.find(project, a.get("session") or to)
     if b is None or not b.running():
         raise RiverError("the browser is not running: open a page first")
     server._typing_pane(conn, to, who)  # the chat can take the message: else the control stays with the person
@@ -234,7 +237,7 @@ def cdp(h, path):
     try:
         if not conn.execute("SELECT 1 FROM projects WHERE name=?", (project,)).fetchone():
             return h._send(404, {"error": f"no project {project}"})
-        b = browser.get(project)
+        b = browser.get(project, agent, conn)  # the session's own browser (#5636)
         if b._attached_now():
             return h._send(409, {"error": f"the browser of {project} is a Chrome that serve did not start "
                                           f"(browser_source): sessions use maxpm browser for it, not a CDP address"})

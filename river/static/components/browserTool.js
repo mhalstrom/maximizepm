@@ -1,5 +1,6 @@
 // The browser of a project in the side panel (#4631, design #4641): a tool tab of the panel (openTool). maxpm serve
-// runs a headless Google Chrome for each project (river/browser.py); this tab shows its page as frames (a long poll
+// runs a headless Google Chrome for each session of a project (river/browser.py, #5636); this tab shows the page of
+// the Chrome of the panel's session as frames (a long poll
 // of GET api/browser/frame), and sends the person's clicks, wheel, keys and pasted text (op browser_input, with the
 // page's token). Back, Forward, Reload, an address field, the tabs of the browser, and who controls it: nobody, the
 // person (Take control, Give back), or a session (maxpm browser control) and the subagent it names. While a session
@@ -17,7 +18,7 @@ import { openTool, panelSession } from "./sidePanel.js";
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function call(action, args = {}) {
+async function callOp(action, args = {}) {
   const r = await fetch("api/action", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ op: "browser", args: { action, ...args }, actor: actor() }) });
   const j = await r.json().catch(() => ({}));
@@ -25,12 +26,18 @@ async function call(action, args = {}) {
   return j.result;
 }
 
+// Each session has a browser of its own (#5636): the tab key names the session too, because the panel keeps one set
+// of tabs for each session, and its browser is that session's Chrome.
+const showTool = (project, session) => openTool("browser:" + project + ":" + (session || ""), "Browser · " + project,
+  (box) => render(box, project, session));
+
 // The browser of the session's project: the tab "Browser · <project>" in the panel; with url, it opens that address
 // (an outside address of the side panel, #5628).
 export async function openBrowser(session, url) {
-  const info = await call("status", session ? { agent: session } : {});
-  openTool("browser:" + info.project, "Browser · " + info.project, (box) => render(box, info.project));
-  if (url) await call("open", { project: info.project, url });
+  session = session || panelSession();
+  const info = await callOp("status", session ? { agent: session, session } : {});
+  showTool(info.project, session);
+  if (url) await callOp("open", { project: info.project, session, url });
 }
 
 // maxpm browser open (#4631): a session asks the page to show its browser. The request comes in the state; the tab
@@ -41,8 +48,7 @@ export function browserOpens(list) {
   const top = list.reduce((m, x) => Math.max(m, x.seq), 0);
   if (seen === null || top < seen) { seen = top; return; }
   for (const x of list.filter(x => x.seq > seen))
-    if (x.session && x.session === panelSession())
-      openTool("browser:" + x.project, "Browser · " + x.project, (box) => render(box, x.project));
+    if (x.session && x.session === panelSession()) showTool(x.project, x.session);
   seen = top;
 }
 
@@ -51,7 +57,9 @@ const KEYS = new Set(["Enter", "Backspace", "Tab", "Escape", "Delete", "ArrowLef
   "Home", "End", "PageUp", "PageDown"]);
 const mods = (e) => ({ alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey });
 
-function render(box, project) {
+function render(box, project, session) {
+  session = session || "";
+  const call = (action, args = {}) => callOp(action, { session, ...args });  // this panel's session's browser
   box.innerHTML = `<div class="br">
     <form class="br-bar" autocomplete="off">
       ${button("◀", { kind: "icon", label: "Back", title: "Back", data: { br: "back" } })}
@@ -93,7 +101,7 @@ function render(box, project) {
     busy = true;
     while (pending.length) {
       const evs = pending; pending = [];
-      try { await typeAction("browser_input", { project, pane, evs }); } catch (e) { toast(e.message, true); }
+      try { await typeAction("browser_input", { project, session, pane, evs }); } catch (e) { toast(e.message, true); }
     }
     busy = false;
   }
@@ -197,7 +205,7 @@ function render(box, project) {
       if (document.hidden) { await sleep(1000); continue; }
       try {
         token = token || await pageToken();
-        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&after=${v.seq}&pane=${pane}&token=${encodeURIComponent(token)}`);
+        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&session=${encodeURIComponent(session)}&after=${v.seq}&pane=${pane}&token=${encodeURIComponent(token)}`);
         if (r.status === 403) { token = await pageToken(true); continue; }
         const j = await r.json();
         if (!box.isConnected) break;
@@ -252,7 +260,7 @@ function render(box, project) {
     const what = b.dataset.br;
     try {
       if (what === "hand") {  // #5616: the session controls it now, and its chat has the page's address
-        const r = await typeAction("browser_hand", { project, to: b.dataset.to });
+        const r = await typeAction("browser_hand", { project, session, to: b.dataset.to });
         toast(`${r.told} has the browser`); return show(r);
       }
       if (what === "window" || what === "headless") { msg.classList.remove("hidden"); msg.textContent = what === "window" ? "Opening a window…" : "Back to the panel…"; }
@@ -273,7 +281,7 @@ function render(box, project) {
     label: "Addresses and a search",
     load: async (text) => {
       const r = await fetch("api/action", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ op: "browser", args: { action: "suggest", project, text }, actor: actor() }) });
+        body: JSON.stringify({ op: "browser", args: { action: "suggest", project, session, text }, actor: actor() }) });
       const items = r.ok ? ((await r.json()).result || {}).items || [] : [];
       return items.map(x => ({ value: x.url,
           html: `<span class="br-st">${esc(x.title || x.url)}</span><span class="br-su">${esc(x.url)}</span>` }))
