@@ -5865,6 +5865,23 @@ class Kill(Base):
                                       ("88888888-2222-3333-4444-555555555555", "w2", False), ("", "w2", False)):
             with mock.patch.dict(os.environ, {"MAXPM_AGENT": "", "CLAUDE_CODE_SESSION_ID": env_sid}):
                 self.assertEqual(cli._for_other(self.c, actor), other, (env_sid, actor))
+        # #5576: MAXPM_AGENT names a worker that unregistered a moment before (its own 'maxpm --as mgr who' after
+        # 'maxpm unregister'): the command records nothing for the manager, whose chat stays its own.
+        core.register(self.c, "w4")
+        w4sid = "66666666-2222-3333-4444-555555555555"
+        core.record_claude_session(self.c, "w4", w4sid)
+        core.unregister(self.c, "w4")
+        with mock.patch.dict(os.environ, {"MAXPM_AGENT": "w4", "CLAUDE_CODE_SESSION_ID": w4sid}):
+            self.assertTrue(cli._for_other(self.c, "mgr"))
+            self.assertFalse(cli._for_other(self.c, "w3"))  # an actor with no session yet takes it, as before
+        mine = lambda: [r[0] for r in self.c.execute("SELECT session_id FROM agent_sessions WHERE agent='mgr'")]
+        before = mine()
+        env = {"MAXPM_DB": self.path, "CLAUDE_CODE_SESSION_ID": w4sid, "MAXPM_AGENT": "w4"}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.run(["--as", "mgr", "who"]), 0)
+        self.assertEqual(mine(), before)
+        self.assertNotIn(w4sid, mine())
 
     def test_refusals_and_a_dead_process_counts_as_gone(self):
         core.set_process(self.c, "ag", self.p.pid, "something else")

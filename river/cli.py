@@ -1973,17 +1973,25 @@ def _for_other(conn, actor):
     'maxpm --as manager-36ec who' at 09:06:43Z; its session became the manager's newest, and the manager's chat on
     the Sessions tab showed the worker's transcript, with none of the person's turns. Such a command is refused
     nothing (a person's own session or a script may act as several agents), but it records nothing for an actor
-    that has a session of its own already."""
+    that has a session of its own already.
+    The same holds when MAXPM_AGENT names an agent that is gone (#5576): worker maximizepm-1d68 unregistered and then,
+    in the same command line, ran 'maxpm --as manager-477c who'; with no agent row for the caller the command counted
+    as the caller's own, and the manager's chat on the Sessions tab showed the worker's ended chat."""
     me = (os.environ.get("MAXPM_AGENT") or "").strip()
-    if not me:
+
+    def other_session():  # the session id names the caller: is it another agent's, and has the actor one of its own?
         owner = core.session_owner(conn, core.session_from_env())
         return bool(owner and actor and owner != actor
                     and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone()
                     and conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? LIMIT 1", (actor,)).fetchone())
+    if not me:
+        return other_session()
     if not (actor and actor != me):
         return False
     caller = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai'", (me,)).fetchone()
-    if not caller or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone():
+    if not caller:
+        return other_session()
+    if not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone():
         return False
     if caller["role"] != "manager":
         manager = core.active_manager(conn)
