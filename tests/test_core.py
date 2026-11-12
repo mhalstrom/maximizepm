@@ -6836,6 +6836,76 @@ class Operational(Base):
         self.assertEqual(core.cleanup_trigger(self.c), [])
 
 
+class ReviewPin(Base):
+    """review pass pins the commit it checked (#5498): release #5486 of toolscaled-prod was cut by a reviewer that
+    took its review, with no revision; the review passed at one commit, the main tree moved one commit on, and the
+    deploy hook, with no MAXPM_REV, released the newer commit."""
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@example.test", *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, text):
+        with open(os.path.join(self.repo, "f.txt"), "w") as f:
+            f.write(text)
+        self.git("add", "f.txt")
+        self.git("commit", "-q", "-m", text)
+        return self.git("rev-parse", "HEAD")
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.dir.name, "repo")
+        os.mkdir(self.repo)
+        self.git("init", "-q")
+        self.a = self.commit("a")
+        core.target_add(self.c, "web", "push")
+        core.project_add(self.c, "site", target="web", path=self.repo)
+        for n in ("dev", "rev", "ops"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        core.config_set(self.c, "review", "on")
+        core.target_own(self.c, "web", "ops")
+        core.target_hook(self.c, "web", "deploy", f'"{sys.executable}" -c "print(1)"', actor="mark")
+        x = self.add("site", "page")
+        core.claim(self.c, x, "dev")
+        core.done(self.c, x, "commit", "dev", ship_it=True)
+        ids = core.item_show(self.c, x)["unblocks"]
+        self.review = [i for i in ids if core.item_show(self.c, i)["kind"] == "review"][0]
+        self.deploy = [i for i in ids if i != self.review][0]
+
+    def deploy_rev(self):
+        self.assertIsNotNone(core.deploy_hook_start(self.c, self.deploy, "tok"))
+        return self.c.execute("SELECT rev FROM hook_runs WHERE event='deploy' ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+    def test_a_review_with_no_pin_pins_the_commit_it_checked_and_the_deploy_gets_it(self):
+        core.claim(self.c, self.review, "rev")  # the cut: no revision
+        self.assertIsNone(core._item(self.c, self.deploy)["cut_rev"])
+        res = core.review_pass(self.c, self.review, None, "rev")
+        self.assertEqual(res["reviewed"], self.a)
+        self.assertIn(f"reviewed {self.a[:12]}", res["output"])
+        self.assertEqual(core._item(self.c, self.deploy)["cut_rev"], self.a)
+        self.commit("b")  # the main tree moves on after the review
+        self.assertEqual(self.deploy_rev(), self.a)  # MAXPM_REV: the reviewed commit, not HEAD
+
+    def test_a_folder_that_left_the_pin_is_refused_until_a_step_brings_it_back(self):
+        core.claim(self.c, self.review, "rev")
+        core.target_cut(self.c, "web", rev=self.a, actor="ops")  # the owner pins a
+        b = self.commit("b")
+        with self.assertRaisesRegex(RiverError, f"is at {b[:12]}, but the release is pinned at {self.a[:12]}"):
+            core.review_pass(self.c, self.review, None, "rev")
+        self.assertEqual(core._item(self.c, self.review)["status"], "in_progress")
+        with self.assertRaisesRegex(RiverError, f"pinned at {self.a[:12]}, and you name {b[:12]}"):
+            core.review_pass(self.c, self.review, None, "rev", rev=b)
+        with self.assertRaisesRegex(RiverError, "--rev nope is not a commit"):
+            core.review_pass(self.c, self.review, None, "rev", rev="nope")
+        # A gate step that checks out the pin itself (as the toolscaled review gate does) passes.
+        core.item_edit(self.c, self.review, check=f"git checkout -q {self.a}", actor="rev")
+        res = core.review_pass(self.c, self.review, None, "rev", cwd=self.repo)
+        self.assertEqual(res["reviewed"], self.a)
+        self.assertEqual(core._item(self.c, self.deploy)["cut_rev"], self.a)
+        self.assertEqual(self.deploy_rev(), self.a)
+
+
 class DeployHook(Base):
     """A target with a deploy hook releases with no session that types its command: maxpm serve runs the hook when
     the deploy item is ready; a failure keeps the deploy item open and starts the release again (#4971)."""

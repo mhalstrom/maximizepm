@@ -165,7 +165,9 @@ your type from your CLI's environment.
    `maxpm review pass <id> --confirm all --output "<what you checked>"`
    (confirms the written steps; runs the command steps and `review_cmd`, which
    must exit 0; a command still running after `review_timeout` (4h) is stopped
-   with every process it started, and the error names the setting), or
+   with every process it started, and the error names the setting; the
+   release's folder must then hold its pinned commit, or `--rev <commit>`,
+   and a release with no pin is pinned at the commit you checked), or
    `maxpm review fail <id> "<fix>" ... --note "<what you found>"`: MaximizePM adds
    the fixes as items the review waits on, and the review comes back after them.
    With `--ask`, the user approves the list first: MaximizePM adds one item for the

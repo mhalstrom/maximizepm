@@ -1467,6 +1467,8 @@ def build_parser():
     x.add_argument("--output", help="what you checked; default: review passed")
     x.add_argument("--confirm", action="append", metavar="all|IDS",
                    help="the written review steps you did: all, or step ids (3,5); required when the release has any")
+    x.add_argument("--rev", help="the commit you reviewed; the release's git folder must hold it after the steps, "
+                   "and a release with no pin is pinned at it (default: the folder's HEAD after the steps)")
     x = rvs.add_parser("fail", help="add fix items the review waits on, and release the review")
     x.add_argument("id", type=int); x.add_argument("fixes", nargs="+", help="one title per fix item")
     x.add_argument("--note", help="what the review found (goes into each fix item's context)")
@@ -3055,7 +3057,7 @@ def dispatch(conn, a, actor):
         return core.ship(conn, a.id, actor)
     if c == "review":
         if a.rcmd == "pass":
-            return core.review_pass(conn, a.id, a.output, actor, os.getcwd(), confirm=a.confirm)
+            return core.review_pass(conn, a.id, a.output, actor, os.getcwd(), confirm=a.confirm, rev=a.rev)
         if a.rcmd == "step":
             if a.scmd == "list":
                 return core.review_steps(conn, a.project)

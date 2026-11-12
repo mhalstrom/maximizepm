@@ -10141,13 +10141,58 @@ def release_review_steps(conn, item_id):
     return out
 
 
-def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, confirm=None):
+def _git_commit(path, rev="HEAD"):
+    """The full id of a commit in a git folder, or None: no folder, no repository, or no such commit."""
+    import subprocess
+    if not path or not os.path.isdir(os.path.expanduser(path)):
+        return None
+    try:
+        r = subprocess.run(["git", "-C", os.path.expanduser(path), "rev-parse", "--verify", "-q", f"{rev}^{{commit}}"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def _review_pin(conn, review_id, rev=None):
+    """What review pass checks of the release's commit (#5498): the deploy item, the folder where its hooks run,
+    the commit the cut pinned (cut_rev, as a commit of that folder) and the commit the reviewer names (rev).
+    None when the release has no git folder: nothing to check. Refuses a rev that is no commit there, or that is
+    not the pinned one."""
+    dep_id = _review_deploy(conn, review_id)
+    dep = _item(conn, dep_id) if dep_id else None
+    folder = _hook_folder(conn, dep["target"], dep_id) if dep and dep["target"] else None
+    if not folder or _git_commit(folder) is None:
+        if rev:
+            raise RiverError(f"--rev needs the release's git folder, and this release has none (maxpm show {dep_id})"
+                             if dep else f"#{review_id} gates no deploy item: --rev has no release to pin")
+        return None
+    pin = _git_commit(folder, dep["cut_rev"]) if dep["cut_rev"] else None
+    named = None
+    if rev:
+        named = _git_commit(folder, rev)
+        if named is None:
+            raise RiverError(f"--rev {rev} is not a commit of {folder}")
+        if pin and named != pin:
+            raise RiverError(f"refused: release #{dep_id} is pinned at {pin[:12]}, and you name {named[:12]}. Review "
+                             f"the pinned commit, or ask the target owner or the manager to move the pin: maxpm target "
+                             f"cut {dep['target']} --rev {named[:12]}")
+    return {"deploy": dep_id, "target": dep["target"], "folder": folder, "pin": pin, "named": named,
+            "cut_rev": dep["cut_rev"]}
+
+
+def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, confirm=None, rev=None):
     """Accept a release review.
 
     Every written step of the projects the release ships must be confirmed (confirm: "all", or the
     step ids), and every command step must exit 0 in its project folder; so must the item's review
-    command (in cwd). Each step's result goes into the item's history."""
+    command (in cwd). Each step's result goes into the item's history. In a release with a git folder, the
+    commit that the folder holds after the steps is the reviewed one (#5498): it must be the release's pin or rev
+    (the reviewer's word), and a release with no pin is pinned at it, so the deploy hook gets it as MAXPM_REV and
+    a later commit of the folder does not go out unreviewed. The check is after the steps, because a gate step
+    may check out the pinned commit itself."""
     it = _review_item(conn, item_id, actor)
+    pin = _review_pin(conn, it["id"], (rev or "").strip() or None)
     groups = release_review_steps(conn, item_id)
     todo = [(g, s) for g in groups for s in g["steps"] if s["kind"] == "do"]
     if isinstance(confirm, str):
@@ -10198,13 +10243,32 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
     if cmd:
         must_pass(cmd, cwd, "review command")
         ran = cmd
+    reviewed = None
+    if pin:
+        head = _git_commit(pin["folder"])
+        want = pin["named"] or pin["pin"]
+        if want and head != want:
+            raise RiverError(
+                f"refused: after the review steps {pin['folder']} is at {(head or 'no commit')[:12]}, but the release "
+                f"is {'pinned' if pin['pin'] else 'named'} at {want[:12]}: the steps checked other code than the release "
+                f"ships, so nothing is recorded. Bring the folder to {want[:12]} and pass again, or ask the target owner "
+                f"or the manager to move the pin: maxpm target cut {pin['target']} --rev {(head or '')[:12]}")
+        reviewed = want or head
     with tx(conn):
+        if reviewed and not pin["cut_rev"]:  # a pin that is a word, not a commit here, stays
+            conn.execute("UPDATE items SET cut_rev=? WHERE id=?", (reviewed, pin["deploy"]))
+            _event(conn, pin["deploy"], actor, f"release pinned at {reviewed[:12]} by review #{it['id']}: the commit "
+                                               f"it checked")
+            _add_note(conn, pin["deploy"], f"[maxpm] release pinned at {iso(now())} by review #{it['id']}: {reviewed}")
         for r in results:
             _event(conn, it["id"], actor, f"review step {r['id']} ({r['project']}) {r['result']}: {r['text']}")
     summary = [f"{len(results)} review step(s) followed"] if results else []
     if ran:
         summary.append(f"{ran} exit 0")
+    if reviewed:
+        summary.append(f"reviewed {reviewed[:12]}")
     res = done(conn, item_id, output or "; ".join(["review passed"] + summary), actor)
+    res["reviewed"] = reviewed
     res["review_cmd"] = ran
     res["review_steps"] = results
     return res
