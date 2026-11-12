@@ -2267,6 +2267,55 @@ class SideFiles(Base):
         self.assertIn(shot, [a["target"] for a in one])
         self.assertEqual(sessions.artifacts(self.c, {}, allowed, self.root, self.croot, agent="nobody"), [])
 
+    def test_a_new_serve_reads_only_what_the_logs_added_since_the_last_save(self):
+        # #5604: the hits of each log are kept in a file beside the queue; a new process reads them from there.
+        from unittest import mock
+        self.write(claude_line("assistant", [{"type": "text", "text": f"Saved {self.proj}/a.png"}], "end_turn",
+                               at="2026-11-08T10:01:00Z"))
+        self.addCleanup(sessions._ART_CACHE.clear)
+        sessions._ART_CACHE.clear()
+        sessions._ART_DISK.update(path=None)
+        first = sessions.artifacts(self.c, {}, None, self.root, self.croot)
+        self.assertTrue(core._beside_queue(self.c, sessions.ART_FILE).exists())
+        sessions._ART_CACHE.clear()  # a new serve
+        sessions._ART_DISK.update(path=None)
+        lines = []
+        real = sessions._line_hits
+        with mock.patch.object(sessions, "_line_hits", lambda raw, ad: lines.append(raw) or real(raw, ad)):
+            self.assertEqual(sessions.artifacts(self.c, {}, None, self.root, self.croot), first)
+            self.assertEqual(lines, [])  # nothing read again
+            self.write(claude_line("assistant", [{"type": "text", "text": f"And {self.proj}/b.png"}], "end_turn",
+                                   at="2026-11-08T10:02:00Z"))
+            got = [a["target"] for a in sessions.artifacts(self.c, {}, None, self.root, self.croot)]
+        self.assertEqual(got, [f"{self.proj}/b.png", f"{self.proj}/a.png"])
+        self.assertEqual(len(lines), 1)  # only the new line
+        # A broken file is an empty cache: everything is read again.
+        core._beside_queue(self.c, sessions.ART_FILE).write_text("{not json", encoding="utf-8")
+        sessions._ART_CACHE.clear()
+        sessions._ART_DISK.update(path=None)
+        self.assertEqual(len(sessions.artifacts(self.c, {}, None, self.root, self.croot)), 2)
+
+    def test_the_log_of_a_known_agent_type_is_asked_of_its_own_adapter_only(self):
+        # #5604: every adapter's chat_path for each session took 242 calls for 22 sessions on each request.
+        from unittest import mock
+        from river import agents as _agents
+        self.write(claude_line("assistant", [{"type": "text", "text": "hi"}], "end_turn"))
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        asked = []
+        for ad in _agents.load().values():
+            real = ad.chat_path
+            ad_patch = mock.patch.object(ad, "chat_path", lambda *a, _r=real, _id=ad.id, **k: asked.append(_id) or _r(*a, **k))
+            ad_patch.start()
+            self.addCleanup(ad_patch.stop)
+        kind, path = sessions.transcript(self.c, "ag", self.root, self.croot)
+        self.assertEqual((kind, asked), ("claude", ["claude"]))
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET agent_type=NULL, platform=NULL WHERE name='ag'")
+        asked.clear()
+        self.assertEqual(sessions.transcript(self.c, "ag", self.root, self.croot)[0], "claude")  # every adapter
+        self.assertGreater(len(asked), 1)
+
     def test_one_row_for_one_claude_ai_artifact_with_each_session_that_named_it(self):
         # #5000: a worker publishes an artifact, the manager names it again in another form; one row, both sessions.
         import shutil

@@ -92,18 +92,31 @@ def transcript(conn, agent, root=None, croot=None):
     runs = _agents.find(a["platform"]) if a["platform"] else None
     roots = {"claude": root, "codex": croot}
     best = None
+    # The adapter of the agent's type first, as no_log_note picks it (#5604): asking every adapter took 242 chat_path
+    # calls for 22 sessions on each Artifacts request (Hermes and Goose open their SQLite files). Every adapter only
+    # when that one finds no log, or the agent's type is not known yet.
+    own = _agents.find(a["agent_type"] or a["platform"]) if (a["agent_type"] or a["platform"]) else None
+    if own is not None:
+        got = _log_of(own, a, r, runs, roots)
+        if got:
+            return got[1], got[2]
     for ad in _agents.load().values():
-        how = ad.chat_ref()
-        ref = (r["session_id"] if how == "session" and r else
-               a["native_address"] if how == "address" and runs is not None and runs.id == ad.id else None)
-        path = ad.chat_path(ref, None, roots.get(ad.id)) if ref and ad.supports("chat") else None
-        try:
-            m = path.stat().st_mtime if path else None
-        except OSError:
-            continue
-        if m is not None and (best is None or m > best[0]):
-            best = (m, ad.id, path)
+        got = None if ad is own else _log_of(ad, a, r, runs, roots)
+        if got and (best is None or got[0] > best[0]):
+            best = got
     return (best[1], best[2]) if best else (None, None)
+
+
+def _log_of(ad, a, r, runs, roots):
+    """(mtime, adapter id, path) of the agent's log that adapter ad reads, or None."""
+    how = ad.chat_ref()
+    ref = (r["session_id"] if how == "session" and r else
+           a["native_address"] if how == "address" and runs is not None and runs.id == ad.id else None)
+    path = ad.chat_path(ref, None, roots.get(ad.id)) if ref and ad.supports("chat") else None
+    try:
+        return (path.stat().st_mtime, ad.id, path) if path else None
+    except OSError:
+        return None
 
 
 def session_ref(conn, agent, ad, path):
@@ -1076,6 +1089,11 @@ def session_usage(conn, name, root=None, croot=None):
 # session reads fill its transcript fast (about 1 MB each in a tool result, #4681). 18 MB takes about 30 ms.
 ARTIFACT_DAYS = 1  # agents seen this recently, besides the running ones
 _ART_CACHE = {}  # path -> (size, mtime, end: the byte after the last complete line read, hits)
+# The cache is also kept in a file beside the queue (#5604): a new serve read all of the logs at the first request of
+# the tab, 103 MB of 22 logs and about 300 ms live. With the file it reads only what the logs added since the save.
+ART_FILE = "artifact-hits.json"
+ART_SAVE_SECS = 60  # the most often the file is written
+_ART_DISK = {"path": None, "saved": 0.0, "dirty": False}
 # Each adapter's chat_texts gives the texts of a line to look in, and skips tool results and lines with none.
 _FILE_RX = None
 _URL_RX = None
@@ -1119,7 +1137,42 @@ def _artifact_hits(path, kind):
     new, end = _scan_from(path, start, _adapter(kind))
     hits = hits + new
     _ART_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, end, hits)
+    _ART_DISK["dirty"] = True
     return hits
+
+
+def _art_disk_load(conn):
+    """Fill the cache from the file beside this queue, once for each queue: a path that the cache holds already
+    keeps its entry. A missing or broken file is an empty cache."""
+    p = core._beside_queue(conn, ART_FILE)
+    if p is None or _ART_DISK["path"] == str(p):
+        return
+    _ART_DISK.update(path=str(p), saved=0.0, dirty=False)  # the first change after a start is saved at once
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    for k, v in (data.items() if isinstance(data, dict) else ()):
+        if isinstance(v, list) and len(v) == 4 and isinstance(v[3], list):
+            _ART_CACHE.setdefault(k, tuple(v))
+
+
+def _art_disk_save(conn, force=False):
+    """Write the cache to the file beside the queue when it changed, at most once in ART_SAVE_SECS. Only the logs
+    that still exist; never an error of its own."""
+    if not _ART_DISK["dirty"] or (not force and time.time() - _ART_DISK["saved"] < ART_SAVE_SECS):
+        return
+    p = core._beside_queue(conn, ART_FILE)
+    if p is None:
+        return
+    _ART_DISK.update(saved=time.time(), dirty=False)
+    try:
+        data = {k: list(v) for k, v in list(_ART_CACHE.items()) if os.path.exists(k)}
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.{id(data)}.tmp")  # one name for each writer: requests run in threads
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
 
 
 def _scan_from(path, start, ad):
@@ -1171,6 +1224,7 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
         seen = since or core.iso(core.now() - core.timedelta(days=ARTIFACT_DAYS))
         names |= {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='ai' AND last_seen>=?", (seen,))}
     best, by = {}, {}  # by: key -> {session: when it named it last}
+    _art_disk_load(conn)
     for name in sorted(names):
         kind, path = transcript(conn, name, root, croot)
         if not path:
@@ -1204,6 +1258,7 @@ def artifacts(conn, terminals=None, allowed=None, root=None, croot=None, limit=3
             out.append(dict(h, item=r["item_id"] if r else None))
         if len(out) >= limit:
             break
+    _art_disk_save(conn)
     return out
 
 
