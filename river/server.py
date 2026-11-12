@@ -1255,6 +1255,27 @@ def ops_watch(conn):
     return started
 
 
+def ops_repair_op(conn, a, who):
+    """The op ops_repair (maxpm ops repair, #5433): the check's repair command runs outside the sandbox in a thread,
+    its result goes on the fault item, then the check runs once. Refusals come at once (core.ops_repair_start)."""
+    c = core.ops_find(conn, a["scope"], a.get("name"))
+    item = core.ops_repair_start(conn, c, a.get("reason"), who)
+    item = dict(item) if item is not None else None
+
+    def work():
+        try:
+            c2 = core.connect()
+            try:
+                core.ops_repair_run(c2, c, item, who)
+                ops_start_now(c2, c, who)
+            finally:
+                c2.close()
+        except Exception as e:  # the result line says what failed; the queue keeps the start
+            print(f"ops repair {c['key']}: {e}", flush=True)
+    threading.Thread(target=work, daemon=True).start()
+    return {"check": f"{c['scope']}/{c['name']}", "item": item["id"] if item else None, "command": c["repair"]}
+
+
 def ops_run_op(conn, a, who):
     """The op ops_run (maxpm ops run): run a check now, also when it is not due or is paused."""
     c = core.ops_find(conn, a["scope"], a.get("name"))
@@ -4018,6 +4039,7 @@ OPS = {
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
     # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
     "ops_run": ops_run_op,
+    "ops_repair": ops_repair_op,
     "ops_beat": lambda c, a, who: core.ops_beat(c, a["scope"], a.get("name"), who),
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops from the page without a reason; the agent then reads who stopped it.

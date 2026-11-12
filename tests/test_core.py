@@ -9407,6 +9407,59 @@ class Ops(Base):
         self.assertIsNone(core.fault_key({"kind": "work", "title": "ops:site:job looks like a key"}))
         self.assertEqual(core.fault_key({"kind": "operational", "title": "ops:site: 4 checks failing"}), "ops:site:")
 
+    def test_a_repair_needs_the_fault_item_and_twice_in_six_hours_then_a_person(self):
+        # #5433, decision 4 B of #5380.
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 1,
+                                                       "repair": "systemctl restart job"}, actor="mark")
+        c = core.ops_find(self.c, "site", "job")
+        with self.assertRaisesRegex(RiverError, "no open fault item"):
+            core.ops_repair_start(self.c, c, "it hangs", "dev")
+        it = self.run_at("site", "job", core.now(), self.proc(2, "JOB CRITICAL - hangs"))["items"][0]["item"]
+        core.register(self.c, "inv")
+        core.claim(self.c, it, "inv")
+        with self.assertRaisesRegex(RiverError, f"only the session that holds a fault item.*#{it} \\(held by inv\\)"):
+            core.ops_repair_start(self.c, c, "it hangs", "dev")
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.ops_repair_start(self.c, c, " ", "inv")
+        for _ in range(2):
+            self.assertEqual(core.ops_repair_start(self.c, c, "the job hangs on its lock", "inv")["id"], it)
+        with self.assertRaisesRegex(RiverError, "ran 2 times in 6h .ops_repair_max 2.: the next one needs a person"):
+            core.ops_repair_start(self.c, c, "again", "inv")
+        self.assertEqual(core.ops_repair_start(self.c, c, "I looked: restart it", "mark")["id"], it)  # a person may
+        self.assertEqual(len(self.notes(it)), 3 + len([n for n in self.notes(it) if not n.startswith("ops repair")]))
+        # The run: its result on the item; a timeout says so.
+        with mock.patch.object(core, "OPS_RUNNER", self.proc(0, "restarted job")):
+            r = core.ops_repair_run(self.c, c, core._item(self.c, it), "inv")
+        self.assertEqual((r["ok"], r["exit_code"]), (True, 0))
+        self.assertIn("ops repair ended: exit 0; the check runs once now\nrestarted job", self.notes(it)[-1])
+        with mock.patch.object(core, "OPS_RUNNER", self.proc(None, "", timed_out=True)):
+            r = core.ops_repair_run(self.c, c, core._item(self.c, it), "inv")
+        self.assertFalse(r["ok"])
+        self.assertIn("stopped at the check's timeout", self.notes(it)[-1])
+        no = core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")["check"]
+        with self.assertRaisesRegex(RiverError, "has no repair command"):
+            core.ops_repair_start(self.c, no, "x", "mark")
+
+    def test_serve_runs_the_repair_then_the_check_once(self):
+        from river import server
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 1,
+                                                       "repair": "systemctl restart job"}, actor="mark")
+        it = self.run_at("site", "job", core.now(), self.proc(2, "JOB CRITICAL - hangs"))["items"][0]["item"]
+        ran = []
+
+        class Now:  # the thread runs at once
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), mock.patch.object(server.threading, "Thread", Now), \
+                mock.patch.object(server, "ops_start_now", lambda conn, c, who=None: ran.append(c["name"])), \
+                mock.patch.object(core, "OPS_RUNNER", self.proc(0, "restarted")):
+            r = server.OPS["ops_repair"](self.c, {"scope": "site", "name": "job", "reason": "hangs"}, "mark")
+        self.assertEqual((r["item"], r["command"], ran), (it, "systemctl restart job", ["job"]))
+        self.assertIn("ops repair ended: exit 0", self.notes(it)[-1])
+
     def test_subjects_have_items_of_their_own_and_a_note_check_none(self):
         core.ops_add(self.c, "site", "jobs", "plugin", {"command": "check_jobs", "fail_after": 1, "subject": True},
                      actor="boss")

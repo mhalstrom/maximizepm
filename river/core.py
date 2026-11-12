@@ -229,6 +229,11 @@ DEFAULT_SETTINGS = {
     # live (#5432), but at most this many investigations at the same time (fault items that a live session holds or
     # that wait for the session started for them).
     "ops_max_investigations": "2",
+    # maxpm ops repair (#5433, decision 4 B of #5380): the session that holds a check's fault item may start the
+    # repair command set in advance on the check, at most ops_repair_max times in ops_repair_window for one check;
+    # after that only a person starts it.
+    "ops_repair_max": "2",
+    "ops_repair_window": "6h",
     "ops_reopen_within": "24h",
     "ops_storm_count": "3",
     "ops_storm_window": "5m",
@@ -1624,7 +1629,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -1647,7 +1652,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_storm_count", "ops_max_investigations", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_storm_count", "ops_max_investigations", "ops_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -4087,6 +4092,77 @@ def _ops_fault_item(conn, c, key, res, at, new):
                  kind="operational", short=f"Fault: {c['name']}"[:60])
     _ops_tell_manager(conn, "alert", f"new fault: {key} ({summary}): #{r['id']}", r["id"])
     return {"key": key, "item": r["id"], "action": "opened"}
+
+
+def _ops_fault_items(conn, c):
+    """The open fault items of a check: its own key, or a key of one of its subjects."""
+    return [r for r in conn.execute("SELECT * FROM items WHERE kind='operational' AND status IN ('open','in_progress',"
+                                    "'held') AND (substr(title, 1, ?)=? OR substr(title, 1, ?)=?) ORDER BY id",
+                                    (len(c["key"]) + 1, c["key"] + " ", len(c["key"]) + 1, c["key"] + ":"))]
+
+
+def ops_repair_start(conn, c, reason, actor=None):
+    """maxpm ops repair (#5433): may this actor start the check's repair now? A person may, at any time. A session
+    only while it holds an open fault item of the check, and at most ops_repair_max times in ops_repair_window for
+    the check (each start is an ops_events row 'repair'). Records the start on the check and on the fault item and
+    returns the item (or None for a person's repair with no item)."""
+    if not (c.get("repair") or "").strip():
+        raise RiverError(f"{c['scope']}/{c['name']} has no repair command; a person or the manager sets one: maxpm ops "
+                         f"edit {c['scope']} {c['name']} --repair \"<command>\"")
+    reason = (reason or "").strip()
+    if not reason:
+        raise RiverError(f"say why: maxpm ops repair {c['scope']} {c['name']} --reason \"<what you found>\"")
+    a = conn.execute("SELECT kind FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+    person = a is None or a["kind"] == "human"
+    items = _ops_fault_items(conn, c)
+    mine = [r for r in items if r["assignee"] == actor and r["status"] in ("in_progress", "held")]
+    how = f"a person starts it: maxpm ops repair {c['scope']} {c['name']} --reason \"<why>\" (as a person, not --as a session)"
+    if not person:
+        if not mine:
+            held = ", ".join(f"#{r['id']}" + (f" (held by {r['assignee']})" if r["assignee"] else "") for r in items)
+            raise RiverError(f"only the session that holds a fault item of {c['scope']}/{c['name']} starts its repair"
+                             + (f" ({held})" if held else " (it has no open fault item)") + f"; else {how}")
+        most = int(setting(conn, "ops_repair_max") or 0)
+        win = parse_duration(setting(conn, "ops_repair_window"))
+        n = conn.execute("SELECT COUNT(*) n FROM ops_events WHERE check_id=? AND state='repair' AND at>=?",
+                         (c["id"], iso(now() - win))).fetchone()["n"]
+        if n >= most:
+            raise RiverError(f"the repair of {c['scope']}/{c['name']} ran {n} times in {setting(conn, 'ops_repair_window')} "
+                             f"(ops_repair_max {most}): the next one needs a person. Write what you found on the item, "
+                             f"then {how}")
+    it = (mine or items or [None])[0]
+    with tx(conn):
+        conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
+                     (c["id"], c["key"], "repair", iso(now()), actor or "person", reason[:500]))
+        if it is not None:
+            _event(conn, it["id"], actor or "person", f"ops repair started: {c['repair']} ({reason[:300]})")
+    return it
+
+
+def ops_repair_run(conn, c, item, actor=None):
+    """Run the check's repair command outside the sandbox (maxpm serve calls it), in the check's folder with its
+    timeout, and put the result on the fault item. Returns {"exit_code", "timed_out", "ok", "output"}."""
+    limit = parse_duration(c["timeout"]).total_seconds()
+    env = {**os.environ, "MAXPM_CHECK": c["name"], "MAXPM_SCOPE": c["scope"], "MAXPM_CHECK_KEY": c["key"],
+           "MAXPM_ITEM": str(item["id"]) if item else ""}
+    folder = _ops_folder(conn, c)
+    try:
+        if folder and not os.path.isdir(folder):
+            raise OSError(f"the folder {folder} does not exist")
+        r = OPS_RUNNER(c["repair"], folder, limit, env) if OPS_RUNNER else _run_command(c["repair"], folder, limit, None, env)
+        code, timed_out = r.returncode, bool(getattr(r, "timed_out", False))
+        text = ((r.stdout or "") + ("\n" + r.stderr if (r.stderr or "").strip() else "")).strip()
+    except OSError as e:
+        code, timed_out, text = None, False, f"the repair did not start: {e}"
+    ok = code == 0 and not timed_out
+    out = {"exit_code": code, "timed_out": timed_out, "ok": ok, "output": _ops_tail(text)}
+    if item is not None:
+        result = (f"stopped at the check's timeout {c['timeout']}" if timed_out else f"exit {code}" if code is not None
+                  else "not started")
+        with tx(conn):
+            _event(conn, item["id"], "maxpm", (f"ops repair ended: {result}; the check runs once now"
+                                               + (f"\n{out['output'][-1500:]}" if out["output"] else ""))[:2000])
+    return out
 
 
 def fault_key(item):

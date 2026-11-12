@@ -997,6 +997,11 @@ def build_parser():
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--until", help="a duration (2h) or a time (tomorrow 7:00)")
     x.add_argument("--resume", action="store_true", help="start the check again now")
+    x = ops.add_parser("repair", help="ask maxpm serve to run the repair command set on a check: the session that "
+                       "holds its fault item, at most ops_repair_max times in ops_repair_window; a person at any time")
+    x.add_argument("scope", help="a project or a deploy target, or the check's name when it is the only one of "
+                   "that name"); x.add_argument("name", nargs="?")
+    x.add_argument("--reason", required=True, help="what you found: why the repair helps")
     x = ops.add_parser("run", help="ask maxpm serve to run a check now, also when it is not due or is paused")
     x.add_argument("scope", help="a project or a deploy target, or the check's name when it is the only one of "
                    "that name"); x.add_argument("name", nargs="?")
@@ -2439,6 +2444,11 @@ def _dispatch_ops(conn, a, actor):
         return {"profile": res, "out": a.out}
     if a.ocmd == "profile" and not a.yes:
         return core.ops_profile_apply(conn, _ops_profile_file(a.file), a.scope, False, actor)
+    if a.ocmd == "repair":
+        if not actor and core.agent_type_from_env(os.environ):
+            raise RiverError("name yourself: maxpm --as <name> ops repair ... (the session that holds the fault item)")
+        core.ops_find(conn, a.scope, a.name)
+        return ask_server(conn, "ops_repair", {"scope": a.scope, "name": a.name, "reason": a.reason}, actor)
     if not actor and core.agent_type_from_env(os.environ):
         raise RiverError(f"name yourself: maxpm --as <name> ops {a.ocmd} ... (an agent may add or change a url or "
                          f"beat check; a person or the manager the others)")
@@ -4231,6 +4241,11 @@ def render_ops(a, res):
         print(f"check {res['check']}: run {res['run']} started" + (" and read (a beat check runs no process)"
               if res["form"] == "beat" else " in maxpm serve")
               + f". The result: maxpm ops history {res['check'].replace('/', ' ', 1)}")
+        return
+    if a.ocmd == "repair":
+        print(f"repair of {res['check']} started in maxpm serve: {res['command']}. Its result goes on "
+              + (f"#{res['item']}" if res.get("item") else "the check's history")
+              + f", then the check runs once: maxpm ops history {res['check'].replace('/', ' ', 1)}")
         return
     if a.ocmd == "beat":
         print(f"beat of {res['check']} at {res['beat']} (it is a fault after no beat for {res['period']})")
