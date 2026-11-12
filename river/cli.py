@@ -1022,6 +1022,31 @@ def build_parser():
                        "a line for each subject, exit 0 OK or 2 CRITICAL), for a cmd check with --subject on: "
                        + "; ".join(f"{k}: {v}" for k, v in core.OPS_PROBES.items()))
     x.add_argument("name", choices=list(core.OPS_PROBES))
+    x = ops.add_parser("visual", help="a page looks as it was approved: screenshots at set widths and themes against "
+                       "approved ones, as a plugin check (maxpm ops add <scope> <name> plugin --command \"maxpm ops "
+                       "visual run <name> --url <address>\" --timeout 2m)")
+    vis = x.add_subparsers(dest="vcmd", required=True)
+    v = vis.add_parser("run", help="the plugin: shoot the page and compare each shot with its approved picture "
+                       "(exit 0 OK, 1 no approved picture yet, 2 a shot differs, 3 the page failed)")
+    v.add_argument("name", help="the visual check's name: its pictures are in <queue folder>/visual/<name>/")
+    v.add_argument("--url", required=True, help="the page's address")
+    v.add_argument("--widths", default="1440,390", help="CSS pixels, a comma list (default 1440,390)")
+    v.add_argument("--themes", default="light,dark", help="light, dark, or light,dark (default)")
+    v.add_argument("--threshold", type=float, default=0.01,
+                   help="a shot differs when more than this percent of its pixels differ (default 0.01: one changed "
+                        "word)")
+    v.add_argument("--wait", type=float, default=1.0, help="seconds after the load before the screenshot (default 1)")
+    v.add_argument("--full", action="store_true", help="the whole page, not only the window")
+    v.add_argument("--mask", action="append", default=[],
+                   help="a CSS selector of a part that changes on each load (a clock): hidden before the screenshot")
+    v.add_argument("--timeout", type=float, default=30, help="seconds for each load (default 30)")
+    v = vis.add_parser("show", help="the last run: for each shot its difference and its three pictures (approved, "
+                       "new, and the new one with the pixels that differ in red)")
+    v.add_argument("name")
+    v = vis.add_parser("approve", help="a person or the manager: the new pictures become the approved ones")
+    v.add_argument("name")
+    v.add_argument("--shot", action="append", help="only this shot, <width>-<theme> (repeatable; default: all)")
+    v.add_argument("--note", help="why the page changed on purpose")
     x = ops.add_parser("pause", help="stop a check for planned work, until a time; --resume starts it again")
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--until", help="a duration (2h) or a time (tomorrow 7:00)")
@@ -1816,6 +1841,16 @@ def run(argv=None):
         return 0
     if args.cmd == "connect":
         return connect_command(args)
+    if args.cmd == "ops" and args.ocmd == "visual" and args.vcmd in ("run", "show"):  # a plugin: its own lines only
+        from .plugins import visual
+        if args.vcmd == "show":
+            res = visual.show(args.name)
+            print(json.dumps(res) if args.json else "\n".join(visual_show_lines(res)))
+            return 0
+        res = visual.run(args.name, args.url, args.widths, args.themes, args.threshold, args.wait, args.full,
+                         args.mask, args.timeout)
+        print(json.dumps(res) if args.json else "\n".join(visual.lines(res)))
+        return res["status"]
     if args.cmd == "ops" and args.ocmd == "probe":  # a plugin: its own lines only, no briefing, no footer, no writes
         conn = core.connect()
         try:
@@ -2683,6 +2718,9 @@ def _dispatch_ops(conn, a, actor):
         return (core.ops_accept if a.ocmd == "accept" else core.ops_reject)(conn, a.scope, a.name, actor, a.note)
     if a.ocmd == "profile":
         return core.ops_profile_apply(conn, _ops_profile_file(a.file), a.scope, True, actor)
+    if a.ocmd == "visual":  # approve; run and show are plugin lines (run())
+        from .plugins import visual
+        return visual.approve(conn, a.name, a.shot, actor, a.note)
     if a.ocmd == "rm":
         return core.ops_rm(conn, a.scope, a.name, actor)
     if a.ocmd == "pause":
@@ -4521,11 +4559,27 @@ def render_ops_proposal(a, res):
         print(f"check {where}: the proposal of {p['proposed_by'] or 'a person'} rejected ({p['note']})")
 
 
+def visual_show_lines(res):
+    """maxpm ops visual show: the last run and the three pictures of each shot."""
+    out = [f"{res['name']}: {res['summary']}", f"  {res['url']}  at {res['at']}"]
+    for shot, r in res["shots"].items():
+        out.append(f"  {shot}: " + ("no approved picture yet" if r.get("diff") is None else f"{r['diff']:.2f}% differ"))
+        out += [f"    approved: {r['baseline']}"] if r.get("baseline") else []
+        out.append(f"    new:      {r['new']}")
+        out += [f"    diff:     {r['diff_image']}  (the new one, faded; red: the pixels that differ)"] if r.get("diff_image") else []
+    out.append(f"to approve the new pictures (a person or the manager): maxpm ops visual approve {res['name']} "
+               f"[--shot <shot>] --note \"<why the page changed>\"")
+    return out
+
+
 def render_ops(a, res):
     if a.ocmd == "profile":
         return render_ops_profile(a, res)
     if a.ocmd == "setup":
         return render_ops_setup(res)
+    if a.ocmd == "visual":
+        print(f"{res['name']}: approved the new pictures of {', '.join(res['approved'])} ({res['folder']})")
+        return
     if a.ocmd in ("propose", "accept", "reject"):
         return render_ops_proposal(a, res)
     if a.ocmd == "run":
