@@ -96,7 +96,10 @@ button.srow-it { cursor: pointer; }
 .sess-menu .sess-mi-end { color: var(--warn); }
 .sess-menu .sess-noopen { margin: 0; white-space: normal; }
 .sess-main .sbody { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-5) 0 var(--sp-1);
-  padding-bottom: calc(var(--sp-1) + var(--cmp-over, calc(0 * var(--hair)))); overflow-anchor: none; }
+  padding-bottom: calc(var(--sp-1) + var(--cmp-over, calc(0 * var(--hair)))); overflow-anchor: none;
+  /* A scrollbar that takes room (--sb-w, set by sessions.js) goes into the pane's side padding: the chat keeps the
+     width of the foot, so the bar and the bubbles stay one column (#5555, #5584). */
+  margin-right: calc(-1 * var(--sb-w, calc(0 * var(--hair)))); }
 .sess-main .sbar { margin-top: var(--sp-3); }
 .sess-main .sbar.hidden, .sess-main.hidden { display: none; }
 /* The note under the waits bar starts where the bar's text starts (#5321). */

@@ -228,6 +228,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
   wirePanel();
+  // The width of the chat's scrollbar when it takes room (Linux, Windows, a Mac with a mouse: 15 px; CI's Chrome showed
+  // it, #5584): sessions.css moves it into the pane's side padding, so the chat keeps the width of its foot (#5555).
+  new ResizeObserver(() => main.style.setProperty("--sb-w", (body.offsetWidth - body.clientWidth) + "px")).observe(body);
   // The chat stays in sight (#4685): in this tab an item opens over the chat or in the side panel, not in the drawer:
   // a #<id> in the chat and the item of the header open the task view (#5572), the item of a session row and an item
   // of the panel's lists open in the side panel; Items and Artifacts open there as lists.

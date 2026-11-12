@@ -398,7 +398,7 @@ try {
   const last = tables[0].querySelector("tbody tr td:last-child");
   const one = tables[0].querySelector("tbody tr:last-child td:last-child");  // 'ok': one line
   post({ broken, colw: col.getBoundingClientRect().width, panew: body.clientWidth,
-         wraps: last.getBoundingClientRect().height > 2 * one.getBoundingClientRect().height,
+         wraps: last.getBoundingClientRect().height > 1.5 * one.getBoundingClientRect().height,  // two lines or more: Linux fonts are narrower
          pageSide: body.scrollWidth - body.clientWidth,
          ownScroll: tables[1].scrollWidth > tables[1].clientWidth,
          inBubble: tables.every(t => t.getBoundingClientRect().right <= t.closest(".msg-agent").getBoundingClientRect().right + 1) });
@@ -1108,6 +1108,7 @@ try {
   q("#hdrMore").click(); scrollTo(0, 700); await sleep(150);
   out.menuKeeps = !header.classList.contains("hdr-hide");
   q("#hdrMore").click(); scrollTo(0, 0);
+  document.body.style.minHeight = "";  // the room to scroll was for Plan: its page scrollbar (CI's Chrome) narrowed the chat
   q('nav button[data-tab="sessions"]').click();
   if (!q("#sessYou").classList.contains("hidden")) q("#youBack").click();  // the first page showed You (#5102)
   await until(() => q('#sessions .srow[data-session="ag"] .srow-main'), "the row of ag");
