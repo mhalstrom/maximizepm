@@ -929,6 +929,46 @@ class Kinds(Base):
         self.assertEqual(ann[e]["conflicts"], [g])  # no folder: only its own project
         self.assertEqual(ann[f]["conflicts"], [])
 
+    def test_a_shared_file_of_more_than_conflict_max_lines_lines_makes_no_conflict(self):
+        """#5579: every item that touched river/core.py conflicted with every other one, so most work on the project
+        ran one item at a time; git merges changes in different parts of a large file."""
+        root = os.path.join(self.dir.name, "big")
+        os.makedirs(os.path.join(root, "src"))
+        for name, n in (("big.py", 2001), ("small.py", 2000)):
+            with open(os.path.join(root, "src", name), "w") as f:
+                f.write("x\n" * n)
+        core.project_add(self.c, "b", path=root)
+        one = core.item_add(self.c, "b", "one", touches=["src/big.py"])["id"]
+        two = core.item_add(self.c, "b", "two", touches=["src/big.py", "src/small.py"])["id"]
+        three = core.item_add(self.c, "b", "three", touches=["src/small.py"])["id"]
+        whole = core.item_add(self.c, "b", "the folder", touches=["src/"])["id"]
+        new = core.item_add(self.c, "b", "a new file", touches=["src/new.py"])["id"]
+        ann = core.annotate(self.c)
+        self.assertEqual(ann[one]["conflicts"], [])  # only the large file: no conflict
+        self.assertEqual(ann[two]["conflicts"], [three, whole])  # the small file still conflicts
+        self.assertEqual(ann[whole]["conflicts"], [two, three, new])  # the folder holds small and unwritten files
+        core.config_set(self.c, "conflict_max_lines", "0", project="b")  # 0: every shared file conflicts again
+        core.item_edit(self.c, one, touches=["src/big.py", "README.md"])
+        self.assertEqual(core.annotate(self.c)[one]["conflicts"], [two, whole])
+
+    def test_the_one_time_pass_removes_the_conflicts_of_a_large_file(self):
+        root = os.path.join(self.dir.name, "big")
+        os.makedirs(root)
+        with open(os.path.join(root, "big.py"), "w") as f:
+            f.write("x\n" * 3000)
+        core.project_add(self.c, "b", path=root)
+        core.config_set(self.c, "conflict_max_lines", "0", project="b")
+        one = core.item_add(self.c, "b", "one", touches=["big.py"])["id"]
+        two = core.item_add(self.c, "b", "two", touches=["big.py"])["id"]
+        self.assertEqual(core.annotate(self.c)[one]["conflicts"], [two])  # as before #5579
+        core.config_unset(self.c, "conflict_max_lines", project="b")
+        self.c.execute("DELETE FROM meta WHERE key='big_file_conflicts'")
+        self.c.commit()
+        core._migrate_big_file_conflicts(self.c)
+        self.assertEqual(core.annotate(self.c)[one]["conflicts"], [])
+        last = self.c.execute("SELECT change FROM events WHERE item_id IN (?, ?) ORDER BY id DESC", (one, two)).fetchone()
+        self.assertIn("no longer conflicts with", last["change"])
+
     def test_touch_edit_adds_and_removes_auto_conflicts(self):
         x = core.item_add(self.c, "a", "x", touches=["a.py"])["id"]
         y = core.item_add(self.c, "a", "y", touches=["b.py"])["id"]

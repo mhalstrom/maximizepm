@@ -89,6 +89,10 @@ DEFAULT_SETTINGS = {
     "owner_ttl": "8h",
     "reserve_ttl": "2h",
     "keep_prereq_limit": "3",
+    # Two open items whose --touches share a file conflict (never in progress together), but not when that file has
+    # more than this many lines (#5579): git merges changes in different parts of a large file, and each worker
+    # rebases before it merges. 0: every shared file conflicts. A change holds for the next add or edit of touches.
+    "conflict_max_lines": "2000",
     # maxpm add first looks for the same work (#2257): open items of the project, and items done in the last
     # similar_days, whose score (0 to 1, words weighted by how rare they are) reaches similar_min. Then it adds
     # nothing and shows them; maxpm add ... --new "<how it differs>" adds anyway. off: no check. maxpm duplicates
@@ -1502,7 +1506,7 @@ def schema_print():
     """One short id of the schema and of the migrations that this code runs. A change to SCHEMA or to a
     migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
     h = hashlib.sha1(SCHEMA.encode())
-    for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers):
+    for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers, _migrate_big_file_conflicts):
         h.update(_code_print(f.__code__))
     return h.hexdigest()[:16]
 
@@ -1525,8 +1529,25 @@ def _upgrade(conn):
         _graph_triggers(conn)
     _migrate_launch_agents(conn)
     _migrate_levels(conn)
+    _migrate_big_file_conflicts(conn)
     with tx(conn):
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, iso(now())))
+
+
+def _migrate_big_file_conflicts(conn):
+    """Once (#5579): the open items with automatic conflicts sync them again, so a conflict that came only from a
+    file of more than conflict_max_lines lines goes."""
+    if conn.execute("SELECT 1 FROM meta WHERE key='big_file_conflicts'").fetchone():
+        return
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM meta WHERE key='big_file_conflicts'").fetchone():
+            return
+        ids = [r[0] for r in conn.execute(
+            f"SELECT DISTINCT i.id FROM deps d JOIN items i ON i.id IN (d.item_id, d.blocked_by) WHERE d.kind="
+            f"'conflicts' AND d.auto=1 AND i.status IN {OPEN_STATES} ORDER BY i.id")]
+        for i in ids:
+            _sync_conflicts(conn, i, "maxpm")
+        conn.execute("INSERT INTO meta(key, value) VALUES ('big_file_conflicts', ?)", (iso(now()),))
 
 
 # The tables annotate reads, and their columns that a command renews without a change of the graph.
@@ -2003,7 +2024,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             re.compile(value)
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
-    elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
+    elif key in ("keep_prereq_limit", "conflict_max_lines", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
                  "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
@@ -8586,6 +8607,40 @@ def _keys_overlap(a, b):
     return a[0] == b[0] and _paths_overlap(a[1], b[1])
 
 
+_LINES = {}  # path -> (mtime, size, lines): the line counts _sync_conflicts read
+
+
+def _file_lines(path):
+    """The lines of a file, or None when it is not a file here (a directory, a file not written yet)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not os.path.isfile(path):
+        return None
+    k = _LINES.get(path)
+    if k and k[:2] == (st.st_mtime_ns, st.st_size):
+        return k[2]
+    try:
+        with open(path, "rb") as f:
+            n = sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1 << 20), b""))
+    except OSError:
+        return None
+    _LINES[path] = (st.st_mtime_ns, st.st_size, n)
+    return n
+
+
+def _keys_conflict(a, b, max_lines):
+    """Two touch keys conflict when they overlap, unless the part they share (the deeper path) is a file of more
+    than max_lines lines (#5579; 0: no limit)."""
+    if not _keys_overlap(a, b):
+        return False
+    if not max_lines or a[0] is not None:  # a path of a project with no folder: no file to count
+        return True
+    n = _file_lines(a[1] if len(a[1]) >= len(b[1]) else b[1])
+    return n is None or n <= max_lines
+
+
 def _sync_conflicts(conn, item_id, actor):
     """Keep automatic conflict links equal to the open items whose touches overlap this item's."""
     it = _item(conn, item_id)
@@ -8593,11 +8648,12 @@ def _sync_conflicts(conn, item_id, actor):
     mine = _touch_keys(it["touches"], it["project_id"], root(it["project_id"]))
     want = set()
     if it["status"] in OPEN_STATES and mine:
+        limit = int(setting(conn, "conflict_max_lines", project_id=it["project_id"]))
         for r in conn.execute(f"SELECT i.id, i.touches, i.project_id, p.path FROM items i JOIN projects p "
                               f"ON p.id=i.project_id WHERE i.id<>? AND i.status IN {OPEN_STATES} AND i.touches<>''",
                               (it["id"],)):
             theirs = _touch_keys(r["touches"], r["project_id"], r["path"])
-            if any(_keys_overlap(x, y) for x in mine for y in theirs):
+            if any(_keys_conflict(x, y, limit) for x in mine for y in theirs):
                 want.add(r["id"])
     have = {r["item_id"] if r["blocked_by"] == it["id"] else r["blocked_by"] for r in conn.execute(
         "SELECT item_id, blocked_by FROM deps WHERE kind='conflicts' AND auto=1 AND (item_id=? OR blocked_by=?)",
@@ -8605,7 +8661,8 @@ def _sync_conflicts(conn, item_id, actor):
     for other in have - want:
         lo, hi = sorted((it["id"], other))
         conn.execute("DELETE FROM deps WHERE item_id=? AND blocked_by=? AND kind='conflicts'", (lo, hi))
-        _event(conn, it["id"], actor, f"no longer conflicts with {other} (touches no longer overlap)")
+        _event(conn, it["id"], actor, f"no longer conflicts with {other} (touches no longer overlap, or share only "
+                                      f"a file of more than conflict_max_lines lines)")
     for other in sorted(want - have):
         _dep_add(conn, it["id"], other, actor, "conflicts", auto=True)
 
