@@ -10000,6 +10000,7 @@ def forget_graph():
         share.pop("ann", None)
         share.pop("ann_open", None)
         share.pop("ann_kept", None)
+        share.pop("ann_closed_kept", None)
         share.pop(("graph", True), None)
         share.pop(("graph", False), None)
 
@@ -10138,7 +10139,33 @@ def _annotate(conn, closed=True):
         return a
 
     if closed:
-        return {i: one(i, it) for i, it in items.items()}
+        share = ANN_SHARE.get()
+        graph = share.get(("graph", True)) if share is not None else None
+        if not (graph and "n" in graph):
+            return {i: one(i, it) for i, it in items.items()}
+        # A done or dropped item is computed again only when something that one() reads for it changed (#5592): its
+        # row, its project, its links and the state of the items they name, its goal tags, tracker links and queue
+        # entry, and the time zone and model settings. The done view's build computed all 5,300 of them on every
+        # poll (100 of its 150 ms). The clock does not reach a closed item: it has no due state and no depth.
+        inputs = (zone, model_defaults, ladder_text)
+        kept = share.get("ann_closed_kept")
+        old = kept["rows"] if kept and kept["db"] == graph["db"] and kept["inputs"] == inputs else {}
+        rows, keep = {}, {}
+        for i, it in items.items():
+            if is_open[i]:
+                rows[i] = one(i, it)
+                continue
+            p = projects[it["project_id"]]
+            mark = (tuple(it.values()), p["name"], p["rank"], p["archived"],
+                    tuple((b, items[b]["status"], items[b]["backlog_at"]) for b in waits_on[i]),
+                    frozenset(waited_by[i]), frozenset(feeds[i]),
+                    tuple((c, items[c]["status"], items[c]["assignee"]) for c in conflicts[i]),
+                    tags.get(i), refs.get(i), queued.get(i))
+            hit = old.get(i)
+            a = hit[1] if hit is not None and hit[0] == mark else one(i, it)
+            rows[i], keep[i] = a, (mark, a)
+        share["ann_closed_kept"] = {"db": graph["db"], "n": graph["n"], "inputs": inputs, "rows": keep}
+        return rows
 
     def more(i):  # a closed item that a caller asks for: its whole row now
         r = conn.execute("SELECT * FROM items WHERE id=?", (i,)).fetchone()

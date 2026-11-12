@@ -4298,7 +4298,8 @@ _state_cache = {}
 _state_build = threading.Lock()
 _state_gen = [0]
 _kept_graph = {}  # the newest item graph that a page build or an action read: ANN_SHARE's ("graph", closed) entries
-_GRAPH_KEYS = (("graph", True), ("graph", False), "ann_kept")  # and the open items annotate computed on it (#5585)
+# and the open items annotate computed on it (#5585), and the done items (#5592)
+_GRAPH_KEYS = (("graph", True), ("graph", False), "ann_kept", "ann_closed_kept")
 
 
 @contextlib.contextmanager

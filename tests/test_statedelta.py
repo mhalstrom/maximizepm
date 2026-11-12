@@ -226,6 +226,50 @@ class Shared(Base):
         self.assertEqual([r["title"] for r in three["rows"]["items"]["set"]], ["three"])
 
 
+class KeptDoneRows(Base):
+    """A page build computes a done item again only when what it shows of it changed (#5592)."""
+
+    def build(self):
+        server.state_changed()
+        st = server.page_state(True)
+        return {i["id"]: i for i in st["items"]}
+
+    def test_an_unchanged_done_item_is_not_computed_again(self):
+        server._kept_graph.clear()
+        self.addCleanup(server._kept_graph.clear)
+        self.build()
+        seen = []
+        one = core._item_models
+
+        def count(it, *a):
+            seen.append(it["id"])
+            return one(it, *a)
+        with unittest.mock.patch.object(core, "_item_models", count):
+            rows = self.build()
+            self.assertNotIn(self.old, seen, "the done item was kept")
+            self.assertIn(self.one, seen, "open items are computed as before")
+            self.assertEqual(rows[self.old]["unblocks"], [])
+            # A new item that waits on the done item: the done item now unblocks it.
+            later = core.item_add(self.c, "a", "later", after=[self.old])["id"]
+            seen.clear()
+            rows = self.build()
+            self.assertIn(self.old, seen)
+            self.assertEqual(rows[self.old]["unblocks"], [later])
+            # Its own row changed.
+            core.item_edit(self.c, self.old, title="old, renamed", actor="ag")
+            rows = self.build()
+            self.assertEqual(rows[self.old]["title"], "old, renamed")
+            # Its project's rank changed.
+            core.project_add(self.c, "b")
+            core.project_rank(self.c, "a", 2)
+            rows = self.build()
+            self.assertEqual(rows[self.old]["project_rank"], core.project_show(self.c, "a")["rank"])
+            # Nothing changed: kept again.
+            seen.clear()
+            self.build()
+            self.assertNotIn(self.old, seen)
+
+
 class Limits(Base):
     """The speed test of the page's data (#5590, p147): on a queue of the size of mark's (300 open items, 5,000 done,
     long notes and output), the first answer is under 1 MB gzipped, a poll after one change under 50 KB, and the
