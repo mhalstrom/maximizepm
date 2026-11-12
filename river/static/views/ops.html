@@ -9,6 +9,13 @@
   </div>
   <div class="panel hidden" id="opsFaultsBox"><h2>Open faults</h2><div id="opsFaults"></div></div>
   <div class="panel hidden" id="opsPropBox"><h2>Proposed checks</h2><div id="opsProposals"></div></div>
+  <!-- The record of every detection (#5510): also noise, planned and warnings, which open no item. -->
+  <div class="panel"><h2>Detections<span class="spacer"></span>
+    <select id="opsRecKind" class="ops-filter" title="Kind" aria-label="Kind"></select>
+    <select id="opsRecSince" class="ops-filter" title="Last seen" aria-label="Last seen">
+      <option value="1d">1 day</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="">All</option>
+    </select></h2>
+    <div id="opsRecord"></div></div>
   <div class="panel"><h2>Checks</h2><div id="opsChecks"></div></div>
 </div>
 <div id="opsDlg" class="hidden" aria-labelledby="opsDlgH"><div class="box ops-box">

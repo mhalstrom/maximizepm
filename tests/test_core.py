@@ -10320,6 +10320,45 @@ class Ops(Base):
         r = self.run_at("api", "home", t + timedelta(seconds=70), self.proc(2, "HOME CRITICAL - down"))
         self.assertEqual(r["items"][0]["action"], "opened")
 
+    def test_the_record_keeps_every_detection_also_warnings_noise_and_ones_with_no_item(self):
+        """#5510: each check or subject that a run found not ok has one row in the record, with its kind, first and last
+        seen, the count, the last evidence and the item it opened; a warning and noise open no item but are there."""
+        from river import cli
+        t = core.now() - timedelta(hours=1)
+        core.config_set(self.c, "ops_confirm", "off")
+        core.ops_add(self.c, "site", "jobs", "plugin", {"command": "x", "subject": True, "fail_after": 1}, actor="boss")
+        core.ops_add(self.c, "site", "disk", "plugin", {"command": "x"}, actor="boss")
+        self.run_at("site", "disk", t, self.proc(1, "DISK WARNING - 85% used"))
+        core.ops_noise_add(self.c, "site", "disk", "the disk fills each night and the job empties it",
+                           pattern="DISK WARNING", actor="boss")
+        self.run_at("site", "disk", t + timedelta(minutes=5), self.proc(1, "DISK WARNING - 86% used\n{\"used\": 86}"))
+        self.run_at("site", "jobs", t, self.proc(2, "JOBS CRITICAL - one failed\nbackup: CRITICAL exit 1\nmail: OK done"))
+        self.run_at("site", "disk", t + timedelta(minutes=10), self.proc(0, "DISK OK - 40% used"))
+        rec = core.ops_detections(self.c, "site")
+        by = {r["key"]: r for r in rec["rows"]}
+        self.assertEqual(sorted(by), ["ops:site:disk", "ops:site:jobs:backup"])  # the check itself: a subject is not ok
+        disk, backup = by["ops:site:disk"], by["ops:site:jobs:backup"]
+        self.assertEqual((disk["status"], disk["count"], disk["kind"], disk["item_id"], disk["summary"], disk["evidence"]),
+                         ("warning", 2, "noise", None, "DISK WARNING - 86% used", '{"used": 86}'))
+        self.assertEqual((disk["first_seen"], disk["last_seen"]), (core.iso(t), core.iso(t + timedelta(minutes=5))))
+        item = core._ops_item(self.c, "ops:site:jobs:backup")
+        self.assertEqual((backup["status"], backup["count"], backup["subject"], backup["item_id"], backup["summary"]),
+                         ("critical", 1, "backup", item["id"], "exit 1"))
+        self.assertEqual(backup["kind"], "unknown")
+        self.assertEqual(rec["kinds"], {"noise": 1, "unknown": 1})
+        self.assertEqual([r["key"] for r in core.ops_detections(self.c, "site", kind="noise")["rows"]], ["ops:site:disk"])
+        self.assertEqual([r["key"] for r in core.ops_detections(self.c, check="jobs")["rows"]], ["ops:site:jobs:backup"])
+        self.assertEqual(core.ops_detections(self.c, since="30m")["rows"], [])
+        with self.assertRaisesRegex(RiverError, "no kind 'loud'"):
+            core.ops_detections(self.c, kind="loud")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "ops", "record", "--project", "site"])
+        lines = out.getvalue().splitlines()
+        self.assertIn("noise  site/disk  warning, 2x since", lines[0])
+        self.assertTrue(lines[0].endswith("  no item"))
+        self.assertEqual(lines[-1], "kinds: noise 1, unknown 1")
+
     # ---- running the checks (#5430)
 
     def run_at(self, scope, name, at, runner=None, http=None):

@@ -1192,6 +1192,30 @@ CREATE TABLE IF NOT EXISTS ops_noise (
 );
 CREATE INDEX IF NOT EXISTS ops_noise_check ON ops_noise(check_id);
 
+-- The record of every detection (#5510): one row for each key (a check, or one subject of it) that a run found not
+-- ok, also noise, planned and WARNING ones. ops_finish writes it after each run; maxpm ops record and the page's
+-- Operations view read it.
+CREATE TABLE IF NOT EXISTS ops_detections (
+  id          INTEGER PRIMARY KEY,
+  check_id    INTEGER NOT NULL,
+  key         TEXT NOT NULL UNIQUE,      -- ops:<scope>:<check>[:<subject>]
+  scope_kind  TEXT NOT NULL,
+  scope       TEXT NOT NULL,
+  check_name  TEXT NOT NULL,
+  subject     TEXT,
+  status      TEXT NOT NULL,             -- of the last run that found it: warning, critical, unknown
+  kind        TEXT,                      -- by the rules of kinds.json (ops_kind), at the last run
+  why         TEXT,
+  first_seen  TEXT NOT NULL,
+  last_seen   TEXT NOT NULL,
+  count       INTEGER NOT NULL DEFAULT 1,  -- the runs that found it
+  summary     TEXT,
+  evidence    TEXT,                      -- the last run's evidence object, else the end of its output
+  item_id     INTEGER,                   -- the fault item it opened, if any
+  run_id      INTEGER                    -- the last run that found it
+);
+CREATE INDEX IF NOT EXISTS ops_detections_seen ON ops_detections(last_seen);
+
 CREATE TABLE IF NOT EXISTS session_samples (
   id          INTEGER PRIMARY KEY,
   at          TEXT NOT NULL,
@@ -5210,10 +5234,11 @@ def ops_finish(conn, run, at=None):
         if again is not None:
             with tx(conn):
                 conn.execute("UPDATE ops_runs SET confirms=? WHERE id=?", (run["id"], again["id"]))
-            first, found = rec, run
+            first, found, first_res = rec, run, res
             run, res = again, ops_execute(again, at)
             rec = ops_record(conn, again, res, at)
             rec["confirms"] = first["run"]
+            ops_detect(conn, found, first_res, {}, at)  # the first run found it too
             # One change for each key across both runs: healthy, then failing, then fault is healthy to fault.
             merged = {}
             for ch in first["changes"] + rec["changes"]:
@@ -5226,13 +5251,86 @@ def ops_finish(conn, run, at=None):
             if watch:
                 rec["watch"] = _ops_watch_end(conn, again if again["id"] in watch["runs"] else found, rec, watch,
                                               rec["items"])
+            ops_detect(conn, run, res, rec, at)
             return rec
     watch = _ops_watch_of_run(conn, run)
     rec["verdicts"] = ops_cause_verdicts(conn, run, rec)  # first: a failed verdict opens the item again
     rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at, watch)
     if watch:
         rec["watch"] = _ops_watch_end(conn, run, rec, watch, rec["items"])
+    ops_detect(conn, run, res, rec, at)
     return rec
+
+
+def ops_detect(conn, run, res, rec, at=None):
+    """The record of every detection (#5510): each key of the run that is not ok (the check, or each subject that is
+    not ok; the check itself only when no subject is) adds to its row: last seen, the count, the status, its kind by
+    the rules (the kind ops_faults gave it, else ops_kind now), the evidence, and the item it opened. Noise, planned
+    and WARNING ones are recorded too; they open no item. Never an error: the record must not stop a run."""
+    at = at or now()
+    try:
+        row = conn.execute("SELECT * FROM checks WHERE id=?", (run["check"]["id"],)).fetchone()
+        if row is None:
+            return []
+        c = _ops_row(row)
+        found = []
+        for name, s in sorted((res.get("subjects") or {}).items()) if c["subject"] else []:
+            if (s.get("status") or "ok") != "ok":
+                found.append((_ops_key(c, name), name, dict(res, status=s["status"], summary=s.get("text") or
+                                                            res.get("summary"))))
+        if not found and res.get("status") not in (None, "ok"):
+            found.append((c["key"], None, res))
+        if not found:
+            return []
+        done = {x["key"]: x for x in (rec or {}).get("items") or []}
+        rules = ops_noise_rules(conn, c, at)
+        out = []
+        for key, sub, r in found:
+            k = ops_kind(conn, c, key, r, at, rules)  # what ops_faults found for a fault too: the rules are fixed
+            open_item = _ops_item(conn, key)
+            item = done.get(key, {}).get("item") or (open_item["id"] if open_item else None)
+            ev = json.dumps(r["evidence"])[:4000] if r.get("evidence") else (r.get("output") or "")[-2000:] or None
+            out.append((run["check"]["id"], key, c["scope_kind"], c["scope"], c["name"], sub, r["status"], k["kind"],
+                        k.get("why"), iso(at), iso(at), (r.get("summary") or "")[:500], ev, item, run["id"]))
+        with tx(conn):
+            conn.executemany(
+                "INSERT INTO ops_detections(check_id,key,scope_kind,scope,check_name,subject,status,kind,why,first_seen,"
+                "last_seen,summary,evidence,item_id,run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO "
+                "UPDATE SET status=excluded.status, kind=excluded.kind, why=excluded.why, last_seen=excluded.last_seen, "
+                "count=count+1, summary=excluded.summary, evidence=excluded.evidence, item_id=COALESCE(excluded.item_id, "
+                "item_id), run_id=excluded.run_id, check_id=excluded.check_id", out)
+        return [x[1] for x in out]
+    except (sqlite3.Error, RiverError, KeyError, TypeError, ValueError):
+        return []
+
+
+def ops_detections(conn, project=None, kind=None, since=None, check=None, limit=50):
+    """maxpm ops record: the detections of a project and its target (or of every scope), newest first; kind: one
+    kind; since: last seen within a duration (7d); check: one check's name. Also the count of each kind among
+    them, for the filters."""
+    where, args = [], []
+    if project:
+        scopes = _ops_scopes(conn, project)
+        where.append("(" + " OR ".join("(scope_kind=? AND scope=?)" for _ in scopes) + ")")
+        args += [x for sc in scopes for x in sc]
+    if kind:
+        if kind not in ops_kinds()["kinds"]:
+            raise RiverError(f"no kind {kind!r}; the kinds: {', '.join(ops_kinds()['kinds'])} (maxpm ops kinds)")
+        where.append("kind=?")
+        args.append(kind)
+    if since:
+        where.append("last_seen>=?")
+        args.append(iso(now() - parse_duration(since)))
+    if check:
+        where.append("check_name=?")
+        args.append(check)
+    sql = " WHERE " + " AND ".join(where) if where else ""
+    rows = [dict(r) for r in conn.execute(f"SELECT * FROM ops_detections{sql} ORDER BY last_seen DESC, id DESC LIMIT ?",
+                                          (*args, int(limit)))]
+    by = {r["kind"]: r["n"] for r in conn.execute(f"SELECT kind, count(*) AS n FROM ops_detections{sql} GROUP BY kind",
+                                                  args)}
+    return {"project": project, "kind": kind, "since": since, "check": check, "rows": rows, "kinds": by,
+            "all_kinds": list(ops_kinds()["kinds"])}
 
 
 # ---- fault items (#5431): a fault opens one operational item for its key, the queue's ordinary work. No model call.

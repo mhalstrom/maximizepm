@@ -4714,6 +4714,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": str(e)})
             finally:
                 conn.close()
+        if path == "/api/ops/record":
+            # The record of every detection (#5510): core.ops_detections, with the filters of the Operations view.
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+            conn = core.connect()
+            try:
+                return self._send(200, core.ops_detections(conn, q.get("project") or None, q.get("kind") or None,
+                                                           q.get("since") or None, q.get("check") or None,
+                                                           max(1, min(int(q.get("n") or 50), 500))))
+            except (RiverError, ValueError) as e:
+                return self._send(400, {"error": str(e)})
+            finally:
+                conn.close()
         if path == "/api/ops":
             # The Operations view of Plan (#5438): core.ops_view, the checks of the scope's project and its target.
             from urllib.parse import parse_qs, urlsplit

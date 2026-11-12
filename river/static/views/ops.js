@@ -3,6 +3,7 @@
 // link their items; a proposed check has Accept and Reject (a reason). Run once, Pause and Resume act on a check.
 // Add a check asks the plain questions of maxpm ops setup for the four forms, runs the check once in maxpm serve
 // (op ops_trial, it keeps nothing), and keeps it when that run passed, or on a second press when it did not.
+// Detections: GET api/ops/record (core.ops_detections) with the kind and time filters (#5510).
 import { $, esc, toast, act, ago, left, getJson } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { button } from "../components/button.js";
@@ -65,13 +66,38 @@ function proposalCard(p) {
   </div>`;
 }
 
+// One detection of the record (#5510): its kind, the check (and subject), how often and when, and its item.
+const QUIET = new Set(["noise", "planned"]);
+function detectionRow(r) {
+  const seen = `${esc(r.status)} · ${r.count}× · ${ago(r.last_seen)}${r.count > 1 ? " · first " + ago(r.first_seen) : ""}`;
+  return `<div class="ops-det">
+    <div class="ops-head">${chip(QUIET.has(r.kind) ? "c-p" : "c-waiting", esc(r.kind || "?"))}<b>${esc(r.check_name)}${r.subject ? ":" + esc(r.subject) : ""}</b>
+      <span class="muted t-s">${seen}</span><span class="spacer"></span>
+      ${r.item_id ? `<span class="link t-s" data-open="${r.item_id}">#${r.item_id}</span>` : `<span class="muted t-s">no item</span>`}</div>
+    <div class="muted t-s ops-sum">${esc(r.summary || "")}</div>
+  </div>`;
+}
+
+function drawRecord(R) {
+  const sel = $("#opsRecKind"), was = sel.value;
+  sel.innerHTML = `<option value="">All kinds</option>` + R.all_kinds.map(k =>
+    `<option value="${esc(k)}">${esc(k)}${R.kinds[k] ? ` (${R.kinds[k]})` : ""}</option>`).join("");
+  sel.value = was;
+  $("#opsRecord").innerHTML = R.rows.map(detectionRow).join("") || empty("No detections in this time.");
+}
+
 export async function renderOps(force) {
   if (!planShown("ops")) return;
   const q = new URLSearchParams(); if (scope.project) q.set("project", scope.project);
-  try { V = await getJson("api/ops?" + q); } catch (e) { $("#opsNote").textContent = e.message; return; }
+  const rq = new URLSearchParams(q);
+  if ($("#opsRecKind").value) rq.set("kind", $("#opsRecKind").value);
+  if ($("#opsRecSince").value) rq.set("since", $("#opsRecSince").value);
+  let R;
+  try { [V, R] = await Promise.all([getJson("api/ops?" + q), getJson("api/ops/record?" + rq)]); }
+  catch (e) { $("#opsNote").textContent = e.message; return; }
   const box = $("#plan-ops");
   if (!force && box.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;  // keep a reason they type
-  const s = JSON.stringify([V, scope.project]);
+  const s = JSON.stringify([V, R, scope.project]);
   if (s === sig && !force) return;
   sig = s;
   const C = V.checks, where = scope.project ? `${esc(scope.project)}${V.scopes.length > 1 ? " and its target " + esc(V.scopes[1].name) : ""}` : "all projects";
@@ -83,7 +109,10 @@ export async function renderOps(force) {
   $("#opsPropBox").classList.toggle("hidden", !V.proposals.length);
   $("#opsProposals").innerHTML = V.proposals.map(proposalCard).join("");
   $("#opsChecks").innerHTML = C.map(checkCard).join("") || empty("No checks.");
+  drawRecord(R);
 }
+$("#opsRecKind").addEventListener("change", () => renderOps(true));
+$("#opsRecSince").addEventListener("change", () => renderOps(true));
 
 // Add a check: the scopes, the four forms and their plain questions come from api/ops.
 const dlg = makeDialog($("#opsDlg"));

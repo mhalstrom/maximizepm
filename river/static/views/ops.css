@@ -12,6 +12,9 @@
 .ops-critical { background: var(--warn); }
 .ops-unknown { background: var(--muted); }
 .ops-fault { padding: var(--sp-2) 0; overflow-wrap: anywhere; }
+.ops-det { border-top: var(--hair) solid var(--line); padding: var(--sp-3) 0; }
+.ops-det:first-child { border-top: 0; padding-top: 0; }
+.ops-filter { width: auto; }
 .ops-why { flex: 1; min-width: var(--w-input-m); }
 .ops-until { width: auto; }
 .ops-box { --dlg-w: var(--w-dlg-m); }

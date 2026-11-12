@@ -1114,6 +1114,13 @@ def build_parser(only=None):
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--form", choices=list(core.OPS_FORMS), help="another form; give its settings too")
     ops_fields(x, False)
+    x = ops.add_parser("record", help="the record of every detection: each check or subject a run found not ok "
+                       "(also noise, planned and warnings), its kind, first and last seen, how often, and its item")
+    x.add_argument("--project", help="the project and its deploy target (default: all)")
+    x.add_argument("--kind", help="one kind (maxpm ops kinds)")
+    x.add_argument("--since", help="last seen within this time, for example 7d")
+    x.add_argument("--check", help="one check's name")
+    x.add_argument("-n", type=int, default=50, help="at most this many (default 50)")
     x = ops.add_parser("list", help="the checks, of one project or deploy target or of all")
     x.add_argument("scope", nargs="?")
     x = ops.add_parser("show", help="one check, its last runs and its last changes of state")
@@ -3082,6 +3089,8 @@ def _setup_profile(conn, name, scope, actor):
 
 
 def _dispatch_ops(conn, a, actor):
+    if a.ocmd == "record":
+        return core.ops_detections(conn, a.project, a.kind, a.since, a.check, a.n)
     if a.ocmd == "list":
         return core.ops_list(conn, a.scope)
     if a.ocmd == "show":
@@ -5141,6 +5150,19 @@ def render_schedule(a, res):
 
 
 def render_ops(a, res):
+    if a.ocmd == "record":
+        if not res["rows"]:
+            print("no detections" + (f" of kind {res['kind']}" if res["kind"] else "") +
+                  (f" in the last {res['since']}" if res["since"] else "") + (f" of {res['project']}" if res["project"] else ""))
+        for r in res["rows"]:
+            sub = f":{r['subject']}" if r["subject"] else ""
+            item = f"  #{r['item_id']}" if r["item_id"] else "  no item"
+            print(f"{core.show_time(r['last_seen'])}  {r['kind'] or '?'}  {r['scope']}/{r['check_name']}{sub}  "
+                  f"{r['status']}, {r['count']}x since {core.show_time(r['first_seen'])}{item}")
+            print(f"    {r['summary'] or ''}")
+        if res["kinds"]:
+            print("kinds: " + ", ".join(f"{k} {n}" for k, n in sorted(res["kinds"].items(), key=lambda kv: -kv[1])))
+        return
     if a.ocmd == "noise":
         if a.oncmd == "list":
             for r in res["rules"]:
