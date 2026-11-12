@@ -214,7 +214,8 @@ DETECT = {
     "hint": r"\bEnter select\b",
 }
 
-INPUT = {"native": None}
+# Stop on the Sessions tab (#5547): Esc cancels the running turn.
+INPUT = {"native": None, "interrupt": ["Escape"]}
 
 # ---------------------------------------------------------------------------------------------------------------
 # Chat log: the thread from `amp threads export`, kept as JSONL beside the queue

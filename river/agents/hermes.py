@@ -271,7 +271,8 @@ DETECT = {
     "image_paste": None,
 }
 
-INPUT = {"native": None}
+# Stop on the Sessions tab (#5547): Ctrl+C ends the turn; a second one at the prompt quits.
+INPUT = {"native": None, "interrupt": ["C-c"]}
 
 # ---------------------------------------------------------------------------------------------------------------
 # 6. Chat log

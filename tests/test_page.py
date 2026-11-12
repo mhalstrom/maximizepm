@@ -704,6 +704,43 @@ try {
         sent = [c[-1] for c in self.tmux.calls if c[0] == "set-buffer"]
         self.assertTrue(any(x.startswith(" Attached files:") and "notes.txt\n\nfirst line for ag" in x for x in sent), sent)
 
+    def _stop_and_send_now(self, size):
+        """#5547: ag waits at a permission prompt in its pane, so it can be stopped: Stop stands in the head, beside
+        its state, and the bolt beside the send arrow is Send now. Both fit the head and the box at this width."""
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag" && !q("#sessText").disabled
+                    && q("#sessStop [data-stop]"), "the chat of ag with Stop");
+  const box = (s) => q(s).getBoundingClientRect(), head = q(".sess-head");
+  const out = { headFits: head.scrollWidth <= head.clientWidth + 1, stopIn: box("#sessStop button").right <= innerWidth,
+                nowHidden: box("#sessNow").width === 0 };
+  const x = q("#sessText"); x.focus(); x.setRangeText("use the other file", 0, 0, "end");
+  x.dispatchEvent(new Event("input", { bubbles: true }));
+  await until(() => box("#sessNow").width > 0, "Send now shows with text");
+  out.nowIn = box("#sessNow").right <= box("#sessSend").left + 1 && box("#sessSend").right <= innerWidth;
+  q("#sessNow").click();
+  await until(() => x.value === "", "Send now empties the box");
+  await fetch("/__step/after_now");
+  await until(() => q("#sessOpen [data-stop]"), "Stop its turn in the menu");
+  out.menu = [...q("#sessOpen").querySelectorAll("button, a")].map(b => b.childNodes[0].textContent.trim());
+  q("#sessStop [data-stop]").click();
+  await sleep(400);
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        keys = {}
+        self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
+        self.pane["keys"].clear()
+        got = self.drive(driver, "/sessions/ag", size=size, steps={"after_now": lambda: keys.update(now=list(self.pane["keys"]))})
+        self.assertEqual(got, {"headFits": True, "stopIn": True, "nowHidden": True, "nowIn": True,
+                               "menu": ["Open on claude.ai", "Stop its turn", "Pin to the top", "Settings", "End"]})
+        self.assertEqual(keys["now"], ["Escape", "use the other file", "Enter"])
+        self.assertEqual(self.pane["keys"][3:], ["Escape"])  # Stop
+
+    def test_stop_and_send_now_at_desktop_width(self):
+        self._stop_and_send_now("1280,900")
+
+    def test_stop_and_send_now_at_phone_width(self):
+        self._stop_and_send_now("390,844")
+
     def test_the_sessions_tab_on_a_phone(self):
         """#4885: at phone width the page is no wider than the screen, each field has 16 px text (Safari on iOS zooms
         into a smaller one), and the Sessions tab shows the chat of one session or the list: Sessions goes back to

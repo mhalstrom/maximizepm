@@ -54,3 +54,21 @@ class QueuedMidTurn(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Interrupted(unittest.TestCase):
+    """#5547: Esc in its terminal (or Stop on the Sessions tab) ends the turn. Claude Code writes a user line for it:
+    the chat shows 'stopped', no turn of the person, and the session is idle."""
+
+    def line(self, text):
+        return {"type": "user", "isSidechain": False, "timestamp": "2026-11-12T08:00:00Z",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+
+    def test_an_interrupt_is_an_event_and_ends_the_turn(self):
+        for text in ("[Request interrupted by user]", "[Request interrupted by user for tool use]"):
+            out, turn = claude.parse_chat_line(self.line(text))
+            self.assertEqual(([(e["role"], e["text"]) for e in out], turn), ([("event", "stopped")], "idle"))
+
+    def test_a_prompt_in_brackets_is_still_the_persons_turn(self):
+        out, turn = claude.parse_chat_line(self.line("[draft] look at the header"))
+        self.assertEqual(([e["role"] for e in out], turn), (["user"], "working"))

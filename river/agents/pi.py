@@ -100,7 +100,8 @@ CHAT = {"compressed": False, "file_tools": ["write", "edit"], "ref": "session", 
 
 STATE = {"state": "hook", "session_id": "hook"}
 
-INPUT = {"native": None}
+# Stop on the Sessions tab (#5547): Esc aborts the running turn.
+INPUT = {"native": None, "interrupt": ["Escape"]}
 
 # Pi's built-in slash commands (BUILTIN_SLASH_COMMANDS of dist/core/slash-commands.js, Pi 1.5.2), in its order, with
 # the argument hints of docs/slash-commands.md; /mcp from the same page (built-in MCP support is on unless --no-mcp).

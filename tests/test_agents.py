@@ -93,6 +93,19 @@ class Contract(Env):
         with self.assertRaisesRegex(RiverError, r"agent 'nosuch' is not registered.*claude, codex.*agents/<id>\.py"):
             agents.get("nosuch")
 
+    def test_each_built_in_agent_names_its_interrupt_keys(self):
+        """#5547: Stop on the Sessions tab types an agent's own keys; every built-in agent has them, and the check
+        refuses a key that MaximizePM does not send for a stop."""
+        for mid in agents.BUILTIN:
+            keys = agents.get(mid).input.get("interrupt")
+            self.assertTrue(keys and set(keys) <= set(agents.INTERRUPT_KEYS), (mid, keys))
+        self.assertEqual(agents.check(module(DESCRIBE=GOOD, INPUT={"native": None, "interrupt": None}), "pi"), [])
+        for bad in ([], ["Enter"], ["C-d"]):
+            got = agents.check(module(DESCRIBE=GOOD, INPUT={"native": None, "interrupt": bad}), "pi")
+            self.assertTrue(any("INPUT['interrupt']" in p for p in got), (bad, got))
+        page = {a["id"]: a["interrupt"] for a in agents.page_list()["agents"]}
+        self.assertEqual((page["claude"], page["opencode"], page["copilot"]), (["Escape"], ["Escape", "Escape"], ["C-c"]))
+
     def test_check_names_each_problem(self):
         self.assertEqual(agents.check(module(DESCRIBE=GOOD), "pi"), [])
         self.assertEqual(agents.check(module(), "x"), ["it has no DESCRIBE (the describe part is required)"])

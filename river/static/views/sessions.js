@@ -40,7 +40,19 @@ const putHtml = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h;
 const MI = "sess-mi";
 function headerOpen(s) {
   const set = s.provider ? button("Settings", { cls: MI, data: { settings: s.name }, title: "This session's settings" }) : "";
-  return headerOpenBtn(s) + pinRow(s) + set + (s.running ? endButton(s, { cls: MI + " sess-mi-end" }) : "");
+  return headerOpenBtn(s) + stopRow(s) + pinRow(s) + set + (s.running ? endButton(s, { cls: MI + " sess-mi-end" }) : "");
+}
+// Stop (#5547, mark 2026-11-12): ends the running turn now, as Esc in its terminal; the session keeps its context and
+// item. Only while it runs a turn (or waits at a prompt) in a tmux pane here. The keys are its agent's
+// (components/agents.js interrupt); an agent with none says so in the row.
+const STOPS = ["working", "prompt", "stopping"];
+const stopKeys = (s) => (agentOf(s.provider || s.agent_type) || mainAgent() || {}).interrupt || [];
+const canStop = (s, state) => !!(s.running && s.terminal && STOPS.includes(state));
+function stopRow(s) {
+  if (!canStop(s, s.state)) return "";
+  if (stopKeys(s).length) return button("Stop its turn", { cls: MI, data: { stop: s.name }, title: "End its turn now" });
+  const why = `${(agentOf(s.provider || s.agent_type) || {}).label || "Its agent"} has no key that stops a turn`;
+  return button(`Stop its turn<span class="muted sess-noopen">${esc(why)}</span>`, { cls: MI, disabled: true, title: why });
 }
 // Pin and Unpin of a worker in the ⋯ menu (#5400): a touch screen has no hover, so the row's pin does not show there.
 function pinRow(s) {
@@ -327,7 +339,12 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // The state in the head of the opened session: its row's (#5364), drawn after each read of the list or of the session.
   function drawState() {
     if (!agent || !lastRead || lastRead.agent !== agent) return;
-    putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(headState(list.find(x => x.name === agent), lastRead, listRead)));
+    const row = list.find(x => x.name === agent), st = headState(row, lastRead, listRead);
+    putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(st));
+    const s = { ...(row || {}), provider: lastRead.provider, running: !!row, terminal: lastRead.terminal };
+    const stop = canStop(s, st.state) && stopKeys(s).length > 0;
+    putHtml($("#sessStop"), stop ? button("Stop", { cls: "sess-stopbtn", data: { stop: agent }, title: "End its turn now" }) : "");
+    $("#sessBar").classList.toggle("can-now", stop);
   }
 
   // The rows from the list as it is now: refresh after each read, and a pin at once (#5400).
@@ -392,7 +409,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       agePending(col);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
-      lastRead = { agent, provider: j.provider, state: j.state, state_label: j.state_label };
+      lastRead = { agent, provider: j.provider, state: j.state, state_label: j.state_label, terminal: j.terminal };
       drawState();
       waitLine(j);
       lastCache = j.cache || null;  // the expert's prompt cache (#5023): the header says it, and a send checks it
@@ -404,7 +421,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       barFor(j.terminal, list.some(x => x.name === agent) ? s : { ended: true });
       dict.showFor(list.some(x => x.name === agent) && !!j.terminal);
       putHtml($("#sessOpen"), headerOpen({ ...s, running: list.some(x => x.name === agent), session_url: j.session_url,
-                                               terminal: j.terminal }));
+                                               terminal: j.terminal, provider: j.provider,
+                                               state: headState(list.find(x => x.name === agent), lastRead, listRead).state }));
       renderGive(agent);
       // The first read shows the end; later new lines are followed. With no new line the chat stays where it is, so
       // a poll while the person types moves nothing (#5111).
@@ -469,7 +487,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
-    for (const id of ["#sessState", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
+    for (const id of ["#sessState", "#sessStop", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
     renderGive(name);
     loadPrompts(name);
     loadDraft(name);
@@ -557,7 +575,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   }
   // The composer (components/composer.js, #5078) grows with the text; Enter sends, Shift+Enter starts a new line.
   $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message for the session's terminal",
-    attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line." });
+    attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line.",
+    nowTitle: "Stop and send now" });
   const text = $("#sessText");
   // The box grows with its text, up to a third of the window, upward over the chat (#5111): the chat keeps its frame
   // and its scroll, so nothing in it moves while the person types. A hidden copy of the box measures the text, so the
@@ -585,10 +604,12 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   };
   // Empty messages send nothing. Files being read reserve a slot, and Send waits until they are ready.
   const FILE_MAX = 10 * 1024 * 1024, FILE_COUNT = 5;
-  let files = [], sending = false;
+  let files = [], sending = false, nowNext = false;
+  // Send now (#5547): the bolt beside the arrow ends the session's turn, then sends; the arrow queues as before.
+  $("#sessNow").addEventListener("click", () => { if (!empty()) { nowNext = true; $("#sessBar").requestSubmit(); } });
   const empty = () => !text.value.trim() && !files.length;
   const sendState = () => {
-    $("#sessSend").disabled = text.disabled || sending || empty() || files.some(f => f.reading);
+    $("#sessSend").disabled = $("#sessNow").disabled = text.disabled || sending || empty() || files.some(f => f.reading);
     composerState($("#sessBar"), !empty());
     $("#sessAttach").disabled = $("#sessPickFiles").disabled = text.disabled || sending;
   };
@@ -606,7 +627,12 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   });
   text.addEventListener("keydown", (e) => {
     if (slash.keydown(e)) { e.preventDefault(); e.stopPropagation(); return; }
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); slash.close(); if (!empty()) $("#sessBar").requestSubmit(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault(); slash.close();
+      // Ctrl+Enter (Cmd+Enter on a Mac) is Send now while the session runs a turn (#5547); Enter sends as before.
+      nowNext = (e.ctrlKey || e.metaKey) && $("#sessBar").classList.contains("can-now");
+      if (!empty()) $("#sessBar").requestSubmit();
+    }
     else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && recall(e.key === "ArrowUp" ? 1 : -1, e)) e.preventDefault();
   });
   // The earlier prompts (#4855), as in a shell: Up brings back the prompts sent to this session from this box,
@@ -781,7 +807,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // transcript has it too when the session reads it as a prompt.
   $("#sessBar").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const input = $("#sessText"), btn = $("#sessSend"), to = agent;
+    const input = $("#sessText"), btn = $("#sessSend"), to = agent, now = nowNext;
+    nowNext = false;
     // A command whose view the Usage panel gives (#5224: /usage, /context, /cost, /status, /stats with no argument):
     // the panel only reads, so it opens also for a session that the page cannot type into; nothing goes to it.
     if (to && !sending && !files.length && /^\/\S+\s*$/.test(input.value)) {
@@ -830,8 +857,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     let ok = true;
     try {
       const sent = files, typed = input.value;
-      const r = await typeAction("session_send", { agent: to, text: typed,
+      const got = await typeAction(now ? "session_interrupt" : "session_send", { agent: to, text: typed,
         ...(sent.length ? { files: sent.map(f => f.id ? { name: f.name, id: f.id } : { name: f.name, data: f.data }) } : {}) });
+      const r = now ? got.sent || {} : got;  // Send now: the interrupt's keys, then the message as Send sends it
+      if (now) toast(`${to}: its turn stopped; your message went at once`);
       if (to === agent) {
         col.querySelector(".sl-none")?.remove();
         // A slash command to an agent whose chat log does not record one (CHAT['commands'], #5253: Hermes) never
@@ -866,7 +895,17 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     await refresh();
     if (name === agent) poll();
   }
+  // Stop (#5547): the agent's interrupt keys go to its pane; the head then says it is at its prompt.
+  async function stopIt(name) {
+    headMore(false);
+    try { await typeAction("session_interrupt", { agent: name }); } catch (err) { return toast(err.message, true); }
+    toast(`${name}: its turn stopped`);
+    await refresh();
+    if (name === agent) poll();
+  }
+  $("#sessStop").addEventListener("click", (e) => { const b = e.target.closest("[data-stop]"); if (b) stopIt(b.dataset.stop); });
   $("#sessOpen").addEventListener("click", (e) => {
+    const stp = e.target.closest("[data-stop]"); if (stp) return stopIt(stp.dataset.stop);
     const end = e.target.closest("[data-end]"); if (end) return endIt(end.dataset.end);
     const pn = e.target.closest("[data-pin-to]"); if (pn) return setPin(pn.dataset.pinName, pn.dataset.pinTo === "on");
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);

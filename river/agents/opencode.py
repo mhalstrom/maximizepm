@@ -128,7 +128,8 @@ DETECT = {
     "row": r"^\s*(\S.*?)\s{3,}(?:ctrl\+f fullscreen\s+)?(?:⇆|left/right) select\s+enter confirm",
 }
 
-INPUT = {"native": None}
+# Stop on the Sessions tab (#5547): the first Esc shows 'esc again to interrupt'; the second ends the turn.
+INPUT = {"native": None, "interrupt": ["Escape", "Escape"]}
 
 # The built-in slash commands of the TUI (its "/" list, OpenCode 2.2.7).
 COMMANDS = [

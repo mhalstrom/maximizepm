@@ -2821,13 +2821,15 @@ def send_keys(pane, keys):
     return len(keys)
 
 
-def _typing_pane(conn, agent, who, shell=False):
+def _typing_pane(conn, agent, who, shell=False, manager=False):
     """The tmux pane a person may type into for this agent; RiverError for an agent, or with no pane. shell: the pane
     may show only a shell (the Terminal tab, where a person types keys into the pane on purpose); the message box,
-    the answer card and the settings never type into a shell (#5298)."""
+    the answer card and the settings never type into a shell (#5298). manager: the active manager may type too
+    (maxpm interrupt, #5547)."""
     row = conn.execute("SELECT kind FROM agents WHERE name=?", (who,)).fetchone() if who else None
-    if row and row["kind"] != "human":
-        raise RiverError("only a person types into an agent's terminal")
+    if row and row["kind"] != "human" and not (manager and who == core.active_manager(conn)):
+        raise RiverError("only a person or the manager types into an agent's terminal" if manager
+                         else "only a person types into an agent's terminal")
     pane = agent_terminals(conn).get(agent)
     if not pane:
         raise RiverError(f"{agent} does not run in a tmux pane on this computer")
@@ -2959,7 +2961,7 @@ def _uploaded(agent, fid):
     return str(path)
 
 
-def session_send(conn, agent, text, who=None, images=None, files=None):
+def session_send(conn, agent, text, who=None, images=None, files=None, manager=False):
     """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
     Enter; text of several lines goes as one bracketed paste. An empty message sends nothing (#4617): the ! dialog
     answers a prompt. The text comes from the person: river types nothing by itself."""
@@ -2970,7 +2972,7 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
     if attachments is not None and (not isinstance(attachments, list) or len(attachments) > UPLOADS_PER_SEND):
         raise RiverError(f"at most {UPLOADS_PER_SEND} files go with one message")
     if attachments:
-        pane = _typing_pane(conn, agent, who)
+        pane = _typing_pane(conn, agent, who, manager=manager)
         paths, saved = [], []
         try:
             for f in attachments:
@@ -3011,7 +3013,7 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
             # mark 2026-11-11: the Settings dialog does this command; its picker would wait in the terminal for keys.
             raise RiverError(f"/{cmd['name']} with no argument opens a picker in the terminal: change the "
                              f"{cmd['setting']} in the session's Settings, or type /{cmd['name']} <value>")
-        pane = _typing_pane(conn, agent, who)
+        pane = _typing_pane(conn, agent, who, manager=manager)
         send_keys(pane, [{"text": text}])
         time.sleep(ENTER_PAUSE)
         send_keys(pane, [{"key": "Enter"}])
@@ -3026,7 +3028,7 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
         return out
     # Several lines: a bracketed paste, which the agent CLI takes as one text (a typed new line would end the
     # prompt early), then Enter.
-    pane = _typing_pane(conn, agent, who)
+    pane = _typing_pane(conn, agent, who, manager=manager)
     _tmux("set-buffer", "-b", "maxpm-send", "--", text)
     _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
     time.sleep(ENTER_PAUSE)
@@ -3035,6 +3037,42 @@ def session_send(conn, agent, text, who=None, images=None, files=None):
     return {"agent": agent, "pane": pane, "sent": 2, "text": text}
 
 
+def session_interrupt(conn, agent, who=None, message=None, files=None, manager=False):
+    """Stop on the Sessions tab and maxpm interrupt (#5547, mark 2026-11-12: 'no way to stop a session like hitting
+    ctrl c in the terminal or to instantly send a message, they just get queued'): the agent's own interrupt keys
+    (its adapter's INPUT['interrupt']: Esc for Claude Code) go into its tmux pane, as a person presses them there. The
+    turn ends; the session keeps its context and its item. A second Stop sends the keys again (a tool call that did
+    not stop at the first). With a message (Send now), the message goes after INTERRUPT_PAUSE, as session_send sends
+    it, so the agent reads it at once instead of after its turn. Who: a person, or the active manager (manager)."""
+    if message is not None and (not isinstance(message, str) or len(message) > 4000):
+        raise RiverError("text is at most 4000 characters")  # before the keys: a refused message stops nothing
+    pane = _typing_pane(conn, agent, who, manager=manager)
+    ad = core.state_adapter(conn, agent)
+    keys = list((ad.input.get("interrupt") if ad else None) or [])
+    if not keys:
+        what = ad.label if ad else "its agent CLI"
+        raise RiverError(f"{agent} runs {what}, which has no key that stops its turn; type into its terminal "
+                         f"(Open in terminal), or end the session")
+    send_keys(pane, [{"key": k} for k in keys])
+    held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                        "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
+    with core.tx(conn):
+        core._event(conn, held["id"] if held else None, who or "?",
+                    f"{agent} stopped by {who or 'a person'} ({' '.join(keys)} in its terminal)"
+                    + ("; a message followed" if message else ""))
+    # Its turn ended: the Sessions tab says 'at its prompt' at once. Claude Code runs no Stop hook for an Esc; the next
+    # prompt's hook (or the pane watcher) says working again.
+    row = conn.execute("SELECT kind FROM agents WHERE name=?", (agent,)).fetchone()
+    if row and row["kind"] == "ai":
+        core.report(conn, agent, "idle")
+    out = {"agent": agent, "pane": pane, "keys": keys}
+    if message is not None and (str(message).strip() or files):
+        time.sleep(INTERRUPT_PAUSE)
+        out["sent"] = session_send(conn, agent, message, who, files=files, manager=manager)
+    return out
+
+
+INTERRUPT_PAUSE = 0.5  # after the interrupt keys, before the message of Send now: the agent's prompt comes back (tests: 0)
 ENTER_PAUSE = 0.3  # between a message's text and its Enter (#5220: Codex's paste window; tests: 0)
 COMMAND_LOOK = 0.8  # after a slash command's Enter, before the look at its pane (tests: 0)
 BOX_LINES = 4  # the last lines of a pane where an agent's input box is
@@ -3566,7 +3604,7 @@ def frame_check(url):
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
-TYPING_OPS = ("terminal_keys", "session_send", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
+TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
               "shell_open", "shell_keys", "shell_close",  # the Terminal tab's shells (#4803)
               "browser_input")  # the person's mouse and keys in a project's browser (#4631)
 
@@ -4115,6 +4153,10 @@ OPS = {
     "expert_end": lambda c, a, who: core.expert_end(c, a["name"], who, a.get("reason"), bool(a.get("done"))),
     "expert_fresh": lambda c, a, who: fresh_expert(c, a["name"], who, new=a.get("new")),
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
+    # Stop and Send now of the Sessions tab (#5547); agent_interrupt is maxpm interrupt (a person, or the manager).
+    "session_interrupt": lambda c, a, who: session_interrupt(c, a["agent"], who, a.get("text"), a.get("files")),
+    "agent_interrupt": lambda c, a, who: (_same_queue(a.get("db")),
+                                          session_interrupt(c, a["agent"], who, a.get("text"), manager=True))[1],
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
     "update": lambda c, a, who: _no_update_in_app() or update_apply(),

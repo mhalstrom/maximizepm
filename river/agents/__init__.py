@@ -315,8 +315,12 @@ DETECT_LAYOUT = {
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in
 # DETECT. INPUT = {"native": argv words with {address} and {text} for a native message command (Codex:
-# codex queue --thread {address} {text}), or None}.
-INPUT_KEYS = {"native": (list, tuple, type(None))}
+# codex queue --thread {address} {text}), or None,
+#      "interrupt": the tmux keys (INTERRUPT_KEYS) that end the agent's running turn and keep its session, as a person
+#                   presses them in its terminal (Claude Code: ["Escape"]; OpenCode asks for a second Esc:
+#                   ["Escape", "Escape"]), or None: the agent has no such key, and the page's Stop says so (#5547)}.
+INPUT_KEYS = {"native": (list, tuple, type(None)), "interrupt": (list, tuple, type(None))}
+INTERRUPT_KEYS = ("Escape", "C-c")
 
 # 9. Resume. resume_command(session_ref, model, effort, settings, name=None) -> argv, or None when it cannot resume that
 # session. The arguments are those of build_command; settings["prompt"] is the first prompt after the resume.
@@ -529,6 +533,9 @@ def check(module, mid=None):
                 out += _regex(f"DETECT['blocked'][{i}]", p) if isinstance(p, str) else [f"DETECT['blocked'][{i}] is no str"]
     if getattr(module, "INPUT", None) is not None:
         out += _shape("INPUT", module.INPUT, INPUT_KEYS)
+        keys = module.INPUT.get("interrupt") if isinstance(module.INPUT, dict) else None
+        if keys is not None and (not keys or any(k not in INTERRUPT_KEYS for k in keys)):
+            out.append(f"INPUT['interrupt'] is {list(keys)!r}: one or more of {', '.join(INTERRUPT_KEYS)}, or None")
     for i, c in enumerate(getattr(module, "COMMANDS", None) or ()):
         out += _shape(f"COMMANDS[{i}]", c, COMMAND_KEYS, ("name",))
         if isinstance(c, dict) and "run" in c and c["run"] not in COMMAND_RUNS:
@@ -1032,11 +1039,12 @@ def page_list():
                     "models": list(d["models"]), "default_model": d["default_model"], "prefix": d["prefix"],
                     "parts": {p: a.supports(p) for p in PARTS}, "launch": dict(a.launch),
                     "setup": dict(a.setup or {}), "main": i == 0,
-                    "chat_commands": (a.chat or {}).get("commands", True)})
+                    "chat_commands": (a.chat or {}).get("commands", True),
+                    "interrupt": list(a.input.get("interrupt") or [])})
     return {"agents": out, "errors": errors()}
 
 
-__all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
+__all__ = ["Adapter", "Raw", "BUILTIN", "PARTS", "STATES", "DETECT_LAYOUT", "HOOK_REPORT_KEYS", "INTERRUPT_KEYS", "MAXPM_EFFORTS", "FAMILIES", "check", "load", "errors", "ids",
            "find", "get", "from_env", "override_dir", "SHARED_INSTRUCTIONS", "instruction_files", "import_files", "shared_readers",
            "setup_entry", "page_list", "ENV_LAST", "env_order", "by_exe"]
 

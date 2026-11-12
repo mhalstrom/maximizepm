@@ -135,7 +135,8 @@ DETECT = {
     "image_paste": "[Image #{n}]",  # an image path pasted alone becomes this in its prompt (#4618)
 }
 
-INPUT = {"native": None}  # messages reach it by tmux paste (or its Unix socket inbox: core.native_message)
+# Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'); the session keeps its context.
+INPUT = {"native": None, "interrupt": ["Escape"]}  # messages reach it by tmux paste (or its Unix socket inbox: core.native_message)
 
 
 def hook_settings(report):
@@ -282,6 +283,10 @@ def parse_chat_line(d):
             out.append({"at": at, "role": "result", "for": x["tool_use_id"], "error": bool(x.get("is_error")),
                         "text": _s()._clip(_s()._result_text(x.get("content")), _s().DETAIL_MAX)})
     text = _s()._parts_text(content, ("text",)).strip()
+    if text.startswith(INTERRUPTED):
+        # Esc in its terminal, or Stop on the Sessions tab (#5547): the turn ended, and the session waits at its prompt.
+        out.append({"at": at, "role": "event", "text": "stopped"})
+        return out, "idle"
     if text.startswith("<task-notification>"):
         out.append({"at": at, "role": "event", "text": "a background task ended"})
     elif (text and not text.startswith("<")) or any(isinstance(x, dict) and x.get("type") == "image"
@@ -290,6 +295,10 @@ def parse_chat_line(d):
         out.append(_s()._user_turn(at, text, sum(1 for x in content if isinstance(x, dict) and x.get("type") == "image")
                                  if isinstance(content, list) else 0))
     return out, "working"
+
+
+# The line Claude Code writes when a person ends its turn: "[Request interrupted by user]", and "... for tool use]".
+INTERRUPTED = "[Request interrupted by user"
 
 
 def _queued_prompt(d):

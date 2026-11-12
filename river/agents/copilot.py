@@ -268,7 +268,8 @@ DETECT = {
     "hint": r"\benter to (select|confirm)\b|\benter accept\b",
 }
 
-INPUT = {"native": None}
+# Stop on the Sessions tab (#5547): Ctrl+C ends the turn ('ctrl+c interrupt'); a second one at the prompt quits.
+INPUT = {"native": None, "interrupt": ["C-c"]}
 
 # ---------------------------------------------------------------------------------------------------------------
 # Chat log: ~/.copilot/session-state/<id>/events.jsonl

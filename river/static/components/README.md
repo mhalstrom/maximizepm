@@ -31,7 +31,7 @@ came (#5028). The list only goes down: when you move a view to the parts, set th
 | Form field | `form.js`; `folderForm.js` for a project folder | classes `.form`, `.two`, `label`, `.actions` |
 | Empty list | `empty.js`: `empty(html, {inline})` | "No open items." |
 | Table | `table.js` (Tabulator) | |
-| Message box of a chat | `composer.js`: `composerHtml(prefix, {...})`, `composerState(form, hasText)` | round + to attach, one pill field, the mic while empty, a round send arrow with text; line icons `PLUS_SVG`, `MIC_SVG`, `SEND_SVG` (#5078) |
+| Message box of a chat | `composer.js`: `composerHtml(prefix, {...})`, `composerState(form, hasText)` | round + to attach, one pill field, the mic while empty, a round send arrow with text; line icons `PLUS_SVG`, `MIC_SVG`, `SEND_SVG` (#5078); `nowTitle` adds Send now, a bolt (`NOW_SVG`) left of the arrow, shown while the form has the class `can-now` (#5547) |
 | Chat | `chat.js` | |
 | "/" list of a message box | `slashList.js`: `makeSlashList(input, host, {load, key, onChange})` | the slash commands of the session's agent above the box; Tab completes, Up and Down move, Esc closes; `keydown(e)` says whether it took a key (#5186) |
 | Model choice of the launch dialog | `modelPick.js`: `modelChoices(models, current)`, `OTHER` | a long list (OpenCode) shows the adapter's models (`pick`) and the current one; "Other model…" finds the rest by typing (#5238) |

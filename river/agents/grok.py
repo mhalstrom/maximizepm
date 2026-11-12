@@ -678,7 +678,8 @@ def chat_usage(lines):
 # 8. Input, 10. Commands, 11. Setup
 # ---------------------------------------------------------------------------------------------------------------
 
-INPUT = {"native": None}
+# Stop on the Sessions tab (#5547): Ctrl+C cancels the turn ('Ctrl+c:cancel' in its footer).
+INPUT = {"native": None, "interrupt": ["C-c"]}
 
 # The built-in slash commands of Grok 1.0.77 (docs/user-guide/04-slash-commands.md), the ones a person types most.
 COMMANDS = [

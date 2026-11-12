@@ -2005,6 +2005,83 @@ class LaunchInTmux(unittest.TestCase):
         self.assertEqual({k for k in env if k.startswith(("MAXPM_", "CLAUDE", "CODEX_"))}, {"CLAUDE_CONFIG_DIR", "CODEX_HOME"})
         self.assertEqual(env["PATH"], os.environ["PATH"])
 
+    def test_stop_and_send_now_end_the_turn_then_type(self):
+        """#5547: Stop types the agent's own interrupt key into its pane (Claude Code: Esc), records who stopped it
+        and that it waits at its prompt; Send now does the same, then types the message and Enter."""
+        core.register(self.c, "mark", human=True)
+        x = core.item_add(self.c, "shop", "work")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        pane = self.tmux.panes[0]
+        core.register(self.c, name)
+        core.claim(self.c, x, name)
+        self.c.execute("UPDATE agents SET agent_type='claude-code', activity_event='UserPromptSubmit' WHERE name=?",
+                       (name,))
+        pane["keys"].clear()
+        r = server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        self.assertEqual((r["keys"], pane["keys"], "sent" in r), (["Escape"], ["Escape"], False))
+        ev = self.c.execute("SELECT item_id, actor, change FROM events ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual((ev["item_id"], ev["actor"]), (x, "mark"))
+        self.assertIn(f"{name} stopped by mark (Escape in its terminal)", ev["change"])
+        a = self.c.execute("SELECT activity_event FROM agents WHERE name=?", (name,)).fetchone()
+        self.assertEqual(a["activity_event"], "report:idle")
+        # Send now: the key, then the message as Send types it.
+        r = server.OPS["session_interrupt"](self.c, {"agent": name, "text": "use the other file "}, "mark")
+        self.assertEqual(pane["keys"][1:], ["Escape", "use the other file", "Enter"])
+        self.assertEqual(r["sent"]["text"], "use the other file")
+        # A message that Send would refuse stops nothing; maxpm interrupt of another queue is refused.
+        with self.assertRaisesRegex(RiverError, "at most 4000"):
+            server.OPS["session_interrupt"](self.c, {"agent": name, "text": "x" * 4001}, "mark")
+        with self.assertRaisesRegex(RiverError, "uses another queue"):
+            server.OPS["agent_interrupt"](self.c, {"agent": name, "db": "/elsewhere/t.db"}, "mark")
+        self.assertEqual(len(pane["keys"]), 4)
+        # Another agent may not; the active manager may, with maxpm interrupt (agent_interrupt), not with the page's op.
+        core.register(self.c, "w2")
+        with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+            server.OPS["agent_interrupt"](self.c, {"agent": name}, "w2")
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        server.OPS["agent_interrupt"](self.c, {"agent": name, "text": "stop and read your inbox"}, "boss")
+        self.assertEqual(pane["keys"][4:], ["Escape", "stop and read your inbox", "Enter"])
+        with self.assertRaisesRegex(RiverError, "only a person types"):
+            server.OPS["session_interrupt"](self.c, {"agent": name}, "boss")
+        # The keys are the adapter's: OpenCode asks for a second Esc, Copilot CLI stops on Ctrl+C.
+        for kind, keys in (("opencode", ["Escape", "Escape"]), ("copilot", ["C-c"])):
+            self.c.execute("UPDATE agents SET agent_type=? WHERE name=?", (kind, name))
+            del pane["keys"][:]
+            server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+            self.assertEqual(pane["keys"], keys)
+        # An agent CLI that MaximizePM does not know has no key: nothing is typed, and the refusal says so.
+        self.c.execute("UPDATE agents SET agent_type='my-own-cli' WHERE name=?", (name,))
+        with self.assertRaisesRegex(RiverError, "has no key that stops its turn"):
+            server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        self.assertEqual(pane["keys"], ["C-c"])
+        # The page's op needs the page's token, as every op that types into a terminal does.
+        self.assertIn("session_interrupt", server.TYPING_OPS)
+        self.assertNotIn("agent_interrupt", server.TYPING_OPS)
+
+    def test_maxpm_interrupt_asks_serve(self):
+        """maxpm interrupt <agent> [--message] (#5547) asks maxpm serve, which types the keys (a sandbox reaches no
+        tmux), and says what it did."""
+        import contextlib, io
+        from river import cli
+        got = []
+
+        def ask(conn, op, args, actor=None, **kw):
+            got.append((op, args, actor))
+            return {"agent": args["agent"], "keys": ["Escape"],
+                    **({"sent": {"text": args["text"]}} if args.get("text") else {})}
+        core.register(self.c, "boss")
+        old, cli.ask_server = cli.ask_server, ask
+        self.addCleanup(setattr, cli, "ask_server", old)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "--as", "boss", "interrupt", "w1", "--message", "read the alert"])
+            cli.run(["-q", "--as", "boss", "interrupt", "w1"])
+        self.assertEqual(got[0], ("agent_interrupt", {"agent": "w1", "text": "read the alert"}, "boss"))
+        self.assertIn("w1: its turn was stopped (Escape in its terminal); the message went at once: read the alert",
+                      out.getvalue())
+        self.assertIn("w1: its turn was stopped (Escape in its terminal); it waits at its prompt", out.getvalue())
+
     def test_the_page_shows_an_agents_terminal_and_types_into_it(self):
         core.register(self.c, "mark", human=True)
         x = core.item_add(self.c, "shop", "work")["id"]

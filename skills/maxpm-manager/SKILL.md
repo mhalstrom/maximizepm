@@ -274,6 +274,8 @@ Stop when the user tells you to, and tell the user what you did.
 - `maxpm note|alert|ask <agent> "..."`: messages (they also go through the
   agent platform's own messaging when MaximizePM knows it).
 - `maxpm stop <agent> --reason "..."`: a request; the agent commits, releases, and ends.
+- `maxpm interrupt <agent> [--message "..."]`: ends its running turn now (Esc in its terminal); it keeps
+  its session and item. With `--message` the text goes in at once, not after the turn. Not tmux send-keys.
 - `maxpm config set launch_agents|default_model|default_effort|default_min_model|default_max_model ...`
 - `maxpm launch ... --option remote_control=off` (or `permission_mode=plan`, `sandbox=read-only`): a launch profile option for one session; the settings `claude_*` and `codex_*` hold the defaults
 - `maxpm launch ... --prompt "<text>"`: the new session's own first instruction. The agent gets the

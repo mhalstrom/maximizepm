@@ -1580,6 +1580,9 @@ def build_parser(only=None):
     x.add_argument("agent"); x.add_argument("--reason", required=True, help="why; the agent sees it")
     x.add_argument("--kill", action="store_true",
                    help="emergency only: end its process on this host now and release what it holds (uncommitted work is lost)")
+    x = sub.add_parser("interrupt", help="end an agent's running turn now, as Esc in its terminal (it keeps its session "
+                                         "and item); --message then types a message into it at once (a person, or the manager)")
+    x.add_argument("agent"); x.add_argument("--message", help="the text the agent reads at once, after its turn ended")
     q = sub.add_parser("queue", help="one agent's own ordered queue: items it takes first, and instructions")
     qs = q.add_subparsers(dest="qcmd", required=True)
     x = qs.add_parser("add", help="add an item (at the end, --first, or --before <id>) or an instruction (--message); a push of the item to another agent ends, and that agent hears it")
@@ -3142,6 +3145,9 @@ def dispatch(conn, a, actor):
         if a.orphans:
             return server.tmux_orphans_view(end=a.tidy)
         return server.tmux_view(a.layout, a.tidy, conn)
+    if c == "interrupt":
+        # maxpm serve types the keys: a sandboxed session cannot reach tmux, and the page does the same (#5547).
+        return ask_server(conn, "agent_interrupt", {"agent": a.agent, "text": a.message}, actor)
     if c == "stop":
         if a.kill:
             from . import server
@@ -5358,6 +5364,11 @@ def render(a, res):
             print(f"no space to show it beside the others; it keeps its own window: {name}")
         if res["panes"] and a.layout:
             print("This command has no terminal of its own, so it shows nothing here. A person sees the agents with: maxpm view")
+        return
+    if c == "interrupt":
+        sent = res.get("sent")
+        print(f"{res['agent']}: its turn was stopped ({' '.join(res['keys'])} in its terminal)"
+              + (f"; the message went at once: {sent['text']}" if sent else "; it waits at its prompt"))
         return
     if c == "stop" and "killed" in res:
         print(f"{'killed' if res['killed'] else 'found dead'}: {res['agent']} (PID {res['pid']}); released "

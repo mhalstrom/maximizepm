@@ -125,7 +125,8 @@ DETECT = {
 }
 
 # Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
-INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{text}"]}
+# Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt').
+INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{text}"], "interrupt": ["Escape"]}
 
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -133,7 +133,8 @@ DETECT = {
     "menu": "→▶",  # the marker of the selected option: → in an approval menu, ▶ on the trust screen
 }
 
-INPUT = {"native": None}
+# Stop on the Sessions tab (#5547): Ctrl+C ends the turn ('ctrl+c to stop').
+INPUT = {"native": None, "interrupt": ["C-c"]}
 
 # Its built-in slash commands (the "/" list of 2026.11.11-043ef28). The model commands (/claude-opus-5-5, ...) depend
 # on the account and are left out.
