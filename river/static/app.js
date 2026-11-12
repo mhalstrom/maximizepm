@@ -384,6 +384,10 @@ const ROOT = new URL("./", document.baseURI).pathname;
 const view = { session: null, art: null, pane: null };  // the session the Sessions tab shows, the tab of its side panel, a pane ("you", "arts")
 let asParam = new URLSearchParams(location.search).get("as");
 let quiet = 0;  // while the page follows an address, its own changes do not write one
+// From the load until openFromUrl reads the address (#5399): a redraw writes no address (the side panel restored its
+// tabs and wrote /sessions/<s> over an artifact address), but a person's own step does, a new entry (#5417: a click on
+// Plan, then Items, before the first state came was lost, and openFromUrl showed the Overview of the old address).
+let booting = true;
 function readUrl() {
   const rel = location.pathname.startsWith(ROOT) ? location.pathname.slice(ROOT.length) : "";
   const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
@@ -415,7 +419,7 @@ function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
 }
 // Write the address of what the page shows: a new history entry (Back returns) or in place of the current one.
 function syncUrl(push) {
-  if (quiet) return;
+  if (quiet || (booting && !push)) return;
   const url = pageUrl();
   if (url === location.pathname + location.search) return;
   if (push) history.pushState(null, "", url);
@@ -945,8 +949,8 @@ setInterval(() => {
 // The tab in the address shows at once, before the state comes (#4888): Sessions, Artifacts, Done and Terminal read
 // their own data, and the others draw when the state is there. A first state that fails says so in the loading line.
 // Until openFromUrl has read the address, nothing that draws writes one: the session's side panel restored its saved
-// tabs, found the artifact of the address closed, and wrote /sessions/<s> before openFromUrl read it (#5399).
-quiet++;
+// tabs, found the artifact of the address closed, and wrote /sessions/<s> before openFromUrl read it (#5399). A
+// person's step still writes its address (booting, #5417).
 {
   const r = readUrl();
   firstPage = r.root && r.item == null;  // before the session list writes the address of the session it shows
@@ -955,7 +959,7 @@ quiet++;
       if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
   }
 }
-refresh().finally(() => { quiet--; }).then(openFromUrl).then(maybeSetup).catch((e) => {
+refresh().finally(() => { booting = false; }).then(openFromUrl).then(maybeSetup).catch((e) => {
   const boot = $("#bootNote");
   if (boot) { boot.textContent = `Could not load the queue (${e.message}); the page asks again every 3 seconds.`; boot.className = "boot-note load-err"; boot.setAttribute("role", "alert"); }
 });
