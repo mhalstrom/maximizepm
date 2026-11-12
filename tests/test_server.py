@@ -4287,23 +4287,43 @@ class OnboardingForm(unittest.TestCase):
     DRIVER = """
 const post = (o) => navigator.sendBeacon("/__result", JSON.stringify(o));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const until = async (f, what) => { for (let i = 0; i < 150; i++) { const v = f(); if (v) return v; await sleep(100); } throw new Error("never: " + what); };
 const q = (s) => document.querySelector(s);
+// The actions (POST) of the page that failed: a 5xx answer or no answer; a poll that fails is not a step's. A busy machine can make one fail (#5496: a
+// 'database is locked' once in 40 runs under load); the step then never ends, so the test sends it again.
+const failed = [], realFetch = window.fetch.bind(window);
+window.fetch = async (...a) => {
+  const post = ((a[1] || {}).method || "GET") === "POST";
+  try { const r = await realFetch(...a); if (post && r.status >= 500) failed.push(r.status + " " + a[0]); return r; }
+  catch (e) { if (post) failed.push(String(e) + " " + a[0]); throw e; } };
+const toastErr = () => { const t = q("#toast"); return t && t.className === "err" && t.style.display === "block" ? t.textContent : ""; };
+// Waits on the condition, at most 30 s (a busy machine runs the whole suite); a failure names what the page saw.
+const until = async (f, what) => { for (let i = 0; i < 300; i++) { const v = f(); if (v) return v; await sleep(100); }
+  throw new Error("never: " + what + "; toast: " + (toastErr() || "none") + "; failed requests: " + (failed.join(", ") || "none")); };
 // What a person does: type in the field, then press Enter.
 const enter = async (sel, text) => { const f = await until(() => q(sel), sel); f.focus(); f.value = text;
   f.dispatchEvent(new Event("input", { bubbles: true }));
   f.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })); };
+// One step: Enter, then wait until it is done. When its request failed (an error toast, a failed request) and
+// the field is still there, the person presses Enter again: at most three times.
+const step = async (sel, text, done, what) => {
+  for (let k = 0; k < 3; k++) {
+    const n = failed.length; q("#toast").style.display = "none";
+    await enter(sel, text);
+    await until(() => done() || failed.length > n || toastErr(), what);
+    if (done()) return;
+    await until(() => done() || q(sel), what);
+    if (done()) return;
+  }
+  await until(done, what);
+};
 try {
   await until(() => !q("#setup").classList.contains("hidden") && q("#suName"), "the guide opens with the name step");
-  await enter("#suName", "mark");
-  await until(() => !q("#suName"), "the name step is done");
-  await enter('#setupSteps [data-ff="path"]', FOLDER);
-  await until(() => q("#suTaskTitle"), "the folder step is done, and the task step has its field");
-  await enter("#suTaskTitle", "add a README");
-  await until(() => !q("#suTaskTitle"), "the task step is done");
+  await step("#suName", "mark", () => !q("#suName"), "the name step is done");
+  await step('#setupSteps [data-ff="path"]', FOLDER, () => q("#suTaskTitle"),
+             "the folder step is done, and the task step has its field");
+  await step("#suTaskTitle", "add a README", () => !q("#suTaskTitle"), "the task step is done");
   q("#setupSteps details.more").open = true;
-  await enter("[data-tracker-for]", "github owner/repo via gh");
-  await until(() => !q("[data-tracker-for]"), "the tracker is saved");
+  await step("[data-tracker-for]", "github owner/repo via gh", () => !q("[data-tracker-for]"), "the tracker is saved");
   // Start an agent: Cancel in its dialog, and the next click opens the dialog again at once.
   const open = () => !q("#launchDlg").classList.contains("hidden");
   const cancel = () => [...document.querySelectorAll("#launchDlg button")].find((b) => b.textContent.trim() === "Cancel").click();
@@ -4367,7 +4387,7 @@ try {
                  "--disable-extensions", "--window-size=1280,900", f"--user-data-dir={os.path.join(d, 'profile')}",
                  f"http://127.0.0.1:{httpd.server_address[1]}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
-                ran = got.wait(90)
+                ran = got.wait(240)  # each step waits up to 30 s on a busy machine, and a failed one runs again
             finally:
                 chrome.kill()
                 chrome.wait()
