@@ -9601,6 +9601,28 @@ class OpsSelf(Base):
         self.assertEqual((r["status"], r["summary"]), ("critical", "the relay https://r is waiting: timed out"))
         self.assertEqual(core.OPS_PROBE_EXIT["warning"], 1)
 
+    def test_page_speed_is_the_p90_of_the_last_50_builds(self):
+        # #5638: a warning over 100 ms, critical over 200 ms; a kept state (no build_ms) is no build.
+        import urllib.request
+        at = core.iso(core.now())
+
+        def run(builds, served=10):
+            rows = [{"at": at, "build_ms": b, "total_ms": b + 5} for b in builds] + [{"at": at, "total_ms": 0.1}] * served
+            return core._probe_page_speed(self.c, rows)
+        status, summary, perf = run([])
+        self.assertEqual((status, perf["builds"]), ("ok", 0))
+        status, summary, perf = run([500] * 10 + [60] * 45 + [130] * 5)  # the 10 slow ones are older than the last 50
+        self.assertEqual((status, perf["builds"], perf["p90_ms"], perf["answer_p90_ms"]), ("ok", 50, 60, 65))
+        self.assertIn("5 over 100 ms", summary)
+        self.assertEqual(run([60] * 40 + [130] * 10)[0], "warning")
+        status, summary, perf = run([60] * 40 + [250] * 10)
+        self.assertEqual((status, perf["max_ms"]), ("critical", 250))
+        self.assertIn("state-timing?profile=1", summary)
+        with mock.patch.object(urllib.request, "urlopen", side_effect=OSError("Connection refused")):
+            r = self.probe("page-speed")
+        self.assertEqual(r["status"], "warning")  # serve down: the serve probe's fault
+        self.assertIn("no build record on port", r["summary"])
+
     def test_notices_names_each_channel_whose_newest_attempt_failed(self):
         t = core.iso(core.now())
         eid = self.c.execute("INSERT INTO needs_you(kind,summary,opened_at) VALUES ('item','x',?)", (t,)).lastrowid
@@ -9654,10 +9676,10 @@ class OpsSelf(Base):
         with mock.patch.object(cli, "SETUP_ASK", ask), contextlib.redirect_stdout(out):
             cli.run(["--as", "mark", "ops", "setup"])
         text = out.getvalue()
-        self.assertIn("  0. MaximizePM itself: 9 checks", text)
-        self.assertIn("added 9 checks to the project maximizepm", text)
+        self.assertIn("  0. MaximizePM itself: 10 checks", text)
+        self.assertIn("added 10 checks to the project maximizepm", text)
         self.assertIn("What should MaximizePM watch in maximizepm?", text)  # then more checks, as for any project
-        self.assertEqual(len(core.ops_list(self.c, "maximizepm")["checks"]), 9)
+        self.assertEqual(len(core.ops_list(self.c, "maximizepm")["checks"]), 10)
 
 
 class EditKeepsOldText(Base):

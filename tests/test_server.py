@@ -1893,6 +1893,41 @@ class LaunchInTmux(unittest.TestCase):
         with mock.patch.object(server, "_main_db", server._queue_db):
             self.assertEqual([p["pane"] for p in server.tmux_done(self.c)], [old])
 
+    def test_a_page_build_keeps_the_queue_s_part_of_tmux_done_for_the_same_panes(self):
+        # #5638: its look at the idle panes' screens took 10-20 ms of each live build. A pane where only a shell runs
+        # now is done at once; another pane set, or TMUX_DONE_KEEP seconds, looks again.
+        panes = [{"pane": "%1", "name": "a", "ended": False}, {"pane": "%2", "name": "b", "ended": False}]
+        looks = []
+
+        def done(conn, ps, terminals=None):
+            if conn is not None:
+                looks.append(1)
+            return {**{p["pane"]: "its agent ended" for p in ps if p["ended"]},
+                    **({"%1": "a is gone"} if conn is not None else {})}
+        for p in (mock.patch.object(server, "TMUX_RUNNER", None), mock.patch.object(server, "_tmux_cmd", lambda: ["tmux"]),
+                  mock.patch.object(server, "_tmux_panes", lambda: [dict(p) for p in panes]),
+                  mock.patch.object(server, "_done_panes", done), mock.patch.dict(server._tmux_done_kept, clear=True)):
+            p.start()
+            self.addCleanup(p.stop)
+        names = lambda: {p["pane"]: p["why"] for p in server.tmux_done(self.c)}
+        token = core.BUILD_MEMO.set({})
+        try:
+            self.assertEqual(names(), {"%1": "a is gone"})
+            panes[1]["ended"] = True
+            self.assertEqual(names(), {"%1": "a is gone", "%2": "its agent ended"})
+            self.assertEqual(len(looks), 1)
+            panes.append({"pane": "%3", "name": "c", "ended": False})
+            names()
+            self.assertEqual(len(looks), 2)  # a new pane: a new look
+            with mock.patch.object(server, "TMUX_DONE_KEEP", 0):
+                names()
+            self.assertEqual(len(looks), 3)
+        finally:
+            core.BUILD_MEMO.reset(token)
+        names()
+        names()
+        self.assertEqual(len(looks), 5)  # outside a page build (maxpm view): always a fresh look
+
     def test_river_serve_tidies_every_tidy_every_and_never_a_busy_agent(self):
         import threading
         from unittest import mock

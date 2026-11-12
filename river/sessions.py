@@ -710,17 +710,12 @@ def custom_title(path, kind, tail=256 * 1024):
     return ad.chat_title(text.splitlines())
 
 
-_LAST_DONE = "SELECT assignee, title, short, MAX(closed_at) t FROM items WHERE status='done' AND assignee {} GROUP BY assignee"
-
-
 def _last_done(conn, name):
-    """{title, short, t (its closed_at)} of the item that the agent finished last, or None. In a page state build, one
-    read for every agent (#5597): a read for each running session went through all 5,300 done items, 10 ms a build."""
-    if core.BUILD_MEMO.get() is None:
-        r = conn.execute(_LAST_DONE.format("=?"), (name,)).fetchone()
-        return dict(r) if r else None
-    return core._memo("last_done", lambda: {r["assignee"]: dict(r) for r in conn.execute(
-        _LAST_DONE.format("IS NOT NULL"))}).get(name)
+    """{title, short, t (its closed_at)} of the item that the agent finished last, or None. One row of the index
+    items_done_by (#5638): without it each read went through all 5,000 done items, 5-10 ms a page build (#5597)."""
+    r = conn.execute("SELECT title, short, closed_at t FROM items WHERE status='done' AND assignee=? "
+                     "ORDER BY closed_at DESC LIMIT 1", (name,)).fetchone()
+    return dict(r) if r else None
 
 
 def work_name(conn, a, path=None, root=None, croot=None, kind=None):

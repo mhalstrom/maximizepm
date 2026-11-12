@@ -3019,7 +3019,7 @@ def ops_setup(conn, a, actor):
                 + [f"target:{r['name']}" for r in conn.execute("SELECT name FROM targets ORDER BY name")])
             if own:
                 say(f"  0. MaximizePM itself: {len(own['checks'])} checks of maxpm serve, the relay, sessions that "
-                    f"stop, notices that fail and errors in its log (the profile maximizepm)")
+                    f"stop, notices that fail, errors in its log and a slow page (the profile maximizepm)")
             for i, n in enumerate(names, 1):
                 say(f"  {i}. {n.replace(':', ' ', 1)}")
             pick = ask("Which project or deploy target should MaximizePM watch? (a number or a name)")

@@ -68,6 +68,13 @@
       "command": "maxpm ops logs --file \"$MAXPM_QUEUE_DIR/locked.log\" --pattern ' tries=' --warning 1 --critical 5",
       "every": "15m", "fail_after": 1, "recover_after": 1, "timeout": "1m", "severity": "item",
       "runbook": "Commands that gave up on the queue's write lock ('database is locked'). The held= lines of locked.log name the transactions that held the lock 2 s or longer: find the function that holds it long."
+    },
+    {
+      "name": "page-speed",
+      "form": "plugin",
+      "command": "maxpm ops probe page-speed",
+      "every": "15m", "fail_after": 2, "recover_after": 1, "timeout": "30s", "severity": "item",
+      "runbook": "The page's state builds of maxpm serve are slow: the p90 of the last 50 is over 100 ms (a warning) or 200 ms (critical); every page action must answer in under 100 ms. GET /api/state-timing on serve_port lists the builds with their parts (start, state, goals, terminals, sessions), CPU and wait; GET /api/state-timing?profile=1 samples the next build and lists its slowest lines and what the other threads of serve did. A part much slower than its CPU waits (a subprocess, the interpreter lock, the disk)."
     }
   ]
 }

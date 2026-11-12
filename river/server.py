@@ -959,13 +959,27 @@ def _done_panes(conn, panes, terminals=None):
     return done
 
 
+TMUX_DONE_KEEP = 15  # seconds a page build keeps the queue's part of tmux_done for the same panes (#5638)
+_tmux_done_kept = {}  # "at", "panes" (the pane ids), "done": the last answer of _done_panes in a page build
+
+
 def tmux_done(conn, terminals=None):
-    """The panes maxpm view --tidy closes now, for the page: [{"pane", "name", "why"}]; [] with no tmux."""
+    """The panes maxpm view --tidy closes now, for the page: [{"pane", "name", "why"}]; [] with no tmux. In a page
+    state build with the real tmux, the answer for the same panes holds for TMUX_DONE_KEEP seconds: its look at the
+    screens of idle panes (tmux capture-pane) took 10-20 ms of each live build (#5638). A pane where only a shell
+    runs now is done at once, and the Close button (maxpm view --tidy) looks again."""
     if TMUX_RUNNER is None and not _tmux_cmd():
         return []
     try:
         panes = [p for p in _tmux_panes() if p["name"]]
-        done = _done_panes(conn, panes, terminals)
+        ids, kept = sorted(p["pane"] for p in panes), _tmux_done_kept
+        keep = core.BUILD_MEMO.get() is not None and TMUX_RUNNER is None
+        if keep and kept.get("panes") == ids and time.monotonic() - kept["at"] < TMUX_DONE_KEEP:
+            done = {**kept["done"], **_done_panes(None, panes)}
+        else:
+            done = _done_panes(conn, panes, terminals)
+            if keep:
+                kept.update(at=time.monotonic(), panes=ids, done=done)
     except RiverError:
         return []
     return [{"pane": p["pane"], "name": p["name"], "why": done[p["pane"]]} for p in panes if p["pane"] in done]

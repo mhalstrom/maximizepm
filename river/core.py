@@ -1718,7 +1718,9 @@ def _migrate(conn):
                       # of each project (project_list): both read every row before (#5580).
                       ("messages_open_question", "messages(from_agent) WHERE kind='question' AND state='open'"),
                       ("items_project_status", "items(project_id, status, backlog_at)"),
-                      ("events_actor", "events(actor, id)")):
+                      ("events_actor", "events(actor, id)"),
+                      # The item each running session finished last, for the name the Sessions tab shows (#5638).
+                      ("items_done_by", "items(assignee, closed_at) WHERE status='done'")):
         conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {sql}")
     # Items held before the holds table existed: their hold starts at the claim.
     conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
@@ -4165,7 +4167,10 @@ OPS_PROBES = {
     "relay": "relay.json is set and the relay is not connected (a warning while maxpm serve does not run: the serve "
              "probe reports that)",
     "notices": "a notice channel whose newest attempt failed (a subject for each channel)",
+    "page-speed": "the p90 of the last 50 page builds of maxpm serve (GET /api/state-timing): a warning over 100 ms, "
+                  "critical over 200 ms",
 }
+PAGE_BUILD_WARN, PAGE_BUILD_CRIT, PAGE_BUILDS = 100, 200, 50  # the page-speed probe (#5638; policy p147)
 
 
 def _item_loops(conn, where, setting_key):
@@ -4200,6 +4205,9 @@ def ops_probe(conn, name):
         bad, summary, perf = _probe_relay()
         if bad is None:
             return {"name": name, "status": "warning", "summary": summary, "perf": perf, "subjects": {}}
+    elif name == "page-speed":
+        status, summary, perf = _probe_page_speed(conn)
+        return {"name": name, "status": status, "summary": summary, "perf": perf, "subjects": {}}
     elif name == "notices":
         for r in conn.execute("SELECT n.channel, n.state, n.last_error, n.created_at FROM notifications n WHERE n.id IN "
                               "(SELECT MAX(id) FROM notifications WHERE attempts>0 GROUP BY channel) ORDER BY channel"):
@@ -4263,6 +4271,38 @@ def _probe_serve(conn):
         return True, f"maxpm serve answers on port {port}, but its loop passed no pass for {_short(age)} " \
                      f"(late after {_short(late)})" + (f"; last error: {loop['error']}" if loop.get("error") else ""), perf
     return False, f"maxpm serve answers on port {port} in {ms} ms; its last pass {_short(age)} ago", perf
+
+
+def _probe_page_speed(conn, timings=None):
+    """(status, summary, perf) of the page-speed probe (#5638): the p90 of the build time of the last PAGE_BUILDS page
+    state builds that maxpm serve recorded (GET /api/state-timing; a page that got a kept state built nothing). Over
+    PAGE_BUILD_WARN ms a warning, over PAGE_BUILD_CRIT critical. A warning while serve gives no answer: the serve probe
+    reports that. timings: the record itself (a test)."""
+    import math
+    import urllib.request
+    port = serve_port_now(conn)
+    if timings is None:
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state-timing", headers={"User-Agent": "maxpm-ops"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                timings = json.loads(r.read().decode())
+        except Exception as e:  # no answer, a refusal, a timeout, not JSON
+            return "warning", f"maxpm serve gives no build record on port {port}: {getattr(e, 'reason', e)}", {}
+    rows = [t for t in timings if isinstance(t, dict) and isinstance(t.get("build_ms"), (int, float))][-PAGE_BUILDS:]
+    if not rows:
+        return "ok", "no page build since maxpm serve started (no page asked for its state)", {"builds": 0}
+    nth = lambda xs, q: sorted(xs)[max(0, math.ceil(q * len(xs)) - 1)]
+    builds = [t["build_ms"] for t in rows]
+    answers = [t["total_ms"] for t in rows if isinstance(t.get("total_ms"), (int, float))]
+    p90, med = nth(builds, 0.9), nth(builds, 0.5)
+    perf = {"builds": len(rows), "p50_ms": med, "p90_ms": p90, "max_ms": max(builds),
+            "answer_p90_ms": nth(answers, 0.9) if answers else ""}
+    status = "critical" if p90 > PAGE_BUILD_CRIT else "warning" if p90 > PAGE_BUILD_WARN else "ok"
+    over = sum(b > PAGE_BUILD_WARN for b in builds)
+    summary = (f"the last {len(rows)} page builds (from {show_time(rows[0].get('at'))}): p90 {p90} ms, median {med} ms, "
+               f"{over} over {PAGE_BUILD_WARN} ms" + ("" if status == "ok" else
+               f"; GET /api/state-timing?profile=1 samples the next build"))
+    return status, summary, perf
 
 
 def _probe_relay():
@@ -17605,8 +17645,12 @@ def covered_projects(conn, ann=None):
 def project_sessions(conn, ann=None):
     """{project: [the sessions that cover it, as covered_projects counts them]}."""
     ann = ann if ann is not None else annotate(conn, closed=False)
-    live = {r["name"] for r in conn.execute("SELECT * FROM agents WHERE kind='ai'")
-            if _agent_state(conn, r) not in ("gone", "stopped") and not not_connected(conn, r)}
+    if BUILD_MEMO.get() is None:
+        live = {r["name"] for r in conn.execute("SELECT * FROM agents WHERE kind='ai'")
+                if _agent_state(conn, r) not in ("gone", "stopped") and not not_connected(conn, r)}
+    else:  # a page state build has the state of every agent already (#5638: a second read of all 840 took 5 ms)
+        live = {a["name"] for a in _memo("agent_statuses", lambda: _agent_statuses(conn)).values()
+                if a["kind"] == "ai" and a["state"] not in ("gone", "stopped") and not not_connected(conn, a)}
     covered = {}
     for a in sorted(ann.values(), key=lambda a: a["id"]):
         who = (a["assignee"] if a["status"] in ("in_progress", "held") else

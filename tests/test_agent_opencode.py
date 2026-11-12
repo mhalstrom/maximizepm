@@ -90,6 +90,36 @@ class Describe(Env):
         self.assertEqual(self.a.read_models(), got)
         self.assertEqual(len(calls), 1)
 
+    def test_a_page_build_never_waits_for_the_cli_and_an_old_list_stands_while_a_thread_reads(self):
+        # #5638: `opencode models` took 470 ms of the page's build once in ten minutes.
+        import threading
+        go, calls = threading.Event(), []
+
+        def runner():
+            calls.append(1)
+            go.wait(5)
+            return f"opencode/model-{len(calls)}\n"
+        mock.patch.object(opencode, "MODELS_RUNNER", runner).start()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.dict(opencode._models, {"at": 0.0, "list": None, "reader": None}).start()
+        token = core.BUILD_MEMO.set({})
+        try:
+            t = time.monotonic()
+            self.assertIsNone(opencode.read_models())  # no list yet: the build goes on with the described models
+            self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
+            self.assertLess(time.monotonic() - t, 1)
+        finally:
+            core.BUILD_MEMO.reset(token)
+        go.set()
+        self.assertEqual(opencode.read_models(), ["opencode/model-1"])  # a command waits for the read
+        self.assertEqual(len(calls), 1)  # one read at a time
+        opencode._models["at"] = 0.0  # ten minutes later: the old list, and a thread reads the new one
+        self.assertEqual(opencode.read_models(), ["opencode/model-1"])
+        reader = opencode._models["reader"]  # None when it is done already
+        if reader is not None:
+            reader.join(5)
+        self.assertEqual(opencode.read_models(), ["opencode/model-2"])
+
     def test_the_tests_never_run_the_installed_opencode(self):
         # #5286: core.platform_models (the launch dialog, a launch) calls read_models; tests/__init__.py fakes it.
         mock.patch.dict(opencode._models, {"at": 0.0, "list": None}).start()
