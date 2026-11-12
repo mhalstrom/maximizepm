@@ -329,6 +329,7 @@ class Timing(Base):
             self.assertEqual(set(t["parts"]), {"start", "state", "goals", "terminals", "sessions", "rest"})
             self.assertEqual(set(t["cpu_parts"]), set(t["parts"]))  # the CPU of each part too (#5597)
             self.assertLessEqual(sum(t["cpu_parts"].values()), t["cpu_ms"] + 1)
+            self.assertGreaterEqual(t["gc_ms"], 0)  # the garbage collector's share (#5597)
 
 
     def test_the_build_runs_no_sweep_and_the_loop_of_serve_does(self):

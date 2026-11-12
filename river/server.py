@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import gc
 import gzip
 import hmac
 import json
@@ -4514,6 +4515,7 @@ def page_state(closed, timing=None):
         if hit is not None:
             return hit
         t1, c1 = time.perf_counter(), time.thread_time()
+        g1, f1 = GC_SPENT["ms"], GC_SPENT["full"]
         parts, cpu = {}, {}
         mark = [t1, c1]
 
@@ -4571,6 +4573,14 @@ def page_state(closed, timing=None):
                 # The CPU time of each part (#5597): live, a build took 5 times the CPU of the same build on a copy
                 # of the queue; this says which part spends it.
                 timing["cpu_parts"] = cpu
+                timing["gc_ms"] = round(GC_SPENT["ms"] - g1, 1)  # the collector, in any thread, during the build
+                timing["gc_full"] = GC_SPENT["full"] - f1
+                try:  # the peak memory of this process: a large heap makes each full collection slow
+                    import resource
+                    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                    timing["rss_max_mb"] = round(rss / (1 << 20 if sys.platform == "darwin" else 1 << 10))
+                except (ImportError, OSError):
+                    pass
             return st
         finally:
             core.BUILD_MEMO.reset(memo)
@@ -4588,6 +4598,20 @@ _answers_lock = threading.Lock()
 # another build, how long its own build took, and the whole answer. GET /api/state-timing gives them, so a slow
 # refresh of the live page can be measured where it happens.
 STATE_TIMES = __import__("collections").deque(maxlen=200)
+# The time of Python's garbage collector in this process (#5597), summed by a gc callback: a build records how much
+# of its time went to it. Live, a build took 4 times the CPU of the same build on a copy of the queue.
+GC_SPENT = {"ms": 0.0, "full": 0, "t": 0.0}
+
+
+def _gc_watch(phase, info):
+    if phase == "start":
+        GC_SPENT["t"] = time.perf_counter()
+    else:
+        GC_SPENT["ms"] += (time.perf_counter() - GC_SPENT["t"]) * 1000
+        GC_SPENT["full"] += info.get("generation") == 2
+
+
+gc.callbacks.append(_gc_watch)
 
 
 def page_answer(closed, timing=None):
