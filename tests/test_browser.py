@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests import chrome
 from river import browser, cli, core, server
 from river.core import RiverError
 from river.routes import browser as routes
@@ -331,7 +332,7 @@ class RealChrome(Base):
     """One real headless Chrome: a page through the proxy, the text, a click, typing, and a blocked address."""
 
     def test_open_read_click_type_and_the_network_rule(self):
-        if not browser.chrome_path():
+        if not chrome() or not browser.chrome_path():  # the browser of serve starts browser.chrome_path()
             self.skipTest("no Chrome on this computer")
         if not _can_bind():
             self.skipTest("this sandbox does not allow a local port")
@@ -401,14 +402,14 @@ class AttachedChrome(Base):
             time.sleep(0.1)
 
     def test_attach_uses_its_own_tab_and_leaves_the_browser_open(self):
-        chrome = browser.chrome_path()
-        if not chrome:
+        chrome_ = chrome() and browser.chrome_path()
+        if not chrome_:
             self.skipTest("no Chrome on this computer")
         if not _can_bind():
             self.skipTest("this sandbox does not allow a local port")
         import subprocess, time
         prof = os.path.join(self.tmp.name, "shared")
-        p = subprocess.Popen([chrome, "--headless=new", f"--user-data-dir={prof}", "--remote-debugging-port=0",
+        p = subprocess.Popen([chrome_, "--headless=new", f"--user-data-dir={prof}", "--remote-debugging-port=0",
                               "--no-first-run", "data:text/html,<title>Theirs</title>"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.addCleanup(self._stop_chrome, p, prof)
@@ -590,7 +591,7 @@ class CdpAddress(Base):
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["mcpServers"][browser.MCP_NAME]["args"][1], "@playwright/mcp@0.0.40")
 
     def test_a_real_chrome_through_the_cdp_address_of_serve(self):
-        if not browser.chrome_path():
+        if not chrome() or not browser.chrome_path():  # the browser of serve starts browser.chrome_path()
             self.skipTest("no Chrome on this computer")
         if not _can_bind():
             self.skipTest("this sandbox does not allow a local port")
@@ -618,7 +619,7 @@ class CdpAddress(Base):
 
     def test_a_real_chrome_runs_reads_of_an_isolated_world_while_the_person_controls(self):
         # #5460: what Playwright does for browser_snapshot, by hand: an isolated world of the page, then scripts.
-        if not browser.chrome_path():
+        if not chrome() or not browser.chrome_path():  # the browser of serve starts browser.chrome_path()
             self.skipTest("no Chrome on this computer")
         if not _can_bind():
             self.skipTest("this sandbox does not allow a local port")

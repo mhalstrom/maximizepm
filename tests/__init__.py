@@ -34,6 +34,22 @@ from river.agents import opencode as opencode_adapter  # noqa: E402
 opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
 
 
+def chrome():
+    """The Chrome (or Chromium, or Edge) that a test starts, or None, so the test skips. Every test that starts a real
+    browser asks here. MAXPM_CHROME names one; MAXPM_NO_BROWSER=1 gives None: the checks of a release on GitHub run
+    without the browser tests (mark 2026-11-12), and so does its Intel job (#5583)."""
+    import shutil
+    if os.environ.get("MAXPM_NO_BROWSER"):
+        return None
+    for c in (os.environ.get("MAXPM_CHROME"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+              "/Applications/Chromium.app/Contents/MacOS/Chromium",
+              "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+              *(shutil.which(n) for n in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"))):
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
 def proc_after_exec(pid, want, wait=5.0):
     """core.proc_info(pid) once the new child's command line shows `want` (the program it starts) and stays the same
     for 0.2 s, at most wait seconds (#5295). ps right after Popen can find the child before its exec (the test

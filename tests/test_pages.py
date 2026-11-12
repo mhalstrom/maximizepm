@@ -12,6 +12,7 @@ import threading
 import unittest
 from pathlib import Path
 
+from tests import chrome
 from river import browser, core
 from river.plugins import pages
 from river.routes import browser as routes
@@ -316,7 +317,7 @@ def _can_bind():
 
 class RealWalk(Base):
     def test_a_real_page_walk_maps_the_exception_to_the_source_and_reports_the_failed_request(self):
-        if os.environ.get("MAXPM_NO_BROWSER") or not browser.chrome_path():
+        if not chrome() or not browser.chrome_path():  # the browser of serve starts browser.chrome_path()
             self.skipTest("no Chrome on this computer")
         if not _can_bind():
             self.skipTest("this sandbox does not allow a local port")

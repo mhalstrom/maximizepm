@@ -25,7 +25,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - name: Tests (standard library only)
+      # Without the tests that start a real browser (mark 2026-11-12): they run in tests.yml on each push, and a slow
+      # runner must not stop a release.
+      - name: Tests (standard library only, without the browser tests)
+        env:
+          MAXPM_NO_BROWSER: "1"
         run: python -m unittest discover -s tests -t . -v
       - name: Wheel builds and runs
         run: |
@@ -102,10 +106,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-      # The page tests in Chrome gate the release in the checks job (Linux); the page is the same code on every
-      # computer. Here they skip (#5583: on the Intel runner of v0.2.0 a dictation test waited 15 s for words that
-      # come in under 1 s on Linux and Apple silicon, and no release was made). This job checks the Intel build.
-      - name: Tests on Intel (standard library only, without the page tests in Chrome)
+      # The browser tests run in tests.yml on each push, not in a release (#5583: on the Intel runner of v0.2.0 a
+      # dictation test waited 15 s for words that come in under 1 s on Linux and Apple silicon, and no release was
+      # made). This job checks the Intel build.
+      - name: Tests on Intel (standard library only, without the browser tests)
         env:
           MAXPM_NO_BROWSER: "1"
         run: python -m unittest discover -s tests -t .

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
+from tests import chrome
 from river import browser, cli, core
 from river.core import RiverError
 from river.plugins import visual
@@ -143,7 +144,7 @@ class Fake(Base):
         self.assertEqual(r["check"]["form"], "plugin")
 
 
-@unittest.skipUnless(browser.chrome_path(), "no Chrome on this computer (MAXPM_CHROME names one)")
+@unittest.skipUnless(chrome() and browser.chrome_path(), "no Chrome on this computer (MAXPM_CHROME names one)")
 class RealChrome(Base):
     """A real headless Chrome: the same page matches, a changed text differs, a mask hides a clock."""
 

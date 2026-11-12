@@ -4660,19 +4660,7 @@ class StaticFiles(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
-def _chrome():
-    """A Chrome (or Chromium, or Edge) on this computer, or None. MAXPM_CHROME names one; MAXPM_NO_BROWSER=1 gives None,
-    so the page tests skip (the Intel job of a release, #5583: the page tests gate the release on Linux)."""
-    import shutil
-    if os.environ.get("MAXPM_NO_BROWSER"):
-        return None
-    for c in (os.environ.get("MAXPM_CHROME"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-              "/Applications/Chromium.app/Contents/MacOS/Chromium",
-              "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-              *(shutil.which(n) for n in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"))):
-        if c and os.path.exists(c):
-            return c
-    return None
+from tests import chrome as _chrome  # noqa: E402  (the one check of every browser test)
 
 
 def _chrome_window(size):
