@@ -9980,9 +9980,11 @@ class OpenAnn(dict):
         return self[k] if k in self else default
 
 
-def annotate(conn, closed=True):
+def annotate(conn, closed=True, copy=True):
     """Compute readiness, effective priority, unblock counts, and sort keys for every item. closed=False: an
-    OpenAnn, for a caller that looks only at open items (it iterates over the open ones)."""
+    OpenAnn, for a caller that looks only at open items (it iterates over the open ones). copy=False: the done and
+    dropped rows of a shared result come as they are, the same objects from build to build while they do not
+    change (#5593); only a caller that never changes a row asks so (state)."""
     share = ANN_SHARE.get()
     if share is None:
         return _annotate(conn, closed)
@@ -10001,12 +10003,15 @@ def annotate(conn, closed=True):
             got = share[name] = (key, _annotate(conn, closed))
     if isinstance(got[1], OpenAnn):
         return _fresh_renewals(conn, got[1].copy_rows())
-    rows = _fresh_renewals(conn, {i: dict(a) for i, a in got[1].items()})
+    full = got[1]
     if closed:
-        return rows
-    return OpenAnn({i: a for i, a in rows.items() if a["status"] in OPEN_STATES},
-                   {i: a for i, a in rows.items() if a["status"] not in OPEN_STATES}, rows.__getitem__,
-                   ({i: a["waits_on"] for i, a in rows.items()}, {i: a["unblocks"] for i, a in rows.items()}))
+        return _fresh_renewals(conn, {i: dict(a) if copy or a["status"] in OPEN_STATES else a for i, a in full.items()})
+    # An OpenAnn from the whole result: a copy of the open rows only. Its done rows are read (light) or copied
+    # before a caller gets one (OpenAnn.__missing__), as the rows of the graph are in an OpenAnn of its own: copying
+    # all 5,600 rows for the 300 open ones took 13 ms of a page build (#5593).
+    rows = _fresh_renewals(conn, {i: dict(a) for i, a in full.items() if a["status"] in OPEN_STATES})
+    return OpenAnn(rows, {i: a for i, a in full.items() if a["status"] not in OPEN_STATES}, full.__getitem__,
+                   ({i: a["waits_on"] for i, a in full.items()}, {i: a["unblocks"] for i, a in full.items()}))
 
 
 def forget_graph():
@@ -17941,12 +17946,36 @@ def recent_events(conn, limit=40):
         "ORDER BY e.id DESC LIMIT ?", (limit,))]
 
 
+_STATE_ROWS = {}  # item id -> (its computed done row, the row state gave for it), see _state_rows
+
+
+def _state_rows(shown, closed):
+    """The items of the state: each computed row without its sort key. A done row that annotate kept since the
+    last build (the same object) gives the same row as then, so slim and the row hashes of the page's answer
+    (statedelta) reuse their work for it too (#5593). The callers only read the state."""
+    global _STATE_ROWS
+    old, kept, out = _STATE_ROWS, {}, []
+    for a in shown:
+        if a["status"] in CLOSED_STATES:
+            if not closed:
+                continue
+            hit = old.get(a["id"])
+            row = hit[1] if hit is not None and hit[0] is a else {k: v for k, v in a.items() if k != "sort_key"}
+            kept[a["id"]] = (a, row)
+        else:
+            row = {k: v for k, v in a.items() if k != "sort_key"}
+        out.append(row)
+    if closed:
+        _STATE_ROWS = kept
+    return out
+
+
 def state(conn, closed=True):
     """Everything the web page shows, in one read.
 
     closed: False leaves done and dropped items out (the page asks for them only while a view shows them, #4709);
     closed_counts then still says how many each project has."""
-    ann = annotate(conn, closed=closed)
+    ann = annotate(conn, closed=closed, copy=False)
     items = sorted(ann.values(), key=lambda a: a["sort_key"])
     shown = [a for a in items if not a["project_archived"]]
     closed_counts = {}
@@ -17961,8 +17990,7 @@ def state(conn, closed=True):
         "now": iso(now()),
         "projects": project_list(conn),
         "archived_projects": project_archived(conn),  # the Plan tab's Archived list (#5197)
-        "items": [{k: v for k, v in a.items() if k != "sort_key"} for a in shown
-                  if closed or a["status"] not in CLOSED_STATES],
+        "items": _state_rows(shown, closed),
         "closed_counts": closed_counts,
         "agents": [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents ORDER BY name")],
         "capacity": capacity(conn, ann),

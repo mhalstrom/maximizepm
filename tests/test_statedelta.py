@@ -270,6 +270,37 @@ class KeptDoneRows(Base):
             self.assertNotIn(self.old, seen)
 
 
+    def test_an_unchanged_done_row_reaches_the_answer_without_new_work(self):
+        # #5593: the same done row from annotate to the slim row and its hash; a lone page's done-view poll was
+        # 190 ms on 5,600 items, as state, slim and the hashes worked on every row of each build.
+        server._kept_graph.clear()
+        self.addCleanup(server._kept_graph.clear)
+        first = self.build()
+        st1 = server.page_state(True)
+        slim1 = {r["id"]: r for r in statedelta.slim(st1)["items"]}
+        server.state_changed()
+        st2 = server.page_state(True)
+        two = {r["id"]: r for r in st2["items"]}
+        self.assertIs(two[self.old], {r["id"]: r for r in st1["items"]}[self.old], "the same state row")
+        self.assertIsNot(two[self.one], first[self.one], "open rows are new each build")
+        slim2 = {r["id"]: r for r in statedelta.slim(st2)["items"]}
+        self.assertIs(slim2[self.old], slim1[self.old], "the same slim row")
+        # A changed done item gets a new row, and the poll carries it.
+        v = statedelta.answer(statedelta.slim(st2))["v"]
+        core.item_edit(self.c, self.old, title="old, renamed", actor="ag")
+        server.state_changed()
+        st3 = server.page_state(True)
+        self.assertEqual({r["id"]: r for r in st3["items"]}[self.old]["title"], "old, renamed")
+        ans = statedelta.answer(statedelta.slim(st3), v)
+        self.assertEqual([r["title"] for r in ans["rows"]["items"]["set"]], ["old, renamed"])
+        # The open view between two done-view builds keeps the kept rows.
+        server.state_changed()
+        server.page_state(False)
+        server.state_changed()
+        st4 = server.page_state(True)
+        self.assertIs({r["id"]: r for r in st4["items"]}[self.old], {r["id"]: r for r in st3["items"]}[self.old])
+
+
 class Limits(Base):
     """The speed test of the page's data (#5590, p147): on a queue of the size of mark's (300 open items, 5,000 done,
     long notes and output), the first answer is under 1 MB gzipped, a poll after one change under 50 KB, and the

@@ -31,6 +31,9 @@ ITEM_LEFT_OUT = ("context", "check", "touches")
 CLOSED_TEXT = 300
 
 _lock = threading.Lock()
+# The slim rows and the row hashes of the done items of the last state, by the row they came from (#5593).
+_slim_rows: dict = {}
+_row_hashes: dict = {}
 _versions: "OrderedDict[str, dict]" = OrderedDict()
 _prefix = secrets.token_hex(3)
 _count = [0]
@@ -39,16 +42,25 @@ _count = [0]
 def slim(state):
     """The state as the page uses it: items without the fields it never reads; a closed item without empty fields
     and with long text cut."""
-    items = []
+    global _slim_rows
+    items, old, kept = [], _slim_rows, {}
     for it in state.get("items") or []:
         if it.get("status") in ("done", "dropped"):
-            row = {k: (v[:CLOSED_TEXT] + "…" if v.__class__ is str and len(v) > CLOSED_TEXT else v)
-                   for k, v in it.items() if v is not None and k not in ITEM_LEFT_OUT}
+            # The same done row as in the last state (core._state_rows keeps it): the same slim row (#5593).
+            hit = old.get(it["id"])
+            if hit is not None and hit[0] is it:
+                row = hit[1]
+            else:
+                row = {k: (v[:CLOSED_TEXT] + "…" if v.__class__ is str and len(v) > CLOSED_TEXT else v)
+                       for k, v in it.items() if v is not None and k not in ITEM_LEFT_OUT}
+            kept[it["id"]] = (it, row)
         else:
             row = dict(it)
             for k in ITEM_LEFT_OUT:
                 row.pop(k, None)
         items.append(row)
+    if kept:
+        _slim_rows = kept
     return dict(state, items=items)
 
 
@@ -56,14 +68,31 @@ def _hash(value):
     return hash(json.dumps(value, default=str))
 
 
+def _row_hash(row, old, kept):
+    """The hash of an item row; a done row's from the last signature when it is the same object (#5593)."""
+    if row.get("status") not in ("done", "dropped"):
+        return _hash(row)
+    hit = old.get(id(row))
+    h = hit[1] if hit is not None and hit[0] is row else _hash(row)
+    kept[id(row)] = (row, h)
+    return h
+
+
 def _signature(state, last):
     """A hash per part; for a KEYED part, a hash per row and one of the order. A part that did not change since
     the last version shares that version's object, so the remembered versions stay small."""
+    global _row_hashes
     sig = {}
     for name, value in state.items():
+        if name == "items" and isinstance(value, list):
+            old, kept = _row_hashes, {}
+            rows = {r["id"]: _row_hash(r, old, kept) for r in value}
+            if kept:
+                _row_hashes = kept
+        elif name in KEYED and isinstance(value, list):
+            rows = {r[KEYED[name]]: _hash(r) for r in value}
         if name in KEYED and isinstance(value, list):
             key = KEYED[name]
-            rows = {r[key]: _hash(r) for r in value}
             order = hash(tuple(r[key] for r in value))
             prev = last.get(name) if last else None
             if prev and prev[0] == "k" and prev[2] == order and prev[1] == rows:
@@ -134,3 +163,5 @@ def reset():
     with _lock:
         _versions.clear()
         _sigs.clear()
+        _slim_rows.clear()
+        _row_hashes.clear()
