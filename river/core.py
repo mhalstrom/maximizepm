@@ -250,6 +250,9 @@ DEFAULT_SETTINGS = {
     # after that only a person starts it.
     "ops_repair_max": "2",
     "ops_repair_window": "6h",
+    # A noise rule (#5504, maxpm ops noise add) ends after at most ops_noise_max when an agent adds it (decision 1 of
+    # canvas problem-kinds: the investigating agent adds a rule with a 30-day end, and the manager sees each one).
+    "ops_noise_max": "30d",
     # The release watch (#5459): after each release of a deploy target (its deploy item is done), each check of the
     # target and of its projects runs at once, then every ops_watch_every (when its own every is longer) until
     # fail_after runs (or recover_after, when larger) have ended since the release; then on its own schedule. A fault
@@ -1067,6 +1070,27 @@ CREATE TABLE IF NOT EXISTS ops_systems (
 );
 CREATE INDEX IF NOT EXISTS ops_systems_project ON ops_systems(project_id, state, id);
 
+-- A noise rule (#5504): a check, one subject of it, or the lines and results of it that match a pattern are not a
+-- problem until the rule ends. A matching fault opens no item and starts no agent; it is counted here and goes to the
+-- history only. A log check does not count the matching lines.
+CREATE TABLE IF NOT EXISTS ops_noise (
+  id          INTEGER PRIMARY KEY,
+  check_id    INTEGER NOT NULL,
+  subject     TEXT,                      -- one subject of the check; none: any
+  pattern     TEXT,                      -- a regular expression over log lines, subject names and the run's summary
+  reason      TEXT NOT NULL,
+  fault_id    INTEGER,                   -- the fault item that showed it
+  until       TEXT NOT NULL,             -- when it ends
+  created_by  TEXT,
+  created_at  TEXT NOT NULL,
+  removed_by  TEXT,
+  removed_at  TEXT,
+  removed_note TEXT,
+  hits        INTEGER NOT NULL DEFAULT 0,  -- faults it kept from becoming items
+  last_hit    TEXT
+);
+CREATE INDEX IF NOT EXISTS ops_noise_check ON ops_noise(check_id);
+
 CREATE TABLE IF NOT EXISTS session_samples (
   id          INTEGER PRIMARY KEY,
   at          TEXT NOT NULL,
@@ -1698,7 +1722,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_watch_every", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_watch_every", "ops_noise_max", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -3937,6 +3961,123 @@ def ops_due(conn, at=None):
     return out
 
 
+def ops_noise_rules(conn, c, at=None):
+    """The noise rules of a check that are in force at `at`."""
+    return [dict(r) for r in conn.execute("SELECT * FROM ops_noise WHERE check_id=? AND removed_at IS NULL AND until>? "
+                                          "ORDER BY id", (c["id"], iso(at or now())))]
+
+
+def _ops_noise_patterns(rules):
+    """The compiled patterns of rules that have one and name no subject (they apply to every line of the check)."""
+    out = []
+    for r in rules:
+        if r["pattern"] and not r["subject"]:
+            try:
+                out.append(re.compile(r["pattern"]))
+            except re.error:
+                pass
+    return out
+
+
+def _ops_noise_match(c, key, rules, summary):
+    """The rule that makes a fault key of check c noise, or None: a rule with no pattern for the check (and for the
+    subject, when it names one), or a rule whose pattern matches the subject's name or the run's summary."""
+    subject = key[len(c["key"]) + 1:] if key.startswith(c["key"] + ":") else None
+    for r in rules:
+        if r["subject"] and r["subject"] != subject:
+            continue
+        if not r["pattern"]:
+            return r
+        try:
+            if re.search(r["pattern"], subject or summary or ""):
+                return r
+        except re.error:
+            continue
+    return None
+
+
+def ops_noise_add(conn, scope, name, reason, pattern=None, subject=None, until=None, fault=None, actor=None):
+    """maxpm ops noise add: a rule that marks a check, a subject of it, or what matches a pattern as not a problem,
+    with a reason, the fault that showed it and an end. An agent's rule ends within ops_noise_max (30d); the active
+    manager gets a note for each rule it did not add itself."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise RiverError("say why it is not a problem: --reason \"<what it is, and why nobody needs to act>\"")
+    pattern = (pattern or "").strip() or None
+    subject = (subject or "").strip() or None
+    if pattern:
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise RiverError(f"bad --pattern: {e}")
+    c = ops_find(conn, scope, name)
+    agent = bool(actor) and not _is_person(conn, actor) and not _is_manager(conn, actor)
+    most = parse_duration(setting(conn, "ops_noise_max"))
+    u = (until or "").strip()
+    end = now() + most if not u else parse_when(u)
+    if end <= now():
+        raise RiverError(f"--until {until} has passed: give a time in the future (30d, or a date)")
+    if agent and end > now() + most:
+        raise RiverError(f"an agent's noise rule ends within ops_noise_max ({setting(conn, 'ops_noise_max')}); a person "
+                         f"or the manager sets a later end")
+    with tx(conn):
+        if fault is None and actor:
+            held = _held_item(conn, actor)
+            fault = held["id"] if held and held["kind"] == "operational" else None
+        if fault is not None:
+            _item(conn, fault)
+        cur = conn.execute("INSERT INTO ops_noise(check_id,subject,pattern,reason,fault_id,until,created_by,created_at) "
+                           "VALUES (?,?,?,?,?,?,?,?)", (c["id"], subject, pattern, reason, fault, iso(end), actor,
+                                                       iso(now())))
+        rid = cur.lastrowid
+        what = (f"{c['scope']}/{c['name']}" + (f" subject {subject}" if subject else "")
+                + (f" matching {pattern!r}" if pattern else ""))
+        _event(conn, fault, actor, f"ops noise rule n{rid} added: {what} until {show_time(iso(end))}: {reason}")
+    if actor != active_manager(conn):
+        _ops_tell_manager(conn, "note", f"{actor or 'a person'} added noise rule n{rid}: {what}, until "
+                          f"{show_time(iso(end))}. Why: {reason}. Remove it: maxpm ops noise rm n{rid} --note \"<why>\"",
+                          fault)
+    return {"changed": "added", "rule": ops_noise_list(conn, all_=True, rule_id=rid)[0]}
+
+
+def ops_noise_list(conn, scope=None, all_=False, rule_id=None):
+    """The noise rules, of one scope or of all; only the ones in force unless all_."""
+    q = ("SELECT n.*, k.scope_kind, k.scope, k.name check_name FROM ops_noise n LEFT JOIN checks k ON k.id=n.check_id "
+         "WHERE 1=1")
+    args = []
+    if rule_id is not None:
+        q, args = q + " AND n.id=?", args + [rule_id]
+    if scope:
+        kind, name = _ops_scope(conn, scope)
+        q, args = q + " AND k.scope_kind=? AND k.scope=?", args + [kind, name]
+    if not all_:
+        q, args = q + " AND n.removed_at IS NULL AND n.until>?", args + [iso(now())]
+    out = []
+    for r in conn.execute(q + " ORDER BY n.id", args):
+        d = dict(r)
+        d["state"] = ("removed" if d["removed_at"] else "ended" if d["until"] <= iso(now()) else "in force")
+        out.append(d)
+    return out
+
+
+def ops_noise_rm(conn, rule, actor=None, note=None):
+    """maxpm ops noise rm n<id>: the rule ends now. Its writer, a person or the manager removes it, with a reason."""
+    note = (note or "").strip()
+    if not note:
+        raise RiverError("say why: --note \"<why it is a problem after all>\"")
+    rid = int(str(rule).lstrip("n#"))
+    with tx(conn):
+        r = conn.execute("SELECT * FROM ops_noise WHERE id=?", (rid,)).fetchone()
+        if r is None or r["removed_at"]:
+            raise RiverError(f"no noise rule n{rid} in force (maxpm ops noise list)")
+        if actor and actor != r["created_by"] and not _is_person(conn, actor) and not _is_manager(conn, actor):
+            raise RiverError(f"n{rid} is {r['created_by'] or 'a person'}'s rule; it, a person or the manager removes it")
+        conn.execute("UPDATE ops_noise SET removed_by=?, removed_at=?, removed_note=? WHERE id=?",
+                     (actor, iso(now()), note, rid))
+        _event(conn, r["fault_id"], actor, f"ops noise rule n{rid} removed: {note}")
+    return {"changed": "removed", "rule": ops_noise_list(conn, all_=True, rule_id=rid)[0]}
+
+
 def ops_start(conn, c, at=None, actor=None):
     """Open the run of a check: one ops_runs row, in a transaction, so two passes never run it twice. Returns what
     the run needs (the check, the folder, the limit), or None when a run of it is open already."""
@@ -3947,7 +4088,8 @@ def ops_start(conn, c, at=None, actor=None):
         cur = conn.execute("INSERT INTO ops_runs(check_id,key,started_at) VALUES (?,?,?)", (c["id"], c["key"], iso(at)))
     return {"id": cur.lastrowid, "check": c, "folder": _ops_folder(conn, c) if c["runs_command"] else None,
             "limit": parse_duration(c["timeout"]).total_seconds(), "actor": actor,
-            "last_beat": conn.execute("SELECT last_beat, created_at FROM checks WHERE id=?", (c["id"],)).fetchone()}
+            "last_beat": conn.execute("SELECT last_beat, created_at FROM checks WHERE id=?", (c["id"],)).fetchone(),
+            "noise": [r["pattern"] for r in ops_noise_rules(conn, c, at) if r["pattern"] and not r["subject"]]}
 
 
 def _ops_tail(text):
@@ -4036,7 +4178,10 @@ def ops_execute(run, at=None):
             else:
                 res.update(status="critical", summary=f"no answer: {getattr(e, 'reason', e)}")
     else:
-        env = {**os.environ, "MAXPM_CHECK": c["name"], "MAXPM_SCOPE": c["scope"], "MAXPM_CHECK_KEY": c["key"]}
+        # MAXPM_NOISE: the patterns of the check's noise rules, one a line; a plugin leaves out the lines that match
+        # (maxpm ops logs does), as the log form does here (#5504).
+        env = {**os.environ, "MAXPM_CHECK": c["name"], "MAXPM_SCOPE": c["scope"], "MAXPM_CHECK_KEY": c["key"],
+               "MAXPM_NOISE": "\n".join(run.get("noise") or [])}
         try:
             if run["folder"] and not os.path.isdir(run["folder"]):
                 raise OSError(f"the folder {run['folder']} does not exist")
@@ -4076,8 +4221,13 @@ def ops_execute(run, at=None):
                 res.update(status="unknown", summary=f"the log command ended with exit {code}: the check could not run")
             else:
                 pat = re.compile(cfg["pattern"])
+                noise = _ops_noise_patterns([{"pattern": p, "subject": None} for p in run.get("noise") or []])
                 hits = [x for x in lines if pat.search(x)]
+                quiet = [x for x in hits if any(n.search(x) for n in noise)]
+                hits = [x for x in hits if x not in quiet] if quiet else hits
                 res.update(status="ok", matches=len(hits), evidence={"lines": hits[-20:]} if hits else None)
+                if quiet:
+                    res["evidence"] = dict(res["evidence"] or {}, noise=len(quiet))
                 if c["subject"]:
                     per = {}
                     for x in hits:
@@ -4236,7 +4386,9 @@ def _ops_evidence(c, key, res, at, since=None, project=None):
             f"--output \"<cause>\"). The check's runs and changes: maxpm ops history {c['scope']} {c['name']}. "
             f"A recovery adds a note here and leaves the item open: you close it. A fact about the system that you "
             f"lacked goes into its description: maxpm ops system edit {project or c['scope']} --set <part.field>=\"...\" "
-            f"--why \"<the fact, and this fault>\" (maxpm ops system show {project or c['scope']}).")
+            f"--why \"<the fact, and this fault>\" (maxpm ops system show {project or c['scope']}). It is not a problem "
+            f"(a bot, a closed connection): maxpm ops noise add {c['scope']} {c['name']} [--pattern <regex>] --reason "
+            f"\"<why nobody needs to act>\" (it ends within 30 days), then close this item with the reason.")
 
 
 def _ops_note(conn, item_id, text, at, force=False):
@@ -4453,8 +4605,18 @@ def ops_faults(conn, check_id, rec, res, at=None, watch=None):
     if c["state"] == "fault" and not faulted:
         faulted.append(c["key"])
     out = []
+    rules = ops_noise_rules(conn, c, at)
     for key in faulted:
         new = to.get(key) == "fault"
+        rule = _ops_noise_match(c, key, rules, res.get("summary")) if rules else None
+        if rule:  # noise (#5504): the record only; no item, no agent
+            if new:
+                with tx(conn):
+                    conn.execute("UPDATE ops_noise SET hits=hits+1, last_hit=? WHERE id=?", (iso(at), rule["id"]))
+                    _event(conn, None, "maxpm", f"ops noise: {key} in fault, kept out of the queue by rule n{rule['id']} "
+                                                f"({rule['reason']}): {res.get('summary') or res.get('status')}")
+            out.append({"key": key, "item": None, "action": "noise", "rule": rule["id"]})
+            continue
         if c["severity"] == "note":
             if new:
                 _ops_tell_manager(conn, "note", f"fault: {key} ({res.get('summary') or res.get('status')}); the check "

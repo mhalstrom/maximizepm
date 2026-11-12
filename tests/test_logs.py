@@ -43,6 +43,14 @@ class Logs(unittest.TestCase):
         res = logs.run("t", file=self.log)
         self.assertEqual((res["status"], res["matches"]), (2, ["ERROR after rotation"]))  # no limit: one line
 
+    def test_the_noise_patterns_that_maxpm_serve_gives_are_not_counted(self):
+        logs.run("t", file=self.log)
+        self.write("ERROR BrokenPipeError: [Errno 32]\nERROR db down\nERROR ConnectionResetError\n")
+        with mock.patch.dict(os.environ, {"MAXPM_NOISE": "BrokenPipeError\nConnectionResetError\n(bad"}):
+            res = logs.run("t", file=self.log)
+        self.assertEqual((res["count"], res["matches"]), (1, ["ERROR db down"]))
+        self.assertIn("; 2 more are noise (maxpm ops noise list)", res["summary"])
+
     def test_from_start_reads_the_old_lines_and_a_large_read_skips_the_oldest_bytes(self):
         res = logs.run("t", file=self.log, from_start=True)
         self.assertEqual((res["status"], res["count"]), (2, 1))

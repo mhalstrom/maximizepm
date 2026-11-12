@@ -181,7 +181,16 @@ def run(name=None, file=None, ssh=None, command=None, pattern=None, ignore=None,
         return {"status": 0, "summary": f"{source}: the first read found the end of the log; from the next run on, "
                                         f"new lines count", "perf": "", "matches": [], "count": 0, "lines": 0,
                 "skipped_bytes": 0}
+    # The patterns of the check's noise rules (maxpm ops noise, #5504), which maxpm serve gives each run.
+    noise = []
+    for n in (os.environ.get("MAXPM_NOISE") or "").splitlines():
+        try:
+            noise.append(re.compile(n))
+        except re.error:
+            pass
     hits = [x for x in lines if pat.search(x) and not (ign and ign.search(x))]
+    quiet = [x for x in hits if any(n.search(x) for n in noise)]
+    hits = [x for x in hits if x not in quiet] if quiet else hits
     n = len(hits)
     value = n / minutes if per_minute and minutes else n
     unit = " a minute" if per_minute else ""
@@ -189,7 +198,8 @@ def run(name=None, file=None, ssh=None, command=None, pattern=None, ignore=None,
     rate = f" ({value:.1f}{unit})" if per_minute else ""
     summary = (f"{source}: {n} of {len(lines)} new lines match{rate}"
                + (f"; the limit is {critical if status == 2 else warning:g}{unit}" if status else "")
-               + (f"; {skipped} older bytes skipped (more than {max_read} bytes came)" if skipped else ""))
+               + (f"; {skipped} older bytes skipped (more than {max_read} bytes came)" if skipped else "")
+               + (f"; {len(quiet)} more are noise (maxpm ops noise list)" if quiet else ""))
     perf = (f"matches={n};{'' if warning is None else f'{warning:g}'};{'' if critical is None else f'{critical:g}'} "
             f"lines={len(lines)}")
     return {"status": status, "summary": summary, "perf": perf, "count": n, "lines": len(lines),

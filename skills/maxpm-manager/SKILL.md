@@ -418,6 +418,7 @@ maxpm target rename <target> <new>                     # with its deploy project
 maxpm target own <target>                              # one owner per target runs its deploys
 maxpm ops add <target> <check> <form> ...              # its checks, and its projects', run at once after each release
 maxpm ops system show|edit|accept|reject <project>     # its system description; an agent's edit waits for your accept
+maxpm ops noise add|list|rm                            # what is not a problem; you get a note for each agent's rule
 maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect
 maxpm target cut <target> --rev <commit>               # fix the release's items now; later ships join the next one
 maxpm target hook <target> <event> "<command>"         # MaximizePM runs it on release-cut, review-passed, review-failed, or deployed (a person or the manager sets it)

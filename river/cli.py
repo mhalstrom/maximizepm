@@ -1143,6 +1143,21 @@ def build_parser(only=None):
     x = ops.add_parser("history", help="the last runs of a check and its changes of state, also of its subjects")
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("-n", type=int, default=20, help="how many runs and changes (default 20)")
+    x = ops.add_parser("noise", help="noise rules: a check, a subject of it, or what matches a pattern is not a "
+                       "problem until the rule ends; a matching fault opens no item and starts no agent, and a log "
+                       "check does not count the matching lines")
+    nz = x.add_subparsers(dest="oncmd", required=True)
+    y = nz.add_parser("add", help="add a rule (an agent's rule ends within ops_noise_max, 30d; the manager gets a note)")
+    y.add_argument("scope"); y.add_argument("name", help="the check")
+    y.add_argument("--reason", required=True, help="what it is, and why nobody needs to act")
+    y.add_argument("--pattern", help="a regular expression over the log lines, the subject names and the run's summary")
+    y.add_argument("--subject", help="only this subject of the check")
+    y.add_argument("--until", help="when the rule ends: 30d, or a date (default ops_noise_max)")
+    y.add_argument("--fault", type=int, help="the fault item that showed it (default: the fault item you hold)")
+    y = nz.add_parser("list", help="the rules in force, of one project or target or of all")
+    y.add_argument("scope", nargs="?"); y.add_argument("--all", action="store_true", help="also ended and removed ones")
+    y = nz.add_parser("rm", help="end a rule now (its writer, a person or the manager)")
+    y.add_argument("rule", help="n<id>"); y.add_argument("--note", required=True)
     x = ops.add_parser("system", help="the system description of a project: the facts of its code, its "
                        "infrastructure and its own rules that the kinds of problems and the evidence pack read. Kept "
                        "here, never in a repository; an agent's change is proposed until a person or the manager "
@@ -2817,6 +2832,12 @@ def _dispatch_ops(conn, a, actor):
     if a.ocmd == "run":
         core.ops_find(conn, a.scope, a.name)  # a wrong name says so here, not after a trip to maxpm serve
         return ask_server(conn, "ops_run", {"scope": a.scope, "name": a.name}, actor)
+    if a.ocmd == "noise":
+        if a.oncmd == "add":
+            return core.ops_noise_add(conn, a.scope, a.name, a.reason, a.pattern, a.subject, a.until, a.fault, actor)
+        if a.oncmd == "list":
+            return {"rules": core.ops_noise_list(conn, a.scope, a.all)}
+        return core.ops_noise_rm(conn, a.rule, actor, a.note)
     if a.ocmd == "system":
         if a.oscmd == "show":
             return core.ops_system_show(conn, a.project, a.version)
@@ -4750,7 +4771,24 @@ def render_ops_system(a, res):
               f"show {res['project']} --proposed")
 
 
+def _noise_line(r):
+    return (f"n{r['id']} {r['scope']}/{r['check_name']}" + (f" subject {r['subject']}" if r["subject"] else "")
+            + (f" matching {r['pattern']!r}" if r["pattern"] else "") + f": {r['reason']} ({r['state']}"
+            + (f" until {core.show_time(r['until'])}" if r["state"] == "in force" else "")
+            + (f"; {r['hits']} fault(s) kept out" if r["hits"] else "") + (f"; fault #{r['fault_id']}" if r["fault_id"] else "")
+            + f"; by {r['created_by'] or 'a person'})")
+
+
 def render_ops(a, res):
+    if a.ocmd == "noise":
+        if a.oncmd == "list":
+            for r in res["rules"]:
+                print(_noise_line(r))
+            if not res["rules"]:
+                print("no noise rules" + ("" if a.all else " in force (--all shows ended ones)"))
+            return
+        print(f"noise rule {res['changed']}: {_noise_line(res['rule'])}")
+        return
     if a.ocmd == "system":
         return render_ops_system(a, res)
     if a.ocmd == "profile":

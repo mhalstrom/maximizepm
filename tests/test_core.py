@@ -10325,6 +10325,73 @@ class Ops(Base):
         self.assertEqual([p["name"] for p in core.ops_proposals(self.c, "site")], ["check_jobs"])
 
 
+class OpsNoise(Base):
+    """Noise rules (#5504): a check, a subject of it, or what matches a pattern is not a problem until the rule ends:
+    a matching fault opens no item and starts no agent, and a log check does not count the matching lines."""
+
+    run_at, proc = Ops.run_at, staticmethod(Ops.proc)
+
+    def setUp(self):
+        super().setUp()
+        core.target_add(self.c, "prod", "the servers")
+        core.project_add(self.c, "site", target="prod")
+        for n in ("dev", "boss", "other"):
+            core.register(self.c, n)
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        core.register(self.c, "mark", human=True)
+
+    def items(self):
+        return [r[0] for r in self.c.execute("SELECT title FROM items WHERE kind='operational' ORDER BY id")]
+
+    def test_a_rule_keeps_a_fault_out_of_the_queue_and_an_agents_rule_ends_within_30_days(self):
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "x", "fail_after": 1}, actor="boss")
+        with self.assertRaisesRegex(RiverError, "ends within ops_noise_max"):
+            core.ops_noise_add(self.c, "site", "job", "closed pages", until="60d", actor="dev")
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.ops_noise_add(self.c, "site", "job", " ", actor="dev")
+        r = core.ops_noise_add(self.c, "site", "job", "the job's host is being retired", actor="dev")["rule"]
+        self.assertEqual((r["state"], r["created_by"]), ("in force", "dev"))
+        self.assertLessEqual(core.parse_iso(r["until"]), core.now() + timedelta(days=30))
+        self.assertTrue([m for m in core.inbox(self.c, "boss") if f"dev added noise rule n{r['id']}" in m["body"]])
+        res = self.run_at("site", "job", core.now(), self.proc(2, "JOB CRITICAL - down"))
+        self.assertEqual(res["items"], [{"key": "ops:site:job", "item": None, "action": "noise", "rule": r["id"]}])
+        self.assertEqual(self.items(), [])
+        self.assertEqual(core.ops_noise_list(self.c, "site")[0]["hits"], 1)
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE change LIKE 'ops noise: ops:site:job in fault, kept "
+                                       "out of the queue by rule n%'").fetchone())
+        # The rule ends: the fault that still lasts gets its item at the next run.
+        with self.assertRaisesRegex(RiverError, "it, a person or the manager removes it"):
+            core.ops_noise_rm(self.c, f"n{r['id']}", actor="other", note="x")
+        core.ops_noise_rm(self.c, f"n{r['id']}", actor="boss", note="the host stays")
+        self.assertEqual(core.ops_noise_list(self.c, "site"), [])
+        self.run_at("site", "job", core.now() + timedelta(minutes=5), self.proc(2, "JOB CRITICAL - down"))
+        self.assertEqual(self.items(), ["ops:site:job JOB CRITICAL - down"])
+
+    def test_a_pattern_matches_the_summary_or_a_subject_and_a_log_check_does_not_count_its_lines(self):
+        core.ops_add(self.c, "site", "certs", "plugin", {"command": "x", "fail_after": 1, "subject": True}, actor="boss")
+        core.ops_noise_add(self.c, "site", "certs", "a test host", pattern="^staging", actor="dev")
+        seen = {}
+
+        def runner(cmd, folder, limit, env):
+            seen["noise"] = env["MAXPM_NOISE"]
+            return subprocess.CompletedProcess(cmd, 2, "CERTS CRITICAL\nstaging.example: expired\nshop.example: "
+                                                       "expired\n", "")
+        res = self.run_at("site", "certs", core.now(), runner)
+        self.assertEqual(seen["noise"], "^staging")
+        self.assertEqual(sorted((x["key"], x["action"]) for x in res["items"]),
+                         [("ops:site:certs:shop.example", "opened"), ("ops:site:certs:staging.example", "noise")])
+        core.ops_add(self.c, "site", "errs", "log", {"command": "cat log", "pattern": "Traceback|Error", "limit": 2,
+                                                    "fail_after": 1}, actor="boss")
+        core.ops_noise_add(self.c, "site", "errs", "a page closed its connection",
+                           pattern="BrokenPipeError|ConnectionResetError", actor="dev")
+        out = "Traceback\nBrokenPipeError: [Errno 32]\nConnectionResetError: reset\nok\n"
+        res = self.run_at("site", "errs", core.now(), self.proc(0, out))
+        self.assertEqual(res["status"], "ok")  # one line counts (Traceback), the limit is 2
+        run = core.ops_history(self.c, "site", "errs", 1)["runs"][0]
+        self.assertEqual(json.loads(run["evidence"])["noise"], 2)
+
+
 class Speed(Base):
     """The shortcuts of #5491 give the same answers as the long way."""
 
