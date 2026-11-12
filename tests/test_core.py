@@ -5595,7 +5595,8 @@ class Kill(Base):
         self.assertEqual(core.proc_info(self.p.pid)[0], os.getpid())
         self.assertEqual(core.proc_info(os.getpid())[0], os.getppid())
         self.assertTrue(core.pid_alive(self.p.pid))
-        self.assertEqual(core.agent_process(self.p.pid)[0], self.p.pid)  # not a shell: it is the agent
+        with mock.patch.object(core, "_cli_process_name", return_value=None):  # no agent CLI in the environment
+            self.assertEqual(core.agent_process(self.p.pid)[0], self.p.pid)  # not a shell: it is the agent
         self.assertTrue(core._between("-zsh", "-zsh"))
         self.assertFalse(core._between("claude", "claude go"))
         with mock.patch("os.name", "nt"):
