@@ -140,8 +140,9 @@ def running(h, path):
                 ended = set()
             rows = sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals), ended_panes=ended)
             for r in rows:  # its first Stop waits for a second one (#5563): the page keeps Stop while it is idle
-                if r["name"] in server.STOPPED:
-                    r["stop_again"] = server.STOPPED[r["name"]]
+                does = server.stop_waits(conn, r["name"]) if r["name"] in server.STOPPED else None
+                if does:
+                    r["stop_again"] = does
             return h._send(200, {"sessions": rows, "proposals": core.expert_proposals(conn)})
         cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
         if "file" in q:  # scrolling up: the page of lines before a byte of one of its transcripts (#5120)

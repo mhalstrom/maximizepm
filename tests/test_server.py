@@ -2141,8 +2141,8 @@ class LaunchInTmux(unittest.TestCase):
         server.session_send(self.c, name, "go on", "mark")
         self.assertNotIn(name, server.STOPPED)
         server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
-        server._pane_reports(self.c, {name: ("working", None)})
-        self.assertNotIn(name, server.STOPPED)
+        server._pane_reports(self.c, {name: ("working", None)})  # in the loop's own process (#5569): read from the queue
+        self.assertIsNone(server.stop_waits(self.c, name))
         # Send now is a first Stop, and Claude Code has no second step.
         del pane["keys"][:]
         server.OPS["session_interrupt"](self.c, {"agent": name, "text": "use the other file"}, "mark")
@@ -4015,6 +4015,94 @@ class ServeReload(unittest.TestCase):
                     mock.patch.object(server, "restart_now", lambda why: did.append("restart")):
                 notify.loop(stop, interval_s=1)
             self.assertEqual(did, want)
+
+    def test_the_loop_process_asks_for_the_restart_with_its_exit(self):
+        """#5569: in its own process (river/loop.py) the loop does not exec itself: it ends after the pass, and its
+        exit code asks maxpm serve to start again."""
+        import threading
+        from river import notify
+        stop, did = threading.Event(), []
+        with mock.patch.dict(notify.SERVE_PORT, {"port": 8765}), mock.patch.dict(notify.CHILD, {"on": True}), \
+                mock.patch.object(server, "reload_ready", lambda c: "2"), \
+                mock.patch.object(server, "restart_now", lambda why: did.append("restart")):
+            notify.loop(stop, interval_s=1)  # it ends by itself: the restart set stop
+            self.assertEqual((did, notify.CHILD["restart"], stop.is_set()), ([], True, True))
+
+    def test_the_loop_process_reads_the_code_that_serve_runs(self):
+        """#5569: python -m river.loop serve <port> takes serve's port and code ids, ends when its stdin pipe ends,
+        and exits with RESTART_EXIT when its loop asked for the restart."""
+        import io as _io
+        from river import loop, notify
+        seen = {}
+
+        def run(stop):
+            stop.wait(5)  # the pipe of serve ended (an empty stdin here): the loop stops
+            seen.update(port=notify.SERVE_PORT["port"], code=server.BOOT_CODE, boot=server.BOOT, dev=server.DEV["on"],
+                        stopped=stop.is_set())
+            notify.CHILD["restart"] = True
+        for k, v in (("BOOT", server.BOOT), ("BOOT_CODE", server.BOOT_CODE)):
+            self.addCleanup(setattr, server, k, v)
+        self.addCleanup(server.DEV.update, {"on": server.DEV["on"]})
+        stdin = _io.TextIOWrapper(_io.BytesIO(b""))
+        with mock.patch.dict(notify.SERVE_PORT, {"port": None}), mock.patch.dict(notify.CHILD, {"on": False}), \
+                mock.patch.dict(os.environ, {"MAXPM_LOOP_BOOT": "111.5", "MAXPM_LOOP_CODE": "42", "MAXPM_LOOP_DEV": ""}), \
+                mock.patch.object(notify, "loop", run), mock.patch.object(sys, "stdin", stdin):
+            self.assertEqual(loop.main(["serve", "8765"]), loop.RESTART_EXIT)
+            self.assertTrue(notify.CHILD["on"])
+        self.assertEqual(seen, {"port": 8765, "code": "42", "boot": "111.5", "dev": False, "stopped": True})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(loop.main(["8765"]), 2)
+
+    def test_serve_runs_the_loop_in_a_process_and_restarts_when_it_asks(self):
+        """#5569: with serve_loop_process on, keep_loop starts the loop's process and starts it again when it ended
+        (not more often than LOOP_RESTART_S); an exit with RESTART_EXIT restarts serve once its own hooks and checks
+        end; stop_loop_process closes the pipe."""
+        import threading
+        from river import loop
+
+        class Proc:
+            def __init__(self):
+                self.returncode, self.stdin, self.waited = None, mock.Mock(), False
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.waited = True
+                self.returncode = 0 if self.returncode is None else self.returncode
+                return self.returncode
+        procs, restarts, stop = [], [], threading.Event()
+        self.assertEqual(core.setting(self.c, "serve_loop_process"), "on")
+        self.addCleanup(server.LOOP_THREAD.update, {"thread": None, "stop": None, "at": 0.0, "proc": None,
+                                                    "child": False, "restart": None})
+        said = io.StringIO()
+        with mock.patch.object(server, "_loop_process", lambda: procs.append(Proc()) or procs[-1]), \
+                mock.patch.object(server, "restart_now", restarts.append), contextlib.redirect_stdout(said):
+            server.LOOP_THREAD.update(thread=None, proc=None, stop=stop, child=True, restart=None)
+            self.assertTrue(server.keep_loop())
+            self.assertFalse(server.keep_loop())  # it runs
+            procs[0].returncode = 1  # it ended: once LOOP_RESTART_S passed it starts again
+            self.assertFalse(server.keep_loop())
+            server.LOOP_THREAD["at"] -= server.LOOP_RESTART_S
+            self.assertTrue(server.keep_loop())
+            self.assertEqual((len(procs), server.LOOP_THREAD["thread"]), (2, None))
+            self.assertIn("the loop process ended; it starts again", said.getvalue())
+            procs[1].returncode = loop.RESTART_EXIT  # the new code is ready: serve restarts, not the loop
+            server.HOOKS["running"] += 1
+            try:
+                self.assertFalse(server.keep_loop())
+                self.assertFalse(server.keep_loop())  # a hook of serve's own thread runs: it waits
+                self.assertEqual((restarts, len(procs)), ([], 2))
+            finally:
+                server.HOOKS["running"] -= 1
+            server.keep_loop()
+            self.assertEqual((restarts, len(procs)), (["the MaximizePM code changed"], 2))
+            # serve stops: the pipe closes.
+            server.LOOP_THREAD.update(restart=None, proc=Proc())
+            p = server.LOOP_THREAD["proc"]
+            server.stop_loop_process()
+            self.assertTrue(p.stdin.close.called and p.waited)
+            self.assertIsNone(server.LOOP_THREAD["proc"])
 
     def test_the_code_on_disk_loads_or_says_why_not(self):
         self.assertIsNone(server._code_loads())  # this clone

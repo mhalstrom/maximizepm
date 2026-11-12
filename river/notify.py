@@ -19,6 +19,8 @@ ADAPTERS = {}
 SERVE_PORT = {"port": None}  # set by maxpm serve, so links point at the page that is running
 # The loop of this process: when it started, and its last complete pass. core.serve_loop reads it from a file.
 LOOP = {"started": None, "last_pass": None}
+# The loop runs in a process of its own (river/loop.py, #5569): on; and it ended to ask serve for a restart.
+CHILD = {"on": False, "restart": False}
 
 
 def register_channel(name, make):
@@ -501,8 +503,12 @@ def loop(stop, interval_s=None):
             # maxpm serve only: run the new code, but not while one of its threads runs a hook or a check
             if SERVE_PORT.get("port") and not server.HOOKS["running"] and not server.OPS_RUNNING \
                     and server.reload_ready(conn):
-                conn.close()
-                server.restart_now("the MaximizePM code changed")
+                if CHILD["on"]:  # a process of its own (river/loop.py, #5569): it ends, and serve restarts
+                    CHILD["restart"] = True
+                    stop.set()
+                else:
+                    conn.close()
+                    server.restart_now("the MaximizePM code changed")
         except Exception as e:  # keep the loop alive; the next pass retries
             error = f"{type(e).__name__}: {e}"
             _say(f"maxpm notify: {e}")

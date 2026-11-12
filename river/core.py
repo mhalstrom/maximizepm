@@ -321,6 +321,10 @@ DEFAULT_SETTINGS = {
     # every command runs in its own process. MAXPM_LOCAL=1 does that for one command or shell. It counts when serve
     # starts.
     "serve_runners": "on",
+    # serve_loop_process on: maxpm serve runs the passes of its loop (watch, fresh sessions, checks, notices) in a process
+    # of its own (river/loop.py), so a page action does not wait on a pass for Python's GIL (#5569: 172 ms against
+    # 67 ms). off: in a thread of serve, as before. It counts when serve starts.
+    "serve_loop_process": "on",
     # tmux_adopt on: maxpm serve moves an agent session that runs outside tmux (a Terminal tab) into a tmux pane, so
     # the Sessions page can type into it (#4598). It waits until the session's turn has ended and it has written
     # nothing for ADOPT_QUIET, with no prompt, question or background work open; then it ends the old process and
@@ -2005,7 +2009,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_runners", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal",
+    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":

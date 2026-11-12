@@ -479,7 +479,6 @@ class PaneState(Env):
         server.TMUX_RUNNER = FakeTmux()
         self.addCleanup(setattr, server, "TMUX_RUNNER", None)
         self.addCleanup(server.PROMPTS.clear)
-        self.addCleanup(server.SENT_AT.clear)
         in_tmux = os.environ.pop("TMUX", None)
         if in_tmux is not None:
             self.addCleanup(os.environ.__setitem__, "TMUX", in_tmux)
@@ -525,7 +524,8 @@ class PaneState(Env):
         self.server.session_send(self.c, name, "run the tests", who="mark")
         self.assertEqual(self.event(name)["activity_event"], "report:working")
         self.assertNotIn("reported", self.server.watch_prompts(self.c))  # just sent: the prompt still shows
-        self.server.SENT_AT[name] -= self.server.TURN_GRACE + 1  # later: the grace is over
+        later = core.iso(core.now() - core.timedelta(seconds=self.server.TURN_GRACE + 1))  # the grace is over
+        self.c.execute("UPDATE agents SET typed_at=? WHERE name=?", (later, name))
         self.assertEqual(self.server.watch_prompts(self.c)["reported"], {name: "idle"})  # the turn ended
         self.server.session_send(self.c, name, "/status", who="mark")  # a slash command: the screen tells
         self.assertEqual(self.event(name)["activity_event"], "report:idle")

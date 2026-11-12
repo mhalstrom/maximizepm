@@ -2341,21 +2341,20 @@ def _pane_reports(conn, states):
     screen also when its message changed). Returns {agent: state} of what it recorded."""
     out = {}
     for agent, (state, message) in sorted(states.items()):
-        r = conn.execute("SELECT activity_event, activity_prompt, activity_at FROM agents WHERE name=? AND kind='ai'",
-                         (agent,)).fetchone()
+        r = conn.execute("SELECT activity_event, activity_prompt, activity_at, typed_at FROM agents WHERE name=? AND "
+                         "kind='ai'", (agent,)).fetchone()
         if not r:
             continue
         said = json.dumps({"message": (message or "")[:400]}) if state == "blocked" else None
         if r["activity_event"] == f"report:{state}" and (state != "blocked" or r["activity_prompt"] == said):
             continue
-        if state == "idle" and time.monotonic() - SENT_AT.get(agent, -TURN_GRACE) < TURN_GRACE:
+        if state == "idle" and r["activity_event"] == "report:working" and r["typed_at"] and \
+                (core.now() - core.parse_iso(r["typed_at"])).total_seconds() < TURN_GRACE:
             continue  # a message went in just now: the agent has not left its prompt yet (turn_started)
         try:
             core.report(conn, agent, state, message)
         except RiverError:
             continue
-        if state == "working":
-            STOPPED.pop(agent, None)  # it runs a turn again: its next Stop is a first one (#5563)
         out[agent] = state
     return out
 
@@ -3102,7 +3101,7 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
         raise RiverError(f"{agent} runs {what}, which has no key that stops its turn; type into its terminal "
                          f"(Open in terminal), or end the session")
     again = (ad.input.get("interrupt_again") if ad else None) if message is None else None
-    second = bool(again) and agent in STOPPED
+    second = bool(again) and stop_waits(conn, agent) is not None
     sent = keys
     if second:
         working = (ad.detect or {}).get("working")
@@ -3117,8 +3116,6 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
         STOPPED.pop(agent, None)
     else:
         send_keys(pane, [{"key": k} for k in keys])
-        if again:
-            STOPPED[agent] = again["does"]
     did = " ".join(sent + [again["text"]] if second else sent)
     held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                         "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
@@ -3131,6 +3128,9 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
     row = conn.execute("SELECT kind FROM agents WHERE name=?", (agent,)).fetchone()
     if row and row["kind"] == "ai":
         core.report(conn, agent, "idle")
+    if again and not second:
+        at = conn.execute("SELECT activity_at FROM agents WHERE name=?", (agent,)).fetchone()
+        STOPPED[agent] = {"does": again["does"], "at": at["activity_at"] if at else None}
     out = {"agent": agent, "pane": pane, "keys": sent}
     if second:
         out["command"] = again["text"]
@@ -3143,10 +3143,24 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
     return out
 
 
-# The agents whose first Stop waits for its second step (#5563): {agent: what the second Stop does}, for the agents
-# with INPUT['interrupt_again']. Their next turn ends the wait: a message into the pane (_keep_prompt) or the pane
-# watcher's report that they work again (_pane_reports). The page shows Stop while an agent is here.
+# The agents whose first Stop waits for its second step (#5563): {agent: {"does": what the second Stop does, "at":
+# the time of the first Stop's idle report}}, for the agents with INPUT['interrupt_again']. Their next turn ends the
+# wait: a message into the pane (_keep_prompt), or any later report of their state (the pane watcher's, in the
+# loop's process, #5569), which changes activity_at in the queue.
 STOPPED = {}
+
+
+def stop_waits(conn, agent):
+    """What a second Stop of agent does (STOPPED), while its first Stop's idle report is still its last report;
+    else None. The page shows Stop while it is not None."""
+    st = STOPPED.get(agent)
+    if not st:
+        return None
+    r = conn.execute("SELECT activity_event, activity_at FROM agents WHERE name=?", (agent,)).fetchone()
+    if r and r["activity_event"] == "report:idle" and r["activity_at"] == st["at"]:
+        return st["does"]
+    STOPPED.pop(agent, None)
+    return None
 
 
 INTERRUPT_PAUSE = 0.5  # after the interrupt keys, before the message of Send now: the agent's prompt comes back (tests: 0)
@@ -3199,10 +3213,10 @@ def _keep_prompt(conn, agent, text, who):
 
 
 # After a message went into a pane, the pane watcher reports idle no sooner than this (seconds): a pass just after
-# it can still see the idle prompt that the agent has not left yet (#5277). SENT_AT: {agent: time.monotonic() of the
-# message}; the page's messages and the watcher both run in maxpm serve.
+# it can still see the idle prompt that the agent has not left yet (#5277). The watcher reads the message's time from
+# the queue (agents.typed_at, core.typed_to), because the page's messages and the watcher's passes run in two
+# processes (#5569). A first prompt or an answer that a pass pastes is a whole pass older than this at the next look.
 TURN_GRACE = 10
-SENT_AT = {}
 
 
 def turn_started(conn, agent, text=None):
@@ -3217,7 +3231,6 @@ def turn_started(conn, agent, text=None):
         core.report(conn, agent, "working")
     except RiverError:
         return False
-    SENT_AT[agent] = time.monotonic()
     return True
 
 
@@ -3737,6 +3750,7 @@ def restart_now(why="code changed"):
     """Replace this process with a new maxpm serve on the same port, which runs the code on disk. Python
     sockets are not inherited across exec, so the port is free for the new process."""
     print(f"{why}; restarting", flush=True)
+    stop_loop_process()  # the new serve starts its own (#5569)
     os.execv(sys.executable, _restart_argv())
 
 
@@ -4630,6 +4644,7 @@ def _restart_on_change(httpd):
             # Replace the process in place. Shutting down first would let the main thread exit before this
             # line runs.
             time.sleep(0.3)  # let an editor finish writing
+            stop_loop_process()
             os.execv(sys.executable, _restart_argv())
 
 
@@ -4648,27 +4663,75 @@ class _Server(ThreadingHTTPServer):
             print(f"maxpm serve: the loop thread did not start: {e}", flush=True)
 
 
-# The loop thread of maxpm serve (notify.loop), its stop event, and when it started (time.monotonic).
-LOOP_THREAD = {"thread": None, "stop": None, "at": 0.0}
-LOOP_RESTART_S = 30  # a loop thread that ended starts again, but not more often than this
+# The loop of maxpm serve (notify.loop), its stop event, and when it started (time.monotonic). It runs in a process
+# of its own (proc, river/loop.py, #5569) when serve_loop_process is on (child), else in a thread of serve. restart:
+# the reason when the loop's process asked for a restart onto the new code (its exit code RESTART_EXIT).
+LOOP_THREAD = {"thread": None, "stop": None, "at": 0.0, "proc": None, "child": False, "restart": None}
+LOOP_RESTART_S = 30  # a loop that ended starts again, but not more often than this
 
 
 def keep_loop():
-    """Start the loop thread of maxpm serve when it does not run: at the start of serve, and again when the
-    thread ended. No error of a pass ends it (notify.loop), but when it ended on 2026-10-08 the page still
-    answered and serve did none of its automatic work for 3 hours (#1663). True when it started one."""
-    t, stop = LOOP_THREAD["thread"], LOOP_THREAD["stop"]
-    if stop is None or stop.is_set() or (t is not None and t.is_alive()):
+    """Start the loop of maxpm serve when it does not run: at the start of serve, and again when it ended. No error
+    of a pass ends it (notify.loop), but when it ended on 2026-10-08 the page still answered and serve did none of its
+    automatic work for 3 hours (#1663). A loop process that asked for a restart (#5569) gets it once no hook or check
+    of serve's own threads runs. True when it started one."""
+    t, stop, p = LOOP_THREAD["thread"], LOOP_THREAD["stop"], LOOP_THREAD["proc"]
+    if stop is None or stop.is_set():
         return False
-    if t is not None:
+    if LOOP_THREAD["restart"]:
+        if not HOOKS["running"] and not OPS_RUNNING:
+            restart_now(LOOP_THREAD["restart"])
+        return False
+    if (t is not None and t.is_alive()) or (p is not None and p.poll() is None):
+        return False
+    from . import loop
+    if p is not None and p.returncode == loop.RESTART_EXIT:
+        LOOP_THREAD["restart"] = "the MaximizePM code changed"
+        return False
+    if t is not None or p is not None:
         if time.monotonic() - LOOP_THREAD["at"] < LOOP_RESTART_S:
             return False
-        print("maxpm serve: the loop thread ended; it starts again", flush=True)
+        print("maxpm serve: the loop " + ("process" if p is not None else "thread") + " ended; it starts again",
+              flush=True)
+    LOOP_THREAD["at"] = time.monotonic()
+    if LOOP_THREAD["child"]:
+        LOOP_THREAD.update(proc=_loop_process(), thread=None)
+        return True
     from . import notify
-    LOOP_THREAD.update(at=time.monotonic(), thread=threading.Thread(
-        target=notify.loop, args=(stop,), daemon=True, name="maxpm-notify"))
+    LOOP_THREAD.update(proc=None, thread=threading.Thread(target=notify.loop, args=(stop,), daemon=True,
+                                                          name="maxpm-notify"))
     LOOP_THREAD["thread"].start()
     return True
+
+
+def _loop_process():
+    """Start python -m river.loop serve <port> (#5569): the passes of serve in a process of their own. Its stdin is a
+    pipe that serve keeps open; it ends after its pass when the pipe ends (serve stopped or replaced itself). Its
+    output goes where serve's goes. The code ids tell it the code that serve runs, for reload_ready."""
+    import subprocess
+    from . import notify
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {**os.environ, "MAXPM_LOOP_BOOT": BOOT, "MAXPM_LOOP_CODE": BOOT_CODE or "",
+           "MAXPM_LOOP_DEV": "1" if DEV["on"] else ""}
+    return subprocess.Popen([sys.executable, "-m", "river.loop", "serve", str(notify.SERVE_PORT["port"] or 0)],
+                            cwd=root, env=env, stdin=subprocess.PIPE)
+
+
+def stop_loop_process(wait=2.0):
+    """End the loop's process (serve stops, or restarts with exec): close its pipe, so it ends after its pass, and
+    kill it when it has not ended after wait seconds (exec of the old loop thread ended a pass the same way)."""
+    p, LOOP_THREAD["proc"] = LOOP_THREAD["proc"], None
+    if p is None or p.poll() is not None:
+        return
+    try:
+        p.stdin.close()
+        p.wait(timeout=wait)
+    except Exception:  # noqa: BLE001
+        try:
+            p.kill()
+            p.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------- runners (#5501)
@@ -4775,15 +4838,16 @@ def serve(port: int, open_browser=False, dev=False):
     from . import notify
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()
-    LOOP_THREAD.update(thread=None, stop=stop)
-    keep_loop()
-    relay.start(stop, port)  # keeps the relay socket open while relay.json exists (maxpm connect)
-    serve_file = None
     conn = core.connect()
     try:
         runners = core.setting(conn, "serve_runners") == "on"
+        child = core.setting(conn, "serve_loop_process") == "on"
     finally:
         conn.close()
+    LOOP_THREAD.update(thread=None, proc=None, stop=stop, child=child, restart=None)
+    keep_loop()
+    relay.start(stop, port)  # keeps the relay socket open while relay.json exists (maxpm connect)
+    serve_file = None
     if os.name != "nt" and runners:
         start_runners(str(core.db_path()))
         serve_file = write_serve_file(port)
@@ -4795,6 +4859,7 @@ def serve(port: int, open_browser=False, dev=False):
         pass
     finally:
         stop.set()
+        stop_loop_process()
         if serve_file:
             remove_serve_file(serve_file)
         for r in RUNNERS:
