@@ -4620,14 +4620,24 @@ class _BuildSampler:
     def __init__(self):
         import collections
         self.tid, self.n, self.done = threading.get_ident(), 0, threading.Event()
-        self.own, self.within = collections.Counter(), collections.Counter()
+        self.own, self.within, self.others = collections.Counter(), collections.Counter(), collections.Counter()
         self.thread = threading.Thread(target=self._run, daemon=True, name="maxpm-build-sampler")
         self.thread.start()
 
     def _run(self):
         here = os.path.dirname(os.path.abspath(__file__))
+        me = threading.get_ident()
         while not self.done.wait(self.SAMPLE_EVERY):
-            f = sys._current_frames().get(self.tid)
+            frames = sys._current_frames()
+            f = frames.get(self.tid)
+            for t, o in frames.items():  # where the other threads are: the ones that may hold the interpreter lock
+                if t in (self.tid, me):
+                    continue
+                top = o
+                while o is not None and not o.f_code.co_filename.startswith(here):
+                    o = o.f_back
+                c = (o or top).f_code
+                self.others[f"{os.path.basename(c.co_filename)}:{(o or top).f_lineno} {c.co_name}"] += 1
             names = []
             while f is not None:
                 c = f.f_code
@@ -4646,7 +4656,8 @@ class _BuildSampler:
         ms = self.SAMPLE_EVERY * 1000
         return {"samples": self.n, "sample_ms": ms,
                 "lines": [f"{n} {k}" for k, n in self.own.most_common(25)],
-                "functions": [f"{n} {k}" for k, n in self.within.most_common(30)]}
+                "functions": [f"{n} {k}" for k, n in self.within.most_common(30)],
+                "others": [f"{n} {k}" for k, n in self.others.most_common(20)]}
 
 
 def _gc_watch(phase, info):

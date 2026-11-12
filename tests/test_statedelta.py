@@ -357,7 +357,7 @@ class Timing(Base):
         wire("/api/state?since=", {})
         (t,) = [x for x in self.get("/api/state-timing") if x.get("build_ms")]
         prof = t["profile"]
-        self.assertEqual(set(prof), {"samples", "sample_ms", "lines", "functions"})
+        self.assertEqual(set(prof), {"samples", "sample_ms", "lines", "functions", "others"})
         if prof["samples"]:  # a fast machine can build before the first sample
             self.assertTrue(any(" state" in f for f in prof["functions"]), prof)
         self.assertFalse(any(th.name == "maxpm-build-sampler" for th in threading.enumerate()))
