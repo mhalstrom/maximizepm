@@ -1167,6 +1167,17 @@ def build_parser(only=None):
                        "line: '<vendor>: <status page> <addresses>'), each with its check; --add: a url check of each "
                        "status page that has none, of layer dependency")
     x.add_argument("project"); x.add_argument("--add", action="store_true", help="add the missing checks")
+    x = ops.add_parser("cause", help="state the cause of a fault in the fixed form, with a proof that MaximizePM runs "
+                       "now; fix items of the fault wait until a proof passes, and the item opens again when the check "
+                       "fails after the action")
+    x.add_argument("id", type=int, help="the fault item")
+    x.add_argument("--cause", required=True, help="what went wrong")
+    x.add_argument("--proof", required=True, help="a check (its key or <scope>/<check>: maxpm serve runs it) or a "
+                   "command (it runs here, in your sandbox, within ops_proof_timeout)")
+    x.add_argument("--expect", help="what the proof gives: exit N, a status of a check (ok, warning, critical, "
+                   "unknown), or a text of its output (default: a check is critical, a command exits 0)")
+    x.add_argument("--action", required=True, help="what fixes it")
+    x.add_argument("--check", help="the check that must pass after the action (default: the fault's own check)")
     x = ops.add_parser("kinds", help="the kinds of problems, and the eight rules that give each fault its kind")
     x = ops.add_parser("kind", help="give a fault item its kind (the sorting session of an unknown fault, or a person "
                        "or the manager who corrects one); the session that holds it releases it")
@@ -2979,6 +2990,20 @@ def _dispatch_ops(conn, a, actor):
         return ask_server(conn, "ops_run", {"scope": a.scope, "name": a.name}, actor)
     if a.ocmd == "deps":
         return core.ops_deps(conn, a.project, a.add, actor)
+    if a.ocmd == "cause":
+        def run_check(c):
+            import time
+            res = ask_server(conn, "ops_run", {"scope": c["scope"], "name": c["name"]}, actor)
+            wait = core.parse_duration(c["timeout"]).total_seconds() + 15
+            end = time.monotonic() + wait
+            while time.monotonic() < end:
+                r = conn.execute("SELECT * FROM ops_runs WHERE id=? AND ended_at IS NOT NULL", (res["run"],)).fetchone()
+                if r:
+                    return dict(r)
+                time.sleep(0.5)
+            raise RiverError(f"the run of {c['scope']}/{c['name']} did not end within {int(wait)}s: maxpm ops history "
+                             f"{c['scope']} {c['name']}")
+        return core.ops_cause(conn, a.id, a.cause, a.proof, a.action, a.expect, a.check, actor, run_check)
     if a.ocmd == "kinds":
         return {"kinds": core.ops_kinds()}
     if a.ocmd == "kind":
@@ -5037,6 +5062,16 @@ def render_ops(a, res):
                      "none" + ("" if d["status"] else " (no status page to check)")))
         if not res["added"] and any(not d["check"] and d["status"] for d in res["dependencies"]):
             print(f"add their checks: maxpm ops deps {res['project']} --add")
+        return
+    if a.ocmd == "cause":
+        if res["passed"]:
+            print(f"cause c{res['cause']} of #{res['item']} proven: the proof gave {res['result']} (it expects "
+                  f"{res['expect']}). Now fix it or add its fix items (maxpm add \"<fix>\" --found-during {res['item']}); "
+                  + (f"after the action, {res['check']} must pass, or #{res['item']} opens again" if res["check"]
+                     else "the fault has no check to confirm the action"))
+        else:
+            print(f"cause c{res['cause']} of #{res['item']} NOT proven: the proof gave {res['result']}, and it expects "
+                  f"{res['expect']}. Investigate again; fix items wait until a proof passes")
         return
     if a.ocmd == "kinds":
         k = res["kinds"]

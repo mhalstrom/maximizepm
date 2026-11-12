@@ -271,6 +271,8 @@ DEFAULT_SETTINGS = {
     # Before a new fault opens an item, maxpm serve runs the check once again at once (#5505): the fault comes only
     # when that run fails too. off: the run that makes the fault opens the item.
     "ops_confirm": "on",
+    # The time limit of a command that proves the cause of a fault (maxpm ops cause --proof "<command>", #5513).
+    "ops_proof_timeout": "60s",
     "ops_reopen_within": "24h",
     "ops_storm_count": "3",
     "ops_storm_window": "5m",
@@ -1045,6 +1047,25 @@ CREATE TABLE IF NOT EXISTS schedules (
   last_item   INTEGER,                   -- that item
   created_by  TEXT,
   created_at  TEXT NOT NULL
+);
+
+-- The cause of a fault in a fixed form (#5513): what the investigating agent states, the proof MaximizePM ran and
+-- its result, the action, and the check that must pass after it (its verdict comes from the check's first run after
+-- the fault item closes). Fix items of the fault wait until a proof passed.
+CREATE TABLE IF NOT EXISTS ops_causes (
+  id          INTEGER PRIMARY KEY,
+  item_id     INTEGER NOT NULL,          -- the fault item
+  cause       TEXT NOT NULL,
+  proof       TEXT NOT NULL,             -- a check (key or scope/name) that serve runs, or a command
+  expect      TEXT NOT NULL,             -- exit N, a status (ok, warning, critical, unknown), or a text in the output
+  result      TEXT,                      -- what the proof gave
+  passed      INTEGER NOT NULL DEFAULT 0,
+  action      TEXT NOT NULL,
+  check_key   TEXT,                      -- the check that must pass after the action
+  verdict     TEXT,                      -- pass or fail: the check's first run after the fault item closed
+  verdict_at  TEXT,
+  actor       TEXT,
+  at          TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ops_runs (
@@ -1896,7 +1917,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -5063,6 +5084,7 @@ def ops_finish(conn, run, at=None):
             for ch in first["changes"] + rec["changes"]:
                 merged[ch["key"]] = {"key": ch["key"], "from": merged.get(ch["key"], ch)["from"], "to": ch["to"]}
             rec["changes"] = [ch for ch in merged.values() if ch["from"] != ch["to"]]
+            rec["verdicts"] = ops_cause_verdicts(conn, run, rec)  # first: a failed verdict opens the item again
             # The release watch is the one of the run that found the fault: the confirming run may be one past it.
             watch = _ops_watch_of_run(conn, again) or _ops_watch_of_run(conn, found)
             rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at, watch)
@@ -5071,6 +5093,7 @@ def ops_finish(conn, run, at=None):
                                               rec["items"])
             return rec
     watch = _ops_watch_of_run(conn, run)
+    rec["verdicts"] = ops_cause_verdicts(conn, run, rec)  # first: a failed verdict opens the item again
     rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at, watch)
     if watch:
         rec["watch"] = _ops_watch_end(conn, run, rec, watch, rec["items"])
@@ -5107,8 +5130,11 @@ def _ops_evidence(c, key, res, at, since=None, project=None):
             + ("Last output:\n" + "\n".join(lines) + "\n" if lines else "")
             + (f"Evidence: {json.dumps(res['evidence'])[:1500]}\n" if res.get("evidence") else "")
             + f"Runbook: {c.get('runbook') or 'none'}\n"
-            f"Find the cause, fix it or add the items it needs, then close this item with the cause (maxpm done <id> "
-            f"--output \"<cause>\"). The check's runs and changes: maxpm ops history {c['scope']} {c['name']}. "
+            f"State the cause first, in the fixed form, with a proof that MaximizePM runs: maxpm ops cause <id> --cause "
+            f"\"<what went wrong>\" --proof \"<a check or a command>\" [--expect \"<what it gives>\"] --action \"<what "
+            f"fixes it>\" [--check <the check that passes after it>]; fix items of this fault wait until a proof "
+            f"passes. Then fix it or add the items it needs, and close this item with the cause (maxpm done <id> "
+            f"--output \"<cause>\"); when the check fails after the action, this item opens again. The check's runs and changes: maxpm ops history {c['scope']} {c['name']}. "
             f"A recovery adds a note here and leaves the item open: you close it. A fact about the system that you "
             f"lacked goes into its description: maxpm ops system edit {project or c['scope']} --set <part.field>=\"...\" "
             f"--why \"<the fact, and this fault>\" (maxpm ops system show {project or c['scope']}). It is not a problem "
@@ -5455,6 +5481,139 @@ def investigations_live(conn):
         if a is not None and _agent_state(conn, a) not in ("gone", "stopped"):
             n += 1
     return n
+
+
+def _ops_expect(expect, check_proof):
+    """The normal form of what a proof must give: 'exit N', a status, or 'text: <text>'. Default: a check proof
+    fails (critical), since it shows the cause; a command exits 0."""
+    e = (expect or "").strip()
+    if not e:
+        return "critical" if check_proof else "exit 0"
+    if re.match(r"^exit \d+$", e):
+        return e
+    if e.lower() in ("ok", "warning", "critical", "unknown"):
+        if not check_proof:
+            raise RiverError(f"--expect {e} is a status of a check; a command proof expects 'exit N' or a text")
+        return e.lower()
+    return "text: " + e
+
+
+def _ops_expect_met(expect, status=None, code=None, output=""):
+    if expect.startswith("exit "):
+        return code == int(expect.split()[1])
+    if expect.startswith("text: "):
+        return expect[6:].lower() in (output or "").lower()
+    return status == expect
+
+
+def ops_cause(conn, item_id, cause, proof, action, expect=None, check=None, actor=None, run_check=None):
+    """maxpm ops cause: the cause of a fault in a fixed form (#5513): the cause, a proof and what it must give, the
+    action, and the check that must pass after it (default: the fault's own check). MaximizePM runs the proof now:
+    a check (its key or scope/name) through maxpm serve (run_check: the check -> its run's result), else a command in
+    this process, so an agent's command stays in its sandbox (decision 2 of #5380), within ops_proof_timeout. Fix
+    items of the fault wait until a proof passes; the check's first run after the fault item closes gives the
+    verdict, and a failed run opens the item again."""
+    it = _item(conn, item_id)
+    key = fault_key(it)
+    if not key:
+        raise RiverError(f"#{item_id} is no fault item (an operational item whose title starts with ops:)")
+    for name, v in (("--cause", cause), ("--proof", proof), ("--action", action)):
+        if not (v or "").strip():
+            raise RiverError(f"{name} is part of the fixed form: maxpm ops cause {item_id} --cause \"<what went "
+                             f"wrong>\" --proof \"<a check or a command>\" [--expect \"<what it gives>\"] --action "
+                             f"\"<what fixes it>\" [--check <the check that passes after it>]")
+    after = _check_named(conn, check) if check else _check_named(conn, key)
+    if check and after is None:
+        raise RiverError(f"no check {check!r}: name one by its key or <scope>/<check> (maxpm ops list)")
+    pc = _check_named(conn, proof)
+    expect = _ops_expect(expect, pc is not None)
+    if pc is not None:
+        if run_check is None:
+            raise RiverError("a check as the proof runs in maxpm serve: run maxpm ops cause from the command line")
+        res = run_check(pc)
+        status, code, output = res.get("status"), res.get("exit_code"), res.get("output") or res.get("summary") or ""
+        result = f"check {pc['scope']}/{pc['name']}: {res.get('status')}: {res.get('summary') or ''}".strip()
+    else:
+        folder = None
+        r = conn.execute("SELECT path FROM projects WHERE id=?", (it["project_id"],)).fetchone()
+        if r and r["path"] and os.path.isdir(os.path.expanduser(r["path"])):
+            folder = os.path.expanduser(r["path"])
+        limit = parse_duration(setting(conn, "ops_proof_timeout", item_id=item_id)).total_seconds()
+        try:
+            rr = OPS_RUNNER(proof, folder, limit, dict(os.environ)) if OPS_RUNNER else \
+                _run_command(proof, folder, limit, None, dict(os.environ))
+            code = None if getattr(rr, "timed_out", False) else rr.returncode
+            output = ((rr.stdout or "") + ("\n" + rr.stderr if (rr.stderr or "").strip() else "")).strip()
+        except OSError as e:
+            code, output = None, f"the command did not start: {e}"
+        status = None
+        result = (f"exit {code}" if code is not None else "stopped at ops_proof_timeout") + \
+            (": " + _ops_tail(output)[-600:] if output else "")
+    passed = _ops_expect_met(expect, status, code, output)
+    with tx(conn):
+        cur = conn.execute("INSERT INTO ops_causes(item_id,cause,proof,expect,result,passed,action,check_key,actor,at) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)", (item_id, cause.strip(), proof.strip(), expect, result,
+                                                           int(passed), action.strip(),
+                                                           after["key"] if after else None, actor, iso(now())))
+        _event(conn, item_id, actor, f"ops cause c{cur.lastrowid} (proof {'passed' if passed else 'FAILED'}): "
+                                     f"{cause.strip()}; proof: {proof.strip()} (expects {expect}) gave {result[:300]}; "
+                                     f"action: {action.strip()}" + (f"; must pass after it: {after['key']}" if after
+                                                                     else ""))
+    return {"cause": cur.lastrowid, "item": item_id, "passed": passed, "result": result, "expect": expect,
+            "check": after["key"] if after else None}
+
+
+def _ops_cause_proven(conn, item_id):
+    return conn.execute("SELECT 1 FROM ops_causes WHERE item_id=? AND passed=1", (item_id,)).fetchone() is not None
+
+
+def _ops_fix_refusal(conn, actor, doer, found_during, blocks):
+    """Why an agent may not add this item yet: it is a fix of a fault item whose cause has no proof (#5513). A
+    person's item (a person's step), MaximizePM itself, a person and the manager may add one."""
+    if doer == "human" or not actor or actor == "maxpm":
+        return None
+    r = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone()
+    if r is None or r["kind"] == "human" or r["role"] == "manager":
+        return None
+    for fid in (found_during, blocks):
+        if fid is None:
+            continue
+        f = conn.execute("SELECT id, title, kind FROM items WHERE id=?", (fid,)).fetchone()
+        if f and fault_key(f) and not _ops_cause_proven(conn, f["id"]):
+            return (f"refused: #{f['id']} is a fault, and its cause has no proof yet. State it first, with a proof "
+                    f"that MaximizePM runs: maxpm ops cause {f['id']} --cause \"<what went wrong>\" --proof \"<a check "
+                    f"or a command>\" [--expect \"<what it gives>\"] --action \"<what fixes it>\"; then add the fix")
+    return None
+
+
+def ops_cause_verdicts(conn, run, rec):
+    """After a run of a check (ops_finish): each proven cause whose check this is, whose fault item closed before
+    the run and that has no verdict yet, gets one: pass, or fail, which opens the fault item again with the result."""
+    c = run["check"]
+    started = conn.execute("SELECT started_at FROM ops_runs WHERE id=?", (run["id"],)).fetchone()
+    if started is None or rec.get("status") not in ("ok", *OPS_FAILED):
+        return []
+    out = []
+    for r in conn.execute("SELECT o.*, i.status, i.closed_at FROM ops_causes o JOIN items i ON i.id=o.item_id WHERE "
+                          "o.passed=1 AND o.verdict IS NULL AND (o.check_key=? OR o.check_key LIKE ?)",
+                          (c["key"], c["key"] + ":%")).fetchall():
+        if r["status"] != "done" or not r["closed_at"] or r["closed_at"] > started["started_at"]:
+            continue
+        verdict = "fail" if rec["status"] in OPS_FAILED else "pass"
+        with tx(conn):
+            conn.execute("UPDATE ops_causes SET verdict=?, verdict_at=? WHERE id=?", (verdict, iso(now()), r["id"]))
+        if verdict == "fail":
+            reopen(conn, r["item_id"], actor="maxpm")
+            with tx(conn):
+                _event(conn, r["item_id"], "maxpm", f"ops cause c{r['id']}: the check {c['key']} still fails after the "
+                                                    f"action ({r['action']}): {rec['status']}: "
+                                                    f"{(rec.get('summary') or '')[:300]}. The cause or the action was "
+                                                    f"wrong: investigate again")
+        else:
+            with tx(conn):
+                _event(conn, r["item_id"], "maxpm", f"ops cause c{r['id']}: the check {c['key']} passes after the action")
+        out.append({"cause": r["id"], "item": r["item_id"], "verdict": verdict})
+    return out
 
 
 def ops_fault_brief(conn, item):
@@ -7748,6 +7907,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
                          actor, doer=doer) if check_similar or new else []
     if like and check_similar and new is None:
         raise SimilarWork(like)
+    why = _ops_fix_refusal(conn, actor, doer, found_during, blocks)
+    if why:
+        raise RiverError(why)
     with tx(conn):
         if found_during is not None:
             _item(conn, found_during)

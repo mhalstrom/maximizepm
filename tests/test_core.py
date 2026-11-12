@@ -5148,6 +5148,8 @@ class FixVerify(ReleaseBase):
     of the fault it fixes, gives the verdict at the end of the watch of the release that ships it."""
 
     def ship_fix(self, title, check="", found_during=None):
+        if found_during:  # a fix of a fault waits on a proven cause (#5513)
+            core.ops_cause(self.c, found_during, "the page broke", "true", "fix the page", actor="dev")
         x = core.item_add(self.c, "site", title, check=check, found_during=found_during, actor="dev")["id"]
         core.claim(self.c, x, "dev")
         core.done(self.c, x, "fixed", "dev", ship_it=True)
@@ -11417,3 +11419,73 @@ class EvidencePack(Base):
                 "TypeError: x is undefined\n    at load (https://example.test/web/app.js:12:5)\n"
                 "    at run (node:internal/main:3:1)")
         self.assertEqual(core._ops_frames(text, self.repo), [("src/api.rs", 41, "rust"), ("web/app.js", 12, "javascript")])
+
+
+class Causes(Base):
+    """The cause of a fault in a fixed form (#5513): a proof that MaximizePM runs before any fix, and a verdict from
+    the fault's check after the action."""
+
+    run_at, proc = Ops.run_at, staticmethod(Ops.proc)
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "site")
+        for n in ("dev", "boss"):
+            core.register(self.c, n)
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        core.ops_add(self.c, "site", "disk", "cmd", {"command": "check_disk", "fail_after": 1}, actor="boss")
+        core.ops_add(self.c, "site", "app", "cmd", {"command": "check_app", "fail_after": 1}, actor="boss")
+        self.t = core.now()
+        r = self.run_at("site", "app", self.t, self.proc(2, "ERROR: could not write the session: No space left"))
+        self.fault = r["items"][0]["item"]
+
+    def test_a_fix_waits_on_a_proof_that_passes_and_a_failed_proof_says_so(self):
+        with self.assertRaisesRegex(RiverError, "its cause has no proof yet"):
+            core.item_add(self.c, "site", "Clean the logs", found_during=self.fault, actor="dev")
+        core.item_add(self.c, "site", "Grow the disk", doer="human", blocks=self.fault, actor="dev")  # a person's step
+        core.item_add(self.c, "site", "Clean the logs", found_during=self.fault, actor="boss")  # the manager may
+        with mock.patch.object(core, "OPS_RUNNER", self.proc(0, "/dev/disk1 41%")):
+            r = core.ops_cause(self.c, self.fault, "the disk is full", "df -h /", "clean the logs",
+                               expect="100%", actor="dev")
+        self.assertEqual((r["passed"], r["expect"], r["check"]), (False, "text: 100%", "ops:site:app"))
+        with self.assertRaisesRegex(RiverError, "no proof yet"):
+            core.item_add(self.c, "site", "Rotate the logs", found_during=self.fault, actor="dev")
+        with mock.patch.object(core, "OPS_RUNNER", self.proc(0, "/dev/disk1 100%")):
+            r = core.ops_cause(self.c, self.fault, "the disk is full", "df -h /", "clean the logs", expect="100%",
+                               actor="dev")
+        self.assertTrue(r["passed"])
+        core.item_add(self.c, "site", "Rotate the logs", found_during=self.fault, actor="dev")
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'ops cause c% (proof "
+                                       "passed): the disk is full%'", (self.fault,)).fetchone())
+
+    def test_a_check_as_the_proof_runs_through_serve_and_expects_it_to_fail(self):
+        def run_check(c):
+            self.assertEqual(c["name"], "disk")
+            return {"status": "critical", "summary": "DISK CRITICAL - 100% used"}
+        r = core.ops_cause(self.c, self.fault, "the disk is full", "site/disk", "clean the logs", actor="dev",
+                           run_check=run_check)
+        self.assertEqual((r["passed"], r["expect"]), (True, "critical"))
+        with self.assertRaisesRegex(RiverError, "runs in maxpm serve"):
+            core.ops_cause(self.c, self.fault, "x", "ops:site:disk", "y", actor="dev")
+        with self.assertRaisesRegex(RiverError, "--action is part of the fixed form"):
+            core.ops_cause(self.c, self.fault, "x", "true", "", actor="dev")
+        with self.assertRaisesRegex(RiverError, "no fault item"):
+            core.ops_cause(self.c, core.item_add(self.c, "site", "plain", actor="dev")["id"], "x", "true", "y")
+
+    def test_the_check_after_the_action_gives_the_verdict_and_a_failure_opens_the_item_again(self):
+        core.ops_cause(self.c, self.fault, "the disk is full", "true", "clean the logs", actor="dev")
+        core.claim(self.c, self.fault, "dev")
+        core.done(self.c, self.fault, "cleaned the logs", "dev")
+        r = self.run_at("site", "app", self.t + timedelta(minutes=10), self.proc(2, "ERROR: No space left"))
+        self.assertEqual(r["verdicts"][0]["verdict"], "fail")
+        it = core._item(self.c, self.fault)
+        self.assertEqual(it["status"], "open")
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'ops cause c%: the check "
+                                       "ops:site:app still fails after the action%'", (self.fault,)).fetchone())
+        core.ops_cause(self.c, self.fault, "the logs grow again", "true", "rotate the logs", actor="dev")
+        core.claim(self.c, self.fault, "dev")
+        core.done(self.c, self.fault, "rotated", "dev")
+        r = self.run_at("site", "app", self.t + timedelta(minutes=20), self.proc(0, "OK"))
+        self.assertEqual([v["verdict"] for v in r["verdicts"]], ["pass"])
+        self.assertEqual(core._item(self.c, self.fault)["status"], "done")
