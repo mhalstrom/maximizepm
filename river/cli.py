@@ -1834,13 +1834,15 @@ def build_parser(only=None):
     x.add_argument("--restart", action="store_true",
                    help="ask the maxpm serve that runs to start again with the code on disk, and wait until it answers")
     x.add_argument("--install-login", action="store_true",
-                   help="macOS: start maxpm serve at login and again after a crash (a launchd agent), for a computer "
-                        "you reach through the relay")
-    x.add_argument("--remove-login", action="store_true", help="remove that launchd agent")
+                   help="start maxpm serve at login and again after a crash (macOS: a launchd agent; Linux: a systemd "
+                        "user unit), for a computer you reach through the relay")
+    x.add_argument("--remove-login", action="store_true", help="remove that login agent")
+    x.add_argument("--kick", action="store_true", help="stop maxpm serve and start it again through its login agent, "
+                   "also when it hangs (the repair of the serve check)")
     x.add_argument("--install-watchdog", action="store_true",
-                   help="macOS: a launchd job that runs maxpm ops check --outside every minute, also when maxpm serve "
-                        "is down (the checks marked outside, their repairs, a notice)")
-    x.add_argument("--remove-watchdog", action="store_true", help="remove that launchd job")
+                   help="a job that runs maxpm ops check --outside every minute, also when maxpm serve is down (the "
+                        "checks marked outside, their repairs, a notice); macOS: launchd, Linux: a systemd timer")
+    x.add_argument("--remove-watchdog", action="store_true", help="remove that job")
     sk = sub.add_parser("skills", help="install the agent guides as Claude Code skills")
     sks = sk.add_subparsers(dest="scmd", required=True)
     x = sks.add_parser("install", help="link the guides (maxpm, maxpm-manager) into ~/.claude/skills")
@@ -2107,29 +2109,37 @@ def _run(args, conn):
         from . import login
         if args.remove_watchdog:
             res = login.remove_watchdog()
-            print(f"Removed {res['plist']}: the watchdog no longer runs." if res["removed"]
+            print(f"Removed {res['file']}: the watchdog no longer runs." if res["removed"]
                   else "The watchdog was not installed.")
             return 0
         res = login.install_watchdog(conn)
         n = res["checks"]
-        print(f"The watchdog runs maxpm ops check --outside every {res['every']} s: {res['plist']}. Its output goes to "
+        print(f"The watchdog runs maxpm ops check --outside every {res['every']} s: {res['file']}. Its output goes to "
               f"{res['log']}. " + (f"It runs {n} check{'' if n == 1 else 's'} marked outside now." if n else
                                    "No check is marked outside yet: maxpm ops edit <scope> <name> --outside on")
               + " Undo: maxpm serve --remove-watchdog")
+        return 0
+    if args.cmd == "serve" and args.kick:
+        from . import login
+        res = login.kick()
+        print("maxpm serve " + ("started through its login agent" if res["how"] == "loaded" else
+                                "stopped and started again through its login agent"))
         return 0
     if args.cmd == "serve" and (args.install_login or args.remove_login):
         from . import login
         if args.remove_login:
             res = login.remove()
-            print(f"Removed {res['plist']}: maxpm serve no longer starts at login." if res["removed"]
+            print(f"Removed {res['file']}: maxpm serve no longer starts at login." if res["removed"]
                   else "maxpm serve was not set to start at login.")
             return 0
         res = login.install(conn)
         how = ("it runs now" if res["started_now"] else
-               "launchd starts it at the next login (an agent is loaded already)" if res["agent_loaded"] else
-               f"a maxpm serve already answers on port {res['port']}, so launchd starts it at the next login")
-        print(f"maxpm serve starts at login and again after a crash: {res['plist']} ({how}). Its output goes to "
-              f"{res['log']}. Undo: maxpm serve --remove-login")
+               f"{res['system']} starts it at the next login (an agent is loaded already)" if res["agent_loaded"] else
+               f"a maxpm serve already answers on port {res['port']}, so {res['system']} starts it at the next login")
+        print(f"maxpm serve starts at login and again after a crash: {res['file']} ({how}). Its output goes to "
+              f"{res['log']}. Undo: maxpm serve --remove-login"
+              + (". To start it at boot before anyone logs in: loginctl enable-linger" if res["system"] == "systemd"
+                 else ""))
         return 0
     if args.cmd == "serve":
         from . import server

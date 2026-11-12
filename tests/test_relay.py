@@ -887,6 +887,21 @@ class LoginAgent(Base):
         self.assertFalse(path.exists())
         self.assertIn("the watchdog no longer runs", gone.getvalue())
 
+    def test_kick_loads_the_agent_or_restarts_it_and_needs_one(self):
+        with self.assertRaisesRegex(core.RiverError, "install one first"):
+            self.login.kick()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["serve", "--install-login"])
+        self.calls.clear()
+        self.assertEqual(self.login.kick()["how"], "loaded")  # the file, not loaded: launchd loads it
+        self.assertEqual(self.calls, ["print", "bootstrap"])
+        self.calls.clear()
+        self.loaded = True
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["serve", "--kick"])
+        self.assertEqual(self.calls, ["print", "kickstart"])
+        self.assertIn("stopped and started again", out.getvalue())
+
     def test_a_serve_that_runs_already_is_not_started_twice(self):
         s = socket.socket()
         try:
@@ -899,3 +914,73 @@ class LoginAgent(Base):
         self.assertTrue(res["already_running"])
         self.assertFalse(res["started_now"])
         self.assertNotIn("bootstrap", self.calls)
+
+
+class LoginSystemd(Base):
+    """#5520: the same on Linux, as systemd user units."""
+
+    def setUp(self):
+        super().setUp()
+        from river import login
+        self.login = login
+        self.calls = []
+
+        def systemctl(argv):
+            self.assertEqual(argv[:2], ["systemctl", "--user"])
+            self.calls.append(" ".join(argv[2:]))
+            return 0, ""
+        login.SYSTEMCTL = systemctl
+        self.addCleanup(setattr, login, "SYSTEMCTL", None)
+        self.units = os.path.join(self.tmp.name, "config")
+        patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.units})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.conn = core.connect()
+        self.addCleanup(self.conn.close)
+        core.config_set(self.conn, "serve_port", "1")  # nothing answers on port 1
+
+    def unit(self, name):
+        with open(os.path.join(self.units, "systemd", "user", name)) as f:
+            return f.read()
+
+    def test_login_is_a_user_service_that_restarts_after_a_crash(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["serve", "--install-login"])
+        text = self.unit("maxpm-serve.service")
+        self.assertIn(" serve --port 1\n", text)
+        self.assertIn("Restart=on-failure\n", text)
+        self.assertIn(f"Environment=MAXPM_DB={os.environ['MAXPM_DB']}\n", text)
+        self.assertIn("WantedBy=default.target", text)
+        self.assertEqual(self.calls, ["daemon-reload", "enable --now maxpm-serve.service"])
+        self.assertIn("loginctl enable-linger", out.getvalue())
+        self.calls.clear()
+        self.assertEqual(self.login.kick()["how"], "restarted")
+        self.assertEqual(self.calls, ["restart maxpm-serve.service"])
+        self.calls.clear()
+        self.assertTrue(self.login.remove()["removed"])
+        self.assertEqual(self.calls, ["disable --now maxpm-serve.service", "daemon-reload"])
+        self.assertFalse(os.path.exists(os.path.join(self.units, "systemd", "user", "maxpm-serve.service")))
+        with self.assertRaisesRegex(core.RiverError, "install one first"):
+            self.login.kick()
+
+    def test_the_watchdog_is_a_timer_every_minute(self):
+        res = self.login.install_watchdog(self.conn)
+        self.assertEqual(res["system"], "systemd")
+        service, timer = self.unit("maxpm-watchdog.service"), self.unit("maxpm-watchdog.timer")
+        self.assertIn("Type=oneshot\n", service)
+        self.assertIn(" ops check --outside\n", service)
+        self.assertIn("OnUnitActiveSec=60s\n", timer)
+        self.assertEqual(self.calls, ["daemon-reload", "enable --now maxpm-watchdog.timer",
+                                      "restart maxpm-watchdog.timer"])
+        self.calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()) as gone:
+            cli.run(["serve", "--remove-watchdog"])
+        self.assertIn("the watchdog no longer runs", gone.getvalue())
+        self.assertEqual(self.calls, ["disable --now maxpm-watchdog.timer", "daemon-reload"])
+        self.assertFalse(os.path.exists(os.path.join(self.units, "systemd", "user", "maxpm-watchdog.service")))
+
+    def test_a_word_with_a_space_is_quoted_for_systemd(self):
+        self.assertEqual(self.login._quote("/a b/python3"), '"/a b/python3"')
+        self.assertEqual(self.login._quote("x$y%z"), '"x$$y%%z"')
+        self.assertEqual(self.login._quote("/usr/bin/python3"), "/usr/bin/python3")
+
