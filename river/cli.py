@@ -997,16 +997,6 @@ def build_parser():
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--until", help="a duration (2h) or a time (tomorrow 7:00)")
     x.add_argument("--resume", action="store_true", help="start the check again now")
-    x = ops.add_parser("run", help="ask maxpm serve to run a check now, also when it is not due or is paused")
-    x.add_argument("scope", help="a project or a deploy target, or the check's name when it is the only one of "
-                   "that name"); x.add_argument("name", nargs="?")
-    x = ops.add_parser("beat", help="the project's own job says it ran: a beat check is healthy while beats come "
-                       "within its period (the same op on /api/action: ops_beat)")
-    x.add_argument("scope", help="a project or a deploy target, or the check's name when it is the only one of "
-                   "that name"); x.add_argument("name", nargs="?")
-    x = ops.add_parser("history", help="the last runs of a check and its changes of state, also of its subjects")
-    x.add_argument("scope"); x.add_argument("name")
-    x.add_argument("-n", type=int, default=20, help="how many runs and changes (default 20)")
 
     tg = sub.add_parser("target", help="deploy targets: where projects ship to")
     tgs = tg.add_subparsers(dest="tcmd", required=True)
@@ -2403,13 +2393,6 @@ def _dispatch_ops(conn, a, actor):
         return core.ops_list(conn, a.scope)
     if a.ocmd == "show":
         return core.ops_show(conn, a.scope, a.name)
-    if a.ocmd == "history":
-        return core.ops_history(conn, a.scope, a.name, a.n)
-    if a.ocmd == "beat":
-        return core.ops_beat(conn, a.scope, a.name, actor)
-    if a.ocmd == "run":
-        core.ops_find(conn, a.scope, a.name)  # a wrong name says so here, not after a trip to maxpm serve
-        return ask_server(conn, "ops_run", {"scope": a.scope, "name": a.name}, actor)
     if not actor and core.agent_type_from_env(os.environ):
         raise RiverError(f"name yourself: maxpm --as <name> ops {a.ocmd} ... (an agent may add or change a url or "
                          f"beat check; a person or the manager the others)")
@@ -4140,36 +4123,7 @@ def _ops_state(c):
     return f"paused until {c['paused_until']}" if s == "paused" and c.get("paused_until") else s
 
 
-def _ops_run_line(r):
-    took = f", {r['seconds']:.1f}s" if r.get("seconds") is not None else ""
-    head = (f"{r['status']}" + (" (timed out)" if r.get("timed_out") else "") + took) if r.get("status") else "runs now"
-    return f"run {r['started_at']}: {head}" + (f": {r['summary']}" if r.get("summary") else "") + \
-        (f" | {r['perfdata']}" if r.get("perfdata") else "")
-
-
 def render_ops(a, res):
-    if a.ocmd == "run":
-        print(f"check {res['check']}: run {res['run']} started" + (" and read (a beat check runs no process)"
-              if res["form"] == "beat" else " in maxpm serve")
-              + f". The result: maxpm ops history {res['check'].replace('/', ' ', 1)}")
-        return
-    if a.ocmd == "beat":
-        print(f"beat of {res['check']} at {res['beat']} (it is a fault after no beat for {res['period']})")
-        return
-    if a.ocmd == "history":
-        print(f"check {res['check']}  [{res['state']}]  key {res['key']}")
-        print("runs, newest first:" if res["runs"] else "no runs yet: maxpm serve runs it when it is due")
-        for r in res["runs"]:
-            print(f"    {_ops_run_line(r)}")
-            if r.get("subjects"):
-                subj = json.loads(r["subjects"])
-                if subj:
-                    print("        subjects: " + ", ".join(f"{k} {v.get('status', '?')}" for k, v in sorted(subj.items())))
-        if res["events"]:
-            print("changes of state, newest first:")
-        for e in res["events"]:
-            print(f"    {e['at']} {e['key']}: {e['state']}" + (f" ({e['note']})" if e["note"] else ""))
-        return
     if a.ocmd == "list":
         if not res["checks"]:
             print(f"no checks{' of ' + res['scope'] if res['scope'] else ''}. Add one: maxpm ops add "
@@ -4206,7 +4160,7 @@ def render_ops(a, res):
         print("    it runs a command outside the sandbox: only a person or the manager changes it"
               + (" (the repair on a deploy target: a person)" if c["repair"] and c["scope_kind"] == "target" else ""))
     for r in c.get("runs") or []:
-        print(f"    {_ops_run_line(r)}")
+        print(f"    run {r['started_at']}: {r['status'] or 'runs now'}" + (f" {r['summary']}" if r["summary"] else ""))
     for e in c.get("events") or []:
         print(f"    {e['at']} {e['state']}" + (f": {e['note']}" if e["note"] and e["note"] != e["state"] else ""))
 

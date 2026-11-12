@@ -48,6 +48,15 @@ export function makePanZoom(el) {
     const k = clampK(READ);
     v = { k, x: size.w * k <= W - 2 * PAD ? (W - size.w * k) / 2 : PAD, y: top() };
     apply();
+    // The corner of a large drawing can be empty (the layout puts no box there): start at the first group or box,
+    // at the top left, so the first view shows a part of the drawing (#5331). Mermaid names them .cluster and .node.
+    const first = [...stage.querySelectorAll(".cluster, .node")].map((n) => n.getBoundingClientRect())
+      .filter((r) => r.width).sort((a, b) => a.top - b.top || a.left - b.left)[0];
+    if (!first) return;
+    const s = stage.getBoundingClientRect();
+    if (size.w * k > W - 2 * PAD) v.x = PAD - (first.left - s.left);
+    v.y = top() - (first.top - s.top);
+    apply();
   }
 
   el.addEventListener("wheel", (e) => {

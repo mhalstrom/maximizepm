@@ -454,7 +454,6 @@ def loop(stop, interval_s=None):
                 server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
                 server.hooks_soon,  # a hook whose command ended before it ran it
-                server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
             )
             failed = []
@@ -472,9 +471,8 @@ def loop(stop, interval_s=None):
                         pass
             if failed:
                 error = "; ".join(failed)
-            # maxpm serve only: run the new code, but not while one of its threads runs a hook or a check
-            if SERVE_PORT.get("port") and not server.HOOKS["running"] and not server.OPS_RUNNING \
-                    and server.reload_ready(conn):
+            # maxpm serve only: run the new code, but not while one of its threads runs a hook
+            if SERVE_PORT.get("port") and not server.HOOKS["running"] and server.reload_ready(conn):
                 conn.close()
                 server.restart_now("the MaximizePM code changed")
         except Exception as e:  # keep the loop alive; the next pass retries

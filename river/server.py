@@ -1203,67 +1203,6 @@ def hooks_soon(conn, token=None, cwd=None):
     return True
 
 
-# Operations checks (#5430): the run ids that a thread of this maxpm serve runs now. The loop does not start the
-# new code while one runs (notify.loop), and ops_close_lost leaves these alone.
-OPS_RUNNING = set()
-OPS_MAX_RUNNING = 8  # checks that run at the same time; a due check past this waits for the next pass
-
-
-def _ops_thread(run):
-    def work():
-        try:
-            c = core.connect()
-            try:
-                r = core.ops_finish(c, run)
-                for ch in r["changes"]:
-                    print(f"ops {ch['key']}: {ch['from']} -> {ch['to']}", flush=True)
-            finally:
-                c.close()
-        except Exception as e:  # a busy queue: the run stays open, and ops_close_lost closes it as unknown
-            print(f"ops {run['check']['key']}: {e}", flush=True)
-        finally:
-            OPS_RUNNING.discard(run["id"])
-    OPS_RUNNING.add(run["id"])
-    threading.Thread(target=work, daemon=True).start()
-
-
-def ops_start_now(conn, c, actor=None):
-    """Start one run of a check. A beat check runs no process: it is read at once. Every other form runs in a
-    thread of its own, so a check never blocks the loop of maxpm serve. Returns the run id, or None when a run of
-    the check is open already."""
-    run = core.ops_start(conn, c, actor=actor)
-    if run is None:
-        return None
-    if c["form"] == "beat":
-        core.ops_finish(conn, run)
-    else:
-        _ops_thread(run)
-    return run["id"]
-
-
-def ops_watch(conn):
-    """One pass of the loop of maxpm serve (step ops_watch): close the runs that a stopped serve left open, then
-    start each check that is due (core.ops_due), at most OPS_MAX_RUNNING at the same time. Returns the run ids."""
-    core.ops_close_lost(conn, running=set(OPS_RUNNING))
-    started = []
-    for c in core.ops_due(conn):
-        if c["form"] != "beat" and len(OPS_RUNNING) >= OPS_MAX_RUNNING:
-            break
-        rid = ops_start_now(conn, c)
-        if rid:
-            started.append(rid)
-    return started
-
-
-def ops_run_op(conn, a, who):
-    """The op ops_run (maxpm ops run): run a check now, also when it is not due or is paused."""
-    c = core.ops_find(conn, a["scope"], a.get("name"))
-    rid = ops_start_now(conn, c, who)
-    if rid is None:
-        raise core.RiverError(f"{c['scope']}/{c['name']} runs now; read the result: maxpm ops history {c['scope']} {c['name']}")
-    return {"check": f"{c['scope']}/{c['name']}", "run": rid, "form": c["form"]}
-
-
 def auto_end_orphans(conn):
     """One pass of the loop of maxpm serve: every tidy_every (0s: never) it ends the tmux servers the tests left
     behind (tmux_orphans). Returns the servers it ended."""
@@ -4006,9 +3945,6 @@ OPS = {
                                                      **_launch_args(a)),
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
-    # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
-    "ops_run": ops_run_op,
-    "ops_beat": lambda c, a, who: core.ops_beat(c, a["scope"], a.get("name"), who),
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops from the page without a reason; the agent then reads who stopped it.
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
