@@ -1328,7 +1328,7 @@ _CLOCK = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$")
 def local_zone(name: str = ""):
     """The zone for times a person types and reads: the timezone setting, else the machine's own."""
     if name:
-        # UTC needs no time zone database; Windows has none unless the tzdata package is installed.
+        # UTC needs no time zone database; a computer may have none (a small Linux image).
         if name.upper() in ("UTC", "Z", "GMT", "ETC/UTC"):
             return timezone.utc
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -1336,8 +1336,8 @@ def local_zone(name: str = ""):
             return ZoneInfo(name)
         except (ZoneInfoNotFoundError, ValueError):
             if not available_timezones():
-                raise RiverError(f"time zone {name!r}: this computer has no time zone database (Windows has none "
-                                 f"by default). Install it: python -m pip install tzdata; or use UTC")
+                raise RiverError(f"time zone {name!r}: this computer has no time zone database. Install it: "
+                                 f"python -m pip install tzdata; or use UTC")
             raise RiverError(f"unknown time zone {name!r}: use a name such as America/New_York or UTC")
     return _machine_zone()
 
@@ -1348,7 +1348,7 @@ _MACHINE_ZONE = {}
 def _machine_zone():
     """The machine's own zone with its rules, so a date in summer gets the summer offset (#5549): the zone that TZ
     names, else the one /etc/localtime links to (macOS, most Linux), else that file read as a zone. Only when none
-    of them works (Windows), the offset that holds now, as before. Kept by the link it came from, which is read
+    of them works (a computer with no zone files), the offset that holds now, as before. Kept by the link it came from, which is read
     again after MACHINE_ZONE_SECS: a person who moves the machine's zone gets the new one. A readlink on each call
     took up to 12 ms for one page build on a busy machine (#5585)."""
     hit = _MACHINE_ZONE.get(None)
@@ -1385,7 +1385,7 @@ def _machine_zone_now():
         try:
             with open("/etc/localtime", "rb") as f:
                 tz = ZoneInfo.from_file(f, key="localtime")
-        except Exception:  # noqa: BLE001 - no zone file (Windows): the offset of now
+        except Exception:  # noqa: BLE001 - no zone file: the offset of now
             tz = datetime.now().astimezone().tzinfo
     _MACHINE_ZONE[key] = tz
     return tz
@@ -1912,7 +1912,7 @@ def _log_locked(conn, tries):
     try:
         path = conn.execute("PRAGMA database_list").fetchone()[2]
         if path:
-            with open(Path(path).parent / "locked.log", "a") as f:
+            with open(Path(path).parent / "locked.log", "a", encoding="utf-8") as f:
                 f.write(f"{iso(now())} tries={tries} pid={os.getpid()} {' '.join(sys.argv[1:4])}\n")
     except Exception:
         pass
@@ -1934,7 +1934,7 @@ def _log_held(conn, seconds, frame):
         path = conn.execute("PRAGMA database_list").fetchone()[2]
         if path:
             import threading
-            with open(Path(path).parent / "locked.log", "a") as f:
+            with open(Path(path).parent / "locked.log", "a", encoding="utf-8") as f:
                 f.write(f"{iso(now())} held={seconds:.1f}s pid={os.getpid()} {' '.join(sys.argv[1:4])} "
                         f"thread={threading.current_thread().name} in {'<'.join(chain)}\n")
     except Exception:
@@ -2601,7 +2601,7 @@ def outside_tmux(env):
     """True when a command runs in an agent CLI (agent_type_from_env) that is not inside a tmux pane. TMUX alone does
     not say it: a Terminal app started from a tmux pane passes TMUX to every tab it opens. tmux sets TERM_PROGRAM
     to tmux in its panes, so another TERM_PROGRAM there (Apple_Terminal, iTerm.app, vscode) means outside (#4599)."""
-    if os.name == "nt" or not agent_type_from_env(env) or env.get("MAXPM_CHAT"):
+    if not agent_type_from_env(env) or env.get("MAXPM_CHAT"):
         return False
     return not env.get("TMUX") or env.get("TERM_PROGRAM", "tmux") != "tmux"
 
@@ -3951,7 +3951,7 @@ def ops_builtin_profile(name):
     path = OPS_BUILTIN_DIR / f"{name}.json"
     if not re.match(r"^[a-z0-9][a-z0-9_-]*$", name or "") or not path.is_file():
         return None
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _ops_profile_read(profile):
@@ -8690,9 +8690,8 @@ def dep_remove(conn, item_id, on, actor=None):
 
 
 def _norm_path(p):
-    """One form for comparing paths: forward slashes (Windows gives backslashes), and no case on Windows."""
-    p = p.replace("\\", "/")
-    return p.lower() if os.name == "nt" else p
+    """One form for comparing paths: forward slashes (a path that a person typed with backslashes)."""
+    return p.replace("\\", "/")
 
 
 def _paths_overlap(a, b):
@@ -9455,7 +9454,7 @@ def _df(conn):
         got = dict(zip(("key", "df", "n"), _DF[f]))
     elif path:
         try:
-            got = json.loads(path.read_text())
+            got = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError, TypeError):
             got = None
     if isinstance(got, dict) and got.get("key") == key:
@@ -9473,7 +9472,7 @@ def _df(conn):
     if path:
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
-            tmp.write_text(json.dumps({"key": key, "n": n, "df": df}))
+            tmp.write_text(json.dumps({"key": key, "n": n, "df": df}), encoding="utf-8")
             os.replace(tmp, path)
         except OSError:
             tmp.unlink(missing_ok=True)
@@ -11005,8 +11004,7 @@ def _drop_queue(conn, agent, why, items_only=False):
 
 # ---------------------------------------------------------------- agent processes
 
-SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "env", "timeout", "cmd", "powershell", "pwsh",
-          "sandbox-exec", "script"}  # Windows names without .exe
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "env", "timeout", "sandbox-exec", "script"}
 
 
 def this_host():
@@ -11015,8 +11013,6 @@ def this_host():
 
 
 def pid_alive(pid):
-    if os.name == "nt":
-        return _win_running(pid) is not None  # os.kill(pid, 0) is no check there: 0 is the Ctrl-C event
     try:
         os.kill(int(pid), 0)
     except ProcessLookupError:
@@ -11028,9 +11024,9 @@ def pid_alive(pid):
 
 def proc_cwd(pid):
     """The working folder of process pid on this computer, or None (#5262): a session's folder when its chat log does
-    not name it (Grok, Copilot). Linux: /proc/<pid>/cwd; macOS: lsof; Windows: None."""
+    not name it (Grok, Copilot). Linux: /proc/<pid>/cwd; macOS: lsof."""
     import subprocess
-    if not pid or PLATFORM == "win32":
+    if not pid:
         return None
     link = f"/proc/{int(pid)}/cwd"
     if os.path.exists(link):
@@ -11047,11 +11043,8 @@ def proc_cwd(pid):
 
 
 def proc_info(pid):
-    """(parent pid, program name, command line) of a process, from ps (on Windows, from the system's process
-    list); None when it does not run or no ps."""
+    """(parent pid, program name, command line) of a process, from ps; None when it does not run or no ps."""
     import subprocess
-    if os.name == "nt":
-        return _win_proc_info(int(pid))
     try:
         out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
         args = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
@@ -11064,122 +11057,15 @@ def proc_info(pid):
     return int(ppid), os.path.basename(comm.strip()), args.stdout.strip()
 
 
-_WIN = None
-
-
-def _win_api():
-    """Windows: kernel32 and ntdll with the types of the calls below, and the two structures they fill."""
-    global _WIN
-    if _WIN is None:
-        import ctypes
-        from ctypes import wintypes as w
-        k32, ntdll = ctypes.WinDLL("kernel32", use_last_error=True), ctypes.WinDLL("ntdll")
-
-        class Entry(ctypes.Structure):  # PROCESSENTRY32W
-            _fields_ = [("dwSize", w.DWORD), ("cntUsage", w.DWORD), ("th32ProcessID", w.DWORD),
-                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", w.DWORD), ("cntThreads", w.DWORD),
-                        ("th32ParentProcessID", w.DWORD), ("pcPriClassBase", w.LONG), ("dwFlags", w.DWORD),
-                        ("szExeFile", w.WCHAR * 260)]
-
-        class UnicodeString(ctypes.Structure):
-            _fields_ = [("Length", w.USHORT), ("MaximumLength", w.USHORT), ("Buffer", ctypes.c_void_p)]
-        for fn, res, args in (
-                (k32.OpenProcess, w.HANDLE, (w.DWORD, w.BOOL, w.DWORD)),
-                (k32.CloseHandle, w.BOOL, (w.HANDLE,)),
-                (k32.WaitForSingleObject, w.DWORD, (w.HANDLE, w.DWORD)),
-                (k32.GetProcessTimes, w.BOOL, (w.HANDLE,) + (ctypes.POINTER(w.FILETIME),) * 4),
-                (k32.CreateToolhelp32Snapshot, w.HANDLE, (w.DWORD, w.DWORD)),
-                (k32.Process32FirstW, w.BOOL, (w.HANDLE, ctypes.POINTER(Entry))),
-                (k32.Process32NextW, w.BOOL, (w.HANDLE, ctypes.POINTER(Entry))),
-                (ntdll.NtQueryInformationProcess, ctypes.c_long,
-                 (w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.ULONG, ctypes.POINTER(w.ULONG)))):
-            fn.restype, fn.argtypes = res, args
-        _WIN = (ctypes, k32, ntdll, Entry, UnicodeString)
-    return _WIN
-
-
-def _win_running(pid):
-    """Windows: None when the process does not run; else (start time, command line), each None when Windows
-    does not let this user read it."""
-    ctypes, k32, ntdll, _, UnicodeString = _win_api()
-    from ctypes import wintypes as w
-    h = k32.OpenProcess(0x00100000 | 0x1000, False, int(pid))  # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
-    if not h:
-        return (None, None) if ctypes.get_last_error() == 5 else None  # 5: access denied, so it exists
-    try:
-        if k32.WaitForSingleObject(h, 0) != 0x102:  # not WAIT_TIMEOUT: it has ended
-            return None
-        times = [w.FILETIME() for _ in range(4)]
-        created = None
-        if k32.GetProcessTimes(h, *[ctypes.byref(t) for t in times]):
-            created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-        cmd, size = None, w.ULONG(0)
-        ntdll.NtQueryInformationProcess(h, 60, None, 0, ctypes.byref(size))  # 60: ProcessCommandLineInformation
-        if size.value:
-            buf = ctypes.create_string_buffer(size.value)
-            if ntdll.NtQueryInformationProcess(h, 60, buf, size.value, ctypes.byref(size)) == 0:
-                us = UnicodeString.from_buffer(buf)
-                cmd = ctypes.wstring_at(us.Buffer, us.Length // 2) if us.Buffer else ""
-        return created, cmd
-    finally:
-        k32.CloseHandle(h)
-
-
-def _win_proc_info(pid):
-    """proc_info on Windows: the parent and the program name from a snapshot of the process list, the
-    command line from the process itself (the program name when Windows does not give it)."""
-    run = _win_running(pid)
-    if run is None:
-        return None
-    ctypes, k32, _, Entry, _ = _win_api()
-    snap = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
-    if not snap or snap == ctypes.c_void_p(-1).value:
-        return None
-    found, e = None, Entry()
-    e.dwSize = ctypes.sizeof(Entry)
-    try:
-        ok = k32.Process32FirstW(snap, ctypes.byref(e))
-        while ok and found is None:
-            if e.th32ProcessID == pid:
-                found = (e.th32ParentProcessID, e.szExeFile)
-            ok = k32.Process32NextW(snap, ctypes.byref(e))
-    finally:
-        k32.CloseHandle(snap)
-    if found is None:
-        return None
-    ppid, name = found
-    # Windows keeps the parent's PID after the parent ends and can give that PID to a new process: a
-    # "parent" that started after its child is another program.
-    parent = _win_running(ppid) if ppid else None
-    if parent is None or (parent[0] and run[0] and parent[0] > run[0]):
-        ppid = 0
-    return ppid, name, (run[1] or "").strip() or name
-
-
-# Windows: programs that hold terminals and the desktop. One of them above the shells means a person ran
-# river by hand; it is not an agent, and maxpm stop --kill must not end it.
-WIN_HOSTS = {"explorer", "windowsterminal", "openconsole", "conhost", "svchost", "services", "wininit", "winlogon",
-             "sihost", "csrss"}
-
-
 def _between(comm, args):
-    """True for a process between the agent CLI and this river command: a shell, and on Windows also the
-    river launcher and a Python that runs river (river.exe and a venv's python.exe start the real one)."""
-    name = comm.lower().lstrip("-")
-    if os.name == "nt":
-        name = name[:-4] if name.endswith(".exe") else name
-        runs_maxpm = re.search(r'(^|[\\/\s"])maxpm(\.exe|-script\.py)?["\s]|\s-m river\s', args.lower() + " ")
-        if name == COMMAND or re.fullmatch(r"py|python[\d.]*w?", name) and runs_maxpm:
-            return True
-    return name in SHELLS
+    """True for a process between the agent CLI and this river command: a shell."""
+    return comm.lower().lstrip("-") in SHELLS
 
 
 def proc_tty(pid):
     """The terminal of a process ('ttys030'); '' when it runs on none (a background process: ps shows ?? or ?);
-    None when ps cannot tell (no ps, no such process, or Windows)."""
+    None when ps cannot tell (no ps, or no such process)."""
     import subprocess
-    if os.name == "nt":
-        return None
     try:
         out = subprocess.run(["ps", "-o", "tty=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
@@ -11228,8 +11114,7 @@ def drop_background_process(conn, name):
 
 def agent_process(start=None, terminal=False, climb=False):
     """The agent CLI process that runs this river command: the first ancestor above the shell(s) that is not
-    a shell (SHELLS). Returns (pid, command line), or (None, None) when it finds none (no ps, or on Windows a
-    terminal that a person works in). terminal: that process counts only when it runs on a terminal
+    a shell (SHELLS). Returns (pid, command line), or (None, None) when it finds none (no ps). terminal: that process counts only when it runs on a terminal
     (process_on_terminal, #5247): a Hermes command runs under the gateway that every Hermes session shares.
     climb: go on upward to the first process that runs on a terminal (#5283: an OpenCode command runs under the
     TUI's private server, which has none; the TUI is the session's own process).
@@ -11246,9 +11131,7 @@ def agent_process(start=None, terminal=False, climb=False):
             return first
         ppid, comm, args = info
         if not _between(comm, args):
-            if os.name == "nt" and re.sub(r"\.exe$", "", comm.lower()) in WIN_HOSTS:
-                return None, None
-            if (terminal or climb) and os.name != "nt" and not proc_tty(pid):
+            if (terminal or climb) and not proc_tty(pid):
                 if climb and ppid > 1:
                     pid = ppid
                     continue
@@ -11290,8 +11173,6 @@ def live_agent_process(name, process=None, ref=None):
     CLI, it runs that CLI (_runs_cli). (pid, command line), or (None, None) when there is none or ps cannot tell. ps
     shows the environment of this user's own processes only (macOS and Linux)."""
     import subprocess
-    if os.name == "nt":
-        return None, None
     if PS_ENV is not None:
         text = PS_ENV()
     else:
@@ -11363,20 +11244,17 @@ def kill_agent(conn, agent, reason, actor=None, grace=5.0, sleep=None, pane=None
         if info is not None and ag["pid_cmd"] and info[2] != ag["pid_cmd"]:
             raise RiverError(f"refused: PID {ag['pid']} now runs another command ({info[2][:80]}), not {agent}'s; "
                              f"nothing was killed")
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(ag["pid"]), "/T", "/F"], capture_output=True)
-        else:
-            os.kill(ag["pid"], signal.SIGTERM)
-            waited = 0.0
-            while pid_alive(ag["pid"]) and waited < grace:
-                sleep(0.2)
-                waited += 0.2
-                try:
-                    os.waitpid(ag["pid"], os.WNOHANG)  # a child of this process (tests): reap it
-                except (ChildProcessError, OSError):
-                    pass
-            if pid_alive(ag["pid"]):
-                os.kill(ag["pid"], signal.SIGKILL)
+        os.kill(ag["pid"], signal.SIGTERM)
+        waited = 0.0
+        while pid_alive(ag["pid"]) and waited < grace:
+            sleep(0.2)
+            waited += 0.2
+            try:
+                os.waitpid(ag["pid"], os.WNOHANG)  # a child of this process (tests): reap it
+            except (ChildProcessError, OSError):
+                pass
+        if pid_alive(ag["pid"]):
+            os.kill(ag["pid"], signal.SIGKILL)
         killed = True
     return _killed(conn, agent, reason, actor, ag["pid"], killed)
 
@@ -11385,7 +11263,7 @@ def _kill_pane(conn, agent, reason, actor, pane, grace, sleep):
     """kill_agent for the foreground process group of the agent's tmux pane (pane: server.pane_process)."""
     import signal
     pid, group = int(pane["pid"]), int(pane["pgid"])
-    if os.name == "nt" or group <= 1 or group == os.getpgrp():
+    if group <= 1 or group == os.getpgrp():
         raise RiverError(f"refused: process group {group} is not one MaximizePM may end")
     killed = False
     if pid_alive(pid):
@@ -11837,11 +11715,9 @@ def _elapsed(text):
 
 
 def _process_list():
-    """The output of one ps call (pid, parent, and age of every process), or None with no ps (Windows, a sandbox
-    that blocks it)."""
+    """The output of one ps call (pid, parent, and age of every process), or None with no ps (a sandbox that
+    blocks it)."""
     import subprocess
-    if PROC_RUNNER is None and os.name == "nt":
-        return None
     try:
         return PROC_RUNNER() if PROC_RUNNER else subprocess.run(
             ["ps", "-A", "-o", "pid=,ppid=,etime="], capture_output=True, text=True, timeout=5).stdout
@@ -11856,7 +11732,7 @@ def busy_now(conn, names=None, skip=()):
     itself. On macOS Claude Code also runs `caffeinate -i -t 300` below it while a turn runs (it restarts it every
     4 minutes and ends it 30 seconds after the turn): that counts too, and rightly, since the session works; at
     its prompt it has none (#4294). Only within busy_max of the last river command. The processes in skip (the
-    hook that asks, #4293) and the ones below them do not count. One ps call; an empty set with no ps (Windows, a sandbox that blocks it)."""
+    hook that asks, #4293) and the ones below them do not count. One ps call; an empty set with no ps (a sandbox that blocks it)."""
     limit = parse_duration(setting(conn, "busy_max"))
     t, host = now(), this_host()
     rows = [r for r in conn.execute("SELECT name, pid, last_seen FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
@@ -13462,15 +13338,13 @@ def _run_command(cmd, cwd, limit, renew=None, env=None):
     """Run a shell command in its own process group and capture its output.
 
     renew runs every REVIEW_RENEW_EVERY seconds while the command runs, so a long gate keeps the
-    reviewer's leases. After limit seconds (0: none) the whole group stops: SIGTERM, then SIGKILL
-    (taskkill /T on Windows), so no build is left running without an owner. The result has
+    reviewer's leases. After limit seconds (0: none) the whole group stops: SIGTERM, then SIGKILL, so no build
+    is left running without an owner. The result has
     returncode, stdout, stderr, and timed_out."""
     import subprocess
     import time
-    win = os.name == "nt"
-    kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if win else {"start_new_session": True}
     p = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                         **kw)
+                         start_new_session=True)
     end = time.monotonic() + limit if limit > 0 else None
     out = err = ""
     while True:
@@ -13501,9 +13375,6 @@ def _stop_group(p):
     """Stop a process started by _run_command and every process in its group."""
     import signal
     import subprocess
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
-        return
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(p.pid, sig)
@@ -14387,7 +14258,7 @@ def _background_tasks(path):
     at, what, command}]. A start counts only as the first words of a tool result, so text that quotes one (a
     grep of another transcript) starts nothing."""
     started, ended = {}, set()
-    with open(path, errors="replace") as f:
+    with open(path, errors="replace", encoding="utf-8") as f:
         for line in f:
             if "<task-notification>" in line and "<status>" in line:
                 for body in _BG_NOTE.findall(line):
@@ -14421,7 +14292,7 @@ def _background_tasks(path):
     tasks = [v for k, v in started.items() if k not in ended]
     uses = {v["use"]: v for v in tasks if v["use"]}
     if uses:  # what each one is: the description and the command of its tool call
-        with open(path, errors="replace") as f:
+        with open(path, errors="replace", encoding="utf-8") as f:
             for line in f:
                 if '"tool_use"' not in line or not any(u in line for u in uses):
                     continue
@@ -16072,7 +15943,7 @@ def canvas_save(conn, ref, path, version=None, project=None, force=False):
     if p.exists() and not force:
         raise RiverError(f"{p} exists; add --force to write over it")
     try:
-        p.write_text(d["shown"]["body"])
+        p.write_text(d["shown"]["body"], encoding="utf-8")
     except OSError as e:
         raise RiverError(f"cannot write {p}: {e.strerror}")
     return {"canvas": d["name"], "version": d["shown"]["version"], "path": str(p), "bytes": d["bytes"]}
@@ -16864,8 +16735,7 @@ def model_name_of(models, value):
     return next((m["name"] for m in models if re.search(r"(?:^|[-_.])" + re.escape(m["name"]) + r"(?:$|[-_.])", v)), None)
 
 
-# The system whose shell gets the commands river builds: its quoting, and how the page opens a session (a
-# tmux pane; a console window on Windows, where tmux does not run). Tests set it.
+# The system that river runs on (darwin or linux; Windows only inside WSL 2, which is linux). Tests set it.
 PLATFORM = sys.platform
 
 
@@ -16940,14 +16810,12 @@ def tmux_install():
 
 
 def can_start_agents():
-    """Whether this computer can open an agent session: tmux is installed, or it is Windows (a console window)."""
-    return PLATFORM == "win32" or bool(tmux_path())
+    """Whether this computer can open an agent session: tmux is installed."""
+    return bool(tmux_path())
 
 
 def _shell_quote(s):
     import shlex
-    if PLATFORM == "win32":
-        return f'"{s}"' if not s or re.search(r'[\s"&|<>^%]', s) else s
     return shlex.quote(s)
 
 
@@ -17017,11 +16885,7 @@ def skill_prompt_args(args):
     import hashlib
     import shlex
     try:
-        if PLATFORM == "win32":  # a POSIX split drops the backslashes of a Windows path
-            words = [w[1:-1] if len(w) > 1 and w[0] == w[-1] == '"' else w
-                     for w in shlex.split(args or "", posix=False)]
-        else:
-            words = shlex.split(args or "")
+        words = shlex.split(args or "")
     except ValueError:
         return args
     rest, primer = [], None
@@ -17037,8 +16901,8 @@ def skill_prompt_args(args):
             rest.append(w)
         i += 1
     try:
-        skill = (GUIDES / "maxpm" / "SKILL.md").read_text()
-        head = (Path(primer).expanduser().read_text().rstrip() + "\n\n") if primer else ""
+        skill = (GUIDES / "maxpm" / "SKILL.md").read_text(encoding="utf-8")
+        head = (Path(primer).expanduser().read_text(encoding="utf-8").rstrip() + "\n\n") if primer else ""
     except OSError:
         return args
     if skill.startswith("---"):
@@ -17048,7 +16912,7 @@ def skill_prompt_args(args):
     if not f.is_file():
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = f.with_name(f.name + f".{os.getpid()}.tmp")
-        tmp.write_text(text)
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(f)
     return " ".join([_shell_quote(w) for w in rest] + ["--append-system-prompt-file", _shell_quote(str(f))])
 
@@ -17116,7 +16980,7 @@ CUSTOM_PROMPT_MAX = 4000
 def custom_prompt(text):
     """The text of maxpm launch --prompt, checked: not empty, at most CUSTOM_PROMPT_MAX characters, and no
     control characters but line breaks (a launch types the command into a shell, where a tab completes and
-    Ctrl-C stops). A tab becomes a space. Windows: cmd cannot quote a line break, '"' or '%', so they are refused."""
+    Ctrl-C stops). A tab becomes a space."""
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ").strip()
     if not text:
         raise RiverError("--prompt is empty; give the session's first instruction, or leave --prompt out")
@@ -17126,14 +16990,12 @@ def custom_prompt(text):
     bad = sorted({c for c in text if (ord(c) < 32 and c != "\n") or ord(c) == 127})
     if bad:
         raise RiverError(f"--prompt has control characters ({', '.join(repr(c) for c in bad)}); leave them out")
-    if PLATFORM == "win32" and re.search(r'[\n"%]', text):
-        raise RiverError("--prompt on Windows is one line with no '\"' or '%': cmd cannot quote them")
     return text
 
 
 def join_prompt(first, extra):
-    """The profile's first prompt, a blank line, then the custom prompt (Windows: one line, a space between)."""
-    return f"{first} {extra}" if PLATFORM == "win32" else f"{first}\n\n{extra}"
+    """The profile's first prompt, a blank line, then the custom prompt."""
+    return f"{first}\n\n{extra}"
 
 
 def entry_exe(cmd):
@@ -18102,7 +17964,7 @@ def state(conn, closed=True):
         "model_ladder": parse_ladder(setting(conn, "model_ladder")),
         "model_ids": model_ids(conn),
         "launch_options": launch_options(conn),
-        "tmux": can_start_agents(),  # every agent starts in tmux (Windows: a console window): the page says when it is missing
+        "tmux": can_start_agents(),  # every agent starts in tmux: the page says when it is missing
         "tmux_install": tmux_install(),
         "start_next": _start_next(conn),
         "queues": {agent: queue_list(conn, agent, ann, rows)["entries"] for agent, rows in _all_queues(conn).items()},
@@ -19781,7 +19643,7 @@ def serve_loop_beat(conn, beat):
         if p is None:
             return
         tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps({**beat, "pid": os.getpid(), "host": this_host()}))
+        tmp.write_text(json.dumps({**beat, "pid": os.getpid(), "host": this_host()}), encoding="utf-8")
         os.replace(tmp, p)
     except Exception:
         pass
@@ -19793,7 +19655,7 @@ def serve_loop(conn):
     for longer than LOOP_LATE_PASSES passes and LOOP_LATE_MIN. The thread ended, a pass hangs, or every pass
     fails; on 2026-10-08 nothing said so for 3 hours (#1663). None when no maxpm serve runs on this queue."""
     try:
-        d = json.loads(_beside_queue(conn, LOOP_FILE).read_text())
+        d = json.loads(_beside_queue(conn, LOOP_FILE).read_text(encoding="utf-8"))
         since = parse_iso(d.get("last_pass") or d["started"])
         if d["host"] != this_host() or not pid_alive(d["pid"]):
             return None

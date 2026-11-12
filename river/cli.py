@@ -2108,7 +2108,7 @@ def run(argv=None):
             print(core.DECISION_FORMAT)
         else:
             name = {"manager": "maxpm-manager"}.get(args.which, "maxpm")
-            text = (GUIDES / name / "SKILL.md").read_text()
+            text = (GUIDES / name / "SKILL.md").read_text(encoding="utf-8")
             print(text.split("---", 2)[2].strip() if text.startswith("---") else text)
         return 0
     if args.cmd == "init":
@@ -2196,11 +2196,11 @@ def run(argv=None):
             print(AGENT_SNIPPET)
             return 0
         f = Path(args.append)
-        old = f.read_text() if f.exists() else ""
+        old = f.read_text(encoding="utf-8") if f.exists() else ""
         if core.names_product(old):
             print(f"{f} already mentions {core.PRODUCT}; nothing added")
             return 0
-        f.write_text(old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + AGENT_SNIPPET)
+        f.write_text(old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + AGENT_SNIPPET, encoding="utf-8")
         print(f"added the work queue block to {f}")
         return 0
     conn = core.connect()
@@ -2405,7 +2405,7 @@ def _browser_cmd(conn, a, actor):
         out.write_bytes(base64.b64decode(res.pop("png")))
         res["file"] = str(out.resolve())
     if b == "html" and a.out:
-        Path(a.out).expanduser().write_text(res.pop("html"))
+        Path(a.out).expanduser().write_text(res.pop("html"), encoding="utf-8")
         res["file"] = str(Path(a.out).expanduser().resolve())
     return res
 
@@ -2552,13 +2552,13 @@ def _hint(a, res, actor):
 
 
 def _append_block(f):
-    old = f.read_text() if f.exists() else ""
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
     if OLD_SNIPPET in old:  # the block of a maxpm init before #4978: its 'maxpm plan' line names a gone role
-        f.write_text(old.replace(OLD_SNIPPET, AGENT_SNIPPET, 1))
+        f.write_text(old.replace(OLD_SNIPPET, AGENT_SNIPPET, 1), encoding="utf-8")
         return f"{f.name}: the work queue block is current again (the 'maxpm plan' line is gone)"
     if core.names_product(old):
         return f"{f.name}: already has the work queue block"
-    f.write_text(old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + AGENT_SNIPPET)
+    f.write_text(old + ("\n" if old and not old.endswith("\n") else "") + ("\n" if old else "") + AGENT_SNIPPET, encoding="utf-8")
     return f"{f.name}: added the work queue block"
 
 
@@ -2584,8 +2584,8 @@ def instructions_layout(folder):
     from . import agents
     own, shared, _, _ = agents.instruction_files()
     c, a = Path(folder, own), Path(folder, shared)
-    ct = c.read_text(errors="replace") if c.exists() else None
-    at = a.read_text(errors="replace") if a.exists() else None
+    ct = c.read_text(errors="replace", encoding="utf-8") if c.exists() else None
+    at = a.read_text(errors="replace", encoding="utf-8") if a.exists() else None
     if ct is not None and _imports_agents(ct):
         return "shared"
     c_rules = ct is not None and not _only_block(ct)
@@ -2621,11 +2621,11 @@ def _setup_importers(folder):
     out = []
     for own, line, label in agents.import_files()[1:]:
         f = Path(folder) / own
-        text = f.read_text(errors="replace") if f.exists() else None
+        text = f.read_text(errors="replace", encoding="utf-8") if f.exists() else None
         if text is not None and any(x.strip() == line for x in text.splitlines()):
             continue
         if text is None or _only_block(text):
-            f.write_text(line + "\n")
+            f.write_text(line + "\n", encoding="utf-8")
             out.append(f"{own}: {'created as' if text is None else 'now'} the one line {line}, so {label} reads "
                        f"{agents.SHARED_INSTRUCTIONS} too")
         else:
@@ -2647,18 +2647,18 @@ def _setup_shared(folder, move=None):
     layout = instructions_layout(folder)
     out = []
     if layout == "claude_only" and move:
-        a.write_text(c.read_text())
+        a.write_text(c.read_text(encoding="utf-8"), encoding="utf-8")
         out += [f"{shared}: now holds the rules from {own}", _append_block(a)]
-        c.write_text(line + "\n")
+        c.write_text(line + "\n", encoding="utf-8")
         out.append(f"{own}: now the one line {line}, so {label} and every other agent read the same rules")
         return out
     if layout in ("none", "agents_only", "shared"):
         if layout != "shared" and c.exists():  # CLAUDE.md holds only the block: AGENTS.md has it now
-            c.write_text(line + "\n")
+            c.write_text(line + "\n", encoding="utf-8")
             out.append(f"{own}: now the one line {line} (it held only the work queue block)")
         out.append(_append_block(a))
         if not c.exists():
-            c.write_text(line + "\n")
+            c.write_text(line + "\n", encoding="utf-8")
             out.append(f"{own}: created as the one line {line}, so {label} reads {shared} too")
         return out
     out += [_append_block(c), _append_block(a)]
@@ -2787,7 +2787,7 @@ def _expert_cmd(conn, a, actor):
         if a.summary_file:
             if summary:
                 raise RiverError("give the summary once: --summary \"...\" or --summary-file <path>")
-            summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text()
+            summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text(encoding="utf-8")
         return {"expert_proposal": core.expert_propose(conn, a.name, a.topic, a.project, a.item, a.model, a.effort,
                                                        summary, a.source, a.canvas, a.session, actor)}
     if e == "end":
@@ -2800,7 +2800,7 @@ def _expert_cmd(conn, a, actor):
             core._expert(conn, a.name)  # it was never an expert: the error says how to make one
         canvas = core.expert_notes_name(a.name)
         if a.put:
-            body = sys.stdin.read() if a.put == "-" else Path(a.put).expanduser().read_text()
+            body = sys.stdin.read() if a.put == "-" else Path(a.put).expanduser().read_text(encoding="utf-8")
             if not project:
                 raise RiverError(f"{a.name} has no project for its notes; adopt it again with --project <name>")
             core.canvas_put(conn, canvas, body, actor or a.name, kind="md", title=f"Notes of the expert {a.name}",
@@ -2817,7 +2817,7 @@ def _expert_cmd(conn, a, actor):
     if a.summary_file:
         if summary:
             raise RiverError("give the summary once: --summary \"...\" or --summary-file <path>")
-        summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text()
+        summary = sys.stdin.read() if a.summary_file == "-" else Path(a.summary_file).expanduser().read_text(encoding="utf-8")
     args = {"name": a.name, "topic": a.topic, "project": a.project, "resume": a.resume, "agent": a.agent,
             "model": a.model, "effort": a.effort, "item": a.item, "summary": summary,
             "sources": a.source, "canvases": a.canvas, "sessions": a.session}
@@ -2842,7 +2842,7 @@ def _ops_profile_file(path):
         if builtin is not None:
             return builtin
     try:
-        text = sys.stdin.read() if path == "-" else Path(path).read_text()
+        text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
     except OSError as e:
         raise RiverError(f"cannot read the profile {path}: {e.strerror}")
     try:
@@ -3140,7 +3140,7 @@ def _dispatch_ops(conn, a, actor):
                 sets[k.strip()] = v
             body = None
             if a.file:
-                text = sys.stdin.read() if a.file == "-" else Path(a.file).read_text()
+                text = sys.stdin.read() if a.file == "-" else Path(a.file).read_text(encoding="utf-8")
                 try:
                     body = json.loads(text)
                 except ValueError as e:
@@ -3156,7 +3156,7 @@ def _dispatch_ops(conn, a, actor):
     if a.ocmd == "profile" and a.opcmd == "export":
         res = core.ops_profile_export(conn, a.scope)
         if a.out:
-            Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
+            Path(a.out).write_text(json.dumps(res, indent=2) + "\n", encoding="utf-8")
         return {"profile": res, "out": a.out}
     if a.ocmd == "profile" and not a.yes:
         return core.ops_profile_apply(conn, _ops_profile_file(a.file), a.scope, False, actor)
@@ -3257,7 +3257,7 @@ def dispatch(conn, a, actor):
             text = a.text
             if a.file:
                 try:
-                    text = Path(a.file).expanduser().read_text()
+                    text = Path(a.file).expanduser().read_text(encoding="utf-8")
                 except OSError as e:
                     raise RiverError(f"cannot read {a.file}: {e.strerror}")
             return core.goal_handoff(conn, a.name, text, actor, a.version)
@@ -3357,7 +3357,7 @@ def dispatch(conn, a, actor):
         if a.plan_file:
             if len(a.words) > 1:
                 raise RiverError("with --from, give at most a project: maxpm add [project] --from plan.md")
-            text = sys.stdin.read() if a.plan_file == "-" else Path(a.plan_file).expanduser().read_text()
+            text = sys.stdin.read() if a.plan_file == "-" else Path(a.plan_file).expanduser().read_text(encoding="utf-8")
             project = a.words[0] if a.words else core.project_for_add(conn, os.getcwd(), None)
             return core.add_plan(conn, project, text, actor, a.priority, a.doer, a.dry_run)
         if a.dry_run:  # a one-item add has no preview: it would add the item
@@ -4120,8 +4120,7 @@ def render_expert(res):
         if t.get("fresh_from"):
             print(f"ended the expert {t['fresh_from']}: its context left the prompt cache (close its terminal or pane "
                   f"if it is still open)")
-        how = "a console window" if core.PLATFORM == "win32" else "a tmux pane"
-        print(f"started the expert {t['session_name']} on {t.get('model')} ({t.get('model_why')}) in {how} "
+        print(f"started the expert {t['session_name']} on {t.get('model')} ({t.get('model_why')}) in a tmux pane "
               f"({t['project']}) on #{t.get('task')}: {t['topic']}"
               + (f"; it resumes session {t['resumed']}" if t.get("resumed") else ""))
         if t.get("handover"):
@@ -4626,7 +4625,7 @@ def _canvas_dispatch(conn, a, actor):
             body = sys.stdin.read()
         elif a.file:
             try:
-                body = Path(a.file).expanduser().read_text()
+                body = Path(a.file).expanduser().read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as e:
                 raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
         else:
@@ -4681,7 +4680,7 @@ def _canvas_dispatch(conn, a, actor):
             body = sys.stdin.read()
         elif a.file:
             try:
-                body = Path(a.file).expanduser().read_text()
+                body = Path(a.file).expanduser().read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as e:
                 raise RiverError(f"cannot read {a.file}: {getattr(e, 'strerror', None) or e}")
         return core.canvas_section(conn, a.name, a.heading, body, actor, a.project, a.note, a.pending)
@@ -5530,7 +5529,7 @@ def render(a, res):
                 print(f"  no terminal: {res['would_push_to']} waits for work in {res['project']} and would get it")
             else:
                 print("  command: " + "".join(f"{k}={v} " for k, v in res["env"].items()) + res["command"]
-                      + f"   (in a new {'console window' if core.PLATFORM == 'win32' else 'tmux pane'})")
+                      + "   (in a new tmux pane)")
         elif res.get("pushed_to"):
             print(f"gave {it} to {res['pushed_to']}, which was waiting for work in {res['project']}")
         else:
@@ -5964,6 +5963,8 @@ def render(a, res):
 
 
 def main():
+    from .client import refuse_native_windows
+    refuse_native_windows()
     try:
         sys.exit(run())
     except RiverError as e:

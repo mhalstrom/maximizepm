@@ -147,7 +147,7 @@ def main():
     null = os.open(os.devnull, os.O_RDWR)
     os.dup2(null, 0)
     os.dup2(null, 1)
-    sys.stdin = open(os.devnull)
+    sys.stdin = open(os.devnull, encoding="utf-8")
     sys.stdout = io.TextIOWrapper(os.fdopen(1, "wb", buffering=0, closefd=False), write_through=True)
     from river import core
     serve_requests(db or str(core.db_path()), proto_in, proto_out)

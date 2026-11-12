@@ -20,11 +20,11 @@ SESSION_ID = "ses_e366d1e13ffe0SgSDgPP6MNKXx"
 
 
 def lines(name="session.jsonl"):
-    return (FIX / name).read_text().splitlines()
+    return (FIX / name).read_text(encoding="utf-8").splitlines()
 
 
 def screen(name):
-    return (FIX / f"pane-{name}.txt").read_text()
+    return (FIX / f"pane-{name}.txt").read_text(encoding="utf-8")
 
 
 class Env(unittest.TestCase):
@@ -328,7 +328,7 @@ class Card(Env):
 
 class Commands(Env):
     def test_the_built_in_list_is_the_recorded_slash_list(self):
-        self.assertEqual([c["name"] for c in opencode.COMMANDS], [w.lstrip("/") for w in (FIX / "commands.txt").read_text().split()])
+        self.assertEqual([c["name"] for c in opencode.COMMANDS], [w.lstrip("/") for w in (FIX / "commands.txt").read_text(encoding="utf-8").split()])
         self.assertIn("compact", [c["name"] for c in self.a.read_commands(None)])
 
     def test_custom_commands_of_the_folder_up_to_git_and_of_the_global_config(self):
@@ -336,14 +336,14 @@ class Commands(Env):
         (self.root / "repo" / ".git").mkdir(parents=True)
         d = self.root / "repo" / ".opencode" / "commands" / "deep"
         d.mkdir(parents=True)
-        (d.parent / "hello.md").write_text("---\ndescription: Say hello\nargument-hint: <name>\n---\nHi $ARGUMENTS\n")
-        (d / "x.md").write_text("Nested one\n")
+        (d.parent / "hello.md").write_text("---\ndescription: Say hello\nargument-hint: <name>\n---\nHi $ARGUMENTS\n", encoding="utf-8")
+        (d / "x.md").write_text("Nested one\n", encoding="utf-8")
         work.mkdir(parents=True)
         g = self.root / "oc-config" / "command"
         g.mkdir(parents=True)
-        (g / "hello.md").write_text("---\ndescription: the global one\n---\n")
-        (g / "ship.md").write_text("---\ndescription: Ship it\n---\n")
-        (g / "compact.md").write_text("a custom command cannot take a built-in name\n")
+        (g / "hello.md").write_text("---\ndescription: the global one\n---\n", encoding="utf-8")
+        (g / "ship.md").write_text("---\ndescription: Ship it\n---\n", encoding="utf-8")
+        (g / "compact.md").write_text("a custom command cannot take a built-in name\n", encoding="utf-8")
         got = self.a.read_commands(str(work))
         names = [c["name"] for c in got]
         self.assertEqual(names[:len(opencode.COMMANDS)], [c["name"] for c in opencode.COMMANDS])
@@ -432,11 +432,11 @@ class Database(Env):
         db = self.make_db([("session.jsonl", SESSION_ID, None)])
         p = self.a.chat_path(SESSION_ID)
         self.assertEqual(p, Path(core.river_dir()) / "opencode" / "chats" / f"{SESSION_ID}.jsonl")
-        got = [json.loads(ln) for ln in p.read_text().splitlines()]
+        got = [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines()]
         want = [json.loads(ln) for ln in lines()]
         self.assertEqual([{k: v for k, v in r.items() if k != "id"} for r in got],
                          [{k: v for k, v in r.items() if k != "id"} for r in want])
-        self.assertEqual(self.a.parse_chat(p.read_text().splitlines())[0], self.a.parse_chat(lines())[0])
+        self.assertEqual(self.a.parse_chat(p.read_text(encoding="utf-8").splitlines())[0], self.a.parse_chat(lines())[0])
         before = p.stat().st_mtime_ns
         self.assertEqual(self.a.chat_path(SESSION_ID), p)
         self.assertEqual(p.stat().st_mtime_ns, before)  # the database did not change
@@ -447,7 +447,7 @@ class Database(Env):
         conn.commit()
         conn.close()
         self.a.chat_path(SESSION_ID)
-        entries, turn = self.a.parse_chat(p.read_text().splitlines())
+        entries, turn = self.a.parse_chat(p.read_text(encoding="utf-8").splitlines())
         self.assertEqual((entries[-1]["text"], turn), ("one more", "working"))
         self.assertEqual(self.a.chat_path(str(p)), p)  # a path of such a file, as it is
 
@@ -456,6 +456,7 @@ class Database(Env):
         from river import sessions
         self.make_db([("session.jsonl", SESSION_ID, None)])
         conn = core.connect()
+        self.addCleanup(conn.close)
         core.register(conn, "oc1")
         conn.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('oc1', ?, '2026-11-11')",
                      (SESSION_ID,))
@@ -469,13 +470,14 @@ class Database(Env):
         from river import sessions
         work = self.root / "work"
         (work / ".opencode" / "commands").mkdir(parents=True)
-        (work / ".opencode" / "commands" / "hello.md").write_text("---\ndescription: Say hello\n---\nhi\n")
+        (work / ".opencode" / "commands" / "hello.md").write_text("---\ndescription: Say hello\n---\nhi\n", encoding="utf-8")
         db = self.make_db([("session.jsonl", SESSION_ID, None)])
         conn = sqlite3.connect(db)
         conn.execute("UPDATE session_v2 SET directory=?", (str(work),))
         conn.commit()
         conn.close()
         mconn = core.connect()
+        self.addCleanup(mconn.close)
         core.register(mconn, "oc1")
         mconn.execute("UPDATE agents SET agent_type='opencode' WHERE name='oc1'")
         mconn.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('oc1', ?, '2026-11-11')",
@@ -526,7 +528,7 @@ class State(Env):
         words = self.a.install_hooks("/work/demo", report)
         d = Path(core.river_dir()) / "opencode" / opencode.PLUGIN_DIR
         self.assertEqual(words, ["env", 'OPENCODE_CLI_CONFIG_CONTENT={"plugins":["%s"]}' % d])
-        text = (d / "tui.js").read_text()
+        text = (d / "tui.js").read_text(encoding="utf-8")
         self.assertIn('const REPORT = ["maxpm", "--as", "w1", "report"];', text)
         self.assertIn('"opencode", "--standalone", "--session"]', text)
         before = (d / "tui.js").stat().st_mtime_ns
@@ -540,7 +542,7 @@ class State(Env):
         cfg = self.root / "oc-config"
         cfg.mkdir()
         (cfg / "cli.json").write_text('{\n  // my plugins\n  "plugins": ["./mine", "https://x.test/a//b"],\n'
-                                      '  "theme": "dark", /* a note */\n}\n')
+                                      '  "theme": "dark", /* a note */\n}\n', encoding="utf-8")
         words = self.a.install_hooks("/work/demo", ["maxpm", "report"])
         got = json.loads(words[1].split("=", 1)[1])["plugins"]
         self.assertEqual(got[:2], ["./mine", "https://x.test/a//b"])
@@ -582,14 +584,14 @@ class State(Env):
             }
             dispose?.();
             console.log(JSON.stringify(issued));
-        """)
+        """, encoding="utf-8")
         env = {**os.environ, "MAXPM_AGENT": "oc1"}
         run = subprocess.run(["node", str(harness), plugin.as_uri(), str(FIX / "events.jsonl")], capture_output=True,
                              text=True, env=env, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)
         # The words after the stand-in's "sh", split as the stand-in prints them ("$*").
         calls = [" ".join(argv[4:]).split() for argv in json.loads(run.stdout)]
-        real = [ln.split() for ln in (FIX / "reports.txt").read_text().splitlines()]
+        real = [ln.split() for ln in (FIX / "reports.txt").read_text(encoding="utf-8").splitlines()]
 
         def states(cs):
             return [c[c.index("--state") + 1] if "--state" in c else c[2] for c in cs]
@@ -601,10 +603,10 @@ class State(Env):
         seqs = [int(c[c.index("--seq") + 1]) for c in reports]
         self.assertEqual(seqs, sorted(set(seqs)))  # each report's seq is above the last: a late one changes nothing
         for _ in range(100):  # each command runs in a process of its own, in no fixed order
-            if out.exists() and len(out.read_text().splitlines()) >= len(calls):
+            if out.exists() and len(out.read_text(encoding="utf-8").splitlines()) >= len(calls):
                 break
             time.sleep(0.1)
-        self.assertEqual(sorted(ln.split() for ln in out.read_text().splitlines()), sorted(calls))
+        self.assertEqual(sorted(ln.split() for ln in out.read_text(encoding="utf-8").splitlines()), sorted(calls))
         blocked = next(c for c in reports if "blocked" in c)
         msg = blocked[blocked.index("--message") + 1: blocked.index("--session-id")]
         self.assertEqual(msg, ["permission:", "read", ".env"])  # 2.2.7 names the file in 'resources'
@@ -617,7 +619,7 @@ class State(Env):
         self.assertEqual(out2.returncode, 0, out2.stderr)
         self.assertEqual(json.loads(out2.stdout), [])
         time.sleep(0.3)
-        self.assertEqual(len(out.read_text().splitlines()), len(calls))  # not started by MaximizePM: no report
+        self.assertEqual(len(out.read_text(encoding="utf-8").splitlines()), len(calls))  # not started by MaximizePM: no report
 
 
 if __name__ == "__main__":

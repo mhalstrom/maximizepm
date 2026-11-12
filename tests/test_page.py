@@ -70,6 +70,8 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         chrome = subprocess.Popen([
             _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
+            # The driver's clicks are no person's: no autoplay rule may hold an AudioContext (the microphone tests).
+            "--autoplay-policy=no-user-gesture-required",
             *([f"--window-size={window}"] if window else []), *flags,
             f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -533,7 +535,7 @@ try {
         from river import dictation
         from tests.test_dictation import FAKE
         fake = Path(self.dir.name, "fake.py")
-        fake.write_text(FAKE)
+        fake.write_text(FAKE, encoding="utf-8")
         old, dictation.HELPER = dictation.HELPER, [__import__("sys").executable, str(fake)]
         self.addCleanup(setattr, dictation, "HELPER", old)
         driver = r'''try {
@@ -570,7 +572,7 @@ try {
         from river import dictation
         from tests.test_dictation import FAKE
         fake = Path(self.dir.name, "fake.py")
-        fake.write_text(FAKE)
+        fake.write_text(FAKE, encoding="utf-8")
         old, dictation.HELPER = dictation.HELPER, [__import__("sys").executable, str(fake)]
         self.addCleanup(setattr, dictation, "HELPER", old)
         self.pane["screen"] = "❯ \n"  # the session waits at its prompt: the box sends
@@ -606,7 +608,7 @@ try {
         lines a page at a time, and the lines in sight stay where they are, up to 'Start of the session'."""
         from tests.test_view_sessions import History
         h = History.__new__(History)
-        self.path.write_text("")
+        self.path.write_text("", encoding="utf-8")
         self.write(h.lines(0, 200) + h.boundary(1) + h.lines(200, 200) + h.boundary(2) + h.lines(400, 200))
         driver = r'''try {
   const col = q("#sessCol"), body = q("#sessBody");
@@ -976,6 +978,7 @@ try {
         core.send(self.c, "question", "Which color?", to="mark", actor="ag")
         driver = r'''try {
   await until(() => window.__appReady && !q("#sessYou").classList.contains("hidden"), "the You view on the first page");
+  await until(() => location.pathname === "/you", "the address /you");  // it follows the view (a slow CI runner saw /)
   post({ path: location.pathname, tab: q("#tabName").textContent, tabs: [...document.querySelectorAll("nav button")].map(b => b.dataset.tab) });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         self.assertEqual(self.drive(driver, "/?as=mark"), {"path": "/you", "tab": "Sessions",
@@ -996,7 +999,7 @@ try {
   await until(() => window.__appReady && q("#sessStart [data-launch]") && q("#sessFoot [data-sess-ended]"), "Start an agent and Show ended");
   q("#sessFoot [data-sess-ended]").click();
   await until(() => q('#sessEnded .srow[data-session="old"]'), "the ended session");
-  check(q('#sessions .srow[data-session="ag"][data-agent="ag"]'), "a running row is a drop target");
+  await until(() => q('#sessions .srow[data-session="ag"][data-agent="ag"]'), "a running row is a drop target");
   q('[data-sp-open="items"]').click();
   await until(() => q("#spBody .sp-queue") && q("#spBody .sp-queue").textContent.includes("#FOOTER"), "the queue in Items");
   q("#spBody [data-sp-add] input").value = "found in passing";
@@ -1160,7 +1163,7 @@ try {
         the drawer; a reload shows the same view, and Back returns."""
         plan = server.uploads_dir() / "ag" / "plan.md"  # a file the side panel may show, that ag wrote
         plan.parent.mkdir(parents=True)
-        plan.write_text("# Plan")
+        plan.write_text("# Plan", encoding="utf-8")
         target = str(plan.resolve())
         self.write(claude_line("assistant", [{"type": "tool_use", "name": "Write",
                                               "input": {"file_path": target, "content": "# Plan"}}], "tool_use"))

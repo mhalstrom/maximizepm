@@ -537,7 +537,7 @@ class Go(Base):
         # The guides say it too.
         self.assertIn("maxpm project add <name> --result-look ask_first|push_first", cli.SETUP)
         self.assertIn("A project\n       where nobody chose has this value.", cli.SETUP)
-        self.assertIn("--result-look ask_first|push_first", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text())
+        self.assertIn("--result-look ask_first|push_first", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text(encoding="utf-8"))
 
     def test_a_project_linked_to_another_folder_moves_only_with_move(self):
         other = os.path.join(self.dir.name, "other")
@@ -1237,7 +1237,7 @@ class Transcript:
         row = {"type": kind, "timestamp": when.strftime("%Y-%m-%dT%H:%M:%S.000Z"), **more}
         if content is not None:
             row["message"] = {"role": kind, "content": content}
-        with open(self.path, "a") as f:
+        with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
 
     def use(self, when, name, **inp):
@@ -1363,7 +1363,7 @@ class Usage(Base):
         if sub:
             folder = os.path.join(folder, sid, "subagents")
             os.makedirs(folder, exist_ok=True)
-        with open(os.path.join(folder, f"{sub or sid}.jsonl"), "w") as f:
+        with open(os.path.join(folder, f"{sub or sid}.jsonl"), "w", encoding="utf-8") as f:
             for x in lines:
                 f.write(json.dumps(x) + "\n")
 
@@ -1569,7 +1569,7 @@ class Plan(Base):
         self.assertIn("maxpm guide manager, section Writing tasks", out.getvalue())
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             cli.run(["guide", "planner"])
-        self.assertIn("## Writing tasks", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text())
+        self.assertIn("## Writing tasks", (cli.GUIDES / "maxpm-manager" / "SKILL.md").read_text(encoding="utf-8"))
 
 
 
@@ -2175,8 +2175,7 @@ class WhoFile(Base):
 
 
 class PathsOverlap(unittest.TestCase):
-    def test_windows_backslashes_match_forward_slashes(self):
-        self.assertTrue(core._paths_overlap("C:\\repo\\river\\core.py", "C:/repo/river"))
+    def test_backslashes_match_forward_slashes(self):
         self.assertTrue(core._paths_overlap("river\\static\\app.js", "river/static/"))
         self.assertFalse(core._paths_overlap("river\\static2", "river/static"))
 
@@ -3090,7 +3089,7 @@ class Experts(Base):
         self.assertIn("EXPERT on: research", run("--as", "fab", "-q", "go", "--project", "a"))
         self.assertIn("no notes yet", run("--as", "fab", "-q", "expert", "notes", "fab"))
         f = os.path.join(self.dir.name, "notes.md")
-        with open(f, "w") as fh:
+        with open(f, "w", encoding="utf-8") as fh:
             fh.write("# Notes\n\n- Beads sorts by its own priority\n")
         self.assertIn("Beads sorts by its own priority", run("--as", "fab", "-q", "expert", "notes", "fab", "--put", f))
         self.assertIn("research", run("-q", "expert", "list"))
@@ -3351,7 +3350,7 @@ class Upgrade(Base):
         core.LOCK_SLOW = 0
         core.project_add(self.c, "a")
         core.item_add(self.c, "a", "anything")
-        with open(os.path.join(self.dir.name, "locked.log")) as f:
+        with open(os.path.join(self.dir.name, "locked.log"), encoding="utf-8") as f:
             line = f.read().splitlines()[-1]
         self.assertRegex(line, r"held=\d+\.\ds pid=\d+ .* thread=MainThread in item_add$")
 
@@ -3559,7 +3558,7 @@ class NotifyOpen(Base):
         self.assertEqual(seen[-1].get_header("Icon"), "https://maximizepm.com/apple-touch-icon.png")  # #4705
         self.assertIn("ntfy_click (https://claude.ai/code)", notify.status(self.c)["phone"])
         self.assertIn("maxpm connect", notify.phone_note(self.c))
-        with open(relay.config_path(), "w") as f:
+        with open(relay.config_path(), "w", encoding="utf-8") as f:
             json.dump({"url": "https://relay.example.org", "token": "tok",
                        "tunnel": "https://mark-ab3cd9.relay.example.org"}, f)
         self.assertEqual(send(local), "https://mark-ab3cd9.relay.example.org/sessions/cx?as=mark")
@@ -3621,7 +3620,7 @@ class CommandNames(unittest.TestCase):
             ls = subprocess.run([sys.executable, str(root / "bin" / "maxpm"), "project", "list"], capture_output=True,
                                 text=True, env=env)
             self.assertIn("shop", ls.stdout)
-        text = (root / "pyproject.toml").read_text()
+        text = (root / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('maxpm = "river.client:main"', text)  # serve runs it when it can, else river.cli (#5525)
         self.assertNotIn('river = "river.cli:main"', text)
         self.assertIn('name = "maximizepm"', text)
@@ -3638,10 +3637,10 @@ class AgentBlock(unittest.TestCase):
             new, notes = Path(d, "AGENTS.md"), Path(d, "CLAUDE.md")
             self.assertIn("added", cli._append_block(new))  # created
             self.assertIn("already", cli._append_block(new))
-            self.assertEqual(new.read_text(), cli.AGENT_SNIPPET)
-            notes.write_text("# Notes\n")
+            self.assertEqual(new.read_text(encoding="utf-8"), cli.AGENT_SNIPPET)
+            notes.write_text("# Notes\n", encoding="utf-8")
             self.assertIn("added", cli._append_block(notes))
-            self.assertEqual(notes.read_text(), "# Notes\n\n" + cli.AGENT_SNIPPET)
+            self.assertEqual(notes.read_text(encoding="utf-8"), "# Notes\n\n" + cli.AGENT_SNIPPET)
 
     def test_no_old_blocks_and_no_refresh(self):
         # No old installs (mark, 2026-10-03): the earlier blocks, init --refresh and the briefing's note are gone.
@@ -3679,44 +3678,44 @@ class AgentBlock(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
             cli.setup_instructions(d)  # nothing yet: AGENTS.md holds the block, CLAUDE.md imports it
-            self.assertEqual((c.read_text(), a.read_text()), ("@AGENTS.md\n", cli.AGENT_SNIPPET))
+            self.assertEqual((c.read_text(encoding="utf-8"), a.read_text(encoding="utf-8")), ("@AGENTS.md\n", cli.AGENT_SNIPPET))
             self.assertEqual(cli.instructions_layout(d), "shared")
             cli.setup_instructions(d)  # again: nothing changes
-            self.assertEqual((c.read_text(), a.read_text()), ("@AGENTS.md\n", cli.AGENT_SNIPPET))
+            self.assertEqual((c.read_text(encoding="utf-8"), a.read_text(encoding="utf-8")), ("@AGENTS.md\n", cli.AGENT_SNIPPET))
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
-            c.write_text("# Rules\n\nPush to main deploys.\n")
-            a.write_text(cli.AGENT_SNIPPET)  # what an older maxpm init made
+            c.write_text("# Rules\n\nPush to main deploys.\n", encoding="utf-8")
+            a.write_text(cli.AGENT_SNIPPET, encoding="utf-8")  # what an older maxpm init made
             self.assertEqual(cli.instructions_layout(d), "claude_only")
             lines = cli.setup_instructions(d)  # no choice given: both get the block, and the choice is named
             self.assertIn("maxpm init --move", lines[-1])
-            self.assertIn("Push to main", c.read_text())
+            self.assertIn("Push to main", c.read_text(encoding="utf-8"))
             cli.setup_instructions(d, move=True)
-            self.assertEqual(c.read_text(), "@AGENTS.md\n")
-            text = a.read_text()
+            self.assertEqual(c.read_text(encoding="utf-8"), "@AGENTS.md\n")
+            text = a.read_text(encoding="utf-8")
             self.assertIn("Push to main deploys", text)
             self.assertEqual(text.count("## Work queue"), 1)
             self.assertEqual(cli.instructions_layout(d), "shared")
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
-            c.write_text("claude rules\n"); a.write_text("codex rules\n")
+            c.write_text("claude rules\n", encoding="utf-8"); a.write_text("codex rules\n", encoding="utf-8")
             self.assertEqual(cli.instructions_layout(d), "both")
             lines = cli.setup_instructions(d, move=True)  # two sets of rules: river never merges them
             self.assertIn("different rules", lines[-1])
-            self.assertIn(cli.AGENT_SNIPPET, c.read_text()); self.assertIn(cli.AGENT_SNIPPET, a.read_text())
-            self.assertIn("claude rules", c.read_text())
+            self.assertIn(cli.AGENT_SNIPPET, c.read_text(encoding="utf-8")); self.assertIn(cli.AGENT_SNIPPET, a.read_text(encoding="utf-8"))
+            self.assertIn("claude rules", c.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
-            c.write_text("claude rules\n")
+            c.write_text("claude rules\n", encoding="utf-8")
             cli.setup_instructions(d, move=False)  # keep apart
-            self.assertEqual((c.read_text().count("## Work queue"), a.read_text()), (1, cli.AGENT_SNIPPET))
+            self.assertEqual((c.read_text(encoding="utf-8").count("## Work queue"), a.read_text(encoding="utf-8")), (1, cli.AGENT_SNIPPET))
         with tempfile.TemporaryDirectory() as d:
             c, a = Path(d, "CLAUDE.md"), Path(d, "AGENTS.md")
-            c.write_text("@AGENTS.md\n")
-            a.write_text(cli.OLD_SNIPPET + "\n## Rules\n\nTest first.\n")  # an init before #4978: the 'maxpm plan' line
+            c.write_text("@AGENTS.md\n", encoding="utf-8")
+            a.write_text(cli.OLD_SNIPPET + "\n## Rules\n\nTest first.\n", encoding="utf-8")  # an init before #4978: the 'maxpm plan' line
             lines = cli.setup_instructions(d)  # init again: the old block becomes the current one, the rules stay
             self.assertIn("AGENTS.md: the work queue block is current again", lines[0])
-            self.assertEqual(a.read_text(), cli.AGENT_SNIPPET + "\n## Rules\n\nTest first.\n")
+            self.assertEqual(a.read_text(encoding="utf-8"), cli.AGENT_SNIPPET + "\n## Rules\n\nTest first.\n")
             self.assertEqual(cli.setup_instructions(d)[0], "AGENTS.md: already has the work queue block")
 
 
@@ -4319,7 +4318,7 @@ class ReleaseReview(Base):
         # The gate is a Python script, so the same command runs in sh and in cmd.exe (Windows).
         pidfile = os.path.join(self.dir.name, "child.pid")
         gate = os.path.join(self.dir.name, "gate.py")
-        with open(gate, "w") as f:
+        with open(gate, "w", encoding="utf-8") as f:
             f.write("import subprocess, sys\n"
                     "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
                     f"open({pidfile!r}, 'w').write(str(p.pid))\n"
@@ -4343,7 +4342,7 @@ class ReleaseReview(Base):
         it = core.item_show(self.c, self.review)
         self.assertEqual(it["status"], "in_progress")
         self.assertGreater(core.parse_iso(it["lease_expires_at"]), core.now())
-        with open(pidfile) as f:
+        with open(pidfile, encoding="utf-8") as f:
             pid = int(f.read())
         for _ in range(40):
             if not core.pid_alive(pid):
@@ -5117,8 +5116,7 @@ class Models(Base):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             cli.run(["--as", "s3", "go", "--project", "a"])
         self.assertEqual(core._item(self.c, fable)["assignee"], "s3")
-        # The launch command quotes a full id: [1m] is a glob in zsh. A POSIX shell, on every system the tests
-        # run (cmd on Windows has no glob, so _shell_quote leaves the id bare there).
+        # The launch command quotes a full id: [1m] is a glob in zsh.
         from unittest import mock
         with mock.patch.object(core, "PLATFORM", "darwin"):
             self.assertIn("--model 'claude-opus-5-5[1m]' ", core.build_command("claude-code", {"prompt": "go"},
@@ -5862,7 +5860,7 @@ class Kill(Base):
         self.p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         self.addCleanup(lambda: (self.p.poll() is None and self.p.kill(), self.p.wait()))
         info = core.proc_info(self.p.pid)
-        if info is None and os.name != "nt":  # Windows reads its process list itself
+        if info is None:
             self.skipTest("no ps on this system: river records no process there, so --kill has none to end")
         cmd = info[2]
         self.assertIn("time.sleep(60)", cmd)
@@ -5897,13 +5895,6 @@ class Kill(Base):
             self.assertEqual(core.agent_process(self.p.pid)[0], self.p.pid)  # not a shell: it is the agent
         self.assertTrue(core._between("-zsh", "-zsh"))
         self.assertFalse(core._between("claude", "claude go"))
-        with mock.patch("os.name", "nt"):
-            self.assertTrue(core._between("cmd.exe", "cmd /k claude go"))
-            self.assertTrue(core._between("maxpm.exe", "maxpm go"))
-            self.assertTrue(core._between("python.exe", r"C:\py\python.exe C:\tools\maximizepm\bin\maxpm go"))
-            self.assertTrue(core._between("python.exe", "python.exe -m river go"))  # the package is river
-            self.assertFalse(core._between("python.exe", r"D:\maximizepm\venv\python.exe agent.py"))
-            self.assertFalse(core._between("node.exe", "node claude.js go"))
         self.p.kill()
         self.p.wait(10)
         self.assertFalse(core.pid_alive(self.p.pid))
@@ -6979,7 +6970,7 @@ class Locked(Base):
         self.assertEqual(core.poll_activity(self.c, None), [])
         self.unlock()
         # Each write that gave up left a line beside the queue (#1617).
-        with open(os.path.join(self.dir.name, "locked.log")) as f:
+        with open(os.path.join(self.dir.name, "locked.log"), encoding="utf-8") as f:
             self.assertRegex(f.read(), r"(?m)^\d{4}-\d\d-\d\dT\S+Z tries=1 pid=\d+")
 
     def test_a_poll_renews_the_agent_and_sweeps_each_half_minute(self):
@@ -7147,7 +7138,7 @@ class ReviewPin(Base):
                               capture_output=True, text=True, check=True).stdout.strip()
 
     def commit(self, text):
-        with open(os.path.join(self.repo, "f.txt"), "w") as f:
+        with open(os.path.join(self.repo, "f.txt"), "w", encoding="utf-8") as f:
             f.write(text)
         self.git("add", "f.txt")
         self.git("commit", "-q", "-m", text)
@@ -7188,7 +7179,7 @@ class ReviewPin(Base):
         core.item_edit(self.c, self.review, actor="rev2", check=f'"{sys.executable}" -c "import os; open({seen!r}, \'w\')'
                        f'.write(os.environ[\'MAXPM_REV\'] + \' \' + os.environ[\'MAXPM_REVIEW\'])"')
         core.review_pass(self.c, self.review, None, "rev2", cwd=self.repo)
-        with open(seen) as f:
+        with open(seen, encoding="utf-8") as f:
             self.assertEqual(f.read(), f"{self.a} {self.review}")
 
     def deploy_rev(self):
@@ -7246,7 +7237,7 @@ class DeployHook(Base):
         self.deploy = [i for i in ids if i != self.review][0]
         self.flag = os.path.join(self.dir.name, "fail")
         path = os.path.join(self.dir.name, "release.py")
-        with open(path, "w") as f:  # fails while the file 'fail' exists; prints one line
+        with open(path, "w", encoding="utf-8") as f:  # fails while the file 'fail' exists; prints one line
             f.write("import os, sys\n"
                     f"if os.path.exists({self.flag!r}):\n    print('migration 7 failed'); sys.exit(4)\n"
                     "print('released', os.environ['MAXPM_DEPLOY'])\n")
@@ -7292,7 +7283,7 @@ class DeployHook(Base):
         self.assertIsNone(core.deploy_hook_start(self.c, self.deploy, "x"))  # once
 
     def test_a_failure_keeps_the_deploy_open_and_starts_the_release_again(self):
-        open(self.flag, "w").close()
+        open(self.flag, "w", encoding="utf-8").close()
         self.pass_review("rev")
         r = self.run_deploy()
         self.assertEqual([(h["ok"], h["deploy_end"], h["alerted"]) for h in r], [(False, "failed", "ops")])
@@ -7361,7 +7352,7 @@ class DeployHook(Base):
         when the alert went to the target's owner."""
         core.register(self.c, "boss")
         core.manage(self.c, self.dir.name, "boss")
-        open(self.flag, "w").close()
+        open(self.flag, "w", encoding="utf-8").close()
         self.pass_review("rev")
         w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)  # the pass wakes it (#4289)
         self.assertTrue(any("passed" in m["body"] for m in w["messages"]))
@@ -7425,7 +7416,7 @@ class ReleaseGate(DeployHook):
 
     def test_a_failed_deploy_asks_again(self):
         core.config_set(self.c, "release_approval", "person", project="site")
-        open(self.flag, "w").close()
+        open(self.flag, "w", encoding="utf-8").close()
         self.pass_review("rev")
         yes = core.release_yes_pass(self.c)[self.deploy]
         core.done(self.c, yes, "yes", "mark")
@@ -7499,7 +7490,7 @@ class Hooks(Base):
     def script(self, name, body):
         """A hook as a Python script, so the same command runs in sh and in cmd.exe (Windows)."""
         path = os.path.join(self.dir.name, name)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(body)
         return f'"{sys.executable}" "{path}"'
 
@@ -7515,7 +7506,7 @@ class Hooks(Base):
     def runs(self):
         if not os.path.exists(self.log):
             return []
-        with open(self.log) as f:
+        with open(self.log, encoding="utf-8") as f:
             return [json.loads(line) for line in f]
 
     def test_each_release_event_runs_its_hook_once_with_the_environment(self):
@@ -7729,7 +7720,7 @@ class Hooks(Base):
         self.assertEqual((h["ok"], h["timed_out"], h["alerted"]), (False, True, "ops"))
         self.assertIn("stopped at hook_timeout (2s)", h["result"])
         self.assertIn("started", h["output"])
-        with open(pidfile) as f:
+        with open(pidfile, encoding="utf-8") as f:
             pid = int(f.read())
         for _ in range(40):
             if not core.pid_alive(pid):
@@ -8723,7 +8714,7 @@ class Activity(Base):
                             for hs in settings["hooks"].values() for h in hs))
         with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}):
             f = core.activity_hook_file()
-            self.assertEqual(_json.loads(Path(f).read_text()), settings)
+            self.assertEqual(_json.loads(Path(f).read_text(encoding="utf-8")), settings)
             out = io.StringIO()
             for text in ('{"hook_event_name": "Stop", "session_id": "%s"}' % self.SID, "not json", ""):
                 with mock.patch.object(sys, "stdin", io.StringIO(text)), contextlib.redirect_stdout(out), \
@@ -9092,14 +9083,14 @@ class Canvas(Base):
         path = os.path.join(self.dir.name, "out")
         os.mkdir(path)
         saved = core.canvas_save(self.c, "plan", path, version=1)
-        self.assertEqual(open(saved["path"]).read(), "# Plan")
+        self.assertEqual(open(saved["path"], encoding="utf-8").read(), "# Plan")
         with self.assertRaisesRegex(core.RiverError, "exists"):
             core.canvas_save(self.c, "plan", path)
 
     def test_the_command_reads_a_file_or_stdin_and_the_kind_from_the_file_name(self):
         from river import cli
         f = os.path.join(self.dir.name, "chart.svg")
-        with open(f, "w") as fh:
+        with open(f, "w", encoding="utf-8") as fh:
             fh.write("<svg></svg>")
         old = os.environ.get("MAXPM_DB")
         os.environ["MAXPM_DB"] = self.path
@@ -9172,7 +9163,7 @@ class Policies(Base):
     def setUp(self):
         super().setUp()
         g = os.path.join(self.dir.name, "policies.json")
-        with open(g, "w") as f:
+        with open(g, "w", encoding="utf-8") as f:
             json.dump({"policies": [{"id": "g1", "text": "Global rule A", "reason": "reason A", "source": "tester 2026-01-01"},
                                     {"id": "g2", "text": "Global rule B", "reason": "reason B", "source": "tester 2026-01-01",
                                      "role": "manager"}]}, f)
@@ -9228,7 +9219,7 @@ class Policies(Base):
 
     def test_a_global_policy_of_several_roles(self):
         g = os.path.join(self.dir.name, "policies2.json")
-        with open(g, "w") as f:
+        with open(g, "w", encoding="utf-8") as f:
             json.dump({"policies": [{"id": "g1", "text": "Rule MW", "reason": "r", "source": "tester 2026-01-01",
                                      "role": ["manager", "worker"]}]}, f)
         with mock.patch.object(core, "GLOBAL_POLICIES_FILE", g):
@@ -11409,7 +11400,7 @@ class OpsOutside(Base):
             self.assertEqual(cli.run(["ops", "check", "--outside"]), 0)
         self.assertIn("maxpm/serve: critical; fault; notice log sent", out.getvalue())
         log = os.path.join(self.dir.name, "notifications.log")
-        with open(log) as f:
+        with open(log, encoding="utf-8") as f:
             self.assertEqual(json.loads(f.readline())["title"], "MaximizePM: maxpm/serve is down")
 
 
@@ -11720,7 +11711,7 @@ class EvidencePack(Base):
                               capture_output=True, text=True, check=True).stdout.strip()
 
     def commit(self, body, msg):
-        with open(os.path.join(self.repo, "app", "pay.py"), "w") as f:
+        with open(os.path.join(self.repo, "app", "pay.py"), "w", encoding="utf-8") as f:
             f.write(body)
         self.git("add", "app/pay.py")
         self.git("commit", "-q", "-m", msg)
@@ -11786,7 +11777,7 @@ class EvidencePack(Base):
     def test_rust_and_javascript_frames_of_the_project_are_read(self):
         for f in ("src/api.rs", "web/app.js"):
             os.makedirs(os.path.dirname(os.path.join(self.repo, f)), exist_ok=True)
-            open(os.path.join(self.repo, f), "w").close()
+            open(os.path.join(self.repo, f), "w", encoding="utf-8").close()
         text = ("thread 'main' panicked at src/api.rs:41:9:\nindex out of bounds\n"
                 "TypeError: x is undefined\n    at load (https://example.test/web/app.js:12:5)\n"
                 "    at run (node:internal/main:3:1)")
@@ -12175,3 +12166,23 @@ class AnnotateKept(Base):
             except RiverError:
                 continue  # a refused change changes nothing
             self.same(f"step {step}: {op} #{i} #{j}")
+
+
+class NativeWindows(unittest.TestCase):
+    """mark 2026-11-12: MaximizePM runs on Windows only inside WSL 2. On native Windows each entry point of the maxpm
+    command (bin/maxpm and the pyproject entry point, river.client.main; river.cli.main) stops at once with one line
+    that says to install WSL 2, and runs nothing."""
+
+    def test_each_entry_point_refuses_with_the_wsl_line(self):
+        from river import cli, client
+        for main in (client.main, cli.main):
+            err = io.StringIO()
+            with mock.patch.object(os, "name", "nt"), mock.patch.object(client, "run_remote") as remote, \
+                    mock.patch.object(cli, "run") as run, contextlib.redirect_stderr(err), \
+                    self.assertRaises(SystemExit) as end:
+                main()
+            self.assertEqual(end.exception.code, 2)
+            self.assertEqual(err.getvalue(), f"maxpm: {client.WSL_ONLY}\n")
+            self.assertIn("WSL 2", err.getvalue())
+            remote.assert_not_called()
+            run.assert_not_called()

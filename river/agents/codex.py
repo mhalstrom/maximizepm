@@ -377,7 +377,7 @@ def context_window(model):
     from pathlib import Path
     path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
     try:
-        models = json.loads(path.read_text()).get("models") or []
+        models = json.loads(path.read_text(encoding="utf-8")).get("models") or []
     except (OSError, ValueError, AttributeError):
         return None
     m = next((x for x in models if isinstance(x, dict) and x.get("slug") == model), None)
@@ -509,7 +509,7 @@ def write_mcp_config(path=None, remove=False):
     from . import setup_entry
     from ..core import RiverError
     f = Path(path).expanduser() if path else Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser() / "config.toml"
-    old = f.read_text() if f.exists() else ""
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
     before = _toml_load(old, f)
     had = before is not None and "maxpm" in (before.get("mcp_servers") or {}) or "[mcp_servers.maxpm]" in old
     base = _toml_without(old)
@@ -531,9 +531,9 @@ def write_mcp_config(path=None, remove=False):
             raise RiverError(f"MaximizePM could not add its entry to {f} without changing other settings; add it by hand: "
                              f"codex mcp add maxpm --env MAXPM_CHAT=1 -- maxpm mcp")
     if old:
-        f.with_name(f.name + ".bak").write_text(old)
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(new)
+    f.write_text(new, encoding="utf-8")
     if remove:
         return f"took MaximizePM out of {f} (the old file: {f.name}.bak). Restart the ChatGPT desktop app."
     return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") + ".\n"
@@ -552,7 +552,7 @@ def codex_models():
     from pathlib import Path
     path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         return {m["slug"]: [x["effort"] for x in m.get("supported_reasoning_levels") or [] if x.get("effort")]
                 for m in data.get("models") or [] if m.get("slug")}
     except (OSError, ValueError, TypeError, KeyError, AttributeError):

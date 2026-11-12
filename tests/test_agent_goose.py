@@ -17,15 +17,15 @@ FIX = Path(__file__).parent / "fixtures" / "goose"
 
 
 def pane(name):
-    return (FIX / f"pane_{name}.txt").read_text()
+    return (FIX / f"pane_{name}.txt").read_text(encoding="utf-8")
 
 
 def session_row():
-    return json.loads((FIX / "session_row.json").read_text())
+    return json.loads((FIX / "session_row.json").read_text(encoding="utf-8"))
 
 
 def message_rows():
-    return [json.loads(line) for line in (FIX / "session_messages.jsonl").read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in (FIX / "session_messages.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def watch(screen):
@@ -86,7 +86,7 @@ class Root(unittest.TestCase):
     def recorded_lines(self):
         """The lines of the copy of the recorded session (chat_path from a database with its rows)."""
         self.make_db([session_row()], message_rows())
-        return Path(goose.chat_path("20261111_1")).read_text().splitlines()
+        return Path(goose.chat_path("20261111_1")).read_text(encoding="utf-8").splitlines()
 
 
 class Contract(unittest.TestCase):
@@ -224,7 +224,7 @@ class Chat(Root):
     def test_a_real_chatgpt_codex_session_reads_the_same_way(self):
         # Recorded with chatgpt_codex/gpt-5.6-terra (a ChatGPT sign-in), effort low, mode approve: the copy as
         # chat_path wrote it.
-        lines = (FIX / "chatgpt_codex_copy.jsonl").read_text().splitlines()
+        lines = (FIX / "chatgpt_codex_copy.jsonl").read_text(encoding="utf-8").splitlines()
         entries, turn = goose.parse_chat(lines)
         self.assertEqual([(e["role"], e.get("name") or e["text"][:22]) for e in entries], [
             ("user", "Run the shell command:"), ("tool", "shell"), ("event", "Asks to approve shell"),
@@ -251,17 +251,17 @@ class Chat(Root):
         db = self.make_db([session_row()], rows[:8])
         path = Path(goose.chat_path("20261111_1"))
         self.assertEqual(path.parent, Path(core.river_dir()) / "goose")
-        first = path.read_text()
+        first = path.read_text(encoding="utf-8")
         self.assertEqual(len(first.splitlines()), 1 + 8)
         self.assertEqual(goose.chat_path("20261111_1"), path)
-        self.assertEqual(path.read_text(), first)  # nothing new: nothing written
+        self.assertEqual(path.read_text(encoding="utf-8"), first)  # nothing new: nothing written
         self.make_db(messages=rows[8:])
         c = sqlite3.connect(db)
         c.execute("UPDATE sessions SET accumulated_input_tokens=99999 WHERE id='20261111_1'")
         c.commit()
         c.close()
         goose.chat_path("20261111_1")
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         self.assertTrue(text.startswith(first))  # only appended: a cursor into the copy stays valid
         added = [json.loads(x) for x in text[len(first):].splitlines()]
         self.assertEqual(added[0]["session"]["accumulated_input_tokens"], 99999)
@@ -269,7 +269,7 @@ class Chat(Root):
         self.assertTrue(added[3]["summary"].startswith("# Conversation Summary"))
         self.assertEqual(goose.chat_usage(text.splitlines())["input"], 99999)
         path.unlink()
-        self.assertEqual(len(Path(goose.chat_path("20261111_1")).read_text().splitlines()), 1 + 13)
+        self.assertEqual(len(Path(goose.chat_path("20261111_1")).read_text(encoding="utf-8").splitlines()), 1 + 13)
 
     def test_no_database_or_no_session_is_no_chat(self):
         self.assertIsNone(goose.chat_path("20261111_1"))
@@ -355,13 +355,13 @@ class Commands(Root):
         cfg.mkdir(parents=True)
         (cfg / "config.yaml").write_text("GOOSE_MODE: approve\nslash_commands:\n- command: release\n"
                                          "  recipe_path: /r/release.yaml\n- recipe_path: /r/c.yaml\n"
-                                         "  command: compact\nplugins: {}\n")
+                                         "  command: compact\nplugins: {}\n", encoding="utf-8")
         work = self.home / "work"
         for base, name, desc in ((work / ".agents" / "skills", "lint-all", "Lint every file"),
                                  (self.home / ".claude" / "skills", "Ship It", "Ship the release"),
                                  (self.root / ".agents" / "plugins" / "p1" / "skills", "plug", "From a plugin")):
             (base / name).mkdir(parents=True)
-            (base / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: '{desc}'\n---\nbody\n")
+            (base / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: '{desc}'\n---\nbody\n", encoding="utf-8")
         got = goose.read_commands(str(work))
         self.assertEqual([(c["name"], c["description"]) for c in got], [
             ("release", "Run the recipe /r/release.yaml"), ("lint-all", "Lint every file"),

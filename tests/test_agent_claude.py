@@ -8,7 +8,7 @@ FIX = Path(__file__).resolve().parent / "fixtures" / "claude"
 
 
 def lines(name):
-    return (FIX / name).read_text().splitlines()
+    return (FIX / name).read_text(encoding="utf-8").splitlines()
 
 
 class QueuedMidTurn(unittest.TestCase):

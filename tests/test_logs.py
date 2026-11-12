@@ -24,7 +24,7 @@ class Logs(unittest.TestCase):
         self.write("old ERROR line\nok\n", "w")
 
     def write(self, text, mode="a"):
-        with open(self.log, mode) as f:
+        with open(self.log, mode, encoding="utf-8") as f:
             f.write(text)
 
     def test_a_file_counts_only_the_lines_since_the_last_run_and_starts_again_after_a_rotation(self):
@@ -93,7 +93,7 @@ class Logs(unittest.TestCase):
             self.assertIn("Permission denied", res["summary"])
         self.assertEqual(calls[0][:5], ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
         self.assertIn("o=120", calls[1][-1])
-        self.assertEqual(json.loads((core.db_path().parent / "logs" / "r.json").read_text())["offset"], 136)
+        self.assertEqual(json.loads((core.db_path().parent / "logs" / "r.json").read_text(encoding="utf-8"))["offset"], 136)
 
     def test_the_rate_per_minute_and_the_check_key_as_the_name(self):
         os.environ["MAXPM_CHECK_KEY"] = "ops:shop:errors"

@@ -162,7 +162,7 @@ def _post(port, body, token, timeout):
 def run_remote(words, env=None, cwd=None):
     """Run the command in maxpm serve; its exit status, or None when it must run here (see the module text)."""
     env = dict(os.environ if env is None else env)
-    if env.get("MAXPM_LOCAL") or os.name == "nt":
+    if env.get("MAXPM_LOCAL"):
         return None
     cmd = _command(words)
     if cmd not in REMOTE or "-" in words or any(w.split("=", 1)[0] in FILE_WORDS for w in words):
@@ -170,7 +170,7 @@ def run_remote(words, env=None, cwd=None):
     if cmd == "artifacts" and "show" in words:  # it prints the text of a file
         return None
     try:
-        with open(serve_file(env)) as f:
+        with open(serve_file(env), encoding="utf-8") as f:
             info = _loads(f.read())
         port, token = int(info["port"]), str(info["token"])
     except (OSError, ValueError, KeyError, TypeError):
@@ -205,8 +205,22 @@ def run_remote(words, env=None, cwd=None):
     return int(res.get("code") or 0)
 
 
+# mark 2026-11-12: MaximizePM runs on Windows only inside WSL 2 (a Linux system); native Windows is not supported.
+WSL_ONLY = ("MaximizePM runs on Windows only inside WSL 2. Install WSL 2 (wsl --install; "
+            "https://learn.microsoft.com/windows/wsl/install), then install and run maxpm in its Linux terminal")
+
+
+def refuse_native_windows():
+    """Stop at the start on native Windows, with the one line that says what to do."""
+    if os.name == "nt":
+        sys.stderr.write(f"maxpm: {WSL_ONLY}\n")
+        sys.exit(2)
+
+
 def main():
-    """The installed maxpm command (the pyproject entry point): serve runs it when it can, else maxpm here."""
+    """The installed maxpm command (the pyproject entry point, and bin/maxpm): serve runs it when it can, else
+    maxpm here."""
+    refuse_native_windows()
     code = run_remote(sys.argv[1:])
     if code is not None:
         sys.exit(code)

@@ -192,7 +192,7 @@ def _first_record(path):
 def _project_slug(folder):
     """The short name of folder's project in ~/.gemini/projects.json (its chats are in tmp/<slug>/chats), or None."""
     try:
-        projects = json.loads((gemini_dir() / "projects.json").read_text()).get("projects") or {}
+        projects = json.loads((gemini_dir() / "projects.json").read_text(encoding="utf-8")).get("projects") or {}
     except (OSError, ValueError, AttributeError):
         return None
     want = os.path.realpath(os.path.expanduser(str(folder)))
@@ -545,7 +545,14 @@ def _toml_description(text):
     except ValueError:
         return ""
     m = re.search(r'(?m)^\s*description\s*=\s*(?:"((?:[^"\\]|\\.)*)"|\'([^\']*)\')', text)
-    return (m.group(1) if m and m.group(1) is not None else (m.group(2) if m else "")) or ""
+    if not m:
+        return ""
+    if m.group(1) is None:
+        return m.group(2)  # a literal string: no escapes
+    try:  # a basic string: its escapes (\" \\ \n \t \uXXXX) are JSON's
+        return json.loads(f'"{m.group(1)}"')
+    except ValueError:
+        return m.group(1)
 
 
 # How each command works from the page (#5220, #5290). Gemini CLI was not signed in on this Mac (its commands ran into

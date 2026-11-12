@@ -99,7 +99,7 @@ class Launch(Env):
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         fake = bin_dir / "amp"
-        fake.write_text("#!/bin/sh\nprintf 'ARGS:%s\\n' \"$*\"\ncat\n")
+        fake.write_text("#!/bin/sh\nprintf 'ARGS:%s\\n' \"$*\"\ncat\n", encoding="utf-8")
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         prompt = "say \"hi\" and it's\nfine"
         line = core.shell_command(self.a.build_command(None, None, None, "high", {}, prompt))
@@ -270,7 +270,7 @@ class Chat(Env):
         self.assertEqual(amp.refresh(TOOLS_THREAD, f, e), 8)
         self.assertEqual(amp.refresh(TOOLS_THREAD, f, export()), 2)
         self.assertEqual(amp.refresh(TOOLS_THREAD, f, export()), 0)
-        entries, turn = amp.parse_chat(f.read_text().splitlines())
+        entries, turn = amp.parse_chat(f.read_text(encoding="utf-8").splitlines())
         self.assertEqual((len(entries), turn), (7, "idle"))
         with mock.patch.object(amp, "_export", side_effect=AssertionError("no export within REFRESH")):
             self.assertEqual(amp.chat_path(TOOLS_THREAD), f)  # the export of a moment ago stands
@@ -282,7 +282,7 @@ class Chat(Env):
     def test_chat_path_takes_a_thread_id_and_a_root_with_no_export(self):
         root = self.root / "logs"
         root.mkdir()
-        (root / f"{REPLY_THREAD}.jsonl").write_text("\n".join(file_lines("thread_reply.json")) + "\n")
+        (root / f"{REPLY_THREAD}.jsonl").write_text("\n".join(file_lines("thread_reply.json")) + "\n", encoding="utf-8")
         with mock.patch.object(amp, "_export", side_effect=AssertionError("a root is read as it is")):
             self.assertEqual(self.a.chat_path(REPLY_THREAD, root=root), root / f"{REPLY_THREAD}.jsonl")
             self.assertIsNone(self.a.chat_path(TOOLS_THREAD, root=root))
@@ -291,7 +291,7 @@ class Chat(Env):
 
     def test_the_sessions_tab_reads_the_file_line_by_line(self):
         f = self.root / f"{TOOLS_THREAD}.jsonl"
-        f.write_text("\n".join(file_lines()) + "\n")
+        f.write_text("\n".join(file_lines()) + "\n", encoding="utf-8")
         got = sessions.entries("amp", f)
         self.assertEqual([e["role"] for e in got["entries"]],
                          ["user", "user", "tool", "result", "assistant", "user", "assistant"])
@@ -302,10 +302,10 @@ class Setup(Env):
     def test_the_mcp_server_goes_into_amp_settings(self):
         f = self.root / "config" / "amp" / "settings.json"
         f.parent.mkdir(parents=True)
-        f.write_text(json.dumps({"amp.permissions": [{"tool": "shell_command", "action": "ask"}]}))
+        f.write_text(json.dumps({"amp.permissions": [{"tool": "shell_command", "action": "ask"}]}), encoding="utf-8")
         a = agents.get("amp")
         self.assertIn("added MaximizePM", a.write_mcp_config())
-        data = json.loads(f.read_text())
+        data = json.loads(f.read_text(encoding="utf-8"))
         entry = data["amp.mcpServers"]["maxpm"]
         self.assertEqual(entry["args"][-1], "mcp")
         self.assertNotIn("MAXPM_CHAT", entry["env"])
@@ -313,16 +313,16 @@ class Setup(Env):
         self.assertTrue(f.with_name("settings.json.bak").exists())
         self.assertIn("nothing changed", a.write_mcp_config())
         self.assertIn("took MaximizePM out", a.write_mcp_config(remove=True))
-        self.assertEqual(json.loads(f.read_text())["amp.mcpServers"], {})
+        self.assertEqual(json.loads(f.read_text(encoding="utf-8"))["amp.mcpServers"], {})
         self.assertIn("nothing changed", a.write_mcp_config(remove=True))
 
     def test_a_settings_file_with_comments_is_not_rewritten(self):
         f = self.root / "config" / "amp" / "settings.json"
         f.parent.mkdir(parents=True)
-        f.write_text('{\n  // mine\n  "amp.updates.mode": "auto"\n}\n')
+        f.write_text('{\n  // mine\n  "amp.updates.mode": "auto"\n}\n', encoding="utf-8")
         with self.assertRaisesRegex(core.RiverError, "amp mcp add --env MAXPM_DB=.* maxpm -- .* mcp"):
             agents.get("amp").write_mcp_config()
-        self.assertIn("// mine", f.read_text())
+        self.assertIn("// mine", f.read_text(encoding="utf-8"))
 
     def test_amp_settings_file_moves_the_settings(self):
         with mock.patch.dict(os.environ, {"AMP_SETTINGS_FILE": str(self.root / "s.json")}):

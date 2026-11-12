@@ -39,7 +39,7 @@ class Dictation(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         fake = Path(self.dir.name, "fake.py")
-        fake.write_text(FAKE)
+        fake.write_text(FAKE, encoding="utf-8")
         self.old = dictation.HELPER
         dictation.HELPER = [sys.executable, str(fake)]
         self.addCleanup(setattr, dictation, "HELPER", self.old)
@@ -109,7 +109,7 @@ class Dictation(unittest.TestCase):
             with mock.patch.object(dictation, "BUILT", built), mock.patch.object(dictation, "BUNDLED", Path(self.dir.name, "none")):
                 self.assertIsNone(dictation.helper())  # BUILD is off in the tests: nothing builds
                 built.mkdir()
-                dictation._built_path().write_text("")
+                dictation._built_path().write_text("", encoding="utf-8")
                 self.assertEqual(dictation.helper(), [str(dictation._built_path())])
             with mock.patch.object(dictation, "BUNDLED", Path(self.dir.name, "fake.py")):
                 self.assertEqual(dictation.engine(), "mac")

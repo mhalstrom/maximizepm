@@ -1,7 +1,7 @@
 # Each push to a branch and each pull request: the unit tests only (#4636). They are quick, and they keep the
-# promises that break without a sign: Python 3.10 to 3.13 (the standard library differs between them) and the
-# Windows paths and process calls (_norm_path, _win_*). The wheel build and the desktop smoke tests run on a
-# release tag, in desktop-release.yml, before the release builds.
+# promises that break without a sign: Python 3.10 to 3.13 (the standard library differs between them), on Linux
+# and macOS. Windows runs maxpm only inside WSL 2, which is Linux (mark 2026-11-12): no Windows job. The wheel
+# build and the desktop smoke tests run on a release tag, in desktop-release.yml, before the release builds.
 name: tests
 on:
   push:
@@ -25,15 +25,3 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Tests (standard library only)
         run: python -m unittest discover -s tests -t . -v
-  # Windows: maxpm works there too (#273, #274).
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-      - name: "Tests (standard library, plus tzdata: Windows has no time zone database)"
-        run: |
-          python -m pip install --quiet tzdata
-          python -m unittest discover -s tests -t . -v

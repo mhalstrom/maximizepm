@@ -1,6 +1,6 @@
 // The launch dialog: every button that starts an agent opens it first, to pick the agent, the model, the
 // effort, the work (Start only), and under More the agent's launch options (a profile: Remote Control, permission
-// or sandbox mode). Every agent starts in a pane of the tmux session maxpm (#5105; Windows: a console window), so
+// or sandbox mode). Every agent starts in a pane of the tmux session maxpm (#5105), so
 // there is no choice of where. The server builds the command (a profile) or fills {model} and {effort} in a custom
 // one, and sets MAXPM_MODEL. The last choices stay in this browser; options that the person does not change are left
 // to the server, so a project's own setting still applies.

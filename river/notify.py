@@ -32,7 +32,7 @@ def _log_channel(conn):
     path = Path(core.db_path()).with_name("notifications.log")
 
     def send(title, body, url):
-        with path.open("a") as f:
+        with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"at": core.iso(core.now()), "title": title, "body": body, "url": url}) + "\n")
     return send
 
@@ -194,7 +194,7 @@ def mac_hint():
     if marker.exists():
         return None
     try:
-        marker.write_text(core.iso(core.now()) + "\n")
+        marker.write_text(core.iso(core.now()) + "\n", encoding="utf-8")
     except OSError:
         return None  # without a marker it would show on every notice; stay quiet instead
     return MAC_HINT

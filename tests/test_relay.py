@@ -203,8 +203,7 @@ class Connect(Base):
         self.assertEqual(cfg["token"], "secret-token")
         self.assertEqual(relay.load()["account"], "Alice")
         self.assertEqual(relay.config_path(), os.path.join(self.tmp.name, "relay.json"))
-        if os.name != "nt":  # Windows chmod has no Unix owner/group permission bits
-            self.assertEqual(stat.S_IMODE(os.stat(relay.config_path()).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(relay.config_path()).st_mode), 0o600)
         conn = core.connect()
         self.addCleanup(conn.close)
         self.assertNotIn("secret-token", json.dumps(core.config_list(conn)), "never in the settings")
@@ -801,7 +800,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-@unittest.skipIf(os.name == "nt", "launchd is macOS only, and Windows has no os.getuid for its gui/<uid> domain")
 class LoginAgent(Base):
     """#4754: maxpm serve --install-login and --remove-login (a launchd agent)."""
 
@@ -940,7 +938,7 @@ class LoginSystemd(Base):
         core.config_set(self.conn, "serve_port", "1")  # nothing answers on port 1
 
     def unit(self, name):
-        with open(os.path.join(self.units, "systemd", "user", name)) as f:
+        with open(os.path.join(self.units, "systemd", "user", name), encoding="utf-8") as f:
             return f.read()
 
     def test_login_is_a_user_service_that_restarts_after_a_crash(self):

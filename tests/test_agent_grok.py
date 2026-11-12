@@ -68,13 +68,13 @@ class Contract(Home):
     def test_models_and_effort_levels_come_from_grok_s_cache(self):
         self.assertIsNone(grok.read_models())
         self.assertIsNone(grok.read_effort_levels("grok-4.6"))
-        (self.gh / "models_cache.json").write_text(json.dumps(MODELS_CACHE))
+        (self.gh / "models_cache.json").write_text(json.dumps(MODELS_CACHE), encoding="utf-8")
         self.assertEqual(grok.read_models(), ["grok-fast", "grok-4.6", "grok-4.5"])
         self.assertEqual(grok.read_effort_levels("grok-4.6"), ["low", "medium", "high", "xhigh"])
         self.assertEqual(grok.read_effort_levels("grok-4.5"), ["low", "medium", "high"])
         self.assertEqual(grok.read_effort_levels("grok-fast"), [])
         self.assertIsNone(grok.read_effort_levels("grok-9"))
-        (self.gh / "models_cache.json").write_text("{not json")
+        (self.gh / "models_cache.json").write_text("{not json", encoding="utf-8")
         self.assertIsNone(grok.read_models())
 
 
@@ -119,14 +119,14 @@ class Hooks(Home):
         words = grok.install_hooks("/p", REPORT, python="/usr/bin/python3", where=q)
         agent, script = q / "grok-agent.md", q / "grok-hook.py"
         self.assertEqual(words, ["--agent", str(agent)])
-        text = agent.read_text()
+        text = agent.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\nname: maxpm\n"))
         self.assertIn("prompt_mode: extend\nagents_md: true\nhooks:\n", text)
         for ev in grok.HOOK_EVENTS:
             self.assertIn(f"  {ev}:\n    - hooks:\n        - type: command\n"
                           f"          command: \"/usr/bin/python3 {script} {ev}\"\n          timeout: 10\n", text)
         self.assertIn(grok.AGENT_BODY, text)
-        code = script.read_text()
+        code = script.read_text(encoding="utf-8")
         self.assertIn(repr(REPORT), code)
         self.assertIn(repr(str(ROOT)), code)
         self.assertIn(repr(str(q / "grok-hooks")), code)
@@ -189,8 +189,8 @@ class States(Home):
     def test_a_new_session_removes_the_state_of_sessions_that_ended_unseen(self):
         self.state.mkdir()
         old, fresh = self.state / "gone.state", self.state / "other.state"
-        old.write_text("{}")
-        fresh.write_text("{}")
+        old.write_text("{}", encoding="utf-8")
+        fresh.write_text("{}", encoding="utf-8")
         os.utime(old, (1, 1))
         self.hook("SessionStart", now=time.time())
         self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["other.state", "s1.state"])
@@ -306,7 +306,7 @@ class Recorded(Home):
     def test_the_log_is_found_by_session_id_under_the_real_path_of_the_folder(self):
         d = self.gh / "sessions" / "%2Fwork%2Frepo" / SID
         d.mkdir(parents=True)
-        (d / "updates.jsonl").write_text("")
+        (d / "updates.jsonl").write_text("", encoding="utf-8")
         a = agents.Adapter(grok, "builtin")
         self.assertEqual(a.chat_path(SID), d / "updates.jsonl")
         with mock.patch("os.path.realpath", lambda p: "/work/repo"):
@@ -315,7 +315,7 @@ class Recorded(Home):
             self.assertIsNone(a.chat_path(bad), bad)
 
     def test_the_chat_log_reads_into_the_shared_entries(self):
-        lines = (FIX / "updates.jsonl").read_text().splitlines()
+        lines = (FIX / "updates.jsonl").read_text(encoding="utf-8").splitlines()
         entries, turn = agents.Adapter(grok, "builtin").parse_chat(lines)
         self.assertEqual(turn, "idle")  # the resumed turn ended
         for e in entries:
@@ -346,7 +346,7 @@ class Recorded(Home):
         self.assertEqual(grok.parse_chat(lines[:cut + 1])[1], "working")
 
     def test_usage_counts_the_turns(self):
-        lines = (FIX / "updates.jsonl").read_text().splitlines()
+        lines = (FIX / "updates.jsonl").read_text(encoding="utf-8").splitlines()
         got = grok.chat_usage(lines)
         turns = [json.loads(l)["params"]["update"]["usage"] for l in lines if '"turn_completed"' in l]
         self.assertEqual(len(turns), 5)
@@ -370,11 +370,11 @@ class Recorded(Home):
                 "pane_working_thinking.txt": "working", "pane_working_tool.txt": "working",
                 "pane_idle.txt": "idle", "pane_idle_start.txt": "idle", "pane_slash.txt": "idle"}
         for name, s in want.items():
-            self.assertEqual(state((FIX / name).read_text()), s, name)
-        self.assertRegex((FIX / "pane_blocked_permission.txt").read_text(), det["tell_instead"])
+            self.assertEqual(state((FIX / name).read_text(encoding="utf-8")), s, name)
+        self.assertRegex((FIX / "pane_blocked_permission.txt").read_text(encoding="utf-8"), det["tell_instead"])
 
     def test_the_recorded_hook_events_report_each_change_of_state(self):
-        rows = [json.loads(l) for l in (FIX / "hooks.jsonl").read_text().splitlines()]
+        rows = [json.loads(l) for l in (FIX / "hooks.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual({r["env"]["GROK_SESSION_ID"] for r in rows}, {SID})
         self.assertTrue(all(r["env"]["MAXPM_AGENT"] for r in rows))  # the hook has the session's environment
         from datetime import datetime
@@ -407,15 +407,15 @@ class Commands(Home):
         proj = self.home / "work" / "app"
         (proj / ".grok" / "skills" / "ship").mkdir(parents=True)
         (proj / ".grok" / "skills" / "ship" / "SKILL.md").write_text(
-            "---\nname: ship\ndescription: \"Ship the app\"\nargument-hint: <version>\n---\nbody\n")
+            "---\nname: ship\ndescription: \"Ship the app\"\nargument-hint: <version>\n---\nbody\n", encoding="utf-8")
         (proj / ".grok" / "skills" / "quiet").mkdir()
-        (proj / ".grok" / "skills" / "quiet" / "SKILL.md").write_text("---\nname: quiet\nuser-invocable: false\n---\n")
+        (proj / ".grok" / "skills" / "quiet" / "SKILL.md").write_text("---\nname: quiet\nuser-invocable: false\n---\n", encoding="utf-8")
         (self.home / "work" / ".claude" / "commands").mkdir(parents=True)
-        (self.home / "work" / ".claude" / "commands" / "review.md").write_text("Review the diff.\n")
+        (self.home / "work" / ".claude" / "commands" / "review.md").write_text("Review the diff.\n", encoding="utf-8")
         (self.gh / "skills" / "ship").mkdir(parents=True)
-        (self.gh / "skills" / "ship" / "SKILL.md").write_text("---\nname: ship\ndescription: the user's own\n---\n")
+        (self.gh / "skills" / "ship" / "SKILL.md").write_text("---\nname: ship\ndescription: the user's own\n---\n", encoding="utf-8")
         (self.gh / "commands").mkdir()
-        (self.gh / "commands" / "standup.md").write_text("---\ndescription: Notes\n---\n")
+        (self.gh / "commands" / "standup.md").write_text("---\ndescription: Notes\n---\n", encoding="utf-8")
         got = agents.Adapter(grok, "builtin").read_commands(str(proj))
         names = [c["name"] for c in got]
         self.assertEqual(names[:len(grok.COMMANDS)], [c["name"] for c in grok.COMMANDS])
@@ -461,11 +461,11 @@ class Watcher(unittest.TestCase):
     its menu, and reads the other screens as working or idle."""
 
     def test_the_trust_question_is_blocked_above_its_version_line(self):
-        self.assertEqual(watch((FIX / "pane_blocked_trust.txt").read_text()),
+        self.assertEqual(watch((FIX / "pane_blocked_trust.txt").read_text(encoding="utf-8")),
                          ("blocked", "Do you trust the contents of this directory?", []))
 
     def test_the_permission_menu_has_its_header_and_options_with_the_mark_after_the_number(self):
-        state, question, options = watch((FIX / "pane_blocked_permission.txt").read_text())
+        state, question, options = watch((FIX / "pane_blocked_permission.txt").read_text(encoding="utf-8"))
         self.assertEqual((state, question), ("blocked", "Delete notes.txt with rm"))
         self.assertEqual(options, [("Yes, and don't ask again for anything (always-approve mode)", False),
                                    ("Always allow: rm notes.txt", False), ("Yes, proceed", True),
@@ -483,9 +483,9 @@ class Watcher(unittest.TestCase):
         want = {"pane_working_thinking.txt": "working", "pane_working_tool.txt": "working",
                 "pane_idle.txt": "idle", "pane_idle_start.txt": "idle", "pane_slash.txt": "idle"}
         for name, s in want.items():
-            self.assertEqual(watch((FIX / name).read_text()), (s, None, None), name)
+            self.assertEqual(watch((FIX / name).read_text(encoding="utf-8")), (s, None, None), name)
         # The words of a blocked screen in the chat, with the input box under them: no prompt.
-        idle = (FIX / "pane_idle.txt").read_text().splitlines()
+        idle = (FIX / "pane_idle.txt").read_text(encoding="utf-8").splitlines()
         quoted = "\n".join(["  You hit your free usage limit. Do you trust the contents of this directory?"] + idle)
         self.assertEqual(watch(quoted)[0], "idle")
 

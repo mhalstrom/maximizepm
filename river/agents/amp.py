@@ -333,7 +333,7 @@ def refresh(ref, path, export=None):
         if export is None and mark.exists() and time.time() - mark.stat().st_mtime < REFRESH:
             return 0
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(mark, "a+") as lock:
+        with open(mark, "a+", encoding="utf-8") as lock:
             try:
                 import fcntl
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -522,7 +522,7 @@ def write_mcp_config(path=None, remove=False):
     f = Path(path).expanduser() if path else settings_file()
     entry = setup_entry()
     entry["env"].pop("MAXPM_CHAT", None)
-    old = f.read_text() if f.exists() else ""
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
     try:
         data = json.loads(old) if old.strip() else {}
     except ValueError:
@@ -542,9 +542,9 @@ def write_mcp_config(path=None, remove=False):
             return f"MaximizePM is already in {f}; nothing changed"
         servers["maxpm"] = entry
     if old:
-        f.with_name(f.name + ".bak").write_text(old)
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(data, indent=2) + "\n")
+    f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     if remove:
         return f"took MaximizePM out of {f} (the old file: {f.name}.bak). A new Amp session has no maxpm tools."
     return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") +

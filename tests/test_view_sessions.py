@@ -73,7 +73,7 @@ class Base(unittest.TestCase):
             self.dir.cleanup()
 
     def write(self, text):
-        with open(self.path, "a") as f:
+        with open(self.path, "a", encoding="utf-8") as f:
             f.write(text)
 
     def cards(self):
@@ -105,7 +105,7 @@ class History(Base):
         return out, pages
 
     def test_two_compactions_show_two_dividers_and_scrolling_up_reads_every_line(self):
-        self.path.write_text("")
+        self.path.write_text("", encoding="utf-8")
         self.write(self.lines(0, 200) + self.boundary(1) + self.lines(200, 200) + self.boundary(2) + self.lines(400, 200))
         got = sessions.view(self.c, "ag", None, self.root, self.croot)
         self.assertEqual(len(got["entries"]), sessions.LIMIT)
@@ -122,14 +122,14 @@ class History(Base):
         self.assertFalse(any("summary" in e["text"] for e in every if e["role"] == "user"))  # never the person's turn
 
     def test_a_resumed_session_goes_on_in_the_same_chat(self):
-        self.path.write_text("")
+        self.path.write_text("", encoding="utf-8")
         self.write(self.lines(0, 5))
         other = self.root / "-other" / f"{SID2}.jsonl"  # a session id in another folder is not this chat
         other.parent.mkdir()
-        other.write_text(self.lines(900, 3))
+        other.write_text(self.lines(900, 3), encoding="utf-8")
         core.record_claude_session(self.c, "ag", SID2)
         new = self.path.parent / f"{SID3}.jsonl"
-        new.write_text(claude_line("user", "go on", at="2026-11-09T09:00:00Z") + self.lines(5, 3))
+        new.write_text(claude_line("user", "go on", at="2026-11-09T09:00:00Z") + self.lines(5, 3), encoding="utf-8")
         core.record_claude_session(self.c, "ag", SID3)
         got = sessions.view(self.c, "ag", None, self.root, self.croot)
         self.assertEqual([e["text"] for e in got["entries"][:2]], ["Resumed", "go on"])  # the new file, whole
@@ -286,7 +286,7 @@ class Sessions(Base):
                          ([(q, True)], "waits for an answer"))  # still on the card, behind 'Answer it'
         core.config_set(self.c, "question_popup_max", "0s")
         self.assertFalse(self.cards()[0]["waiting"][0]["old"])
-        js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text()
+        js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text(encoding="utf-8")
         self.assertIn("const popsUp = (s) => (s.waiting || []).filter(w => !w.old);", js)
         self.assertIn("if (!s || !popsUp(s).some(", js)
 
@@ -317,7 +317,7 @@ class Sessions(Base):
         core.unregister(self.c, "ag", "ag")
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM session_pins").fetchone()[0], 0)
         # The page: a pin button on worker rows only, and pinned workers first in their group.
-        js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text()
+        js = (Path(sessions.__file__).parent / "static" / "views" / "sessions.js").read_text(encoding="utf-8")
         # No pin on these rows; the pin sits over the second line, so no slot keeps its place (#5402).
         self.assertIn('if (["manager", "expert", "assistant"].includes(s.role)) return "";', js)
         self.assertIn("workers.sort((a, b) => isPinned(b) - isPinned(a));", js)
@@ -419,7 +419,7 @@ class Sessions(Base):
                 + codex_line("response_item", {"type": "message", "role": "assistant",
                                                "content": [{"type": "output_text", "text": "Fixed."}]})
                 + codex_line("event_msg", {"type": "task_complete"}))
-        log.write_text(text)
+        log.write_text(text, encoding="utf-8")
         card = next(c for c in self.cards() if c["name"] == "cx")
         self.assertEqual([(e["role"], e["text"]) for e in card["last"]],
                          [("user", "Fix the footer"), ("tool", "shell: git status"), ("assistant", "Fixed.")])
@@ -443,7 +443,7 @@ class Sessions(Base):
         os.environ["CLAUDE_CONFIG_DIR"] = str(conf)
         self.addCleanup(os.environ.pop, "CLAUDE_CONFIG_DIR", None)
         (conf / "projects" / "-proj").mkdir(parents=True)
-        (conf / "projects" / "-proj" / f"{SID}.jsonl").write_text(self.path.read_text())
+        (conf / "projects" / "-proj" / f"{SID}.jsonl").write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
 
         def get(path):
             h = server.Handler.__new__(server.Handler)
@@ -464,7 +464,6 @@ class Sessions(Base):
         self.assertEqual([p["text"] for p in get("/api/session?agent=ag")[1]["pending"]], ["after your turn"])
 
 
-@unittest.skipIf(os.name == "nt", "tmux adoption uses Unix terminals and signals")
 class Adopt(Base):
     """tmux_adopt (#4598): a session outside tmux moves into a tmux pane when it is quiet at its prompt."""
 
@@ -548,7 +547,7 @@ class Adopt(Base):
         self.assertIn(f"--model {opus} ", r["command"])
         self.assertEqual(r["env"]["MAXPM_MODEL"], "opus")
         # Nothing names it: no resume, and tmux_adopt ends nothing and tells the manager once.
-        self.path.write_text(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn", cwd=self.dir.name))
+        self.path.write_text(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn", cwd=self.dir.name), encoding="utf-8")
         with self.assertRaisesRegex(core.RiverError, "does not know the model ag ran on"):
             core.resume_command(self.c, "ag", "claude-code", SID)
         core.register(self.c, "mgr")
@@ -608,7 +607,7 @@ class Adopt(Base):
         """#5288: after /model with no reply, Claude Code's transcript still names the old model, and the dialog showed
         it. A change that the page sent shows ('changed now') until a line written after it names the setting."""
         def reply(model):
-            with open(self.path, "a") as f:
+            with open(self.path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"type": "assistant", "timestamp": "2026-11-08T10:01:00Z", "cwd": self.dir.name,
                                     "message": {"role": "assistant", "model": model, "stop_reason": "end_turn",
                                                 "content": [{"type": "text", "text": "ok"}]}}) + "\n")
@@ -623,7 +622,7 @@ class Adopt(Base):
         self.assertEqual(model(), ("opus", "session"))
         server.session_setting_live(self.c, "ag", "model", "sonnet")
         self.assertEqual(model(), ("sonnet", "changed now"))
-        with open(self.path, "a") as f:  # what Claude Code writes for the command itself names no model
+        with open(self.path, "a", encoding="utf-8") as f:  # what Claude Code writes for the command itself names no model
             f.write(json.dumps({"type": "user", "message": {"role": "user", "content": "<command-name>/model</command-name>"}}) + "\n")
         self.assertEqual(model(), ("sonnet", "changed now"))
         reply("claude-opus-5-5")  # the CLI did not take it: its next reply says what it runs
@@ -681,7 +680,7 @@ class Adopt(Base):
             self.skipTest("no lsof or /proc here")
         with core.tx(self.c):
             self.c.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name='ag'", (proc.pid, proc_after_exec(proc.pid, "sleep")[2]))
-        Path(self.path).write_text(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn"))  # no cwd
+        Path(self.path).write_text(claude_line("assistant", [{"type": "text", "text": "Done."}], "end_turn"), encoding="utf-8")  # no cwd
         self.quiet()
         got = server.session_restart(self.c, "ag", {"permission_mode": "plan"})
         self.assertEqual(got["changed"], ["Permission mode plan"])
@@ -1316,7 +1315,7 @@ document.getElementById("out").textContent = "RESULT " + JSON.stringify({{row: r
 </script>"""
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "row.html"
-            f.write_text(page)
+            f.write_text(page, encoding="utf-8")
             try:
                 dom = subprocess.run([_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
                                       "--allow-file-access-from-files", f"--user-data-dir={d}/browser",
@@ -1429,7 +1428,7 @@ class PersonTurns(Base):
         other = self.root / "-proj" / f"{SID2}.jsonl"
         other.write_text(claude_line("assistant", [{"type": "tool_use", "id": "t9", "name": "Bash",
                                                     "input": {"command": "ls"}}], "tool_use",
-                                     at="2026-11-08T11:00:00Z"))
+                                     at="2026-11-08T11:00:00Z"), encoding="utf-8")
         core.unregister(self.c, "w9")
         env = {"MAXPM_DB": os.environ["MAXPM_DB"], "CLAUDE_CODE_SESSION_ID": SID2, "MAXPM_AGENT": ""}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
@@ -1681,7 +1680,7 @@ class ExpertCache(Base):
         p.write_text(codex_line("turn_context", {"model": "gpt-6-astra", "cwd": "/x"}, at="2026-11-08T12:00:00Z")
                      + codex_line("event_msg", {"type": "token_count", "info": {"last_token_usage": {
                          "input_tokens": 40_000, "cached_input_tokens": 30_000, "output_tokens": 500}}},
-                         at="2026-11-08T12:00:10Z"))
+                         at="2026-11-08T12:00:10Z"), encoding="utf-8")
         c = sessions.cache_state(self.c, "cx", at=core.parse_iso("2026-11-08T12:03:00Z"), found=("codex", p))
         self.assertEqual((c["state"], c["ttl"], c["ttl_from"], c["context"], c["model"]),
                          ("warm", "5m", "setting", 40_500, "gpt-6-astra"))
@@ -1902,7 +1901,7 @@ class WorkNames(Base):
             self.c.execute("UPDATE items SET assignee=NULL")
         self.write(json.dumps({"type": "custom-title", "customTitle": "#12 Fix the \"cart\" page", "sessionId": SID}) + "\n")
         self.assertEqual(self.name(), 'Fix the "cart" page')  # the Claude Code session title, without its #id
-        self.path.write_text("")
+        self.path.write_text("", encoding="utf-8")
         core.register(self.c, "web-app-6c44")
         self.assertEqual(self.name("web-app-6c44"), "web-app")
         with core.tx(self.c):
@@ -1949,7 +1948,7 @@ class NewCode(Base):
     def test_page_build_follows_the_files(self):
         from unittest import mock
         f = Path(self.dir.name) / "app.js"
-        f.write_text("1")
+        f.write_text("1", encoding="utf-8")
         server._PAGE_BUILD["at"] = 0
         self.addCleanup(server._PAGE_BUILD.update, at=0)
         with mock.patch.object(server, "_watched", lambda: [f]):
@@ -2010,7 +2009,7 @@ try {
         self.assertEqual(got, {"loads": 2, "text": "MaximizePM was updated, and this page must load again."})
 
     def test_the_page_and_the_server_read_the_same_state_shape(self):
-        js = (Path(server.__file__).parent / "static" / "app.js").read_text()
+        js = (Path(server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn(f"const PAGE_SHAPE = {server.STATE_SHAPE};", js)
 
 
@@ -2082,10 +2081,10 @@ class SideFiles(Base):
         self.proj = Path(self.dir.name) / "proj"
         (self.proj / "scratch").mkdir(parents=True)
         (self.proj / "scratch" / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-        (self.proj / "page.html").write_text("<script>fetch('/api/action')</script>")
-        (self.proj / "notes.py").write_text("x = 1")
+        (self.proj / "page.html").write_text("<script>fetch('/api/action')</script>", encoding="utf-8")
+        (self.proj / "notes.py").write_text("x = 1", encoding="utf-8")
         (self.proj / ".env").mkdir()
-        (self.proj / ".env" / "key.txt").write_text("secret")
+        (self.proj / ".env" / "key.txt").write_text("secret", encoding="utf-8")
         core.project_add(self.c, "web", path=str(self.proj))
         server._ROOTS["at"] = 0
         self.addCleanup(server._ROOTS.update, at=0)
@@ -2150,9 +2149,9 @@ class SideFiles(Base):
         slug = re.sub(r"[^A-Za-z0-9]", "-", str(self.proj.resolve()))
         pad = tmp / slug / "c3a5e255-f33c" / "scratchpad"
         (pad / "shots").mkdir(parents=True)
-        (pad / "shots" / "index.html").write_text("<p>")
+        (pad / "shots" / "index.html").write_text("<p>", encoding="utf-8")
         (tmp / slug / "c3a5e255-f33c" / "tasks").mkdir()
-        (tmp / slug / "c3a5e255-f33c" / "tasks" / "out.txt").write_text("log")
+        (tmp / slug / "c3a5e255-f33c" / "tasks" / "out.txt").write_text("log", encoding="utf-8")
         (tmp / "-other-project" / "s1" / "scratchpad").mkdir(parents=True)
         (tmp / "-other-project" / "s1" / "scratchpad" / "a.png").write_bytes(b"\x89PNG")
         with mock.patch.object(server, "CLAUDE_TMP", str(tmp.resolve())):
@@ -2176,7 +2175,7 @@ class SideFiles(Base):
         self.write(json.dumps({"type": "user", "cwd": str(self.proj / "site"), "timestamp": "2026-11-09T01:00:00Z",
                                "message": {"role": "user", "content": "go"}}) + "\n"
                    + claude_line("assistant", [{"type": "text", "text": f"Saved {board}"}], "end_turn"))
-        # The file URLs of this system: file:///tmp/x.png, or file:///C:/Users/x.png on Windows.
+        # The file URLs of this system: file:///tmp/x.png.
         url = Path(shot).as_uri()
         local = "file://localhost" + url[len("file://"):]
         with mock.patch.object(core, "transcripts_root", lambda: self.root):
@@ -2191,9 +2190,6 @@ class SideFiles(Base):
         self.assertIn("only from the project folders", got[str(Path(self.dir.name) / "t.db")]["why"])
         self.assertIn("another computer", got["file://other/x.png"]["why"])
         self.assertIn("no file of this session", got["notes.py"]["why"])  # not in its folder, never named
-        with mock.patch.object(core, "PLATFORM", "win32"):  # the drive of a Windows file URL (#5073)
-            self.assertEqual(server._check_path(self.c, "file:///C:/Users/a%20b/x.png", None, [])["target"],
-                             str(Path("C:/Users/a b/x.png")))
         self.assertEqual(self.get("/api/file-check?path=a.png")["code"], 403)  # the page's token
         out = self.get(f"/api/file-check?path={shot}&token={server.PAGE_TOKEN}")
         self.assertEqual(out["body"]["paths"][shot]["ok"], True)
@@ -2223,8 +2219,6 @@ class SideFiles(Base):
 
     def test_the_scratchpad_folder_from_the_environment(self):
         from unittest import mock
-        if not hasattr(os, "getuid"):
-            self.skipTest("no scratchpads on Windows")
         own = f"claude-{os.getuid()}"
         d = Path(self.dir.name).resolve()
         for env, want in ((str(d / own), d / own), (str(d), d / own)):  # a session's own value, or its parent
@@ -2270,7 +2264,7 @@ class SideFiles(Base):
         (self.root / "-boss" / f"{sid2}.jsonl").write_text(
             claude_line("assistant", [{"type": "text", "text": "Look at http://Claude.AI/artifact/9bimT1oWobMH8TBekRjK3q?v=2 "
                                                                "and https://claude.ai/Code/Artifact/ab-12"}], "end_turn",
-                        at="2026-11-08T10:05:00Z"))
+                        at="2026-11-08T10:05:00Z"), encoding="utf-8")
         rows = [a for a in sessions.artifacts(self.c, {}, None, self.root, self.croot) if a["kind"] == "artifact"]
         self.assertEqual([(a["target"], a["session"], a["sessions"]) for a in rows],
                          [(art, "boss", ["boss", "ag"]), ("https://claude.ai/code/artifact/ab-12", "boss", ["boss"])])
@@ -2365,7 +2359,7 @@ class ArtifactScan(unittest.TestCase):
     def test_names_before_many_pictures_and_only_new_lines_later(self):
         from unittest import mock
         picture = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 1_000_000}}
-        with open(self.path, "w") as f:
+        with open(self.path, "w", encoding="utf-8") as f:
             f.write(self.line("assistant", [{"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "/p/a.png"}}]))
             for n in range(6):  # 6 MB of pictures, more than the 4 MB tail of before
                 f.write(self.line("user", [{"type": "tool_result", "tool_use_id": f"r{n}",
@@ -2373,19 +2367,19 @@ class ArtifactScan(unittest.TestCase):
             f.write(self.line("user", 'I typed "type":"tool_result" and /p/typed.png'))
             f.write(self.line("assistant", [{"type": "text", "text": "Saved /p/b.png"}]))
         self.assertEqual(self.targets(), ["/p/a.png", "/p/b.png", "/p/typed.png"])  # a tool result names none
-        with open(self.path, "a") as f:
+        with open(self.path, "a", encoding="utf-8") as f:
             f.write(self.line("assistant", [{"type": "text", "text": "And /p/c.png"}]))
             f.write('{"type":"assistant","message":{"content":[{"type":"text","text":"/p/half')  # still written
         lines = []
         real = sessions._line_hits
         with mock.patch.object(sessions, "_line_hits", lambda raw, ad: lines.append(raw) or real(raw, ad)):
             self.assertEqual(self.targets(), ["/p/a.png", "/p/b.png", "/p/c.png", "/p/typed.png"])
-            with open(self.path, "a") as f:
+            with open(self.path, "a", encoding="utf-8") as f:
                 f.write('.png"}]}}\n')
             self.assertIn("/p/half.png", self.targets())
         self.assertEqual(len(lines), 2, lines)  # only the lines after the last read, each one once
         # A file written again, shorter: read again from its start.
-        self.path.write_text(self.line("assistant", [{"type": "text", "text": "/p/new.png"}]))
+        self.path.write_text(self.line("assistant", [{"type": "text", "text": "/p/new.png"}]), encoding="utf-8")
         self.assertEqual(self.targets(), ["/p/new.png"])
 
 
@@ -2451,39 +2445,6 @@ class OldPane(TmuxBase):
         self.assertNotIn("ag", {k: v for k, v in server.agent_terminals(self.c).items() if v == self.pane["id"]})
 
 
-class WindowsPaths(unittest.TestCase):
-    def test_windows_artifacts_and_full_screen_paths(self):
-        for path in (r"C:\Users\person\project\page.html", r"C:/Users/person/project/page.html",
-                     r"\\computer\share\page.html"):
-            with self.subTest(path=path):
-                self.assertEqual(sessions._hits_in("Saved " + path + ";", None, "named"),
-                                 [{"target": path, "kind": "file", "how": "named", "at": None}])
-                self.assertTrue(server._file_target(path))
-        self.assertFalse(server._file_target(r"C:relative.txt"))
-        self.assertFalse(server._file_target("https://example.com/file.txt"))
-
-    def test_uploads_in_backslash_paths_still_have_previews_and_downloads(self):
-        from unittest.mock import patch
-        with patch.object(core, "river_dir", lambda: "C:/Users/person/.maximizepm"):
-            turn = sessions._user_turn(None, r"C:\Users\person\.maximizepm\uploads\ag\20261108-120000-12345678-shot.png"
-                                       + "\n" + r"C:\Users\person\.maximizepm\uploads\ag\20261108-120000-12345678-report.pdf")
-        self.assertEqual(turn["images"], ["ag/20261108-120000-12345678-shot.png"])
-        self.assertEqual(turn["files"], [{"path": "ag/20261108-120000-12345678-report.pdf", "name": "report.pdf"}])
-
-
-class EndProcess(unittest.TestCase):
-    def test_windows_ends_the_process_tree_without_unix_signal_or_waitpid(self):
-        from unittest.mock import patch
-        with patch.object(os, "name", "nt"), patch("subprocess.run") as run, \
-                patch.object(core, "pid_alive", return_value=False), patch.object(os, "kill") as kill:
-            self.assertTrue(server._end_process(1234))
-            run.assert_called_once_with(["taskkill", "/PID", "1234", "/T", "/F"], capture_output=True)
-            kill.assert_not_called()
-        with patch.object(os, "name", "nt"), patch("subprocess.run"), patch.object(core, "pid_alive", return_value=True):
-            self.assertFalse(server._end_process(1234))
-
-
-@unittest.skipIf(os.name == "nt", "Windows does not use tmux; outside_tmux intentionally returns false")
 class OutsideTmux(unittest.TestCase):
     """#4599: go and manage say when a session runs outside tmux, where the Sessions page cannot type into it."""
 
@@ -2528,7 +2489,7 @@ class AdapterFolder(Base):
         fixture = Path(__file__).resolve().parent / "fixtures" / "copilot" / "events.jsonl"
         self.log = self.home / "session-state" / self.CSID / "events.jsonl"
         self.log.parent.mkdir(parents=True)
-        self.log.write_text(fixture.read_text())
+        self.log.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
         sessions._HEAD_CWD.clear()
 
     def test_the_folder_comes_from_the_adapter_in_the_tail_and_from_the_head(self):
@@ -2611,7 +2572,7 @@ class SessionUsage(Base):
         os.environ["CLAUDE_CONFIG_DIR"] = str(conf)
         self.addCleanup(os.environ.pop, "CLAUDE_CONFIG_DIR", None)
         (conf / "projects" / "-proj").mkdir(parents=True)
-        (conf / "projects" / "-proj" / f"{SID}.jsonl").write_text(self.path.read_text())
+        (conf / "projects" / "-proj" / f"{SID}.jsonl").write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
         h = server.Handler.__new__(server.Handler)
         out = {}
         h.path, h.client_address, h.headers = "/api/session-usage?agent=ag", ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}
@@ -2626,7 +2587,7 @@ class SessionUsage(Base):
         home = Path(self.dir.name) / "codexhome"
         home.mkdir()
         (home / "models_cache.json").write_text(json.dumps({"models": [
-            {"slug": "gpt-6.1-sol", "context_window": 500000, "effective_context_window_percent": 95}]}))
+            {"slug": "gpt-6.1-sol", "context_window": 500000, "effective_context_window_percent": 95}]}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
             self.assertEqual(codex_agent.context_window("gpt-6.1-sol"), 475000)
             self.assertIsNone(codex_agent.context_window("gpt-9"))

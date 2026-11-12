@@ -67,7 +67,7 @@ def hermes_home(env=None):
 def read_models(provider=DEFAULT_PROVIDER):
     """The model ids that Hermes cached for `provider` ($HERMES_HOME/provider_models_cache.json), or None."""
     try:
-        got = json.loads((hermes_home() / "provider_models_cache.json").read_text())
+        got = json.loads((hermes_home() / "provider_models_cache.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     models = (got.get(provider) or {}).get("models") if isinstance(got, dict) else None
@@ -679,7 +679,7 @@ def context_window(model):
     from pathlib import Path
     try:
         lines = (Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "context_length_cache.yaml"
-                 ).read_text().splitlines()
+                 ).read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
     import re
@@ -706,7 +706,7 @@ def read_commands(folder):
         return []
     for f in files:
         try:
-            meta = _front(f.read_text(errors="replace")[:4000])
+            meta = _front(f.read_text(errors="replace", encoding="utf-8")[:4000])
         except OSError:
             continue
         name = meta.get("name") or f.parent.name

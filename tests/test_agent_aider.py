@@ -20,11 +20,11 @@ FIX = Path(__file__).resolve().parent / "fixtures" / "aider"
 
 
 def screen(name):
-    return (FIX / f"screen-{name}.txt").read_text()
+    return (FIX / f"screen-{name}.txt").read_text(encoding="utf-8")
 
 
 def chat_lines():
-    return (FIX / "chat.history.md").read_text().splitlines()
+    return (FIX / "chat.history.md").read_text(encoding="utf-8").splitlines()
 
 
 def watch(text):
@@ -119,7 +119,7 @@ class Launch(Env):
     def test_agents_md_and_the_skill_go_in_as_read_only_files(self):
         folder = self.root / "proj"
         folder.mkdir()
-        (folder / "AGENTS.md").write_text("# rules\n")
+        (folder / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
         with mock.patch.object(core, "skill_prompt_args", lambda args: "--append-system-prompt-file /x/skill.md"):
             argv = self.a.build_command("w1", str(folder), None, None, {"system_prompt_file": True}, None)
         self.assertEqual(argv[-4:], ["--read", "/x/skill.md", "--read", "AGENTS.md"])
@@ -158,7 +158,7 @@ class Launch(Env):
         self.assertIsNone(self.a.resume_command("w1"))  # no log yet: nothing to restore
         log = self.root / "aider" / "w1.chat.history.md"
         log.parent.mkdir()
-        log.write_text((FIX / "chat.history.md").read_text())
+        log.write_text((FIX / "chat.history.md").read_text(encoding="utf-8"), encoding="utf-8")
         argv = self.a.resume_command("w1", "sonnet", "medium", {"prompt": "go on", "fork": "x"}, name="w2")
         self.assertEqual(argv, ["aider", "--model", "sonnet", "--reasoning-effort", "medium",
                                 "--no-gitignore", "--no-show-model-warnings", "--no-analytics",
@@ -175,7 +175,7 @@ class Launch(Env):
             self.assertIsNone(core.session_from_env({"MAXPM_AIDER_SESSION": bad}), bad)
         log = aider.chat_file("w")
         log.parent.mkdir(parents=True)
-        log.write_text((FIX / "chat.history.md").read_text())
+        log.write_text((FIX / "chat.history.md").read_text(encoding="utf-8"), encoding="utf-8")
         c = core.connect()
         self.addCleanup(c.close)
         core.register(c, "w")
@@ -320,13 +320,13 @@ class Chat(Env):
         self.assertIsNone(self.a.chat_path("w1"))
         log = aider.chat_file("w1")
         log.parent.mkdir(parents=True)
-        log.write_text("\n# aider chat started at 2026-11-10 23:45:12\n\n")
+        log.write_text("\n# aider chat started at 2026-11-10 23:45:12\n\n", encoding="utf-8")
         self.assertEqual(self.a.chat_path("w1"), log)
         self.assertEqual(self.a.chat_path(str(FIX / "chat.history.md")), FIX / "chat.history.md")
         self.assertIsNone(self.a.chat_path(""))
         other = self.root / "logs"
         other.mkdir()
-        (other / "w2.chat.history.md").write_text("")
+        (other / "w2.chat.history.md").write_text("", encoding="utf-8")
         self.assertEqual(self.a.chat_path("w2", None, root=str(other)), other / "w2.chat.history.md")
         self.assertEqual(self.a.chat_ref(), "session")
 
@@ -354,12 +354,12 @@ class SessionsTab(Env):
 
     def test_a_new_prompt_and_its_reply_come_after_the_cursor(self):
         cur = sessions.entries("aider", self.log)["cursor"]
-        with open(self.log, "a") as f:
+        with open(self.log, "a", encoding="utf-8") as f:
             f.write("\n#### Explain hello.py  \n")
         got = sessions.entries("aider", self.log, cur)
         self.assertEqual([(e["role"], e["text"]) for e in got["entries"]], [("user", "Explain hello.py")])
         self.assertEqual(got["turn"], "working")
-        with open(self.log, "a") as f:
+        with open(self.log, "a", encoding="utf-8") as f:
             f.write("\nIt prints a greeting.\n\nRun it with python3.\n")
         got = sessions.entries("aider", self.log, got["cursor"])
         self.assertEqual([(e["role"], e["text"]) for e in got["entries"]],

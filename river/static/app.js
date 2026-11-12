@@ -589,7 +589,7 @@ function renderSetup(st) {
     `<input id="suName" placeholder="your name" style="width:160px"><button class="btn primary" data-su="register">Save</button>`));
   // Agents run `maxpm go`: a new terminal must find the maxpm command (the app writes a small launcher).
   const rc = st.maxpm_cmd || {};
-  if (!rc.unsupported) out.push(step(rc.ok, "Let agents use MaximizePM",
+  out.push(step(rc.ok, "Let agents use MaximizePM",
     rc.ok ? `Agents can run the maxpm command${rc.shell_path ? ` (${esc(rc.shell_path)})` : ""}.`
       : rc.in_app_image ? "First drag MaximizePM to your Applications folder, then open it from there."
       : rc.launcher === "old" ? "The maxpm command still points at an older copy of MaximizePM. Update it to this one."

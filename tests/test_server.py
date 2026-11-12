@@ -21,7 +21,7 @@ from river.core import RiverError
 
 class LaunchAgent(unittest.TestCase):
     def setUp(self):
-        self.platform, core.PLATFORM = core.PLATFORM, "darwin"  # a tmux pane (the runner gets its line); Windows has its own
+        self.platform, core.PLATFORM = core.PLATFORM, "darwin"  # a tmux pane (the runner gets its line)
         self.dir = tempfile.TemporaryDirectory()
         os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
         self.c = core.connect()
@@ -59,13 +59,13 @@ class LaunchAgent(unittest.TestCase):
         # The line runs in a shell, with a stand-in amp that writes what it got: the variables and its stdin.
         bin_dir, out = os.path.join(self.dir.name, "bin"), os.path.join(self.dir.name, "got.txt")
         os.mkdir(bin_dir)
-        with open(os.path.join(bin_dir, "amp"), "w") as f:
+        with open(os.path.join(bin_dir, "amp"), "w", encoding="utf-8") as f:
             f.write(f"#!/bin/sh\n{{ env | grep '^MAXPM_' | sort; cat; }} > {shlex.quote(out)}\n")
         os.chmod(os.path.join(bin_dir, "amp"), 0o755)
         env = {k: v for k, v in os.environ.items() if not k.startswith("MAXPM_")}
         subprocess.run(["/bin/sh", "-c", sent[0]], env={**env, "PATH": bin_dir + os.pathsep + env["PATH"]},
                        check=True, timeout=10)
-        with open(out) as f:
+        with open(out, encoding="utf-8") as f:
             got = f.read()
         self.assertIn(f"MAXPM_AGENT={t['session_name']}\n", got)
         self.assertRegex(got, r"MAXPM_FOCUS=item:\d+\n")
@@ -115,7 +115,7 @@ class LaunchAgent(unittest.TestCase):
         sid = "44444444-4444-4444-8444-444444444444"
         root = os.path.join(self.dir.name, "claude")
         os.makedirs(os.path.join(root, "projects", "-shop"))
-        with open(os.path.join(root, "projects", "-shop", sid + ".jsonl"), "w") as f:
+        with open(os.path.join(root, "projects", "-shop", sid + ".jsonl"), "w", encoding="utf-8") as f:
             f.write(json.dumps({"type": "assistant", "timestamp": core.iso(core.now()), "message": {"id": "m", "usage": {
                 "input_tokens": 3, "cache_read_input_tokens": 30000, "cache_creation_input_tokens": 9000}}}) + "\n")
         core.project_add(self.c, "shop", path=self.dir.name)
@@ -253,7 +253,7 @@ class LaunchAgent(unittest.TestCase):
         rv, dep = self._release(owner="ops")
         core.register(self.c, "mark", human=True)
         broken = os.path.join(self.dir.name, "broken")
-        open(broken, "w").close()  # the deploy fails while this file exists
+        open(broken, "w", encoding="utf-8").close()  # the deploy fails while this file exists
         code = f"import os, sys; sys.exit(2 if os.path.exists({broken!r}) else 0)"
         core.target_hook(self.c, "web", "deploy", f'"{sys.executable}" -c "{code}"', actor="mark")
         core.target_cadence(self.c, "web", "2h", "mark", reason="a release every two hours at most")
@@ -1009,10 +1009,9 @@ class LaunchAgent(unittest.TestCase):
         self.assertEqual(server.dispatch_item(self.c, x, runner=sent.append)["pushed_to"], "w")
         core.cancel_push(self.c, x)
         core.unregister(self.c, "w")
-        core.PLATFORM = "win32"  # tearDown restores it
         t = server.dispatch_item(self.c, x, runner=sent.append, model="fable")
-        self.assertEqual(sent[-1]["env"]["MAXPM_MODEL"], "fable")
-        b = core.go(self.c, self.dir.name, t["session_name"], model=sent[-1]["env"]["MAXPM_MODEL"])
+        self.assertIn("MAXPM_MODEL=fable", sent[-1])
+        b = core.go(self.c, self.dir.name, t["session_name"], model="fable")
         self.assertEqual((b["item"]["id"], core.agent_model(self.c, t["session_name"])), (x, "fable"))
 
     def test_start_spreads_sessions_across_projects(self):
@@ -1241,19 +1240,10 @@ class LaunchAgent(unittest.TestCase):
         core.item_add(self.c, "shop", "work")
         self.assertTrue(core.launch_target(self.c, agent="Pi")["command"].startswith("pi "))
 
-    def test_windows_opens_a_console_window_with_the_env_set(self):
+    def test_with_no_tmux_a_start_refuses_and_says_how_to_install_it(self):
+        # Every agent starts in tmux (#5105): with no tmux, a start refuses and says how to install it.
         core.project_add(self.c, "shop", path=self.dir.name)
-        x = core.item_add(self.c, "shop", "work")["id"]
-        core.PLATFORM = "win32"  # tearDown restores it
-        sent = []
-        t = server.dispatch_item(self.c, x, runner=sent.append)
-        # cmd reads double quotes, not the single quotes of a POSIX shell.
-        self.assertEqual(t["command"], f'claude --name "#{x} work" go --remote-control "#{x} work"')
-        self.assertEqual(sent[0], {"args": f"cmd /k title #{x} work & {t['command']}", "cwd": t["path"],
-                                   "env": {"MAXPM_DB": str(core.db_path()), "MAXPM_AGENT": t["session_name"],
-                                           "MAXPM_FOCUS": f"item:{x}"}})
-        # Every other system starts agents in tmux (#5105): with no tmux, a start refuses and says how to install it.
-        core.item_add(self.c, "shop", "more work")
+        core.item_add(self.c, "shop", "work")
         for system, how in (("linux", "sudo apt install tmux"), ("darwin", "brew install tmux")):
             core.PLATFORM = system
             with self.assertRaisesRegex(RiverError, f"every agent starts in tmux, and tmux is not installed: {how}"):
@@ -2556,9 +2546,6 @@ class LaunchInTmux(unittest.TestCase):
         # No tmux on this computer: the page says so, with the command that installs it (#5105).
         self.assertEqual((core.state(self.c)["tmux"], server.setup_status(self.c)["tmux"]), (False, False))
         self.assertEqual(core.state(self.c)["tmux_install"], "sudo apt install tmux (Fedora: sudo dnf install tmux)")
-        core.PLATFORM = "win32"  # Windows has no tmux: a console window opens there
-        self.assertEqual(core.state(self.c)["tmux"], True)
-        core.PLATFORM = "linux"
         # tmux is installed: every start opens a tmux pane, also the fresh sessions of maxpm serve.
         with mock.patch.object(core, "tmux_path", lambda: "/opt/homebrew/bin/tmux"):
             self.assertEqual((core.state(self.c)["tmux"], server.setup_status(self.c)["tmux"]), (True, True))
@@ -3089,7 +3076,7 @@ class LaunchInTmux(unittest.TestCase):
         sock = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, sock, True)
         conf = Path(sock, "tmux.conf")
-        conf.write_text("set -g default-shell /bin/sh\n")  # a shell that starts at once, and no profile of the user
+        conf.write_text("set -g default-shell /bin/sh\n", encoding="utf-8")  # a shell that starts at once, and no profile of the user
         cmd, server.TMUX_CMD = server.TMUX_CMD, ["tmux", "-S", str(Path(sock, "tmux.sock")), "-f", str(conf)]
         self.addCleanup(setattr, server, "TMUX_CMD", cmd)
 
@@ -3154,7 +3141,7 @@ class LaunchInTmux(unittest.TestCase):
         # a fresh session for the work (a script stands for the agent CLI).
         from unittest import mock
         fake = Path(self.dir.name, "fake-agent")
-        fake.write_text('echo "fake agent: $MAXPM_AGENT $MAXPM_FOCUS"\nexec sleep 60\n')
+        fake.write_text('echo "fake agent: $MAXPM_AGENT $MAXPM_FOCUS"\nexec sleep 60\n', encoding="utf-8")
         # /bin/sh runs it: macOS scans a new executable file before its first start (Gatekeeper; it took 13 s on a busy
         # Mac, past the 10 s the panes get), and never a script that a system shell reads.
         core.config_set(self.c, "launch_agents", f"Fake=/bin/sh {fake}")
@@ -3396,7 +3383,7 @@ class FrameTitle(unittest.TestCase):
         from river import agents
         from pathlib import Path
         a = agents.get("amp")
-        text = (Path(__file__).parent / "fixtures" / "amp" / name).read_text()
+        text = (Path(__file__).parent / "fixtures" / "amp" / name).read_text(encoding="utf-8")
         tail = server._prompt_tail(text)
         return tail, server._prompt_found(tail, server._AnyOf(tuple(a.detect["blocked"])), server._layout(a.detect)), \
             server._layout(a.detect)
@@ -3433,7 +3420,7 @@ class Watched(unittest.TestCase):
             static = Path(d)
             for f in ("app.js", "components/chip.js", "vendor/lib/big.js", ".hidden/x.js"):
                 (static / f).parent.mkdir(parents=True, exist_ok=True)
-                (static / f).write_text("x")
+                (static / f).write_text("x", encoding="utf-8")
             old, server.STATIC = server.STATIC, static
             try:
                 names = [f.relative_to(static).as_posix() for f in server._watched() if f.suffix == ".js"]
@@ -3478,7 +3465,7 @@ class SetupGuide(unittest.TestCase):
         self.assertEqual((f["claude_md"], f["agents_md"]), ("current", "current"))
 
     def test_block_fix_can_move_claude_rules_to_agents_md(self):
-        with open(os.path.join(self.folder, "CLAUDE.md"), "w") as f:
+        with open(os.path.join(self.folder, "CLAUDE.md"), "w", encoding="utf-8") as f:
             f.write("# Rules\n")
         self.assertEqual(server.setup_status(self.c)["folders"][0]["layout"], "claude_only")
         server.setup_block(self.c, self.folder, move=True)
@@ -3488,17 +3475,17 @@ class SetupGuide(unittest.TestCase):
     def test_add_a_project_folder_from_the_page(self):
         blog = os.path.join(self.dir.name, "My Blog")
         os.mkdir(blog)
-        with open(os.path.join(blog, "CLAUDE.md"), "w") as f:
+        with open(os.path.join(blog, "CLAUDE.md"), "w", encoding="utf-8") as f:
             f.write("# Rules\nNo tabs.\n")
         r = server.folder_add(self.c, blog, description="my writing")
         self.assertEqual((r["project"], r["layout"]), ("my-blog", "claude_only"))
         self.assertEqual(core._project(self.c, "my-blog")["path"], os.path.realpath(blog))
         self.assertEqual(core._project(self.c, "my-blog")["notes"], "my writing")
-        self.assertIn("MaximizePM", Path(os.path.join(blog, "AGENTS.md")).read_text())
+        self.assertIn("MaximizePM", Path(os.path.join(blog, "AGENTS.md")).read_text(encoding="utf-8"))
         # the rules choice, then the same folder again: nothing new, still one project
         r = server.folder_add(self.c, blog, move=True)
         self.assertEqual((r["project"], r["layout"]), ("my-blog", "shared"))
-        self.assertEqual(Path(os.path.join(blog, "CLAUDE.md")).read_text().strip(), "@AGENTS.md")
+        self.assertEqual(Path(os.path.join(blog, "CLAUDE.md")).read_text(encoding="utf-8").strip(), "@AGENTS.md")
         self.assertEqual(sum(p["name"] == "my-blog" for p in core.project_list(self.c)), 1)
 
     def test_add_a_project_folder_refuses_bad_paths_and_a_name_in_use_elsewhere(self):
@@ -3511,7 +3498,6 @@ class SetupGuide(unittest.TestCase):
             server.folder_add(self.c, other, name="shop")
         self.assertEqual(core._project(self.c, "shop")["path"], os.path.realpath(self.folder))
 
-    @unittest.skipIf(os.name == "nt", "the maxpm command installer is for macOS and Linux shells")
     def test_install_the_maxpm_command_writes_the_launcher_and_the_path_once(self):
         home = os.path.join(self.dir.name, "home")
         os.mkdir(home)
@@ -3524,22 +3510,22 @@ class SetupGuide(unittest.TestCase):
             r = server.install_command()
             launcher = os.path.join(home, ".local", "bin", "maxpm")
             self.assertTrue(os.access(launcher, os.X_OK))
-            self.assertIn(server.LAUNCHER_MARK, Path(launcher).read_text())
-            prof = Path(os.path.join(home, ".zprofile")).read_text()
+            self.assertIn(server.LAUNCHER_MARK, Path(launcher).read_text(encoding="utf-8"))
+            prof = Path(os.path.join(home, ".zprofile")).read_text(encoding="utf-8")
             self.assertIn('$HOME/.local/bin', prof)
             self.assertEqual(len(r["changed"]), 2)
             self.assertEqual(os.listdir(os.path.join(home, ".local", "bin")), ["maxpm"])  # one command, no other name
-            self.assertNotRegex(Path(launcher).read_text().replace("river-app", ""), r"(?<![/\w])river(?![/\w])")
+            self.assertNotRegex(Path(launcher).read_text(encoding="utf-8").replace("river-app", ""), r"(?<![/\w])river(?![/\w])")
             found["path"] = launcher  # a new terminal now finds it
             self.assertTrue(server.command_status()["ok"])
             server.install_command()  # again: the profile line is not added twice
-            self.assertEqual(Path(os.path.join(home, ".zprofile")).read_text(), prof)
+            self.assertEqual(Path(os.path.join(home, ".zprofile")).read_text(encoding="utf-8"), prof)
             # a maxpm command the person installed (a clone, pip) is left alone
             found["path"] = "/opt/elsewhere/maxpm"
             self.assertTrue(server.command_status()["ok"])
             self.assertIn("already installed", server.install_command()["note"])
             # a launcher of an older copy is the guide's own, and the guide rewrites it
-            with open(launcher, "w") as f:
+            with open(launcher, "w", encoding="utf-8") as f:
                 f.write("#!/bin/sh\n# MaximizePM launcher: runs an older copy ...\n")
             self.assertEqual(server.command_status()["launcher"], "old")
         finally:
@@ -3687,7 +3673,7 @@ class LaunchProfiles(unittest.TestCase):
         self.assertIsNotNone(m, cmd)
         f = Path(m.group(1).strip("'"))
         self.assertEqual(f, Path(core.river_dir()) / agents.get("claude").module.HOOK_FILE)
-        self.assertEqual(json.loads(f.read_text()), core.activity_hook_settings())
+        self.assertEqual(json.loads(f.read_text(encoding="utf-8")), core.activity_hook_settings())
         # A person's own --settings in claude_args wins: river adds no second one.
         core.config_set(self.c, "claude_args", "--settings /x/mine.json")
         self.assertEqual(core._launch_agent_cmd(self.c, pid, None)["command"].count("--settings"), 1)
@@ -3698,9 +3684,9 @@ class LaunchProfiles(unittest.TestCase):
         cmd = core._launch_agent_cmd(self.c, pid, None)["command"]
         m = re.search(r"--append-system-prompt-file (\S+) go --remote-control$", cmd)
         self.assertIsNotNone(m, cmd)
-        f = Path(m.group(1).strip("'"))  # quoted on Windows: the test's platform is darwin, the path has backslashes
+        f = Path(m.group(1).strip("'"))
         self.assertEqual(f.parent, Path(core.river_dir()) / "prompts")
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         self.assertTrue(text.startswith(core.SKILL_PROMPT_HEAD))
         self.assertIn("maxpm go", text)
         self.assertNotIn("\nname: maxpm", text)  # the skill's front matter stays out
@@ -3708,23 +3694,14 @@ class LaunchProfiles(unittest.TestCase):
         self.assertEqual(core._launch_agent_cmd(self.c, pid, None)["command"], cmd)
         # A primer that claude_args names goes in the same file, first; the other arguments stay.
         primer = Path(self.dir.name) / "primer.md"
-        primer.write_text("# Primer\nThe map of the shop.\n")
+        primer.write_text("# Primer\nThe map of the shop.\n", encoding="utf-8")
         core.config_set(self.c, "claude_args", f"--verbose --append-system-prompt-file {shlex.quote(str(primer))}",
                         project="shop")
         cmd2 = core._launch_agent_cmd(self.c, pid, None)["command"]
         self.assertEqual(cmd2.count("--append-system-prompt-file"), 1)
         self.assertIn("claude --verbose --append-system-prompt-file ", cmd2)
-        text2 = Path(re.search(r"--append-system-prompt-file (\S+)", cmd2).group(1).strip("'")).read_text()
+        text2 = Path(re.search(r"--append-system-prompt-file (\S+)", cmd2).group(1).strip("'")).read_text(encoding="utf-8")
         self.assertTrue(text2.startswith("# Primer\nThe map of the shop.\n\n" + core.SKILL_PROMPT_HEAD))
-        # On Windows the arguments split the cmd.exe way: double quotes, and a path keeps its backslashes.
-        core.PLATFORM = "win32"
-        spaced = Path(self.dir.name) / "my primer.md"
-        spaced.write_text("# Spaced\n")
-        words = core.skill_prompt_args(f'--verbose --append-system-prompt-file "{spaced}"').split(
-            " --append-system-prompt-file ")
-        self.assertEqual(words[0], "--verbose")
-        self.assertTrue(Path(words[1].strip('"')).read_text().startswith("# Spaced\n\n" + core.SKILL_PROMPT_HEAD))
-        core.PLATFORM = "darwin"
         # A primer that cannot be read: the arguments stay as they are, and the skill stays out.
         core.config_set(self.c, "claude_args", "--append-system-prompt-file /no/such/primer.md", project="shop")
         self.assertIn("--append-system-prompt-file /no/such/primer.md go", core._launch_agent_cmd(self.c, pid, None)["command"])
@@ -3820,7 +3797,7 @@ class LaunchProfiles(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "not minimal"):
             core._launch_agent_cmd(self.c, None, "Codex", "sol", "minimal")
         Path(codex_home.name, "models_cache.json").write_text(json.dumps({"models": [
-            {"slug": "gpt-6-luna", "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high")]}]}))
+            {"slug": "gpt-6-luna", "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium", "high")]}]}), encoding="utf-8")
         self.assertIn("model_reasoning_effort=high", core._launch_agent_cmd(self.c, None, "Codex", "luna", "high")["command"])
         with self.assertRaisesRegex(RiverError, "gpt-6-luna takes effort low, medium, high, not max"):
             core._launch_agent_cmd(self.c, None, "Codex", "luna", "max")
@@ -3871,14 +3848,6 @@ class LaunchProfiles(unittest.TestCase):
                 core._launch_agent_cmd(self.c, None, "Claude Code", prompt=bad)
         with self.assertRaisesRegex(RiverError, "Grok is a custom command .* takes no --prompt"):
             core._launch_agent_cmd(self.c, None, "Grok", prompt="hi")
-        # Windows: cmd cannot quote a line break, '"' or '%'; one line goes after the prompt with a space.
-        core.PLATFORM = "win32"
-        self.assertTrue(core._launch_agent_cmd(self.c, None, "Claude Code", prompt="fix it & push")["command"]
-                        .endswith('"go fix it & push" --remote-control'))
-        for bad in ("two\nlines", 'say "hi"', "100%"):
-            with self.assertRaisesRegex(RiverError, "one line with no"):
-                core._launch_agent_cmd(self.c, None, "Claude Code", prompt=bad)
-        core.PLATFORM = "darwin"
         # A launch opens a new session even when one waits for work, and the item's history says what it was told.
         x = core.item_add(self.c, "shop", "work")["id"]
         core.register(self.c, "w1")
@@ -4171,8 +4140,8 @@ class ServeReload(unittest.TestCase):
         self.assertIsNone(server._code_loads())  # this clone
         bad = os.path.join(self.dir.name, "clone")
         os.makedirs(os.path.join(bad, "river"))
-        open(os.path.join(bad, "river", "__init__.py"), "w").close()
-        with open(os.path.join(bad, "river", "server.py"), "w") as f:
+        open(os.path.join(bad, "river", "__init__.py"), "w", encoding="utf-8").close()
+        with open(os.path.join(bad, "river", "server.py"), "w", encoding="utf-8") as f:
             f.write("def half(:\n")
         with mock.patch.object(server, "REPO", Path(bad)), mock.patch.object(server, "PKG", Path(bad, "river")):
             self.assertIn("SyntaxError", server._code_loads())
@@ -4499,7 +4468,7 @@ class ServeLoop(unittest.TestCase):
         git = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],
                                         check=True, capture_output=True)
         git("init", "-q", "-b", "main")
-        (repo / "river" / "core.py").write_text("x = 1\n")
+        (repo / "river" / "core.py").write_text("x = 1\n", encoding="utf-8")
         git("add", "."), git("commit", "-q", "-m", "one")
         with mock.patch.object(server, "REPO", repo), mock.patch.object(server, "PKG", repo / "river"):
             self.assertFalse(server._code_dirty())
@@ -4507,18 +4476,18 @@ class ServeLoop(unittest.TestCase):
             (repo / "river" / ".DS_Store").write_bytes(b"\0")
             (repo / "river" / "static").mkdir()
             (repo / "river" / "static" / ".DS_Store").write_bytes(b"\0")
-            (repo / "river" / "notes.txt").write_text("a note\n")
+            (repo / "river" / "notes.txt").write_text("a note\n", encoding="utf-8")
             self.assertFalse(server._code_dirty())
             # New code that is not committed, and a change of a file git tracks, still hold it.
-            (repo / "river" / "static" / "new.py").write_text("y = 2\n")
+            (repo / "river" / "static" / "new.py").write_text("y = 2\n", encoding="utf-8")
             self.assertTrue(server._code_dirty())
             (repo / "river" / "static" / "new.py").unlink()
-            (repo / "river" / "core.py").write_text("x = 2\n")
+            (repo / "river" / "core.py").write_text("x = 2\n", encoding="utf-8")
             self.assertTrue(server._code_dirty())
             git("commit", "-q", "-am", "two")
             self.assertFalse(server._code_dirty())
         # And this clone ignores the file.
-        self.assertIn(".DS_Store", (Path(server.REPO) / ".gitignore").read_text().split())
+        self.assertIn(".DS_Store", (Path(server.REPO) / ".gitignore").read_text(encoding="utf-8").split())
 
 
 class PageUpdate(unittest.TestCase):
@@ -4538,7 +4507,7 @@ class PageUpdate(unittest.TestCase):
         self.dir.cleanup()
 
     def commit(self, repo, msg):
-        with open(os.path.join(repo, msg), "w") as f:
+        with open(os.path.join(repo, msg), "w", encoding="utf-8") as f:
             f.write(msg)
         self.git(repo, "add", msg)
         self.git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg)
@@ -4563,7 +4532,7 @@ class PageUpdate(unittest.TestCase):
 
     def test_local_changes_in_the_way_say_so(self):
         self.commit(self.up, "two")
-        with open(os.path.join(self.clone, "two"), "w") as f:
+        with open(os.path.join(self.clone, "two"), "w", encoding="utf-8") as f:
             f.write("mine, not committed")
         with self.assertRaises(RiverError) as e:
             server.update_apply(self.clone, lambda: self.fail("restarted"))
@@ -4596,9 +4565,9 @@ class StaticFiles(unittest.TestCase):
         os.makedirs(os.path.join(self.root, "vendor", "tab"))
         for rel, body in (("app.js", "export const a = 1;"), ("app.css", "b{}"), ("vendor/tab/LICENSE", "MIT"),
                           ("vendor/tab/t.min.js.map", "{}"), (".hidden", "x")):
-            with open(os.path.join(self.root, rel), "w") as f:
+            with open(os.path.join(self.root, rel), "w", encoding="utf-8") as f:
                 f.write(body)
-        with open(os.path.join(base, "secret.txt"), "w") as f:
+        with open(os.path.join(base, "secret.txt"), "w", encoding="utf-8") as f:
             f.write("no")
         os.symlink(os.path.join(base, "secret.txt"), os.path.join(self.root, "link.txt"))
 
@@ -4755,8 +4724,8 @@ try {
 """
 
     def test_the_fields_have_an_enter_key(self):
-        app = (server.STATIC / "app.js").read_text()
-        form = (server.STATIC / "components" / "folderForm.js").read_text()
+        app = (server.STATIC / "app.js").read_text(encoding="utf-8")
+        form = (server.STATIC / "components" / "folderForm.js").read_text(encoding="utf-8")
         self.assertRegex(app, r'\$\("#setupSteps"\)\.addEventListener\("keydown"')
         for field in ('f.id === "suName"', 'f.id === "suTaskTitle"', "f.dataset.trackerFor"):
             self.assertIn(field, app)
@@ -4822,7 +4791,7 @@ try {
                                  ["github owner/repo via gh"])
             finally:
                 c.close()
-            self.assertIn("MaximizePM", Path(folder, "AGENTS.md").read_text())  # the folder got its block
+            self.assertIn("MaximizePM", Path(folder, "AGENTS.md").read_text(encoding="utf-8"))  # the folder got its block
 
 
 class TerminalDialogLayout(unittest.TestCase):
@@ -4859,7 +4828,7 @@ try {
 </script>"""
 
     def test_the_styles_take_no_size_from_the_text(self):
-        css = (server.STATIC / "app.css").read_text()
+        css = (server.STATIC / "app.css").read_text(encoding="utf-8")
         rule = lambda sel: re.search(re.escape(sel) + r" \{([^}]*)\}", css).group(1)
         # The dialog part (#5028): .dlg > .box takes its width from --dlg-w, which the terminal dialog sets in px.
         box, term = rule("#termDlg > .box"), rule("#termDlg .term")
@@ -4870,7 +4839,7 @@ try {
             self.assertIn(want, term)
         for sized_by_text in ("max-height", "ch,", "em;"):
             self.assertNotIn(sized_by_text, term)
-        js = (server.STATIC / "components" / "terminalDialog.js").read_text()
+        js = (server.STATIC / "components" / "terminalDialog.js").read_text(encoding="utf-8")
         self.assertNotRegex(js, r"style\.(width|height|fontSize)|resize-pane|resize-window")
 
     @unittest.skipUnless(_chrome(), "no Chrome on this computer (MAXPM_CHROME names one)")
@@ -5055,8 +5024,6 @@ class KillPane(unittest.TestCase):
         self.assertIsNone(server.pane_process(self.c, "nobody"))
 
     def test_end_now_ends_the_pane_s_process_group_of_an_agent_with_no_recorded_process(self):
-        if os.name == "nt":
-            self.skipTest("no process groups and no tmux on Windows")
         p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
         self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
         from tests import proc_after_exec
@@ -5196,7 +5163,7 @@ class OpsPage(unittest.TestCase):
         page = server.page_html("/plan/ops").decode()
         for part in ('id="plan-ops"', 'id="opsDlg"', 'href="views/ops.css"'):
             self.assertIn(part, page)
-        js = (server.STATIC / "views" / "plan.js").read_text()
+        js = (server.STATIC / "views" / "plan.js").read_text(encoding="utf-8")
         self.assertIn('["ops", "Operations"]', js)
 
 

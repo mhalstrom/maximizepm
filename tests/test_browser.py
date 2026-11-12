@@ -111,7 +111,7 @@ class Controller(Base):
         browser.give_back(self.c, b, "mark")
         self.assertEqual(b.info()["controller"]["who"], "ag1")
         # The state stays for a restarted serve.
-        self.assertEqual(json.loads((b.dir / "state.json").read_text())["controller"]["who"], "ag1")
+        self.assertEqual(json.loads((b.dir / "state.json").read_text(encoding="utf-8"))["controller"]["who"], "ag1")
         with self.assertRaisesRegex(RiverError, "not by ag2"):
             browser.release(self.c, b, "ag2")
         browser.release(self.c, b, "ag1")
@@ -381,6 +381,25 @@ class RealChrome(Base):
 class AttachedChrome(Base):
     """browser_source cdp:<port> (#5406): attach to a Chrome that runs already, use only serve's own tab, leave it open."""
 
+    @staticmethod
+    def _stop_chrome(p, prof):
+        """Stop the shared Chrome with its helper processes (its own process group), and remove its profile: a
+        helper still writes there for a moment, and the temporary folder's removal failed on it ('Directory not
+        empty: Default', on Linux)."""
+        import shutil
+        import signal
+        import time
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.wait()
+        for _ in range(50):
+            shutil.rmtree(prof, ignore_errors=True)
+            if not os.path.exists(prof):
+                break
+            time.sleep(0.1)
+
     def test_attach_uses_its_own_tab_and_leaves_the_browser_open(self):
         chrome = browser.chrome_path()
         if not chrome:
@@ -392,11 +411,11 @@ class AttachedChrome(Base):
         p = subprocess.Popen([chrome, "--headless=new", f"--user-data-dir={prof}", "--remote-debugging-port=0",
                               "--no-first-run", "data:text/html,<title>Theirs</title>"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        self.addCleanup(lambda: (p.kill(), p.wait()))
+        self.addCleanup(self._stop_chrome, p, prof)
         port = None
         for _ in range(100):
             try:
-                port = int(Path(prof, "DevToolsActivePort").read_text().split()[0])
+                port = int(Path(prof, "DevToolsActivePort").read_text(encoding="utf-8").split()[0])
                 break
             except (OSError, ValueError, IndexError):
                 time.sleep(0.1)
@@ -453,7 +472,7 @@ class CdpAddress(Base):
         self.assertIsNone(browser.cdp_refusal(self.c, b, "ag1", msg))
         self.assertEqual(msg["params"]["downloadPath"], str(b.dir / "downloads"))
         (b.dir / "downloads").mkdir(parents=True)
-        (b.dir / "downloads" / "a.pdf").write_text("x")
+        (b.dir / "downloads" / "a.pdf").write_text("x", encoding="utf-8")
         self.assertIsNone(no("DOM.setFileInputFiles", {"files": [str(b.dir / "downloads" / "a.pdf")]}))
         self.assertIn("project folder", no("DOM.setFileInputFiles", {"files": ["/etc/hosts"]}))
         # The controller rule: changes wait for control; reads pass.
@@ -562,13 +581,13 @@ class CdpAddress(Base):
         path = browser.browser_dir("web") / "mcp" / "web-1a2b.json"
         self.assertIn(f"--mcp-config {path}", cmd)
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        server_cfg = json.loads(path.read_text())["mcpServers"][browser.MCP_NAME]
+        server_cfg = json.loads(path.read_text(encoding="utf-8"))["mcpServers"][browser.MCP_NAME]
         self.assertEqual(server_cfg["command"], "npx")
         self.assertEqual(server_cfg["args"][:3], ["-y", "@playwright/mcp@latest", "--cdp-endpoint"])
         self.assertEqual(server_cfg["args"][3], browser.cdp_url(self.c, "web", "web-1a2b"))
         core.config_set(self.c, "browser_mcp", "npx -y @playwright/mcp@0.0.40", project="web")
         core._launch_agent_cmd(self.c, pid, None, name="web-1a2b")
-        self.assertEqual(json.loads(path.read_text())["mcpServers"][browser.MCP_NAME]["args"][1], "@playwright/mcp@0.0.40")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["mcpServers"][browser.MCP_NAME]["args"][1], "@playwright/mcp@0.0.40")
 
     def test_a_real_chrome_through_the_cdp_address_of_serve(self):
         if not browser.chrome_path():

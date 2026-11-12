@@ -32,7 +32,7 @@ class PageHooks(unittest.TestCase):
         self.deploy = core.done(self.c, x, "commit", "mark", ship_it=True)["shipped_in"]
         self.log = os.path.join(self.dir.name, "hook.log")
         script = os.path.join(self.dir.name, "hook.py")
-        with open(script, "w") as f:
+        with open(script, "w", encoding="utf-8") as f:
             f.write(f"import os\nopen({self.log!r}, 'a').write(os.environ['MAXPM_EVENT'] + ' ' + "
                     "os.environ['MAXPM_REV'] + '\\n')\n")
         self.cmd = f'"{sys.executable}" "{script}"'
@@ -70,7 +70,7 @@ class PageHooks(unittest.TestCase):
         code, body = self.post("target_cut", target="web", rev="abc1234")
         self.assertEqual(code, 200)
         self.assertEqual(self.ended(), 1)
-        with open(self.log) as f:
+        with open(self.log, encoding="utf-8") as f:
             self.assertEqual(f.read(), "release-cut abc1234\n")
         self.assertTrue(any(e["change"].startswith("hook release-cut: exit 0, ")
                             for e in core.item_show(self.c, self.deploy)["events"]))
@@ -125,5 +125,5 @@ class PageHooks(unittest.TestCase):
         self.c.execute("UPDATE hook_runs SET queued_at='2000-01-01T00:00:00Z'")
         self.assertTrue(server.hooks_soon(self.c))
         self.assertEqual(self.ended(), 1)
-        with open(self.log) as f:
+        with open(self.log, encoding="utf-8") as f:
             self.assertEqual(f.read(), "release-cut abc1234\n")

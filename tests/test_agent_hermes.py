@@ -18,11 +18,11 @@ FIX = Path(__file__).parent / "fixtures" / "hermes"
 
 
 def screen(name):
-    return (FIX / name).read_text()
+    return (FIX / name).read_text(encoding="utf-8")
 
 
 def lines(name):
-    return (FIX / name).read_text().splitlines()
+    return (FIX / name).read_text(encoding="utf-8").splitlines()
 
 
 def state_of(text):
@@ -323,10 +323,10 @@ class Store(HomeCase):
         sid = json.loads(lines("chat_approval.jsonl")[0])["id"]
         path = agents.get("hermes").chat_path(sid)
         self.assertEqual(path, self.home / "queue" / "hermes" / f"{sid}.jsonl")
-        self.assertEqual(path.read_text().splitlines(), lines("chat_approval.jsonl"))
+        self.assertEqual(path.read_text(encoding="utf-8").splitlines(), lines("chat_approval.jsonl"))
         # The Sessions tab parses the file line by line.
         a = agents.get("hermes")
-        entries = [e for x in path.read_text().splitlines() for e in a.parse_chat_line(json.loads(x), x)[0]]
+        entries = [e for x in path.read_text(encoding="utf-8").splitlines() for e in a.parse_chat_line(json.loads(x), x)[0]]
         self.assertEqual(entries, hermes.parse_chat(lines("chat_approval.jsonl"))[0])
 
     def _db(self):
@@ -343,7 +343,7 @@ class Store(HomeCase):
             c.execute("INSERT INTO messages (session_id, id, role, content, timestamp, active, _compressed_summary, "
                       "compacted) VALUES (?, 9999, 'user', 'one more', 1794383300, 1, 0, 0)", (sid,))
             c.execute("UPDATE sessions SET title='New title', output_tokens=200 WHERE id=?", (sid,))
-        got = hermes.chat_path(sid).read_text().splitlines()
+        got = hermes.chat_path(sid).read_text(encoding="utf-8").splitlines()
         self.assertEqual(got[:len(lines("chat_approval.jsonl"))], lines("chat_approval.jsonl"))  # appended only
         self.assertEqual([json.loads(x)["type"] for x in got[-2:]], ["session", "message"])
         self.assertEqual(hermes.chat_title(got), "New title")
@@ -351,10 +351,10 @@ class Store(HomeCase):
 
     def test_an_undo_writes_the_copy_again(self):
         sid = json.loads(lines("chat_approval.jsonl")[0])["id"]
-        before = hermes.parse_chat(hermes.chat_path(sid).read_text().splitlines())[0]
+        before = hermes.parse_chat(hermes.chat_path(sid).read_text(encoding="utf-8").splitlines())[0]
         with self._db() as c:  # /undo of the last turn: Hermes marks its rows inactive
             c.execute("UPDATE messages SET active=0 WHERE session_id=? AND id >= 1348", (sid,))
-        after = hermes.parse_chat(hermes.chat_path(sid).read_text().splitlines())[0]
+        after = hermes.parse_chat(hermes.chat_path(sid).read_text(encoding="utf-8").splitlines())[0]
         self.assertEqual(after, before[:-4])
 
     def test_texts_for_the_artifacts_tab(self):
@@ -413,11 +413,11 @@ class Commands(HomeCase):
         skills = self.home / "skills"
         (skills / "research" / "arxiv").mkdir(parents=True)
         (skills / "research" / "arxiv" / "SKILL.md").write_text(
-            "---\nname: arxiv\ndescription: Search arXiv papers\n---\nbody\n")
+            "---\nname: arxiv\ndescription: Search arXiv papers\n---\nbody\n", encoding="utf-8")
         (skills / "plain").mkdir()
-        (skills / "plain" / "SKILL.md").write_text("no front matter\n")
+        (skills / "plain" / "SKILL.md").write_text("no front matter\n", encoding="utf-8")
         (skills / "bad name").mkdir()
-        (skills / "bad name" / "SKILL.md").write_text("---\nname: bad name\n---\n")
+        (skills / "bad name" / "SKILL.md").write_text("---\nname: bad name\n---\n", encoding="utf-8")
         got = agents.get("hermes").read_commands("/work")
         custom = got[len(hermes.COMMANDS):]
         self.assertEqual(custom, [{"name": "plain", "description": "", "hint": ""},
@@ -432,7 +432,7 @@ class Models(HomeCase):
         a = agents.get("hermes")
         self.assertEqual(a.read_models(), a.describe["models"])  # no cache: the built-in list
         (self.home / "provider_models_cache.json").write_text(json.dumps(
-            {"openai-codex": {"models": ["gpt-6.1-sol", "gpt-6.1-terra"]}, "anthropic": {"models": ["x"]}}))
+            {"openai-codex": {"models": ["gpt-6.1-sol", "gpt-6.1-terra"]}, "anthropic": {"models": ["x"]}}), encoding="utf-8")
         self.assertEqual(a.read_models(), ["gpt-6.1-sol", "gpt-6.1-terra"])
         self.assertEqual(hermes.read_models("anthropic"), ["x"])
 

@@ -290,13 +290,13 @@ def install_hooks(folder, report):
     path = Path(river_dir()) / "pi" / EXTENSION_NAME
     text = extension_text(report, path)
     try:
-        same = path.read_text() == text
+        same = path.read_text(encoding="utf-8") == text
     except OSError:
         same = False
     if not same:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-        tmp.write_text(text)
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(path)
     return ["-e", str(path)]
 
@@ -485,7 +485,7 @@ def _header(lines):
 def _head(p):
     """(header, id of the first entry) of a session file; (None, None) when it cannot be read."""
     try:
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             rows = _rows([f.readline(), f.readline()])
     except OSError:
         return None, None
@@ -565,7 +565,7 @@ def _templates(d):
     out = []
     for f in sorted(Path(d).glob("*.md")) if Path(d).is_dir() else ():
         try:
-            meta, body = _front(f.read_text(errors="replace"))
+            meta, body = _front(f.read_text(errors="replace", encoding="utf-8"))
         except OSError:
             continue
         first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
@@ -586,7 +586,7 @@ def _skills(d, top_md=False):
     out = []
     for f in files:
         try:
-            meta, _ = _front(f.read_text(errors="replace"))
+            meta, _ = _front(f.read_text(errors="replace", encoding="utf-8"))
         except OSError:
             continue
         name = meta.get("name") or (f.parent.name if f.name == "SKILL.md" else f.stem)
@@ -617,7 +617,7 @@ def context_window(model):
     import json
     from pathlib import Path
     try:
-        store = json.loads((Path.home() / ".pi" / "agent" / "models-store.json").read_text())
+        store = json.loads((Path.home() / ".pi" / "agent" / "models-store.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     text = str(model or "")

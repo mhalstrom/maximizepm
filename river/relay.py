@@ -101,7 +101,7 @@ def state_path() -> str:
 
 def load() -> dict | None:
     try:
-        with open(config_path()) as f:
+        with open(config_path(), encoding="utf-8") as f:
             cfg = json.load(f)
     except (OSError, ValueError):
         return None
@@ -111,7 +111,7 @@ def load() -> dict | None:
 def _write_private(path: str, data: dict) -> None:
     tmp = f"{path}.{os.getpid()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
 
@@ -436,7 +436,7 @@ def saved_status() -> dict:
            "tunnel": (cfg or {}).get("tunnel"),
            "host": (cfg or {}).get("host"), "state": "off"}
     try:
-        with open(state_path()) as f:
+        with open(state_path(), encoding="utf-8") as f:
             st = json.load(f)
     except (OSError, ValueError):
         st = {}

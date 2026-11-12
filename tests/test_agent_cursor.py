@@ -18,11 +18,11 @@ CHAT_ID = "7a14bd07-35ce-499a-8a3a-9b8c2333855d"
 
 
 def lines(name="transcript.jsonl"):
-    return (FIX / name).read_text().splitlines()
+    return (FIX / name).read_text(encoding="utf-8").splitlines()
 
 
 def screen(name):
-    return server._prompt_tail((FIX / f"screen-{name}.txt").read_text())
+    return server._prompt_tail((FIX / f"screen-{name}.txt").read_text(encoding="utf-8"))
 
 
 class Env(unittest.TestCase):
@@ -137,7 +137,7 @@ class Chat(Env):
     def _transcript(self, folder):
         d = self.root / "projects" / cursor.workspace_key(folder) / "agent-transcripts" / CHAT_ID
         d.mkdir(parents=True)
-        (d / f"{CHAT_ID}.jsonl").write_text((FIX / "transcript.jsonl").read_text())
+        (d / f"{CHAT_ID}.jsonl").write_text((FIX / "transcript.jsonl").read_text(encoding="utf-8"), encoding="utf-8")
         return d / f"{CHAT_ID}.jsonl"
 
     def test_chat_path_by_folder_and_by_id(self):
@@ -150,7 +150,7 @@ class Chat(Env):
     def test_chat_path_in_the_home_folder(self):
         d = self.root / "home" / ".cursor" / "projects" / "Users-person-app" / "agent-transcripts" / CHAT_ID
         d.mkdir(parents=True)
-        (d / f"{CHAT_ID}.jsonl").write_text("")
+        (d / f"{CHAT_ID}.jsonl").write_text("", encoding="utf-8")
         self.assertEqual(self.a.chat_path(CHAT_ID), d / f"{CHAT_ID}.jsonl")
 
     def test_the_recorded_chat(self):
@@ -189,7 +189,7 @@ class Chat(Env):
     def test_meta(self):
         d = self.root / "home" / ".cursor" / "chats" / cursor.chats_key("/w") / CHAT_ID
         d.mkdir(parents=True)
-        (d / "meta.json").write_text(json.dumps({"title": "Date And Year", "cwd": "/w"}))
+        (d / "meta.json").write_text(json.dumps({"title": "Date And Year", "cwd": "/w"}), encoding="utf-8")
         self.assertEqual(cursor.meta(CHAT_ID, "/w")["title"], "Date And Year")
         self.assertEqual(cursor.meta(CHAT_ID)["cwd"], "/w")
         self.assertIsNone(cursor.meta("ffffffff-0000"))
@@ -245,12 +245,12 @@ class Commands(Env):
     def test_custom_commands_and_skills(self):
         home, ws = self.root / "home", self.root / "ws"
         (ws / ".cursor" / "commands").mkdir(parents=True)
-        (ws / ".cursor" / "commands" / "ship.md").write_text("---\ndescription: Ship it\nargument-hint: <what>\n---\nBody")
+        (ws / ".cursor" / "commands" / "ship.md").write_text("---\ndescription: Ship it\nargument-hint: <what>\n---\nBody", encoding="utf-8")
         (home / ".claude" / "commands").mkdir(parents=True)
-        (home / ".claude" / "commands" / "ship.md").write_text("# Another ship\n")  # the folder's one wins
-        (home / ".claude" / "commands" / "model.md").write_text("# Not the built-in\n")
+        (home / ".claude" / "commands" / "ship.md").write_text("# Another ship\n", encoding="utf-8")  # the folder's one wins
+        (home / ".claude" / "commands" / "model.md").write_text("# Not the built-in\n", encoding="utf-8")
         (home / ".cursor" / "skills" / "tidy").mkdir(parents=True)
-        (home / ".cursor" / "skills" / "tidy" / "SKILL.md").write_text("---\nname: tidy-up\ndescription: Tidy\n---\n")
+        (home / ".cursor" / "skills" / "tidy" / "SKILL.md").write_text("---\nname: tidy-up\ndescription: Tidy\n---\n", encoding="utf-8")
         got = cursor.read_commands(ws, home=home)
         self.assertEqual(got, [{"name": "ship", "description": "Ship it", "hint": "<what>"},
                                {"name": "tidy-up", "description": "Tidy", "hint": ""}])
@@ -261,11 +261,12 @@ class Commands(Env):
         from river import sessions
         ws = self.root / "ws"
         (ws / ".cursor" / "commands").mkdir(parents=True)
-        (ws / ".cursor" / "commands" / "ship.md").write_text("---\ndescription: Ship it\n---\nBody")
+        (ws / ".cursor" / "commands" / "ship.md").write_text("---\ndescription: Ship it\n---\nBody", encoding="utf-8")
         chat = self.root / "home" / ".cursor" / "chats" / cursor.chats_key(ws) / CHAT_ID
         chat.mkdir(parents=True)
-        (chat / "meta.json").write_text(json.dumps({"cwd": str(ws)}))
+        (chat / "meta.json").write_text(json.dumps({"cwd": str(ws)}), encoding="utf-8")
         conn = core.connect()
+        self.addCleanup(conn.close)
         core.register(conn, "cur1")
         conn.execute("UPDATE agents SET agent_type='cursor' WHERE name='cur1'")
         conn.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('cur1', ?, '2026-11-11')",
@@ -291,7 +292,7 @@ class Setup(Env):
         got = self.a.write_mcp_config()
         self.assertTrue(got.startswith(f"added MaximizePM to {self.file()}"), got)
         self.assertIn("cursor-agent mcp enable maxpm", got)
-        entry = json.loads(self.file().read_text())["mcpServers"]["maxpm"]
+        entry = json.loads(self.file().read_text(encoding="utf-8"))["mcpServers"]["maxpm"]
         want = agents.setup_entry()
         self.assertEqual((entry["command"], entry["args"]), (want["command"], want["args"]))
         self.assertEqual(entry["env"], {"MAXPM_DB": str(self.root / "t.db")})  # a folder session, not a chat
@@ -300,31 +301,31 @@ class Setup(Env):
     def test_the_other_servers_and_keys_stay_and_the_old_file_is_kept(self):
         self.file().parent.mkdir(parents=True)
         old = {"mcpServers": {"github": {"url": "https://example.test/mcp"}}, "other": 1}
-        self.file().write_text(json.dumps(old))
+        self.file().write_text(json.dumps(old), encoding="utf-8")
         self.a.write_mcp_config()
-        new = json.loads(self.file().read_text())
+        new = json.loads(self.file().read_text(encoding="utf-8"))
         self.assertEqual(new["mcpServers"]["github"], old["mcpServers"]["github"])
         self.assertEqual(new["other"], 1)
-        self.assertEqual(json.loads(self.file().with_name("mcp.json.bak").read_text()), old)
+        self.assertEqual(json.loads(self.file().with_name("mcp.json.bak").read_text(encoding="utf-8")), old)
         self.assertIn("nothing changed", self.a.write_mcp_config())  # the same entry again
 
     def test_remove_takes_only_maxpm_out(self):
         self.assertIn("has no MaximizePM entry", self.a.write_mcp_config(remove=True))
         self.file().parent.mkdir(parents=True)
-        self.file().write_text(json.dumps({"mcpServers": {"github": {"url": "https://example.test/mcp"}}}))
+        self.file().write_text(json.dumps({"mcpServers": {"github": {"url": "https://example.test/mcp"}}}), encoding="utf-8")
         self.a.write_mcp_config()
         self.assertIn("took MaximizePM out", self.a.write_mcp_config(remove=True))
-        self.assertEqual(json.loads(self.file().read_text()), {"mcpServers": {"github": {"url": "https://example.test/mcp"}}})
+        self.assertEqual(json.loads(self.file().read_text(encoding="utf-8")), {"mcpServers": {"github": {"url": "https://example.test/mcp"}}})
 
     def test_another_file_and_a_file_that_is_no_json(self):
         project = self.root / "proj" / ".cursor" / "mcp.json"
         self.a.write_mcp_config(str(project))
-        self.assertIn("maxpm", json.loads(project.read_text())["mcpServers"])
+        self.assertIn("maxpm", json.loads(project.read_text(encoding="utf-8"))["mcpServers"])
         self.assertFalse(self.file().exists())
-        project.write_text("{ not json")
+        project.write_text("{ not json", encoding="utf-8")
         with self.assertRaises(core.RiverError):
             self.a.write_mcp_config(str(project))
-        self.assertEqual(project.read_text(), "{ not json")  # left as it was
-        project.write_text(json.dumps({"mcpServers": []}))
+        self.assertEqual(project.read_text(encoding="utf-8"), "{ not json")  # left as it was
+        project.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
         with self.assertRaises(core.RiverError):
             self.a.write_mcp_config(str(project))
