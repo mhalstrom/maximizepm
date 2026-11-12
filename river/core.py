@@ -274,6 +274,14 @@ DEFAULT_SETTINGS = {
     # next one waits for the next interval.
     "ops_deadman_url": "",
     "ops_deadman_every": "1m",
+    # The watchdog (#5441, decisions 1 A and 5 A of #5337): a launchd job (maxpm serve --install-watchdog) runs
+    # maxpm ops check --outside every minute, also when maxpm serve is down. It runs the checks marked outside (a
+    # check of serve itself, of the relay). When one is in fault and its last run failed, it starts the check's repair,
+    # at most ops_outside_repair_max times in ops_outside_repair_window for the check; then it stops repairing and
+    # sends a notice itself on notify_channels, because serve, which sends the other notices, may be down. A check
+    # in fault with no repair sends the notice at once. A check of severity note sends none.
+    "ops_outside_repair_max": "3",
+    "ops_outside_repair_window": "30m",
     # A shell command of a session that matches push_guard (a push, a merge of a pull request, a launch) is refused
     # while the session has an unread alert or holds an item that someone blocked (#5381: the rule 'read the inbox
     # before a push' in text failed ten times). The session reads its inbox, then runs the command again. Add a
@@ -999,6 +1007,7 @@ CREATE TABLE IF NOT EXISTS checks (
   subject       INTEGER NOT NULL DEFAULT 0,  -- 1: each line of the output names a subject with its own fault
   repair        TEXT,                    -- a command that fixes a known fault
   layer         TEXT NOT NULL DEFAULT 'app',  -- what it watches (OPS_LAYERS): a fault of a lower layer gives the kind
+  outside       INTEGER NOT NULL DEFAULT 0,  -- 1: the watchdog runs it (maxpm ops check --outside), not maxpm serve
   paused_until  TEXT,
   last_beat     TEXT,                    -- beat: when the project's own job last sent one (maxpm ops beat)
   state         TEXT NOT NULL DEFAULT 'new',  -- new, healthy, failing, fault, recovered, paused
@@ -1447,6 +1456,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE checks ADD COLUMN layer TEXT NOT NULL DEFAULT 'app'")
     if "subjects" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
         conn.execute("ALTER TABLE ops_runs ADD COLUMN subjects TEXT")
+    # The watchdog (#5441): a check marked outside runs in maxpm ops check --outside, not in maxpm serve.
+    if "outside" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
+        conn.execute("ALTER TABLE checks ADD COLUMN outside INTEGER NOT NULL DEFAULT 0")
     if "backlog_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN backlog_at TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN backlog_note TEXT")
@@ -1800,7 +1812,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_watch_every", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -1823,7 +1835,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_storm_count", "ops_max_investigations", "ops_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_storm_count", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -3360,6 +3372,7 @@ def _ops_row(r):
     d = dict(r)
     d["config"] = json.loads(d["config"])
     d["subject"] = bool(d["subject"])
+    d["outside"] = bool(d.get("outside"))
     d["key"] = _ops_key(d)
     d["runs_command"] = d["form"] in OPS_COMMAND_FORMS
     return d
@@ -3468,6 +3481,7 @@ def _ops_build(form, fields, old=None):
         raise RiverError(f"no layer {col['layer']!r}: app (the project itself), dependency (an outside vendor), "
                          f"capacity (a disk, memory, a quota) or service (a process, the database service)")
     col["subject"] = bool(fields["subject"]) if fields.get("subject") is not None else bool(old.get("subject"))
+    col["outside"] = bool(fields["outside"]) if fields.get("outside") is not None else bool(old.get("outside"))
     if col["subject"] and form not in OPS_COMMAND_FORMS:
         raise RiverError(f"a {form} check has no subjects: only a cmd, log, or plugin check names them in its output")
     return col
@@ -3480,11 +3494,12 @@ def _ops_summary(c):
             "cmd": lambda: cfg["command"], "plugin": lambda: cfg["command"],
             "log": lambda: f"{cfg['command']}: fewer than {cfg['limit']} lines match {cfg['pattern']!r} in {cfg['window']}"}
     return (f"{c['form']} {what[c['form']]()}; every {c['every']}, fault after {c['fail_after']}, {c['severity']}"
-            + (f", layer {c['layer']}" if c.get("layer", "app") != "app" else ""))
+            + (f", layer {c['layer']}" if c.get("layer", "app") != "app" else "")
+            + ("; outside serve (the watchdog runs it)" if c.get("outside") else ""))
 
 
 _OPS_COLS = ("form", "config", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "subject",
-             "repair", "layer")
+             "repair", "layer", "outside")
 
 
 def _ops_name(name):
@@ -3503,11 +3518,11 @@ def _ops_refuse(conn, actor, *checks):
 def _ops_insert(conn, kind, scope, name, col, actor):
     """Write a new check (inside the caller's tx; the caller checked the rights)."""
     conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
-                 "severity,runbook,subject,repair,layer,created_by,created_at) "
-                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 "severity,runbook,subject,repair,layer,outside,created_by,created_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (kind, scope, name, col["form"], json.dumps(col["config"]), col["every"], col["fail_after"],
                   col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
-                  col["repair"], col.get("layer") or "app", actor, iso(now())))
+                  col["repair"], col.get("layer") or "app", int(bool(col.get("outside"))), actor, iso(now())))
     c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
     _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else ""))
@@ -3517,14 +3532,15 @@ def _ops_insert(conn, kind, scope, name, col, actor):
 def _ops_update(conn, old, col, actor):
     """Write the new columns of a check (inside the caller's tx). Returns the changed columns and the check."""
     col = dict(col, layer=col.get("layer") or old.get("layer") or "app")  # a proposal from before #5509 has none
+    col.setdefault("outside", False)  # and one from before #5441
     changed = [k for k in _OPS_COLS if col[k] != old[k]]
     if not changed:
         return [], old
     conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
-                 " runbook=?, subject=?, repair=?, layer=?, changed_by=?, changed_at=? WHERE id=?",
+                 " runbook=?, subject=?, repair=?, layer=?, outside=?, changed_by=?, changed_at=? WHERE id=?",
                  (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
                   col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"],
-                  col.get("layer") or "app", actor, iso(now()), old["id"]))
+                  col.get("layer") or "app", int(bool(col.get("outside"))), actor, iso(now()), old["id"]))
     c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
     _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} changed ({', '.join(changed)}): {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
@@ -3577,7 +3593,7 @@ def ops_rm(conn, scope, name, actor=None):
 #    "settings": {"ops_page": "..."},                optional: settings of the scope, only keys that start with ops_
 #    "checks": [{"name": "home", "form": "url", "url": "https://...", "statuses": "200-399", "body": "Welcome",
 #                "every": "1m", "fail_after": 3, "recover_after": 2, "timeout": "10s", "severity": "page",
-#                "runbook": "...", "repair": "...", "subject": true}, ...]}
+#                "runbook": "...", "repair": "...", "subject": true, "outside": true}, ...]}
 #
 # A check holds its name, its form, the settings of the form (OPS_FORM_FIELDS) and the common fields; a field it
 # leaves out takes its default, as in maxpm ops add. The file is the whole profile: apply adds the checks that are
@@ -3585,7 +3601,7 @@ def ops_rm(conn, scope, name, actor=None):
 # idempotent, and it keeps the state and the pause of a check that stays.
 OPS_PROFILE_VERSION = 1
 _OPS_CHECK_KEYS = ({"name", "form", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "repair",
-                    "layer", "subject"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
+                    "layer", "subject", "outside"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
 
 
 def _ops_settings_scope(conn, kind, scope):
@@ -3611,6 +3627,8 @@ def ops_profile_export(conn, scope):
             d["layer"] = c["layer"]
         if c["subject"]:
             d["subject"] = True
+        if c["outside"]:
+            d["outside"] = True
         checks.append(d)
     out = {"maxpm_ops_profile": OPS_PROFILE_VERSION, "scope": f"{kind}:{name}", "checks": checks}
     sp = name if kind == "project" else f"deploy-{name}" if _deploy_project_id(conn, name) else None
@@ -3674,6 +3692,7 @@ def ops_profile_apply(conn, profile, scope=None, yes=False, actor=None):
             for k in ("runbook", "repair"):
                 fields.setdefault(k, "")  # left out: none, also when the check has one now
             fields.setdefault("subject", False)
+            fields.setdefault("outside", False)
             col = named(c["name"], "in the profile", lambda: _ops_build(c["form"], fields))
             new = dict(col, scope_kind=kind, scope=name, name=c["name"])
             if c["name"] not in old:
@@ -4027,13 +4046,16 @@ def _ops_verify(conn, run, watch, state):
     return out
 
 
-def ops_due(conn, at=None):
+def ops_due(conn, at=None, outside=False, slack=None):
     """The checks whose next run is due: not paused, no run open, and the last run started at least `every` ago,
     or sooner in the watch of a release of its target (_ops_watch_due). A pause whose time passed ends here (an
-    ops_events row 'resumed')."""
+    ops_events row 'resumed'). outside: the checks of the watchdog (maxpm ops check --outside), else those of
+    maxpm serve. slack: a run counts as due this much early, because launchd starts the watchdog every 60 s from
+    its own clock, and a check of every 1m that started a second late would wait a second minute."""
     at = at or now()
+    slack = slack or timedelta(0)
     out = []
-    for r in conn.execute("SELECT * FROM checks ORDER BY id").fetchall():
+    for r in conn.execute("SELECT * FROM checks WHERE outside=? ORDER BY id", (int(bool(outside)),)).fetchall():
         c = _ops_row(r)
         if c["paused_until"]:
             if parse_iso(c["paused_until"]) > at:
@@ -4048,7 +4070,8 @@ def ops_due(conn, at=None):
             continue
         last = conn.execute("SELECT started_at FROM ops_runs WHERE check_id=? ORDER BY id DESC LIMIT 1",
                             (c["id"],)).fetchone()
-        if last is None or at - parse_iso(last["started_at"]) >= parse_duration(c["every"]) or _ops_watch_due(conn, c, at):
+        if last is None or at - parse_iso(last["started_at"]) + slack >= parse_duration(c["every"]) or \
+                _ops_watch_due(conn, c, at):
             out.append(c)
     return out
 
@@ -4997,13 +5020,15 @@ def ops_faults(conn, check_id, rec, res, at=None, watch=None):
     return out
 
 
-def ops_close_lost(conn, running=(), at=None):
+def ops_close_lost(conn, running=(), at=None, outside=None):
     """Runs that never ended (maxpm serve stopped while they ran) count as unknown once their timeout and
-    OPS_LOST_GRACE have passed. running: the ids that a thread of this serve still runs."""
+    OPS_LOST_GRACE have passed. running: the ids that a thread of this serve still runs. outside: True only the
+    runs of the watchdog's checks, False only serve's, None all."""
     at = at or now()
     out = []
+    only = "" if outside is None else f" AND c.outside={int(bool(outside))}"
     for r in conn.execute("SELECT r.id, r.started_at, c.timeout FROM ops_runs r JOIN checks c ON c.id=r.check_id "
-                          "WHERE r.ended_at IS NULL").fetchall():
+                          "WHERE r.ended_at IS NULL" + only).fetchall():
         if r["id"] in running:
             continue
         if at - parse_iso(r["started_at"]) < parse_duration(r["timeout"]) + timedelta(seconds=OPS_LOST_GRACE):
@@ -5016,6 +5041,118 @@ def ops_close_lost(conn, running=(), at=None):
         rec = ops_record(conn, {"id": r["id"], "check": _ops_row(row)}, res, at)
         rec["items"] = ops_faults(conn, row["id"], rec, res, at)
         out.append(rec)
+    return out
+
+
+# ---- the watchdog (#5441, decisions 1 A and 5 A of #5337): maxpm ops check --outside, from a launchd job every
+# minute (maxpm serve --install-watchdog). It needs no maxpm serve: it runs the checks marked outside in its own
+# process, one after the other, and writes their runs, states and fault items to the queue as serve does. It starts a
+# check's repair itself (it restarts only local serve and the relay, never production: the repair is the person's
+# or the manager's command), at most ops_outside_repair_max times in ops_outside_repair_window, and then it sends a
+# notice on notify_channels itself, because serve, which sends the other notices, may be the thing that is down.
+OPS_OUTSIDE_SLACK = timedelta(seconds=10)
+_OPS_PAGE_STATES = ("fault", "paged", "page-ended")
+
+
+def _ops_page_last(conn, c):
+    """The newest of the check's fault, paged (a notice of the fault went out) and page-ended (a notice of the
+    recovery went out) events, or None."""
+    r = conn.execute(f"SELECT state FROM ops_events WHERE check_id=? AND key=? AND state IN "
+                     f"({','.join('?' * len(_OPS_PAGE_STATES))}) ORDER BY id DESC LIMIT 1",
+                     (c["id"], c["key"], *_OPS_PAGE_STATES)).fetchone()
+    return r["state"] if r else None
+
+
+def _ops_outside_repairs(conn, c, at, pid):
+    win = parse_duration(setting(conn, "ops_outside_repair_window", project_id=pid))
+    return conn.execute("SELECT COUNT(*) n FROM ops_events WHERE check_id=? AND state='repair' AND at>=?",
+                        (c["id"], iso(at - win))).fetchone()["n"]
+
+
+def _ops_outside_one(conn, c, notice, at=None):
+    """Run one outside check, then repair or send a notice as the rules say. Returns what it did."""
+    run = ops_start(conn, c, at)
+    if run is None:
+        return {"check": f"{c['scope']}/{c['name']}", "skipped": "a run of it is open"}
+    rec = ops_finish(conn, run, at)
+    t = at or now()
+    row = conn.execute("SELECT * FROM checks WHERE id=?", (c["id"],)).fetchone()
+    if row is None:
+        return rec
+    c = _ops_row(row)
+    failed = rec["status"] in OPS_FAILED
+    pid = _ops_scope_project_id(conn, c)
+    most = int(setting(conn, "ops_outside_repair_max", project_id=pid) or 0)
+    window = setting(conn, "ops_outside_repair_window", project_id=pid)
+    if c["state"] == "fault" and failed and c["repair"]:
+        n = _ops_outside_repairs(conn, c, t, pid)
+        if n < most:
+            items = _ops_fault_items(conn, c)
+            item = dict(items[0]) if items else None
+            why = f"the watchdog: {c['key']} is in fault ({rec.get('status')}); repair {n + 1} of {most} in {window}"
+            with tx(conn):
+                conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
+                             (c["id"], c["key"], "repair", iso(t), "watchdog", why[:500]))
+                if item is not None:
+                    _event(conn, item["id"], "watchdog", f"ops repair started: {c['repair']} ({why})")
+            rec["repair"] = ops_repair_run(conn, c, item, "watchdog")
+            rec["repair"]["n"] = n + 1
+            return rec
+        rec["repair_limit"] = n
+    if c["severity"] == "note" or notice is None:
+        return rec
+    last = _ops_page_last(conn, c)
+    if c["state"] == "fault" and failed and last in (None, "fault"):
+        what = (f"the watchdog ran its repair {rec['repair_limit']} times in {window} (ops_outside_repair_max {most}) "
+                f"and stopped: a person looks now"
+                if "repair_limit" in rec else "it has no repair command: a person looks now")
+        items = _ops_fault_items(conn, c)
+        title = f"MaximizePM: {c['scope']}/{c['name']} is down"
+        body = (f"{c['key']}: {_ops_last_summary(conn, c)}. {what}."
+                + (f" Item #{items[0]['id']}." if items else "") + f" Runs: maxpm ops history {c['scope']} {c['name']}")
+        rec["notice"] = _ops_notice(conn, c, "paged", title, body, notice, t)
+    elif c["state"] in ("healthy", "recovered") and last == "paged":
+        title = f"MaximizePM: {c['scope']}/{c['name']} works again"
+        body = f"{c['key']} passed again: {_ops_last_summary(conn, c)}. Close its item with the cause."
+        rec["notice"] = _ops_notice(conn, c, "page-ended", title, body, notice, t)
+    return rec
+
+
+def _ops_scope_project_id(conn, c):
+    r = conn.execute("SELECT id FROM projects WHERE name=?", (_ops_project(conn, c),)).fetchone()
+    return r["id"] if r else None
+
+
+def _ops_last_summary(conn, c):
+    r = conn.execute("SELECT status, summary FROM ops_runs WHERE check_id=? AND ended_at IS NOT NULL ORDER BY id DESC "
+                     "LIMIT 1", (c["id"],)).fetchone()
+    return (r["summary"] or r["status"]) if r else "no run"
+
+
+def _ops_notice(conn, c, state, title, body, notice, at):
+    """Send one notice through notice(title, body) -> [{"channel", "ok", "error"}]; when one channel took it,
+    record it (state paged or page-ended), so the next pass does not send it again. When none did, the next pass
+    tries again."""
+    sent = notice(title, body)
+    ok = [x["channel"] for x in sent if x.get("ok")]
+    if ok:
+        with tx(conn):
+            conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
+                         (c["id"], c["key"], state, iso(at), "watchdog", f"notice on {', '.join(ok)}: {title}"))
+    return {"title": title, "body": body, "sent": sent}
+
+
+def ops_outside(conn, notice=None, at=None):
+    """One pass of the watchdog (maxpm ops check --outside): close the lost runs of the outside checks, then run
+    each one that is due. notice(title, body) sends a notice on every channel of notify_channels (notify.direct);
+    None sends none. Returns one result for each check that ran."""
+    ops_close_lost(conn, at=at, outside=True)
+    out = []
+    for c in ops_due(conn, at, outside=True, slack=OPS_OUTSIDE_SLACK):
+        try:
+            out.append(_ops_outside_one(conn, c, notice, at))
+        except Exception as e:  # one check that fails does not stop the others; the run stays open, then lost
+            out.append({"check": f"{c['scope']}/{c['name']}", "error": f"{type(e).__name__}: {e}"})
     return out
 
 
@@ -5182,6 +5319,7 @@ def ops_line(conn, project):
 def _ops_proposal_row(conn, r):
     d = dict(r)
     d["spec"] = json.loads(d["spec"])
+    d["spec"].setdefault("outside", False)  # proposed before #5441
     c = dict(d["spec"], scope_kind=d["scope_kind"], scope=d["scope"], name=d["name"])
     d["summary"] = _ops_summary(c)
     d["runs_command"] = c["form"] in OPS_COMMAND_FORMS

@@ -390,6 +390,24 @@ def test(conn, channel):
     return {"channel": channel, "ok": True}
 
 
+def direct(conn, title, body):
+    """Send one notice now on each channel of notify_channels (the queue's and each person's), outside the outbox.
+    For the watchdog (#5441): it runs when maxpm serve, which sends the outbox, may be down. Never raises: each
+    channel's result is returned."""
+    out = []
+    people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
+    channels = dict.fromkeys(ch for who in [None, *people]
+                             for ch in core._channels(core.setting(conn, "notify_channels", agent=who)))
+    for ch in channels:
+        try:
+            _adapter(conn, ch)(title, body, page_url(conn))
+        except Exception as e:
+            out.append({"channel": ch, "ok": False, "error": f"{type(e).__name__}: {e}"})
+        else:
+            out.append({"channel": ch, "ok": True})
+    return out
+
+
 def status(conn):
     configured = core._channels(core.setting(conn, "notify_channels"))
     names = sorted(set(configured) | {r[0] for r in conn.execute("SELECT DISTINCT channel FROM notifications")})

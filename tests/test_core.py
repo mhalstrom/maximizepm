@@ -10577,6 +10577,135 @@ class OpsKindRelease(ReleaseBase):
         self.assertEqual(r["items"][0]["kind"], "unknown")
 
 
+class OpsOutside(Base):
+    """The watchdog (#5441): checks marked outside run in maxpm ops check --outside, with no maxpm serve; it repairs
+    a fault at most ops_outside_repair_max times in ops_outside_repair_window, then sends a notice itself."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "maxpm")
+        core.register(self.c, "mark", human=True)
+        self.calls = []
+        self.check_code = 2
+
+        def runner(cmd, folder, limit, env):
+            self.calls.append(cmd)
+            code = 0 if cmd.startswith("restart") else self.check_code
+            r = subprocess.CompletedProcess(cmd, code, "SERVE CRITICAL - no answer" if code else "SERVE OK", "")
+            r.timed_out = False
+            return r
+        p = mock.patch.object(core, "OPS_RUNNER", runner)
+        p.start()
+        self.addCleanup(p.stop)
+        self.sent = []
+        self.channel_ok = True
+
+    def notice(self, title, body):
+        self.sent.append((title, body))
+        return [{"channel": "ntfy", "ok": self.channel_ok, "error": None if self.channel_ok else "down"}]
+
+    def add(self, **kw):
+        fields = {"command": "check_serve", "every": "1m", "timeout": "10s", "fail_after": 2, "outside": True,
+                  "repair": "restart serve"}
+        fields.update(kw)
+        return core.ops_add(self.c, "maxpm", "serve", "plugin", fields, actor="mark")["check"]
+
+    def test_an_outside_check_runs_only_in_the_watchdog_and_keeps_its_mark_in_the_profile(self):
+        c = self.add()
+        self.assertTrue(c["outside"])
+        self.assertIn("outside serve (the watchdog runs it)", core.ops_list(self.c, "maxpm")["checks"][0]["summary"])
+        self.assertEqual(core.ops_due(self.c), [])  # maxpm serve skips it
+        self.assertEqual([x["name"] for x in core.ops_due(self.c, outside=True)], ["serve"])
+        prof = core.ops_profile_export(self.c, "maxpm")
+        self.assertTrue(prof["checks"][0]["outside"])
+        self.assertEqual(core.ops_profile_apply(self.c, prof, yes=True, actor="mark")["same"], ["serve"])
+        prof["checks"][0].pop("outside")
+        self.assertEqual(core.ops_profile_apply(self.c, prof, actor="mark")["change"][0]["fields"], ["outside"])
+        core.ops_edit(self.c, "maxpm", "serve", {"outside": False}, actor="mark")
+        self.assertEqual([x["name"] for x in core.ops_due(self.c)], ["serve"])
+        self.assertEqual(core.ops_due(self.c, outside=True), [])
+
+    def test_a_run_one_second_early_is_due_in_the_watchdog(self):
+        self.add()
+        t = core.now()
+        core.ops_outside(self.c, self.notice, t)
+        self.assertEqual(len(core.ops_outside(self.c, self.notice, t + timedelta(seconds=59))), 1)
+        self.assertEqual(core.ops_outside(self.c, self.notice, t + timedelta(seconds=70)), [])  # the last ran at 59 s
+
+    def test_three_repairs_in_the_window_then_one_notice_then_one_when_it_works_again(self):
+        self.add()
+        t = core.now()
+
+        def at(i):
+            return core.ops_outside(self.c, self.notice, t + timedelta(minutes=i))[0]
+        r = at(0)
+        self.assertEqual((r["changes"][0]["to"], "repair" in r), ("failing", False))
+        reps = [at(i).get("repair", {}).get("n") for i in (1, 2, 3)]
+        self.assertEqual(reps, [1, 2, 3])
+        self.assertEqual(self.calls.count("restart serve"), 3)
+        self.assertEqual(self.sent, [])  # the watchdog repairs before it asks a person
+        r = at(4)
+        self.assertEqual(r["repair_limit"], 3)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][0], "MaximizePM: maxpm/serve is down")
+        self.assertIn("ran its repair 3 times in 30m (ops_outside_repair_max 3) and stopped", self.sent[0][1])
+        item = [x for x in core.item_list(self.c, project="maxpm") if x["title"].startswith("ops:maxpm:serve ")][0]
+        self.assertIn(f"Item #{item['id']}", self.sent[0][1])
+        at(5)
+        self.assertEqual(len(self.sent), 1)  # one notice for one fault
+        self.assertEqual(self.calls.count("restart serve"), 3)
+        notes = [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=? ORDER BY id", (item["id"],))]
+        self.assertEqual(len([n for n in notes if n.startswith("ops repair started: restart serve (the watchdog")]), 3)
+        self.check_code = 0
+        at(6)
+        self.assertEqual(len(self.sent), 1)  # one pass is not a recovery (recover_after 2)
+        at(7)
+        self.assertEqual(self.sent[1][0], "MaximizePM: maxpm/serve works again")
+        at(8)
+        self.assertEqual(len(self.sent), 2)
+        states = [r[0] for r in self.c.execute("SELECT state FROM ops_events ORDER BY id")]
+        self.assertEqual([s for s in states if s in ("fault", "repair", "paged", "page-ended", "recovered")],
+                         ["fault", "repair", "repair", "repair", "paged", "recovered", "page-ended"])
+        # After the window, the watchdog repairs again.
+        self.check_code = 2
+        at(40)
+        r = at(41)
+        self.assertEqual(r["repair"]["n"], 1)
+
+    def test_a_fault_with_no_repair_sends_its_notice_at_once_and_again_when_no_channel_took_it(self):
+        self.add(repair="")
+        t = core.now()
+        self.channel_ok = False
+        core.ops_outside(self.c, self.notice, t)
+        r = core.ops_outside(self.c, self.notice, t + timedelta(minutes=1))[0]
+        self.assertIn("it has no repair command", r["notice"]["body"])
+        core.ops_outside(self.c, self.notice, t + timedelta(minutes=2))
+        self.assertEqual(len(self.sent), 2)  # not recorded: tried again
+        self.channel_ok = True
+        core.ops_outside(self.c, self.notice, t + timedelta(minutes=3))
+        core.ops_outside(self.c, self.notice, t + timedelta(minutes=4))
+        self.assertEqual(len(self.sent), 3)
+
+    def test_a_check_of_severity_note_sends_no_notice(self):
+        self.add(repair="", severity="note")
+        t = core.now()
+        for i in range(4):
+            core.ops_outside(self.c, self.notice, t + timedelta(minutes=i))
+        self.assertEqual(self.sent, [])
+
+    def test_maxpm_ops_check_outside_sends_on_the_channels_of_the_queue(self):
+        from river import cli
+        self.add(repair="", fail_after=1)
+        core.config_set(self.c, "notify_channels", "log")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.run(["ops", "check", "--outside"]), 0)
+        self.assertIn("maxpm/serve: critical; fault; notice log sent", out.getvalue())
+        log = os.path.join(self.dir.name, "notifications.log")
+        with open(log) as f:
+            self.assertEqual(json.loads(f.readline())["title"], "MaximizePM: maxpm/serve is down")
+
+
 class Speed(Base):
     """The shortcuts of #5491 give the same answers as the long way."""
 

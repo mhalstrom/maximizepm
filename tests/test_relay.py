@@ -862,6 +862,31 @@ class LoginAgent(Base):
         self.assertIn("bootout", self.calls)
         self.assertIn("no longer starts at login", gone.getvalue())
 
+    def test_install_watchdog_writes_a_job_every_minute_and_loads_it_again(self):
+        # #5441: maxpm ops check --outside from launchd, also when no maxpm serve runs.
+        import plistlib
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["serve", "--install-watchdog"])
+        path = self.login.plist_path(self.login.WATCHDOG_LABEL)
+        spec = plistlib.loads(path.read_bytes())
+        self.assertEqual(spec["Label"], "com.maximizepm.watchdog")
+        self.assertEqual(spec["ProgramArguments"][2:], ["ops", "check", "--outside"])
+        self.assertEqual((spec["StartInterval"], spec["RunAtLoad"]), (60, True))
+        self.assertNotIn("KeepAlive", spec)
+        self.assertEqual(spec["EnvironmentVariables"]["MAXPM_DB"], os.environ["MAXPM_DB"])
+        self.assertTrue(spec["StandardOutPath"].endswith("watchdog.log"))
+        self.assertEqual(self.calls, ["print", "bootstrap"])
+        self.assertIn("No check is marked outside yet", out.getvalue())
+        # Loaded already: it holds no state, so it is loaded again with the new file.
+        self.calls.clear()
+        self.loaded = True
+        self.login.install_watchdog(self.conn)
+        self.assertEqual(self.calls, ["print", "bootout", "bootstrap"])
+        with contextlib.redirect_stdout(io.StringIO()) as gone:
+            cli.run(["serve", "--remove-watchdog"])
+        self.assertFalse(path.exists())
+        self.assertIn("the watchdog no longer runs", gone.getvalue())
+
     def test_a_serve_that_runs_already_is_not_started_twice(self):
         s = socket.socket()
         try:

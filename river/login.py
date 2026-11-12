@@ -1,8 +1,11 @@
-"""maxpm serve at login (macOS launchd): maxpm serve --install-login and --remove-login.
+"""maxpm serve at login (macOS launchd): maxpm serve --install-login and --remove-login, and the watchdog:
+maxpm serve --install-watchdog and --remove-watchdog.
 
 The person's computer stays at home while they reach it through the relay, so maxpm serve must run after a
 restart without anyone at the keyboard: a launchd agent in ~/Library/LaunchAgents starts it at login and again
-when it stops with an error. Standard library only.
+when it stops with an error. The watchdog (#5441) is a second launchd job that runs maxpm ops check --outside every
+minute, with no maxpm serve: it runs the checks that serve cannot run about itself, starts their repairs, and sends
+a notice when serve is down. Standard library only.
 """
 
 from __future__ import annotations
@@ -19,11 +22,34 @@ from . import core
 from .core import RiverError
 
 LABEL = "com.maximizepm.serve"
+WATCHDOG_LABEL = "com.maximizepm.watchdog"
+WATCHDOG_EVERY = 60  # seconds between two runs of maxpm ops check --outside
 LAUNCHCTL = None  # test hook: (argv) -> (returncode, output)
 
 
-def plist_path() -> Path:
-    return Path(os.path.expanduser("~/Library/LaunchAgents")) / f"{LABEL}.plist"
+def plist_path(label: str = LABEL) -> Path:
+    return Path(os.path.expanduser("~/Library/LaunchAgents")) / f"{label}.plist"
+
+
+def _env() -> dict:
+    """The environment of a launchd job: a PATH with Homebrew and this Python, and the queue of this command."""
+    env = {"PATH": os.pathsep.join(dict.fromkeys(
+        [os.path.dirname(sys.executable), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin",
+         "/sbin"]))}
+    if os.environ.get("MAXPM_DB"):
+        env["MAXPM_DB"] = os.environ["MAXPM_DB"]
+    return env
+
+
+def _write(path: Path, spec: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        plistlib.dump(spec, f)
+
+
+def _macos(what: str) -> None:
+    if core.PLATFORM != "darwin" and LAUNCHCTL is None:
+        raise RiverError(f"maxpm serve --install-{what} is for macOS (launchd); on Linux use a systemd user unit")
 
 
 def _maxpm() -> str:
@@ -54,23 +80,15 @@ def _serving(port: int) -> bool:
 def install(conn) -> dict:
     """Writes the launchd agent and loads it. When a maxpm serve already answers, launchd starts its own copy
     only at the next login (two would fight for the port)."""
-    if core.PLATFORM != "darwin" and LAUNCHCTL is None:
-        raise RiverError("maxpm serve --install-login is for macOS (launchd); on Linux use a systemd user unit")
+    _macos("login")
     port = int(core.setting(conn, "serve_port"))
-    env = {"PATH": os.pathsep.join(dict.fromkeys(
-        [os.path.dirname(sys.executable), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin",
-         "/sbin"]))}
-    if os.environ.get("MAXPM_DB"):
-        env["MAXPM_DB"] = os.environ["MAXPM_DB"]
     log = str(Path(core.river_dir()) / "serve.log")
     spec = {"Label": LABEL, "ProgramArguments": [sys.executable, _maxpm(), "serve", "--port", str(port)],
             "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30,
-            "EnvironmentVariables": env, "StandardOutPath": log, "StandardErrorPath": log,
+            "EnvironmentVariables": _env(), "StandardOutPath": log, "StandardErrorPath": log,
             "ProcessType": "Interactive"}
     path = plist_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        plistlib.dump(spec, f)
+    _write(path, spec)
     uid = os.getuid()
     # Loaded already (it may run this very maxpm serve): leave it; launchd reads the new file at the next login.
     agent_loaded = _launchctl("print", f"gui/{uid}/{LABEL}")[0] == 0
@@ -89,6 +107,35 @@ def remove() -> dict:
     path = plist_path()
     existed = path.exists()
     _launchctl("bootout", f"gui/{os.getuid()}/{LABEL}")
+    if existed:
+        path.unlink()
+    return {"plist": str(path), "removed": existed}
+
+
+def install_watchdog(conn) -> dict:
+    """Writes the watchdog's launchd job and loads it: maxpm ops check --outside at load and every WATCHDOG_EVERY
+    seconds. A job that is loaded already is loaded again, so it runs the new file: it holds no state between runs."""
+    _macos("watchdog")
+    log = str(Path(core.river_dir()) / "watchdog.log")
+    spec = {"Label": WATCHDOG_LABEL, "ProgramArguments": [sys.executable, _maxpm(), "ops", "check", "--outside"],
+            "RunAtLoad": True, "StartInterval": WATCHDOG_EVERY, "EnvironmentVariables": _env(),
+            "StandardOutPath": log, "StandardErrorPath": log}
+    path = plist_path(WATCHDOG_LABEL)
+    _write(path, spec)
+    uid = os.getuid()
+    if _launchctl("print", f"gui/{uid}/{WATCHDOG_LABEL}")[0] == 0:
+        _launchctl("bootout", f"gui/{uid}/{WATCHDOG_LABEL}")
+    code, out = _launchctl("bootstrap", f"gui/{uid}", str(path))
+    if code:
+        raise RiverError(f"launchctl bootstrap failed: {out}; the file is {path}")
+    n = conn.execute("SELECT COUNT(*) n FROM checks WHERE outside=1").fetchone()["n"]
+    return {"plist": str(path), "every": WATCHDOG_EVERY, "log": log, "checks": n}
+
+
+def remove_watchdog() -> dict:
+    path = plist_path(WATCHDOG_LABEL)
+    existed = path.exists()
+    _launchctl("bootout", f"gui/{os.getuid()}/{WATCHDOG_LABEL}")
     if existed:
         path.unlink()
     return {"plist": str(path), "removed": existed}

@@ -1039,6 +1039,9 @@ def build_parser(only=None):
                        "default); dependency (an outside vendor), capacity (a disk, memory, a quota) or service (a "
                        "process, the database service): while it fails, the faults of the other checks of the project "
                        "get its kind")
+        x.add_argument("--outside", choices=("on", "off"), help="on: the watchdog runs it (maxpm ops check --outside, "
+                       "a launchd job: maxpm serve --install-watchdog), not maxpm serve, so it also runs while serve "
+                       "is down; for a check of serve itself or of the relay")
 
     x = ops.add_parser("add", help="add a check: maxpm ops add <project|target> <name> <form> --url ... "
                        "(forms: " + "; ".join(f"{k}: {v}" for k, v in core.OPS_FORMS.items()) + ")")
@@ -1144,6 +1147,11 @@ def build_parser(only=None):
     x.add_argument("scope", help="a project or a deploy target, or the check's name when it is the only one of "
                    "that name"); x.add_argument("name", nargs="?")
     x.add_argument("--reason", required=True, help="what you found: why the repair helps")
+    x = ops.add_parser("check", help="the watchdog: run the checks marked outside that are due, with no maxpm serve; "
+                       "repair one in fault (at most ops_outside_repair_max in ops_outside_repair_window), then send "
+                       "a notice on notify_channels. A launchd job runs it every minute (maxpm serve --install-watchdog)")
+    x.add_argument("--outside", action="store_true", required=True, help="the checks marked outside (the only ones "
+                   "it runs: maxpm serve runs the others)")
     x = ops.add_parser("run", help="ask maxpm serve to run a check now, also when it is not due or is paused")
     x.add_argument("scope", help="a project or a deploy target, or the check's name when it is the only one of "
                    "that name"); x.add_argument("name", nargs="?")
@@ -1792,6 +1800,10 @@ def build_parser(only=None):
                    help="macOS: start maxpm serve at login and again after a crash (a launchd agent), for a computer "
                         "you reach through the relay")
     x.add_argument("--remove-login", action="store_true", help="remove that launchd agent")
+    x.add_argument("--install-watchdog", action="store_true",
+                   help="macOS: a launchd job that runs maxpm ops check --outside every minute, also when maxpm serve "
+                        "is down (the checks marked outside, their repairs, a notice)")
+    x.add_argument("--remove-watchdog", action="store_true", help="remove that launchd job")
     sk = sub.add_parser("skills", help="install the agent guides as Claude Code skills")
     sks = sk.add_subparsers(dest="scmd", required=True)
     x = sks.add_parser("install", help="link the guides (maxpm, maxpm-manager) into ~/.claude/skills")
@@ -1984,6 +1996,15 @@ def run(argv=None):
                          args.mask, args.timeout)
         print(json.dumps(res) if args.json else "\n".join(visual.lines(res)))
         return res["status"]
+    if args.cmd == "ops" and args.ocmd == "check":  # the watchdog (#5441): no activity, no footer; its log is the output
+        from . import notify
+        conn = core.connect()
+        try:
+            res = core.ops_outside(conn, lambda title, body: notify.direct(conn, title, body))
+        finally:
+            conn.close()
+        print(json.dumps(res) if args.json else "\n".join(ops_outside_lines(res)), flush=True)
+        return 0
     if args.cmd == "ops" and args.ocmd == "probe":  # a plugin: its own lines only, no briefing, no footer, no writes
         conn = core.connect()
         try:
@@ -2045,6 +2066,20 @@ def _run(args, conn):
               if res["restarted"] else
               "maxpm serve took the request but did not answer again within 60s: look at its terminal")
         return 0 if res["restarted"] else 1
+    if args.cmd == "serve" and (args.install_watchdog or args.remove_watchdog):
+        from . import login
+        if args.remove_watchdog:
+            res = login.remove_watchdog()
+            print(f"Removed {res['plist']}: the watchdog no longer runs." if res["removed"]
+                  else "The watchdog was not installed.")
+            return 0
+        res = login.install_watchdog(conn)
+        n = res["checks"]
+        print(f"The watchdog runs maxpm ops check --outside every {res['every']} s: {res['plist']}. Its output goes to "
+              f"{res['log']}. " + (f"It runs {n} check{'' if n == 1 else 's'} marked outside now." if n else
+                                   "No check is marked outside yet: maxpm ops edit <scope> <name> --outside on")
+              + " Undo: maxpm serve --remove-watchdog")
+        return 0
     if args.cmd == "serve" and (args.install_login or args.remove_login):
         from . import login
         if args.remove_login:
@@ -2754,6 +2789,7 @@ def ops_setup(conn, a, actor):
 
     fields = {k: getattr(a, k) for k in _OPS_FIELDS}
     fields["subject"] = None if a.subject is None else a.subject == "on"
+    fields["outside"] = None if a.outside is None else a.outside == "on"
     form = _setup_form(a)
     if not asking:
         if not a.scope:
@@ -2911,6 +2947,7 @@ def _dispatch_ops(conn, a, actor):
         return core.ops_pause(conn, a.scope, a.name, a.until, a.resume, actor)
     fields = {k: getattr(a, k) for k in _OPS_FIELDS}
     fields["subject"] = None if a.subject is None else a.subject == "on"
+    fields["outside"] = None if a.outside is None else a.outside == "on"
     if a.ocmd == "add":
         return core.ops_add(conn, a.scope, a.name, a.form, fields, actor)
     if a.ocmd == "propose":
@@ -4683,6 +4720,32 @@ def render_ops_profile(a, res):
         print(f"  the same: {', '.join(res['same'])}")
     if not res["written"]:
         print(f"  write it: maxpm ops profile apply {a.file}" + (f" --scope {a.scope}" if a.scope else "") + " --yes")
+
+
+def ops_outside_lines(res):
+    """The lines of one pass of the watchdog, for its log: a line for each check that failed, changed its state,
+    ran its repair or sent a notice."""
+    out = []
+    for r in res:
+        if "error" in r or "skipped" in r:
+            out.append(f"{core.iso(core.now())} {r['check']}: {r.get('error') or r.get('skipped')}")
+            continue
+        if r["status"] == "ok" and not (r.get("changes") or r.get("repair") or r.get("notice")):
+            continue  # a pass that only passed writes no line: the log stays small
+        line = f"{core.iso(core.now())} {r['check']}: {r['status']}"
+        line += "".join(f"; {ch['to']}" for ch in r.get("changes") or [])
+        if r.get("repair"):
+            rp = r["repair"]
+            line += f"; repair {rp['n']} " + ("ok" if rp["ok"] else "timed out" if rp["timed_out"] else
+                                             f"exit {rp['exit_code']}")
+        elif "repair_limit" in r:
+            line += f"; no repair: {r['repair_limit']} ran in the window"
+        if r.get("notice"):
+            sent = r["notice"]["sent"]
+            line += "; notice " + (", ".join(f"{x['channel']} {'sent' if x['ok'] else x['error']}" for x in sent)
+                                   or "on no channel (notify_channels is empty)")
+        out.append(line)
+    return out
 
 
 def ops_line_text(project, o):
