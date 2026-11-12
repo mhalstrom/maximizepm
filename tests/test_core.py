@@ -9268,6 +9268,25 @@ class Ops(Base):
         return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id IS NULL AND change LIKE 'ops %' "
                                              "ORDER BY id")]
 
+    def test_project_show_has_a_monitoring_line_with_the_checks_of_the_project_and_its_target(self):
+        from river import cli
+
+        def show():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.run(["-q", "project", "show", "site"])
+            return [x for x in out.getvalue().splitlines() if "monitoring:" in x]
+        self.assertEqual(show(), ["  monitoring: no checks (maxpm ops setup site)"])
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
+        core.ops_add(self.c, "prod", "nightly", "beat", {"period": "1d"}, actor="dev")
+        self.c.execute("UPDATE checks SET state='fault' WHERE name='nightly'")
+        self.c.commit()
+        it = core.item_add(self.c, "site", "ops:prod:nightly no beat in 1d", kind="operational", doer="ai",
+                           actor="maxpm")["id"]
+        core.ops_propose(self.c, "site", "disk", "cmd", {"command": "df -h"}, why="the disk fills", actor="dev")
+        self.assertEqual(show(), [f"  monitoring: 2 checks (1 fault, 1 new); open faults: #{it}; 1 proposed "
+                                  f"(maxpm ops list site)"])
+
     def test_any_session_adds_a_url_check_with_the_defaults_and_the_history_records_it(self):
         r = core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
         c = r["check"]

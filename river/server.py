@@ -1276,6 +1276,15 @@ def ops_repair_op(conn, a, who):
     return {"check": f"{c['scope']}/{c['name']}", "item": item["id"] if item else None, "command": c["repair"]}
 
 
+def ops_name_for(a):
+    """The name of a check that the page adds: the one typed, else one from its settings (maxpm ops setup does
+    the same); a beat check has none, so the person names the job."""
+    name = (a.get("name") or "").strip() or core.ops_default_name(a["form"], a.get("fields") or {})
+    if not name:
+        raise core.RiverError("name the check: a beat check takes the name of the job that sends the beat")
+    return name
+
+
 def ops_run_op(conn, a, who):
     """The op ops_run (maxpm ops run): run a check now, also when it is not due or is paused."""
     c = core.ops_find(conn, a["scope"], a.get("name"))
@@ -4043,6 +4052,12 @@ OPS = {
     # maxpm ops setup (#5437): one run of a check that is not kept yet, here outside the sandbox; it writes nothing.
     "ops_trial": lambda c, a, who: core.ops_trial(c, a["scope"], a.get("name"), a["form"], a.get("fields") or {}, who),
     "ops_beat": lambda c, a, who: core.ops_beat(c, a["scope"], a.get("name"), who),
+    # The Operations view of Plan (#5438): Add a check, Pause and Resume, and Accept or Reject a proposed check.
+    "ops_add": lambda c, a, who: core.ops_add(c, a["scope"], ops_name_for(a), a["form"], a.get("fields") or {}, who),
+    "ops_pause": lambda c, a, who: core.ops_pause(c, a["scope"], a["name"], until=a.get("until") or None,
+                                                  resume=bool(a.get("resume")), actor=who),
+    "ops_accept": lambda c, a, who: core.ops_accept(c, a["scope"], a["name"], who, a.get("note") or None),
+    "ops_reject": lambda c, a, who: core.ops_reject(c, a["scope"], a["name"], who, a.get("note") or None),
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops from the page without a reason; the agent then reads who stopped it.
     "stop_agent": lambda c, a, who: core.stop_agent(c, a["agent"], _page_reason(a, who), who),
@@ -4234,6 +4249,17 @@ class Handler(BaseHTTPRequestHandler):
                                                    status=q.get("status") or None, since=q.get("since") or None,
                                                    limit=max(1, min(int(q.get("n") or 50), 500)),
                                                    kinds=bool(q.get("kinds"))))
+            except (RiverError, ValueError) as e:
+                return self._send(400, {"error": str(e)})
+            finally:
+                conn.close()
+        if path == "/api/ops":
+            # The Operations view of Plan (#5438): core.ops_view, the checks of the scope's project and its target.
+            from urllib.parse import parse_qs, urlsplit
+            q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+            conn = core.connect()
+            try:
+                return self._send(200, core.ops_view(conn, q.get("project") or None))
             except (RiverError, ValueError) as e:
                 return self._send(400, {"error": str(e)})
             finally:

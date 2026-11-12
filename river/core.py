@@ -2462,6 +2462,7 @@ def project_show(conn, name):
         tracker=setting(conn, "tracker", project_id=p["id"]),
         result_look=setting(conn, "result_look", project_id=p["id"]),
         look=look_setup(conn, name),
+        ops=ops_line(conn, name),
     )
     if p.get("target"):  # the release gate and cadence of its target, each set from the project's needs (#5003)
         t = conn.execute("SELECT cadence, cadence_reason FROM targets WHERE name=?", (p["target"],)).fetchone()
@@ -2475,8 +2476,10 @@ def project_list(conn):
         "SELECT p.*, (SELECT COUNT(*) FROM items i WHERE i.project_id=p.id AND i.status IN ('open','in_progress','held') "
         "AND i.backlog_at IS NULL) open_items, (SELECT COUNT(*) FROM items i WHERE i.project_id=p.id AND i.status='open' "
         "AND i.backlog_at IS NOT NULL) backlog_items FROM projects p WHERE archived=0 ORDER BY rank, id")]
+    lines = ops_lines(conn)
     for r in rows:
         r["tracker"] = setting(conn, "tracker", project_id=r["id"])
+        r["ops"] = lines.get(r["name"])  # the monitoring line (#5438)
     return rows
 
 
@@ -4443,6 +4446,89 @@ def ops_history(conn, scope, name, n=20):
                                             (c["id"], n))]
     return {"check": f"{c['scope']}/{c['name']}", "key": c["key"], "state": c["state"], "runs": runs, "events": events}
 
+
+OPS_VIEW_RUNS = 20  # the runs of each check that the page's Operations view shows as its short history
+
+
+def _ops_scopes(conn, project=None):
+    """The scopes (kind, name) of a project's checks: the project and the deploy target it ships to. With no
+    project, every project and target that has a check or a proposal."""
+    if project:
+        p = _project(conn, project)
+        return [("project", p["name"])] + ([("target", p["target"])] if p["target"] else [])
+    return sorted({(r["scope_kind"], r["scope"]) for r in conn.execute(
+        "SELECT scope_kind, scope FROM checks UNION SELECT scope_kind, scope FROM ops_proposals WHERE state='open'")})
+
+
+def _ops_open_faults(conn, scope):
+    """The open fault items of a scope: one per fault key, and the storm item (title ops:<scope>: ...)."""
+    head = f"ops:{scope}:"
+    return [{"id": r["id"], "title": r["title"], "short": r["short"], "status": r["status"], "assignee": r["assignee"],
+             "created_at": r["created_at"]} for r in conn.execute(
+        "SELECT * FROM items WHERE kind='operational' AND status IN ('open','in_progress','held') AND "
+        "substr(title, 1, ?)=? ORDER BY id", (len(head), head))]
+
+
+def ops_view(conn, project=None):
+    """The Operations view of the page (#5438): the checks of a project and of its deploy target (or of every
+    scope), each with its state, last result and short history; the open fault items; the open proposals; and the
+    forms with their plain questions for Add a check."""
+    scopes = _ops_scopes(conn, project)
+    checks, faults, proposals = [], [], []
+    for kind, name in scopes:
+        for r in conn.execute("SELECT * FROM checks WHERE scope_kind=? AND scope=? ORDER BY name", (kind, name)):
+            c = _ops_row(r)
+            c["summary"] = _ops_summary(c)
+            runs = [dict(x) for x in conn.execute(
+                "SELECT id, started_at, ended_at, status, summary, timed_out, seconds FROM ops_runs WHERE check_id=? "
+                "ORDER BY id DESC LIMIT ?", (c["id"], OPS_VIEW_RUNS))]
+            c["last"] = runs[0] if runs else None
+            c["runs"] = runs[::-1]  # oldest first, as the history reads left to right
+            c["faults"] = [x["id"] for x in _ops_fault_items(conn, c)]
+            c["repair"] = bool(c["repair"])
+            checks.append(c)
+        faults += [dict(f, scope=name) for f in _ops_open_faults(conn, name)]
+        proposals += ops_proposals(conn, f"{kind}:{name}")
+    forms = [{"form": f, "label": label, "summary": OPS_FORMS[f],
+              "questions": [{"field": k, "ask": q, "default": d} for k, q, d in OPS_SETUP_QUESTIONS[f]]}
+             for f, label in OPS_SETUP_FORMS]
+    return {"project": project, "scopes": [{"kind": k, "name": n} for k, n in scopes], "checks": checks,
+            "faults": faults, "proposals": proposals, "forms": forms, "severities": list(OPS_SEVERITIES),
+            "defaults": OPS_DEFAULTS}
+
+
+def ops_lines(conn, projects=None):
+    """One line of monitoring for each project (mark 2026-11-12: monitoring is the stage after code, review and
+    release; maxpm project show and the project's page show it): the checks of the project and of its deploy target
+    by state, the open fault items, and the open proposals. A few queries for all projects, as the page state reads
+    it on each refresh. projects: names; None: every project."""
+    rows = conn.execute("SELECT name, target FROM projects").fetchall()
+    rows = [r for r in rows if projects is None or r["name"] in projects]
+    states, proposed, faults = {}, {}, {}
+    for r in conn.execute("SELECT scope_kind, scope, state, COUNT(*) n FROM checks GROUP BY scope_kind, scope, state"):
+        states.setdefault((r["scope_kind"], r["scope"]), {})[r["state"]] = r["n"]
+    for r in conn.execute("SELECT scope_kind, scope, COUNT(*) n FROM ops_proposals WHERE state='open' "
+                          "GROUP BY scope_kind, scope"):
+        proposed[(r["scope_kind"], r["scope"])] = r["n"]
+    open_faults = conn.execute("SELECT id, title FROM items WHERE kind='operational' AND status IN ('open',"
+                               "'in_progress','held') AND title LIKE 'ops:%' ORDER BY id").fetchall()
+    out = {}
+    for r in rows:
+        scopes = [("project", r["name"])] + ([("target", r["target"])] if r["target"] else [])
+        st = {}
+        for sc in scopes:
+            for k, n in states.get(sc, {}).items():
+                st[k] = st.get(k, 0) + n
+        fl = [f["id"] for f in open_faults if any(f["title"].startswith(f"ops:{name}:") for _, name in scopes)]
+        out[r["name"]] = {"checks": sum(st.values()), "states": st, "faults": fl,
+                          "proposed": sum(proposed.get(sc, 0) for sc in scopes)}
+    return out
+
+
+def ops_line(conn, project):
+    """The monitoring line of one project (ops_lines)."""
+    name = _project(conn, project)["name"]
+    return ops_lines(conn, [name])[name]
 
 # Proposals (#5437, decision 2 of #5380): an agent that sees a missing check, or one it may not add (a command
 # runs outside the sandbox), proposes it. A proposal never runs. A person or the manager accepts it: it becomes

@@ -1,0 +1,22 @@
+/* The Operations view of Plan (#5438). A check is a row with a line under it; the strip of its last runs holds one
+   mark per run in the color of its status. Colors and sizes are the tokens of app.css. */
+.ops-check { border-top: var(--hair) solid var(--line); padding: var(--sp-4) 0; }
+.ops-check:first-child { border-top: 0; padding-top: 0; }
+.ops-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.ops-sum, .ops-last { margin-top: var(--sp-1); overflow-wrap: anywhere; }
+.ops-check .actions { margin-top: var(--sp-3); flex-wrap: wrap; gap: var(--sp-3); }
+.ops-strip { display: inline-flex; gap: var(--sp-0); align-items: center; }
+.ops-run { display: inline-block; width: var(--sp-3); height: var(--sp-6); border-radius: var(--r-xs); background: var(--line); }
+.ops-ok { background: var(--ready); }
+.ops-warning { background: var(--wait); }
+.ops-critical { background: var(--warn); }
+.ops-unknown { background: var(--muted); }
+.ops-fault { padding: var(--sp-2) 0; overflow-wrap: anywhere; }
+.ops-why { flex: 1; min-width: var(--w-input-m); }
+.ops-until { width: auto; }
+.ops-box { --dlg-w: var(--w-dlg-m); }
+@media (max-width: 759px) {
+  .ops-head .spacer { flex-basis: 100%; }
+  .ops-why { min-width: 0; width: 100%; flex-basis: 100%; }
+}
+.ops-faultbtn { color: var(--warn); }

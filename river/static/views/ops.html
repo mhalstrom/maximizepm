@@ -1,0 +1,39 @@
+<!-- The Operations view of Plan (#5438, design #5379): monitoring, the stage of a project after code, review and
+     release (mark 2026-11-12). The checks of the scope's project and of its deploy target, each with its state, last
+     result and short history; the open faults with their items; the proposed checks with Accept and Reject; and Add a
+     check. maxpm serve puts it into plan.html, at view: ops. -->
+<div id="plan-ops" class="plan-view hidden">
+  <div class="panel">
+    <h2>Operations<span class="spacer"></span><button class="btn primary" type="button" id="opsAdd" title="Add a check">Add a check</button></h2>
+    <div id="opsNote" class="muted t-s"></div>
+  </div>
+  <div class="panel hidden" id="opsFaultsBox"><h2>Open faults</h2><div id="opsFaults"></div></div>
+  <div class="panel hidden" id="opsPropBox"><h2>Proposed checks</h2><div id="opsProposals"></div></div>
+  <div class="panel"><h2>Checks</h2><div id="opsChecks"></div></div>
+</div>
+<div id="opsDlg" class="hidden" aria-labelledby="opsDlgH"><div class="box ops-box">
+  <div class="dlg-head">
+    <h2 id="opsDlgH">Add a check</h2>
+    <button class="iconbtn" type="button" id="opsClose" title="Close">✕</button>
+  </div>
+  <div class="form">
+    <label>Where<select id="opsScope"></select></label>
+    <label>What to watch<select id="opsKind"></select></label>
+    <div id="opsFields"></div>
+    <div class="two">
+      <label>Name<input id="opsName" placeholder="from the address or command"></label>
+      <label>How often<input id="opsEvery" placeholder="5m"></label>
+    </div>
+    <label>On a fault<select id="opsSeverity">
+      <option value="item" selected>an item for an agent, and the manager hears</option>
+      <option value="page">also reach the person's phone</option>
+      <option value="note">a line on this page only</option>
+    </select></label>
+    <label>What the investigator reads first (optional)<textarea id="opsRunbook" rows="2" placeholder="Where the logs are, what a restart does"></textarea></label>
+    <div id="opsTrial" class="muted t-s" role="status"></div>
+    <div class="dlg-foot">
+      <button class="btn" type="button" id="opsTry" title="Run it once, keep nothing">Try once</button>
+      <button class="btn primary" type="button" id="opsSave" title="Keep the check">Add check</button>
+    </div>
+  </div>
+</div></div>

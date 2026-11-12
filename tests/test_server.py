@@ -4683,6 +4683,85 @@ class HealthApi(unittest.TestCase):
         self.assertIn("no project 'nope'", body["error"])
 
 
+class OpsPage(unittest.TestCase):
+    """The Operations view of Plan (#5438): GET /api/ops and the ops of its buttons."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "t.db")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        core.project_add(self.c, "shop", path=self.dir.name)
+        core.project_add(self.c, "blog")
+        core.target_add(self.c, "web")
+        core.project_target(self.c, "shop", "web")
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w")
+
+    get = HealthApi.get
+
+    def test_the_view_gets_the_checks_of_the_project_and_its_target_with_faults_and_proposals(self):
+        core.ops_add(self.c, "shop", "home", "url", {"url": "https://shop.example/"}, actor="mark")
+        core.ops_add(self.c, "web", "nightly", "beat", {"period": "1d"}, actor="mark")
+        core.ops_add(self.c, "blog", "feed", "url", {"url": "https://blog.example/"}, actor="mark")
+        fault = core.item_add(self.c, "shop", "ops:shop:home GET https://shop.example/ 503", kind="operational",
+                              doer="ai", actor="maxpm")["id"]
+        core.ops_propose(self.c, "shop", "disk", "cmd", {"command": "df -h"}, why="the disk fills", actor="w")
+        code, body = self.get("/api/ops?project=shop")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["scopes"], [{"kind": "project", "name": "shop"}, {"kind": "target", "name": "web"}])
+        self.assertEqual([(c["scope"], c["name"]) for c in body["checks"]], [("shop", "home"), ("web", "nightly")])
+        home = body["checks"][0]
+        self.assertEqual((home["state"], home["faults"], home["runs"], home["last"]), ("new", [fault], [], None))
+        self.assertEqual([f["id"] for f in body["faults"]], [fault])
+        self.assertEqual([(p["name"], p["runs_command"]) for p in body["proposals"]], [("disk", True)])
+        self.assertEqual([f["form"] for f in body["forms"]], ["url", "beat", "cmd", "log"])
+        self.assertTrue(all(f["questions"] for f in body["forms"]))
+        code, body = self.get("/api/ops")
+        self.assertEqual(len(body["checks"]), 3)  # every scope with a check
+        code, body = self.get("/api/ops?project=nope")
+        self.assertEqual(code, 400)
+
+    def test_the_buttons_add_pause_resume_accept_and_reject(self):
+        r = server.OPS["ops_add"](self.c, {"scope": "project:shop", "form": "url",
+                                           "fields": {"url": "https://shop.example/health", "severity": "page"}}, "mark")
+        self.assertEqual((r["check"]["name"], r["check"]["severity"]), ("shop-example", "page"))  # named from the host
+        with self.assertRaisesRegex(RiverError, "name the check"):
+            server.OPS["ops_add"](self.c, {"scope": "shop", "form": "beat", "fields": {"period": "1d"}}, "mark")
+        server.OPS["ops_add"](self.c, {"scope": "shop", "form": "beat", "name": "backup", "fields": {"period": "1d"}}, "mark")
+        r = server.OPS["ops_pause"](self.c, {"scope": "shop", "name": "backup", "until": "1h"}, "mark")
+        self.assertEqual((r["changed"], r["check"]["state"]), ("paused", "paused"))
+        r = server.OPS["ops_pause"](self.c, {"scope": "shop", "name": "backup", "resume": True}, "mark")
+        self.assertEqual((r["changed"], r["check"]["state"]), ("resumed", "new"))
+        core.ops_propose(self.c, "shop", "disk", "cmd", {"command": "df -h"}, why="the disk fills", actor="w")
+        core.ops_propose(self.c, "shop", "feed", "url", {"url": "https://shop.example/feed"}, why="feed", actor="w")
+        with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+            server.OPS["ops_accept"](self.c, {"scope": "shop", "name": "disk"}, "w")
+        r = server.OPS["ops_accept"](self.c, {"scope": "shop", "name": "disk"}, "mark")
+        self.assertEqual((r["changed"], r["check"]["form"]), ("accepted", "cmd"))
+        r = server.OPS["ops_reject"](self.c, {"scope": "shop", "name": "feed", "note": "the home check covers it"}, "mark")
+        self.assertEqual(r["changed"], "rejected")
+        self.assertEqual(core.ops_proposals(self.c, "shop"), [])
+
+    def test_the_project_list_of_the_state_carries_the_monitoring_line(self):
+        core.ops_add(self.c, "shop", "home", "url", {"url": "https://shop.example/"}, actor="mark")
+        fault = core.item_add(self.c, "shop", "ops:web:many 4 checks failing", kind="operational", doer="ai",
+                              actor="maxpm")["id"]  # a storm item of the target counts for its project
+        lines = {p["name"]: p["ops"] for p in core.project_list(self.c)}
+        self.assertEqual(lines["shop"], {"checks": 1, "states": {"new": 1}, "faults": [fault], "proposed": 0})
+        self.assertEqual(lines["blog"]["checks"], 0)
+
+    def test_the_page_has_the_view_and_its_dialog(self):
+        page = server.page_html("/plan/ops").decode()
+        for part in ('id="plan-ops"', 'id="opsDlg"', 'href="views/ops.css"'):
+            self.assertIn(part, page)
+        js = (server.STATIC / "views" / "plan.js").read_text()
+        self.assertIn('["ops", "Operations"]', js)
+
+
 class Ops(unittest.TestCase):
     """maxpm serve runs the operations checks (#5430): step ops_watch, and the ops ops_run and ops_beat."""
 

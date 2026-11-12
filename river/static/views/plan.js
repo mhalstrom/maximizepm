@@ -4,7 +4,7 @@
 // A click on a project or a goal sets the scope of every view (page.js scope); the address names it
 // (/plan/<view>?project=<p>&goal=<g>). The views are buttons at the top; Add item opens a dialog whose project and
 // goal come from the scope. The views: Overview (overview.js), Items (projects.js), Goals (goals.js), Graph (graph.js),
-// Releases (targets.js), Done (done.js).
+// Releases (targets.js), Operations (ops.js), Done (done.js).
 import { $, esc } from "../lib.js";
 import { button } from "../components/button.js";
 import { bar, pct } from "../components/bar.js";
@@ -13,7 +13,7 @@ import { S, scope, planView } from "../page.js";
 import { miniGraph } from "./graph.js";
 
 // The views of Plan, in the order of their buttons.
-export const PLAN_VIEWS = [["overview", "Overview"], ["items", "Items"], ["goals", "Goals"], ["graph", "Graph"], ["releases", "Releases"], ["done", "Done"], ["health", "Health"]];
+export const PLAN_VIEWS = [["overview", "Overview"], ["items", "Items"], ["goals", "Goals"], ["graph", "Graph"], ["releases", "Releases"], ["ops", "Operations"], ["done", "Done"], ["health", "Health"]];
 
 export function renderPlanViews() {
   const html = PLAN_VIEWS.map(([k, name]) => button(esc(name), { cls: "plan-vbtn", pressed: planView === k, data: { "plan-view": k },

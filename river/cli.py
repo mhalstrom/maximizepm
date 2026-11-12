@@ -4458,6 +4458,21 @@ def render_ops_profile(a, res):
         print(f"  write it: maxpm ops profile apply {a.file}" + (f" --scope {a.scope}" if a.scope else "") + " --yes")
 
 
+def ops_line_text(project, o):
+    """The monitoring line of a project (core.ops_line): its checks by state, the open faults, the proposals."""
+    if not o["checks"] and not o["proposed"]:
+        return f"no checks (maxpm ops setup {project})"
+    order = ("fault", "failing", "recovered", "new", "paused", "healthy")
+    states = sorted(o["states"].items(), key=lambda kv: order.index(kv[0]) if kv[0] in order else len(order))
+    text = f"{o['checks']} check{'' if o['checks'] == 1 else 's'}"
+    if states:
+        text += " (" + ", ".join(f"{n} {s}" for s, n in states) + ")"
+    text += "; open faults: " + (", ".join(f"#{i}" for i in o["faults"]) or "none")
+    if o["proposed"]:
+        text += f"; {o['proposed']} proposed"
+    return text + f" (maxpm ops list {project})"
+
+
 def render_ops_setup(res):
     d = res["setup"]
     scope = d["scope"].split(":", 1)[1]
@@ -4772,6 +4787,8 @@ def render(a, res):
                       + (f" ({g['cadence_reason']})" if g["cadence_reason"] else
                          f" (why: maxpm target cadence {res['target']} <time>|off --reason \"...\")"))
             print("  tracker: " + (res.get("tracker") or "none (maxpm project tracker " + res["name"] + " \"<tracker> <where> via <tool>\")"))
+            if res.get("ops") is not None:
+                print("  monitoring: " + ops_line_text(res["name"], res["ops"]))
             if res.get("look"):
                 print("\n".join("  " + line for line in look_setup_lines(res["name"], res["look"])))
             print("  items: " + ", ".join(f"{v} {'in backlog' if k == 'backlog' else k.replace('_', ' ')}" for k, v in res["counts"].items() if v))

@@ -39,10 +39,16 @@ export function renderProjects() {
     const who = [...new Set(open.filter(i => i.assignee && ["in_progress", "held"].includes(i.status)).map(i => i.assignee))];
     const home = p.path ? p.path.replace(/^\/(Users|home)\/[^/]+/, "~") : "";
     // The folder, the target and the tracker are a hover on the counts (#5082): nobody acts on them here.
-    const meta = [home ? "folder " + home : "no folder", p.target ? "deploys to " + p.target : "", p.tracker ? "tracker " + p.tracker : ""].filter(Boolean);
+    // Monitoring (#5438, mark 2026-11-12) is the stage after the release: its checks are a hover too, and an open fault
+    // shows, as a link to the Operations view.
+    const o = p.ops || { checks: 0, faults: [] };
+    const meta = [home ? "folder " + home : "no folder", p.target ? "deploys to " + p.target : "", p.tracker ? "tracker " + p.tracker : "",
+      o.checks ? `${o.checks} check${o.checks === 1 ? "" : "s"}` : "no checks"].filter(Boolean);
+    const faults = o.faults.length ? button(`${o.faults.length} open fault${o.faults.length === 1 ? "" : "s"}`, { cls: "plain ops-faultbtn",
+      data: { "plan-go": "ops", project: p.name }, title: "Open Operations" }) : "";
     const me = actor();
     // One + goal in one place: the goal box, under the goal cards, also when the project has none yet (#5423).
-    return projCard(p, isClosed, `<div class="pcounts" title="${esc(meta.join(" · ") + (closedN ? ` · ${closedN} done` : "") + (backlog.length ? ` · ${backlog.length} in backlog` : ""))}">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${who.length ? `<span class="muted t-s">${who.map(esc).join(", ")}</span>` : ""}</div>
+    return projCard(p, isClosed, `<div class="pcounts" title="${esc(meta.join(" · ") + (closedN ? ` · ${closedN} done` : "") + (backlog.length ? ` · ${backlog.length} in backlog` : ""))}">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${who.length ? `<span class="muted t-s">${who.map(esc).join(", ")}</span>` : ""}${faults}</div>
       <div class="pbody">
         <div class="pdesc t-s">${p.notes ? noteLine(p) : `<span class="link" data-describe="${esc(p.name)}">+ description</span>`}</div>
         <div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<div class="gc-add">${button("+ goal", { cls: "plain", data: { addgoal: p.name } })}</div></div>
