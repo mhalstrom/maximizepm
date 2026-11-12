@@ -85,6 +85,7 @@ function render(box, project) {
     const win = $$(".br-win");
     win.textContent = j.window ? "Back to the panel" : "Open as a window";
     win.dataset.br = j.window ? "headless" : "window";
+    win.classList.toggle("hidden", !!j.source);  // a Chrome that runs already (browser_source) has its own window
     stage.classList.toggle("br-locked", !v.mine);
     if (document.activeElement !== addr) addr.value = j.url && j.url !== "about:blank" ? j.url : "";
     const sel = $$(".br-tabs"), tabs = j.tabs || [];

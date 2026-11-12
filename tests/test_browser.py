@@ -11,6 +11,7 @@ import socket
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from river import browser, cli, core, server
@@ -128,6 +129,73 @@ class Controller(Base):
     def test_the_profile_lives_beside_the_queue(self):
         self.assertEqual(browser.browser_dir("my web/app").parent, core.db_path().parent / "browsers")
         self.assertEqual(browser.browser_dir("my web/app").name, "my_web_app")
+
+
+class SharedBrowserLock(Base):
+    """browser_lock and browser_unlock (#5406): serve takes and gives back a shared browser's lock with the control."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls, self.refuse = [], set()
+
+        def run(cmd, cwd):
+            self.calls.append(cmd)
+            return (3, f"held by someone else") if cmd in self.refuse else (0, "ok")
+        old = browser.LOCK_RUNNER
+        browser.LOCK_RUNNER = run
+        self.addCleanup(lambda: setattr(browser, "LOCK_RUNNER", old))
+        core.config_set(self.c, "browser_lock", "lock {who}", project="web")
+        core.config_set(self.c, "browser_unlock", "unlock {who}", project="web")
+        core.register(self.c, "ag1"); core.register(self.c, "ag2"); core.register(self.c, "mark", human=True)
+
+    def test_the_lock_follows_the_controller(self):
+        b = browser.get("web")
+        browser.control(self.c, b, "ag1")
+        browser.take(self.c, b, "mark")
+        browser.give_back(self.c, b, "mark")
+        browser.release(self.c, b, "ag1")
+        self.assertEqual(self.calls, ["lock ag1", "unlock ag1", "lock mark", "unlock mark", "lock ag1", "unlock ag1"])
+
+    def test_a_refused_lock_refuses_the_control(self):
+        b = browser.get("web")
+        self.refuse.add("lock ag2")
+        with self.assertRaisesRegex(RiverError, "lock of web refused ag2: held by someone else"):
+            browser.control(self.c, b, "ag2")
+        self.assertIsNone(b.info()["controller"])
+        browser.control(self.c, b, "ag1")
+        self.refuse.add("lock mark")
+        with self.assertRaisesRegex(RiverError, "refused mark"):
+            browser.take(self.c, b, "mark")
+        self.assertEqual(b.info()["controller"]["who"], "ag1")  # the session keeps it, and its lock again
+        self.assertEqual(self.calls[-1], "lock ag1")
+
+    def test_the_controller_renews_its_lock_while_it_acts(self):
+        b = browser.get("web")
+        browser.control(self.c, b, "ag1")
+        browser.may_change(self.c, b, "ag1", False)
+        self.assertEqual(self.calls, ["lock ag1"])  # renewed only after LOCK_RENEW
+        b.state["locked"]["at"] -= browser.LOCK_RENEW + 1
+        browser.may_change(self.c, b, "ag1", False)
+        self.assertEqual(self.calls, ["lock ag1", "lock ag1"])
+
+    def test_a_gone_session_gives_its_lock_back(self):
+        b = browser.get("web")
+        browser.control(self.c, b, "ag1")
+        core.unregister(self.c, "ag1")
+        browser.control(self.c, b, "ag2")
+        self.assertEqual(self.calls, ["lock ag1", "unlock ag1", "lock ag2"])
+
+    def test_the_settings_are_checked(self):
+        self.assertEqual(core.browser_cdp_port("cdp:9339"), 9339)
+        self.assertIsNone(core.browser_cdp_port(""))
+        for bad in ("9339", "cdp:", "cdp:70000", "http://x"):
+            with self.assertRaisesRegex(RiverError, "browser_source is empty"):
+                core.config_set(self.c, "browser_source", bad, project="web")
+        with self.assertRaisesRegex(RiverError, "names the holder"):
+            core.config_set(self.c, "browser_lock", "bash lock.sh", project="web")
+        core.config_set(self.c, "browser_source", "cdp:9339", project="web")
+        with self.assertRaisesRegex(RiverError, "has its own window"):
+            browser.get("web").start(window=True)
 
 
 class ProjectOf(Base):
@@ -280,6 +348,49 @@ class RealChrome(Base):
         self.assertIn(got, ("ERR", "got 403"))  # the proxy's refusal, or Chrome's own
         self.assertNotIn("/sneak", hits)
         browser.person_input(b, {"type": "key", "key": "Tab"})
+
+
+class AttachedChrome(Base):
+    """browser_source cdp:<port> (#5406): attach to a Chrome that runs already, use only serve's own tab, leave it open."""
+
+    def test_attach_uses_its_own_tab_and_leaves_the_browser_open(self):
+        chrome = browser.chrome_path()
+        if not chrome:
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        import subprocess, time
+        prof = os.path.join(self.tmp.name, "shared")
+        p = subprocess.Popen([chrome, "--headless=new", f"--user-data-dir={prof}", "--remote-debugging-port=0",
+                              "--no-first-run", "data:text/html,<title>Theirs</title>"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        port = None
+        for _ in range(100):
+            try:
+                port = int(Path(prof, "DevToolsActivePort").read_text().split()[0])
+                break
+            except (OSError, ValueError, IndexError):
+                time.sleep(0.1)
+        self.assertTrue(port, "the shared Chrome did not start")
+        core.config_set(self.c, "browser_source", f"cdp:{port}", project="web")
+        b = browser.get("web")
+        b.start()
+        info = b.info()
+        self.assertEqual(info["source"], f"cdp:{port}")
+        self.assertEqual(len(info["tabs"]), 1)  # its own tab; the other tab stays out of it
+        self.assertNotIn("Theirs", [t["title"] for t in info["tabs"]])
+        own = info["tabs"][0]["id"]
+        b.evaluate("document.title = 'Mine'")
+        self.assertEqual(b.evaluate("document.title"), "Mine")
+        browser.new_tab(b)
+        self.assertEqual(len(b.info()["tabs"]), 2)
+        b.close()
+        self.assertIsNone(p.poll())  # serve leaves the shared Chrome running
+        self.assertTrue(b._version(port)["Browser"])
+        b.start()  # serve restarted: the same own tab again
+        self.assertIn(b.info()["tabs"][0]["id"], (own, b.state["tab"]))
+        b.close()
 
 
 if __name__ == "__main__":

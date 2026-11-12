@@ -133,6 +133,18 @@ DEFAULT_SETTINGS = {
     # 10/8, 172.16/12, 192.168/16, 169.254/16), so a page cannot reach maxpm serve, a test database or the Docker API.
     # The hosts it may open anyway, as host or host:port, separated by spaces or commas (localhost:5173).
     "browser_allow": "",
+    # Where the browser of a project comes from (#5406): empty, maxpm serve starts its own (above); cdp:<port>, the
+    # panel attaches to a Chrome that runs already with its debugging port on 127.0.0.1:<port> (a project's shared
+    # test browser), and shows a tab of its own in it. browser_allow and the private-address rule do not hold for such
+    # a browser: serve did not start it, and its network is that Chrome's own. serve never closes it.
+    "browser_source": "",
+    # A command that takes a project's browser lock for a session or a person, and one that gives it back (#5406):
+    # {who} is the name of the holder. serve runs them in the project folder when a session takes or gives back control
+    # (maxpm browser control|release), when the person takes control in the panel and gives it back, and the lock
+    # command again every 10 minutes of actions, to renew it. A lock command that fails refuses the control. Empty: no
+    # lock. Example: bash scripts/test-browser.sh lock {who}   and   bash scripts/test-browser.sh unlock {who}
+    "browser_lock": "",
+    "browser_unlock": "",
     # The Terminal tab (#4803): a plain shell on this computer in the page, for a person (never an agent). On for
     # the page on this computer; through the relay only when web_terminal_relay is on too, because whoever holds
     # the relay sign-in could then run any command here.
@@ -1495,6 +1507,18 @@ def _scope(conn, project=None, item=None, agent=None, kind=None) -> str:
     return "global"
 
 
+def browser_cdp_port(value):
+    """The setting browser_source: None for a browser of serve's own, else the port of the Chrome to attach to."""
+    v = (value or "").strip().lower()
+    if not v:
+        return None
+    m = re.fullmatch(r"cdp:(\d{1,5})", v)
+    if not m or not 0 < int(m.group(1)) < 65536:
+        raise RiverError("browser_source is empty (serve starts the project's browser) or cdp:<port> (attach to a Chrome "
+                         "that runs with its debugging port on 127.0.0.1:<port>), for example cdp:9339")
+    return int(m.group(1))
+
+
 def config_set(conn, key, value, project=None, item=None, agent=None, actor=None, kind=None):
     if key not in DEFAULT_SETTINGS:
         setting_default(key)  # an agent's setting (#5169), else RiverError
@@ -1524,6 +1548,12 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
         canvas_hosts(value)
+    elif key == "browser_source":
+        browser_cdp_port(value)
+    elif key in ("browser_lock", "browser_unlock"):
+        if value.strip() and "{who}" not in value:
+            raise RiverError(f"{key} names the holder as {{who}}: bash scripts/test-browser.sh "
+                             f"{'lock' if key == 'browser_lock' else 'unlock'} {{who}}")
     elif key == "launch_agents":
         parse_launch_agents(value)
     elif _platform_setting(key):

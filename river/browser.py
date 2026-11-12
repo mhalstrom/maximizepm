@@ -14,6 +14,10 @@ the person sees and uses in the side panel of the Sessions tab, and which a sess
   pages are blocked; downloads go to <queue folder>/browsers/<project>/downloads.
 - The panel shows the page as frames (CDP Page.startScreencast) that it reads with a long poll (frame()), and
   sends the person's mouse and keys (person_input()).
+- A project's setting browser_source cdp:<port> (#5406) attaches to a Chrome that runs already (a shared test
+  browser) instead: the panel and the sessions use only the tabs that serve opened in it, serve never closes that
+  Chrome, and the network rule above does not hold for it. browser_lock and browser_unlock name the commands that
+  take and give back that browser's lock when the controller changes.
 
 Python's standard library has no WebSocket client, so the CDP connection uses the small one below (RFC 6455)."""
 
@@ -25,6 +29,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -403,6 +408,8 @@ class Browser:
         self.frame = None    # {seq, data, w, h}
         self.seq = 0
         self.size = None     # (w, h) of the panel, CSS px
+        self.attached = None # the debugging port of a Chrome that serve did not start (browser_source cdp:<port>)
+        self.mine = set()    # attached: the tabs serve opened in it, and the tabs that they opened
         self.state = self._load()
 
     # state.json: the controller, the window mode, Chrome's pid and the proxy port (to attach after a restart)
@@ -424,8 +431,14 @@ class Browser:
         return self.ws is not None
 
     def start(self, window=None):
-        """Start Chrome (or attach to the one that this project's browser left running before serve restarted)."""
+        """Start Chrome (or attach to the one that this project's browser left running before serve restarted). With
+        browser_source cdp:<port>, attach to that Chrome instead (#5406)."""
+        port = setting_of(self.project, "browser_source", core.browser_cdp_port)
+        if port:
+            return self._start_attached(port, window)
         with self.lock:
+            if self.attached:  # the setting changed: leave the other Chrome alone
+                self._stop_chrome()
             if self.ws is not None and window in (None, bool(self.state.get("window"))):
                 return
             if window is not None and window != bool(self.state.get("window")):
@@ -439,6 +452,33 @@ class Browser:
             if not self._attach_old():
                 self._launch()
             self._connect()
+
+    def _start_attached(self, port, window):
+        if window:
+            raise RiverError(f"the browser of {self.project} is a Chrome that runs already (browser_source cdp:{port}): "
+                             f"it has its own window, so it does not open as one")
+        with self.lock:
+            if self.ws is not None and self.attached == port:
+                return
+            if self.ws is not None:
+                self._stop_chrome()
+            try:
+                self._version(port)
+            except (OSError, ValueError):
+                raise RiverError(f"no Chrome answers on 127.0.0.1:{port} (browser_source cdp:{port} of {self.project}): "
+                                 f"start that browser first, as the project's own steps say")
+            self.attached = self.port = port
+            self._connect()
+
+    def _new_target(self, url="about:blank"):
+        """A new tab; attached, it is one of serve's own tabs."""
+        t = self.call("Target.createTarget", {"url": url})["targetId"]
+        if self.attached:
+            self.mine.add(t)
+            self.targets.setdefault(t, {"url": url, "title": "", "opener": None})
+            self.state["tab"] = t
+            self._save()
+        return t
 
     def _active_port(self):
         try:
@@ -512,14 +552,24 @@ class Browser:
         self.ws = WS(url)
         threading.Thread(target=self._reader, args=(self.ws,), daemon=True, name=f"browser-{self.project}").start()
         self.call("Target.setDiscoverTargets", {"discover": True})
+        pages = [t for t in self.call("Target.getTargets")["targetInfos"] if t["type"] == "page"]
+        if self.attached:  # only serve's own tab: the other tabs are other sessions' and the person's (#5406)
+            self.targets = {}
+            own = [t for t in pages if t["targetId"] == self.state.get("tab")]
+            if own:
+                t = own[0]
+                self.mine = {t["targetId"]}
+                self.targets[t["targetId"]] = {"url": t["url"], "title": t["title"], "opener": None}
+                return self._attach(t["targetId"])
+            self.mine = set()
+            return self._attach(self._new_target())
         try:
             self.call("Browser.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(self.dir / "downloads")})
         except RiverError:
             pass
-        pages = [t for t in self.call("Target.getTargets")["targetInfos"] if t["type"] == "page"]
         for t in pages:
             self.targets[t["targetId"]] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
-        self._attach(pages[0]["targetId"] if pages else self.call("Target.createTarget", {"url": "about:blank"})["targetId"])
+        self._attach(pages[0]["targetId"] if pages else self._new_target())
 
     def _attach(self, target):
         old = self.session
@@ -570,6 +620,13 @@ class Browser:
 
     def _stop_chrome(self):
         ws, self.ws = self.ws, None
+        if self.attached:  # a Chrome that serve did not start: only leave it
+            if ws:
+                ws.close()
+            self.attached = None
+            self.session = self.target = None
+            self.targets, self.mine = {}, set()
+            return
         if ws:
             try:
                 ws.send(json.dumps({"id": 0, "method": "Browser.close"}))
@@ -637,6 +694,10 @@ class Browser:
             t = p["targetInfo"]
             if t["type"] != "page":
                 return
+            if self.attached:  # attached: only serve's own tabs and the tabs they open
+                if t["targetId"] not in self.mine and t.get("openerId") not in self.mine:
+                    return
+                self.mine.add(t["targetId"])
             new = t["targetId"] not in self.targets
             self.targets[t["targetId"]] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
             if new and t.get("openerId") and t["openerId"] == self.target:  # a page opened a new tab: show it
@@ -646,6 +707,7 @@ class Browser:
                 self.cond.notify_all()
         elif method == "Target.targetDestroyed":
             self.targets.pop(p["targetId"], None)
+            self.mine.discard(p["targetId"])
             if p["targetId"] == self.target:
                 self.session = self.target = None
                 threading.Thread(target=self._switch_quiet, args=(None,), daemon=True).start()
@@ -658,7 +720,7 @@ class Browser:
             with self.lock:
                 if target is None:
                     left = list(self.targets)
-                    target = left[-1] if left else self.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+                    target = left[-1] if left else self._new_target()
                 self._attach(target)
         except (RiverError, OSError):
             pass
@@ -721,6 +783,7 @@ class Browser:
         cur = self.targets.get(self.target) or {}
         c = self.state.get("controller") or {}
         return {"project": self.project, "running": self.running(), "window": bool(self.state.get("window")),
+                "source": f"cdp:{self.attached}" if self.attached else None,
                 "url": cur.get("url", ""), "title": cur.get("title", ""), "controller": c or None,
                 "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target}
                          for k, v in self.targets.items()]}
@@ -728,7 +791,7 @@ class Browser:
     def open(self, url):
         url = norm_url(url)
         u = urlsplit(url)
-        if u.scheme in ("http", "https"):
+        if u.scheme in ("http", "https") and not self._attached_now():
             resolve(u.hostname, u.port or (443 if u.scheme == "https" else 80), self.proxy_allow())
         self.start()
         r = self.page("Page.navigate", {"url": url})
@@ -736,6 +799,10 @@ class Browser:
             raise RiverError(f"the browser could not open {url}: {r['errorText']}")
         self.settle()
         return self.info()
+
+    def _attached_now(self):
+        """Whether this browser is (or will be, at its start) a Chrome that serve did not start."""
+        return bool(self.attached or setting_of(self.project, "browser_source", core.browser_cdp_port))
 
     def proxy_allow(self):
         if self.proxy is None:
@@ -787,6 +854,17 @@ BROWSERS = {}
 _lock = threading.Lock()
 
 
+def setting_of(project, key, parse=None):
+    """A project's setting, read at once (a changed setting holds at the next action)."""
+    conn = core.connect()
+    try:
+        r = conn.execute("SELECT id FROM projects WHERE name=?", (project,)).fetchone()
+        v = core.setting(conn, key, project_id=r[0] if r else None)
+    finally:
+        conn.close()
+    return parse(v) if parse else v
+
+
 def get(project):
     with _lock:
         b = BROWSERS.get(project)
@@ -820,6 +898,55 @@ def project_of(conn, project=None, agent=None, cwd=None):
                      + (" (this session holds no item of a project)" if agent else ""))
 
 
+# ---- the lock of a shared browser (#5406): browser_lock and browser_unlock, run when the controller changes
+
+LOCK_RENEW = 600     # seconds between two runs of browser_lock while one holder keeps control
+LOCK_WAIT = 60       # seconds that one lock command may take
+LOCK_RUNNER = None   # tests: (command, folder) -> (exit code, output)
+
+
+def _lock_run(conn, b, key, who):
+    """Run the project's browser_lock or browser_unlock for who: (ok, output). No command set: (True, None)."""
+    r = conn.execute("SELECT id, path FROM projects WHERE name=?", (b.project,)).fetchone()
+    cmd = (core.setting(conn, key, project_id=r["id"] if r else None) or "").strip()
+    if not cmd:
+        return True, None
+    cmd = cmd.replace("{who}", shlex.quote(who))
+    cwd = os.path.expanduser(r["path"]) if r and r["path"] else None
+    if LOCK_RUNNER:
+        code, out = LOCK_RUNNER(cmd, cwd)
+        return code == 0, out or ""
+    try:
+        p = subprocess.run(cmd, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=LOCK_WAIT)
+    except subprocess.TimeoutExpired:
+        return False, f"{key} did not end within {LOCK_WAIT}s"
+    return p.returncode == 0, (p.stdout + p.stderr).strip() or f"exit {p.returncode}"
+
+
+def _take_lock(conn, b, who):
+    ok, out = _lock_run(conn, b, "browser_lock", who)
+    if not ok:
+        raise RiverError(f"the browser lock of {b.project} refused {who}: {out}. Wait until the lock is free, then "
+                         f"take control again")
+    if out is not None:  # a lock command ran: renew it while who acts
+        b.state["locked"] = {"who": who, "at": time.time()}
+
+
+def _give_lock(conn, b, who):
+    _lock_run(conn, b, "browser_unlock", who)
+    if (b.state.get("locked") or {}).get("who") == who:
+        b.state.pop("locked", None)
+
+
+def _renew(conn, b, c):
+    """The controller keeps its lock while it acts: browser_lock again after LOCK_RENEW."""
+    lk = b.state.get("locked")
+    if c and lk and lk.get("who") == c["who"] and time.time() - lk.get("at", 0) > LOCK_RENEW:
+        _take_lock(conn, b, c["who"])
+        b._save()
+
+
 # ---- the controller rule: one controller at a time
 
 def controller_gone(conn, c):
@@ -834,13 +961,14 @@ def may_change(conn, b, who, person):
     c = b.state.get("controller")
     if controller_gone(conn, c):
         b.state.pop("controller", None)
+        _give_lock(conn, b, c["who"])
         b._save()
         c = None
     if not c:
         return
     if person:
         if c["kind"] == "person":
-            return
+            return _renew(conn, b, c)
         raise RiverError(f"{c['who']} controls the browser of {b.project}"
                          f"{' (subagent ' + c['sub'] + ')' if c.get('sub') else ''}: press Take control first")
     if c["kind"] == "person":
@@ -848,6 +976,7 @@ def may_change(conn, b, who, person):
                          f"maxpm browser status until they give it back")
     if c["who"] != who:
         raise RiverError(f"the browser of {b.project} is controlled by {c['who']}; maxpm browser status")
+    _renew(conn, b, c)
 
 
 def control(conn, b, who, sub=None):
@@ -860,6 +989,9 @@ def control(conn, b, who, sub=None):
             raise RiverError(f"the person ({c['who']}) controls the browser of {b.project}; wait, and read maxpm browser "
                              f"status until they give it back")
         raise RiverError(f"the browser of {b.project} is controlled by {c['who']}; maxpm browser status")
+    if c and c["who"] != who:  # a gone session's lock goes first
+        _give_lock(conn, b, c["who"])
+    _take_lock(conn, b, who)
     b.state["controller"] = {"who": who, "kind": "session", "sub": (sub or "").strip() or None, "since": core.iso(core.now())}
     b._save()
     _notify(b)
@@ -871,6 +1003,8 @@ def release(conn, b, who):
     if c and c["who"] != who and not controller_gone(conn, c):
         raise RiverError(f"the browser of {b.project} is controlled by {c['who']}, not by {who}")
     b.state.pop("controller", None)
+    if c:
+        _give_lock(conn, b, c["who"])
     b._save()
     _notify(b)
     return b.info()
@@ -879,9 +1013,19 @@ def release(conn, b, who):
 def take(conn, b, who):
     """The person takes control in the panel; Give back returns it to the session that held it."""
     c = b.state.get("controller")
+    who = who or "person"
+    if c and c["who"] != who:  # the session's lock goes to the person; when the lock refuses, the session keeps it
+        _give_lock(conn, b, c["who"])
+        try:
+            _take_lock(conn, b, who)
+        except RiverError:
+            _lock_run(conn, b, "browser_lock", c["who"])
+            raise
+    else:
+        _take_lock(conn, b, who)
     if c and c["kind"] == "session":
         b.state["before"] = c
-    b.state["controller"] = {"who": who or "person", "kind": "person", "sub": None, "since": core.iso(core.now())}
+    b.state["controller"] = {"who": who, "kind": "person", "sub": None, "since": core.iso(core.now())}
     b._save()
     _notify(b)
     return b.info()
@@ -889,10 +1033,17 @@ def take(conn, b, who):
 
 def give_back(conn, b, who):
     before = b.state.pop("before", None)
+    c = b.state.pop("controller", None)
+    if c:
+        _give_lock(conn, b, c["who"])
     if before and not controller_gone(conn, before):
+        try:
+            _take_lock(conn, b, before["who"])
+        except RiverError:
+            b._save()
+            _notify(b)
+            raise
         b.state["controller"] = before
-    else:
-        b.state.pop("controller", None)
     b._save()
     _notify(b)
     return b.info()
@@ -1021,7 +1172,7 @@ def switch_tab(b, target):
 def new_tab(b, url="about:blank"):
     url = norm_url(url)
     b.start()
-    t = b.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+    t = b._new_target()
     with b.lock:
         b._attach(t)
     if url != "about:blank":
