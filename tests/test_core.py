@@ -8080,6 +8080,18 @@ class Activity(Base):
             cli._footer(self.c, "w")
         self.assertNotIn("open question", err.getvalue())
 
+    def test_the_probe_stuck_session_reports_a_silence_while_it_lasts(self):
+        # #5440: the probe reads the same rule as activity_watch, writes nothing, and reports after the alert too.
+        self.event("PostToolUse", tool_name="Bash")
+        self.assertEqual(core.ops_probe(self.c, "stuck-session")["status"], "ok")
+        self.clock[0] += core.timedelta(minutes=11)
+        for _ in range(2):
+            res = core.ops_probe(self.c, "stuck-session")
+            self.assertEqual((res["status"], list(res["subjects"])), ("critical", ["w"]))
+            self.assertIn("nothing for 11m while it holds #", res["subjects"]["w"])
+        self.assertEqual(core.activity_watch(self.c), ["w"])  # the probe did not mark it told
+        self.assertEqual(core.ops_probe(self.c, "stuck-session")["status"], "critical")
+
     def test_silence_with_an_item_in_hand_alerts_the_manager_once(self):
         self.event("PermissionRequest", tool_name="Bash", tool_input={"command": "make deploy"})
         self.assertEqual(core.activity_watch(self.c), [])
@@ -8746,6 +8758,68 @@ class AnnotateOnce(Base):
             core.annotate(self.c)
             core.annotate(self.c)  # outside a build: each call reads anew
             self.assertEqual(len(runs), 4)
+
+
+class OpsProbes(Base):
+    """maxpm ops probe (#5440): MaximizePM's own checks as Monitoring Plugins, read only."""
+
+    def test_idle_work_needs_ready_work_and_no_session_for_the_window(self):
+        core.project_add(self.c, "web")
+        self.assertEqual(core.ops_probe(self.c, "idle-work")["status"], "ok")  # no work
+        self.add("web", "Build it", doer="ai")
+        self.assertEqual(core.ops_probe(self.c, "idle-work")["status"], "critical")  # work and never a session
+        core.register(self.c, "w1")
+        res = core.ops_probe(self.c, "idle-work")
+        self.assertEqual((res["status"], res["perf"]["live"]), ("ok", 1))
+        later = core.now() + core.timedelta(minutes=11)
+        with mock.patch.object(core, "now", lambda: later), mock.patch.object(core, "live_sessions", lambda c: 0):
+            res = core.ops_probe(self.c, "idle-work")
+        self.assertEqual(res["status"], "critical")
+        self.assertIn("no live session for 11m", res["summary"])
+
+    def test_lease_and_release_loops_name_the_item(self):
+        core.project_add(self.c, "web")
+        a, b = self.add("web", "Loops"), self.add("web", "Calm")
+        for _ in range(3):
+            core._event(self.c, a, "maxpm", "lease expired (was w1); back to open")
+        core._event(self.c, b, "maxpm", "lease expired (was w1); back to open")
+        res = core.ops_probe(self.c, "lease-loop")
+        self.assertEqual((res["status"], list(res["subjects"])), ("critical", [f"#{a}"]))
+        self.assertIn("3 lease expiries in 6h", res["subjects"][f"#{a}"])
+        core.config_set(self.c, "ops_lease_loop", "4/6h")
+        self.assertEqual(core.ops_probe(self.c, "lease-loop")["status"], "ok")
+        core.register(self.c, "w1")
+        for _ in range(3):
+            core.claim(self.c, b, "w1"); core.release(self.c, b, actor="w1", note="later")
+        self.assertEqual(core.ops_probe(self.c, "release-loop")["status"], "ok")  # 3 of 4
+        core.claim(self.c, b, "w1"); core.done(self.c, b, "w1"); core.reopen(self.c, b, actor="w1")
+        res = core.ops_probe(self.c, "release-loop")
+        self.assertEqual(list(res["subjects"]), [f"#{b}"])
+        core._event(self.c, None, "w1", "released goal g; its items are open to every agent")  # no item: not counted
+        self.assertEqual(len(core.ops_probe(self.c, "release-loop")["subjects"]), 1)
+        for bad in ("3", "0/6h", "3/soon"):
+            with self.assertRaises(RiverError):
+                core.config_set(self.c, "ops_release_loop", bad)
+
+    def test_the_command_prints_a_plugin_answer_and_its_exit_code(self):
+        core.project_add(self.c, "web")
+        a = self.add("web", "Loops")
+        for _ in range(3):
+            core._event(self.c, a, "maxpm", "lease expired (was w1); back to open")
+        from river import cli
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), contextlib.redirect_stdout(out):
+            code = cli.run(["ops", "probe", "lease-loop"])
+            ok = cli.run(["ops", "probe", "release-loop"])
+        lines = out.getvalue().splitlines()
+        self.assertEqual((code, ok), (2, 0))
+        self.assertTrue(lines[0].startswith("LEASE-LOOP CRITICAL - 1 item(s) with 3 or more lease expiries"), lines[0])
+        self.assertIn("| items=1", lines[0])
+        self.assertTrue(lines[1].startswith(f"#{a}: 3 lease expiries"))
+        self.assertEqual(list(json.loads(lines[2])["subjects"]), [f"#{a}"])
+        self.assertTrue(lines[3].startswith("RELEASE-LOOP OK - "))
+        self.assertEqual(json.loads(lines[4]), {"subjects": {}})
+        self.assertEqual(len(lines), 5)  # no footer, no hint
 
 
 class EditKeepsOldText(Base):

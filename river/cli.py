@@ -989,6 +989,10 @@ def build_parser():
     x.add_argument("scope"); x.add_argument("name")
     x = ops.add_parser("rm", help="remove a check (its runs and changes of state stay)")
     x.add_argument("scope"); x.add_argument("name")
+    x = ops.add_parser("probe", help="one of MaximizePM's own checks, on the Monitoring Plugins API (a status line, "
+                       "a line for each subject, exit 0 OK or 2 CRITICAL), for a cmd check with --subject on: "
+                       + "; ".join(f"{k}: {v}" for k, v in core.OPS_PROBES.items()))
+    x.add_argument("name", choices=list(core.OPS_PROBES))
     x = ops.add_parser("pause", help="stop a check for planned work, until a time; --resume starts it again")
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--until", help="a duration (2h) or a time (tomorrow 7:00)")
@@ -1759,6 +1763,14 @@ def run(argv=None):
         return 0
     if args.cmd == "connect":
         return connect_command(args)
+    if args.cmd == "ops" and args.ocmd == "probe":  # a plugin: its own lines only, no briefing, no footer, no writes
+        conn = core.connect()
+        try:
+            res = core.ops_probe(conn, args.name)
+        finally:
+            conn.close()
+        print(json.dumps(res) if args.json else "\n".join(core.ops_probe_lines(res)))
+        return 0 if res["status"] == "ok" else 2
     if args.cmd == "setup-agent":
         if args.claude_desktop and args.codex:
             raise RiverError("one app at a time: --claude-desktop or --chatgpt-desktop")

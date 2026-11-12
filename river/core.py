@@ -215,6 +215,13 @@ DEFAULT_SETTINGS = {
     # or on a background command, alerts the active manager; a permission prompt or a turn end with an item in
     # hand alerts it at once. 0s: no silence alert.
     "activity_silence": "10m",
+    # MaximizePM's own probes (#5440, maxpm ops probe): a cmd check runs them like any plugin. idle-work: ready agent
+    # work and no live session for ops_idle_work; lease-loop: an item whose lease ran out ops_lease_loop times (count
+    # / window); release-loop: an item released or reopened ops_release_loop times. stuck-session reads
+    # activity_silence.
+    "ops_idle_work": "10m",
+    "ops_lease_loop": "3/6h",
+    "ops_release_loop": "4/24h",
     # A shell command of a session that matches push_guard (a push, a merge of a pull request, a launch) is refused
     # while the session has an unread alert or holds an item that someone blocked (#5381: the rule 'read the inbox
     # before a push' in text failed ten times). The session reads its inbox, then runs the command again. Add a
@@ -1592,7 +1599,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -1616,6 +1623,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
         canvas_hosts(value)
+    elif key in ("ops_lease_loop", "ops_release_loop"):
+        count_window(value, key)
     elif key == "browser_source":
         browser_cdp_port(value)
     elif key == "browser_mcp":
@@ -3377,6 +3386,87 @@ def ops_list(conn, scope=None):
         c["last"] = _ops_last(conn, c)
         out.append(c)
     return {"scope": scope, "checks": out, "forms": OPS_FORMS}
+
+
+def count_window(value, key="the setting"):
+    """'3/6h': a count and a window (ops_lease_loop, ops_release_loop). Returns (count, timedelta)."""
+    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\S+)\s*", value or "")
+    if not m or int(m.group(1)) < 1:
+        raise RiverError(f"{key} is a count and a window, for example 3/6h")
+    return int(m.group(1)), parse_duration(m.group(2))
+
+
+# MaximizePM's own checks 3 to 6 of #5337 (#5440): commands that only read the queue and answer on the Monitoring
+# Plugins API, so the generic cmd check runs them like any plugin (with subject on). maxpm ops probe <name> prints:
+#   <NAME> OK|CRITICAL - <summary> | <perfdata>
+#   <subject>: <what is wrong>                 (one line for each subject, only when CRITICAL)
+#   {"subjects": {"<subject>": "<what is wrong>"}, ...}    (one JSON object of evidence)
+# and exits 0 (OK) or 2 (CRITICAL).
+OPS_PROBES = {
+    "idle-work": "ready agent work and no live session for ops_idle_work (10m)",
+    "stuck-session": "a session that holds an item and reported nothing for activity_silence (10m)",
+    "lease-loop": "an item whose lease ran out ops_lease_loop times (3 in 6h)",
+    "release-loop": "an item released or reopened ops_release_loop times (4 in 24h)",
+}
+
+
+def _item_loops(conn, where, setting_key):
+    n, win = count_window(setting(conn, setting_key), setting_key)
+    since = iso(now() - win)
+    rows = conn.execute(f"SELECT e.item_id, COUNT(*) n, i.title FROM events e JOIN items i ON i.id=e.item_id "
+                        f"WHERE e.at>=? AND ({where}) GROUP BY e.item_id HAVING COUNT(*)>=? ORDER BY n DESC, e.item_id",
+                        (since, n)).fetchall()
+    return n, win, rows
+
+
+def ops_probe(conn, name):
+    """One of MaximizePM's own checks (OPS_PROBES): {"name", "status" ok|critical, "summary", "perf", "subjects"}.
+    It only reads the queue."""
+    if name not in OPS_PROBES:
+        raise RiverError(f"no probe {name!r}; the probes: {', '.join(OPS_PROBES)}")
+    subjects, perf = {}, {}
+    if name == "idle-work":
+        limit = parse_duration(setting(conn, "ops_idle_work"))
+        ready = capacity(conn)["ready_for_agents"]
+        live = live_sessions(conn)
+        seen = [parse_iso(r["last_seen"]) for r in conn.execute(
+            "SELECT last_seen FROM agents WHERE kind='ai' AND COALESCE(role, '')<>'assistant' AND last_seen IS NOT NULL")]
+        quiet = now() - max(seen) if seen else None
+        perf = {"ready": len(ready), "live": live, "quiet_s": int(quiet.total_seconds()) if quiet else ""}
+        bad = bool(ready) and live == 0 and (quiet is None or quiet >= limit)
+        summary = (f"{len(ready)} ready agent item(s) and no live session for {_short(quiet) if quiet else 'ever'}"
+                   if bad else f"{len(ready)} ready agent item(s), {live} live session(s)")
+    elif name == "stuck-session":
+        for s in silent_holders(conn, told_too=True):
+            subjects[s["row"]["name"]] = (f"nothing for {_short(s['quiet'])} while it holds #{s['held']['id']} "
+                                          f"{s['held']['title'][:80]}")
+        perf = {"stuck": len(subjects)}
+        summary = (f"{len(subjects)} session(s) silent for activity_silence while they hold an item" if subjects
+                   else "no silent session holds an item")
+        bad = bool(subjects)
+    else:
+        loop = name == "lease-loop"
+        n, win, rows = _item_loops(conn, "e.change LIKE 'lease expired (was %'" if loop
+                                   else "e.change LIKE 'released%' OR e.change='reopened'",
+                                   "ops_lease_loop" if loop else "ops_release_loop")
+        what = "lease expiries" if loop else "releases or reopens"
+        for r in rows:
+            subjects[f"#{r['item_id']}"] = f"{r['n']} {what} in {_short(win)}: {r['title'][:80]}"
+        perf = {"items": len(subjects)}
+        summary = (f"{len(subjects)} item(s) with {n} or more {what} in {_short(win)}" if subjects
+                   else f"no item with {n} {what} in {_short(win)}")
+        bad = bool(subjects)
+    return {"name": name, "status": "critical" if bad else "ok", "summary": summary, "perf": perf,
+            "subjects": subjects}
+
+
+def ops_probe_lines(res):
+    """The probe's answer as a Monitoring Plugins output: the status line, a line for each subject, the evidence."""
+    perf = " ".join(f"{k}={v}" for k, v in res["perf"].items())
+    out = [f"{res['name'].upper()} {res['status'].upper()} - {res['summary']}" + (f" | {perf}" if perf else "")]
+    out += [f"{k}: {v}" for k, v in res["subjects"].items()]
+    out.append(json.dumps({"subjects": res["subjects"]}))
+    return out
 
 
 def ops_show(conn, scope, name, n=10):
@@ -9512,29 +9602,13 @@ def activity_watch(conn):
     in maxpm wait, one that waits on a person's answer, one with a stop request, or one that runs a background
     command: one whose last turn ended while its own background work runs (activity_waits, for at most busy_max),
     or one with a process below it (busy_now). Returns the agents it alerted about."""
-    limit = parse_duration(setting(conn, "activity_silence"))
-    if not limit:
+    told = []
+    silent = silent_holders(conn)
+    if not silent:
         return []
-    t, told = now(), []
-    bg = parse_duration(setting(conn, "busy_max"))
-    rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, activity_waits, "
-                                    "last_seen FROM agents WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
-                                    "AND waiting_since IS NULL AND COALESCE(role, '') NOT IN ('expert', 'assistant')").fetchall()
-            if r["activity_told"] != r["activity_at"]
-            and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit
-            and not (r["activity_waits"] and t - parse_iso(r["activity_at"]) < bg)]
-    # The silence of an agent whose state its pane gives (STATE 'detect'): the pane watcher reports a change of
-    # state only, so a long turn is no silence; this watch is for the hooks.
-    rows = [r for r in rows if _state_source(conn, r["name"]) != "detect"]
-    if not rows:
-        return []
-    waiting = waits_on_person(conn, [r["name"] for r in rows])
-    busy = busy_now(conn, [r["name"] for r in rows])
     with tx(conn):
-        for r in rows:
-            held = _activity_item(conn, r["name"])
-            if not held or r["name"] in waiting or r["name"] in busy:
-                continue
+        for s in silent:
+            r, held, t = s["row"], s["held"], now()
             quiet = _short(t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])))
             call = _activity_call(r["activity_prompt"])
             last = (f"it waits on a permission prompt for {call}" if call
@@ -9544,6 +9618,37 @@ def activity_watch(conn):
                 told.append(r["name"])
             conn.execute("UPDATE agents SET activity_told=activity_at WHERE name=?", (r["name"],))
     return told
+
+
+def silent_holders(conn, told_too=False):
+    """The agents that activity_watch alerts about (it reads no more than this): each {"row", "held", "quiet"}.
+    told_too: also those it told already about this silence (the probe stuck-session, #5440, reports a silence for as
+    long as it lasts)."""
+    limit = parse_duration(setting(conn, "activity_silence"))
+    if not limit:
+        return []
+    t = now()
+    bg = parse_duration(setting(conn, "busy_max"))
+    rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, activity_waits, "
+                                    "last_seen FROM agents WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
+                                    "AND waiting_since IS NULL AND COALESCE(role, '') NOT IN ('expert', 'assistant')").fetchall()
+            if (told_too or r["activity_told"] != r["activity_at"])
+            and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit
+            and not (r["activity_waits"] and t - parse_iso(r["activity_at"]) < bg)]
+    # The silence of an agent whose state its pane gives (STATE 'detect'): the pane watcher reports a change of
+    # state only, so a long turn is no silence; this watch is for the hooks.
+    rows = [r for r in rows if _state_source(conn, r["name"]) != "detect"]
+    if not rows:
+        return []
+    waiting = waits_on_person(conn, [r["name"] for r in rows])
+    busy = busy_now(conn, [r["name"] for r in rows])
+    out = []
+    for r in rows:
+        held = _activity_item(conn, r["name"])
+        if held and r["name"] not in waiting and r["name"] not in busy:
+            out.append({"row": r, "held": held,
+                        "quiet": t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"]))})
+    return out
 
 
 REPORT_STATES = ("working", "idle", "blocked")  # maxpm report --state (river/agents STATES)
