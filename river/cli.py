@@ -1251,6 +1251,11 @@ def build_parser(only=None):
                        "soon as a release has a deploy item, so it waits during the review and deploys the moment the "
                        "review passes; off starts nothing")
     x.add_argument("name"); x.add_argument("mode", nargs="?", choices=core.DEPLOYER_MODES, help="none shows it")
+    x = tgs.add_parser("watch", help="the times after each release that the checks of the target and its projects "
+                       "run as the watch of that release, for example 1m 10m 1h 24h: a newer release ends the older "
+                       "series, a time that passed with no run (serve did not run) runs once, marked late; off: at "
+                       "once, then every ops_watch_every")
+    x.add_argument("name"); x.add_argument("times", nargs="*", help="durations after the release; off; none shows them")
     x = tgs.add_parser("cadence", help="the shortest time between two normal releases of the target (2h: at most 12 "
                        "a day; 6h, 1d, 1w, 1mo; off: each release starts at once): ship requests collect on the open "
                        "deploy item, and its review (the deploy item when there is no review) is ready at the end of "
@@ -3163,6 +3168,9 @@ def dispatch(conn, a, actor):
             return core.target_rename(conn, a.name, a.new, actor)
         if a.tcmd == "deployer":
             return core.target_show(conn, a.name) if a.mode is None else core.target_deployer(conn, a.name, a.mode, actor)
+        if a.tcmd == "watch":
+            return core.target_show(conn, a.name) if not a.times else core.target_watch_times(conn, a.name,
+                                                                                              " ".join(a.times), actor)
         if a.tcmd == "cadence":
             return core.target_show(conn, a.name) if a.cadence is None else core.target_cadence(conn, a.name, a.cadence, actor,
                                                                                                     a.reason)
@@ -5029,8 +5037,12 @@ def render_ops(a, res):
                 print(f"        it confirms the new fault of run {r['confirms']}, at once")
             if r.get("missed"):
                 m = json.loads(r["missed"])
-                print(f"        after a stop: {m['count']} times were due between {core.show_time(m['since'])} and "
-                      f"{core.show_time(m['until'])}; it ran once")
+                if m.get("release"):
+                    print(f"        late: the watch time {m['time']} of release #{m['release']}; {m['count']} time(s) "
+                          f"passed since {core.show_time(m['since'])} with no run; it ran once")
+                else:
+                    print(f"        after a stop: {m['count']} times were due between {core.show_time(m['since'])} "
+                          f"and {core.show_time(m['until'])}; it ran once")
             if r.get("subjects"):
                 subj = json.loads(r["subjects"])
                 if subj:
@@ -5424,8 +5436,11 @@ def render(a, res):
                   "cadence, so a fix is live soon; a public tool repository: each push); the commands are below")
         print("  " + (res["description"] or f"(no description: maxpm target describe {res['name']} \"how it deploys\")"))
         checks = res.get("checks") or []
-        print("  release watch: " + (", ".join(checks) + " run at once after each deploy" if checks else
-                                     f"none (no check of the target or its projects: maxpm ops add {res['name']} <check> <form> ...)"))
+        when = (f"run at {res['watch_times']} after each deploy" if res.get("watch_times") else
+                f"run at once after each deploy (times after it: maxpm target watch {res['name']} 1m 10m 1h 24h)")
+        print("  release watch: " + (", ".join(checks) + " " + when if checks else
+                                     f"none (no check of the target or its projects: maxpm ops add {res['name']} <check> <form> ...)"
+                                     + (f"; times {res['watch_times']} after each deploy" if res.get("watch_times") else "")))
         modes = {"launch": "launch (maxpm serve alerts the owner when a deploy is ready, and starts a deployer session "
                            "when the owner cannot take it)",
                  "standing": "standing (maxpm serve keeps a deployer session that owns the target while a release "

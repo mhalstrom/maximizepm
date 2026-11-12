@@ -5035,6 +5035,49 @@ class ReleaseWatch(ReleaseBase):
         self.run_at("api", t + timedelta(hours=3), 503)  # after the watch, fail_after (3) counts
         self.assertEqual(core.ops_show(self.c, "site", "api")["state"], "failing")
 
+    def test_with_watch_times_the_checks_run_at_each_time_after_the_release_and_a_missed_time_once_late(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/", "every": "6h"}, actor="dev")
+        self.run_at("home", core.now() - timedelta(minutes=1))
+        self.assertEqual(core.target_watch_times(self.c, "web", "10m 1m, 1h")["watch_times"], "1m 10m 1h")
+        with self.assertRaisesRegex(RiverError, "after the release"):
+            core.target_watch_times(self.c, "web", "0m")
+        t = self.release()
+        self.assertEqual(self.due(t + timedelta(seconds=30)), [])  # the first time, 1m, has not come
+        self.assertEqual(self.due(t + timedelta(seconds=61)), ["home"])
+        self.assertIsNone(self.run_at("home", t + timedelta(seconds=61))["watch"])
+        self.assertEqual(self.due(t + timedelta(minutes=5)), [])
+        self.run_at("home", t + timedelta(minutes=10, seconds=5))
+        # serve did not run from 30m to 3h: the time 1h passed with no run; it runs once, marked late.
+        c = core.ops_due(self.c, t + timedelta(hours=3))[0]
+        self.assertEqual((c["missed"]["late"], c["missed"]["time"], c["missed"]["release"]), (True, "1h", self.deploy))
+        with mock.patch.object(core, "OPS_HTTP", lambda url, limit: (200, "")):  # as serve does: the due check
+            r = core.ops_finish(self.c, core.ops_start(self.c, c, at=t + timedelta(hours=3)), at=t + timedelta(hours=3))
+        self.assertEqual(json.loads(core.ops_history(self.c, "site", "home", 1)["runs"][0]["missed"])["time"], "1h")
+        self.assertEqual(r["watch"], "release watch: site/home healthy after 3 of the watch times (1m 10m 1h) since "
+                                     "the release (last run ok)")
+        self.assertIn("release watch: site/home runs late for the watch time 1h", " ".join(self.deploy_lines()))
+        self.assertEqual(self.due(t + timedelta(hours=4)), [])  # the series ended: its own schedule again
+
+    def test_a_newer_release_ends_the_older_series_and_a_fault_at_a_watch_time_names_its_release(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/", "every": "6h",
+                                                     "fail_after": 1}, actor="dev")
+        self.run_at("home", core.now() - timedelta(minutes=1))
+        core.target_watch_times(self.c, "web", "1m 1h")
+        t = self.release()
+        self.run_at("home", t + timedelta(seconds=61))
+        w = self.add("site", "fix")
+        core.claim(self.c, w, "dev")
+        core.done(self.c, w, "def", "dev", ship_it=True)
+        second = core.item_show(self.c, w)["unblocks"][0]
+        core.claim(self.c, second, "ops")
+        with mock.patch.object(core, "now", lambda: t + timedelta(minutes=5)):
+            core.done(self.c, second, "v2 out", "ops")
+        t2 = core.parse_iso(core._item(self.c, second)["closed_at"])
+        self.assertEqual(self.due(t + timedelta(hours=1, seconds=1)), ["home"])  # the 1m of release 2, never the 1h of 1
+        r = self.run_at("home", t2 + timedelta(minutes=2), 503)
+        it = core.item_show(self.c, r["items"][0]["item"])
+        self.assertEqual(it["found_during"], second)
+
     def test_a_check_added_after_the_release_runs_on_its_own_schedule(self):
         t = self.release() + timedelta(seconds=5)
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")

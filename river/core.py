@@ -492,6 +492,7 @@ CREATE TABLE IF NOT EXISTS targets (
   description       TEXT NOT NULL DEFAULT '',
   deployer          TEXT NOT NULL DEFAULT 'launch',  -- what maxpm serve starts for its deploys (maxpm target deployer)
   cadence           TEXT NOT NULL DEFAULT '',  -- how often it releases: 2h, 1d, 1w, 1mo; '' is off (maxpm target cadence)
+  watch_times       TEXT NOT NULL DEFAULT '',  -- times after a release that its watch checks run: '1m 10m 1h 24h' (#5508)
   cadence_reason    TEXT NOT NULL DEFAULT '',  -- why that cadence fits the project's needs (#5003)
   owner             TEXT,
   owner_expires_at  TEXT,
@@ -1631,6 +1632,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE targets ADD COLUMN cadence TEXT NOT NULL DEFAULT ''")
     if "cadence_reason" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
         conn.execute("ALTER TABLE targets ADD COLUMN cadence_reason TEXT NOT NULL DEFAULT ''")
+    if "watch_times" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
+        conn.execute("ALTER TABLE targets ADD COLUMN watch_times TEXT NOT NULL DEFAULT ''")
     if "owner_lease" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN owner_lease TEXT")
     if "shared" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
@@ -4106,21 +4109,66 @@ def _ops_watch(conn, c, at):
                         "ORDER BY id", (c["id"], d["closed_at"], iso(at))).fetchall()
     fault = conn.execute("SELECT MIN(at) t FROM ops_events WHERE check_id=? AND state='fault' AND at>=?",
                          (c["id"], d["closed_at"])).fetchone()["t"]
+    times = parse_watch_times(conn.execute("SELECT watch_times FROM targets WHERE name=?", (target,)).fetchone()
+                              ["watch_times"])
+    released = parse_iso(d["closed_at"])
     return {"deploy": d["id"], "target": target, "released_at": d["closed_at"], "runs": [r["id"] for r in runs],
-            "last_start": runs[-1]["started_at"] if runs else None, "fault_at": fault}
+            "starts": [r["started_at"] for r in runs], "last_start": runs[-1]["started_at"] if runs else None,
+            "fault_at": fault, "times": [w for w, _ in times], "slots": [released + t for _, t in times]}
 
 
-def _ops_watch_len(c):
-    """The runs of a release watch: enough to call a fault (fail_after) and a recovery (recover_after)."""
+def parse_watch_times(text):
+    """The times after a release that the release watch runs at (#5508), from a text such as '1m 10m 1h 24h':
+    (word, duration) pairs, sorted, one for each duration. Empty: none (the watch runs at once, then every
+    ops_watch_every)."""
+    out = {}
+    for x in (text or "").replace(",", " ").split():
+        out.setdefault(parse_duration(x), x)
+    if out and min(out) <= timedelta(0):
+        raise RiverError("a watch time is after the release: 1m or more")
+    return [(out[t], t) for t in sorted(out)]
+
+
+def _ops_watch_len(c, w=None):
+    """The runs of a release watch: one for each of its target's watch times; with none, enough to call a fault
+    (fail_after) and a recovery (recover_after)."""
+    if w and w.get("slots"):
+        return len(w["slots"])
     return max(c["fail_after"], c["recover_after"])
 
 
+def _ops_watch_slot(w, start):
+    """With watch times: how many of the times passed at `start` (a run then covers the newest of them)."""
+    return sum(1 for s in w["slots"] if s <= start)
+
+
+def _ops_watch_missed(conn, c, w, at):
+    """With watch times: the run due now and what it covers, or None. Due when a time passed and no run started at
+    or after it; times that passed with no run run once, and the run is late when two or more passed or it starts
+    more than ops_watch_every after its time. A newer release starts its own series (_ops_watch takes the newest)."""
+    passed = [s for s in w["slots"] if s <= at]
+    if not passed or w["fault_at"]:
+        return None
+    last = parse_iso(w["last_start"]) if w["last_start"] else None
+    if last is not None and last >= passed[-1]:
+        return None
+    missed = [s for s in passed if last is None or s > last]
+    late = len(missed) >= 2 or at - passed[-1] > parse_duration(setting(conn, "ops_watch_every"))
+    return {"count": len(missed), "since": iso(missed[0]), "until": iso(at), "release": w["deploy"],
+            "time": w["times"][len(passed) - 1], "late": late}
+
+
 def _ops_watch_due(conn, c, at):
-    """True when the release watch of a check makes it due now: its first run after the release, or the next one
-    ops_watch_every (or its own every, when shorter) after the last. The watch is open while fewer than
+    """True when the release watch of a check makes it due now. With watch times on its target: a time passed and
+    no run started since it (_ops_watch_missed). Without: its first run after the release, or the next one
+    ops_watch_every (or its own every, when shorter) after the last; the watch is open while fewer than
     _ops_watch_len runs started since the release and no new fault came since."""
     w = _ops_watch(conn, c, at)
-    if w is None or len(w["runs"]) >= _ops_watch_len(c) or w["fault_at"]:
+    if w is None:
+        return False
+    if w["slots"]:
+        return _ops_watch_missed(conn, c, w, at) is not None
+    if len(w["runs"]) >= _ops_watch_len(c) or w["fault_at"]:
         return False
     if not w["runs"]:
         return True
@@ -4129,15 +4177,22 @@ def _ops_watch_due(conn, c, at):
 
 
 def _ops_watch_of_run(conn, run):
-    """The release watch that a run belongs to, with its place in it ("n"), or None: the run is one of the first
-    _ops_watch_len runs since the release, and no fault came before it in the watch."""
+    """The release watch that a run belongs to, with its place in it ("n"), or None: no fault came before it in the
+    watch, and the run is one of the first _ops_watch_len runs since the release, or with watch times, it started
+    before the last time or is the first run after it (n: the times that passed at its start)."""
     c = run["check"]
     r = conn.execute("SELECT started_at FROM ops_runs WHERE id=?", (run["id"],)).fetchone()
     w = _ops_watch(conn, c, parse_iso(r["started_at"])) if r else None
-    if w is None or run["id"] not in w["runs"]:
+    if w is None or run["id"] not in w["runs"] or (w["fault_at"] and w["fault_at"] < r["started_at"]):
         return None
+    if w["slots"]:
+        start = parse_iso(r["started_at"])
+        after = [x for x in w["starts"] if parse_iso(x) >= w["slots"][-1]]
+        if start >= w["slots"][-1] and after and after[0] != r["started_at"]:
+            return None
+        return dict(w, n=_ops_watch_slot(w, start))
     n = w["runs"].index(run["id"]) + 1
-    if n > _ops_watch_len(c) or (w["fault_at"] and w["fault_at"] < r["started_at"]):
+    if n > _ops_watch_len(c):
         return None
     return dict(w, n=n)
 
@@ -4148,12 +4203,14 @@ def _ops_watch_end(conn, run, rec, watch, items):
     c = run["check"]
     row = conn.execute("SELECT state FROM checks WHERE id=?", (c["id"],)).fetchone()
     new_fault = any(ch["to"] == "fault" for ch in rec.get("changes") or [])
-    if row is None or (watch["n"] < _ops_watch_len(c) and not new_fault):
+    if row is None or (watch["n"] < _ops_watch_len(c, watch) and not new_fault):
         return None
     faults = [x["item"] for x in items if x.get("item")]
+    done = (f"{watch['n']} of the watch times ({' '.join(watch['times'])})" if watch.get("slots")
+            else f"{watch['n']} run(s)")
     line = f"release watch: {c['scope']}/{c['name']} " + (
-        f"in fault after {watch['n']} run(s) since the release: " + ", ".join(f"#{x}" for x in faults) if faults
-        else f"{row['state']} after {watch['n']} run(s) since the release (last run {rec['status']})")
+        f"in fault after {done} since the release: " + ", ".join(f"#{x}" for x in faults) if faults
+        else f"{row['state']} after {done} since the release (last run {rec['status']})")
     with tx(conn):
         _event(conn, watch["deploy"], "maxpm", line)
     _ops_verify(conn, run, watch, row["state"])
@@ -4486,8 +4543,12 @@ def ops_due(conn, at=None, outside=False, slack=None):
         else:
             due = since is None or at - since + slack >= parse_duration(c["every"])
             count = int((at - since + slack) / parse_duration(c["every"])) if due and since else 0
-        if due or _ops_watch_due(conn, c, at):
-            if count >= 2:  # a stop: it runs once, and the run records the times that passed
+        w = _ops_watch(conn, c, at)
+        watch = _ops_watch_missed(conn, c, w, at) if w and w["slots"] else None
+        if watch or due or (not (w and w["slots"]) and _ops_watch_due(conn, c, at)):
+            if watch and (watch["late"] or watch["count"] >= 2):  # a watch time that passed: once, marked late
+                c["missed"] = watch
+            elif count >= 2:  # a stop: it runs once, and the run records the times that passed
                 c["missed"] = {"count": count, "since": iso(since), "until": iso(at)}
             out.append(c)
     return out
@@ -4620,7 +4681,11 @@ def ops_start(conn, c, at=None, actor=None):
         m = c.get("missed")
         cur = conn.execute("INSERT INTO ops_runs(check_id,key,started_at,missed) VALUES (?,?,?,?)",
                            (c["id"], c["key"], iso(at), json.dumps(m) if m else None))
-        if m:
+        if m and m.get("release"):
+            _event(conn, m["release"], "maxpm", f"release watch: {c['scope']}/{c['name']} runs late for the watch time "
+                                                f"{m['time']} ({m['count']} time(s) passed since {show_time(m['since'])} "
+                                                f"with no run); it runs once now")
+        elif m:
             _event(conn, None, "maxpm", f"ops check {c['scope']}/{c['name']}: {m['count']} times were due between "
                                         f"{show_time(m['since'])} and {show_time(m['until'])}, when nothing ran it; "
                                         f"it runs once now")
@@ -6616,6 +6681,17 @@ def parse_cadence(text):
         raise RiverError(f"bad cadence {text!r}: use a number and m, h, d, w, or mo (for example 1h, 2h, 1d, 1w, 1mo), "
                          f"or off")
     return f"{int(m.group(1))}{m.group(2)}", int(m.group(1)) * _CADENCE_UNITS[m.group(2)]
+
+
+def target_watch_times(conn, name, value, actor=None):
+    """maxpm target watch: the times after each release that the checks of the target and its projects run, as
+    the watch of that release (#5508); off: at once, then every ops_watch_every until fail_after runs."""
+    text = "" if (value or "").strip().lower() in ("off", "") else " ".join(w for w, _ in parse_watch_times(value))
+    with tx(conn):
+        name = _target(conn, name)["name"]
+        conn.execute("UPDATE targets SET watch_times=? WHERE name=?", (text, name))
+        _event(conn, None, actor, f"target {name} release watch times {text or 'off'}")
+    return target_show(conn, name)
 
 
 def target_cadence(conn, name, value, actor=None, reason=None):
