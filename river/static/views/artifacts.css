@@ -5,6 +5,8 @@
 #artItem { width: var(--w-input-s); }
 .arts-filter { display: flex; gap: var(--sp-2); margin: var(--sp-1) 0 var(--sp-3); }
 .arts-filter select { min-width: 0; flex: 0 1 auto; }
+/* The session select and the Item # field have one height (#5325). */
+.arts-filter select, .arts-filter input { box-sizing: border-box; height: calc(var(--sp-7) + var(--sp-3)); }
 .slist-arts { flex: none; margin-bottom: var(--sp-4); }
 .art-row { display: flex; gap: var(--sp-5); align-items: center; justify-content: space-between; border-top: var(--hair) solid var(--line); padding: var(--sp-3) var(--sp-0); }
 .art-row:first-child { border-top: 0; }
@@ -12,6 +14,8 @@
 .art-main b { overflow-wrap: anywhere; }
 .art-main .sub { color: var(--muted); font-size: var(--fs-s); display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; }
 .art-path { overflow-wrap: anywhere; }
+/* The words after the chip are one piece of text: the flex gap does not add space around the #item link (#5325). */
+.art-meta { min-width: 0; overflow-wrap: anywhere; }
 .art-btns { display: flex; gap: var(--sp-2); flex: none; }
 .art-btns .btn { font-size: var(--fs-s); }
 .art-btns a.btn { background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-4); color: var(--ink); text-decoration: none; }

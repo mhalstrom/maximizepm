@@ -23,8 +23,8 @@ export function showRows(el, rows, empty) {
   el._rows = rows;
   const html = rows.map((a, i) => `<div class="art-row">
       <div class="art-main"><b title="${esc(a.target)}">${esc(clip(name(a), 80))}</b>
-        <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} ${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}${(a.sessions || []).length > 1 ? `, also ${esc(a.sessions.slice(1).join(", "))}` : ""}
-          ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}
+        <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} <span class="art-meta">${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}${(a.sessions || []).length > 1 ? `, also ${esc(a.sessions.slice(1).join(", "))}` : ""}
+          ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}</span>
           <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div></div>
       <div class="art-btns">${a.kind === "artifact"
         ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="claude.ai does not let another page show it in a frame">Open on claude.ai</a>`
