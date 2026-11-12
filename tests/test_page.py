@@ -911,6 +911,7 @@ try {
         core.config_set(self.c, "setup_done", "on")
         core.item_add(self.c, "site", "Approve the logo", doer="human")
         core.send(self.c, "question", "Which color?", to="mark", actor="ag")
+        core.sync_needs_you(self.c)  # as maxpm add does; the page build syncs nothing since #5597
         driver = r'''try {
   await until(() => window.__appReady && q("#sessYouRow .wbadge"), "the You row with its badge");
   const shown = (el) => el.getBoundingClientRect().height > 0;
@@ -947,6 +948,7 @@ try {
         ids = [core.item_add(self.c, "site", f"Sign form {i}", doer="human")["id"] for i in range(106)]  # 1 message: the takeover note
         core.register(self.c, "helper")
         core.takeover(self.c, ids[0], "I fill it in myself", actor="helper")
+        core.sync_needs_you(self.c)  # as maxpm add does; the page build syncs nothing since #5597
         # The inbox comes in a poll of its own, after the state: wait for its count in the line, not only for the
         # badge (#5153: on a slow CI machine the line was read before ' · 1 message' came).
         driver = r'''try {

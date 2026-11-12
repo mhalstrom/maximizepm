@@ -326,9 +326,24 @@ class Timing(Base):
             self.assertIn("wait_ms", t)
             self.assertTrue(t["whole"])
             self.assertIn("cpu_ms", t)
-            self.assertEqual(set(t["parts"]), {"start", "activity", "state", "goals", "terminals", "sessions", "rest"})
+            self.assertEqual(set(t["parts"]), {"start", "state", "goals", "terminals", "sessions", "rest"})
             self.assertEqual(set(t["cpu_parts"]), set(t["parts"]))  # the CPU of each part too (#5597)
             self.assertLessEqual(sum(t["cpu_parts"].values()), t["cpu_ms"] + 1)
+
+
+    def test_the_build_runs_no_sweep_and_the_loop_of_serve_does(self):
+        """#5597: live, the page builds once a minute, and each build ran the sweep (63 ms CPU, about 150 ms wall);
+        the loop of serve runs it each pass instead."""
+        from river import notify
+        core.claim(self.c, self.one, "ag")
+        self.c.execute("UPDATE items SET lease_expires_at=? WHERE id=?", ("2000-01-01T00:00:00Z", self.one))
+        self.c.commit()
+        core._POLL_SWEPT.clear()
+        server.state_changed()
+        server.page_state(False)
+        self.assertEqual(core._item(self.c, self.one)["status"], "in_progress")  # the build left it
+        notify.sweep(self.c)
+        self.assertEqual(core._item(self.c, self.one)["status"], "open")  # the loop's first step ends the lease
 
 
 class Limits(Base):

@@ -4532,8 +4532,8 @@ def page_state(closed, timing=None):
         _ask_tmux_early(core.BUILD_MEMO.get())
         try:
             part("start")
-            core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
-            part("activity")
+            # No sweep here (#5597): the loop of serve runs it each pass (notify.sweep). Live, the page builds once a
+            # minute, so each build ran the sweep: 63 ms CPU and about 150 ms of its 500, with waits for the write lock.
             st = core.state(conn, closed=key)
             part("state")
             st["goals"] = core.goal_list(conn, include_complete=True)

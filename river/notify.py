@@ -490,6 +490,12 @@ def ops_deadman(conn):
     return core.ops_deadman(conn) if SERVE_PORT.get("port") else None
 
 
+def sweep(conn):
+    """The sweep of maxpm serve, once a pass (core.poll_activity: at most each POLL_SWEEP). The page build ran it
+    before #5597, in the request of the page."""
+    core.poll_activity(conn, None)
+
+
 def loop(stop, interval_s=None):
     """Run the dispatcher until stop (a threading.Event) is set. For maxpm serve and maxpm notify run.
     No error of a pass ends the loop: the next pass tries again. After each pass it records the time and the
@@ -506,6 +512,7 @@ def loop(stop, interval_s=None):
             # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
             # error in adopt_sessions stopped auto_release and every later step while one agent had no pid).
             steps = (
+                sweep,  # expired leases, holds and reservations, and needs-you, as every command does (#5597)
                 server.watch_prompts,  # an agent that waits on a prompt in its tmux pane: tell the person
                 server.paste_first_prompts,  # an agent that takes no prompt on its command line: paste it (#5221)
                 server.paste_answers,  # an answer for an asker that waits at its prompt: type it there (#5303)
