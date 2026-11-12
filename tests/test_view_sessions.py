@@ -391,7 +391,7 @@ class Sessions(Base):
 
     def test_one_card_for_a_session_that_ran_commands_under_two_names(self):
         core.register(self.c, "alias")
-        core.record_claude_session(self.c, "alias", SID)
+        core.record_claude_session(self.c, "alias", SID, move=True)  # a naming command (go, register) of the session
         (card,) = self.cards()
         self.assertEqual((card["name"], card["also"]), ("ag", ["alias"]))  # the name that holds the work
 
@@ -1409,7 +1409,7 @@ class PersonTurns(Base):
     """#5088, mark 2026-11-10: 'what happened to the user messages in chats? i can't see them currently'. A worker
     that had unregistered ran 'maxpm --as manager-36ec who' in its own Claude Code session, with no MAXPM_AGENT in
     that shell: its session became the manager's newest, and the manager's chat showed the worker's transcript,
-    which holds no turn of the person. Now such a command records nothing for the other agent, and the chat shows
+    which holds no turn of the person. Now such a command is refused (#5576), and the chat shows
     the person's turn as a bubble that one can read, in light and in dark."""
 
     def test_the_persons_turn_shows_in_the_chat_after_another_session_ran_as_this_agent(self):
@@ -1427,7 +1427,8 @@ class PersonTurns(Base):
         env = {"MAXPM_DB": os.environ["MAXPM_DB"], "CLAUDE_CODE_SESSION_ID": SID2, "MAXPM_AGENT": ""}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.run(["--as", "ag", "who"]), 0)
+            with self.assertRaisesRegex(core.RiverError, "this session is w9"):  # refused since #5576
+                cli.run(["--as", "ag", "who"])
         self.assertEqual(sessions.transcript(self.c, "ag", self.root)[1], self.path)  # still ag's own
         driver = DRIVE_HEAD + r"""
 const look = () => {

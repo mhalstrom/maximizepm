@@ -5855,33 +5855,6 @@ class Kill(Base):
         with mock.patch.dict(os.environ, {"MAXPM_AGENT": "w1"}):
             self.assertFalse(cli._for_other(self.c, "w1"))
             self.assertFalse(cli._for_other(self.c, "mark"))
-        # #5088: with no MAXPM_AGENT, a command in the Claude Code session of another agent records nothing for an
-        # actor that has a session of its own (w2 has); one with no session yet takes it; no session id: as before.
-        w1sid, w2sid = "99999999-2222-3333-4444-555555555555", "77777777-2222-3333-4444-555555555555"
-        core.record_claude_session(self.c, "w1", w1sid)
-        core.record_claude_session(self.c, "w2", w2sid)
-        core.register(self.c, "w3")
-        for env_sid, actor, other in ((w1sid, "w2", True), (w1sid, "w1", False), (w1sid, "w3", False),
-                                      ("88888888-2222-3333-4444-555555555555", "w2", False), ("", "w2", False)):
-            with mock.patch.dict(os.environ, {"MAXPM_AGENT": "", "CLAUDE_CODE_SESSION_ID": env_sid}):
-                self.assertEqual(cli._for_other(self.c, actor), other, (env_sid, actor))
-        # #5576: MAXPM_AGENT names a worker that unregistered a moment before (its own 'maxpm --as mgr who' after
-        # 'maxpm unregister'): the command records nothing for the manager, whose chat stays its own.
-        core.register(self.c, "w4")
-        w4sid = "66666666-2222-3333-4444-555555555555"
-        core.record_claude_session(self.c, "w4", w4sid)
-        core.unregister(self.c, "w4")
-        with mock.patch.dict(os.environ, {"MAXPM_AGENT": "w4", "CLAUDE_CODE_SESSION_ID": w4sid}):
-            self.assertTrue(cli._for_other(self.c, "mgr"))
-            self.assertFalse(cli._for_other(self.c, "w3"))  # an actor with no session yet takes it, as before
-        mine = lambda: [r[0] for r in self.c.execute("SELECT session_id FROM agent_sessions WHERE agent='mgr'")]
-        before = mine()
-        env = {"MAXPM_DB": self.path, "CLAUDE_CODE_SESSION_ID": w4sid, "MAXPM_AGENT": "w4"}
-        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.run(["--as", "mgr", "who"]), 0)
-        self.assertEqual(mine(), before)
-        self.assertNotIn(w4sid, mine())
 
     def test_refusals_and_a_dead_process_counts_as_gone(self):
         core.set_process(self.c, "ag", self.p.pid, "something else")
@@ -7921,8 +7894,10 @@ class TextQueue(Base):
     def cli(self, *words):
         from river import cli
         out, err = io.StringIO(), io.StringIO()
+        # Not the session that runs the tests: its MAXPM_AGENT is no agent of this queue (#5576).
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
-                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1"}):
+                mock.patch.dict(os.environ, {"MAXPM_DB": self.path, "MAXPM_QUIET": "1", "MAXPM_AGENT": "",
+                                             "CLAUDE_CODE_SESSION_ID": "", "CLAUDE_CODE_BRIDGE_SESSION_ID": ""}):
             try:
                 cli.run(list(words))
             except RiverError as e:
@@ -8184,7 +8159,7 @@ class CloseCheck(TextQueue):
         # The closer keeps one with the reason; the check does not list it again for this close.
         out = self.cli("--as", "w1", "keep", str(again), "--close", str(reset), "--note", "the video needs it")
         self.assertIn(f"kept after the close of #{reset}: #{again}", out)
-        self.assertIn("kept after the close", core.item_show(self.c, again)["events"][0]["change"])
+        self.assertTrue(any("kept after the close" in e["change"] for e in core.item_show(self.c, again)["events"]))
         self.assertIn("lists", self.cli("--as", "w1", "keep", str(again), "--close", str(reset)))
         # The other one waits in cleanup and in the manager's findings until someone decides.
         rows = core.cleanup(self.c, git=False)
@@ -11799,3 +11774,109 @@ class WorkLine(Base):
             "EXPLAIN QUERY PLAN SELECT id, at, item_id, change FROM events WHERE actor=? AND id>=? AND id<? "
             "AND item_id IS NOT NULL ORDER BY id", ("s1", 0, 1 << 62)))
         self.assertIn("events_actor", plan)
+
+
+class SessionSelf(Base):
+    """#5576, mark 2026-11-12: 'this should not be allowed or possible'. A command records a session id, a session
+    link or a process only for the agent whose session it runs in. The past cases: #5060 (the manager's session
+    recorded for another agent), #5088 and #5576 (a worker whose agent had unregistered ran 'maxpm --as <manager>
+    who', and the manager's chat on the Sessions tab showed the worker's ended chat)."""
+
+    W1, MGR, GONE, NEW = ("11111111-2222-3333-4444-5555555555%02d" % i for i in range(1, 5))
+
+    def setUp(self):
+        super().setUp()
+        for n in ("mgr", "w1", "w2"):
+            core.register(self.c, n)
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='mgr'")
+        core.record_session(self.c, "mgr", self.MGR)
+        core.record_session(self.c, "w1", self.W1)
+
+    def run_cli(self, me, sid, *argv):
+        from unittest import mock
+        from river import cli
+        env = {"MAXPM_DB": self.path, "MAXPM_AGENT": me, "CLAUDE_CODE_SESSION_ID": sid,
+               "CLAUDE_CODE_BRIDGE_SESSION_ID": "session_01Abc"}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            try:
+                return cli.run(list(argv))
+            except RiverError as e:
+                return str(e)
+
+    def sessions(self, agent):
+        return [r[0] for r in self.c.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY rowid",
+                                             (agent,))]
+
+    def gone_worker(self, name="w9"):
+        core.register(self.c, name)
+        core.record_session(self.c, name, self.GONE)
+        core.unregister(self.c, name)
+
+    def test_5060_the_managers_session_stays_the_managers(self):
+        self.assertEqual(self.run_cli("mgr", self.MGR, "--as", "w2", "note", "the manager acts for w2"), 0)
+        self.assertEqual(core.agent_status(self.c, "w2")["note"], "the manager acts for w2")
+        self.assertEqual(self.sessions("w2"), [])
+        self.assertIsNone(self.c.execute("SELECT session_url FROM agents WHERE name='w2'").fetchone()[0])
+        # With no MAXPM_AGENT the session id names the manager: the same.
+        self.assertEqual(self.run_cli("", self.MGR, "--as", "w2", "note", "again"), 0)
+        self.assertEqual(self.sessions("w2"), [])
+
+    def test_5088_a_gone_workers_session_is_refused_as_another_agent(self):
+        self.gone_worker()
+        for actor in ("mgr", "w2"):  # w2 has no session yet: before, it took the worker's
+            got = self.run_cli("", self.GONE, "--as", actor, "who")
+            self.assertIn(f"this session is w9, and only the manager runs a command as another agent (--as {actor})",
+                          got)
+        self.assertEqual(self.sessions("mgr"), [self.MGR])
+        self.assertEqual(self.sessions("w2"), [])
+
+    def test_5576_a_gone_maxpm_agent_is_refused_as_another_agent(self):
+        self.gone_worker("w4")
+        got = self.run_cli("w4", self.GONE, "--as", "mgr", "who")
+        self.assertIn("this session is w4", got)
+        self.assertEqual(self.sessions("mgr"), [self.MGR])
+        # The session of a gone agent may take a new name with a naming command (register, go).
+        self.assertEqual(self.run_cli("w4", self.GONE, "register", "w5"), 0)
+        self.assertEqual(self.sessions("w5"), [self.GONE])
+
+    def test_a_live_workers_session_is_refused_and_records_nothing(self):
+        got = self.run_cli("", self.W1, "--as", "w2", "note", "w1 acts for w2")
+        self.assertIn("this session is w1", got)
+        self.assertNotEqual(core.agent_status(self.c, "w2")["note"], "w1 acts for w2")
+        self.assertEqual(self.sessions("w2"), [])
+
+    def test_a_persons_terminal_acts_as_anyone_and_records_nothing(self):
+        # A Claude Code chat of the person that no agent ran in, and a terminal with no session id.
+        for sid in (self.NEW, ""):
+            self.assertEqual(self.run_cli("", sid, "--as", "w2", "note", "the person acts for w2"), 0)
+        self.assertEqual(self.sessions("w2"), [])
+
+    def test_an_agents_own_new_session_id_is_recorded(self):
+        # /clear gives the session a new id: the agent's own command records it, so its chat stays current.
+        self.assertEqual(self.run_cli("w1", self.NEW, "--as", "w1", "note", "after /clear"), 0)
+        self.assertEqual(self.sessions("w1"), [self.W1, self.NEW])
+        self.assertEqual(self.c.execute("SELECT session_url FROM agents WHERE name='w1'").fetchone()[0],
+                         "https://claude.ai/code/session_01Abc")
+
+    def test_a_session_id_of_another_live_agent_is_not_taken(self):
+        self.assertIs(core.record_session(self.c, "w2", self.W1), False)
+        self.assertEqual(self.sessions("w2"), [])
+        # MAXPM_AGENT names w2, and the session id is w1's: the command runs, and w1 keeps its chat.
+        self.assertEqual(self.run_cli("w2", self.W1, "note", "mine"), 0)
+        self.assertEqual(self.sessions("w2"), [])
+        self.assertIs(core.record_session(self.c, "w2", self.W1, move=True), True)
+
+    def test_session_move_by_a_person_or_the_manager(self):
+        with core.tx(self.c):  # the wrong row that #5576 made
+            self.c.execute("INSERT INTO agent_sessions (agent, session_id, first_seen) VALUES ('mgr', ?, '2099-01-01')",
+                           (self.W1,))
+        self.assertIn("only a person or the manager moves a session",
+                      self.run_cli("w2", "", "--as", "w2", "session", "--move", self.W1, "--to", "w1"))
+        self.assertEqual(self.run_cli("mgr", self.MGR, "--as", "mgr", "session", "--move", self.W1, "--to", "w1"), 0)
+        self.assertEqual(self.sessions("mgr"), [self.MGR])
+        self.assertEqual(self.sessions("w1"), [self.W1])
+        self.assertIn("is no agent", self.run_cli("", "", "session", "--move", self.W1, "--to", "nobody"))
+        self.assertIn("--move <session id> --to <agent>", self.run_cli("", "", "session", "--move", self.W1))
+

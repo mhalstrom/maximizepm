@@ -13973,16 +13973,53 @@ def session_owner(conn, sid):
     return r["agent"] if r else None
 
 
-def record_session(conn, name, sid):
+def record_session(conn, name, sid, move=False):
     """Remember that agent `name` ran a command in session `sid` (once per pair): a Claude Code session, or the
-    session of any agent whose adapter names its id (session_from_env, #5212)."""
+    session of any agent whose adapter names its id (session_from_env, #5212). A session id that MaximizePM
+    recorded last for another registered agent stays that agent's (#5576): the newest row of an agent is the chat
+    that the Sessions tab shows for it, so one session must not become a second agent's. Returns False then; only
+    `move` (a naming command in that session, cli.NAMING) records it for `name`."""
     if not (name and sid) or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? AND session_id=?",
                                           (name, sid)).fetchone():
-        return
+        return None
+    owner = session_owner(conn, sid)
+    if owner and owner != name and not move and \
+            conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (owner,)).fetchone():
+        return False
     if conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (name,)).fetchone():
         with tx(conn):
             conn.execute("INSERT OR IGNORE INTO agent_sessions (agent, session_id, first_seen) VALUES (?,?,?)",
                          (name, sid, iso(now())))
+        return True
+    return None
+
+
+def session_move(conn, sid, to, actor=None):
+    """maxpm session --move <session id> --to <agent> (#5576): the session belongs to `to` only. Its rows of every
+    other agent go, so a chat that a wrong record gave to another agent (a command as another agent, before #5576)
+    leaves that agent's view of the Sessions tab. Only a person or the manager may; `to` is an agent that has run in
+    some session or is registered (the session's true agent may be gone). Returns {"session", "to", "from"}."""
+    sid = (sid or "").strip()
+    if not sid or not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", sid):
+        raise RiverError("maxpm session --move takes a session id: maxpm session --move <session id> --to <agent>")
+    by = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+    if actor and not (by and (by["kind"] == "human" or by["role"] == "manager")):
+        raise RiverError(f"refused: only a person or the manager moves a session to another agent; ask the manager: "
+                         f"maxpm --as {actor} alert {active_manager(conn) or '<manager>'} \"session {sid} is {to}'s\"")
+    if not to or not (conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (to,)).fetchone()
+                      or conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? LIMIT 1", (to,)).fetchone()):
+        raise RiverError(f"{to or '--to'} is no agent: maxpm session --move <session id> --to <agent>")
+    rows = conn.execute("SELECT agent, first_seen FROM agent_sessions WHERE session_id=?", (sid,)).fetchall()
+    if not rows:
+        raise RiverError(f"no agent has session {sid}: maxpm who --all names the agents")
+    others = sorted({r["agent"] for r in rows if r["agent"] != to})
+    first = min(r["first_seen"] for r in rows)
+    with tx(conn):
+        conn.execute("DELETE FROM agent_sessions WHERE session_id=? AND agent<>?", (sid, to))
+        conn.execute("INSERT OR IGNORE INTO agent_sessions (agent, session_id, first_seen) VALUES (?,?,?)",
+                     (to, sid, first))
+        _event(conn, None, actor, f"session {sid} moved to {to}" + (f" from {', '.join(others)}" if others else ""))
+    return {"session": sid, "to": to, "from": others}
 
 
 record_claude_session = record_session  # its name before #5212

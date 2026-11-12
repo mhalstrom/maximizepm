@@ -1808,8 +1808,10 @@ def build_parser(only=None):
     x.add_argument("--session", help="the Claude Code session this agent runs in")
     x = sub.add_parser("session", help="record the Claude Code session you run in: maxpm session \"<name>\" --ref <ref>; "
                        "or pin a session to the top of the Sessions tab: maxpm --as <you> session pin|unpin <agent>")
-    x.add_argument("name", nargs="+", help="the name ListAgents prints; put it in quotes when it has spaces or starts with #")
+    x.add_argument("name", nargs="*", help="the name ListAgents prints; put it in quotes when it has spaces or starts with #")
     x.add_argument("--ref", help="the short code in brackets after the name in ListAgents")
+    x.add_argument("--move", metavar="SESSION_ID", help="a person or the manager: the session id belongs to --to only")
+    x.add_argument("--to", metavar="AGENT", help="with --move: the agent whose session it is")
     x = sub.add_parser("unregister", help="remove an agent that holds nothing"); x.add_argument("name")
     x = sub.add_parser("now", help="what you do now, in about 10 plain words, for your row on the Sessions tab: "
                        "run it when you start an item and at each new step")
@@ -1962,43 +1964,78 @@ def activity_command(stdin=None, agent_id="claude"):
     return 0
 
 
-def _for_other(conn, actor):
-    """Whether this command runs, in the session of one AI agent (its MAXPM_AGENT), as another AI agent (--as).
-    Only the manager may (mark 2026-11-10, #5060: 'the manager should be allowed to run for other agents'); its
-    command then records nothing of its session for that agent: no session id, no link, no process (with them,
-    every hook of the manager's session counted as the other agent, and tmux_adopt took the manager for a session
-    outside tmux). Another session is refused. A person's terminal (no MAXPM_AGENT) may act as anyone.
-    With no MAXPM_AGENT, the Claude Code session id names the caller: the agent that MaximizePM recorded last for
-    that session (#5088). A worker that exported MAXPM_AGENT in an earlier shell only, and had unregistered, ran
-    'maxpm --as manager-36ec who' at 09:06:43Z; its session became the manager's newest, and the manager's chat on
-    the Sessions tab showed the worker's transcript, with none of the person's turns. Such a command is refused
-    nothing (a person's own session or a script may act as several agents), but it records nothing for an actor
-    that has a session of its own already.
-    The same holds when MAXPM_AGENT names an agent that is gone (#5576): worker maximizepm-1d68 unregistered and then,
-    in the same command line, ran 'maxpm --as manager-477c who'; with no agent row for the caller the command counted
-    as the caller's own, and the manager's chat on the Sessions tab showed the worker's ended chat."""
-    me = (os.environ.get("MAXPM_AGENT") or "").strip()
+# The commands that name the agent of the session they run in: a session may take a new name with them (its agent
+# ended, or MaximizePM names it), and its session id, link and process then go to that name.
+NAMING = ("go", "register", "session", "manage")
 
-    def other_session():  # the session id names the caller: is it another agent's, and has the actor one of its own?
-        owner = core.session_owner(conn, core.session_from_env())
-        return bool(owner and actor and owner != actor
-                    and conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone()
-                    and conn.execute("SELECT 1 FROM agent_sessions WHERE agent=? LIMIT 1", (actor,)).fetchone())
-    if not me:
-        return other_session()
-    if not (actor and actor != me):
+
+def _session_self(conn):
+    """The agent this command's session is (#5576): MAXPM_AGENT while it names a registered AI agent; else the agent
+    that MaximizePM recorded last for this session id (it may be gone now); else MAXPM_AGENT when it names no agent
+    yet (a session that maxpm serve started and named, before its first go); else None (a person's terminal). In
+    a chat over MCP HTTP the environment is maxpm serve's, not the chat's: None."""
+    if core.HTTP_CHAT.get():
+        return None
+    me = (os.environ.get("MAXPM_AGENT") or "").strip()
+    row = me and conn.execute("SELECT kind FROM agents WHERE name=?", (me,)).fetchone()
+    if row and row["kind"] == "ai":
+        return me
+    return core.session_owner(conn, core.session_from_env()) or (me if me and not row else None)
+
+
+def _for_other(conn, actor, cmd=None):
+    """Whether this command runs, in the session of one AI agent, as another AI agent (--as). Only the manager may
+    (mark 2026-11-10, #5060: 'the manager should be allowed to run for other agents'); its command then records
+    nothing of its session for that agent: no session id, no link, no process (with them, every hook of the
+    manager's session counted as the other agent, and tmux_adopt took the manager for a session outside tmux).
+    Another session is refused (mark 2026-11-12, #5576: 'this should not be allowed or possible'). A person's
+    terminal may act as anyone.
+
+    The session is its MAXPM_AGENT, or the agent recorded last for its session id (_session_self). Two sessions
+    had no MAXPM_AGENT that named a registered agent, and each ran 'maxpm --as <manager> who' after its agent
+    unregistered: #5088 (maximizepm-873b, 2026-11-10) and #5576 (maximizepm-1d68, 2026-11-12). Each recorded the
+    worker's session as the manager's newest, so the manager's chat on the Sessions tab showed the worker's ended
+    chat. Such a session is refused too; only go and register may give it a new name."""
+    own = _session_self(conn)
+    if not (actor and own and actor != own):
         return False
-    caller = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai'", (me,)).fetchone()
-    if not caller:
-        return other_session()
     if not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (actor,)).fetchone():
-        return False
-    if caller["role"] != "manager":
-        manager = core.active_manager(conn)
-        raise RiverError(f"refused: this session is {me}, and only the manager runs a command as another agent "
-                         f"(--as {actor}). Run it as yourself, or ask the manager: maxpm --as {me} alert "
-                         f"{manager or '<manager>'} \"<what {actor} needs>\"")
-    return True
+        return False  # a person, or a name that go or register gives this session now
+    caller = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai'", (own,)).fetchone()
+    if caller and caller["role"] == "manager":
+        return True
+    if not caller and cmd in ("go", "register"):
+        return False  # the agent of this session is gone: the session takes another name
+    manager = core.active_manager(conn)
+    raise RiverError(f"refused: this session is {own}, and only the manager runs a command as another agent "
+                     f"(--as {actor}). Run it as yourself, or ask the manager: maxpm --as {own} alert "
+                     f"{manager or '<manager>'} \"<what {actor} needs>\"")
+
+
+def _carries_no_name(conn, sid):
+    """Whether session id `sid` is a new one of an agent CLI that gives MAXPM_AGENT to no command (Hermes, Aider:
+    their commands name the agent with --as only): no MAXPM_AGENT, no agent has the id yet, and Claude Code did not
+    give it. Any command of such a session records its id (#5212). A Claude Code session has MAXPM_AGENT when maxpm
+    serve started it and records its id with go when a person did, so a Claude Code id with neither is a person's
+    own chat, which is no agent's (#5576)."""
+    return bool(sid and not (os.environ.get("MAXPM_AGENT") or "").strip() and not core.session_owner(conn, sid)
+                and sid != core.claude_session_from_env())
+
+
+def _record_self(conn, name, cmd, for_other):
+    """Record this command's session id and session link for agent `name`, only when the session is that agent's
+    own (#5576): never for a command as another agent (for_other), never in a chat over MCP HTTP, and for any
+    command but a naming one (NAMING) only when the session is `name` (_session_self). A session id that another
+    registered agent has is not taken (core.record_session); only a naming command, or maxpm session --move run
+    by a person or the manager, moves it."""
+    if for_other or not name or core.HTTP_CHAT.get():
+        return
+    naming = cmd in NAMING
+    sid = core.session_from_env()
+    if not naming and name != _session_self(conn) and not _carries_no_name(conn, sid):
+        return
+    if core.record_session(conn, name, sid, move=naming) is not False:
+        core.record_session_url(conn, name, core.session_url_from_env())
 
 
 def _record_hook_process(conn, name):
@@ -2180,14 +2217,13 @@ def _run(args, conn):
         server.serve(port, open_browser=args.open, dev=args.dev)
         return 0
     actor = args.actor
-    for_other = _for_other(conn, actor)
+    for_other = _for_other(conn, actor, args.cmd)
     if args.cmd not in ("go", "plan"):
         core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
     if st and not args.json:
         print(_stop_banner(actor, st), file=sys.stderr)
-    if not for_other:  # the manager's session stays the manager's (#5060)
-        core.record_session(conn, actor, core.session_from_env())  # before done measures the item
+    _record_self(conn, actor, args.cmd, for_other)  # before done measures the item
     changes = conn.total_changes
     try:
         res = dispatch(conn, args, actor)
@@ -2200,10 +2236,9 @@ def _run(args, conn):
     hooks = run_hooks(conn, actor)
     if hooks and isinstance(res, dict):
         res["hooks_run"] = hooks
-    me = res.get("agent") if args.cmd in ("go", "plan", "manage") and isinstance(res, dict) else actor
-    if not for_other:
-        core.record_session_url(conn, me, core.session_url_from_env())
-        core.record_session(conn, me, core.session_from_env())
+    me = (res.get("agent") if args.cmd in ("go", "plan", "manage") and isinstance(res, dict) else
+          args.name if args.cmd == "register" and not args.human else actor)
+    _record_self(conn, me, args.cmd, for_other)
     if conn.total_changes != changes:  # the command may have made a human item ready, or sent a question to a person
         core.sync_needs_you_now(conn)
     if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json
@@ -3543,6 +3578,15 @@ def dispatch(conn, a, actor):
             _record_process(conn, a.name)
         return res
     if c == "session":
+        if a.move or a.to:
+            if not (a.move and a.to) or a.name:
+                raise RiverError("maxpm session --move <session id> --to <agent>")
+            if not actor and _session_self(conn):
+                raise RiverError("maxpm session --move: name yourself, a person or the manager: maxpm --as <name> "
+                                 "session --move <session id> --to <agent>")
+            return core.session_move(conn, a.move, a.to, actor)
+        if not a.name:
+            raise RiverError('maxpm session "<name>" --ref <ref>')
         if len(a.name) == 2 and a.name[0] in ("pin", "unpin") and not a.ref:
             return {"pin": core.session_pin(conn, a.name[1], actor, a.name[0] == "pin")}
         if not actor:
@@ -3568,7 +3612,8 @@ def dispatch(conn, a, actor):
                 print(f"({ended} stopped or gone agent(s) that hold nothing are hidden: maxpm who --all)", file=sys.stderr)
         return res
     if c == "heartbeat":
-        _record_process(conn, actor)
+        if actor == _session_self(conn):  # a command as another agent records no process for it (#5576)
+            _record_process(conn, actor)
         return {"ok": True}
     if c == "capacity":
         return core.capacity(conn)
@@ -5823,6 +5868,10 @@ def render(a, res):
         x = res["pin"]
         print(f"{x['agent']}: {'pinned' if x['pinned'] else 'unpinned'} for {x['person']}"
               + (f" (pinned by {', '.join(x['pinned_by'])})" if x["pinned_by"] else ""))
+        return
+    if c == "session" and "to" in res:
+        print(f"session {res['session']} is {res['to']}'s now"
+              + (f"; removed from {', '.join(res['from'])}" if res["from"] else ""))
         return
     if c == "session":
         print(f"{res['name']}: session {res['session']}" + (f" [{res['session_ref']}]" if res["session_ref"] else "")
