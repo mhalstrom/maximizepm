@@ -9493,3 +9493,58 @@ class Ops(Base):
         self.assertEqual([c["name"] for c in core.ops_due(self.c, t + timedelta(hours=1))], ["home"])
         self.assertEqual(self.state("site", "home"), "new")
         self.assertEqual(self.events("site", "home")[-2:], [("ops:site:home", "paused"), ("ops:site:home", "resumed")])
+
+    # ---- the outside switch (#5435)
+
+    def test_serve_beats_to_the_outside_address_once_each_interval_and_a_failure_is_logged_not_retried(self):
+        sent = []
+        state = dict(core.OPS_DEADMAN)
+        self.addCleanup(lambda: core.OPS_DEADMAN.update(state))
+        core.OPS_DEADMAN.update(last=None, sending=False, sent=None, error=None)
+        self.assertIsNone(core.ops_deadman(self.c))  # no address: no beat
+        with self.assertRaisesRegex(RiverError, "http:// or https://"):
+            core.config_set(self.c, "ops_deadman_url", "hc-ping.example/abc")
+        core.config_set(self.c, "ops_deadman_url", "https://hc-ping.example/abc")
+        core.config_set(self.c, "ops_deadman_every", "1m")
+        gate = threading.Event()
+
+        def get(url, limit):
+            sent.append((url, limit))
+            gate.wait(5)
+            return 200
+        clock = [1000.0]
+        with mock.patch.object(core, "OPS_DEADMAN_GET", get), mock.patch.object(core, "_monotonic", lambda: clock[0]):
+            t0 = time.monotonic()
+            self.assertEqual(core.ops_deadman(self.c), "https://hc-ping.example/abc")
+            self.assertLess(time.monotonic() - t0, 1)  # the GET waits in its thread, not in the loop
+            clock[0] += 70
+            self.assertIsNone(core.ops_deadman(self.c))  # the first one still runs: no second at the same time
+            gate.set()
+            for _ in range(100):
+                if not core.OPS_DEADMAN["sending"]:
+                    break
+                time.sleep(0.02)
+            self.assertIsNotNone(core.OPS_DEADMAN["sent"])
+            self.assertEqual(core.ops_deadman(self.c), "https://hc-ping.example/abc")  # 70 s after the first
+            for _ in range(100):
+                if not core.OPS_DEADMAN["sending"]:
+                    break
+                time.sleep(0.02)
+            clock[0] += 30
+            self.assertIsNone(core.ops_deadman(self.c))  # 30 s after the last start: not yet
+        self.assertEqual(sent, [("https://hc-ping.example/abc", 10.0)] * 2)
+
+        def down(url, limit):
+            raise OSError("connection refused")
+        with mock.patch.object(core, "OPS_DEADMAN_GET", down), mock.patch.object(core, "_monotonic", lambda: clock[0]):
+            clock[0] += 60
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                core.ops_deadman(self.c)
+                for _ in range(100):
+                    if not core.OPS_DEADMAN["sending"]:
+                        break
+                    time.sleep(0.02)
+            self.assertIn("connection refused", core.OPS_DEADMAN["error"])
+            self.assertIn("the beat to https://hc-ping.example/abc failed", out.getvalue())
+            clock[0] += 5
+            self.assertIsNone(core.ops_deadman(self.c))  # no retry in a loop: the next beat waits for the interval

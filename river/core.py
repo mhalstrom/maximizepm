@@ -222,6 +222,12 @@ DEFAULT_SETTINGS = {
     "ops_idle_work": "10m",
     "ops_lease_loop": "3/6h",
     "ops_release_loop": "4/24h",
+    # The outside switch (#5435, decision 3 A of #5380): maxpm serve sends an HTTP GET to ops_deadman_url every
+    # ops_deadman_every, so a heartbeat service outside this computer tells the person when the machine or serve is
+    # gone. Empty: no beat. MaximizePM sends only to the address the person gives; a failed beat is logged and the
+    # next one waits for the next interval.
+    "ops_deadman_url": "",
+    "ops_deadman_every": "1m",
     # A shell command of a session that matches push_guard (a push, a merge of a pull request, a launch) is refused
     # while the session has an unread alert or holds an item that someone blocked (#5381: the rule 'read the inbox
     # before a push' in text failed ten times). The session reads its inbox, then runs the command again. Add a
@@ -1606,10 +1612,14 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
+    elif key == "ops_deadman_url":
+        if value.strip() and not re.match(r"^https?://\S+$", value.strip()):
+            raise RiverError("ops_deadman_url is the ping address of a heartbeat service, http:// or https://, or "
+                             "empty for no beat")
     elif key == "model_prices":
         parse_prices(value)
     elif key == "similar_min":
@@ -3813,6 +3823,45 @@ def ops_close_lost(conn, running=(), at=None):
                "matches": None}
         out.append(ops_record(conn, {"id": r["id"], "check": _ops_row(row)}, res, at))
     return out
+
+
+# The outside switch (#5435): the state of the beat to ops_deadman_url in this process.
+OPS_DEADMAN = {"last": None, "sending": False, "sent": None, "error": None}
+OPS_DEADMAN_GET = None  # a test hook: (url, timeout) -> the HTTP status; raises OSError when no answer came
+
+
+def ops_deadman(conn):
+    """One pass of the loop of maxpm serve: send the beat to ops_deadman_url when ops_deadman_every has passed
+    since the last one. The GET runs in a thread of its own with a short time limit, so it never blocks the
+    loop; a failure is logged (OPS_DEADMAN['error'], the terminal of serve) and never retried in a loop: the next
+    beat comes at the next interval. Returns the address when a beat started, else None."""
+    import threading
+    url = (setting(conn, "ops_deadman_url") or "").strip()
+    if not url:
+        return None
+    every = parse_duration(setting(conn, "ops_deadman_every")).total_seconds()
+    t = _monotonic()
+    if OPS_DEADMAN["sending"] or (OPS_DEADMAN["last"] is not None and t - OPS_DEADMAN["last"] < every):
+        return None
+    OPS_DEADMAN.update(last=t, sending=True)
+
+    def send():
+        try:
+            code = (OPS_DEADMAN_GET or (lambda u, lim: _ops_http(u, lim)[0]))(url, max(1.0, min(10.0, every / 2)))
+            if 200 <= int(code) < 300:
+                OPS_DEADMAN.update(sent=iso(now()), error=None)
+            else:
+                raise OSError(f"HTTP {code}")
+        except Exception as e:
+            OPS_DEADMAN["error"] = f"{iso(now())}: {getattr(e, 'reason', e)}"
+            try:
+                print(f"ops deadman: the beat to {url} failed: {getattr(e, 'reason', e)}", flush=True)
+            except Exception:
+                pass
+        finally:
+            OPS_DEADMAN["sending"] = False
+    threading.Thread(target=send, daemon=True).start()
+    return url
 
 
 def ops_find(conn, scope_or_name, name=None):

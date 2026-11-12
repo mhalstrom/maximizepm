@@ -421,6 +421,12 @@ def _say(text):
         pass
 
 
+def ops_deadman(conn):
+    """maxpm serve only: the beat to the outside heartbeat service (core.ops_deadman, #5435). maxpm notify run
+    sends none: the beat says that serve runs."""
+    return core.ops_deadman(conn) if SERVE_PORT.get("port") else None
+
+
 def loop(stop, interval_s=None):
     """Run the dispatcher until stop (a threading.Event) is set. For maxpm serve and maxpm notify run.
     No error of a pass ends the loop: the next pass tries again. After each pass it records the time and the
@@ -455,6 +461,7 @@ def loop(stop, interval_s=None):
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
                 server.hooks_soon,  # a hook whose command ended before it ran it
                 server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
+                ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
             )
             failed = []
