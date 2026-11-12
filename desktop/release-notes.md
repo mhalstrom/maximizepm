@@ -2,7 +2,7 @@ MaximizePM desktop app {TAG}. The app carries its own Python, so you do not have
 
 ## What's new in {TAG}
 
-About 50 changes since v0.2.0. The main ones:
+About 80 changes since v0.2.0. The main ones:
 
 - **Stop and Send now.** While a session works, a Stop square takes the place of the send arrow. It ends the turn that's running, just like the key you'd press in its terminal, and the session keeps its context and its task. A message you send while a session works waits under the chat, and MaximizePM types it when the turn ends. Its Send now stops the turn and sends just that message. In Codex, a second Stop also ends the commands the turn left running in the background. `maxpm interrupt` does the same from the command line.
 - **Faster everywhere.** `maxpm` commands now run inside `maxpm serve`, which keeps the queue open between commands: `maxpm inbox` went from 87 ms to 43, and `maxpm show` from 221 ms to 117. The page answers a click or a tab switch in under 100 ms. On a phone, the Sessions tab went from 474 ms to 10.
