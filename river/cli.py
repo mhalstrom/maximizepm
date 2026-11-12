@@ -942,6 +942,58 @@ def build_parser():
     x.add_argument("--drop-open", action="store_true", help="drop the goal's open items, with the result as the note")
     x = gls.add_parser("reopen"); x.add_argument("name")
 
+    op = sub.add_parser("ops", help="operations checks of a project or a deploy target: what MaximizePM watches "
+                        "(a url, a beat, a command, a log, or a Monitoring Plugins executable), when it is a fault, "
+                        "and who is told. Any session adds a url or beat check; a cmd, log, or plugin check and a "
+                        "repair need a person or the manager; a repair on a deploy target needs a person")
+    ops = op.add_subparsers(dest="ocmd", required=True)
+
+    def ops_fields(x, add):
+        x.add_argument("--url", help="url: the address of the HTTP GET")
+        x.add_argument("--statuses", help=f"url: the healthy HTTP statuses (default {core.OPS_DEFAULTS['statuses']}; "
+                       "for example 200,204)")
+        x.add_argument("--body", help="url: a text that the healthy answer holds")
+        x.add_argument("--command", help="cmd: a shell command, healthy on exit 0; log: a command that prints the "
+                       "new log lines; plugin: the executable and its arguments")
+        x.add_argument("--pattern", help="log: a regular expression; the lines that match count")
+        x.add_argument("--limit", type=int, help="log: the count of lines in the window that is a failure (default 1)")
+        x.add_argument("--window", help="log: the time the count covers (default 15m)")
+        x.add_argument("--period", help="beat: the longest time between two beats, for example 1h")
+        d = core.OPS_DEFAULTS
+        x.add_argument("--every", help="how often it runs" + (f" (default {d['every']})" if add else ""))
+        x.add_argument("--fail-after", dest="fail_after", type=int,
+                       help="failed runs in a row before it is a fault" + (f" (default {d['fail_after']})" if add else ""))
+        x.add_argument("--recover-after", dest="recover_after", type=int, help="passed runs in a row before a fault "
+                       "counts as healed" + (f" (default {d['recover_after']})" if add else ""))
+        x.add_argument("--timeout", help="the time limit of one run" + (f" (default {d['timeout']})" if add else ""))
+        x.add_argument("--severity", choices=core.OPS_SEVERITIES, help="page: it may reach the phone; item: an item "
+                       "and the manager; note: a line on the page" + (f" (default {d['severity']})" if add else ""))
+        x.add_argument("--runbook", help="for the agent that investigates a fault: where to look, what is normal")
+        x.add_argument("--subject", choices=("on", "off"), help="cmd, log, plugin: each line of the output names a "
+                       "subject, and each subject has its own fault")
+        x.add_argument("--repair", help="a command that fixes a known fault (a person or the manager sets it; on a "
+                       "deploy target, a person); empty removes it")
+
+    x = ops.add_parser("add", help="add a check: maxpm ops add <project|target> <name> <form> --url ... "
+                       "(forms: " + "; ".join(f"{k}: {v}" for k, v in core.OPS_FORMS.items()) + ")")
+    x.add_argument("scope", help="a project or a deploy target (project:<name> or target:<name> when both exist)")
+    x.add_argument("name"); x.add_argument("form", choices=list(core.OPS_FORMS))
+    ops_fields(x, True)
+    x = ops.add_parser("edit", help="change the settings of a check")
+    x.add_argument("scope"); x.add_argument("name")
+    x.add_argument("--form", choices=list(core.OPS_FORMS), help="another form; give its settings too")
+    ops_fields(x, False)
+    x = ops.add_parser("list", help="the checks, of one project or deploy target or of all")
+    x.add_argument("scope", nargs="?")
+    x = ops.add_parser("show", help="one check, its last runs and its last changes of state")
+    x.add_argument("scope"); x.add_argument("name")
+    x = ops.add_parser("rm", help="remove a check (its runs and changes of state stay)")
+    x.add_argument("scope"); x.add_argument("name")
+    x = ops.add_parser("pause", help="stop a check for planned work, until a time; --resume starts it again")
+    x.add_argument("scope"); x.add_argument("name")
+    x.add_argument("--until", help="a duration (2h) or a time (tomorrow 7:00)")
+    x.add_argument("--resume", action="store_true", help="start the check again now")
+
     tg = sub.add_parser("target", help="deploy targets: where projects ship to")
     tgs = tg.add_subparsers(dest="tcmd", required=True)
     x = tgs.add_parser("add"); x.add_argument("name")
@@ -2320,8 +2372,33 @@ def _expert_cmd(conn, a, actor):
                                                   sessions=a.session)}
 
 
+_OPS_FIELDS = ("url", "statuses", "body", "command", "pattern", "limit", "window", "period", "every", "fail_after",
+               "recover_after", "timeout", "severity", "runbook", "repair")
+
+
+def _dispatch_ops(conn, a, actor):
+    if a.ocmd == "list":
+        return core.ops_list(conn, a.scope)
+    if a.ocmd == "show":
+        return core.ops_show(conn, a.scope, a.name)
+    if not actor and core.agent_type_from_env(os.environ):
+        raise RiverError(f"name yourself: maxpm --as <name> ops {a.ocmd} ... (an agent may add or change a url or "
+                         f"beat check; a person or the manager the others)")
+    if a.ocmd == "rm":
+        return core.ops_rm(conn, a.scope, a.name, actor)
+    if a.ocmd == "pause":
+        return core.ops_pause(conn, a.scope, a.name, a.until, a.resume, actor)
+    fields = {k: getattr(a, k) for k in _OPS_FIELDS}
+    fields["subject"] = None if a.subject is None else a.subject == "on"
+    if a.ocmd == "add":
+        return core.ops_add(conn, a.scope, a.name, a.form, fields, actor)
+    return core.ops_edit(conn, a.scope, a.name, fields, a.form, actor)
+
+
 def dispatch(conn, a, actor):
     c = a.cmd
+    if c == "ops":
+        return _dispatch_ops(conn, a, actor)
     if c == "project":
         if a.pcmd == "add":
             return core.project_add(conn, a.name, a.rank, a.notes, actor, a.path, a.target, a.result_look)
@@ -4029,8 +4106,57 @@ def _art_where(r):
                                  f"{at} UTC" if at else None) if x)
 
 
+def _ops_state(c):
+    s = c["state"]
+    return f"paused until {c['paused_until']}" if s == "paused" and c.get("paused_until") else s
+
+
+def render_ops(a, res):
+    if a.ocmd == "list":
+        if not res["checks"]:
+            print(f"no checks{' of ' + res['scope'] if res['scope'] else ''}. Add one: maxpm ops add "
+                  f"<project|target> <name> <{'|'.join(res['forms'])}> ...")
+            return
+        for c in res["checks"]:
+            last = c["last"]
+            ran = f"last run {last['started_at']}: {last['status'] or 'runs now'}" if last else "never ran"
+            print(f"{c['scope']}/{c['name']}  [{_ops_state(c)}; {ran}]")
+            print(f"    {c['summary']}")
+        return
+    c = res if a.ocmd == "show" else res["check"]
+    if a.ocmd != "show":
+        if res["changed"] is None:
+            print(f"check {c['scope']}/{c['name']}: nothing changed")
+        else:
+            print(f"check {c['scope']}/{c['name']} {res['changed']}"
+                  + (f" ({', '.join(res['fields'])})" if res.get("fields") else ""))
+        if res["changed"] == "removed":
+            print("    its runs and changes of state stay in the history")
+            return
+    print(f"{c['scope_kind']} {c['scope']}, check {c['name']}  [{_ops_state(c)}]  key {c['key']}")
+    print(f"    {core.OPS_FORMS[c['form']]}")
+    for k, v in c["config"].items():
+        print(f"    {k}: {v}")
+    print(f"    every {c['every']}, timeout {c['timeout']}, fault after {c['fail_after']} failed runs, healed after "
+          f"{c['recover_after']} passed runs; severity {c['severity']}"
+          + ("; a fault for each subject in the output" if c["subject"] else ""))
+    if c["runbook"]:
+        print(f"    runbook: {c['runbook']}")
+    if c["repair"]:
+        print(f"    repair: {c['repair']}")
+    if c["runs_command"] or c["repair"]:
+        print("    it runs a command outside the sandbox: only a person or the manager changes it"
+              + (" (the repair on a deploy target: a person)" if c["repair"] and c["scope_kind"] == "target" else ""))
+    for r in c.get("runs") or []:
+        print(f"    run {r['started_at']}: {r['status'] or 'runs now'}" + (f" {r['summary']}" if r["summary"] else ""))
+    for e in c.get("events") or []:
+        print(f"    {e['at']} {e['state']}" + (f": {e['note']}" if e["note"] and e["note"] != e["state"] else ""))
+
+
 def render(a, res):
     c = a.cmd
+    if c == "ops":
+        return render_ops(a, res)
     if c == "wait":
         return render_wait(res)
     if c == "usage":

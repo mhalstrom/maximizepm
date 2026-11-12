@@ -917,6 +917,64 @@ CREATE TABLE IF NOT EXISTS changes (
   created_at  TEXT NOT NULL
 );
 
+-- Operations checks (#5429): what MaximizePM watches for a project or a deploy target. A check runs a plugin:
+-- a built-in form (url, beat, cmd, log) or an executable on the Monitoring Plugins API (form plugin). One
+-- generic process: nothing about a project lives in the code, each project sets its own checks.
+CREATE TABLE IF NOT EXISTS checks (
+  id            INTEGER PRIMARY KEY,
+  scope_kind    TEXT NOT NULL,           -- project or target
+  scope         TEXT NOT NULL,           -- the name of the project or the target
+  name          TEXT NOT NULL,
+  form          TEXT NOT NULL,           -- one of OPS_FORMS
+  config        TEXT NOT NULL,           -- the settings of the form as JSON (OPS_FORM_FIELDS)
+  every         TEXT NOT NULL,           -- a duration: how often it runs
+  fail_after    INTEGER NOT NULL,        -- failed runs in a row before it is a fault
+  recover_after INTEGER NOT NULL,        -- passed runs in a row before a fault counts as healed
+  timeout       TEXT NOT NULL,           -- a duration: the time limit of one run
+  severity      TEXT NOT NULL,           -- page, item, or note
+  runbook       TEXT,                    -- for the agent that investigates a fault
+  subject       INTEGER NOT NULL DEFAULT 0,  -- 1: each line of the output names a subject with its own fault
+  repair        TEXT,                    -- a command that fixes a known fault
+  paused_until  TEXT,
+  state         TEXT NOT NULL DEFAULT 'new',  -- new, healthy, failing, fault, recovered, paused
+  created_by    TEXT,
+  created_at    TEXT NOT NULL,
+  changed_by    TEXT,
+  changed_at    TEXT,
+  UNIQUE (scope_kind, scope, name)
+);
+
+-- One row for each run of a check. check_id stays when the check is removed, so the history stays readable.
+CREATE TABLE IF NOT EXISTS ops_runs (
+  id          INTEGER PRIMARY KEY,
+  check_id    INTEGER NOT NULL,
+  key         TEXT NOT NULL,             -- ops:<scope>:<check>
+  started_at  TEXT NOT NULL,
+  ended_at    TEXT,
+  status      TEXT,                      -- ok, warning, critical, unknown (the Monitoring Plugins API)
+  exit_code   INTEGER,
+  timed_out   INTEGER NOT NULL DEFAULT 0,
+  seconds     REAL,
+  summary     TEXT,                      -- the status line, without the perfdata
+  perfdata    TEXT,                      -- after '|' on the status line
+  evidence    TEXT,                      -- one JSON object from the later lines of a plugin's output, if any
+  output      TEXT                       -- the last lines
+);
+
+-- One row for each change of the state of a check, or of one subject of it (#5336 reads it: faults per week, the
+-- time to recovery).
+CREATE TABLE IF NOT EXISTS ops_events (
+  id          INTEGER PRIMARY KEY,
+  check_id    INTEGER NOT NULL,
+  key         TEXT NOT NULL,             -- ops:<scope>:<check>[:<subject>]
+  state       TEXT NOT NULL,
+  at          TEXT NOT NULL,
+  actor       TEXT,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS ops_runs_check ON ops_runs(check_id, id);
+CREATE INDEX IF NOT EXISTS ops_events_key ON ops_events(key, id);
+
 CREATE TABLE IF NOT EXISTS session_samples (
   id          INTEGER PRIMARY KEY,
   at          TEXT NOT NULL,
@@ -3031,6 +3089,305 @@ def target_hook(conn, name, event=None, command=None, clear=False, actor=None):
             "deploy_timeout": setting(conn, "deploy_timeout", project_id=_deploy_project_id(conn, name)),
             "review": setting(conn, "review", project_id=_deploy_project_id(conn, name)),
             "deployer": _target(conn, name)["deployer"]}
+
+
+# ---------------------------------------------------------------- operations checks (#5429)
+
+# A check runs a plugin: one of the built-in forms, or any executable on the Monitoring Plugins API (contract C,
+# manager-477c for mark 2026-11-12): the exit code (0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN) and the first output
+# line (perfdata after '|') are the result, and the later lines may hold one JSON object of evidence, which the
+# fault item keeps. So plugins such as check_http, check_disk and check_procs work as they are. The scaffolding (the schedule, the state, the
+# fault items) is deterministic code with no model call (mark 2026-11-12); maxpm serve runs the checks (#5430).
+OPS_FORMS = {
+    "url": "an HTTP GET with a time limit; healthy when the status is in the list and the body holds the text",
+    "beat": "waits for a beat from the project's own job; healthy when one came within the period",
+    "cmd": "runs a shell command outside the sandbox; healthy on exit 0",
+    "log": "runs a command that prints the new log lines; healthy while the lines that match the pattern in the "
+           "window stay below the limit",
+    "plugin": "runs an executable on the Monitoring Plugins API outside the sandbox: exit 0 OK, 1 WARNING, "
+              "2 CRITICAL, 3 UNKNOWN; the first line is the status, later lines may hold one JSON object of evidence",
+}
+OPS_FORM_FIELDS = {"url": ("url", "statuses", "body"), "beat": ("period",), "cmd": ("command",),
+                   "log": ("command", "pattern", "limit", "window"), "plugin": ("command",)}
+OPS_COMMAND_FORMS = ("cmd", "log", "plugin")  # they run a command outside the sandbox (decision 2 of #5380)
+OPS_SEVERITIES = ("page", "item", "note")
+OPS_DEFAULTS = {"every": "5m", "fail_after": 3, "recover_after": 2, "timeout": "30s", "severity": "item",
+                "statuses": "200-399"}
+_OPS_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_OPS_STATUSES = re.compile(r"^\d{3}(-\d{3})?$")
+
+
+def _ops_scope(conn, scope):
+    """('project'|'target', name) of the scope of a check. 'project:<name>' or 'target:<name>' names the kind;
+    a bare name is the project or the target of that name, and is refused when both exist."""
+    kind, _, name = scope.partition(":") if scope.startswith(("project:", "target:")) else ("", "", scope)
+    if kind == "project" or (not kind and conn.execute("SELECT 1 FROM projects WHERE name=?", (name,)).fetchone()):
+        if not kind and conn.execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone():
+            raise RiverError(f"{name!r} is a project and a deploy target: name one, project:{name} or target:{name}")
+        return "project", _project(conn, name)["name"]
+    if kind == "target" or conn.execute("SELECT 1 FROM targets WHERE name=?", (name,)).fetchone():
+        return "target", _target(conn, name)["name"]
+    raise RiverError(f"no project or deploy target {name!r}: a check belongs to one (maxpm project list, "
+                     f"maxpm target list)")
+
+
+def _ops_key(check, subject=None):
+    return f"ops:{check['scope']}:{check['name']}" + (f":{subject}" if subject else "")
+
+
+def _ops_check(conn, scope, name):
+    kind, scope = _ops_scope(conn, scope)
+    r = conn.execute("SELECT * FROM checks WHERE scope_kind=? AND scope=? AND name=?", (kind, scope, name)).fetchone()
+    if r is None:
+        names = [x["name"] for x in conn.execute("SELECT name FROM checks WHERE scope_kind=? AND scope=? ORDER BY name",
+                                                  (kind, scope))]
+        raise RiverError(f"{scope} has no check {name!r}; its checks: {', '.join(names) or 'none'} "
+                         f"(maxpm ops list {scope})")
+    return r
+
+
+def _ops_row(r):
+    d = dict(r)
+    d["config"] = json.loads(d["config"])
+    d["subject"] = bool(d["subject"])
+    d["key"] = _ops_key(d)
+    d["runs_command"] = d["form"] in OPS_COMMAND_FORMS
+    return d
+
+
+def may_set_check(conn, actor, check):
+    """Who may add, change, pause, or remove a check (decisions 2 and 4 of #5380): any session a url or beat
+    check, which runs no command; a person or the manager a cmd, log, or plugin check and any repair, because
+    maxpm serve runs them outside the sandbox; only a person a repair on a check of a deploy target, because a
+    target is production. None (no name: a person at the terminal, or the page) may. Returns why not, or None."""
+    r = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+    person = r is None or r["kind"] == "human"
+    if check.get("repair") and check["scope_kind"] == "target" and not person:
+        return (f"{actor} is {'the manager' if r['role'] == 'manager' else 'an agent'}; only a person sets, changes, "
+                f"or removes a check with a repair on the deploy target {check['scope']}, because a repair there "
+                f"changes production. Ask the person: maxpm --as {actor} ask <person> \"<the check and why>\"")
+    if person or r["role"] == "manager" or (check["form"] not in OPS_COMMAND_FORMS and not check.get("repair")):
+        return None
+    what = "a repair command" if check.get("repair") else f"a {check['form']} check"
+    return (f"{actor} is an agent; only a person or the manager sets, changes, or removes {what}, because maxpm "
+            f"serve runs it outside the sandbox. An agent may add a url or a beat check. Ask the manager: "
+            f"maxpm --as {actor} ask manager \"<the check and why>\"")
+
+
+def _ops_statuses(text):
+    parts = [p.strip() for p in str(text).split(",") if p.strip()]
+    for p in parts:
+        lo, _, hi = p.partition("-")
+        if not _OPS_STATUSES.match(p) or not 100 <= int(lo) <= 599 or (hi and not int(lo) <= int(hi) <= 599):
+            raise RiverError(f"bad statuses {text!r}: HTTP statuses and ranges, for example 200-399 or 200,204")
+    if not parts:
+        raise RiverError("bad statuses '': HTTP statuses and ranges, for example 200-399 or 200,204")
+    return ",".join(parts)
+
+
+def _ops_build(form, fields, old=None):
+    """The columns of a check from its form and the fields a person gave (the CLI options); for an edit, over the
+    old check. Every value is checked here, so a check in the table is always one that maxpm serve can run."""
+    old = old or {}
+    if form not in OPS_FORMS:
+        raise RiverError(f"no form {form!r}: one of {', '.join(OPS_FORMS)}")
+    cfg = dict(old.get("config", {})) if old.get("form") == form else {}
+    other = {k for k, v in fields.items() if v is not None} & ({f for fs in OPS_FORM_FIELDS.values() for f in fs}
+                                                               - set(OPS_FORM_FIELDS[form]))
+    if other:
+        raise RiverError(f"a {form} check has no {', '.join('--' + f for f in sorted(other))}; its settings: "
+                         f"{', '.join('--' + f for f in OPS_FORM_FIELDS[form])}")
+    for f in OPS_FORM_FIELDS[form]:
+        if fields.get(f) is not None:
+            cfg[f] = fields[f]
+    if form == "url":
+        if not re.match(r"^https?://\S+$", cfg.get("url") or ""):
+            raise RiverError("a url check needs --url with an http:// or https:// address")
+        cfg["statuses"] = _ops_statuses(cfg.get("statuses") or OPS_DEFAULTS["statuses"])
+        if not cfg.get("body"):
+            cfg.pop("body", None)
+    if form in OPS_COMMAND_FORMS:
+        cfg["command"] = (cfg.get("command") or "").strip()
+        if not cfg["command"]:
+            raise RiverError(f"a {form} check needs --command: "
+                             + ("the executable and its arguments" if form == "plugin" else
+                                "a command that prints the new log lines" if form == "log" else "a shell command"))
+    if form == "log":
+        if not cfg.get("pattern"):
+            raise RiverError("a log check needs --pattern: the lines that count (a regular expression)")
+        try:
+            re.compile(cfg["pattern"])
+        except re.error as e:
+            raise RiverError(f"bad --pattern {cfg['pattern']!r}: {e}")
+        try:
+            cfg["limit"] = int(cfg.get("limit") if cfg.get("limit") is not None else 1)
+        except (TypeError, ValueError):
+            raise RiverError(f"bad --limit {cfg.get('limit')!r}: a whole number of lines")
+        if cfg["limit"] < 1:
+            raise RiverError("--limit is at least 1: the check is healthy while the count stays below it")
+        cfg["window"] = cfg.get("window") or "15m"
+        parse_duration(cfg["window"])
+    if form == "beat":
+        if not cfg.get("period"):
+            raise RiverError("a beat check needs --period: the longest time between two beats, for example 1h")
+        parse_duration(cfg["period"])
+    col = {"form": form, "config": cfg}
+    for k in ("every", "timeout", "severity", "fail_after", "recover_after"):
+        v = fields.get(k)
+        col[k] = v if v is not None else old.get(k, OPS_DEFAULTS[k])
+    for k in ("every", "timeout"):
+        parse_duration(col[k])
+    if form != "beat" and parse_duration(col["timeout"]) > parse_duration(col["every"]):
+        raise RiverError(f"the timeout {col['timeout']} is longer than every {col['every']}: one run would still "
+                         f"run when the next one is due")
+    for k in ("fail_after", "recover_after"):
+        try:
+            col[k] = int(col[k])
+        except (TypeError, ValueError):
+            raise RiverError(f"bad --{k.replace('_', '-')} {col[k]!r}: a whole number of runs")
+        if col[k] < 1:
+            raise RiverError(f"--{k.replace('_', '-')} is at least 1")
+    if col["severity"] not in OPS_SEVERITIES:
+        raise RiverError(f"no severity {col['severity']!r}: page (it may reach the phone), item (an item and the "
+                         f"manager), or note (a line on the page)")
+    for k in ("runbook", "repair"):
+        v = fields.get(k)
+        col[k] = (v.strip() or None) if v is not None else old.get(k)
+    col["subject"] = bool(fields["subject"]) if fields.get("subject") is not None else bool(old.get("subject"))
+    if col["subject"] and form not in OPS_COMMAND_FORMS:
+        raise RiverError(f"a {form} check has no subjects: only a cmd, log, or plugin check names them in its output")
+    return col
+
+
+def _ops_summary(c):
+    cfg = c["config"]
+    what = {"url": lambda: f"GET {cfg['url']} ({cfg['statuses']}" + (f", body has {cfg['body']!r})" if cfg.get("body") else ")"),
+            "beat": lambda: f"a beat at least every {cfg['period']}",
+            "cmd": lambda: cfg["command"], "plugin": lambda: cfg["command"],
+            "log": lambda: f"{cfg['command']}: fewer than {cfg['limit']} lines match {cfg['pattern']!r} in {cfg['window']}"}
+    return f"{c['form']} {what[c['form']]()}; every {c['every']}, fault after {c['fail_after']}, {c['severity']}"
+
+
+def ops_add(conn, scope, name, form, fields=None, actor=None):
+    """maxpm ops add: a new check of a project or a deploy target (OPS_FORMS). It does not run yet: maxpm serve
+    runs the checks that are due (#5430)."""
+    if not _OPS_NAME.match(name or ""):
+        raise RiverError("check names use lower-case letters, digits, '.', '_', '-'")
+    with tx(conn):
+        kind, scope = _ops_scope(conn, scope)
+        if conn.execute("SELECT 1 FROM checks WHERE scope_kind=? AND scope=? AND name=?", (kind, scope, name)).fetchone():
+            raise RiverError(f"{scope} has a check {name!r}; change it: maxpm ops edit {scope} {name} ...")
+        col = _ops_build(form, fields or {})
+        why = may_set_check(conn, actor, dict(col, scope_kind=kind, scope=scope))
+        if why:
+            raise RiverError(why)
+        conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
+                     "severity,runbook,subject,repair,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (kind, scope, name, form, json.dumps(col["config"]), col["every"], col["fail_after"],
+                      col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
+                      col["repair"], actor, iso(now())))
+        c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
+        _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
+               + (f"; repair: {c['repair']}" if c["repair"] else ""))
+    return {"changed": "added", "check": c}
+
+
+def ops_edit(conn, scope, name, fields=None, form=None, actor=None):
+    """maxpm ops edit: change the settings of a check. The rights hold for the check before and after the change,
+    so an agent cannot turn a url check into a command, nor change a command check."""
+    fields = fields or {}
+    with tx(conn):
+        old = _ops_row(_ops_check(conn, scope, name))
+        col = _ops_build(form or old["form"], fields, old)
+        for c in (old, dict(col, scope_kind=old["scope_kind"], scope=old["scope"])):
+            why = may_set_check(conn, actor, c)
+            if why:
+                raise RiverError(why)
+        cols = ("form", "config", "every", "fail_after", "recover_after", "timeout", "severity", "runbook",
+                "subject", "repair")
+        changed = [k for k in cols if col[k] != old[k]]
+        if not changed:
+            return {"changed": None, "check": old}
+        conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
+                     " runbook=?, subject=?, repair=?, changed_by=?, changed_at=? WHERE id=?",
+                     (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
+                      col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"], actor,
+                      iso(now()), old["id"]))
+        c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
+        _event(conn, None, actor, f"ops check {c['scope']}/{name} changed ({', '.join(changed)}): {_ops_summary(c)}"
+               + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
+    return {"changed": "changed", "fields": changed, "check": c}
+
+
+def ops_rm(conn, scope, name, actor=None):
+    """maxpm ops rm: remove a check. Its runs and its events stay, so the history of faults stays whole."""
+    with tx(conn):
+        c = _ops_row(_ops_check(conn, scope, name))
+        why = may_set_check(conn, actor, c)
+        if why:
+            raise RiverError(why)
+        conn.execute("DELETE FROM checks WHERE id=?", (c["id"],))
+        _event(conn, None, actor, f"ops check {c['scope']}/{name} removed (was: {_ops_summary(c)})")
+    return {"changed": "removed", "check": c}
+
+
+def ops_pause(conn, scope, name, until=None, resume=False, actor=None):
+    """maxpm ops pause: stop a check for planned work, until a time (a duration, or a time as parse_when reads it);
+    --resume starts it again at once. A pause is a change of state (ops_events)."""
+    if resume == (until is not None):
+        raise RiverError(f"give --until <time> (for example 2h) or --resume: maxpm ops pause {scope} {name} --until 2h")
+    with tx(conn):
+        c = _ops_row(_ops_check(conn, scope, name))
+        why = may_set_check(conn, actor, c)
+        if why:
+            raise RiverError(why)
+        if resume:
+            if not c["paused_until"]:
+                raise RiverError(f"{c['scope']}/{name} is not paused")
+            conn.execute("UPDATE checks SET paused_until=NULL, state='new', changed_by=?, changed_at=? WHERE id=?",
+                         (actor, iso(now()), c["id"]))
+            state, note = "resumed", "resumed"
+        else:
+            at = iso(parse_when(until, setting(conn, "timezone")))
+            conn.execute("UPDATE checks SET paused_until=?, state='paused', changed_by=?, changed_at=? WHERE id=?",
+                         (at, actor, iso(now()), c["id"]))
+            state, note = "paused", f"paused until {at}"
+        conn.execute("INSERT INTO ops_events(check_id,key,state,at,actor,note) VALUES (?,?,?,?,?,?)",
+                     (c["id"], c["key"], state, iso(now()), actor, note))
+        _event(conn, None, actor, f"ops check {c['scope']}/{name} {note}")
+        c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (c["id"],)).fetchone())
+    return {"changed": state, "check": c}
+
+
+def _ops_last(conn, c):
+    r = conn.execute("SELECT * FROM ops_runs WHERE check_id=? ORDER BY id DESC LIMIT 1", (c["id"],)).fetchone()
+    return dict(r) if r else None
+
+
+def ops_list(conn, scope=None):
+    """maxpm ops list: the checks of every scope, or of one project or deploy target, each with its last run."""
+    q, args = "SELECT * FROM checks", ()
+    if scope:
+        kind, name = _ops_scope(conn, scope)
+        q, args = q + " WHERE scope_kind=? AND scope=?", (kind, name)
+    out = []
+    for r in conn.execute(q + " ORDER BY scope_kind, scope, name", args).fetchall():
+        c = _ops_row(r)
+        c["summary"] = _ops_summary(c)
+        c["last"] = _ops_last(conn, c)
+        out.append(c)
+    return {"scope": scope, "checks": out, "forms": OPS_FORMS}
+
+
+def ops_show(conn, scope, name, n=10):
+    """maxpm ops show: one check, its last runs, and its last changes of state."""
+    c = _ops_row(_ops_check(conn, scope, name))
+    c["summary"] = _ops_summary(c)
+    c["runs"] = [dict(r) for r in conn.execute("SELECT * FROM ops_runs WHERE check_id=? ORDER BY id DESC LIMIT ?",
+                                               (c["id"], n))]
+    c["events"] = [dict(r) for r in conn.execute("SELECT * FROM ops_events WHERE check_id=? ORDER BY id DESC LIMIT ?",
+                                                 (c["id"], n))]
+    return c
 
 
 def _deploy_project_id(conn, target):

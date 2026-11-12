@@ -9113,3 +9113,149 @@ class LaunchWaitingModel(Base):
         with contextlib.redirect_stdout(out):
             cli.run(["--json", "--as", "", "launch", "--item", str(self.plain), "--model", "fable", "--dry-run"])
         self.assertIsNone(json.loads(out.getvalue())["would_push_to"])
+
+
+class Ops(Base):
+    """Operations checks of a project or a deploy target (#5429): the record, the rights, and the commands."""
+
+    def setUp(self):
+        super().setUp()
+        core.target_add(self.c, "prod", "the servers")
+        core.project_add(self.c, "site", target="prod")
+        core.register(self.c, "dev")
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        core.register(self.c, "mark", human=True)
+
+    def history(self):
+        return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id IS NULL AND change LIKE 'ops %' "
+                                             "ORDER BY id")]
+
+    def test_any_session_adds_a_url_check_with_the_defaults_and_the_history_records_it(self):
+        r = core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
+        c = r["check"]
+        self.assertEqual((c["scope_kind"], c["scope"], c["key"], c["state"]), ("project", "site", "ops:site:home", "new"))
+        self.assertEqual(c["config"], {"url": "https://example.com/", "statuses": "200-399"})
+        self.assertEqual((c["every"], c["fail_after"], c["recover_after"], c["timeout"], c["severity"]),
+                         ("5m", 3, 2, "30s", "item"))
+        self.assertEqual(self.history(), ["ops check site/home added: url GET https://example.com/ (200-399); every "
+                                          "5m, fault after 3, item"])
+        core.ops_add(self.c, "prod", "beat", "beat", {"period": "1h", "severity": "page"}, actor="dev")
+        self.assertEqual([(x["scope"], x["name"]) for x in core.ops_list(self.c)["checks"]],
+                         [("site", "home"), ("prod", "beat")])
+        self.assertEqual([x["name"] for x in core.ops_list(self.c, "prod")["checks"]], ["beat"])
+        self.assertEqual(core.ops_show(self.c, "prod", "beat")["key"], "ops:prod:beat")
+
+    def test_a_command_or_a_repair_needs_a_person_or_the_manager_and_a_repair_on_a_target_a_person(self):
+        for form, f in (("cmd", {"command": "true"}), ("plugin", {"command": "/usr/lib/check_disk -w 20%"}),
+                        ("log", {"command": "tail -n 100 app.log", "pattern": "ERROR"})):
+            with self.assertRaisesRegex(RiverError, f"only a person or the manager .* a {form} check"):
+                core.ops_add(self.c, "site", form, form, f, actor="dev")
+            core.ops_add(self.c, "site", form, form, f, actor="boss")
+        with self.assertRaisesRegex(RiverError, "a repair command"):
+            core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/", "repair": "restart"}, actor="dev")
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/", "repair": "restart"}, actor="boss")
+        with self.assertRaisesRegex(RiverError, "only a person .* repair on the deploy target prod"):
+            core.ops_add(self.c, "prod", "api", "url", {"url": "https://example.com/", "repair": "restart"}, actor="boss")
+        core.ops_add(self.c, "prod", "api", "url", {"url": "https://example.com/", "repair": "restart"}, actor="mark")
+        core.ops_add(self.c, "prod", "disk", "cmd", {"command": "df -h"})  # no name: a person at the terminal
+
+    def test_an_agent_cannot_turn_a_url_check_into_a_command_nor_change_pause_or_remove_a_command_check(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
+        with self.assertRaisesRegex(RiverError, "a cmd check"):
+            core.ops_edit(self.c, "site", "home", {"command": "true"}, form="cmd", actor="dev")
+        r = core.ops_edit(self.c, "site", "home", {"every": "1m", "body": "Welcome"}, actor="dev")
+        self.assertEqual((r["fields"], r["check"]["config"]["body"]), (["config", "every"], "Welcome"))
+        self.assertIsNone(core.ops_edit(self.c, "site", "home", {"every": "1m"}, actor="dev")["changed"])
+        core.ops_add(self.c, "site", "jobs", "cmd", {"command": "true"}, actor="boss")
+        for act in (lambda: core.ops_edit(self.c, "site", "jobs", {"every": "1h"}, actor="dev"),
+                    lambda: core.ops_pause(self.c, "site", "jobs", "2h", actor="dev"),
+                    lambda: core.ops_rm(self.c, "site", "jobs", actor="dev")):
+            with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+                act()
+        r = core.ops_edit(self.c, "site", "jobs", {"command": "check_jobs --all"}, form="plugin", actor="boss")
+        self.assertEqual((r["check"]["form"], r["check"]["config"]), ("plugin", {"command": "check_jobs --all"}))
+
+    def test_each_setting_is_checked_before_the_check_is_kept(self):
+        bad = [("url", {"url": "example.com"}, "http:// or https://"),
+               ("url", {"url": "https://x.io", "statuses": "2xx"}, "bad statuses"),
+               ("url", {"url": "https://x.io", "command": "true"}, "a url check has no --command"),
+               ("url", {"url": "https://x.io", "subject": True}, "has no subjects"),
+               ("url", {"url": "https://x.io", "every": "1m", "timeout": "2m"}, "longer than every"),
+               ("url", {"url": "https://x.io", "every": "soon"}, "bad duration"),
+               ("url", {"url": "https://x.io", "fail_after": 0}, "at least 1"),
+               ("url", {"url": "https://x.io", "severity": "loud"}, "no severity"),
+               ("log", {"command": "cat log"}, "needs --pattern"),
+               ("log", {"command": "cat log", "pattern": "("}, "bad --pattern"),
+               ("log", {"command": "cat log", "pattern": "E", "limit": 0}, "at least 1"),
+               ("beat", {}, "needs --period"),
+               ("cmd", {"command": "  "}, "needs --command"),
+               ("ping", {}, "no form")]
+        for form, f, why in bad:
+            with self.assertRaisesRegex(RiverError, why):
+                core.ops_add(self.c, "site", "x", form, f, actor="mark")
+        self.assertEqual(core.ops_list(self.c)["checks"], [])
+        with self.assertRaisesRegex(RiverError, "lower-case"):
+            core.ops_add(self.c, "site", "Home", "beat", {"period": "1h"})
+        with self.assertRaisesRegex(RiverError, "no project or deploy target 'nope'"):
+            core.ops_add(self.c, "nope", "home", "beat", {"period": "1h"})
+        core.ops_add(self.c, "site", "home", "beat", {"period": "1h"})
+        with self.assertRaisesRegex(RiverError, "has a check 'home'"):
+            core.ops_add(self.c, "site", "home", "beat", {"period": "1h"})
+        c = core.ops_add(self.c, "site", "errors", "log", {"command": "cat new.log", "pattern": "ERROR", "subject": True})
+        self.assertEqual((c["check"]["config"]["limit"], c["check"]["config"]["window"], c["check"]["subject"]),
+                         (1, "15m", True))
+
+    def test_a_name_that_is_a_project_and_a_target_needs_its_kind(self):
+        core.project_add(self.c, "prod")
+        with self.assertRaisesRegex(RiverError, "project:prod or target:prod"):
+            core.ops_add(self.c, "prod", "beat", "beat", {"period": "1h"})
+        core.ops_add(self.c, "target:prod", "beat", "beat", {"period": "1h"})
+        core.ops_add(self.c, "project:prod", "beat", "beat", {"period": "2h"})
+        self.assertEqual(sorted((x["scope_kind"], x["config"]["period"]) for x in core.ops_list(self.c)["checks"]),
+                         [("project", "2h"), ("target", "1h")])
+
+    def test_a_pause_and_a_resume_are_changes_of_state_and_a_removed_check_keeps_its_history(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
+        with self.assertRaisesRegex(RiverError, "--until <time>"):
+            core.ops_pause(self.c, "site", "home", actor="dev")
+        c = core.ops_pause(self.c, "site", "home", "2h", actor="dev")["check"]
+        self.assertEqual(c["state"], "paused")
+        self.assertTrue(c["paused_until"] > core.iso(core.now() + timedelta(hours=1)))
+        self.assertEqual(core.ops_pause(self.c, "site", "home", resume=True, actor="dev")["check"]["state"], "new")
+        with self.assertRaisesRegex(RiverError, "is not paused"):
+            core.ops_pause(self.c, "site", "home", resume=True, actor="dev")
+        core.ops_rm(self.c, "site", "home", actor="dev")
+        self.assertEqual([(r["key"], r["state"]) for r in self.c.execute("SELECT key, state FROM ops_events ORDER BY id")],
+                         [("ops:site:home", "paused"), ("ops:site:home", "resumed")])
+        self.assertTrue(self.history()[-1].startswith("ops check site/home removed (was: url GET"))
+        with self.assertRaisesRegex(RiverError, "site has no check 'home'"):
+            core.ops_show(self.c, "site", "home")
+
+    def test_the_command_line_adds_shows_and_refuses_an_unnamed_agent(self):
+        from river import cli
+
+        def run(*words, env=None):
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, env or {}), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    code = cli.run(list(words))
+                except RiverError as e:
+                    return 2, str(e)
+            return code, out.getvalue()
+        code, out = run("--as", "mark", "ops", "add", "site", "errors", "log", "--command", "tail -n 50 app.log",
+                        "--pattern", "ERROR", "--limit", "5", "--window", "10m", "--subject", "on",
+                        "--runbook", "read app.log")
+        self.assertEqual(code, 0)
+        self.assertIn("check site/errors added", out)
+        self.assertIn("runs a command outside the sandbox", out)
+        code, out = run("--as", "mark", "ops", "list")
+        self.assertIn("site/errors  [new; never ran]", out)
+        code, out = run("--as", "mark", "ops", "show", "site", "errors")
+        self.assertIn("pattern: ERROR", out)
+        self.assertIn("a fault for each subject", out)
+        code, out = run("ops", "rm", "site", "errors", env={"CLAUDECODE": "1"})
+        self.assertEqual(code, 2)
+        self.assertIn("name yourself", out)
