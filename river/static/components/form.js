@@ -15,8 +15,9 @@ export function select(a, options, selected) {
     return `<option${withValue ? ` value="${esc(v)}"` : ""} ${v === selected ? "selected" : ""}>${esc(label)}</option>`;
   }).join("")}</select>`;
 }
-// A label above its control; hint goes after the label text.
-export function field(label, control, hint = "") { return `<label>${label}${hint}${control}</label>`; }
+// A label above its control; hint goes after the label text, on its line: the label is a grid, so the text and the
+// hint are one span, not two rows (#5332).
+export function field(label, control, hint = "") { return `<label>${hint ? `<span>${label}${hint}</span>` : label}${control}</label>`; }
 export function two(a, b) { return `<div class="two">${a}${b}</div>`; }
 export function actions(inner, style) { return `<div class="actions"${style ? ` style="${style}"` : ""}>${inner}</div>`; }
 
