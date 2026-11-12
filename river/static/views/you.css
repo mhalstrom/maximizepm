@@ -27,5 +27,5 @@
 .ny-more { padding: var(--sp-3) var(--sp-1); border-top: var(--hair) solid var(--line); }  /* the list holds the most important 100 (#5114) */
 .nyx { padding: 0 var(--sp-1) var(--sp-3); }
 .send-row { margin-top: var(--sp-3); }
-#sendItem { width: var(--w-xs); }
+#sendItem { width: var(--w-xs); flex: none; }  /* its placeholder shows whole on a phone too (#5324) */
 #sendBody { flex: 1; min-width: var(--w-m); }
