@@ -9301,12 +9301,18 @@ def agent_process(start=None, terminal=False, climb=False):
     terminal that a person works in). terminal: that process counts only when it runs on a terminal
     (process_on_terminal, #5247): a Hermes command runs under the gateway that every Hermes session shares.
     climb: go on upward to the first process that runs on a terminal (#5283: an OpenCode command runs under the
-    TUI's private server, which has none; the TUI is the session's own process)."""
+    TUI's private server, which has none; the TUI is the session's own process).
+    When the environment names the agent CLI (its adapter's DETECT process, for example claude), the nearest ancestor
+    that runs it wins over a program between (#5533: a session's Python script that ran maxpm 24 times through a
+    runner of serve was recorded as the session, ended, and serve resumed the session that still ran); with none,
+    the first ancestor above the shells, as before."""
     pid = start or CALLER_PPID or os.getppid()
+    want = None if (terminal or climb) else _cli_process_name()
+    first = (None, None)
     for _ in range(12):
         info = proc_info(pid)
         if info is None:
-            return None, None
+            return first
         ppid, comm, args = info
         if not _between(comm, args):
             if os.name == "nt" and re.sub(r"\.exe$", "", comm.lower()) in WIN_HOSTS:
@@ -9316,10 +9322,63 @@ def agent_process(start=None, terminal=False, climb=False):
                     pid = ppid
                     continue
                 return None, None
-            return pid, args
+            if not want or _runs_cli(comm, args, want):
+                return pid, args
+            if first[0] is None:
+                first = (pid, args)
         if ppid <= 1:
-            return None, None
+            return first
         pid = ppid
+    return first
+
+
+def _cli_process_name(env=None):
+    """The program name of the agent CLI that this command runs inside (its adapter's DETECT process), or None."""
+    try:
+        a = _adapters().from_env(os.environ if env is None else env)
+    except Exception:  # noqa: BLE001 - an adapter that fails to load must not stop a command
+        return None
+    return ((a.detect or {}).get("process") if a else None) or None
+
+
+def _runs_cli(comm, args, name):
+    """Whether a process runs the agent CLI `name`: its program is it, or it is an interpreter whose first argument
+    is it (node /opt/homebrew/bin/codex)."""
+    if re.sub(r"\.exe$", "", comm.lower()) == name.lower():
+        return True
+    words = (args or "").split()[:2]
+    return any(os.path.basename(w).lower() == name.lower() for w in words)
+
+
+PS_ENV = None  # a test hook: () -> the text of 'ps axeww -o pid=,command=' (each process with its environment)
+
+
+def live_agent_process(name, process=None, ref=None):
+    """A live process of this host that runs the agent `name`: its environment holds MAXPM_AGENT=<name>, or its
+    command line names the agent's chat (ref, the session id that a resume passes), and when process names the agent
+    CLI, it runs that CLI (_runs_cli). (pid, command line), or (None, None) when there is none or ps cannot tell. ps
+    shows the environment of this user's own processes only (macOS and Linux)."""
+    import subprocess
+    if os.name == "nt":
+        return None, None
+    if PS_ENV is not None:
+        text = PS_ENV()
+    else:
+        try:
+            out = subprocess.run(["ps", "axeww", "-o", "pid=,command="], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None, None
+        text = out.stdout if out.returncode == 0 else ""
+    tag = re.compile(rf"(^|\s)MAXPM_AGENT={re.escape(name)}(\s|$)"
+                     + (rf"|(^|\s){re.escape(ref)}(\s|$)" if ref and len(ref) >= 8 else ""))
+    for line in text.splitlines():
+        head, _, rest = line.strip().partition(" ")
+        if not head.isdigit() or not tag.search(rest) or int(head) == os.getpid():
+            continue
+        info = proc_info(int(head))
+        if info is None or (process and not _runs_cli(info[1], info[2], process)):
+            continue
+        return int(head), info[2]
     return None, None
 
 

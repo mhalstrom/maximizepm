@@ -1165,6 +1165,41 @@ class Setup(Env):
             self.assertNotIn(name, js)
 
 
+class CliAncestor(Env):
+    """#5533: a session's script that runs maxpm (python3 - <<EOF ... subprocess.run(["maxpm", ...])) is not the
+    session: the nearest ancestor that runs the agent CLI of the environment wins over a program between."""
+
+    TREE = {100: (90, "zsh", "zsh -c ..."), 90: (80, "Python", "python3 - show"), 80: (70, "zsh", "/bin/zsh -c x"),
+            70: (1, "claude", "claude --name ag --model opus")}
+    NODE = {100: (90, "Python", "python3 timing.py"), 90: (1, "node", "node /opt/homebrew/bin/codex --yolo")}
+
+    def test_the_agent_cli_wins_over_a_script_between_and_the_first_ancestor_stays_the_rule_without_one(self):
+        with mock.patch.object(core, "proc_info", self.TREE.get):
+            with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
+                self.assertEqual(core.agent_process(100), (70, "claude --name ag --model opus"))
+            with mock.patch.object(core, "_cli_process_name", lambda env=None: None):
+                self.assertEqual(core.agent_process(100)[0], 90)  # no agent CLI named: the first ancestor, as before
+            with mock.patch.object(core, "_cli_process_name", lambda env=None: "gemini"):
+                self.assertEqual(core.agent_process(100)[0], 90)  # the CLI is not among them: the first one
+        with mock.patch.object(core, "proc_info", self.NODE.get), \
+                mock.patch.object(core, "_cli_process_name", lambda env=None: "codex"):
+            self.assertEqual(core.agent_process(100)[0], 90)  # an interpreter that runs the CLI is the CLI
+
+    def test_a_live_process_whose_environment_or_command_names_the_agent_runs_it(self):
+        ps = ("  4242 claude --name ag --model opus PATH=/bin MAXPM_AGENT=ag TERM=xterm\n"
+              "  4300 /bin/zsh -c x MAXPM_AGENT=ag\n"
+              "  4400 claude --name other MAXPM_AGENT=agent2\n"
+              "  4500 claude --resume c6e1f9d0-06a7-4982 --name x\n")
+        tree = {4242: (1, "claude", "claude --name ag --model opus"), 4300: (4242, "zsh", "/bin/zsh -c x"),
+                4400: (1, "claude", "claude --name other"), 4500: (1, "claude", "claude --resume c6e1f9d0-06a7-4982")}
+        with mock.patch.object(core, "PS_ENV", lambda: ps), mock.patch.object(core, "proc_info", tree.get):
+            self.assertEqual(core.live_agent_process("ag", "claude"), (4242, "claude --name ag --model opus"))
+            self.assertEqual(core.live_agent_process("ag")[0], 4242)
+            self.assertEqual(core.live_agent_process("agent"), (None, None))  # a name is a whole word
+            self.assertEqual(core.live_agent_process("nobody", "claude", ref="c6e1f9d0-06a7-4982")[0], 4500)
+            self.assertEqual(core.live_agent_process("nobody", "codex", ref="c6e1f9d0-06a7-4982"), (None, None))
+
+
 class SharedGateway(Env):
     """#5247: a Hermes command runs under the background gateway that every Hermes session shares, so the session's
     own process is the ancestor only when that one runs on a terminal."""

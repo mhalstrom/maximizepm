@@ -810,6 +810,19 @@ class Revive(Base):
         # Its new process has not run a river command yet (no pid): nothing more to do.
         self.assertEqual(server.revive_sessions(self.c), {})
 
+    def test_a_session_that_still_runs_under_another_process_is_recorded_and_not_resumed(self):
+        # #5533: the recorded process was a script of the session; the session's CLI still runs with its name.
+        with mock.patch.object(core, "live_agent_process", lambda name, process=None, ref=None:
+                               (4242, "claude --name ag") if (name, process, ref) == ("ag", "claude", SID) else (None, None)), \
+                mock.patch.object(core, "set_process", lambda conn, name, pid, cmd, host=None, env=None:
+                                  conn.execute("UPDATE agents SET pid=?, pid_cmd=? WHERE name=?", (pid, cmd, name))):
+            self.assertEqual(server.revive_sessions(self.c), {})
+        self.assertEqual(self.tmux.panes, [])
+        self.assertEqual(self.notices(), [])
+        self.assertEqual(core.agent_status(self.c, "ag")["pid"], 4242)
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE change LIKE 'ag: its recorded process % ended, but "
+                                       "process 4242 still runs it%'").fetchone())
+
     def test_an_end_on_purpose_stays_ended(self):
         # A stop (maxpm stop, End, kill) sets stop_at; the session stays ended.
         with core.tx(self.c):

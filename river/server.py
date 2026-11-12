@@ -1397,6 +1397,21 @@ def revive_sessions(conn, runner=None):
         kind, path = sessions.transcript(conn, name)
         if not path:
             continue
+        # The recorded process ended, but the session may still run under another one (#5533: a script of the session
+        # was recorded as its process): a live agent CLI whose environment names the agent is the session. Record it
+        # and resume nothing, so two sessions never run under one name.
+        ad = sessions._adapter(kind)
+        try:
+            ref = sessions.session_ref(conn, name, ad, path)
+        except Exception:  # noqa: BLE001 - the name alone still finds a session that maxpm started
+            ref = None
+        live, cmd = core.live_agent_process(name, ((ad.detect or {}).get("process") if ad else None), ref)
+        if live:
+            core.set_process(conn, name, live, cmd, env={"MAXPM_AGENT": name})
+            with core.tx(conn):
+                core._event(conn, None, "maxpm", f"{name}: its recorded process {pid} ended, but process {live} still "
+                                                 f"runs it ({cmd[:80]}); recorded that one, no resume")
+            continue
         try:
             cwd = sessions.entries(kind, path, None, 1, sessions.CARD_BYTES)["cwd"]
         except (OSError, ValueError, EOFError):
