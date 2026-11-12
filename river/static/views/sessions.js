@@ -126,7 +126,16 @@ function pinButton(s) {
 // message are the hover of the row and the head of the opened session. A session that waits at a prompt or for an
 // answer stands out (class "needs").
 const DOT = { working: "active", expert: "active", prompt: "needs", answer: "needs", idle: "away", starting: "away",
-              stopping: "gone", ended: "gone" };
+              stopping: "gone", ended: "gone", gone: "gone" };
+// #5364: the head of the opened session shows the state of its row, so the two never disagree: the list applies
+// rules that one session's read does not (no transcript and no process: not connected yet; a pane that shows a shell:
+// ended; a question the person answered in the chat). A session that left the list has ended. Before the first read
+// of the list, the session's own read (one) says it.
+export function headState(row, one, listRead) {
+  if (row) return { state: row.state, state_label: row.state_label };
+  if (listRead) return { state: "gone", state_label: "ended" };
+  return { state: one.state, state_label: one.state_label };
+}
 function rowHover(s) {
   const last = s.last.length ? s.last[s.last.length - 1] : null;
   const lastText = last ? (last.role === "tool" ? last.text : plainText(last.text)) : "";
@@ -188,12 +197,12 @@ function renderList(el, list, picked, empty) {
 }
 
 export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
-  let list = [], busy = false, again = false, proposals = [];
+  let list = [], busy = false, again = false, proposals = [], listRead = false;
   // A pane in place of a session's chat (#5102): "you" (what waits on the person) or "arts" (the artifacts of all
   // sessions); null while a session shows.
   let pane = null;
   const PANES = { you: "#sessYou", arts: "#sessArts" };
-  let agent = null, cursor = null, timer = null, gen = 0, lastCache = null;
+  let agent = null, cursor = null, timer = null, gen = 0, lastCache = null, lastRead = null;
   let older = null, readingOlder = false;  // where the earlier lines of the chat start (#5120), and a read of them
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
@@ -305,7 +314,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     try {
       await loadAgents();  // once: the rows ask it about each session's agent
       const j = await getJson("api/sessions");
-      list = j.sessions;
+      list = j.sessions; listRead = true;
       proposals = j.proposals || [];
       forgetDrafts(list);
       draw();
@@ -313,6 +322,12 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       side.innerHTML = `<div class="load-err" role="alert">Could not read the sessions (${esc(e.message)}); the page asks again.</div>`;
       delete side.dataset.empty;
     } finally { busy = false; if (again) refresh(); }
+  }
+
+  // The state in the head of the opened session: its row's (#5364), drawn after each read of the list or of the session.
+  function drawState() {
+    if (!agent || !lastRead || lastRead.agent !== agent) return;
+    putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(headState(list.find(x => x.name === agent), lastRead, listRead)));
   }
 
   // The rows from the list as it is now: refresh after each read, and a pin at once (#5400).
@@ -334,6 +349,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     workers.sort((a, b) => isPinned(b) - isPinned(a));
     renderList(side, workers, agent,
       `<div class="muted">No other agent session runs now. Start one with Start an agent, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
+    drawState();
     proposeCard();
     fit();
     autoWait();
@@ -376,7 +392,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       agePending(col);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
-      $("#sessState").innerHTML = provTag(j.provider) + stateDot(j);
+      lastRead = { agent, provider: j.provider, state: j.state, state_label: j.state_label };
+      drawState();
       waitLine(j);
       lastCache = j.cache || null;  // the expert's prompt cache (#5023): the header says it, and a send checks it
       const itemHtml = s.name ? headerItem(s) : "";

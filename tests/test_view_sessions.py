@@ -1538,6 +1538,30 @@ try {
             self.assertGreaterEqual(got["boot_x"], 14, f"a side gutter at {size}: {got}")
             self.assertTrue(got["boot_color"] and got["list_color"], f"the warn color at {size}: {got}")
 
+class HeadState(Base):
+    """#5364: the head of the opened session shows the state of its row. A session with no process and no transcript
+    is 'not connected yet' in the list; its head said 'working'. A session that left the list (#5394) has ended."""
+
+    def test_the_head_and_the_row_show_one_state(self):
+        core.register(self.c, "bare")  # no process, no transcript
+        self.assertEqual([(c["name"], c["state"]) for c in self.cards() if c["name"] == "bare"], [("bare", "starting")])
+        driver = DRIVE_HEAD + r'''
+try {
+  await until(() => q('#sessions [data-session="bare"] .srow-main'), "the row of bare");
+  q('#sessions [data-session="bare"] .srow-main').click();
+  await until(() => q("#sessTitle").textContent === "bare" && q("#sessState .sess-stw"), "the head of bare");
+  await sleep(1500);  // a read of the session and of the list after it
+  const row = q('#sessions [data-session="bare"] .dot'), head = q("#sessState .sess-stw");
+  const m = await import("/views/sessions.js");
+  post({ row: [row.className, row.title], head: [head.querySelector(".dot").className, head.textContent.trim()],
+         gone: m.headState(undefined, { state: "working", state_label: "working" }, true) });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = drive_page(self, driver)
+        self.assertEqual(got["row"], ["dot away", "not connected yet: it ran no maxpm command"])
+        self.assertEqual(got["head"], got["row"])
+        self.assertEqual(got["gone"], {"state": "gone", "state_label": "ended"})
+
 class ExpertCache(Base):
     """#5023: an expert's prompt cache from its transcript: warm with the minutes left, or cold, and what the next
     message costs at the read or the write price of the lifetime in force."""
