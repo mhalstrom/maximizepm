@@ -979,6 +979,34 @@ def build_parser():
     x.add_argument("scope", help="a project or a deploy target (project:<name> or target:<name> when both exist)")
     x.add_argument("name"); x.add_argument("form", choices=list(core.OPS_FORMS))
     ops_fields(x, True)
+    x = ops.add_parser("propose", help="propose a check, or a change of one: it never runs; a person or the manager "
+                       "accepts it (maxpm ops accept) or rejects it. Any form: the way for an agent to ask for a cmd, "
+                       "log, or plugin check or a repair")
+    x.add_argument("scope"); x.add_argument("name")
+    x.add_argument("form", nargs="?", choices=list(core.OPS_FORMS), help="the form of a new check; leave it out to "
+                   "change a check that exists")
+    x.add_argument("--why", required=True, help="what the check would catch, or what it watches")
+    ops_fields(x, True)
+    x = ops.add_parser("accept", help="a person or the manager: the proposed check becomes the check")
+    x.add_argument("scope"); x.add_argument("name"); x.add_argument("--note", help="a word to the proposer")
+    x = ops.add_parser("reject", help="a person or the manager: the proposed check is not wanted")
+    x.add_argument("scope"); x.add_argument("name"); x.add_argument("--note", required=True, help="why")
+    x = ops.add_parser("setup", help="a guided start: which project, what to watch (plain questions for the four "
+                       "forms), one run of each new check before it is kept, a test notice to your phone, and the "
+                       "outside switch. In a terminal it asks one question at a time; an agent gives the answers "
+                       "as options (--url, --period, --command and --pattern, --test-notice, --deadman-url)")
+    x.add_argument("scope", nargs="?", help="a project or a deploy target")
+    x.add_argument("--name", help="the check's name (default: from its address or command; a beat check needs one)")
+    x.add_argument("--form", choices=list(core.OPS_FORMS), help="the form (default: from the options: --url url, "
+                   "--period beat, --pattern log, --command cmd)")
+    ops_fields(x, True)
+    x.add_argument("--anyway", action="store_true", help="keep the check also when its first run fails")
+    x.add_argument("--why-propose", dest="why_propose", help="when you may not add the check (a command, a repair): "
+                   "propose it with this reason instead")
+    x.add_argument("--test-notice", dest="test_notice", action="store_true", help="send one test notice to the phone")
+    x.add_argument("--deadman-url", dest="deadman_url", help="the ping address of a heartbeat service outside this "
+                   "computer (ops_deadman_url); setup sends one beat to it at once")
+    x.add_argument("--yes", action="store_true", help="ask nothing: do only what the options say")
     x = ops.add_parser("edit", help="change the settings of a check")
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--form", choices=list(core.OPS_FORMS), help="another form; give its settings too")
@@ -2425,6 +2453,204 @@ def _ops_profile_file(path):
         raise RiverError(f"the profile {path} is no JSON: {e}")
 
 
+# maxpm ops setup (#5437). SETUP_ASK: a test hook, (question) -> the answer; else input().
+SETUP_ASK = None
+
+
+def _setup_form(a):
+    """The form of the check that the options of maxpm ops setup describe, or None when they describe none."""
+    if a.form:
+        return a.form
+    return "url" if a.url else "beat" if a.period else "log" if a.pattern else "cmd" if a.command else None
+
+
+def _setup_check(conn, scope, name, form, fields, actor, say, anyway=False, why=None, keep=None):
+    """One check of the setup: its rights first; then one run in maxpm serve (outside the sandbox; a beat check has
+    none), then keep it. keep(passed) asks the person; without it the check is kept when its run passed, or with
+    anyway. When the actor may not add it and gives why, it is proposed instead."""
+    kind, sc = core._ops_scope(conn, scope)
+    name = name or core.ops_default_name(form, fields)
+    if not name:
+        raise RiverError("a beat check needs a name: the job that reports, for example --name nightly-backup")
+    col = core._ops_build(form, fields)  # every value is checked before anything runs
+    why_not = core.may_set_check(conn, actor, dict(col, scope_kind=kind, scope=sc))
+    if why_not:
+        if not why:
+            return {"name": name, "kept": False, "refused": why_not}
+        p = core.ops_propose(conn, f"{kind}:{sc}", name, form, fields, why, actor)
+        return {"name": name, "kept": False, "proposed": True, "summary": p["proposal"]["summary"]}
+    result = None
+    if form != "beat":
+        say(f"  running {sc}/{name} once now (maxpm serve runs it, outside the sandbox) ...")
+        limit = core.parse_duration(col["timeout"]).total_seconds()
+        result = ask_server(conn, "ops_trial", {"scope": f"{kind}:{sc}", "name": name, "form": form, "fields": fields},
+                            actor, timeout=limit + 15, retries=0)["result"]
+        say(f"  {'passed' if result['status'] == 'ok' else 'failed'}: {result['summary'] or result['status']}")
+        if result["status"] != "ok" and result.get("output"):
+            for line in result["output"].splitlines()[-5:]:
+                say(f"    {line}")
+    passed = result is None or result["status"] == "ok"
+    if not (keep(passed) if keep else passed or anyway):
+        return {"name": name, "kept": False, "result": result}
+    c = core.ops_add(conn, f"{kind}:{sc}", name, form, fields, actor)["check"]
+    return {"name": name, "kept": True, "form": form, "scope": sc, "result": result, "summary": core._ops_summary(c)}
+
+
+def _setup_notice(conn):
+    """One test notice to the phone (the ntfy channel), now."""
+    from . import notify
+    if "ntfy" not in core._channels(core.setting(conn, "notify_channels")):
+        return {"sent": False, "why": "your phone gets no notices yet: maxpm notify setup ntfy"}
+    r = notify.test(conn, "ntfy")
+    return {"sent": r["ok"], "why": r.get("error")}
+
+
+def _setup_deadman(conn, url, actor):
+    """The outside switch: keep the address (ops_deadman_url), then send one beat to it now."""
+    core.config_set(conn, "ops_deadman_url", url, actor=actor)
+    try:
+        code = int((core.OPS_DEADMAN_GET or (lambda u, lim: core._ops_http(u, lim)[0]))(url, 10))
+        return {"url": url, "ok": 200 <= code < 300, "status": code}
+    except (OSError, ValueError) as e:
+        return {"url": url, "ok": False, "error": str(getattr(e, "reason", e))}
+
+
+def _setup_ask_check(conn, scope, form, actor, ask, yes, say):
+    """The plain questions of one form, then _setup_check, which asks whether to keep it."""
+    fields = {}
+    for key, question, default in core.OPS_SETUP_QUESTIONS[form]:
+        value = ask(question, default)
+        while not value and default is None:
+            value = ask("  an answer is needed. " + question)
+        fields[key] = value or None
+    name = ask("Which job reports? Its short name, for example nightly-backup" if form == "beat" else
+               "A short name for this check", core.ops_default_name(form, fields))
+    while not name:
+        name = ask("  a name is needed. Which job reports? Its short name")
+    if form != "beat":
+        fields["every"] = ask("How often should it run?", core.OPS_DEFAULTS["every"])
+    fields["severity"] = "page" if yes("Should a fault of this check be able to reach your phone?", False) else "item"
+    kind, sc = core._ops_scope(conn, scope)
+    why = None
+    why_not = core.may_set_check(conn, actor, dict(core._ops_build(form, fields), scope_kind=kind, scope=sc))
+    if why_not:
+        say("  " + why_not.split(" Ask ")[0])
+        if not yes("Propose it to the manager instead?"):
+            return {"name": name, "kept": False, "refused": why_not}
+        while not why:
+            why = ask("Why is it needed? (one line for the manager)")
+    r = _setup_check(conn, scope, name, form, fields, actor, say, why=why, keep=lambda passed: yes(
+        "Keep this check?") if passed else yes("It failed now. Keep it anyway?", False))
+    if r["kept"] and form == "beat":
+        say(f"  the job reports each time it runs: maxpm ops beat {sc} {name}")
+    return r
+
+
+def ops_setup(conn, a, actor):
+    """maxpm ops setup (#5437): in a terminal, one question at a time; with --yes, or with no terminal, only what the
+    options say. Steps: the project or target, the checks (each runs once before it is kept), a test notice to the
+    phone, the outside switch."""
+    from . import notify
+    asking = not a.yes and (SETUP_ASK is not None or sys.stdin.isatty())
+    done = {"scope": None, "checks": [], "notice": None, "deadman": None, "asked": asking}
+
+    def say(text=""):
+        print(text, flush=True)
+
+    def ask(question, default=None):
+        try:
+            answer = (SETUP_ASK or input)(f"{question} [{default}] " if default else f"{question} ").strip()
+        except EOFError:
+            raise RiverError("setup stopped: no answer came. An agent gives the answers as options: "
+                             "maxpm ops setup <scope> --yes ... (maxpm ops setup --help)")
+        return answer or default or ""
+
+    def yes(question, default=True):
+        answer = ask(question + (" (Y/n)" if default else " (y/N)")).lower()
+        return default if not answer else answer.startswith("y")
+
+    fields = {k: getattr(a, k) for k in _OPS_FIELDS}
+    fields["subject"] = None if a.subject is None else a.subject == "on"
+    form = _setup_form(a)
+    if not asking:
+        if not a.scope:
+            raise RiverError("name the project or the deploy target: maxpm ops setup <scope> --yes ... (in a "
+                             "terminal it asks)")
+        if not (form or a.test_notice or a.deadman_url):
+            raise RiverError("nothing to set up: give a check (--url; --period with --name; --command; --command "
+                             "with --pattern), --test-notice, or --deadman-url")
+        done["scope"] = "{}:{}".format(*core._ops_scope(conn, a.scope))
+        if form:
+            done["checks"].append(_setup_check(conn, a.scope, a.name, form, fields, actor, say, a.anyway,
+                                               a.why_propose))
+        if a.test_notice:
+            done["notice"] = _setup_notice(conn)
+        if a.deadman_url:
+            done["deadman"] = _setup_deadman(conn, a.deadman_url, actor)
+        return {"setup": done}
+
+    say("MaximizePM can watch a project's production and tell you when something breaks.")
+    say("Enter takes the answer in [brackets].")
+    scope = a.scope
+    while True:
+        if not scope:
+            names = ([f"project:{r['name']}" for r in conn.execute(
+                "SELECT name FROM projects WHERE archived=0 AND name NOT LIKE 'deploy-%' ORDER BY rank, name")]
+                + [f"target:{r['name']}" for r in conn.execute("SELECT name FROM targets ORDER BY name")])
+            for i, n in enumerate(names, 1):
+                say(f"  {i}. {n.replace(':', ' ', 1)}")
+            pick = ask("Which project or deploy target should MaximizePM watch? (a number or a name)")
+            scope = names[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(names) else pick
+        try:
+            done["scope"] = "{}:{}".format(*core._ops_scope(conn, scope))
+            break
+        except RiverError as e:
+            say(f"  {e}")
+            scope = None
+    say(f"What should MaximizePM watch in {done['scope'].split(':', 1)[1]}? Add as many checks as you like.")
+    numbers = {str(i): f for i, (f, _) in enumerate(core.OPS_SETUP_FORMS, 1)}
+    while True:
+        for i, (f, text) in enumerate(core.OPS_SETUP_FORMS, 1):
+            say(f"  {i}. {text}")
+        pick = ask(f"Which one? (1-{len(numbers)}, Enter: no more checks)")
+        if not pick:
+            break
+        f = numbers.get(pick) or (pick if pick in numbers.values() else None)
+        if f is None:
+            say(f"  answer 1 to {len(numbers)}, or press Enter")
+            continue
+        try:
+            done["checks"].append(_setup_ask_check(conn, done["scope"], f, actor, ask, yes, say))
+        except RiverError as e:
+            say(f"  {e}. This check was not kept; try again")
+    if "ntfy" not in core._channels(core.setting(conn, "notify_channels")):
+        say("Your phone gets no notices from MaximizePM yet.")
+        if yes("Set up notices to your phone now (the free ntfy app)?"):
+            for line in notify.setup_ntfy(conn, actor=actor)["subscribe"]:
+                say(f"  {line}")
+            ask("Press Enter when the phone has subscribed")
+    if "ntfy" in core._channels(core.setting(conn, "notify_channels")) and yes(
+            "Send a test notice to your phone now?"):
+        done["notice"] = _setup_notice(conn)
+        say("  sent: look at your phone" if done["notice"]["sent"] else f"  not sent: {done['notice']['why']}")
+    current = core.setting(conn, "ops_deadman_url")
+    if current:
+        say(f"The outside switch is on: maxpm serve sends a beat to {current} every "
+            f"{core.setting(conn, 'ops_deadman_every')}.")
+    else:
+        say("When this computer is off or offline, nothing on it can tell you. A heartbeat service outside it can:")
+        say("maxpm serve sends it a beat each minute, and the service tells you when the beats stop. Any service with")
+        say("a ping address works; Healthchecks.io has a free plan, and it can send its alerts to your ntfy topic.")
+        url = ask("The ping address (Enter: skip for now)")
+        if url:
+            done["deadman"] = _setup_deadman(conn, url, actor)
+            d = done["deadman"]
+            say("  the first beat arrived" if d["ok"] else
+                f"  the first beat failed ({d.get('error') or 'HTTP ' + str(d.get('status'))}); maxpm serve tries "
+                f"again each minute")
+    return {"setup": done}
+
+
 def _dispatch_ops(conn, a, actor):
     if a.ocmd == "list":
         return core.ops_list(conn, a.scope)
@@ -2452,6 +2678,10 @@ def _dispatch_ops(conn, a, actor):
     if not actor and core.agent_type_from_env(os.environ):
         raise RiverError(f"name yourself: maxpm --as <name> ops {a.ocmd} ... (an agent may add or change a url or "
                          f"beat check; a person or the manager the others)")
+    if a.ocmd == "setup":
+        return ops_setup(conn, a, actor)
+    if a.ocmd in ("accept", "reject"):
+        return (core.ops_accept if a.ocmd == "accept" else core.ops_reject)(conn, a.scope, a.name, actor, a.note)
     if a.ocmd == "profile":
         return core.ops_profile_apply(conn, _ops_profile_file(a.file), a.scope, True, actor)
     if a.ocmd == "rm":
@@ -2462,6 +2692,8 @@ def _dispatch_ops(conn, a, actor):
     fields["subject"] = None if a.subject is None else a.subject == "on"
     if a.ocmd == "add":
         return core.ops_add(conn, a.scope, a.name, a.form, fields, actor)
+    if a.ocmd == "propose":
+        return core.ops_propose(conn, a.scope, a.name, a.form, fields, a.why, actor)
     return core.ops_edit(conn, a.scope, a.name, fields, a.form, actor)
 
 
@@ -4234,9 +4466,60 @@ def render_ops_profile(a, res):
         print(f"  write it: maxpm ops profile apply {a.file}" + (f" --scope {a.scope}" if a.scope else "") + " --yes")
 
 
+def render_ops_setup(res):
+    d = res["setup"]
+    scope = d["scope"].split(":", 1)[1]
+    print(f"ops setup of {d['scope'].replace(':', ' ', 1)}:")
+    if not d["checks"] and d["asked"]:
+        print("  no new check")
+    for c in d["checks"]:
+        if c["kept"]:
+            print(f"  kept {c['name']}: {c['summary']}")
+            if c["form"] == "beat":
+                print(f"    the job reports each time it runs: maxpm ops beat {scope} {c['name']}")
+        elif c.get("proposed"):
+            print(f"  proposed {c['name']} to the manager: {c['summary']} (it runs once a person or the manager "
+                  f"accepts it)")
+        elif c.get("refused"):
+            print(f"  not kept {c['name']}: {c['refused']}"
+                  + ("" if d["asked"] else "; or propose it: add --why-propose \"<why it is needed>\""))
+        else:
+            print(f"  not kept {c['name']}: " + ("its first run failed (keep it anyway: --anyway)"
+                                                if not d["asked"] else "you chose not to keep it"))
+    n = d["notice"]
+    if n:
+        print("  test notice: sent to your phone" if n["sent"] else f"  test notice: not sent ({n['why']})")
+    m = d["deadman"]
+    if m:
+        print(f"  outside switch: {m['url']}; the first beat "
+              + ("arrived" if m["ok"] else f"failed ({m.get('error') or 'HTTP ' + str(m.get('status'))}); maxpm "
+                 f"serve tries again each minute"))
+    print(f"  the checks of {scope}: maxpm ops list {scope}")
+
+
+def render_ops_proposal(a, res):
+    p = res["proposal"]
+    where = f"{p['scope']}/{p['name']}"
+    if res["changed"] == "proposed":
+        print(f"check {where} proposed" + (" (it replaces your earlier proposal)" if res["replaced"] else "")
+              + f": {p['summary']}" + (f"; repair: {p['repair']}" if p["repair"] else ""))
+        print("    it never runs as a proposal; the manager has a note. A person or the manager accepts it: "
+              f"maxpm ops accept {p['scope']} {p['name']}")
+    elif res["changed"] == "accepted":
+        print(f"check {where}: the proposal of {p['proposed_by'] or 'a person'} accepted; "
+              + ("added" if res["fields"] is None else f"changed ({', '.join(res['fields']) or 'nothing'})")
+              + f": {p['summary']}. maxpm serve runs it from now on")
+    else:
+        print(f"check {where}: the proposal of {p['proposed_by'] or 'a person'} rejected ({p['note']})")
+
+
 def render_ops(a, res):
     if a.ocmd == "profile":
         return render_ops_profile(a, res)
+    if a.ocmd == "setup":
+        return render_ops_setup(res)
+    if a.ocmd in ("propose", "accept", "reject"):
+        return render_ops_proposal(a, res)
     if a.ocmd == "run":
         print(f"check {res['check']}: run {res['run']} started" + (" and read (a beat check runs no process)"
               if res["form"] == "beat" else " in maxpm serve")
@@ -4267,13 +4550,19 @@ def render_ops(a, res):
     if a.ocmd == "list":
         if not res["checks"]:
             print(f"no checks{' of ' + res['scope'] if res['scope'] else ''}. Add one: maxpm ops add "
-                  f"<project|target> <name> <{'|'.join(res['forms'])}> ...")
-            return
+                  f"<project|target> <name> <{'|'.join(res['forms'])}> ..., or start with: maxpm ops setup")
         for c in res["checks"]:
             last = c["last"]
             ran = f"last run {last['started_at']}: {last['status'] or 'runs now'}" if last else "never ran"
             print(f"{c['scope']}/{c['name']}  [{_ops_state(c)}; {ran}]")
             print(f"    {c['summary']}")
+        if res.get("proposals"):
+            print("proposed, not running (a person or the manager: maxpm ops accept|reject <scope> <name>):")
+        for p in res.get("proposals") or []:
+            what = f"change of {', '.join(p['changes'])}" if p["changes"] is not None else "new"
+            print(f"  {p['scope']}/{p['name']}  [{what}; by {p['proposed_by'] or 'a person'} {p['proposed_at']}]")
+            print(f"    {p['summary']}" + (f"; repair: {p['repair']}" if p["repair"] else ""))
+            print(f"    why: {p['why']}")
         return
     c = res if a.ocmd == "show" else res["check"]
     if a.ocmd != "show":

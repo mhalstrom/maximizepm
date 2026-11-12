@@ -1007,6 +1007,25 @@ CREATE TABLE IF NOT EXISTS ops_events (
 CREATE INDEX IF NOT EXISTS ops_runs_check ON ops_runs(check_id, id);
 CREATE INDEX IF NOT EXISTS ops_events_key ON ops_events(key, id);
 
+-- A check that an agent proposes (maxpm ops propose, #5437): a new check or a change of one. It never runs; a person
+-- or the manager accepts it (it becomes the check, with the rights of maxpm ops add) or rejects it.
+CREATE TABLE IF NOT EXISTS ops_proposals (
+  id          INTEGER PRIMARY KEY,
+  scope_kind  TEXT NOT NULL,             -- project or target
+  scope       TEXT NOT NULL,
+  name        TEXT NOT NULL,             -- the check's name: a new one, or a check it changes
+  spec        TEXT NOT NULL,             -- the columns of the check as JSON (form, config, every, ...)
+  why         TEXT NOT NULL,
+  item_id     INTEGER,                   -- the item the proposer held
+  proposed_by TEXT,
+  proposed_at TEXT NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'open',  -- open, accepted, rejected, replaced
+  decided_by  TEXT,
+  decided_at  TEXT,
+  note        TEXT
+);
+CREATE INDEX IF NOT EXISTS ops_proposals_open ON ops_proposals(state, scope_kind, scope, name);
+
 CREATE TABLE IF NOT EXISTS session_samples (
   id          INTEGER PRIMARY KEY,
   at          TEXT NOT NULL,
@@ -3586,7 +3605,7 @@ def ops_list(conn, scope=None):
         c["summary"] = _ops_summary(c)
         c["last"] = _ops_last(conn, c)
         out.append(c)
-    return {"scope": scope, "checks": out, "forms": OPS_FORMS}
+    return {"scope": scope, "checks": out, "forms": OPS_FORMS, "proposals": ops_proposals(conn, scope)}
 
 
 def count_window(value, key="the setting"):
@@ -4342,6 +4361,195 @@ def ops_history(conn, scope, name, n=20):
     events = [dict(r) for r in conn.execute("SELECT * FROM ops_events WHERE check_id=? ORDER BY id DESC LIMIT ?",
                                             (c["id"], n))]
     return {"check": f"{c['scope']}/{c['name']}", "key": c["key"], "state": c["state"], "runs": runs, "events": events}
+
+
+# Proposals (#5437, decision 2 of #5380): an agent that sees a missing check, or one it may not add (a command
+# runs outside the sandbox), proposes it. A proposal never runs. A person or the manager accepts it: it becomes
+# the check, under the accepter's rights (may_set_check), or rejects it with a reason. The proposer hears either way.
+
+def _ops_proposal_row(conn, r):
+    d = dict(r)
+    d["spec"] = json.loads(d["spec"])
+    c = dict(d["spec"], scope_kind=d["scope_kind"], scope=d["scope"], name=d["name"])
+    d["summary"] = _ops_summary(c)
+    d["runs_command"] = c["form"] in OPS_COMMAND_FORMS
+    d["repair"] = c.get("repair")
+    old = conn.execute("SELECT * FROM checks WHERE scope_kind=? AND scope=? AND name=?",
+                       (d["scope_kind"], d["scope"], d["name"])).fetchone()
+    d["changes"] = [k for k in _OPS_COLS if c[k] != _ops_row(old)[k]] if old else None
+    return d
+
+
+def ops_proposals(conn, scope=None, state="open"):
+    """The proposed checks, of one scope or of all; open ones by default."""
+    q, args = "SELECT * FROM ops_proposals WHERE state=?", [state]
+    if scope:
+        kind, name = _ops_scope(conn, scope)
+        q, args = q + " AND scope_kind=? AND scope=?", args + [kind, name]
+    return [_ops_proposal_row(conn, r) for r in conn.execute(q + " ORDER BY id", args)]
+
+
+def _ops_open_proposal(conn, scope, name):
+    kind, scope = _ops_scope(conn, scope)
+    r = conn.execute("SELECT * FROM ops_proposals WHERE state='open' AND scope_kind=? AND scope=? AND name=?",
+                     (kind, scope, name)).fetchone()
+    if r is None:
+        names = [x["name"] for x in conn.execute("SELECT name FROM ops_proposals WHERE state='open' AND scope_kind=? "
+                                                  "AND scope=? ORDER BY name", (kind, scope))]
+        raise RiverError(f"{scope} has no proposed check {name!r}; proposed: {', '.join(names) or 'none'} "
+                         f"(maxpm ops list {scope})")
+    return _ops_proposal_row(conn, r)
+
+
+def ops_propose(conn, scope, name, form=None, fields=None, why=None, actor=None, item_id=None):
+    """maxpm ops propose: keep a check, or a change of one, as proposed. Anyone may propose any form; it never
+    runs. The manager gets a note with the commands to accept or reject it. A second proposal of the same check
+    replaces the open one."""
+    _ops_name(name)
+    why = (why or "").strip()
+    if not why:
+        raise RiverError("say why the check is needed: --why \"<what it would have caught, or what it watches>\"")
+    with tx(conn):
+        kind, scope = _ops_scope(conn, scope)
+        r = conn.execute("SELECT * FROM checks WHERE scope_kind=? AND scope=? AND name=?", (kind, scope, name)).fetchone()
+        old = _ops_row(r) if r else None
+        if form is None and old is None:
+            raise RiverError(f"{scope} has no check {name!r}: name the form of the new check, "
+                             f"maxpm ops propose {scope} {name} <{'|'.join(OPS_FORMS)}> ...")
+        col = _ops_build(form or old["form"], fields or {}, old)
+        if old and not [k for k in _OPS_COLS if col[k] != old[k]]:
+            raise RiverError(f"{scope}/{name} is like this already: nothing to propose")
+        if item_id is None:
+            held = _held_item(conn, actor)
+            item_id = held["id"] if held else None
+        replaced = conn.execute("UPDATE ops_proposals SET state='replaced', decided_by=?, decided_at=? WHERE state='open' "
+                                "AND scope_kind=? AND scope=? AND name=?",
+                                (actor, iso(now()), kind, scope, name)).rowcount
+        conn.execute("INSERT INTO ops_proposals(scope_kind,scope,name,spec,why,item_id,proposed_by,proposed_at) "
+                     "VALUES (?,?,?,?,?,?,?,?)", (kind, scope, name, json.dumps(col), why, item_id, actor, iso(now())))
+        p = _ops_open_proposal(conn, f"{kind}:{scope}", name)
+        what = "a change of the check" if old else "the check"
+        _event(conn, item_id, actor, f"ops check {scope}/{name} proposed ({what}): {p['summary']}"
+               + (f"; repair: {p['repair']}" if p["repair"] else "") + f"; why: {why}")
+    _ops_tell_manager(conn, "note", f"{actor or 'a person'} proposes {what} {scope}/{name}: {p['summary']}"
+                      + (f"; repair: {p['repair']}" if p["repair"] else "") + f". Why: {why}. "
+                      f"Accept: maxpm ops accept {scope} {name}   reject: maxpm ops reject {scope} {name} --note \"<why>\"",
+                      item_id)
+    return {"changed": "proposed", "replaced": bool(replaced), "proposal": p}
+
+
+def _ops_decider(conn, actor, verb):
+    if actor and not _is_person(conn, actor) and not _is_manager(conn, actor):
+        raise RiverError(f"{actor} is an agent; only a person or the manager {verb} a proposed check. It waits for "
+                         f"them on the page and in maxpm ops list")
+
+
+def _ops_tell_proposer(conn, p, actor, text):
+    who = p["proposed_by"]
+    if who and who != actor and conn.execute("SELECT 1 FROM agents WHERE name=?", (who,)).fetchone():
+        with tx(conn):
+            _send(conn, "note", actor or "maxpm", text, to=who, item_id=p["item_id"])
+
+
+def ops_accept(conn, scope, name, actor=None, note=None):
+    """maxpm ops accept: the proposed check becomes the check (added, or the check changed), under the accepter's
+    rights: a command check needs a person or the manager, a repair on a deploy target a person."""
+    _ops_decider(conn, actor, "accepts")
+    with tx(conn):
+        p = _ops_open_proposal(conn, scope, name)
+        col = p["spec"]
+        r = conn.execute("SELECT * FROM checks WHERE scope_kind=? AND scope=? AND name=?",
+                         (p["scope_kind"], p["scope"], name)).fetchone()
+        old = _ops_row(r) if r else None
+        new = dict(col, scope_kind=p["scope_kind"], scope=p["scope"], name=name)
+        _ops_refuse(conn, actor, *([old] if old else []), new)
+        if old:
+            fields, c = _ops_update(conn, old, col, actor)
+        else:
+            fields, c = None, _ops_insert(conn, p["scope_kind"], p["scope"], name, col, actor)
+        conn.execute("UPDATE ops_proposals SET state='accepted', decided_by=?, decided_at=?, note=? WHERE id=?",
+                     (actor, iso(now()), (note or "").strip() or None, p["id"]))
+        _event(conn, p["item_id"], actor, f"ops check {p['scope']}/{name}: the proposal of {p['proposed_by'] or 'a person'}"
+               f" accepted" + (f" ({note.strip()})" if (note or "").strip() else ""))
+    _ops_tell_proposer(conn, p, actor, f"{actor or 'a person'} accepted your proposed check {p['scope']}/{name}; "
+                       f"maxpm serve runs it from now on (maxpm ops show {p['scope']} {name})")
+    return {"changed": "accepted", "fields": fields, "check": c,
+            "proposal": dict(p, state="accepted", decided_by=actor, note=(note or "").strip() or None)}
+
+
+def ops_reject(conn, scope, name, actor=None, note=None):
+    """maxpm ops reject: the proposal ends with the reason; nothing changes."""
+    _ops_decider(conn, actor, "rejects")
+    note = (note or "").strip()
+    if not note:
+        raise RiverError("say why: --note \"<why the check is not wanted>\"")
+    with tx(conn):
+        p = _ops_open_proposal(conn, scope, name)
+        conn.execute("UPDATE ops_proposals SET state='rejected', decided_by=?, decided_at=?, note=? WHERE id=?",
+                     (actor, iso(now()), note, p["id"]))
+        _event(conn, p["item_id"], actor, f"ops check {p['scope']}/{name}: the proposal of {p['proposed_by'] or 'a person'}"
+               f" rejected ({note})")
+    _ops_tell_proposer(conn, p, actor, f"{actor or 'a person'} rejected your proposed check {p['scope']}/{name}: {note}")
+    return {"changed": "rejected", "proposal": dict(p, state="rejected", decided_by=actor, note=note)}
+
+
+# The guided start (maxpm ops setup, #5437): the four forms in plain questions. The CLI asks them one at a time;
+# each answer is a field of maxpm ops add. A blank answer takes the default; None: an answer is needed.
+OPS_SETUP_FORMS = (("url", "an address that shows your site is up"),
+                   ("beat", "a job that reports each time it ran"),
+                   ("cmd", "a command that must succeed"),
+                   ("log", "a log to scan for errors"))
+OPS_SETUP_QUESTIONS = {
+    "url": (("url", "What address shows that your site is up?", None),
+            ("body", "Which text must the page hold? (Enter: none, a good HTTP status is enough)", "")),
+    "beat": (("period", "How long may the job go without a report? (for example 1h or 1d)", "1d"),),
+    "cmd": (("command", "Which command must succeed (exit 0)? It runs in the project's folder", None),),
+    "log": (("command", "Which command prints the log lines that are new since its last run?", None),
+            ("pattern", "Which lines count as errors? (a regular expression)", "ERROR"),
+            ("limit", "How many such lines in 15 minutes are too many?", "1")),
+}
+
+
+def ops_default_name(form, cfg):
+    """A name for a new check from its settings, or None when only the person knows one (the job of a beat)."""
+    from urllib.parse import urlsplit
+    if form == "url":
+        try:
+            host = urlsplit(cfg.get("url") or "").hostname
+        except ValueError:
+            host = None
+        return re.sub(r"[^a-z0-9]+", "-", (host or "site").lower()).strip("-") or "site"
+    if form == "cmd":
+        words = (cfg.get("command") or "").split()
+        base = re.sub(r"[^a-z0-9._-]+", "-", os.path.basename(words[0]).lower()).strip("-._") if words else ""
+        return base or "command"
+    if form == "log":
+        return "errors"
+    return None
+
+
+def ops_trial(conn, scope, name, form, fields=None, actor=None):
+    """One run of a check that is not kept yet, so the person sees the result before it goes live (maxpm ops
+    setup). maxpm serve runs it (the op ops_trial), outside the sandbox, with the rights of maxpm ops add. It writes
+    nothing. A beat check has no run: it waits for the job."""
+    kind, scope = _ops_scope(conn, scope)
+    name = _ops_name(name or ops_default_name(form, fields or {}) or "trial")
+    col = _ops_build(form, fields or {})
+    c = dict(col, scope_kind=kind, scope=scope, name=name, id=None, runs_command=form in OPS_COMMAND_FORMS)
+    c["key"] = _ops_key(c)
+    _ops_refuse(conn, actor, c)
+    out = {"check": f"{scope}/{name}", "summary": _ops_summary(c), "form": form, "result": None}
+    if form == "beat":
+        return out
+    run = {"check": c, "folder": _ops_folder(conn, c) if c["runs_command"] else None,
+           "limit": parse_duration(c["timeout"]).total_seconds(), "actor": actor, "last_beat": None}
+    res = ops_execute(run)
+    if form == "log" and res["status"] == "ok":
+        n, limit = res["matches"] or 0, col["config"]["limit"]
+        res.update(status="critical" if n >= limit else "ok",
+                   summary=f"{n} line{'' if n == 1 else 's'} match now; a fault from {limit} in {col['config']['window']}")
+    out["result"] = res
+    return out
 
 
 def _deploy_project_id(conn, target):

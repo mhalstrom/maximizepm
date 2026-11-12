@@ -9820,3 +9820,183 @@ class Ops(Base):
         self.assertEqual(sorted(self.checks("shop")), ["errors", "home", "nightly"])
         code, out = run("--as", "mark", "ops", "profile", "apply", path, "--scope", "shop", "--yes")
         self.assertIn("nothing to change (3 the same)", out)
+
+    # ---- proposals and the guided setup (#5437)
+
+    def notes_to(self, who):
+        return [r[0] for r in self.c.execute("SELECT body FROM messages WHERE to_agent=? AND kind='note' ORDER BY id",
+                                             (who,))]
+
+    def test_an_agent_proposes_a_command_check_that_never_runs_until_the_manager_accepts_it(self):
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.ops_propose(self.c, "site", "jobs", "cmd", {"command": "check_jobs"}, actor="dev")
+        r = core.ops_propose(self.c, "site", "jobs", "cmd", {"command": "check_jobs"},
+                             why="the nightly jobs fail with no word", actor="dev")
+        self.assertEqual((r["changed"], r["replaced"], r["proposal"]["changes"]), ("proposed", False, None))
+        listed = core.ops_list(self.c, "site")
+        self.assertEqual(listed["checks"], [])
+        self.assertEqual([(p["name"], p["why"], p["proposed_by"]) for p in listed["proposals"]],
+                         [("jobs", "the nightly jobs fail with no word", "dev")])
+        self.assertEqual(core.ops_due(self.c), [])  # a proposal never runs
+        self.assertIn("Accept: maxpm ops accept site jobs", self.notes_to("boss")[-1])
+        with self.assertRaisesRegex(RiverError, "only a person or the manager accepts"):
+            core.ops_accept(self.c, "site", "jobs", actor="dev")
+        r = core.ops_accept(self.c, "site", "jobs", actor="boss")
+        self.assertEqual((r["changed"], r["fields"], r["check"]["form"], r["check"]["created_by"]),
+                         ("accepted", None, "cmd", "boss"))
+        self.assertEqual([x["name"] for x in core.ops_due(self.c)], ["jobs"])
+        self.assertIn("accepted your proposed check site/jobs", self.notes_to("dev")[-1])
+        self.assertEqual(core.ops_proposals(self.c, "site"), [])
+        with self.assertRaisesRegex(RiverError, "no proposed check 'jobs'"):
+            core.ops_accept(self.c, "site", "jobs", actor="boss")
+
+    def test_a_proposed_change_replaces_the_open_one_and_a_reject_needs_a_reason(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.com/"}, actor="dev")
+        with self.assertRaisesRegex(RiverError, "like this already"):
+            core.ops_propose(self.c, "site", "home", fields={"every": "5m"}, why="x", actor="dev")
+        with self.assertRaisesRegex(RiverError, "has no check 'api': name the form"):
+            core.ops_propose(self.c, "site", "api", fields={"url": "https://x.io/"}, why="x", actor="dev")
+        core.ops_propose(self.c, "site", "home", fields={"every": "1m"}, why="a minute matters", actor="dev")
+        r = core.ops_propose(self.c, "site", "home", fields={"every": "1m", "repair": "restart web"},
+                             why="it can heal itself", actor="dev")
+        self.assertEqual((r["replaced"], r["proposal"]["changes"]), (True, ["every", "repair"]))
+        self.assertEqual(len(core.ops_proposals(self.c)), 1)
+        with self.assertRaisesRegex(RiverError, "say why"):
+            core.ops_reject(self.c, "site", "home", actor="boss")
+        r = core.ops_reject(self.c, "site", "home", actor="boss", note="restart hides the cause")
+        self.assertEqual((r["proposal"]["state"], r["proposal"]["note"]), ("rejected", "restart hides the cause"))
+        self.assertEqual(core.ops_show(self.c, "site", "home")["every"], "5m")
+        self.assertIn("rejected your proposed check site/home: restart hides the cause", self.notes_to("dev")[-1])
+
+    def test_an_accept_keeps_the_rights_of_ops_add(self):
+        core.ops_propose(self.c, "prod", "api", "url", {"url": "https://example.com/", "repair": "restart"},
+                         why="the api hangs", actor="dev")
+        with self.assertRaisesRegex(RiverError, "only a person .* repair on the deploy target prod"):
+            core.ops_accept(self.c, "prod", "api", actor="boss")
+        self.assertEqual(len(core.ops_proposals(self.c, "prod")), 1)
+        r = core.ops_accept(self.c, "prod", "api", actor="mark", note="good catch")
+        self.assertEqual((r["check"]["repair"], r["proposal"]["note"]), ("restart", "good catch"))
+
+    def trial(self, args, actor, runner=None, http=None):
+        from river import server
+        with mock.patch.object(core, "OPS_RUNNER", runner), mock.patch.object(core, "OPS_HTTP", http):
+            return server.OPS["ops_trial"](self.c, args, actor)
+
+    def test_a_trial_runs_a_check_once_in_serve_and_writes_nothing(self):
+        r = self.trial({"scope": "site", "form": "url", "fields": {"url": "https://example.com/", "body": "Welcome"}},
+                       "dev", http=lambda url, t: (200, "<h1>Welcome</h1>"))
+        self.assertEqual((r["check"], r["result"]["status"], r["result"]["summary"]),
+                         ("site/example-com", "ok", "HTTP 200"))
+        r = self.trial({"scope": "site", "form": "url", "fields": {"url": "https://example.com/", "body": "Welcome"}},
+                       "dev", http=lambda url, t: (200, "<h1>Sorry</h1>"))
+        self.assertEqual(r["result"]["status"], "critical")
+        with self.assertRaisesRegex(RiverError, "only a person or the manager"):
+            self.trial({"scope": "site", "form": "cmd", "fields": {"command": "check_jobs"}}, "dev")
+        r = self.trial({"scope": "site", "form": "cmd", "fields": {"command": "check_jobs --all"}}, "boss",
+                       self.proc(1, "2 jobs failed"))
+        self.assertEqual((r["check"], r["result"]["status"], r["result"]["summary"]),
+                         ("site/check_jobs", "critical", "2 jobs failed"))
+        r = self.trial({"scope": "site", "form": "log", "fields": {"command": "tail app.log", "pattern": "ERROR",
+                                                                  "limit": "2"}}, "boss",
+                       self.proc(0, "ERROR a\nok\nERROR b\nERROR c"))
+        self.assertEqual((r["result"]["status"], r["result"]["summary"]),
+                         ("critical", "3 lines match now; a fault from 2 in 15m"))
+        r = self.trial({"scope": "site", "name": "nightly", "form": "beat", "fields": {"period": "1d"}}, "dev")
+        self.assertIsNone(r["result"])
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM checks").fetchone()[0], 0)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM ops_runs").fetchone()[0], 0)
+
+    def setup_run(self, *words, answers=None, http=None, runner=None, beat=None):
+        """maxpm ops setup through cli.run; maxpm serve's op ops_trial runs here. answers: the terminal's."""
+        from river import cli, server
+        asked, out = [], io.StringIO()
+        replies = iter(answers or [])
+
+        def ask(q):
+            asked.append(q)
+            return next(replies)
+
+        def serve(conn, op, args, actor=None, timeout=5, retries=3):
+            return server.OPS[op](self.c, args, actor)
+        with mock.patch.object(cli, "ask_server", serve), mock.patch.object(core, "OPS_HTTP", http), \
+                mock.patch.object(core, "OPS_RUNNER", runner), mock.patch.object(core, "OPS_DEADMAN_GET", beat), \
+                mock.patch.object(cli, "SETUP_ASK", ask if answers is not None else None), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.run(list(words))
+        return code, out.getvalue(), asked
+
+    def test_setup_with_options_keeps_a_check_whose_first_run_passed(self):
+        up = lambda url, t: (200, "ok")  # noqa: E731
+        code, out, _ = self.setup_run("--as", "dev", "ops", "setup", "site", "--url", "https://example.com/", "--yes",
+                                      http=up)
+        self.assertIn("passed: HTTP 200", out)
+        self.assertIn("kept example-com: url GET https://example.com/ (200-399); every 5m", out)
+        down = lambda url, t: (503, "busy")  # noqa: E731
+        _, out, _ = self.setup_run("--as", "dev", "ops", "setup", "site", "--url", "https://api.example.com/",
+                                   "--yes", http=down)
+        self.assertIn("not kept api-example-com: its first run failed (keep it anyway: --anyway)", out)
+        self.setup_run("--as", "dev", "ops", "setup", "site", "--url", "https://api.example.com/", "--anyway", "--yes",
+                       http=down)
+        self.assertEqual(sorted(x["name"] for x in core.ops_list(self.c, "site")["checks"]),
+                         ["api-example-com", "example-com"])
+        _, out, _ = self.setup_run("--as", "dev", "ops", "setup", "site", "--command", "check_jobs", "--yes")
+        self.assertIn("not kept check_jobs: dev is an agent", out)
+        self.assertIn("propose it: add --why-propose", out)
+        _, out, _ = self.setup_run("--as", "dev", "ops", "setup", "site", "--command", "check_jobs", "--why-propose",
+                                   "jobs fail with no word", "--yes")
+        self.assertIn("proposed check_jobs to the manager", out)
+        _, out, _ = self.setup_run("--as", "dev", "ops", "setup", "site", "--period", "1d", "--name", "nightly",
+                                   "--yes")
+        self.assertIn("the job reports each time it runs: maxpm ops beat site nightly", out)
+
+    def test_setup_with_options_sends_the_test_notice_and_sets_the_outside_switch(self):
+        _, out, _ = self.setup_run("--as", "mark", "ops", "setup", "site", "--test-notice", "--deadman-url",
+                                   "https://hc-ping.com/abc", "--yes", beat=lambda url, t: 200)
+        self.assertIn("test notice: not sent (your phone gets no notices yet: maxpm notify setup ntfy)", out)
+        self.assertIn("outside switch: https://hc-ping.com/abc; the first beat arrived", out)
+        self.assertEqual(core.setting(self.c, "ops_deadman_url"), "https://hc-ping.com/abc")
+        with self.assertRaisesRegex(RiverError, "nothing to set up"):
+            self.setup_run("--as", "mark", "ops", "setup", "site", "--yes")
+
+    def test_setup_asks_one_question_at_a_time_in_a_terminal(self):
+        answers = ["1",                                    # site
+                   "1", "https://example.com/", "", "", "", "y", "",     # url: address, body, name, every, phone, keep
+                   "2", "", "nightly-backup", "", "",       # beat: period, name, phone, keep
+                   "",                                      # no more checks
+                   "n",                                     # no ntfy now
+                   ""]                                      # no outside switch
+        code, out, asked = self.setup_run("--as", "mark", "ops", "setup", answers=answers,
+                                          http=lambda url, t: (200, "ok"))
+        self.assertEqual(asked, [
+            "Which project or deploy target should MaximizePM watch? (a number or a name) ",
+            "Which one? (1-4, Enter: no more checks) ",
+            "What address shows that your site is up? ",
+            "Which text must the page hold? (Enter: none, a good HTTP status is enough) ",
+            "A short name for this check [example-com] ",
+            "How often should it run? [5m] ",
+            "Should a fault of this check be able to reach your phone? (y/N) ",
+            "Keep this check? (Y/n) ",
+            "Which one? (1-4, Enter: no more checks) ",
+            "How long may the job go without a report? (for example 1h or 1d) [1d] ",
+            "Which job reports? Its short name, for example nightly-backup ",
+            "Should a fault of this check be able to reach your phone? (y/N) ",
+            "Keep this check? (Y/n) ",
+            "Which one? (1-4, Enter: no more checks) ",
+            "Set up notices to your phone now (the free ntfy app)? (Y/n) ",
+            "The ping address (Enter: skip for now) "])
+        self.assertIn("  1. project site\n  2. target prod\n", out)
+        self.assertIn("passed: HTTP 200", out)
+        checks = {x["name"]: x for x in core.ops_list(self.c, "site")["checks"]}
+        self.assertEqual((checks["example-com"]["severity"], checks["nightly-backup"]["config"]),
+                         ("page", {"period": "1d"}))
+        self.assertIn("kept nightly-backup: beat a beat at least every 1d", out)
+        self.assertIn("maxpm ops beat site nightly-backup", out)
+
+    def test_setup_offers_a_proposal_when_the_person_at_the_terminal_is_an_agent(self):
+        answers = ["3", "check_jobs", "", "", "", "y", "the nightly jobs fail with no word", "", "n", ""]
+        _, out, asked = self.setup_run("--as", "dev", "ops", "setup", "site", answers=answers)
+        self.assertIn("dev is an agent; only a person or the manager sets", out)
+        self.assertEqual(asked[5:7], ["Propose it to the manager instead? (Y/n) ",
+                                      "Why is it needed? (one line for the manager) "])
+        self.assertIn("proposed check_jobs to the manager", out)
+        self.assertEqual([p["name"] for p in core.ops_proposals(self.c, "site")], ["check_jobs"])

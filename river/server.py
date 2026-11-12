@@ -4040,6 +4040,8 @@ OPS = {
     # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
     "ops_run": ops_run_op,
     "ops_repair": ops_repair_op,
+    # maxpm ops setup (#5437): one run of a check that is not kept yet, here outside the sandbox; it writes nothing.
+    "ops_trial": lambda c, a, who: core.ops_trial(c, a["scope"], a.get("name"), a["form"], a.get("fields") or {}, who),
     "ops_beat": lambda c, a, who: core.ops_beat(c, a["scope"], a.get("name"), who),
     "queue_remove": lambda c, a, who: core.queue_remove(c, a["agent"], str(a["ref"]), who),
     # A person stops from the page without a reason; the agent then reads who stopped it.
