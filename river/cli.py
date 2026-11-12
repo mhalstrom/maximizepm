@@ -1023,6 +1023,9 @@ def build_parser(only=None):
         x.add_argument("--period", help="beat: the longest time between two beats, for example 1h")
         d = core.OPS_DEFAULTS
         x.add_argument("--every", help="how often it runs" + (f" (default {d['every']})" if add else ""))
+        x.add_argument("--cron", help="when it runs instead, as a cron expression in the project's time zone: "
+                       "'0 3 * * *' (03:00 each day), '*/15 9-17 * * mon-fri'; empty: every again. After a stop it "
+                       "runs once, and the run records how many times were due")
         x.add_argument("--fail-after", dest="fail_after", type=int,
                        help="failed runs in a row before it is a fault" + (f" (default {d['fail_after']})" if add else ""))
         x.add_argument("--recover-after", dest="recover_after", type=int, help="passed runs in a row before a fault "
@@ -2657,7 +2660,7 @@ def _expert_cmd(conn, a, actor):
 
 
 _OPS_FIELDS = ("url", "statuses", "body", "command", "pattern", "limit", "window", "period", "every", "fail_after",
-               "recover_after", "timeout", "severity", "runbook", "repair", "layer")
+               "recover_after", "timeout", "severity", "runbook", "repair", "layer", "cron")
 
 
 def _ops_profile_file(path):
@@ -4914,6 +4917,10 @@ def render_ops(a, res):
         print("runs, newest first:" if res["runs"] else "no runs yet: maxpm serve runs it when it is due")
         for r in res["runs"]:
             print(f"    {_ops_run_line(r)}")
+            if r.get("missed"):
+                m = json.loads(r["missed"])
+                print(f"        after a stop: {m['count']} times were due between {core.show_time(m['since'])} and "
+                      f"{core.show_time(m['until'])}; it ran once")
             if r.get("subjects"):
                 subj = json.loads(r["subjects"])
                 if subj:

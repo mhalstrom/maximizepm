@@ -1007,6 +1007,7 @@ CREATE TABLE IF NOT EXISTS checks (
   subject       INTEGER NOT NULL DEFAULT 0,  -- 1: each line of the output names a subject with its own fault
   repair        TEXT,                    -- a command that fixes a known fault
   layer         TEXT NOT NULL DEFAULT 'app',  -- what it watches (OPS_LAYERS): a fault of a lower layer gives the kind
+  cron          TEXT,                    -- a cron expression (five fields): it runs then, not every N (#5506)
   outside       INTEGER NOT NULL DEFAULT 0,  -- 1: the watchdog runs it (maxpm ops check --outside), not maxpm serve
   paused_until  TEXT,
   last_beat     TEXT,                    -- beat: when the project's own job last sent one (maxpm ops beat)
@@ -1033,7 +1034,8 @@ CREATE TABLE IF NOT EXISTS ops_runs (
   perfdata    TEXT,                      -- after '|' on the status line
   evidence    TEXT,                      -- one JSON object from the later lines of a plugin's output, if any
   output      TEXT,                      -- the last lines
-  subjects    TEXT                       -- subject on: each subject's status in this run, as JSON
+  subjects    TEXT,                      -- subject on: each subject's status in this run, as JSON
+  missed      TEXT                       -- after a stop: {"count", "since", "until"}: the times due that ran once (#5506)
 );
 
 -- One row for each change of the state of a check, or of one subject of it (#5336 reads it: faults per week, the
@@ -1454,8 +1456,13 @@ def _migrate(conn):
     # The kinds of problems (#5509): a check's layer says what a fault of it means for the other checks.
     if "layer" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
         conn.execute("ALTER TABLE checks ADD COLUMN layer TEXT NOT NULL DEFAULT 'app'")
+    # Cron schedules (#5506): a check's cron expression; a run after a stop records the times that passed.
+    if "cron" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
+        conn.execute("ALTER TABLE checks ADD COLUMN cron TEXT")
     if "subjects" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
         conn.execute("ALTER TABLE ops_runs ADD COLUMN subjects TEXT")
+    if "missed" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
+        conn.execute("ALTER TABLE ops_runs ADD COLUMN missed TEXT")
     # The watchdog (#5441): a check marked outside runs in maxpm ops check --outside, not in maxpm serve.
     if "outside" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
         conn.execute("ALTER TABLE checks ADD COLUMN outside INTEGER NOT NULL DEFAULT 0")
@@ -3460,7 +3467,8 @@ def _ops_build(form, fields, old=None):
         col[k] = v if v is not None else old.get(k, OPS_DEFAULTS[k])
     for k in ("every", "timeout"):
         parse_duration(col[k])
-    if form != "beat" and parse_duration(col["timeout"]) > parse_duration(col["every"]):
+    if form != "beat" and not (fields.get("cron") or (fields.get("cron") is None and old.get("cron"))) and \
+            parse_duration(col["timeout"]) > parse_duration(col["every"]):
         raise RiverError(f"the timeout {col['timeout']} is longer than every {col['every']}: one run would still "
                          f"run when the next one is due")
     for k in ("fail_after", "recover_after"):
@@ -3476,6 +3484,10 @@ def _ops_build(form, fields, old=None):
     for k in ("runbook", "repair"):
         v = fields.get(k)
         col[k] = (v.strip() or None) if v is not None else old.get(k)
+    cron = fields.get("cron")
+    col["cron"] = (cron.strip() or None) if cron is not None else old.get("cron")
+    if col["cron"]:
+        cron_parse(col["cron"])
     col["layer"] = fields.get("layer") or old.get("layer") or "app"
     if col["layer"] not in OPS_LAYERS:
         raise RiverError(f"no layer {col['layer']!r}: app (the project itself), dependency (an outside vendor), "
@@ -3493,13 +3505,14 @@ def _ops_summary(c):
             "beat": lambda: f"a beat at least every {cfg['period']}",
             "cmd": lambda: cfg["command"], "plugin": lambda: cfg["command"],
             "log": lambda: f"{cfg['command']}: fewer than {cfg['limit']} lines match {cfg['pattern']!r} in {cfg['window']}"}
-    return (f"{c['form']} {what[c['form']]()}; every {c['every']}, fault after {c['fail_after']}, {c['severity']}"
+    when = f"at cron '{c['cron']}'" if c.get("cron") else f"every {c['every']}"
+    return (f"{c['form']} {what[c['form']]()}; {when}, fault after {c['fail_after']}, {c['severity']}"
             + (f", layer {c['layer']}" if c.get("layer", "app") != "app" else "")
             + ("; outside serve (the watchdog runs it)" if c.get("outside") else ""))
 
 
 _OPS_COLS = ("form", "config", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "subject",
-             "repair", "layer", "outside")
+             "repair", "layer", "outside", "cron")
 
 
 def _ops_name(name):
@@ -3518,11 +3531,12 @@ def _ops_refuse(conn, actor, *checks):
 def _ops_insert(conn, kind, scope, name, col, actor):
     """Write a new check (inside the caller's tx; the caller checked the rights)."""
     conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
-                 "severity,runbook,subject,repair,layer,outside,created_by,created_at) "
-                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 "severity,runbook,subject,repair,layer,outside,cron,created_by,created_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (kind, scope, name, col["form"], json.dumps(col["config"]), col["every"], col["fail_after"],
                   col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
-                  col["repair"], col.get("layer") or "app", int(bool(col.get("outside"))), actor, iso(now())))
+                  col["repair"], col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"), actor,
+                  iso(now())))
     c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
     _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else ""))
@@ -3533,14 +3547,16 @@ def _ops_update(conn, old, col, actor):
     """Write the new columns of a check (inside the caller's tx). Returns the changed columns and the check."""
     col = dict(col, layer=col.get("layer") or old.get("layer") or "app")  # a proposal from before #5509 has none
     col.setdefault("outside", False)  # and one from before #5441
+    col.setdefault("cron", old.get("cron"))  # and one from before #5506
     changed = [k for k in _OPS_COLS if col[k] != old[k]]
     if not changed:
         return [], old
     conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
-                 " runbook=?, subject=?, repair=?, layer=?, outside=?, changed_by=?, changed_at=? WHERE id=?",
+                 " runbook=?, subject=?, repair=?, layer=?, outside=?, cron=?, changed_by=?, changed_at=? WHERE id=?",
                  (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
                   col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"],
-                  col.get("layer") or "app", int(bool(col.get("outside"))), actor, iso(now()), old["id"]))
+                  col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"), actor, iso(now()),
+                  old["id"]))
     c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
     _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} changed ({', '.join(changed)}): {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
@@ -3601,7 +3617,7 @@ def ops_rm(conn, scope, name, actor=None):
 # idempotent, and it keeps the state and the pause of a check that stays.
 OPS_PROFILE_VERSION = 1
 _OPS_CHECK_KEYS = ({"name", "form", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "repair",
-                    "layer", "subject", "outside"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
+                    "layer", "subject", "outside", "cron"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
 
 
 def _ops_settings_scope(conn, kind, scope):
@@ -3625,6 +3641,8 @@ def ops_profile_export(conn, scope):
         d.update({k: c[k] for k in ("runbook", "repair") if c[k]})
         if c.get("layer", "app") != "app":
             d["layer"] = c["layer"]
+        if c.get("cron"):
+            d["cron"] = c["cron"]
         if c["subject"]:
             d["subject"] = True
         if c["outside"]:
@@ -4046,6 +4064,107 @@ def _ops_verify(conn, run, watch, state):
     return out
 
 
+# ---- cron schedules (#5506): a check may run on a cron expression instead of every N. MaximizePM owns all timing as
+# configuration (mark 2026-11-12); the five fields of cron, read in the project's time zone (setting timezone), with the
+# standard library only. After a stop, a check runs once, never once for each time that passed: the run records how
+# many times were due since its last run.
+
+_CRON_FIELDS = (("minute", 0, 59), ("hour", 0, 23), ("day of the month", 1, 31), ("month", 1, 12),
+                ("day of the week", 0, 7))
+_CRON_NAMES = {3: ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"],
+               4: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]}
+
+
+def cron_parse(expr):
+    """The five fields of a cron expression (minute hour day-of-month month day-of-week): numbers, *, ranges a-b,
+    lists a,b, steps */n and a-b/n, and the names jan-dec and sun-sat. Returns (five sets, dom_star, dow_star); a
+    day matches by the classic rule: when both day fields are restricted, either one matching is enough."""
+    fields = (expr or "").split()
+    if len(fields) != 5:
+        raise RiverError(f"a cron expression has five fields (minute hour day month weekday), for example "
+                         f"'0 3 * * *' (03:00 each day) or '*/15 9-17 * * mon-fri'; not {expr!r}")
+    sets = []
+    for i, (field, (what, lo, hi)) in enumerate(zip(fields, _CRON_FIELDS)):
+        names = _CRON_NAMES.get(i, [])
+
+        def num(s, i=i, names=names, what=what, lo=lo, hi=hi):
+            s = s.lower()
+            if s in names:
+                return names.index(s) + (1 if i == 3 else 0)
+            if not s.isdigit() or not lo <= int(s) <= hi:
+                raise RiverError(f"bad {what} {s!r} in the cron expression {expr!r}: {lo} to {hi}")
+            return int(s)
+        out = set()
+        for piece in field.split(","):
+            base, slash, step = piece.partition("/")
+            if slash and (not step.isdigit() or int(step) < 1):
+                raise RiverError(f"bad step {step!r} in the cron expression {expr!r}")
+            if base == "*":
+                a, b = lo, hi
+            elif "-" in base:
+                a, b = (num(x) for x in base.split("-", 1))
+                if a > b:
+                    raise RiverError(f"bad range {base!r} in the cron expression {expr!r}: the first is larger")
+            else:
+                a = b = num(base)
+                if slash:
+                    b = hi
+            out.update(range(a, b + 1, int(step) if slash else 1))
+        if i == 4 and 7 in out:  # 7 is Sunday too
+            out = (out - {7}) | {0}
+        sets.append(out)
+    return sets, fields[2].startswith("*"), fields[4].startswith("*")
+
+
+def _cron_day(spec, d):
+    (_, _, dom, mon, dow), dom_star, dow_star = spec
+    if d.month not in mon:
+        return False
+    a, b = d.day in dom, (d.weekday() + 1) % 7 in dow
+    return a and b if (dom_star or dow_star) else a or b
+
+
+def _local(at, zone):
+    """A UTC time as a naive time of the zone (None: the machine's own zone, with its summer time)."""
+    return at.astimezone(zone).replace(tzinfo=None) if zone else datetime.fromtimestamp(at.timestamp())
+
+
+def _utc(naive, zone):
+    return naive.replace(tzinfo=zone).astimezone(timezone.utc) if zone else \
+        datetime.fromtimestamp(naive.timestamp(), timezone.utc)
+
+
+def cron_prev(spec, at, zone=None):
+    """The last time at or before `at` (UTC) that the cron spec (cron_parse) names, in UTC; None within 5 years."""
+    (mins, hours, _, _, _), _, _ = spec
+    t = _local(at, zone).replace(second=0, microsecond=0)
+    for back in range(366 * 5):
+        d = (t - timedelta(days=back)).date()
+        if not _cron_day(spec, d):
+            continue
+        for h in sorted((h for h in hours if back or h <= t.hour), reverse=True):
+            ms = [m for m in mins if back or h < t.hour or m <= t.minute]
+            if ms:
+                return _utc(datetime(d.year, d.month, d.day, h, max(ms)), zone)
+    return None
+
+
+def cron_count(spec, since, until, zone=None, most=1000):
+    """How many times the cron spec names after `since` and at or before `until` (at most `most`)."""
+    n, x = 0, cron_prev(spec, until, zone)
+    while x is not None and x > since and n < most:
+        n += 1
+        x = cron_prev(spec, x - timedelta(minutes=1), zone)
+    return n
+
+
+def _ops_zone(conn, c):
+    """The time zone of a check's cron: the timezone setting of its project, else the queue's, else the machine's."""
+    r = conn.execute("SELECT id FROM projects WHERE name=?", (_ops_project(conn, c),)).fetchone()
+    name = setting(conn, "timezone", project_id=r["id"] if r else None)
+    return local_zone(name) if name else None
+
+
 def ops_due(conn, at=None, outside=False, slack=None):
     """The checks whose next run is due: not paused, no run open, and the last run started at least `every` ago,
     or sooner in the watch of a release of its target (_ops_watch_due). A pause whose time passed ends here (an
@@ -4070,8 +4189,18 @@ def ops_due(conn, at=None, outside=False, slack=None):
             continue
         last = conn.execute("SELECT started_at FROM ops_runs WHERE check_id=? ORDER BY id DESC LIMIT 1",
                             (c["id"],)).fetchone()
-        if last is None or at - parse_iso(last["started_at"]) + slack >= parse_duration(c["every"]) or \
-                _ops_watch_due(conn, c, at):
+        since = parse_iso(last["started_at"]) if last else None
+        if c.get("cron"):  # due when a time it names passed since its last run (a new check: since it was added)
+            spec, zone = cron_parse(c["cron"]), _ops_zone(conn, c)
+            fire = cron_prev(spec, at + slack, zone)
+            due = fire is not None and fire > (since or parse_iso(c["created_at"]))
+            count = cron_count(spec, since, at + slack, zone) if due and since else 0
+        else:
+            due = since is None or at - since + slack >= parse_duration(c["every"])
+            count = int((at - since + slack) / parse_duration(c["every"])) if due and since else 0
+        if due or _ops_watch_due(conn, c, at):
+            if count >= 2:  # a stop: it runs once, and the run records the times that passed
+                c["missed"] = {"count": count, "since": iso(since), "until": iso(at)}
             out.append(c)
     return out
 
@@ -4200,7 +4329,13 @@ def ops_start(conn, c, at=None, actor=None):
     with tx(conn):
         if conn.execute("SELECT 1 FROM ops_runs WHERE check_id=? AND ended_at IS NULL", (c["id"],)).fetchone():
             return None
-        cur = conn.execute("INSERT INTO ops_runs(check_id,key,started_at) VALUES (?,?,?)", (c["id"], c["key"], iso(at)))
+        m = c.get("missed")
+        cur = conn.execute("INSERT INTO ops_runs(check_id,key,started_at,missed) VALUES (?,?,?,?)",
+                           (c["id"], c["key"], iso(at), json.dumps(m) if m else None))
+        if m:
+            _event(conn, None, "maxpm", f"ops check {c['scope']}/{c['name']}: {m['count']} times were due between "
+                                        f"{show_time(m['since'])} and {show_time(m['until'])}, when nothing ran it; "
+                                        f"it runs once now")
     return {"id": cur.lastrowid, "check": c, "folder": _ops_folder(conn, c) if c["runs_command"] else None,
             "limit": parse_duration(c["timeout"]).total_seconds(), "actor": actor,
             "last_beat": conn.execute("SELECT last_beat, created_at FROM checks WHERE id=?", (c["id"],)).fetchone(),

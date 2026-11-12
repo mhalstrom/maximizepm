@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 from unittest import mock
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from river import core
 from river.core import RiverError
@@ -10704,6 +10704,86 @@ class OpsOutside(Base):
         log = os.path.join(self.dir.name, "notifications.log")
         with open(log) as f:
             self.assertEqual(json.loads(f.readline())["title"], "MaximizePM: maxpm/serve is down")
+
+
+class OpsCron(Base):
+    """Cron schedules (#5506): a check may run on a cron expression in its project's time zone, and after a stop each
+    check runs once, never once for each time that passed; the run records how many times were due."""
+
+    run_at = Ops.run_at
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "site")
+        core.register(self.c, "dev")
+        self.ok = lambda url, limit: (200, "")
+
+    def t(self, hhmm, day=12):
+        return datetime(2026, 11, day, int(hhmm[:2]), int(hhmm[3:]), tzinfo=timezone.utc)
+
+    def test_the_parser_reads_the_five_fields_and_refuses_a_bad_one(self):
+        (mins, hours, dom, mon, dow), dom_star, dow_star = core.cron_parse("*/15 9-17 * jan,dec mon-fri")
+        self.assertEqual((sorted(mins), sorted(hours), len(dom), sorted(mon), sorted(dow), dom_star, dow_star),
+                         ([0, 15, 30, 45], list(range(9, 18)), 31, [1, 12], [1, 2, 3, 4, 5], True, False))
+        self.assertEqual(core.cron_parse("0 0 * * 7")[0][4], {0})  # 7 is Sunday too
+        self.assertEqual(sorted(core.cron_parse("5/20 * * * *")[0][0]), [5, 25, 45])
+        for bad, why in (("0 3 * *", "five fields"), ("60 * * * *", "bad minute '60'"), ("* * * * fri-mon", "larger"),
+                         ("*/0 * * * *", "bad step"), ("0 3 * foo *", "bad month 'foo'")):
+            with self.assertRaisesRegex(RiverError, why):
+                core.cron_parse(bad)
+
+    def test_the_last_time_and_the_count_in_utc_and_in_a_zone(self):
+        utc = timezone.utc
+        p = core.cron_parse
+        self.assertEqual(core.cron_prev(p("0 3 * * *"), self.t("10:07"), utc), self.t("03:00"))
+        self.assertEqual(core.cron_prev(p("*/15 * * * *"), self.t("10:07"), utc), self.t("10:00"))
+        self.assertEqual(core.cron_prev(p("0 3 * * *"), self.t("02:59"), utc), self.t("03:00", 11))
+        # Both day fields restricted: either one is enough (Thursday 2026-11-12 is not the 1st).
+        self.assertEqual(core.cron_prev(p("0 0 1 * thu"), self.t("10:00"), utc), self.t("00:00"))
+        la = core.local_zone("America/Los_Angeles")
+        self.assertEqual(core.cron_prev(p("0 3 * * *"), self.t("12:00"), la), self.t("11:00"))  # 03:00 PST
+        self.assertEqual(core.cron_count(p("0 */4 * * *"), self.t("00:30"), self.t("12:30"), utc), 3)
+        self.assertEqual(core.cron_count(p("0 */4 * * *"), self.t("04:00"), self.t("04:00"), utc), 0)
+
+    def test_a_cron_check_is_due_at_its_times_and_after_a_stop_runs_once_with_the_gap(self):
+        core.config_set(self.c, "timezone", "UTC", project="site")
+        with self.assertRaisesRegex(RiverError, "five fields"):
+            core.ops_add(self.c, "site", "bad", "url", {"url": "https://x.test/", "cron": "daily"}, actor="dev")
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://x.test/", "cron": "0 */4 * * *",
+                                                    "timeout": "10m", "every": "1m"}, actor="dev")
+        with core.tx(self.c):
+            self.c.execute("UPDATE checks SET created_at=? WHERE name='home'", (core.iso(self.t("00:30")),))
+        due = lambda at: [c["name"] for c in core.ops_due(self.c, at)]
+        self.assertEqual(due(self.t("03:59")), [])  # its first time is 04:00, not when it was added
+        self.assertEqual(due(self.t("04:01")), ["home"])
+        self.run_at("site", "home", self.t("04:01"), http=self.ok)
+        self.assertEqual(due(self.t("07:59")), [])
+        # MaximizePM was off from 04:01 to 16:30: 08:00, 12:00 and 16:00 passed; it runs once, and the run says so.
+        [c] = core.ops_due(self.c, self.t("16:30"))
+        self.assertEqual(c["missed"], {"count": 3, "since": "2026-11-12T04:01:00Z", "until": "2026-11-12T16:30:00Z"})
+        with mock.patch.object(core, "OPS_HTTP", self.ok):  # as maxpm serve does: the due check starts its run
+            core.ops_finish(self.c, core.ops_start(self.c, c, at=self.t("16:30")), at=self.t("16:30"))
+        self.assertEqual(due(self.t("16:31")), [])
+        run = core.ops_history(self.c, "site", "home", 1)["runs"][0]
+        self.assertEqual(json.loads(run["missed"])["count"], 3)
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE change LIKE 'ops check site/home: 3 times were due "
+                                       "between % and %, when nothing ran it; it runs once now'").fetchone())
+        self.assertEqual(core.ops_profile_export(self.c, "site")["checks"][0]["cron"], "0 */4 * * *")
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "ops", "history", "site", "home"])
+        self.assertIn("after a stop: 3 times were due between", out.getvalue())
+        core.ops_edit(self.c, "site", "home", {"cron": "", "every": "15m"}, actor="dev")  # empty: every again
+        self.assertIsNone(core.ops_find(self.c, "site", "home")["cron"])
+
+    def test_an_every_check_after_a_stop_runs_once_and_records_the_times_that_passed(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://x.test/", "every": "1h"}, actor="dev")
+        self.run_at("site", "home", self.t("00:00"), http=self.ok)
+        [c] = core.ops_due(self.c, self.t("01:00"))
+        self.assertNotIn("missed", c)  # on time: no gap
+        [c] = core.ops_due(self.c, self.t("12:10"))
+        self.assertEqual(c["missed"]["count"], 12)
 
 
 class Speed(Base):
