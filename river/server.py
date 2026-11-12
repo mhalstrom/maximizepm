@@ -4429,7 +4429,11 @@ def needs_you_view(conn, human=None, sync=True):
 # so the page shows its own change at once.
 STATE_TTL = 2.0
 _state_cache = {}
-_state_build = threading.Lock()
+# One heavy read at a time (#5597): a state build, and each read_memo request (the Sessions and Artifacts tabs). Python
+# runs one thread at a time, and SQLite gives up the interpreter lock at each row: two reads at once slowed each other
+# to several times their CPU (live, a build waited at 'SELECT * FROM agents' while GET /api/sessions, asked on the
+# same 3 s tick, read the same 834 rows).
+_state_build = threading.RLock()
 _state_gen = [0]
 _kept_graph = {}  # the newest item graph that a page build or an action read: ANN_SHARE's ("graph", closed) entries
 # and the open items annotate computed on it (#5585), and the done items (#5592)
@@ -4459,9 +4463,10 @@ def graph_share():
 @contextlib.contextmanager
 def read_memo():
     """A read-only request computes as a page state build does (#5597): the settings and the item graph once
-    (graph_share), every agent's status in four queries and each tmux pane list once (BUILD_MEMO). Only for a request
-    that writes nothing: an answer is not read again after a write."""
-    with graph_share():
+    (graph_share), every agent's status in four queries and each tmux pane list once (BUILD_MEMO), and not at the same
+    time as a state build (_state_build). Only for a request that writes nothing: an answer is not read again after a
+    write."""
+    with _state_build, graph_share():
         tok = core.BUILD_MEMO.set({})
         try:
             yield
@@ -4636,8 +4641,14 @@ class _BuildSampler:
                 top = o
                 while o is not None and not o.f_code.co_filename.startswith(here):
                     o = o.f_back
-                c = (o or top).f_code
-                self.others[f"{os.path.basename(c.co_filename)}:{(o or top).f_lineno} {c.co_name}"] += 1
+                c, outer, x = (o or top).f_code, None, o
+                while x is not None:  # the request it serves (do_GET's path), or its outermost function
+                    if x.f_code.co_filename.startswith(here):
+                        outer = x.f_code.co_name
+                        if outer in ("do_GET", "do_POST"):
+                            outer = f"{outer} {str(getattr(x.f_locals.get('self'), 'path', ''))[:50]}"
+                    x = x.f_back
+                self.others[f"{os.path.basename(c.co_filename)}:{(o or top).f_lineno} {c.co_name} < {outer}"] += 1
             names = []
             while f is not None:
                 c = f.f_code
