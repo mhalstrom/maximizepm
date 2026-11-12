@@ -165,6 +165,31 @@ On macOS, `brew install terminal-notifier` (optional) makes a click on a Mac
 notice open the session's page. Without it MaximizePM uses osascript, and a
 click on the notice opens Script Editor; the link shows only as text.
 
+### Windows
+
+MaximizePM runs on Windows inside WSL 2 (the Windows Subsystem for Linux), and
+only there: agents start in tmux, and tmux is a Linux program. On Windows
+itself, `maxpm` stops with one line that says so.
+
+1. In PowerShell, run `wsl --install`, then restart Windows. That gives you
+   WSL 2 with Ubuntu.
+2. Open Ubuntu and install MaximizePM there, the same way as on Linux:
+
+   ```sh
+   sudo apt install git tmux python3
+   git clone https://github.com/mhalstrom/maximizepm
+   cd maximizepm
+   ./install.sh
+   ```
+
+3. Install your agent CLIs (Claude Code, Codex, and the others) in Ubuntu too.
+   Keep your projects in the Linux home folder (`~/projects/...`), not under
+   `/mnt/c`: files on drive C are slow from Linux.
+4. Run `maxpm serve --open`. The page opens in your Windows browser at
+   `http://127.0.0.1:8765`, because WSL 2 passes localhost through to Linux.
+5. For Windows notifications, run `maxpm config set notify_channels windows`.
+   A click on a notice opens the page.
+
 
 ## Desktop app
 
@@ -381,8 +406,7 @@ differ (`maxpm config set claude_remote_control off --project shop`):
 
 A Claude Code session that MaximizePM starts for an item gets a name (`claude
 --name`, also the Remote Control session name): the goal the item serves,
-else `#<id> <title>`, at most 48 characters. Its tmux pane (a console window
-on Windows) gets the same title. A session for another purpose gets that purpose
+else `#<id> <title>`, at most 48 characters. Its tmux pane gets the same title. A session for another purpose gets that purpose
 as its name: `maxpm manager`, `help #7 <title>`, `unblock #7 <title>`,
 `deploy web`, `review web`, `needs you` (your assistant,
 an agent named `you-<id>`).
@@ -437,8 +461,7 @@ arrow) and answer it.
 `Ctrl-b z` makes one pane large and back, and `Ctrl-b d` leaves the view while
 the agents continue. Install tmux first (`brew install tmux`; Linux:
 `apt install tmux`): without it, a start refuses and names that command.
-Windows has no tmux, so there a session opens in a console window. tmux needs
-no Terminal app, so it also works over SSH. `maxpm serve` also ends, every
+tmux needs no Terminal app, so it also works over SSH. `maxpm serve` also ends, every
 `tidy_every`, the tmux servers that the tests left behind;
 `maxpm view --orphans` lists them, and `--orphans --tidy` ends them now. A session inside a sandbox (Claude Code's, Codex's) cannot reach
 tmux itself: its `maxpm launch` asks the running `maxpm serve` to start the
@@ -721,8 +744,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   CLI's process (the first ancestor of the MaximizePM command that is not a shell)
   and the host; `maxpm who` shows them, and a session whose process on this
   host has ended counts as gone at once. `maxpm stop <agent> --kill --reason
-  "..."` ends that process (SIGTERM, then SIGKILL after 5 s; taskkill on
-  Windows) only on the same host and only while the PID still runs the
+  "..."` ends that process (SIGTERM, then SIGKILL after 5 s) only on the same host and only while the PID still runs the
   recorded command, then releases its items, goals, targets, and queue.
   Uncommitted work in its folder is lost. Only a person or a manager can do
   it. Use it only when a stop request does not work.
@@ -875,8 +897,7 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   a note, `merge`, or `maxpm keep <id> --close <closed-id> --note "<why it is
   still needed>"`. `maxpm cleanup` and the plan briefing list the undecided
   ones first (`--closes 7d` checks older closes).
-- Tests run on GitHub Actions on Linux (Python 3.10 to 3.13), macOS, and
-  Windows.
+- Tests run on GitHub Actions on Linux (Python 3.10 to 3.13) and macOS.
 
 ## License
 

@@ -79,7 +79,11 @@ SETUP = """Setting up agents to use MaximizePM
    Sessions that MaximizePM starts (maxpm launch, the page's Start, fresh sessions)
    open in panes of the tmux session maxpm (maxpm view shows them all in one
    terminal). Install tmux first: brew install tmux (Linux: apt install tmux).
-   Windows has no tmux: there a session opens in a console window.
+   On Windows, MaximizePM runs only inside WSL 2: run wsl --install in
+   PowerShell, then do every step here in Linux, with the project folders in
+   the Linux home folder (~/...), not on /mnt/c. The page opens in the
+   Windows browser at the same address; maxpm config set notify_channels
+   windows shows the notices on Windows.
 
 6. For each project, choose with the person how a finished result (a page, a
    text, a design) gets the person's look. No project gets its value in
