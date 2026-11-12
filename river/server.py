@@ -4581,14 +4581,19 @@ class Handler(BaseHTTPRequestHandler):
             conn = core.connect()
             # The page shown through the relay (relay.handle_page): its actions are recorded as <name>@relay.
             via = core.EVENT_VIA.set("relay" if relay.page_request(self.headers) else None)
+            typing = body.get("op") in TYPING_OPS
             try:
                 # sync=False: the needs-you rows are synced once, after the action (#5522; each sync built the graph
                 # of the whole queue, and another session's write in between made the second one build it again).
-                core.activity(conn, actor, sync=False)
+                # A typing op answers first and runs it after the answer (#5566).
+                if not typing:
+                    core.activity(conn, actor, sync=False)
                 try:
                     result = op(conn, body.get("args", {}), actor)
                 finally:
                     hooks_soon(conn, core.hook_token())  # a release event of this action: its hook runs after the answer
+                if typing:
+                    return self._answer_first(conn, actor, result)
                 core.sync_needs_you_now(conn)
                 return self._send(200, {"ok": True, "result": result})
             finally:
@@ -4599,6 +4604,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(409, {"error": str(e)})
         except (KeyError, ValueError, TypeError) as e:
             return self._send(400, {"error": f"bad request: {e}"})
+
+    def _answer_first(self, conn, actor, result):
+        """A typing op (Stop, a message, a key) answered the person before the queue's own work of the action, the
+        sweep, the person's renewal and sync_needs_you (#5566: 90-140 ms of work, and in a busy serve 500 ms more,
+        between the Stop click and its answer). The keys went into the pane already. An error after the answer goes
+        to the log of serve: the page has its answer."""
+        state_changed()  # the page's refresh after this answer reads the new state
+        self._send(200, {"ok": True, "result": result})
+        try:
+            core.activity(conn, actor, sync=False)
+            core.sync_needs_you_now(conn)
+        except Exception as e:  # the next action or pass of serve does it again
+            print(f"maxpm serve: after the answer of a typing action: {e}", flush=True)
 
 
 def _restart_on_change(httpd):

@@ -2154,6 +2154,44 @@ class LaunchInTmux(unittest.TestCase):
         r = server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
         self.assertEqual((pane["keys"][-2:], "again" in r, "command" in r), (["Escape", "Escape"], False, False))
 
+    def test_stop_answers_before_the_queue_work_of_the_action(self):
+        """#5566: a Stop click waited 540-725 ms, of which the sweep and two needs-you syncs ran before the keys and
+        the answer. A typing op now sends its keys and answers first; the sweep and one sync follow. Another op runs
+        the sweep first, and the sync once, after the op (#5522)."""
+        core.register(self.c, "mark", human=True)
+        core.item_add(self.c, "shop", "work")
+        name = server.launch_agent(self.c)["session_name"]
+        pane = self.tmux.panes[0]
+        core.register(self.c, name)
+        self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name=?", (name,))
+        self.addCleanup(server.STOPPED.clear)
+        pane["keys"].clear()
+        steps = []
+        real_activity, real_sync = core.activity, core.sync_needs_you_now
+
+        def post(op, args):
+            data = json.dumps({"op": op, "args": args, "actor": "mark"}).encode()
+            h = server.Handler.__new__(server.Handler)
+            h.path, h.client_address, h.rfile = "/api/action", ("127.0.0.1", 5555), io.BytesIO(data)
+            h.headers = {"Host": "127.0.0.1:8765", "Content-Length": str(len(data)), "X-Maxpm-Token": server.PAGE_TOKEN}
+            h._send = lambda code, body, ctype=None: steps.append(("answer", code, len(pane["keys"])))
+            h.do_POST()
+        with mock.patch.object(core, "activity", lambda c, a, sync=True: (steps.append(("activity", sync)),
+                                                                          real_activity(c, a, sync=sync))), \
+                mock.patch.object(core, "sync_needs_you_now", lambda c: (steps.append(("sync",)), real_sync(c))):
+            post("session_interrupt", {"agent": name})
+            self.assertEqual(steps, [("answer", 200, 1), ("activity", False), ("sync",)])
+            del steps[:]
+            post("canvas_list", {})
+            self.assertEqual(steps, [("activity", False), ("sync",), ("answer", 200, 1)])
+            del steps[:]
+            # An error after the answer goes to the log: the page has its one answer.
+            with mock.patch.object(core, "sync_needs_you_now", mock.Mock(side_effect=RiverError("locked"))), \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                post("session_interrupt", {"agent": name})
+            self.assertEqual(steps, [("answer", 200, 2), ("activity", False)])
+            self.assertIn("after the answer of a typing action: locked", log.getvalue())
+
     def test_maxpm_interrupt_asks_serve(self):
         """maxpm interrupt <agent> [--message] (#5547) asks maxpm serve, which types the keys (a sandbox reaches no
         tmux), and says what it did."""
