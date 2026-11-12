@@ -1251,7 +1251,43 @@ def local_zone(name: str = ""):
                 raise RiverError(f"time zone {name!r}: this computer has no time zone database (Windows has none "
                                  f"by default). Install it: python -m pip install tzdata; or use UTC")
             raise RiverError(f"unknown time zone {name!r}: use a name such as America/New_York or UTC")
-    return datetime.now().astimezone().tzinfo
+    return _machine_zone()
+
+
+_MACHINE_ZONE = {}
+
+
+def _machine_zone():
+    """The machine's own zone with its rules, so a date in summer gets the summer offset (#5549): the zone that TZ
+    names, else the one /etc/localtime links to (macOS, most Linux), else that file read as a zone. Only when none
+    of them works (Windows), the offset that holds now, as before. Kept by the link it came from: a cheap
+    readlink on each call, and a person who moves the machine's zone gets the new one."""
+    key = os.environ.get("TZ") or ""
+    if not key:
+        try:
+            key = os.readlink("/etc/localtime")
+        except OSError:
+            key = ""
+    if key in _MACHINE_ZONE:
+        return _MACHINE_ZONE[key]
+    from zoneinfo import ZoneInfo
+    tz = None
+    name = key.lstrip(":")
+    if "zoneinfo/" in name:
+        name = name.split("zoneinfo/", 1)[1]
+    try:
+        if name:
+            tz = ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - not a zone name: try the file below
+        tz = None
+    if tz is None:
+        try:
+            with open("/etc/localtime", "rb") as f:
+                tz = ZoneInfo.from_file(f, key="localtime")
+        except Exception:  # noqa: BLE001 - no zone file (Windows): the offset of now
+            tz = datetime.now().astimezone().tzinfo
+    _MACHINE_ZONE[key] = tz
+    return tz
 
 
 def parse_when(s: str, zone: str = "", start: datetime | None = None) -> datetime:

@@ -156,6 +156,24 @@ class Ordering(Base):
                 w(bad)
         self.assertEqual(core.show_time("2026-09-28T11:00:00Z", "America/New_York")[-9:], " 7:00 EDT")
 
+    def test_the_machine_zone_keeps_its_summer_time_rules(self):
+        # #5549: with no timezone setting, a date in summer showed the winter offset of today (22:59 PST for a
+        # time due 23:59 PDT), and a time typed for that date was an hour off.
+        core._MACHINE_ZONE.clear()
+        self.addCleanup(core._MACHINE_ZONE.clear)
+        with mock.patch.dict(os.environ, {"TZ": "America/Los_Angeles"}):
+            self.assertEqual(str(core.local_zone()), "America/Los_Angeles")
+            self.assertTrue(core.show_time("2027-03-16T06:59:00Z").endswith("2027-03-15 23:59 PDT"))
+            self.assertTrue(core.show_time("2026-12-16T07:59:00Z").endswith("2026-12-15 23:59 PST"))
+            start = core.parse_iso("2026-11-12T05:00:00Z")
+            self.assertEqual(core.iso(core.parse_when("2027-07-01 09:00", start=start)), "2027-07-01T16:00:00Z")
+        with mock.patch.dict(os.environ, {"TZ": ""}), \
+                mock.patch.object(core.os, "readlink", lambda p: "/var/db/timezone/zoneinfo/America/New_York"):
+            self.assertEqual(str(core.local_zone()), "America/New_York")
+        with mock.patch.dict(os.environ, {"TZ": ""}), mock.patch.object(core.os, "readlink", side_effect=OSError), \
+                mock.patch("builtins.open", side_effect=OSError):
+            self.assertIsNotNone(core.local_zone().utcoffset(core.now()))  # Windows: the offset of now, as before
+
 
 class Claims(Base):
     def setUp(self):
