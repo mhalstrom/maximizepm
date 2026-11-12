@@ -270,6 +270,19 @@ class KeptDoneRows(Base):
             self.assertNotIn(self.old, seen)
 
 
+    def test_a_done_item_sees_the_change_of_an_item_it_waits_on(self):
+        # The mark holds the rows of the linked items (#5597): their status reaches the kept done row.
+        server._kept_graph.clear()
+        self.addCleanup(server._kept_graph.clear)
+        first = core.item_add(self.c, "a", "first")["id"]
+        late = core.item_add(self.c, "a", "late", after=[first])["id"]
+        core.done(self.c, late, actor="ag", force="done before its prerequisite")
+        self.assertEqual(self.build()[late]["open_blockers"], [first])
+        self.build()
+        core.claim(self.c, first, "ag")
+        core.done(self.c, first, actor="ag")
+        self.assertEqual(self.build()[late]["open_blockers"], [])
+
     def test_an_unchanged_done_row_reaches_the_answer_without_new_work(self):
         # #5593: the same done row from annotate to the slim row and its hash; a lone page's done-view poll was
         # 190 ms on 5,600 items, as state, slim and the hashes worked on every row of each build.

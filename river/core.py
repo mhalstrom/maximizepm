@@ -10177,10 +10177,13 @@ def _annotate(conn, closed=True):
                 rows[i] = one(i, it)
                 continue
             p = projects[it["project_id"]]
-            mark = (tuple(it.values()), p["name"], p["rank"], p["archived"],
-                    tuple((b, items[b]["status"], items[b]["backlog_at"]) for b in waits_on[i]),
-                    frozenset(waited_by[i]), frozenset(feeds[i]),
-                    tuple((c, items[c]["status"], items[c]["assignee"]) for c in conflicts[i]),
+            # The row and the link lists themselves: the kept graph keeps an unchanged one as the same object and
+            # replaces a changed one (_graph_changed), so the compare is mostly by identity (#5597: a tuple of each
+            # row's values was 17 ms of a build). After a whole read of the graph they compare by value. The rows
+            # of the linked items: one() reads their status, backlog and assignee.
+            wo, cf = waits_on[i], conflicts[i]
+            mark = (it, p["name"], p["rank"], p["archived"], wo, waited_by[i], feeds[i], cf,
+                    (tuple(items[b] for b in wo) + tuple(items[c] for c in cf)) if wo or cf else (),
                     tags.get(i), refs.get(i), queued.get(i))
             hit = old.get(i)
             a = hit[1] if hit is not None and hit[0] == mark else one(i, it)
