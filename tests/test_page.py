@@ -26,9 +26,10 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         import subprocess
         import threading
         from unittest.mock import patch
-        from tests.test_server import _chrome
+        from tests.test_server import _chrome, _chrome_window, _frame_page
         if not _chrome():
             self.skipTest("no Chrome on this computer")
+        window, frame = _chrome_window(size)
         got, result = threading.Event(), {}
         tag = b'<script type="module" src="app.js" onerror="riverLoadFailed()"></script>'
         drive = (b'<script type="module">import "./app.js"; window.__appReady = true;</script>'
@@ -36,6 +37,8 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
 
         class H(server.Handler):
             def do_GET(self):
+                if self.path == "/__frame" and frame:
+                    return self._send(200, _frame_page(path, frame), "text/html; charset=utf-8")
                 if self.path.startswith("/__step/"):
                     (steps or {})[self.path[len("/__step/"):]]()
                     return self._send(204, b"")
@@ -67,8 +70,8 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         chrome = subprocess.Popen([
             _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", f"--user-data-dir={self.dir.name}/browser",
-            *([f"--window-size={size}"] if size else []), *flags,
-            f"http://127.0.0.1:{httpd.server_address[1]}{path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            *([f"--window-size={window}"] if window else []), *flags,
+            f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             ran = got.wait(40)
         finally:
@@ -79,6 +82,18 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
         self.assertTrue(ran, "browser test did not report")
         self.assertNotIn("error", result, result.get("error"))
         return result
+
+    def test_a_phone_size_lays_the_page_out_at_that_width(self):
+        """#5415: headless Chrome makes no window narrower than 500 px, so '390,844' gave a 500 px page and no phone
+        test saw a real phone. The page now loads in a 390 px frame: its viewport and its media queries are 390 px."""
+        driver = r'''
+try {
+  await until(() => window.__appReady, "the page");
+  post({w: innerWidth, h: innerHeight, phone: matchMedia("(max-width: 759px)").matches});
+} catch (e) { post({error: String(e.stack || e)}); }
+'''
+        self.assertEqual(self.drive(driver, "/", size="390,844"), {"w": 390, "h": 844, "phone": True})
+        self.assertEqual(self.drive(driver, "/", size="1280,900")["w"], 1280)
 
     def test_every_view_draws_and_its_controls_answer(self):
         """#4656: each tab of the page is a module of its own (views/*.js); each one draws with the queue's data, and

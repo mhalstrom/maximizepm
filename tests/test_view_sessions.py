@@ -1321,14 +1321,17 @@ def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
     import subprocess
     import threading
     from unittest.mock import patch
-    from tests.test_server import _chrome
+    from tests.test_server import _chrome, _chrome_window, _frame_page
     if not _chrome():
         test.skipTest("no Chrome on this computer")
+    window, frame = _chrome_window(size)
     page = server.page_html("/sessions/ag").replace(b"</body>", b'<script type="module" src="/__drive.js"></script></body>')
     got, result = threading.Event(), {}
 
     class H(server.Handler):
         def do_GET(self):
+            if self.path == "/__frame" and frame:
+                return self._send(200, _frame_page("/sessions/ag?as=mark", frame), "text/html; charset=utf-8")
             if self.path.split("?")[0] == "/sessions/ag":
                 return self._send(200, page, "text/html; charset=utf-8")
             if self.path == "/__drive.js":
@@ -1355,8 +1358,8 @@ def drive_page(test, driver, wait=40, routes=None, size="1500,900"):
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         chrome = subprocess.Popen([
             _chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-            "--disable-extensions", f"--window-size={size}", f"--user-data-dir={test.dir.name}/browser",
-            f"http://127.0.0.1:{httpd.server_address[1]}/sessions/ag?as=mark"],
+            "--disable-extensions", f"--window-size={window}", f"--user-data-dir={test.dir.name}/browser",
+            f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else '/sessions/ag?as=mark'}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             ran = got.wait(wait)

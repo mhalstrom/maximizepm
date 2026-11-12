@@ -4233,6 +4233,25 @@ def _chrome():
     return None
 
 
+def _chrome_window(size):
+    """Headless Chrome makes no window narrower than 500 px (#5415): '--window-size=390,844' lays the page out at
+    500 px, so a phone test checked no real phone. A narrower size loads the page in an iframe of that size instead,
+    whose viewport (innerWidth, media queries) is the phone's. Returns (the --window-size value or None, the frame's
+    (width, height) or None)."""
+    if not size:
+        return None, None
+    w, h = (int(x) for x in size.split(","))
+    if w >= 500:
+        return size, None
+    return f"800,{h + 100}", (w, h)
+
+
+def _frame_page(src, frame):
+    """The page that holds the page under test in an iframe of frame = (width, height) (#5415)."""
+    w, h = frame
+    return (f'<!doctype html><meta charset="utf-8"><style>html,body{{margin:0}}iframe{{border:0;display:block}}</style>'
+            f'<iframe src="{src}" width="{w}" height="{h}"></iframe>').encode()
+
 class OnboardingForm(unittest.TestCase):
     """The setup guide of the page (the first run): each field works with the Enter key, as its button does."""
 
