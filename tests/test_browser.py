@@ -395,3 +395,145 @@ class AttachedChrome(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CdpAddress(Base):
+    """A session's own CDP address for the Playwright MCP tools (#5405): the token, the checks of each message, the
+    relay, the route, and the MCP config in the launch command."""
+
+    def test_the_token_is_one_for_each_session_and_project_and_stays(self):
+        t = browser.cdp_token("web", "ag1")
+        self.assertEqual(t, browser.cdp_token("web", "ag1"))
+        self.assertNotEqual(t, browser.cdp_token("web", "ag2"))
+        self.assertNotEqual(t, browser.cdp_token("shop", "ag1"))
+        key = core.db_path().parent / "browsers" / "cdp.key"
+        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        self.assertIn(f"/cdp/ag1?project=web&token={t}", browser.cdp_url(self.c, "web", "ag1"))
+
+    def test_each_message_is_checked_before_chrome_gets_it(self):
+        core.register(self.c, "ag1"); core.register(self.c, "ag2"); core.register(self.c, "mark", human=True)
+        b = browser.get("web")
+        no = lambda m, p=None, who="ag1": browser.cdp_refusal(self.c, b, who, {"id": 1, "method": m, "params": p or {}})
+        for m in ("Browser.close", "Tethering.bind", "Network.setBlockedURLs", "Target.exposeDevToolsProtocol"):
+            self.assertIn("not allowed", no(m))
+        self.assertIn("not file:", no("Page.navigate", {"url": "file:///etc/passwd"}))
+        self.assertIn("not chrome:", no("Target.createTarget", {"url": "chrome://settings"}))
+        self.assertIsNone(no("Page.navigate", {"url": "https://example.com"}))
+        self.assertIsNone(no("Target.createTarget", {"url": "about:blank"}))
+        # Downloads stay in the project's browser folder; an upload takes no file from elsewhere.
+        msg = {"id": 2, "method": "Browser.setDownloadBehavior", "params": {"behavior": "allow", "downloadPath": "/tmp/x"}}
+        self.assertIsNone(browser.cdp_refusal(self.c, b, "ag1", msg))
+        self.assertEqual(msg["params"]["downloadPath"], str(b.dir / "downloads"))
+        (b.dir / "downloads").mkdir(parents=True)
+        (b.dir / "downloads" / "a.pdf").write_text("x")
+        self.assertIsNone(no("DOM.setFileInputFiles", {"files": [str(b.dir / "downloads" / "a.pdf")]}))
+        self.assertIn("project folder", no("DOM.setFileInputFiles", {"files": ["/etc/hosts"]}))
+        # The controller rule: changes wait for control; reads pass.
+        browser.take(self.c, b, "mark")
+        self.assertIn("the person (mark) controls", no("Input.dispatchMouseEvent", {"type": "mousePressed"}))
+        self.assertIn("the person (mark) controls", no("Runtime.callFunctionOn"))
+        self.assertIsNone(no("Page.captureScreenshot"))
+        self.assertIsNone(no("Accessibility.getFullAXTree"))
+        browser.give_back(self.c, b, "mark")
+        browser.control(self.c, b, "ag1")
+        self.assertIsNone(no("Input.dispatchKeyEvent"))
+        self.assertIn("controlled by ag1", no("Page.navigate", {"url": "https://example.com"}, who="ag2"))
+
+    def test_the_relay_passes_what_is_allowed_and_answers_a_refusal_itself(self):
+        import queue
+        b = browser.get("web")
+
+        class Upstream:
+            def __init__(self):
+                self.sent, self.events, self.closed = [], queue.Queue(), False
+
+            def send(self, text):
+                self.sent.append(json.loads(text))
+                self.events.put(json.dumps({"id": json.loads(text)["id"], "result": {"ok": True}}))
+
+            def recv(self):
+                got = self.events.get()
+                if got is None:
+                    raise EOFError
+                return got
+
+            def close(self):
+                self.closed = True
+                self.events.put(None)
+
+        up = Upstream()
+        mine, theirs = socket.socketpair()
+        self.addCleanup(mine.close)
+        self.addCleanup(theirs.close)
+        t = threading.Thread(target=browser.cdp_session, args=(self.c, b, "ag1", theirs.makefile("rb"), theirs, up))
+        t.start()
+        rf = mine.makefile("rb")
+        mine.sendall(browser.ws_frame(0x1, json.dumps({"id": 1, "method": "Page.captureScreenshot"}).encode()))
+        self.assertEqual(json.loads(browser.ws_read(rf)[2]), {"id": 1, "result": {"ok": True}})
+        mine.sendall(browser.ws_frame(0x1, json.dumps({"id": 2, "method": "Browser.close", "sessionId": "S"}).encode()))
+        reply = json.loads(browser.ws_read(rf)[2])
+        self.assertEqual((reply["id"], reply["sessionId"]), (2, "S"))
+        self.assertIn("maxpm: Browser.close is not allowed", reply["error"]["message"])
+        up.events.put(json.dumps({"method": "Page.loadEventFired", "params": {}}))
+        self.assertEqual(json.loads(browser.ws_read(rf)[2])["method"], "Page.loadEventFired")
+        mine.sendall(browser.ws_frame(0x8, b""))
+        t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual([m["method"] for m in up.sent], ["Page.captureScreenshot"])
+        self.assertTrue(up.closed)
+
+    def test_the_route_needs_the_token_and_a_websocket(self):
+        h = FakeHandler("/cdp/ag1?project=web&token=nope")
+        h.headers = {"Upgrade": "websocket", "Sec-WebSocket-Key": "x"}
+        routes.cdp(h, "/cdp/ag1")
+        self.assertEqual(h.sent[0], 403)
+        h = FakeHandler(f"/cdp/ag1?project=web&token={browser.cdp_token('web', 'ag1')}")
+        h.headers = {}
+        routes.cdp(h, "/cdp/ag1")
+        self.assertEqual(h.sent[0], 400)
+        self.assertTrue(any(r[0]("/cdp/ag1") and r[1] is routes.cdp for r in routes.GET))
+
+    def test_browser_mcp_puts_playwright_mcp_into_the_launch_command(self):
+        pid = core._project(self.c, "web")["id"]
+        self.assertNotIn("--mcp-config", core._launch_agent_cmd(self.c, pid, None, name="web-1a2b")["command"])
+        with self.assertRaisesRegex(RiverError, "browser_mcp"):
+            core.config_set(self.c, "browser_mcp", "npx 'open", project="web")
+        core.config_set(self.c, "browser_mcp", "on", project="web")
+        cmd = core._launch_agent_cmd(self.c, pid, None, name="web-1a2b")["command"]
+        path = browser.browser_dir("web") / "mcp" / "web-1a2b.json"
+        self.assertIn(f"--mcp-config {path}", cmd)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        server_cfg = json.loads(path.read_text())["mcpServers"][browser.MCP_NAME]
+        self.assertEqual(server_cfg["command"], "npx")
+        self.assertEqual(server_cfg["args"][:3], ["-y", "@playwright/mcp@latest", "--cdp-endpoint"])
+        self.assertEqual(server_cfg["args"][3], browser.cdp_url(self.c, "web", "web-1a2b"))
+        core.config_set(self.c, "browser_mcp", "npx -y @playwright/mcp@0.0.40", project="web")
+        core._launch_agent_cmd(self.c, pid, None, name="web-1a2b")
+        self.assertEqual(json.loads(path.read_text())["mcpServers"][browser.MCP_NAME]["args"][1], "@playwright/mcp@0.0.40")
+
+    def test_a_real_chrome_through_the_cdp_address_of_serve(self):
+        if not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "serve_port", str(srv.server_address[1]))
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        with self.assertRaisesRegex(OSError, "403"):
+            browser.WS(browser.cdp_url(self.c, "web", "ag1").replace("token=", "token=x"))
+        ws = browser.WS(browser.cdp_url(self.c, "web", "ag1"))
+        self.addCleanup(ws.close)
+        ws.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+        self.assertIn("Chrome", json.loads(ws.recv())["result"]["product"])
+        ws.send(json.dumps({"id": 2, "method": "Browser.close"}))
+        self.assertIn("not allowed", json.loads(ws.recv())["error"]["message"])
+        ws.send(json.dumps({"id": 3, "method": "Target.getTargets"}))
+        got = json.loads(ws.recv())
+        while "id" not in got:  # an event before the answer
+            got = json.loads(ws.recv())
+        self.assertTrue(any(t["type"] == "page" for t in got["result"]["targetInfos"]))
+        self.assertTrue(b.running())  # Browser.close never reached Chrome

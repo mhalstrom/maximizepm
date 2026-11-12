@@ -145,6 +145,12 @@ DEFAULT_SETTINGS = {
     # lock. Example: bash scripts/test-browser.sh lock {who}   and   bash scripts/test-browser.sh unlock {who}
     "browser_lock": "",
     "browser_unlock": "",
+    # The Playwright MCP tools on the project's browser (#5405): on, a Claude Code session that maxpm starts for the
+    # project gets a Playwright MCP server named maxpm-browser in its launch command (--mcp-config), with a CDP address
+    # of its own through maxpm serve (ws://127.0.0.1:<serve_port>/cdp/<agent>?project=..&token=..), which keeps the
+    # controller rule and the sandbox. A command instead of on starts another Playwright MCP (a pinned version):
+    # npx -y @playwright/mcp@0.0.40. Off by default: each session then runs one more Node process.
+    "browser_mcp": "off",
     # The Terminal tab (#4803): a plain shell on this computer in the page, for a person (never an agent). On for
     # the page on this computer; through the relay only when web_terminal_relay is on too, because whoever holds
     # the relay sign-in could then run any command here.
@@ -1550,6 +1556,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         canvas_hosts(value)
     elif key == "browser_source":
         browser_cdp_port(value)
+    elif key == "browser_mcp":
+        from .browser import mcp_command
+        mcp_command(value)
     elif key in ("browser_lock", "browser_unlock"):
         if value.strip() and "{who}" not in value:
             raise RiverError(f"{key} names the holder as {{who}}: bash scripts/test-browser.sh "
@@ -12584,6 +12593,11 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
             built["fork"] = fork_of
         if caps.get("hooks_file") and opts.get("activity_hooks") == "on":
             built["hooks_file"] = hook_file(_adapters().get(prof[0]))
+        if caps.get("mcp_config") and name and project_id is not None:
+            from .browser import mcp_config_file  # browser_mcp on: Playwright MCP on the project's browser (#5405)
+            path = mcp_config_file(conn, project_id, name)
+            if path:
+                built["mcp_config"] = path
         if autocompact and caps.get("autocompact") and "--autocompact" not in opts.get("args", ""):
             built["autocompact"] = autocompact
         else:

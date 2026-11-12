@@ -14,6 +14,10 @@ the person sees and uses in the side panel of the Sessions tab, and which a sess
   pages are blocked; downloads go to <queue folder>/browsers/<project>/downloads.
 - The panel shows the page as frames (CDP Page.startScreencast) that it reads with a long poll (frame()), and
   sends the person's mouse and keys (person_input()).
+- A session drives the browser with the Playwright MCP tools too (#5405): serve gives each session a CDP address of
+  its own, ws://127.0.0.1:<serve port>/cdp/<agent>?project=<name>&token=<t>, and relays the CDP messages to Chrome
+  after it checks each one (cdp_refusal): the token, the controller rule, and the sandbox. The setting browser_mcp
+  puts a Playwright MCP server with that address into the launch command of a session that maxpm starts.
 - A project's setting browser_source cdp:<port> (#5406) attaches to a Chrome that runs already (a shared test
   browser) instead: the panel and the sessions use only the tabs that serve opened in it, serve never closes that
   Chrome, and the network rule above does not hold for it. browser_lock and browser_unlock name the commands that
@@ -23,6 +27,7 @@ Python's standard library has no WebSocket client, so the CDP connection uses th
 
 import base64
 import hashlib
+import hmac
 import itertools
 import ipaddress
 import json
@@ -846,6 +851,191 @@ def norm_url(url):
     if scheme not in ("http", "https"):
         raise RiverError(f"the browser opens http and https addresses only, not {scheme}:")
     return url
+
+
+# ---------------------------------------------------------------- the CDP address of a session (#5405)
+
+def _cdp_key():
+    """The secret of the sessions' CDP tokens: a file beside the queue (mode 0600), made at its first use, so a token
+    in a session's MCP config stays good when serve starts again."""
+    p = core.db_path().parent / "browsers" / "cdp.key"
+    try:
+        key = p.read_bytes()
+        if key:
+            return key
+    except OSError:
+        pass
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f"cdp.key.{os.getpid()}.{threading.get_ident()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(os.urandom(32))
+    try:
+        os.link(tmp, p)  # only the first process makes it; another one reads that one
+    except FileExistsError:
+        pass
+    finally:
+        tmp.unlink()
+    return p.read_bytes()
+
+
+def cdp_token(project, agent):
+    """The token of one session's CDP address for one project's browser."""
+    return hmac.new(_cdp_key(), f"{project}\0{agent}".encode(), hashlib.sha256).hexdigest()[:40]
+
+
+def cdp_url(conn, project, agent):
+    from urllib.parse import quote
+    return (f"ws://127.0.0.1:{core.setting(conn, 'serve_port')}/cdp/{quote(agent, safe='')}"
+            f"?project={quote(project, safe='')}&token={cdp_token(project, agent)}")
+
+
+MCP_NAME = "maxpm-browser"  # its tools: mcp__maxpm-browser__browser_navigate, ...; a playwright server of the person stays
+MCP_DEFAULT = "npx -y @playwright/mcp@latest"
+
+
+def mcp_command(value):
+    """The words that start the Playwright MCP server for the setting browser_mcp (off, on, or a command), or None."""
+    v = (value or "").strip()
+    if v in ("", "off"):
+        return None
+    try:
+        words = shlex.split(MCP_DEFAULT if v == "on" else v)
+    except ValueError as e:
+        raise RiverError(f"browser_mcp: {e}; give off, on, or a command such as {MCP_DEFAULT}")
+    if not words:
+        raise RiverError("browser_mcp takes off, on, or the command that starts Playwright MCP (" + MCP_DEFAULT + ")")
+    return words
+
+
+def mcp_config_file(conn, project_id, agent):
+    """With browser_mcp on for the project: write the session's MCP config (a Playwright MCP server with the session's
+    CDP address) beside the project's browser, mode 0600 because it holds the token, and return its path; else None."""
+    words = mcp_command(core.setting(conn, "browser_mcp", project_id=project_id))
+    if not words:
+        return None
+    project = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()["name"]
+    d = browser_dir(project) / "mcp"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / (re.sub(r"[^A-Za-z0-9._-]+", "_", agent).strip("._") + ".json")
+    cfg = {"mcpServers": {MCP_NAME: {"command": words[0],
+                                     "args": words[1:] + ["--cdp-endpoint", cdp_url(conn, project, agent)]}}}
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+    tmp.replace(path)
+    return str(path)
+
+
+# What a session may never send through its address: it would close the shared browser, open a port of this computer
+# to it, or lift the block of file:// and chrome:// pages.
+CDP_NEVER = {"Browser.close", "Browser.crash", "Browser.crashGpuProcess", "Target.setRemoteLocations",
+             "Target.exposeDevToolsProtocol", "Network.setBlockedURLs"}
+# What changes the page (navigation, input, scripts, tabs): the controller rule holds for it, as for the actions of
+# maxpm browser (routes.CHANGES). Reads (a screenshot, the DOM, the accessibility tree) pass while another controls.
+CDP_CHANGES = {"Page.navigate", "Page.navigateToHistoryEntry", "Page.reload", "Page.close", "Page.stopLoading",
+               "Page.setDocumentContent", "Page.bringToFront", "Runtime.evaluate", "Runtime.callFunctionOn",
+               "Runtime.compileScript", "Runtime.runScript", "Target.createTarget", "Target.closeTarget",
+               "Target.activateTarget", "DOM.setAttributeValue", "DOM.setAttributesAsText", "DOM.setOuterHTML",
+               "DOM.setNodeValue", "DOM.setNodeName", "DOM.removeNode", "DOM.removeAttribute", "DOM.moveTo",
+               "DOM.setFileInputFiles", "DOM.focus"}
+CDP_SCHEMES = ("http", "https", "about", "data", "blob")
+
+
+def _upload_ok(conn, b, f):
+    """A file for an upload: in the project's folder or in the browser's downloads, as the side panel's rule."""
+    try:
+        real = Path(f).expanduser().resolve()
+    except (OSError, RuntimeError, TypeError):
+        return False
+    r = conn.execute("SELECT path FROM projects WHERE name=?", (b.project,)).fetchone()
+    roots = [b.dir / "downloads"] + ([Path(r["path"]).expanduser()] if r and r["path"] else [])
+    return any(real == root.resolve() or root.resolve() in real.parents for root in roots)
+
+
+def cdp_refusal(conn, b, agent, msg):
+    """Why one CDP message of a session must not reach Chrome, or None. It may change msg: a download path becomes
+    the project's downloads folder."""
+    method = msg.get("method") if isinstance(msg.get("method"), str) else ""
+    p = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    if method in CDP_NEVER or method.startswith("Tethering."):
+        return f"{method} is not allowed through a session's CDP address"
+    if method in ("Page.navigate", "Target.createTarget"):
+        scheme = urlsplit(str(p.get("url") or "about:blank")).scheme.lower()
+        if scheme not in CDP_SCHEMES:
+            return f"the browser opens http and https addresses only, not {scheme}:"
+    if method in ("Browser.setDownloadBehavior", "Page.setDownloadBehavior") and "downloadPath" in p:
+        p["downloadPath"] = str(b.dir / "downloads")
+    if method == "DOM.setFileInputFiles":
+        bad = [f for f in p.get("files") or [] if not _upload_ok(conn, b, f)]
+        if bad:
+            return f"an upload takes a file from the project folder or the browser's downloads only, not {bad[0]}"
+    if method in CDP_CHANGES or method.startswith("Input."):
+        try:
+            may_change(conn, b, agent, False)
+        except RiverError as e:
+            return str(e)
+    return None
+
+
+def cdp_session(conn, b, agent, rfile, sock, upstream):
+    """Relay one session's CDP connection until either side closes it. rfile and sock: the session's WebSocket (the
+    server side: frames out are not masked); upstream: a WS to Chrome of this connection only, so the ids and events
+    of two sessions never mix. A refused message gets a CDP error from serve and never reaches Chrome."""
+    wlock = threading.Lock()
+
+    def out(op, data):
+        with wlock:
+            sock.sendall(ws_frame(op, data, mask=False))
+
+    def pump():
+        try:
+            while True:
+                out(0x1, upstream.recv().encode())
+        except (EOFError, OSError):
+            pass
+        for step in (lambda: out(0x8, b""), lambda: sock.shutdown(socket.SHUT_RDWR)):
+            try:
+                step()
+            except OSError:
+                pass
+
+    t = threading.Thread(target=pump, daemon=True, name=f"cdp-{agent}")
+    t.start()
+    parts = []
+    try:
+        while True:
+            op, fin, data = ws_read(rfile)
+            if op == 0x8:
+                break
+            if op == 0x9:
+                out(0xA, data)
+                continue
+            if op == 0xA:
+                continue
+            parts.append(data)
+            if not fin:
+                continue
+            text, parts = b"".join(parts).decode("utf-8", "replace"), []
+            try:
+                msg = json.loads(text)
+            except ValueError:
+                msg = None
+            why = cdp_refusal(conn, b, agent, msg) if isinstance(msg, dict) else "a CDP message is one JSON object"
+            if why:
+                reply = {"id": msg.get("id") if isinstance(msg, dict) else None,
+                         "error": {"code": -32000, "message": f"maxpm: {why}"}}
+                if isinstance(msg, dict) and msg.get("sessionId"):
+                    reply["sessionId"] = msg["sessionId"]
+                out(0x1, json.dumps(reply).encode())
+                continue
+            upstream.send(json.dumps(msg))
+    except (EOFError, OSError):
+        pass
+    finally:
+        upstream.close()
+        t.join(5)
 
 
 # ---------------------------------------------------------------- the browsers of this serve

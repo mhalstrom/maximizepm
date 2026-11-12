@@ -1,6 +1,7 @@
 """The browser of a project in the side panel (#4631; river/browser.py): its frames for the panel (a long poll, with
 the page's token), and one page action, op "browser", for the panel and for maxpm browser alike. The person's mouse
-and keys come through op "browser_input", which needs the page's token (server.TYPING_OPS)."""
+and keys come through op "browser_input", which needs the page's token (server.TYPING_OPS). A session's Playwright MCP
+reaches the browser through its own CDP address, GET /cdp/<agent> (#5405)."""
 
 import hmac
 import threading
@@ -144,8 +145,48 @@ def person_input(conn, a, who):
     return browser.person_input(b, a.get("ev") or {})
 
 
+def cdp(h, path):
+    """GET /cdp/<agent>?project=<name>&token=<t>, a WebSocket: one session's CDP connection to its project's browser
+    (#5405). serve opens a CDP connection to Chrome for it and relays each message after browser.cdp_refusal. The
+    token comes from the session's MCP config (browser.mcp_config_file); the real debugging port never leaves serve."""
+    from urllib.parse import parse_qs, unquote, urlsplit
+    u = urlsplit(h.path)
+    q = {k: v[0] for k, v in parse_qs(u.query).items()}
+    agent, project = unquote(u.path[len("/cdp/"):]), q.get("project", "")
+    if not agent or not project or not hmac.compare_digest(q.get("token", ""), browser.cdp_token(project, agent)):
+        return h._send(403, {"error": "this CDP address needs the token from the session's MCP config "
+                                      "(setting browser_mcp; maxpm starts the session)"})
+    key = h.headers.get("Sec-WebSocket-Key")
+    if (h.headers.get("Upgrade") or "").lower() != "websocket" or not key:
+        return h._send(400, {"error": "a CDP address takes a WebSocket (Playwright: --cdp-endpoint)"})
+    conn = core.connect()
+    try:
+        if not conn.execute("SELECT 1 FROM projects WHERE name=?", (project,)).fetchone():
+            return h._send(404, {"error": f"no project {project}"})
+        b = browser.get(project)
+        if b._attached_now():
+            return h._send(409, {"error": f"the browser of {project} is a Chrome that serve did not start "
+                                          f"(browser_source): sessions use maxpm browser for it, not a CDP address"})
+        try:
+            b.start()
+            upstream = browser.WS(b._version(b.port)["webSocketDebuggerUrl"])
+        except (RiverError, OSError, ValueError, KeyError) as e:
+            return h._send(409, {"error": f"the browser of {project} did not start: {e}"})
+        h.send_response_only(101, "Switching Protocols")
+        h.send_header("Upgrade", "websocket")
+        h.send_header("Connection", "Upgrade")
+        h.send_header("Sec-WebSocket-Accept", browser.ws_accept(key))
+        h.end_headers()
+        h.wfile.flush()
+        h.close_connection = True
+        browser.cdp_session(conn, b, agent, h.rfile, h.connection, upstream)
+    finally:
+        conn.close()
+
+
 GET = [
     (lambda path: path == "/api/browser/frame", frame),
+    (lambda path: path.startswith("/cdp/"), cdp),
 ]
 
 OPS = {

@@ -126,14 +126,15 @@ EFFORT_KEYS = {"levels": (list, tuple, type(None)), "map": dict, "flag": (list, 
 # -> a profile {"settings": {key: value}, "prompt": str} read back from an old hand-written command (a list of words;
 # "{model}" and "{effort}" stand for the values MaximizePM fills in), or None when a profile cannot build it exactly.
 LAUNCH_CAPABILITIES = ("session_name", "system_prompt_file", "hooks_file", "extra_dirs", "fork", "resume",
-                       "autocompact", "background", "fixed_on_resume")
+                       "autocompact", "background", "fixed_on_resume", "mcp_config")
 #    session_name: it takes a session name; system_prompt_file: the maxpm skill goes into its system prompt;
 #    hooks_file: MaximizePM's hooks file goes on its command line; extra_dirs: the queue folder goes on its command
 #    line as a folder it may write; fork: a session starts as a fork of another one; resume: build_command resumes a
 #    session (resume_command uses it); autocompact: it compacts at a token count; background: it runs a command in
 #    the background and wakes the session when it ends (maxpm wait runs there, not in the foreground);
 #    fixed_on_resume: a resume keeps the settings the session started with and refuses a flag that differs (Hermes),
-#    so resume_command passes none, and the Settings dialog changes them live or not at all (#5252).
+#    so resume_command passes none, and the Settings dialog changes them live or not at all (#5252); mcp_config: it
+#    takes a file of MCP servers to add on its command line (the project browser's Playwright MCP, browser_mcp, #5405).
 # The MaximizePM keys in settings, each only when the caller wants it and LAUNCH has its capability:
 LAUNCH_KEYS = {
     "system_prompt_file": "True: put the maxpm skill into the system prompt",
@@ -141,6 +142,7 @@ LAUNCH_KEYS = {
     "fork": "the session id to start a fork of",
     "resume": "the session id to resume (resume_command)",
     "autocompact": "the token count to compact at",
+    "mcp_config": "the path of a file of MCP servers to add (browser_mcp: Playwright MCP on the project's browser)",
     "noflags": "the words a person took out of the args setting (they stay out of what the adapter adds itself)",
 }
 

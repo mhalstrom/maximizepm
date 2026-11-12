@@ -33,7 +33,7 @@ EFFORT = {
 }
 
 LAUNCH = {"session_name": True, "system_prompt_file": True, "hooks_file": True, "fork": True, "resume": True,
-          "autocompact": True, "background": True}
+          "autocompact": True, "background": True, "mcp_config": True}
 
 IDENTITY = {"source": "env", "env": "CLAUDE_CODE_SESSION_ID", "log_glob": None, "pane": None, "url": None,
             "inside_env": ["CLAUDECODE"],
@@ -49,7 +49,7 @@ def _q(s):
 def build_command(name, folder, model, effort, settings, prompt):
     """claude [--name N] [--model M] [--effort E] [--permission-mode P] <args> <prompt> [--remote-control N]. The args
     setting goes in as the person wrote it, after what MaximizePM puts before it, in this order: --autocompact,
-    --settings (the hooks file), then --resume <id> (a resume) or --resume <base> --fork-session (a fork) after the
+    --mcp-config (browser_mcp, #5405), --settings (the hooks file), then --resume <id> (a resume) or --resume <base> --fork-session (a fork) after the
     skill's --append-system-prompt-file. The prompt goes before --remote-control: that flag takes an optional session
     name after it. A full model id can end in [1m], a glob in zsh (#4950): every word but the args is quoted."""
     from ..core import skill_prompt_args
@@ -64,6 +64,8 @@ def build_command(name, folder, model, effort, settings, prompt):
             args = f"--resume {_q(s['fork'])} --fork-session " + args
     if s.get("hooks_file") and "--settings" not in args:
         args = f"--settings {_q(s['hooks_file'])} " + args
+    if s.get("mcp_config") and "--mcp-config" not in args:
+        args = f"--mcp-config {_q(s['mcp_config'])} " + args
     if s.get("autocompact") and "--autocompact" not in args:
         args = f"--autocompact {s['autocompact']} " + args
     words = ["claude"] + (["--name", name] if name else [])
