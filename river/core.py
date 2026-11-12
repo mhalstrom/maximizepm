@@ -16755,7 +16755,7 @@ def is_wsl():
     if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
         return True
     try:
-        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text().lower()
+        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8").lower()
     except OSError:
         return False
 

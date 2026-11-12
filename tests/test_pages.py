@@ -66,11 +66,11 @@ class Base(unittest.TestCase):
             git(f, "config", "user.email", "t@example.com")
             git(f, "config", "user.name", "t")
             (f / "src").mkdir()
-            (f / "src" / "app.ts").write_text(APP_TS)
-            (f / "build.py").write_text(BUILD)
+            (f / "src" / "app.ts").write_text(APP_TS, encoding="utf-8")
+            (f / "build.py").write_text(BUILD, encoding="utf-8")
             core.project_path(self.c, "web", str(f))
-        (f / "app.js.src").write_text(js)
-        (f / "app.map.src").write_text(APP_MAP)
+        (f / "app.js.src").write_text(js, encoding="utf-8")
+        (f / "app.map.src").write_text(APP_MAP, encoding="utf-8")
         git(f, "add", "-A")
         git(f, "commit", "-q", "--allow-empty", "-m", "a build")
         count = Path(self.tmp.name, "builds")
@@ -82,7 +82,7 @@ class Base(unittest.TestCase):
 
     def builds(self):
         p = Path(self.tmp.name, "builds")
-        return len(p.read_text().splitlines()) if p.exists() else 0
+        return len(p.read_text(encoding="utf-8").splitlines()) if p.exists() else 0
 
 
 class Maps(Base):
@@ -115,7 +115,7 @@ class Maps(Base):
         (entry,) = out["files"]["app.js"]
         self.assertEqual((entry["file"], entry["sha256"]), ("dist/assets/app.js", hashlib.sha256(APP_JS.encode()).hexdigest()))
         self.assertNotIn("x.js", out["files"])  # node_modules holds no map of the project
-        self.assertEqual(json.loads((pages.map_dir("web", first) / entry["map"]).read_text()), json.loads(APP_MAP))
+        self.assertEqual(json.loads((pages.map_dir("web", first) / entry["map"]).read_text(encoding="utf-8")), json.loads(APP_MAP))
         self.assertEqual((git(self.folder, "status", "--porcelain"), git(self.folder, "rev-parse", "HEAD")), ("", second))
         self.assertFalse((self.folder / "dist").exists())
         n = self.builds()

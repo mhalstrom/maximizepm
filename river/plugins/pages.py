@@ -194,9 +194,9 @@ def build_maps(conn, project, rev=None):
     d = map_dir(project, commit)
     idx, failed = d / "index.json", d / "failed.json"
     if idx.is_file():
-        return dict(json.loads(idx.read_text()), note=note)
+        return dict(json.loads(idx.read_text(encoding="utf-8")), note=note)
     if failed.is_file() and time.time() - failed.stat().st_mtime < FAIL_AGAIN:
-        return {"rev": commit, "error": json.loads(failed.read_text())["error"]}
+        return {"rev": commit, "error": json.loads(failed.read_text(encoding="utf-8"))["error"]}
     d.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="maxpm-maps-"))
     try:
@@ -230,10 +230,10 @@ def build_maps(conn, project, rev=None):
                     err = "the source map command wrote no .map file beside a script"
                 else:
                     out = {"rev": commit, "built_at": core.iso(core.now()), "files": files}
-                    idx.write_text(json.dumps(out))
+                    idx.write_text(json.dumps(out), encoding="utf-8")
                     failed.unlink(missing_ok=True)
                     return dict(out, note=note)
-        failed.write_text(json.dumps({"error": err}))
+        failed.write_text(json.dumps({"error": err}), encoding="utf-8")
         return {"rev": commit, "error": err}
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -275,7 +275,7 @@ class _Mapper:
         if hit["map"] not in self.loaded:
             try:
                 self.loaded[hit["map"]] = SourceMap(json.loads((map_dir(self.project, self.maps["rev"]) / hit["map"])
-                                                               .read_text()))
+                                                               .read_text(encoding="utf-8")))
             except (OSError, ValueError, KeyError) as e:
                 self.loaded[hit["map"]] = None
                 out["unmapped"] = f"the source map could not be read: {e}"
