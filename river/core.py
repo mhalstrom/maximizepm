@@ -265,6 +265,9 @@ DEFAULT_SETTINGS = {
     # in the watch is linked to the deploy item. A shipped fix whose check this is gets its verdict at the watch's
     # end (#5461).
     "ops_watch_every": "1m",
+    # A check with a cron (a weekly job, a nightly report) runs only at its times: off, it takes no part in the
+    # release watch (#5538). on: it also runs in the watch after each release of its target. Project scope.
+    "ops_watch_cron": "off",
     # Before a new fault opens an item, maxpm serve runs the check once again at once (#5505): the fault comes only
     # when that run fails too. off: the run that makes the fault opens the item.
     "ops_confirm": "on",
@@ -1964,7 +1967,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_runners", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "web_terminal",
+    elif key in ("fresh_sessions", "serve_runners", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -3610,6 +3613,11 @@ def _ops_build(form, fields, old=None):
     return col
 
 
+def ops_when(c):
+    """When a check runs, in words: its cron when it has one (its every is then unused), else its every."""
+    return f"at cron '{c['cron']}'" if c.get("cron") else f"every {c['every']}"
+
+
 def _ops_summary(c):
     cfg = c["config"]
     what = {"url": lambda: f"GET {cfg['url']} ({cfg['statuses']}" + (f", body has {cfg['body']!r})" if cfg.get("body") else ")"),
@@ -3621,7 +3629,7 @@ def _ops_summary(c):
                 f"lines that match {cfg['pattern']!r} in {cfg['window']} stay at the normal {cfg.get('normal')} an hour"
                 f" or below {cfg['limit']}" if c.get("errors") == "ours" else
                 f"fewer than {cfg['limit']} lines match {cfg['pattern']!r} in {cfg['window']}")}
-    when = f"at cron '{c['cron']}'" if c.get("cron") else f"every {c['every']}"
+    when = ops_when(c)
     errors = c.get("errors") or "runs"
     fault = (f"fault after {c['fail_after']}" if errors in ("runs", "ours", "outside") else
              "fault at the first failed run" if errors == "never" else
@@ -4144,9 +4152,12 @@ def _ops_watch(conn, c, at):
     """The release watch of a check at `at` (#5459): the newest release of its target before `at` (a deploy item
     done), with the runs of the check that started since. It is computed from the deploy items and ops_runs, so no
     state is kept for it. None when the target never released, or the check was added after its last release (its
-    first run comes at once anyway)."""
+    first run comes at once anyway). A check with a cron has no watch while ops_watch_cron is off (#5538): a weekly
+    job that builds and fetches would otherwise run after each release."""
     target = _ops_target(conn, c)
     if not target:
+        return None
+    if c.get("cron") and setting(conn, "ops_watch_cron", project_id=_ops_scope_project_id(conn, c)) != "on":
         return None
     d = conn.execute("SELECT id, closed_at FROM items WHERE kind='deploy' AND target=? AND status='done' AND closed_at "
                      "IS NOT NULL AND closed_at<=? ORDER BY closed_at DESC, id DESC LIMIT 1", (target, iso(at))).fetchone()

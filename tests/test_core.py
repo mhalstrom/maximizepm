@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import io
 import json
@@ -5022,6 +5023,22 @@ class ReleaseWatch(ReleaseBase):
         self.assertEqual(self.due(t + timedelta(seconds=122 + 300)), ["home"])
         core.config_set(self.c, "ops_watch_every", "2m")
         self.assertEqual(core.setting(self.c, "ops_watch_every"), "2m")
+
+    def test_a_cron_check_takes_no_part_in_the_watch_unless_ops_watch_cron_is_on(self):
+        """A weekly job (#5538) runs at its cron times only; the setting ops_watch_cron (project) puts it in the watch."""
+        core.config_set(self.c, "timezone", "UTC", project="site")
+        core.ops_add(self.c, "site", "weekly", "url", {"url": "https://example.test/", "cron": "0 9 * * mon"},
+                     actor="dev")
+        released = self.release()
+        with core.tx(self.c):  # added at the release: no cron time of its own passed before t
+            self.c.execute("UPDATE checks SET created_at=?", (core.iso(released),))
+        t = released + timedelta(seconds=1)
+        self.assertEqual(self.due(t), [])
+        self.assertIsNone(core._ops_watch(self.c, core.ops_find(self.c, "site", "weekly"), t))
+        with self.assertRaisesRegex(RiverError, "ops_watch_cron is on or off"):
+            core.config_set(self.c, "ops_watch_cron", "yes", project="site")
+        core.config_set(self.c, "ops_watch_cron", "on", project="site")
+        self.assertEqual(self.due(t), ["weekly"])
 
     def test_a_fault_in_the_watch_opens_its_item_found_during_the_deploy(self):
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
@@ -10440,6 +10457,21 @@ class Ops(Base):
         self.assertEqual([x["name"] for x in core.ops_due(self.c)], ["jobs"])
         self.assertIn("accepted your proposed check site/jobs", self.notes_to("dev")[-1])
         self.assertEqual(core.ops_proposals(self.c, "site"), [])
+
+    def test_show_and_accept_name_the_cron_of_a_cron_check_not_its_every(self):
+        """A weekly check showed 'every 5m' (#5538): its every is unused while it has a cron."""
+        from river import cli
+        core.ops_propose(self.c, "site", "weekly", "cmd", {"command": "check_catalog", "cron": "0 9 * * mon"},
+                         why="the catalog changes each week", actor="dev")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_ops(argparse.Namespace(cmd="ops", ocmd="accept"),
+                           core.ops_accept(self.c, "site", "weekly", actor="boss"))
+            cli.render_ops(argparse.Namespace(cmd="ops", ocmd="show"), core.ops_show(self.c, "site", "weekly"))
+        accepted, shown = out.getvalue().split("\n", 1)
+        self.assertIn("at cron '0 9 * * mon', fault after 3", accepted)
+        self.assertIn("    at cron '0 9 * * mon', timeout 30s, fault after 3", shown)
+        self.assertNotIn("every 5m", out.getvalue())
         with self.assertRaisesRegex(RiverError, "no proposed check 'jobs'"):
             core.ops_accept(self.c, "site", "jobs", actor="boss")
 

@@ -5116,7 +5116,7 @@ def render_ops(a, res):
     print(f"    {core.OPS_FORMS[c['form']]}")
     for k, v in c["config"].items():
         print(f"    {k}: {v}")
-    print(f"    every {c['every']}, timeout {c['timeout']}, fault after {c['fail_after']} failed runs, healed after "
+    print(f"    {core.ops_when(c)}, timeout {c['timeout']}, fault after {c['fail_after']} failed runs, healed after "
           f"{c['recover_after']} passed runs; severity {c['severity']}"
           + ("; a fault for each subject in the output" if c["subject"] else ""))
     if c["runbook"]:
