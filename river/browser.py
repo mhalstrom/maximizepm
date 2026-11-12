@@ -25,9 +25,12 @@ the person sees and uses in the side panel of the Sessions tab, and which a sess
 - Such a browser runs headless too, so no window shows (#5619). The setting browser_mode names the command that starts
   it again as a window or headless ({mode}); with it, the panel offers Open as a window and Back to the panel for it
   as for its own browser, and serve runs the command under the lock (attached_mode).
-- A headless Chrome says HeadlessChrome in its user agent, and Google's sign-in refuses it: serve's own Chrome gets
-  the user agent of the same Chrome with a window (--user-agent). A page that refuses the browser anyway (REFUSED)
-  makes the panel say so and offer Open as a window.
+- A plain headless Chrome says HeadlessChrome in its user agent and navigator.webdriver true, and Google's search
+  answered it with a CAPTCHA at the first search (#5619, Chrome 157). The person drives this browser, so it says what
+  the same Chrome with a window says (#5621, decided for mark 2026-11-12): serve's own Chrome gets that user agent
+  (--user-agent), --disable-blink-features=AutomationControlled, and a window of a normal size. A normal window kept
+  off the screen does not work on macOS: Chrome keeps 40 px of it on the screen, and a minimized or hidden window
+  sends no frames. A page that refuses the browser anyway (REFUSED) makes the panel say so and offer Open as a window.
 
 Python's standard library has no WebSocket client, so the CDP connection uses the small one below (RFC 6455)."""
 
@@ -577,9 +580,13 @@ class Browser:
             (profile / "DevToolsActivePort").unlink()
         except OSError:
             pass
-        w, h = self.size or VIEW
+        # The window has a normal size; the page takes the size of the panel by emulation (_fit). A window of the panel's
+        # size (454x635) was one of the traits that made Google's search answer with a CAPTCHA (#5619). With the
+        # debugging port, Chrome says navigator.webdriver true; the person drives this browser, so it says false.
+        w, h = VIEW
         args = [chrome, f"--user-data-dir={profile}", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
                 "--no-first-run", "--no-default-browser-check", "--disable-default-apps", "--disable-sync",
+                "--disable-blink-features=AutomationControlled",
                 f"--proxy-server=http://127.0.0.1:{self.proxy.port}", "--proxy-bypass-list=<-loopback>",
                 f"--window-size={w},{h}", "about:blank"]
         if not self.state.get("window"):

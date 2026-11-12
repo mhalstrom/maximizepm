@@ -678,6 +678,9 @@ class RealChrome(Base):
         browser.type_text(b, "hello", "#q")
         browser.click(b, "#b")
         self.assertEqual(b.evaluate("document.title"), "clicked hello")
+        # The traits of a Chrome with a window (#5619): Google's search sent plain headless Chrome a CAPTCHA.
+        self.assertEqual(b.evaluate("[navigator.webdriver, /Headless/.test(navigator.userAgent), outerWidth]"),
+                         [False, False, browser.VIEW[0]])
         self.assertTrue(base64.b64decode(browser.screenshot(b)["png"]).startswith(b"\x89PNG"))
         f = browser.frame(b, 0, 5)
         self.assertEqual((f["frame"]["w"], f["frame"]["h"]), (640, 480))
