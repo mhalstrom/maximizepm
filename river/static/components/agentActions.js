@@ -9,7 +9,7 @@ export function managerHtml(S) {
   const m = S.manager;
   if (!m) {
     return `<div class="st">No manager is running.</div>
-      <div class="actions" style="margin-top:6px"><button class="btn primary" data-start-manager="1" title="A manager plans with you, starts agents, fills their queues, and stops stuck ones. Opens the launch dialog; the agent starts with maxpm manage">▶ Start manager</button></div>`;
+      <div class="actions" style="margin-top:6px"><button class="btn primary" data-start-manager="1" title="Start a manager">▶ Start manager</button></div>`;
   }
   return `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="dot ${esc(m.state)}"></span><b>${esc(m.name)}</b>
       ${m.platform ? chip("c-p", esc(m.platform)) : ""}${m.model ? chip("c-p", esc(m.model)) : ""}${chip(m.state === "active" ? "c-ready" : "c-waiting", esc(m.state))}
@@ -34,5 +34,5 @@ export function hasSession(S, name) {
   return ((S && S.sessions) || []).includes(name);
 }
 export function sessionButton(S, name) {
-  return hasSession(S, name) ? `<button class="btn" data-session-go="${esc(name)}" title="Open the session of ${esc(name)} in the Sessions tab: its chat, its item, and what waits for you there">Open session</button>` : "";
+  return hasSession(S, name) ? `<button class="btn" data-session-go="${esc(name)}" title="Open the session of ${esc(name)}">Open session</button>` : "";
 }

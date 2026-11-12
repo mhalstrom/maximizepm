@@ -93,11 +93,11 @@ export function itemDrawerHtml(it, { S, me }) {
     ${it.backlog ? `<div class="meta" style="margin-top:6px"><b>In the backlog</b> since ${ago(it.backlog_at)}: ${esc(it.backlog_note || "")}. Nobody is offered it until it is activated.</div>` : ""}
     <div class="meta" style="margin-top:6px">${esc(it.reason)}${it.lease_expires_at ? " · lease " + left(it.lease_expires_at) + " left" : ""}</div>
     <div class="actions">
-      ${it.backlog ? `<button class="btn primary" data-do="activate" title="Take it out of the backlog: open again, offered to agents and people when ready">Activate</button>` : ""}
+      ${it.backlog ? `<button class="btn primary" data-do="activate" title="Take it out of the backlog">Activate</button>` : ""}
       ${it.status === "open" && !it.backlog ? `<button class="btn primary" data-do="claim">Claim</button>` : ""}
       ${["in_progress", "held"].includes(it.status) ? `<button class="btn primary" data-do="done">Done</button><button class="btn" data-do="release">Release</button>` : ""}
       ${it.status === "open" ? `<button class="btn" data-do="done">Mark done</button>` : ""}
-      ${it.status === "open" && !it.backlog && ["work", "fixes"].includes(it.kind) ? `<button class="btn" data-do="backlog" title="Keep it, but offer it to nobody until you activate it">To backlog</button>` : ""}
+      ${it.status === "open" && !it.backlog && ["work", "fixes"].includes(it.kind) ? `<button class="btn" data-do="backlog" title="Move it to the backlog">To backlog</button>` : ""}
       ${!closed ? `<button class="btn" data-do="drop">Drop</button>` : `<button class="btn" data-do="reopen">Reopen</button>`}
       <button class="btn" data-do="save">Save details</button>
       ${agentButton(it, S)}

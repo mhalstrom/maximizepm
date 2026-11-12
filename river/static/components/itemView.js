@@ -14,7 +14,7 @@ export function itemViewHtml(it) {
   const holder = ["in_progress", "held"].includes(it.status) && it.assignee;
   return `<div class="sp-item">
     <div class="spi-top"><span class="muted">#${it.id} · ${esc(it.project)}</span><span class="spacer"></span>
-      <button class="btn" type="button" data-drawer-open="${it.id}" title="Open #${it.id} in the drawer: claim, done, release, edit its fields">Edit in the drawer</button></div>
+      <button class="btn" type="button" data-drawer-open="${it.id}" title="Open #${it.id} in the drawer">Edit in the drawer</button></div>
     <h3>${esc(it.title)}</h3>
     <div class="chips" style="justify-content:flex-start">${prioChip(it)}${doerChip(it)}${agentChip(it)}${tierChip(it)}${modelChip(it)}${statusChip(it)}</div>
     ${holder ? `<div class="meta">Held by <b>${esc(holder)}</b>${it.lease_expires_at ? " · lease " + left(it.lease_expires_at) + " left" : ""}</div>` : ""}

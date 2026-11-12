@@ -35,25 +35,25 @@
   <!-- A phone (#4903): the name of the tab opens the list of all tabs (the nav below, as a sheet), and the magnifier opens the search. -->
   <button class="tabbtn" type="button" id="tabBtn" aria-expanded="false" aria-controls="tabNav" title="Show all tabs"><span id="tabName">Sessions</span> <span class="caret" aria-hidden="true">▾</span></button>
   <nav id="tabNav">
-    <button data-tab="sessions" class="on" title="Every running agent session: its item, its state, and what it writes now; and what waits on you">Sessions</button>
-    <button data-tab="plan" title="The plan of the work: projects, goals, items, the graph, releases and what is done">Plan</button>
-    <button data-tab="terminal" title="A plain shell on this computer, in the page">Terminal</button>
+    <button data-tab="sessions" class="on" title="Running sessions and what they do">Sessions</button>
+    <button data-tab="plan" title="Projects, goals, items and releases">Plan</button>
+    <button data-tab="terminal" title="A shell on this computer">Terminal</button>
   </nav>
   <span class="spacer"></span>
-  <input type="search" id="search" placeholder="Search items" title="Find items by their words: open, done, and dropped (Enter or /)" autocomplete="off">
+  <input type="search" id="search" placeholder="Search items" title="Search items (Enter or /)" autocomplete="off">
   <button class="iconbtn" type="button" id="searchBtn" title="Search items" aria-label="Search items"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg></button>
-  <button class="iconbtn" type="button" id="hdrMore" aria-expanded="false" aria-controls="hdrMenu" title="More: Settings, theme, relay, update, You are">⋯</button>
+  <button class="iconbtn" type="button" id="hdrMore" aria-expanded="false" aria-controls="hdrMenu" title="More: settings, theme, relay">⋯</button>
   <!-- The controls of the ⋯ (#4885, #4903; at every width since #5083): a card under the bar when it is open.
        Settings (with People) opens from here, not from a tab of the bar (#5116); its address stays /settings. -->
   <div class="hdr-menu" id="hdrMenu">
-  <button class="btn" type="button" id="settingsBtn" data-tab="settings" title="Every setting, its default and its overrides; the people of the queue">Settings</button>
+  <button class="btn" type="button" id="settingsBtn" data-tab="settings" title="Settings and people">Settings</button>
   <label class="sub" id="themeLbl">Theme
-  <select id="theme" title="Theme: System follows your computer's light or dark setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+  <select id="theme" title="Light, dark, or the computer's setting"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
   </label>
   <button class="btn hidden" id="relayBtn">Connect relay</button>
   <button class="btn primary hidden" id="loopLate"></button>
-  <button class="btn" id="updateBtn" title="Pull the latest MaximizePM from git and restart this page's server">Update</button>
-  <label class="sub" id="actorLbl" title="Who you are on this page. What you do here (claim, done, messages) is recorded under this name, and Needs you shows your items. Agents name themselves on the command line.">You are
+  <button class="btn" id="updateBtn" title="Update MaximizePM and restart">Update</button>
+  <label class="sub" id="actorLbl" title="Your name on this page">You are
     <select id="actor"></select>
   </label>
   <span class="sub" id="stamp"></span>
@@ -77,7 +77,7 @@
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js" integrity="sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2" crossorigin="anonymous"></script>
 <div id="setup" class="hidden" role="dialog" aria-modal="true" aria-labelledby="setupTitle"><div class="box">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-    <h2 id="setupTitle" style="margin:0" title="A few steps to your first agent at work. Each step checks itself, so a ✓ means it's done. Settings opens this guide again.">Set up MaximizePM</h2>
+    <h2 id="setupTitle" style="margin:0" title="Steps to your first agent">Set up MaximizePM</h2>
     <button class="iconbtn" id="setupClose" title="Close for now">✕</button>
   </div>
   <div id="setupSteps"></div>
@@ -88,7 +88,7 @@
 </div></div>
 <div id="readyDlg" class="hidden" role="dialog" aria-modal="true" aria-labelledby="readyTitle"><div class="box">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-    <h2 id="readyTitle" style="margin:0" title="Most important first. Dispatch gives the item to a session that waits for work in its project; else it starts a new agent in the project folder, and that agent's first maxpm go takes this item.">Ready for agents</h2>
+    <h2 id="readyTitle" style="margin:0" title="Most important first">Ready for agents</h2>
     <button class="iconbtn" id="readyClose" title="Close">✕</button>
   </div>
   <div id="readyList"></div>
@@ -112,7 +112,7 @@
   <div class="set-foot">
     <label class="muted"><input type="checkbox" id="setDefault"> Also make these the default for new sessions</label>
     <span class="spacer"></span>
-    <button class="btn primary" id="setRestart" type="button" disabled title="End the session when its turn has ended, and resume the same chat with these settings: the same name, items and context">Restart with these settings</button>
+    <button class="btn primary" id="setRestart" type="button" disabled title="End and resume the same chat">Restart with these settings</button>
   </div>
 </div></div>
 
@@ -130,10 +130,10 @@
           </div>
           <div class="two">
             <label>Doer<select id="addDoer"><option value="any">anyone</option><option value="ai">agent</option><option value="human">human</option></select></label>
-            <label title="Expert: a session started for it takes it, and you talk it through with that session for as long as you need; a worker never takes it">Tier<select id="addTier"><option value="">normal</option><option value="expert">expert</option></select></label>
+            <label title="Expert: a long talk with one session">Tier<select id="addTier"><option value="">normal</option><option value="expert">expert</option></select></label>
           </div>
           <label title="Ids of the items it waits on">Waits on<input id="addAfter" placeholder="3, 7"></label>
-          <label title="Ids of the items whose output it reads; it also waits on them">Reads<input id="addFeeds" placeholder="4"></label>
+          <label title="Items whose output it reads">Reads<input id="addFeeds" placeholder="4"></label>
           <label>Goal<select id="addGoal"><option value="">no goal</option></select></label>
           <label>Notes<textarea id="addNotes" rows="2" placeholder="Why, where, what is decided"></textarea></label>
           <div class="actions add-actions"><button class="btn primary" id="addGo">Add</button></div>
@@ -143,13 +143,13 @@
             <div class="two"><label>Project<select id="goalProject"></select></label><label>Name<input id="goalName" placeholder="launch-legal"></label></div>
             <label>Outcome<textarea id="goalOutcome" rows="2" placeholder="What is true when this goal is reached"></textarea></label>
             <label>Done when<input id="goalDoneWhen" placeholder="The test the owner checks before declaring it done"></label>
-            <label title="A sub-goal of that goal (one level, the same project): its sessions read the parent's handoff first">Parent<select id="goalParent"><option value="">none: a goal of its own</option></select></label>
+            <label title="Make it a sub-goal of that goal">Parent<select id="goalParent"><option value="">none: a goal of its own</option></select></label>
             <button class="btn" id="goalGo">Add goal</button>
           </div>
         </details>
         <details id="addProjPart" class="add-part"><summary>Add a project</summary>
-          <div id="projFolderForm" title="A project is usually a folder you work in: MaximizePM links it, and agents started there use the queue"></div>
-          <div class="form add-form" title="A project without a folder, for example tasks for people"><input id="projName" placeholder="name, no folder"><button class="btn" id="projGo">Add project</button></div>
+          <div id="projFolderForm" title="A project linked to a folder"></div>
+          <div class="form add-form" title="A project without a folder"><input id="projName" placeholder="name, no folder"><button class="btn" id="projGo">Add project</button></div>
         </details>
       
 </div></div>
@@ -165,7 +165,7 @@
     <select id="searchProject" title="Project"><option value="">All projects</option></select>
     <select id="searchSince" title="Added or closed in"><option value="">Any time</option><option value="1d">last day</option><option value="7d">last 7 days</option><option value="30d">last 30 days</option></select>
   </div>
-  <div class="muted" id="searchInfo" style="font-size:13px;margin:6px 0" title="Items that hold every word, newest first."></div>
+  <div class="muted" id="searchInfo" style="font-size:13px;margin:6px 0" title="Items that hold every word"></div>
   <div id="searchList"></div>
 </div></div>
 

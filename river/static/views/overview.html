@@ -7,8 +7,8 @@
       <div class="panel">
         <h2>Next up
           <span class="spacer"></span>
-          <button class="btn primary" id="claimNext" title="Take the most important ready item of the scope">Claim next</button>
-          <label class="muted claim-agent" title="After you claim, open an agent in the item's project folder that helps you do it"><input type="checkbox" id="claimAgent" checked>with an agent</label>
+          <button class="btn primary" id="claimNext" title="Take the most important ready item">Claim next</button>
+          <label class="muted claim-agent" title="Then open an agent to help you"><input type="checkbox" id="claimAgent" checked>with an agent</label>
         </h2>
         <div id="next"></div>
       </div>
@@ -19,11 +19,11 @@
     </div>
     <div class="ov-col">
       <div class="panel">
-        <h2 title="Session slots, sessions with nothing ready, and what the queue advises">Capacity <span class="spacer"></span><span id="capStart"></span></h2>
+        <h2 title="Slots, idle sessions and advice">Capacity <span class="spacer"></span><span id="capStart"></span></h2>
         <div id="capacity"></div>
       </div>
       <div class="panel hidden" id="blockedPanel">
-        <h2 title="Items that wait on something outside the queue (maxpm blocked)">Blocked outside the queue</h2>
+        <h2 title="Items blocked outside the queue">Blocked outside the queue</h2>
         <div id="blockedList"></div>
       </div>
     </div>

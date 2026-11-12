@@ -39,7 +39,7 @@ const putHtml = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h;
 // Settings, the links to Plan, and End (#5041) for a session that runs. Each entry is a plain row of the menu.
 const MI = "sess-mi";
 function headerOpen(s) {
-  const set = s.provider ? button("Settings", { cls: MI, data: { settings: s.name }, title: "The settings this session runs with, and what you can change" }) : "";
+  const set = s.provider ? button("Settings", { cls: MI, data: { settings: s.name }, title: "This session's settings" }) : "";
   return headerOpenBtn(s) + pinRow(s) + set + (s.running ? endButton(s, { cls: MI + " sess-mi-end" }) : "");
 }
 // Pin and Unpin of a worker in the ⋯ menu (#5400): a touch screen has no hover, so the row's pin does not show there.
@@ -82,7 +82,7 @@ function planLinks(s) {
 function headerItem(s) {
   return (s.holds || []).map(h => button(
     `#${h.id}<span class="sess-it-t"> ${esc(shortTitle(h))}</span>${h.status && h.status !== "in_progress" ? " " + chip("c-" + h.status, esc(h.status.replace("_", " "))) : ""}`,
-    { cls: "sess-itembtn", data: { open: h.id }, title: `#${h.id} ${h.title || ""}\nOpen it in the side panel: its notes, what it waits on, and what it unblocks` })).join("");
+    { cls: "sess-itembtn", data: { open: h.id }, title: `#${h.id} ${h.title || ""}` })).join("");
 }
 
 // The state of a session in its head: a dot and its word (#5115), the same dot as its row of the list.
@@ -101,7 +101,7 @@ function provTag(p) {
 // The ! badge: how many things wait for the person in this session (a prompt in its pane, open questions).
 function waitBadge(s) {
   const n = (s.waiting || []).length;
-  return n ? `<span class="wbadge" title="${n} thing(s) wait for you here: click to answer">! ${n}</span>` : `<span class="wbadge-slot" aria-hidden="true"></span>`;
+  return n ? `<span class="wbadge" title="${n} thing(s) wait for you here">! ${n}</span>` : `<span class="wbadge-slot" aria-hidden="true"></span>`;
 }
 
 // The pin of a worker row (#5007): a pinned session stays at the top of the worker sessions. The pin is the
@@ -169,7 +169,7 @@ export function sessionRow(s) {
 // one (the page's Start manager: the launch dialog, then the op start_manager).
 const NO_MANAGER = `<div class="srow mgr-none"><div class="srow-main"><div class="srow-h"><span class="mgr-tag">Manager</span>
   <span class="muted">No manager running</span></div></div>
-  <div class="srow-it">${button("Start manager", { kind: "primary", data: { "start-manager": "1" }, title: "Opens the launch dialog; the agent starts with maxpm manage" })}</div></div>`;
+  <div class="srow-it">${button("Start manager", { kind: "primary", data: { "start-manager": "1" }, title: "Start a manager" })}</div></div>`;
 
 // Replace only the rows whose data changed, so a row keeps its hover and focus between reads.
 function renderList(el, list, picked, empty) {

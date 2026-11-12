@@ -28,17 +28,17 @@ export function renderYou() {
                 msgs ? `${msgs} message${msgs === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ") || "Nothing waits on you";
   const on = row.dataset.on === "1";
   const html = `<div class="srow srow-you${n ? " needs" : ""}${on ? " on" : ""}" data-you="1">
-    <div class="srow-main" tabindex="0" role="button" title="What waits on you: Needs you, items an agent took off your list, and your inbox" aria-label="You: what waits on you">
-      <div class="srow-h"><b class="srow-t">You</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} thing(s) need you now: Needs you and the questions that wait on your answer">! ${n}</span>` : ""}</div>
+    <div class="srow-main" tabindex="0" role="button" title="What waits on you" aria-label="You: what waits on you">
+      <div class="srow-h"><b class="srow-t">You</b><span class="spacer"></span>${n ? `<span class="wbadge" title="${n} thing(s) need you now">! ${n}</span>` : ""}</div>
       <div class="sub">${esc(line)}</div></div></div>`;
   if (row.dataset.sig !== html) { row.innerHTML = html; row.dataset.sig = html; }
   // The agent that goes through the list with the person (#5103): next to Copy prompt, in the head of the view.
   // While your assistant runs (#5110), the same place opens its chat.
   const mine = myAssistant(), slot = $("#agentAllSlot");
   const b = mine ? agentStart(null, { label: "Open your assistant", cls: "primary", attrs: 'id="agentAll"',
-      title: `${mine.name} goes through what waits on you, with you: open its chat` })
+      title: `Open the chat of ${mine.name}` })
     : NY.length ? agentStart(S && S.launch_agents, { label: "Go through with an agent", cls: "primary",
-      attrs: 'id="agentAll"', title: "Start your assistant: an agent session that goes through what waits on you, one at a time, with you; its chat opens here" }) : "";
+      attrs: 'id="agentAll"', title: "Start your assistant" }) : "";
   if (slot.dataset.sig !== b) { slot.innerHTML = b; slot.dataset.sig = b; }
 }
 // The You row shows as chosen while the You view shows.

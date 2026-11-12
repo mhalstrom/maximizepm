@@ -281,9 +281,9 @@ function drawBar(t, meta) {
       `<option value="${x.version}"${x.version === v ? " selected" : ""}>v${x.version}${x.version === meta.version ? " (newest)" : ""} · ${esc(x.author || "")} · ${ago(x.created_at)}${x.note ? " · " + esc(clip(x.note, 40)) : ""}</option>`).join("")}</select>
     <span class="muted cv-st">${t.pin ? `<span class="cv-st-of">version ${t.pin} of ${meta.version} · </span><span class="link" data-cv-newest>show the newest</span>` : "shows each new version"}</span>
     ${meta.item_id ? `<span class="link cv-item" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
-    <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Then click a part of the page, or select text, to comment on it">Comment</button>`}
+    <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Click a part or select text to comment">Comment</button>`}
     <span class="cv-menu"><button class="btn" type="button" data-cv-page>Comment on the page</button>
-    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Change the text; it becomes a new version, and the session gets a note">Edit</button>` : ""}</span>
+    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Edit the text as a new version">Edit</button>` : ""}</span>
     ${iconButton("⋯", "More: comment on the page, edit", { cls: "cv-more", data: { "cv-more": "" } })}`;
   bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
   const newest = bar.querySelector("[data-cv-newest]");
@@ -781,7 +781,7 @@ function sessionQueue(name) {
 // The session's item: the one it holds, else the last one in its list.
 const lastItems = {};
 function addForm() {
-  return `<form class="sp-add" data-sp-add autocomplete="off"><input placeholder="Title of a new item" aria-label="The title of a new item">${button("+ item", { type: "submit", title: "Add the item in this session's project, found during its item" })}</form>`;
+  return `<form class="sp-add" data-sp-add autocomplete="off"><input placeholder="Title of a new item" aria-label="The title of a new item">${button("+ item", { type: "submit", title: "Add an item to this session's project" })}</form>`;
 }
 function wireAdd(form, name) {
   form.addEventListener("submit", async (e) => {

@@ -53,7 +53,7 @@ export function renderPlanSide() {
   $("#planSide").innerHTML = card("", "All projects", per.flatMap(x => x.items), "")
     + per.map(({ p, items }) => card(p.name, p.name, items, items.length ? miniGraph(items) : `<span class="gc-none">No open items</span>`)
       + (p.name === scope.project ? goalList : "")).join("")
-    + `<div class="plan-foot">${button("+ project", { cls: "plain", data: { "plan-addproject": 1 }, title: "Add a project: with a folder, or without one" })}${archived.length
+    + `<div class="plan-foot">${button("+ project", { cls: "plain", data: { "plan-addproject": 1 }, title: "With a folder or without one" })}${archived.length
       ? button(`Archived projects (${archived.length})`, { pressed: archivedOpen, data: { "plan-archived": 1 }, attrs: `aria-expanded="${archivedOpen}" aria-controls="planArchived"`,
         title: archivedOpen ? "Hide the archived projects" : "Show the archived projects: Restore brings one back with its items" }) : ""}</div>`
     + (archived.length && archivedOpen ? archivedList(archived) : "");
@@ -68,7 +68,7 @@ export function toggleArchived() { archivedOpen = !archivedOpen; renderPlanSide(
 function archivedList(list) {
   const row = (p) => `<div class="arch-row"><div class="arch-name"><b>${esc(p.name)}</b><span class="gc-n">${p.open_items} open · ${p.done_items} done${p.archived_at
     ? ` · archived ${esc(p.archived_at.slice(0, 10))}` : ""}</span></div>${button("Restore", { data: { "restore-project": p.name },
-    title: `Bring ${p.name} back as the least important project: its open items are in the queue again` })}</div>`;
+    title: `Bring ${p.name} back` })}</div>`;
   return `<div class="plan-archived" id="planArchived" aria-label="Archived projects">${list.map(row).join("")}</div>`;
 }
 

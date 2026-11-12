@@ -98,7 +98,7 @@ function el() {
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
       <h2 id="termTitle" style="margin:0"></h2><button class="iconbtn" data-term-close="1" title="Close">✕</button></div>
     <div class="muted" id="termNote" style="font-size:12px;margin:4px 0 8px"></div>
-    <pre class="term" id="termScreen" tabindex="0" aria-label="The agent's terminal. Keys you type here go to the agent."></pre>
+    <pre class="term" id="termScreen" tabindex="0" aria-label="The agent's terminal"></pre>
     <div class="actions" style="margin-top:8px;align-items:center">
       ${[["Enter", "Enter"], ["Esc", "Escape"], ["↑", "Up"], ["↓", "Down"], ["Tab", "Tab"], ["Shift+Tab", "BTab"], ["Ctrl-C", "C-c"]]
         .map(([label, key]) => `<button class="btn" data-term-key="${key}">${label}</button>`).join("")}

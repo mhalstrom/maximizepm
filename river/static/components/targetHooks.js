@@ -15,7 +15,7 @@ export function hookRun(last) {
 // Folded (#5082): the summary names the hooks, and a hook that failed shows there in the warn color.
 export function hooksHtml(t, events) {
   const hooks = t.hooks || [], name = esc(t.name);
-  const link = (event, label, clear) => `<span class="link" data-hook="${esc(event)}" data-target="${name}"${clear ? ' data-clear="1"' : ""} title="${esc(clear ? "Remove this hook" : (events || {})[event] ? "MaximizePM runs the command when " + events[event] : "")}">${esc(label)}</span>`;
+  const link = (event, label, clear) => `<span class="link" data-hook="${esc(event)}" data-target="${name}"${clear ? ' data-clear="1"' : ""} title="${esc(clear ? "Remove this hook" : label === "change" ? "Change this hook" : "Add a hook on " + event)}">${esc(label)}</span>`;
   const runs = hooks.map(h => hookRun(h.last));
   const lines = hooks.map((h, i) => {
     const r = runs[i];
@@ -27,6 +27,6 @@ export function hooksHtml(t, events) {
   const free = Object.keys(events || {}).filter(e => !hooks.some(h => h.event === e));
   const bad = hooks.filter((h, i) => runs[i].bad).map(h => esc(h.event));
   const head = hooks.length ? `Hooks: ${hooks.map(h => esc(h.event)).join(", ")}` : "Hooks: none";
-  return `<details data-keep="hooks-${name}" title="Commands that MaximizePM runs when a release event occurs; a hook that fails does not undo the event"><summary>${head}${bad.length ? ` · <span style="color:var(--warn)">${bad.join(", ")} failed</span>` : ""}</summary>
+  return `<details data-keep="hooks-${name}" title="Commands that run on release events"><summary>${head}${bad.length ? ` · <span style="color:var(--warn)">${bad.join(", ")} failed</span>` : ""}</summary>
       ${lines}${free.length ? `<div class="muted t-s hook-add">add: ${free.map(e => link(e, e)).join(" · ")}</div>` : ""}</details>`;
 }

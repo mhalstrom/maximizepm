@@ -29,7 +29,7 @@ function field(s, i) {
       <datalist id="setAll${i}">${all.map(c => `<option value="${esc(c)}"></option>`).join("")}</datalist>` : ""}`
     : `<input data-i="${i}" value="${esc(val)}" aria-label="${esc(s.label)}" spellcheck="false">`;
   const how = s.live ? `<button class="btn" type="button" data-live="${i}" title="Type the change into its terminal now">Change now</button>`
-    : `<span class="muted" title="Its chat provider changes this only when the session starts">restart</span>`;
+    : `<span class="muted" title="Changes when the session starts">restart</span>`;
   // A setting that neither Change now nor a restart can change (OpenCode's model, #5285): its value only; the note
   // says how a person changes it. It sends no change.
   if (s.fixed) return `<div class="set-row"><label>${esc(s.label)}</label><span>${val ? esc(val) : "not known"}</span>

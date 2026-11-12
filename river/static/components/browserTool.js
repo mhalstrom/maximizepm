@@ -53,10 +53,10 @@ function render(box, project) {
       <select class="br-tabs hidden" aria-label="The tabs of the browser"></select>
     </form>
     <div class="br-ctl"><span class="br-who muted t-s"></span><span class="br-sp"></span>
-      ${button("Take control", { cls: "br-take", title: "Stop the session's input; you use the browser until Give back", data: { br: "control" } })}
-      ${button("Give back", { cls: "br-back hidden", title: "The session that controlled it before controls it again", data: { br: "give_back" } })}
-      ${button("Open as a window", { cls: "br-win", title: "Show this browser as a normal window, for a site that refuses a headless browser (a sign-in)", data: { br: "window" } })}
-      ${button("Close", { kind: "warn", title: "Close the browser; its profile and sign-ins stay", data: { br: "close" } })}
+      ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
+      ${button("Give back", { cls: "br-back hidden", title: "Give control back to the session", data: { br: "give_back" } })}
+      ${button("Open as a window", { cls: "br-win", title: "Show it as a normal window", data: { br: "window" } })}
+      ${button("Close", { kind: "warn", title: "Close it; the sign-ins stay", data: { br: "close" } })}
     </div>
     <div class="br-stage" tabindex="-1">
       <img class="br-img" alt="The page of the browser" draggable="false">

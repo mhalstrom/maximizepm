@@ -13,11 +13,11 @@ import { S, scope } from "../page.js";
 // Each word carries its full text as a hover; only a gate that is not set shows how to set it.
 function releaseLine(t) {
   const r = t.release || {}, a = r.approval || {}, n = esc(t.name), bits = [];
-  bits.push(a.approval === "person" ? `<span title="A person's yes for each release (set on ${esc(a.project)})">gate: person</span>`
+  bits.push(a.approval === "person" ? `<span title="A person approves each release">gate: person</span>`
     : a.approval === "review" ? `<span title="Ships when its review passes (set on ${esc(a.project)})">gate: review</span>`
-    : `<span style="color:var(--warn)" title="maxpm config set release_approval review|person --project &lt;a project of ${n}&gt;">gate: not set</span>`);
+    : `<span style="color:var(--warn)" title="Set it: maxpm config release_approval">gate: not set</span>`);
   if (r.cadence) bits.push(`<span title="${esc(r.cadence_reason || "At most one release in this time")}">every ${esc(r.cadence)}</span>`);
-  if (t.monitor) bits.push(`<span title="After each deploy, the deploy session watches: ${esc(t.monitor)}">watch</span>`);
+  if (t.monitor) bits.push(`<span title="After a deploy, watch: ${esc(t.monitor)}">watch</span>`);
   if (r.waits && r.text) bits.push(`<span title="${esc(r.text)}">${r.until ? "next in " + left(r.until) : "after #" + r.running}</span>`);
   return `<div class="muted t-s">${bits.join(" · ")}</div>`;
 }
@@ -42,11 +42,11 @@ function historyHtml(t) {
 }
 
 function actionsHtml(t) {
-  if (t.release && t.release.waits) return `<div class="actions"><input id="relwhy-${esc(t.name)}" placeholder="Why now?" style="flex:1;min-width:var(--w-input-m)"> ${button("Release now", { data: { relnow: t.name }, title: "Start this release sooner than the cadence permits; the reason goes in the history of the deploy item" })}</div>`;
+  if (t.release && t.release.waits) return `<div class="actions"><input id="relwhy-${esc(t.name)}" placeholder="Why now?" style="flex:1;min-width:var(--w-input-m)"> ${button("Release now", { data: { relnow: t.name }, title: "Start this release now" })}</div>`;
   if (!t.pending.some(d => d.status === "open" && d.ships.length)) return "";
   return `<div class="actions">${agentStart(S.launch_agents, [
-    { label: "Deploy now", cls: "btn primary", attrs: `data-deploy="${esc(t.name)}"`, title: "Start the deploy now: the owner gets an alert, or the chosen agent opens to take it" },
-    { label: "Review and deploy", attrs: `data-deploy="${esc(t.name)}" data-review="1"`, title: "First one review of everything it ships (review steps per project), then the deploy" }])}</div>`;
+    { label: "Deploy now", cls: "btn primary", attrs: `data-deploy="${esc(t.name)}"`, title: "Start the deploy now" },
+    { label: "Review and deploy", attrs: `data-deploy="${esc(t.name)}" data-review="1"`, title: "Review first, then deploy" }])}</div>`;
 }
 
 // The projects of a target: the names when they are few, else their count with the names as a hover.
@@ -63,7 +63,7 @@ export function renderTargets() {
       ${t.pending.map(pendingHtml).join("")}
       ${actionsHtml(t)}
       ${hooksHtml(t, S.hook_events)}
-      ${historyHtml(t)}`)).join("") || `<div class="muted" title='maxpm target add &lt;name&gt; --description "how it deploys"'>No deploy targets${scope.project ? " for " + esc(scope.project) : ""}.</div>`;
+      ${historyHtml(t)}`)).join("") || `<div class="muted" title='maxpm target add &lt;name&gt;'>No deploy targets${scope.project ? " for " + esc(scope.project) : ""}.</div>`;
   box.querySelectorAll("details[data-keep]").forEach(d => { if (open.has(d.dataset.keep)) d.open = true; });
 }
 

@@ -15,9 +15,9 @@ export function renderStart() {
   if (!S) return;
   const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review", "monitor"].includes(i.kind)).length;
   const slots = S.capacity ? S.capacity.spare_slots : 0;
-  const line = `<span class="muted t-s" title="Open session slots: max_sessions less the sessions that run. Ready: items an agent can take now.">${slots} open slot${slots === 1 ? "" : "s"} · ${ready} ready</span>`;
+  const line = `<span class="muted t-s" title="Open slots and ready items">${slots} open slot${slots === 1 ? "" : "s"} · ${ready} ready</span>`;
   put($("#sessStart"), line + (ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
-    title: "Open a new session in the folder of the most important ready item and start the chosen agent there" }) : ""));
+    title: "Start an agent on the top ready item" }) : ""));
 }
 
 // The ended sessions (stopped or gone agents with no running session), newest first; a click shows the chat read only.
@@ -31,9 +31,9 @@ export function renderFoot() {
   if (!S) return;
   const E = ended(), done = S.tmux_done || [];
   put($("#sessFoot"), (E.length ? button(showEnded ? `Hide ended` : `Show ${E.length} ended`, { cls: "plain", pressed: showEnded,
-      data: { "sess-ended": 1 }, title: "The sessions that stopped: their chats, read only" }) : "")
+      data: { "sess-ended": 1 }, title: "Stopped sessions, read only" }) : "")
     + (done.length ? button(`Close ${done.length} finished`, { data: { "sess-tidy": 1 },
-      title: "Close the tmux panes of the sessions that are done (maxpm view --tidy). A session that holds work, or shows a prompt, stays.\n"
+      title: "Close the panes of finished sessions\n"
         + done.map(p => `${p.name}: ${p.why}`).join("\n") }) : ""));
   const box = $("#sessEnded");
   box.classList.toggle("hidden", !showEnded || !E.length);
@@ -64,7 +64,7 @@ export function renderGive(name) {
   if (!ready.length) return put(el, `${chip("c-ready", "waiting" + since)} <span class="muted t-s">no ready item in ${esc(where.join(", ") || "its projects")}</span>`);
   put(el, `${chip("c-ready", "waiting" + since)}
     <select class="give-sel" data-give-item="${esc(a.name)}" aria-label="The item to give">${ready.map(i => `<option value="${i.id}"${giveChoice[a.name] == i.id ? " selected" : ""}>#${i.id} ${esc(shortTitle(i))}</option>`).join("")}</select>
-    ${button("Give work", { data: { give: a.name }, title: "Push the chosen item to this session: it takes it at once" })}`);
+    ${button("Give work", { data: { give: a.name }, title: "Give the chosen item to this session" })}`);
 }
 document.addEventListener("change", (e) => { const s = e.target.closest && e.target.closest("#sessGive [data-give-item]"); if (s) giveChoice[s.dataset.giveItem] = s.value; });
 

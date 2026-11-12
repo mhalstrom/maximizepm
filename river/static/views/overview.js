@@ -55,11 +55,11 @@ export function renderCapacity() {
   const c = S.capacity; if (!c) return;
   const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review", "monitor"].includes(i.kind)).length;
   put($("#capStart"), ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
-    title: "Open a new session in the folder of the most important ready item and start the chosen agent there" }) : "");
+    title: "Start an agent on the top ready item" }) : "");
   const idle = (S.agents || []).filter(a => a.kind !== "human" && a.role === "waiting");
   put($("#capacity"), `<div class="stats">
-      <div class="stat ${c.spare_slots ? "good" : ""}" title="More agent sessions you can start now (max_sessions less the sessions that run)"><div class="n">${c.spare_slots}</div><div class="l">open slots</div></div>
-      <div class="stat ${c.excess_sessions ? "bad" : ""}" title="Agent sessions with nothing ready for them${idle.length ? ": " + idle.map(a => a.name).join(", ") : ""}"><div class="n">${c.excess_sessions}</div><div class="l">idle</div></div>
+      <div class="stat ${c.spare_slots ? "good" : ""}" title="Sessions you can still start"><div class="n">${c.spare_slots}</div><div class="l">open slots</div></div>
+      <div class="stat ${c.excess_sessions ? "bad" : ""}" title="Idle sessions${idle.length ? ": " + idle.map(a => a.name).join(", ") : ""}"><div class="n">${c.excess_sessions}</div><div class="l">idle</div></div>
       <div class="stat" title="Active agent sessions; ${c.agents_busy} of them busy"><div class="n">${c.agents_active}</div><div class="l">sessions</div></div>
       <div class="stat"><div class="n">${c.in_progress.length}</div><div class="l">in progress</div></div>
       <div class="stat hum" title="Ready items that wait on a person"><div class="n">${c.ready_for_humans.length}</div><div class="l">for people</div></div>
@@ -73,7 +73,7 @@ export function renderSteps() {
   const c = S.capacity; if (!c) return;
   const layers = capacityBars(c.layers);
   put($("#graphSteps"), `<div class="layers">${layers || '<span class="muted">No open items.</span>'}</div>
-    <div class="legend" title="Open items by step: 1 can start now, 2 after step 1, … Peak agent width ${c.peak_width}."><span><span class="sw sw-a"></span>agents</span><span><span class="sw sw-h"></span>people</span></div>`);
+    <div class="legend" title="Open items by step; peak width ${c.peak_width}"><span><span class="sw sw-a"></span>agents</span><span><span class="sw sw-h"></span>people</span></div>`);
 }
 
 export function renderBlocked() {

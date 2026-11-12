@@ -23,11 +23,11 @@ export function goalCard(g, { selected, me }) {
     open && me && g.owner === me ? `<span class="link" data-goal-act="release" data-g="${esc(g.name)}">release</span>` : "",
     `<span class="link" data-goal-act="edit" data-g="${esc(g.name)}">edit</span>`,
     open ? (g.shared ? `<span class="link" data-goal-act="unshare" data-g="${esc(g.name)}" title="One agent can own this goal again">unshare</span>`
-      : `<span class="link" data-goal-act="share" data-g="${esc(g.name)}" title="No owner: maxpm go gives this goal to no agent, and its items stay open to every agent">share</span>`) : "",
+      : `<span class="link" data-goal-act="share" data-g="${esc(g.name)}" title="Shared: no owner">share</span>`) : "",
     open ? `<span class="link" data-goal-act="done" data-g="${esc(g.name)}">complete</span>` : `<span class="link" data-goal-act="reopen" data-g="${esc(g.name)}">reopen</span>`,
   ].filter(Boolean).join("");
   return `<div class="goal${selected ? " on" : ""}${open ? "" : " complete"}" data-goal="${esc(g.name)}" title="${esc(tip)}">
-    <div class="gh"><b>${esc(g.name)}</b>${open ? ownerChip(g.owner, g.shared) : chip("c-done", "complete", null, ' style="text-decoration:none"')}${open && g.owner && g.owner_expires_at ? `<span class="muted" style="font-size:12px" title="Its agent items are reserved for the owner until then; each maxpm command of the owner renews it">${left(g.owner_expires_at)} left</span>` : ""}</div>
+    <div class="gh"><b>${esc(g.name)}</b>${open ? ownerChip(g.owner, g.shared) : chip("c-done", "complete", null, ' style="text-decoration:none"')}${open && g.owner && g.owner_expires_at ? `<span class="muted" style="font-size:12px" title="The owner's claim lasts until then">${left(g.owner_expires_at)} left</span>` : ""}</div>
     ${bar(done)}
     <div class="go">${g.items_done.length}/${total} done${g.items_open.length ? " · " + g.items_open.length + " open" : ""}</div>
     <div class="ga">${acts}</div></div>`;
@@ -42,7 +42,7 @@ export function projCard(p, closed, inner) {
         <span class="spacer"></span>
         <button class="iconbtn" data-rank="${esc(p.name)}" data-to="${p.rank - 1}" title="more important">↑</button>
         <button class="iconbtn" data-rank="${esc(p.name)}" data-to="${p.rank + 1}" title="less important">↓</button>
-        ${button("Archive", { data: { "archive-project": p.name }, title: "Archive this project: its items leave the queue and the lists; nothing is deleted (#5197)" })}</div>
+        ${button("Archive", { data: { "archive-project": p.name }, title: "Archive this project" })}</div>
       ${inner}
     </div>`;
 }

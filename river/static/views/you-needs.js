@@ -48,8 +48,8 @@ export function renderNeedsYou() {
     const detail = isItem ? (e.item_context || e.item_notes) : e.body;
     const buttons = isItem
       ? button("Open", { data: { open: e.item_id } }) + button("Claim", { data: { ny: "claim", id: e.item_id } })
-        + button("Copy prompt", { data: { "copy-prompt": e.item_id }, title: "A prompt for an agent that explains this and helps you do it" })
-        + agentStart(S && S.launch_agents, { label: "Open agent", attrs: `data-agent-help="${e.item_id}"`, title: "Open an agent session with that prompt, in the project folder" })
+        + button("Copy prompt", { data: { "copy-prompt": e.item_id }, title: "An agent prompt that helps you do it" })
+        + agentStart(S && S.launch_agents, { label: "Open agent", attrs: `data-agent-help="${e.item_id}"`, title: "Open an agent with that prompt" })
         + button("Done", { kind: "primary", data: { ny: "done", id: e.item_id } })
       : (e.message_kind === "question"
           ? button("Answer", { kind: "primary", data: { ny: "answer", msg: e.message_id } })

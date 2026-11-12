@@ -27,7 +27,7 @@ export function showRows(el, rows, empty) {
           ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}</span>
           <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div></div>
       <div class="art-btns">${a.kind === "artifact"
-        ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="claude.ai does not let another page show it in a frame">Open on claude.ai</a>`
+        ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="claude.ai blocks showing it in a frame">Open on claude.ai</a>`
         : button("Open", { data: { "art-open": i } })}
         ${button("Open full screen", { data: { "art-full": i } })}</div>
     </div>`).join("") || emptyState(esc(empty));

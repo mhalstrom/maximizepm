@@ -183,3 +183,31 @@ class Selects(unittest.TestCase):
                 if re.search(r"(^|;)\s*background\s*:", body):
                     found.append(f"{path.name}: {sel}")
         self.assertEqual(found, [])
+
+
+class Tooltips(unittest.TestCase):
+    """A tooltip names what the control does in a few words ('Dictate', 'Close finished panes'); an explanation, if
+    one is needed, is visible help text or the guide (#5482). No title, aria-label or data-tip of the page has more
+    than 40 characters of fixed text. The parts that a template fills in (${...}) do not count."""
+
+    LIMIT = 40
+    PATTERNS = [
+        re.compile(r"""\b(?:title|aria-label|data-tip)=(["'])(.*?)\1""", re.S),
+        re.compile(r"""\b(?:title|label|tip)\s*:\s*(["'`])(.*?)(?<!\\)\1""", re.S),
+        re.compile(r"""\.title\s*=\s*(["'`])(.*?)(?<!\\)\1""", re.S),
+        re.compile(r"""setAttribute\(\s*["'](?:title|aria-label)["']\s*,\s*(["'`])(.*?)(?<!\\)\1""", re.S),
+    ]
+
+    def test_no_tooltip_is_longer_than_40_characters(self):
+        found = []
+        for path in sorted(STATIC.rglob("*")):
+            if path.suffix not in (".html", ".js") or "vendor" in path.parts or "canvaskit" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for pat in self.PATTERNS:
+                for m in pat.finditer(text):
+                    fixed = re.sub(r"\$\{[^}]*\}", "", m.group(2))
+                    if len(fixed) > self.LIMIT:
+                        line = text.count("\n", 0, m.start()) + 1
+                        found.append(f"{path.relative_to(STATIC)}:{line} ({len(fixed)}): {fixed[:60]}")
+        self.assertEqual(found, [])

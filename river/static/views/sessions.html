@@ -2,7 +2,7 @@
 <section id="tab-sessions" class="hidden">
   <div class="sess-layout" id="sessLayout">
     <aside class="panel sess-side" aria-label="Running sessions">
-      <h2 title="Read from each session's transcript on this computer. To type in a session, use Open (its claude.ai/code page), or the message box of a session that runs in a tmux pane.">Running sessions</h2>
+      <h2 title="Read from each session's transcript">Running sessions</h2>
       <!-- Start an agent and the open session slots (#5102 step 2): here, where the new session shows. -->
       <div id="sessStart" class="sess-start"></div>
       <!-- The You row (#5102 step 1): what waits on you, with a ! badge; it opens the You view. Under it, the session
@@ -13,7 +13,7 @@
       </div>
       <!-- The Artifacts row (#5102 step 3): what all the sessions made; it opens the Artifacts view. -->
       <div id="sessArtsRow" class="slist-arts" aria-label="Artifacts"><div class="srow srow-arts" data-arts="1">
-        <div class="srow-main" tabindex="0" role="button" title="The pages, files and artifact links all the sessions made or named, also the ended ones" aria-label="Artifacts of all sessions">
+        <div class="srow-main" tabindex="0" role="button" title="What all sessions made or named" aria-label="Artifacts of all sessions">
           <div class="srow-h"><b class="srow-t">Artifacts</b></div><div class="sub">What the sessions made</div></div></div></div>
       <div id="sessMgr" class="slist-mgr" aria-label="Manager"></div>
       <div id="sessExperts" class="slist-mgr slist-experts hidden" aria-label="Experts">
@@ -31,15 +31,15 @@
            lists), then one ⋯ menu: Open session, Give work, Settings, the links to Plan, End. -->
       <div class="sess-head">
         <button class="btn" type="button" id="sessBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
-        <h2 class="sess-h2"><span id="sessName"></span> <span id="sessTitle" class="sid" title="Its agent id: maxpm --as, messages and commands use it"></span></h2>
+        <h2 class="sess-h2"><span id="sessName"></span> <span id="sessTitle" class="sid" title="Its agent id (maxpm --as)"></span></h2>
         <span id="sessState" class="sess-st"></span>
         <span id="sessItem" class="sess-item"></span>
         <span class="spacer"></span>
         <span class="sess-lists" role="group" aria-label="Open in the side panel">
-          <button class="btn sess-tab" type="button" data-sp-open="items" aria-pressed="false" title="The items this session claimed, finished, released or gave away, in the side panel">Items</button><button class="btn sess-tab" type="button" data-sp-open="artifacts" aria-pressed="false" title="The files, local pages and claude.ai artifact links this session wrote or named, in the side panel">Artifacts</button><button class="btn sess-tab" type="button" data-sp-browser aria-pressed="false" title="The browser of this session's project, in the side panel: you and the session use it (one controller at a time)">Browser</button>
+          <button class="btn sess-tab" type="button" data-sp-open="items" aria-pressed="false" title="Items it worked on">Items</button><button class="btn sess-tab" type="button" data-sp-open="artifacts" aria-pressed="false" title="Files and pages it made">Artifacts</button><button class="btn sess-tab" type="button" data-sp-browser aria-pressed="false" title="This project's browser">Browser</button>
         </span>
         <span class="sess-more">
-          <button class="iconbtn" type="button" id="sessMore" aria-expanded="false" aria-controls="sessMenu" title="Open session, Give work, Settings, Plan, End" aria-label="More of this session">⋯</button>
+          <button class="iconbtn" type="button" id="sessMore" aria-expanded="false" aria-controls="sessMenu" title="Session actions" aria-label="More of this session">⋯</button>
           <div class="sess-menu" id="sessMenu" aria-label="This session">
             <div id="sessMenuItem" class="sess-mgrp sess-mitem"></div>
             <!-- On a phone the head has no room for the tab pair: Items, Artifacts and Browser are rows here (#5402). -->
@@ -69,10 +69,10 @@
         <button class="iconbtn" type="button" id="spClose" title="Close the side panel" aria-label="Close the side panel">✕</button></div>
       <form class="sp-bar" id="spForm" autocomplete="off">
         <input id="spAddr" placeholder="Address or path" aria-label="A web address or a full file path">
-        <button class="btn" type="button" id="spFindBtn" title="Find words in this tab (Cmd+F or Ctrl+F in the panel)" aria-controls="spFind" aria-expanded="false">Find</button>
+        <button class="btn" type="button" id="spFindBtn" title="Find in this tab (Cmd+F)" aria-controls="spFind" aria-expanded="false">Find</button>
         <button class="btn" type="button" id="spReload" title="Load it again">Reload</button>
         <button class="btn" type="button" id="spNew" title="Open it in a new browser tab">New tab</button>
-        <button class="btn" type="button" id="spFull" title="Show it alone in a browser tab of its own, with a link to keep">Full screen</button>
+        <button class="btn" type="button" id="spFull" title="Open it alone in a browser tab">Full screen</button>
       </form>
       <div class="sp-find hidden" id="spFind" role="search">
         <input id="spFindQ" type="search" placeholder="Find" aria-label="Find in this tab" autocomplete="off" enterkeyhint="search">

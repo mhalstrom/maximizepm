@@ -56,7 +56,7 @@ function renderLoop() {
   b.classList.toggle("hidden", !(l && l.late));
   if (!l || !l.late) return;
   b.textContent = `Automatic work stopped · ${l.age}`;
-  b.title = `maxpm serve made no complete pass of its loop for ${l.age}, so it closes no finished session, sends no notification, starts no fresh session and does not reload.`
+  b.title = `maxpm serve stalled for ${l.age}`
     + (l.error ? `\nLast error: ${l.error}` : "") + "\nClick to start the server again (maxpm serve --restart).";
 }
 
@@ -478,7 +478,7 @@ function renderReady() {
       <div class="sub">${projectChip(i.project)}${prioNumChip(i.effective_priority ?? i.priority, "priority")}${doerChip(i)}
         ${i.reserved_for ? `<span>reserved for ${esc(i.reserved_for)}${i.reserved_until ? ", " + left(i.reserved_until) + " left" : ""}</span>` : ""}</div></div>
       ${i.reserved_for ? "" : agentStart(S.launch_agents, { label: "Dispatch", attrs: `data-dispatch="${i.id}"`,
-        title: `Give #${i.id} to a session that waits in ${i.project}, or start the chosen agent in its folder for this item` })}
+        title: `Give #${i.id} to a session or a new agent` })}
     </div>`).join("") || `<div class="muted">Nothing is ready for an agent now.</div>`;
 }
 $("#readyClose").onclick = () => readyDialog.close();
@@ -602,7 +602,7 @@ function renderSetup(st) {
     st.folders.length ? st.folders.map(f => `<div title="${esc(f.path)}">${esc(f.path.replace(/^\/(Users|home)\/[^/]+/, "~"))} <span class="muted">(${f.projects.map(esc).join(", ")})</span>`
       + (!f.exists ? " · folder not found" : layouts[f.layout] ? " · " + esc(layouts[f.layout]) : "")
       + (f.layout === "claude_only" ? ` <button class="btn" data-su="block" data-move="1" data-path="${esc(f.path)}"
-          title="The text of CLAUDE.md goes to AGENTS.md; CLAUDE.md becomes the one line @AGENTS.md">Share them with every agent</button>` : "")
+          title="Move CLAUDE.md into AGENTS.md">Share them with every agent</button>` : "")
       + `</div>`).join("")
       + `<details style="margin-top:6px"><summary>Add another folder</summary>${folderForm()}</details>`
       : "The folder of something you're building. Agents you start work in it." + folderForm(),
@@ -624,7 +624,7 @@ function renderSetup(st) {
     (none ? `<button class="btn" data-su="recheck">Check again</button>` : "") + addBtns));
   // How river starts each profile agent (Claude Code, Codex): its options, as global settings.
   const profs = st.launch_profiles || [];
-  const howStart = profs.length && extra(true, `<span title="For every project; set one project apart in Settings (for example claude_remote_control with the project scope). The launch dialog can change the toggles for one start.">How agents start</span>`,
+  const howStart = profs.length && extra(true, `<span title="Applies to every project">How agents start</span>`,
     profs.map(p => `<div style="margin:4px 0"><b>${esc(p.label)}</b> ${p.options.map(o => {
       const name = o.label || o.name.replace(/_/g, " ");
       return o.kind === "toggle"
@@ -649,7 +649,7 @@ function renderSetup(st) {
     started ? "An agent has picked up work. Watch it on Sessions; finished items show in Plan > Done."
       : "An agent opens in a new Terminal window, takes your item, and gets to work. You'll see it on Sessions.",
     tasks.length && ready.length ? agentStart(S.launch_agents, { label: "Start an agent", cls: "btn primary", attrs: 'data-launch="1"',
-        title: "Open a new Terminal window in the project folder and start the chosen agent there" })
+        title: "Start the agent in a new Terminal window" })
       : `<span class="muted">Needs an agent and an item first.</span>`));
   // Extras: nice to have, not needed for a first result.
   const more = howStart ? [howStart] : [];
@@ -818,14 +818,14 @@ function renderRelay() {
   b.classList.toggle("primary", !!r.pending || armed);
   if (r.pending) {
     b.textContent = `Relay code ${r.pending.code}`;
-    b.title = "Approve this code on the relay page. Click to open the page again.";
+    b.title = "Approve this code on the relay page";
   } else if (!r.configured) {
     b.textContent = "Connect relay";
-    b.title = "Open this MaximizePM's page from any browser, through the relay"
+    b.title = "Open this page from any browser"
       + (r.error ? `\nLast try: ${r.error}` : "");
   } else if (armed) {
     b.textContent = "Disconnect?";
-    b.title = "Click again to disconnect this computer from the relay";
+    b.title = "Disconnect this computer from the relay";
   } else {
     const who = r.account ? ` as ${r.account}` : "";
     // A lapsed relay plan (#4759): ended carries nothing until it is renewed; past_due still works.
