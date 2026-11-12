@@ -42,6 +42,8 @@
           <button class="iconbtn" type="button" id="sessMore" aria-expanded="false" aria-controls="sessMenu" title="Open session, Give work, Settings, Plan, End" aria-label="More of this session">⋯</button>
           <div class="sess-menu" id="sessMenu" aria-label="This session">
             <div id="sessMenuItem" class="sess-mgrp sess-mitem"></div>
+            <!-- On a phone the head has no room for the tab pair: Items, Artifacts and Browser are rows here (#5402). -->
+            <div class="sess-mgrp sess-mlists"><button class="btn sess-ml" type="button" data-sp-open="items">Items</button><button class="btn sess-ml" type="button" data-sp-open="artifacts">Artifacts</button><button class="btn sess-ml" type="button" data-sp-browser>Browser</button></div>
             <div id="sessOpen" class="sess-mgrp"></div>
             <div id="sessGive" class="sess-mgrp give-row"></div>
             <div id="sessPlan" class="sess-mgrp"></div>

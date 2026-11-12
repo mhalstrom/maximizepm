@@ -30,18 +30,29 @@ button.srow-it { cursor: pointer; }
    hover only makes them visible (the pin also while on), so the dot and the time never move (#5106). On a touch screen
    End is in the head of the opened session. */
 .srow-main > .srow-h { flex-wrap: nowrap; }
+/* The pin and End sit over the right end of the second line, which is cut with … anyway: they take no width from
+   the name on the first line (#5402: the name was cut at about 150 px of a 336 px row). The hover shows them. */
+.srow-main { position: relative; }
+.srow-acts { position: absolute; right: calc(var(--sp-3) + var(--hair)); bottom: var(--sp-1); display: flex; align-items: center;
+  gap: var(--sp-1); padding-left: var(--sp-2); background: var(--bg); }
+.srow-acts:empty { display: none; }
+.srow-main:hover .srow-acts { background: var(--panel); }
+.srow.on .srow-acts { background: var(--bubble); }
 .srow-h b.srow-t { flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-base); }
 .srow-h .dot { flex: none; margin: 0 0 0 var(--sp-1); }
 .dot.needs { background: var(--warn); }
 .srow-h .sago { flex: none; color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; min-width: calc(var(--w-tool) + var(--sp-6)); text-align: right; }
 /* The ! badge and the time have a slot of their own width: the dot and the time stand in the same column in every row, also
    when the title is cut (#5320). */
-.srow-h .srow-pin-slot { flex: none; width: var(--sp-7); }
-.srow-h .wbadge, .srow-h .wbadge-slot { flex: none; min-width: var(--w-tool); text-align: center; box-sizing: border-box; }
+.srow-h .wbadge { flex: none; min-width: var(--w-tool); text-align: center; box-sizing: border-box; }
+/* No ! badge: no empty slot. The badge stands left of the dot, so the dot and the time keep their column (#5402). */
+.srow-h .wbadge-slot { display: none; }
 .srow .srow-main > .sub { font-size: var(--fs-m); }
 .prov.prov-ic { font-size: var(--fs-xs); padding: 0 var(--sp-1); border-radius: var(--r-xs); line-height: 1.3; }
 .srow:not(:hover):not(:focus-within) .srow-pin:not(.on), .srow:not(:hover):not(:focus-within) .srow-end.iconbtn { visibility: hidden; }
-@media (hover: none) { .srow .srow-end.iconbtn, .srow .srow-pin:not(.on), .srow .srow-pin-slot { display: none; } }
+/* Nothing shows: no background over the second line either. */
+.srow:not(:hover):not(:focus-within):not(.pinned) .srow-acts { visibility: hidden; }
+@media (hover: none) { .srow .srow-end.iconbtn, .srow .srow-pin:not(.on) { display: none; } }
 /* The head of a session (#5115): one row at every width. The name, the agent id, the state and the item give way
    (cut with …); the tab pair and the ⋯ keep their size. */
 .sess-head { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: nowrap; min-width: 0; padding-bottom: var(--sp-3); }
@@ -75,11 +86,11 @@ button.srow-it { cursor: pointer; }
   margin-top: var(--sp-1); padding: var(--sp-2); box-sizing: border-box; background: var(--panel);
   border: var(--hair) solid var(--line); border-radius: var(--r-xl); box-shadow: var(--shadow-pop); }
 .sess-mgrp { display: flex; flex-direction: column; }
-.sess-mgrp:empty, .sess-mitem { display: none; }
-.sess-mgrp:not(:empty):not(.sess-mitem) ~ .sess-mgrp:not(:empty) { border-top: var(--hair) solid var(--line); margin-top: var(--sp-1); padding-top: var(--sp-1); }
-.sess-menu .sess-mi { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; border: 0; background: none;
+.sess-mgrp:empty, .sess-mitem, .sess-mlists { display: none; }
+.sess-mgrp:not(:empty):not(.sess-mitem):not(.sess-mlists) ~ .sess-mgrp:not(:empty) { border-top: var(--hair) solid var(--line); margin-top: var(--sp-1); padding-top: var(--sp-1); }
+.sess-menu .sess-mi, .sess-menu .sess-ml { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; border: 0; background: none;
   color: var(--ink); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-s); font-size: var(--fs-m); text-decoration: none; white-space: normal; }
-.sess-menu .sess-mi:hover:not(:disabled) { background: var(--bubble); }
+.sess-menu .sess-mi:hover:not(:disabled), .sess-menu .sess-ml:hover { background: var(--bubble); }
 .sess-menu .sess-mi:disabled { color: var(--muted); }
 .sess-menu .sess-mi-end { color: var(--warn); }
 .sess-menu .sess-noopen { margin: 0; white-space: normal; }

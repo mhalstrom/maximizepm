@@ -184,8 +184,11 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   .sess-mitem:not(:empty) ~ .sess-mgrp:not(:empty) { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
   #sessMore { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 44px; min-height: 44px;
     border: 0; background: none; color: var(--ink); font-size: 20px; }
-  .sess-lists .sess-tab { min-height: 36px; padding: 0 10px; font-size: 14px; }
-  .sess-menu .sess-mi { min-height: 44px; justify-content: center; font-size: 15px; }
+  /* Items, Artifacts and Browser are rows of the ⋯ menu: the head line keeps its room for the name (#5402). */
+  .sess-head .sess-lists { display: none; }
+  .sess-mlists { display: flex; }
+  .sess-mlists ~ .sess-mgrp:not(:empty) { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 4px; }
+  .sess-menu .sess-mi, .sess-menu .sess-ml { min-height: 44px; justify-content: center; font-size: 15px; }
   .sess-menu .give-sel { font-size: 16px; }
   /* The page's own background: no band of another gray behind the head or the message box (#5304). */
   .sess-head, .chat-foot { flex: none; position: relative; z-index: 1; background: var(--bg); }

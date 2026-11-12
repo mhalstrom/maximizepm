@@ -112,8 +112,8 @@ export function isPinned(s) {
   return me ? by.includes(me) : by.length > 0;
 }
 function pinButton(s) {
-  // No pin, but its place: the dot and the time of every row stand in one column (#5320).
-  if (["manager", "expert", "assistant"].includes(s.role)) return `<span class="srow-pin-slot" aria-hidden="true"></span>`;
+  // No pin on these rows. The pin and End sit over the end of the second line (#5402), so no slot keeps a place.
+  if (["manager", "expert", "assistant"].includes(s.role)) return "";
   const on = isPinned(s);
   return button(PIN_SVG, { kind: "icon", cls: "srow-pin", pressed: on, data: { pin: s.name },
     title: on ? "Unpin: it goes back to its place" : "Pin to the top of the worker sessions", label: `${on ? "Unpin" : "Pin"} ${s.name}` });
@@ -148,8 +148,9 @@ export function sessionRow(s) {
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
-      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span>${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</div>
+      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
       <div class="sub">${esc(clip(line2, 120))}</div>
+      <span class="srow-acts">${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</span>
       ${s.role === "expert" && s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : ""}
     </div>
   </div>`;
@@ -204,8 +205,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // chat, the item of a session row or of the header, an item of the panel's lists), and Items and Artifacts open
   // there as lists.
   $("#tab-sessions").addEventListener("click", (e) => {
-    const l = e.target.closest("[data-sp-open]"); if (l) return openList(l.dataset.spOpen);
-    if (e.target.closest("[data-sp-browser]")) return openBrowser(agent).catch(() => {});  // #4631
+    // Also from the ⋯ menu, where a phone has them (#5402): the menu closes.
+    const l = e.target.closest("[data-sp-open]"); if (l) { if (l.closest("#sessMenu")) headMore(false); return openList(l.dataset.spOpen); }
+    const br = e.target.closest("[data-sp-browser]");
+    if (br) { if (br.closest("#sessMenu")) headMore(false); return openBrowser(agent).catch(() => {}); }  // #4631
     if (e.target.closest("#sessYou, #sessArts")) return;  // these views open an item in the drawer, as their tabs did
     const o = e.target.closest("[data-open]");
     if (!o || !/^\d+$/.test(o.dataset.open) || e.metaKey || e.ctrlKey) return;

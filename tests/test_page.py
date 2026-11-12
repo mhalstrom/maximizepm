@@ -872,8 +872,9 @@ try {
     def test_the_header_of_a_phone_is_one_bar(self):
         """#4903: at phone width the header is one bar of 48 px: the mark, the tab's name, which opens the sheet of all
         tabs, the magnifier, which opens the search, and the ⋯ menu (Settings is there, #5116). The bar hides while the page scrolls down and
-        comes back on a scroll up; the session head is one line with Items and Artifacts (#5115), and its ⋯ shows a card
-        with Open session, Settings and End; a tap outside closes it."""
+        comes back on a scroll up; the session head is one line (#5115) with the name, the state and the ⋯ (#5402:
+        Items and Artifacts left the name about 12 characters, so they are rows of the ⋯ card), and its ⋯ shows a card
+        with Items, Artifacts, Open session, Settings and End; a tap outside closes it."""
         for i in range(40):
             core.item_add(self.c, "site", f"filler {i}")
         driver = r'''try {
@@ -918,9 +919,10 @@ try {
   q('#sessions .srow[data-session="ag"] .srow-main').click();
   await until(() => q("#sessTitle").textContent === "ag" && q("#sessLayout").classList.contains("phone-chat"), "the chat of ag");
   out.head = Math.round(box(".sess-head").height) <= 48 && !shown("#sessMenu") && !shown("#sessItem") && shown("#sessMore")
-    && shown('.sess-lists [data-sp-open="items"]') && shown('.sess-lists [data-sp-open="artifacts"]');
+    && !shown('.sess-lists [data-sp-open="items"]') && box(".sess-head h2").width > 200;
   q("#sessMore").click();
   out.more = shown("#sessMenu") && shown("#sessOpen") && q("#sessMore").getAttribute("aria-expanded") === "true"
+    && shown('#sessMenu [data-sp-open="items"]') && shown('#sessMenu [data-sp-open="artifacts"]')
     && Math.round(box(".sess-head").height) <= 48;
   q("#sessBody").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));  // a tap outside the menu
   await sleep(50);
