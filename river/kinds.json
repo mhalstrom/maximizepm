@@ -5,7 +5,7 @@
     "1 broken check: the check itself failed: its command exited UNKNOWN (3), timed out or did not start, or its output names a known message of the kind broken check (it could not reach its host)",
     "2 noise: a noise rule of the check matches (maxpm ops noise)",
     "3 planned: a check of the same scope is paused at that time (maxpm ops pause)",
-    "4 outside dependency: a check of layer dependency of the same project or target is in fault",
+    "4 outside dependency: a check of layer dependency of the same project or target is in fault, and the output names that dependency (its check name, its address, or a word of its line in the system description)",
     "5 a lower layer failed first: a check of layer capacity or service of the same project or target went to fault before this fault's first failed run; the kind is that check's",
     "6 a known message: the output names a text of the known messages (the project's own first, then these)",
     "7 release regression: the first failed run came within the release window after a release, and this fault did not occur in the 30 days before the release",
@@ -40,7 +40,7 @@
       "name": "outside dependency",
       "signs": "vendor errors, timeouts to one vendor address, the vendor's status page",
       "proof": "the dependency check fails",
-      "action": "one task, which waits on the vendor (blocked until the dependency check passes again); the faults of other checks meanwhile go to it as notes",
+      "action": "one task, which waits on the vendor (blocked until the dependency check passes again); the faults of other checks that name the vendor meanwhile go to it as notes, and when the vendor passes again they run once at once: a check still in fault then opens its own task",
       "never": "a code fix during the outage",
       "doer": "ai",
       "wait": true

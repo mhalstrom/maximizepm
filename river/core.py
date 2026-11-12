@@ -5327,11 +5327,73 @@ def ops_kind_id(word):
     return None
 
 
-def _ops_system_rules(conn, project):
-    """The part rules of the project's system description in force, or {} (no project, no description)."""
+def _ops_system_part(conn, project, part):
+    """A part (code, infra, rules) of the project's system description in force, or {} (no project, none)."""
     r = conn.execute("SELECT s.body FROM ops_systems s JOIN projects p ON p.id=s.project_id WHERE p.name=? AND "
                      "s.state='accepted' ORDER BY s.seq DESC LIMIT 1", (project,)).fetchone()
-    return (json.loads(r["body"]).get("rules") or {}) if r else {}
+    return (json.loads(r["body"]).get(part) or {}) if r else {}
+
+
+def _ops_system_rules(conn, project):
+    """The part rules of the project's system description in force, or {} (no project, no description)."""
+    return _ops_system_part(conn, project, "rules")
+
+
+_OPS_URL = re.compile(r"https?://[^\s,;)]+")
+
+
+def _ops_host(url):
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or "").lower()
+
+
+def ops_dependencies(conn, project):
+    """The dependencies of a project, from the field infra.dependencies of its system description (#5511): one a
+    line, '<vendor>: <status page> <addresses and other words that name it>'. Each: {"name" (the vendor, as a
+    check name), "vendor", "status" (the first address in the line, its status page), "names" (the words that name
+    it in an error: the vendor, the hosts of its addresses, the other words of the line)}."""
+    out = []
+    for line in (_ops_system_part(conn, project, "infra").get("dependencies") or "").splitlines():
+        line = line.strip().lstrip("-* ").strip()
+        if not line:
+            continue
+        if _OPS_URL.match(line):
+            vendor, rest = "", line
+        else:
+            vendor, sep, rest = line.partition(":")
+            if not sep:  # no '<vendor>:': the whole line names it
+                vendor, rest = line, ""
+        vendor = vendor.strip()
+        urls = _OPS_URL.findall(rest)
+        words = [w.strip(",;()") for w in _OPS_URL.sub(" ", rest).split()]
+        names = {vendor.lower()} if vendor else set()
+        names |= {_ops_host(u) for u in urls if _ops_host(u)}
+        names |= {w.lower() for w in words if len(w) >= 3 and re.search(r"[.:/]|\d", w)}  # an address, not a word
+        slug = re.sub(r"[^a-z0-9._-]+", "-", (vendor or (_ops_host(urls[0]) if urls else "")).lower()).strip("-")
+        if not slug:
+            continue
+        out.append({"name": slug, "vendor": vendor or slug, "status": urls[0] if urls else None,
+                    "names": sorted(n for n in names if n)})
+    return out
+
+
+def _ops_dep_names(conn, o):
+    """The words that name the dependency that check o watches: its name, the host of its address, and the names of
+    its line in the system description of its project (the line of the same name, or of the same host)."""
+    host = _ops_host(o["config"].get("url") or "") if o["form"] == "url" else ""
+    names = {o["name"].lower()} | ({host} if host else set())
+    for d in ops_dependencies(conn, _ops_project(conn, o)):
+        if d["name"] == o["name"] or (host and host in d["names"]):
+            names |= set(d["names"])
+    return sorted(names)
+
+
+def _ops_names_in(text, names):
+    """The first name that the text holds as a whole word (any case), or None."""
+    for n in names:
+        if re.search(r"(?<![\w-])" + re.escape(n) + r"(?![\w-])", text or "", re.I):
+            return n
+    return None
 
 
 def ops_known_messages(conn, project):
@@ -5404,13 +5466,17 @@ def ops_kind(conn, c, key, res, at=None, noise=None):
             return {"kind": "planned", "rule": 3, "why": f"{o['scope']}/{o['name']} is paused until "
                                                         f"{show_time(o['paused_until'])} for planned work"}
     first = _ops_first_failure(conn, key, at)
-    # 4. An outside dependency is in fault (the check itself, when it watches one).
+    # 4. An outside dependency is in fault (the check itself, when it watches one), and the output names it (#5511): a
+    # fault that does not name it is not the vendor's, and the later rules give its kind.
     for o in related:
-        if o["layer"] == "dependency" and (o["id"] == c["id"] or o["state"] in ("fault", "failing")):
-            own = o["id"] == c["id"]
-            return {"kind": "dependency", "rule": 4, "from": None if own else o, "why": (
-                "the check watches an outside dependency" if own else
-                f"the dependency check {o['scope']}/{o['name']} is {o['state']}")}
+        if o["layer"] == "dependency" and o["id"] == c["id"]:
+            return {"kind": "dependency", "rule": 4, "from": None, "why": "the check watches an outside dependency"}
+    for o in related:
+        if o["layer"] == "dependency" and o["state"] in ("fault", "failing"):
+            name = _ops_names_in(text, _ops_dep_names(conn, o))
+            if name:
+                return {"kind": "dependency", "rule": 4, "from": o, "why": (
+                    f"the dependency check {o['scope']}/{o['name']} is {o['state']}, and the output names it: {name!r}")}
     # 5. A lower layer failed first.
     for o in sorted(related, key=lambda o: o["id"] != c["id"]):
         if OPS_LAYERS.get(o["layer"]) and o["layer"] != "dependency":
@@ -5565,6 +5631,13 @@ def ops_faults(conn, check_id, rec, res, at=None, watch=None):
     rules = ops_noise_rules(conn, c, at)
     for key in faulted:
         new = to.get(key) == "fault"
+        sub = key[len(c["key"]) + 1:] if key != c["key"] else None
+        passed = ((res.get("subjects") or {}).get(sub, {}).get("status", "ok") if sub else res.get("status")) == "ok"
+        if passed and not _ops_item(conn, key):
+            # It heals and has no item of its own (its faults went to the item of another check, a dependency):
+            # a passing run opens nothing; recover_after passes end the fault (#5511).
+            out.append({"key": key, "item": None, "action": "healing"})
+            continue
         k = ops_kind(conn, c, key, res, at, rules)  # the kind first (#5509): it decides what happens
         summary = res.get("summary") or res.get("status")
         if k["kind"] == "noise":  # noise (#5504): the record only; no item, no agent
@@ -5605,6 +5678,29 @@ def ops_faults(conn, check_id, rec, res, at=None, watch=None):
                 if (it["blocked_reason"] or "").startswith("outside dependency:"):
                     unblock(conn, it["id"], actor="maxpm")  # the vendor is back: the task can go on
                 out.append({"key": key, "item": it["id"], "action": "recovered"})
+            if c["layer"] == "dependency" and key == c["key"]:
+                out += _ops_after_dependency(conn, c, at)
+    return out
+
+
+def _ops_after_dependency(conn, dep, at):
+    """The dependency check dep passes again (#5511): each check of the same system that is still failing or in
+    fault with no item of its own (its faults went to the dependency's task as notes) runs once at once. A check
+    still in fault then opens its own task, since the vendor is no longer its kind. Returns what each run did."""
+    out = []
+    for o in _ops_related(conn, dep):
+        if o["id"] == dep["id"] or o["layer"] == "dependency" or o["state"] not in ("fault", "failing") or \
+                o["paused_until"] or _ops_fault_items(conn, o):
+            continue
+        run = ops_start(conn, o, at)
+        if run is None:  # a run of it is open: its own end decides
+            continue
+        rec = ops_finish(conn, run, at)
+        out.append({"key": o["key"], "action": "run-after-dependency", "run": rec["run"], "status": rec["status"],
+                    "items": rec.get("items") or []})
+        with tx(conn):
+            _event(conn, None, "maxpm", f"ops {dep['scope']}/{dep['name']} passes again: {o['scope']}/{o['name']} ran "
+                                        f"once at once ({rec['status']})")
     return out
 
 
@@ -6061,6 +6157,29 @@ OPS_SYSTEM_FIELDS = {
         "release_window": "the time after a release in which a new error counts as a release regression (e.g. 2h)",
     },
 }
+
+
+def ops_deps(conn, project, add=False, actor=None):
+    """maxpm ops deps: the dependencies of a project's system description, each with its check (layer dependency).
+    add: a url check of its status page for each one that has none (any session may add a url check)."""
+    p = _ops_system_project(conn, project)["name"]
+    deps = ops_dependencies(conn, p)
+    added = []
+    for d in deps:
+        have = conn.execute("SELECT * FROM checks WHERE scope_kind='project' AND scope=? AND name=?",
+                            (p, d["name"])).fetchone()
+        if have is None and d["status"]:
+            have = next((r for r in conn.execute("SELECT * FROM checks WHERE scope_kind='project' AND scope=? AND "
+                                                 "layer='dependency' AND form='url'", (p,))
+                         if json.loads(r["config"]).get("url") == d["status"]), None)
+        d["check"] = f"{have['scope']}/{have['name']}" if have else None
+        if have is None and add and d["status"]:
+            ops_add(conn, p, d["name"], "url", {"url": d["status"], "layer": "dependency",
+                                               "runbook": f"The status page of {d['vendor']}. While it fails, the faults "
+                                                          f"that name {', '.join(d['names'])} wait on it."}, actor=actor)
+            d["check"] = f"{p}/{d['name']}"
+            added.append(d["name"])
+    return {"project": p, "dependencies": deps, "added": added}
 
 
 def _ops_system_project(conn, project):

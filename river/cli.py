@@ -1163,6 +1163,10 @@ def build_parser(only=None):
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--until", help="a duration (2h) or a time (tomorrow 7:00)")
     x.add_argument("--resume", action="store_true", help="start the check again now")
+    x = ops.add_parser("deps", help="the dependencies in a project's system description (infra.dependencies, one a "
+                       "line: '<vendor>: <status page> <addresses>'), each with its check; --add: a url check of each "
+                       "status page that has none, of layer dependency")
+    x.add_argument("project"); x.add_argument("--add", action="store_true", help="add the missing checks")
     x = ops.add_parser("kinds", help="the kinds of problems, and the eight rules that give each fault its kind")
     x = ops.add_parser("kind", help="give a fault item its kind (the sorting session of an unknown fault, or a person "
                        "or the manager who corrects one); the session that holds it releases it")
@@ -2973,6 +2977,8 @@ def _dispatch_ops(conn, a, actor):
     if a.ocmd == "run":
         core.ops_find(conn, a.scope, a.name)  # a wrong name says so here, not after a trip to maxpm serve
         return ask_server(conn, "ops_run", {"scope": a.scope, "name": a.name}, actor)
+    if a.ocmd == "deps":
+        return core.ops_deps(conn, a.project, a.add, actor)
     if a.ocmd == "kinds":
         return {"kinds": core.ops_kinds()}
     if a.ocmd == "kind":
@@ -5020,6 +5026,17 @@ def render_ops(a, res):
         print(f"check {res['check']}: run {res['run']} started" + (" and read (a beat check runs no process)"
               if res["form"] == "beat" else " in maxpm serve")
               + f". The result: maxpm ops history {res['check'].replace('/', ' ', 1)}")
+        return
+    if a.ocmd == "deps":
+        if not res["dependencies"]:
+            print(f"{res['project']} names no dependency: maxpm ops system edit {res['project']} --set "
+                  f"infra.dependencies=\"<vendor>: <status page> <addresses>\" (one a line)")
+        for d in res["dependencies"]:
+            print(f"{d['name']}: status {d['status'] or 'none'}; named by {', '.join(d['names'])}; check "
+                  + (d["check"] + (" (added)" if d["name"] in res["added"] else "") if d["check"] else
+                     "none" + ("" if d["status"] else " (no status page to check)")))
+        if not res["added"] and any(not d["check"] and d["status"] for d in res["dependencies"]):
+            print(f"add their checks: maxpm ops deps {res['project']} --add")
         return
     if a.ocmd == "kinds":
         k = res["kinds"]

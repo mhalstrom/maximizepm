@@ -10738,22 +10738,67 @@ class OpsKinds(Base):
         self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE change LIKE 'ops planned: ops:site:job in fault while "
                                        "prod/db is paused until %'").fetchone())
 
-    def test_rule_4_an_outside_dependency_waits_on_the_vendor_and_takes_the_other_faults_as_notes(self):
-        self.check("stripe", layer="dependency")
-        self.check("pay")
+    def test_rule_4_an_outside_dependency_waits_on_the_vendor_and_takes_the_faults_that_name_it_as_notes(self):
+        core.ops_system_edit(self.c, "site", sets={"infra.dependencies": "Stripe: https://status.stripe.com "
+                                                                         "54.187.174.169"}, why="the vendor")
+        for n in ("stripe", "pay", "search"):
+            self.check(n, command=n, **({"layer": "dependency"} if n == "stripe" else {}))
         [d] = self.fault("stripe", out="STRIPE CRITICAL - 503")
         it = self.item(d["item"])
         self.assertEqual(d["kind"], "dependency")
         self.assertTrue(it["blocked_reason"].startswith("outside dependency: waits on the vendor until site/stripe"))
-        [p] = self.fault("pay", out="PAY CRITICAL - timeouts")
+        [p] = self.fault("pay", out="PAY CRITICAL - connect to 54.187.174.169 timed out")  # a word of its line
         self.assertEqual((p["action"], p["item"], p["kind"]), ("cause-note", d["item"], "dependency"))
-        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind='operational'").fetchone()[0], 1)
         self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'ops ops:site:pay in fault "
                                        "too at %'", (d["item"],)).fetchone())
+        [s] = self.fault("search", out="SEARCH CRITICAL - the index is missing")  # it does not name the vendor
+        self.assertEqual(s["action"], "opened")
+        self.assertNotEqual(s["kind"], "dependency")
+        # The vendor passes again: pay runs once at once; still in fault, it opens its own task.
+        def runner(cmd, folder, limit, env):
+            r = subprocess.CompletedProcess(cmd, 0 if cmd == "stripe" else 2,
+                                            "STRIPE OK" if cmd == "stripe" else "PAY CRITICAL - declined", "")
+            r.timed_out = False
+            return r
         later = core.now() + timedelta(minutes=10)
-        for n in range(2):
-            self.run_at("site", "stripe", later + timedelta(minutes=n), self.proc(0, "STRIPE OK"))
+        self.run_at("site", "stripe", later, runner)
+        r = self.run_at("site", "stripe", later + timedelta(minutes=1), runner)
         self.assertIsNone(self.item(d["item"])["blocked_reason"])  # the vendor is back
+        [after] = [x for x in r["items"] if x.get("action") == "run-after-dependency"]
+        self.assertEqual((after["key"], after["status"], after["items"][0]["action"]), ("ops:site:pay", "critical",
+                                                                                         "opened"))
+        self.assertIn("PAY CRITICAL - declined", self.item(after["items"][0]["item"])["title"])
+
+    def test_after_the_vendor_is_back_a_waiting_check_that_passes_opens_nothing(self):
+        for n in ("stripe", "pay"):
+            self.check(n, command=n, **({"layer": "dependency"} if n == "stripe" else {}))
+        self.fault("stripe", out="STRIPE CRITICAL - 503")
+        [p] = self.fault("pay", out="PAY CRITICAL - stripe answers 503")  # the check's name names it
+        self.assertEqual(p["action"], "cause-note")
+        later = core.now() + timedelta(minutes=10)
+        self.run_at("site", "stripe", later, self.proc(0, "OK"))
+        r = self.run_at("site", "stripe", later + timedelta(minutes=1), self.proc(0, "OK"))
+        [after] = [x for x in r["items"] if x.get("action") == "run-after-dependency"]
+        self.assertEqual((after["status"], after["items"]), ("ok", [{"key": "ops:site:pay", "item": None,
+                                                                      "action": "healing"}]))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind='operational'").fetchone()[0], 1)
+
+    def test_ops_deps_lists_the_dependencies_of_the_system_description_and_adds_a_check_for_each(self):
+        core.ops_system_edit(self.c, "site", sets={"infra.dependencies": "Stripe: https://status.stripe.com "
+                                                                         "api.stripe.com\nPostmark: "
+                                                                         "https://status.postmarkapp.com\nan internal "
+                                                                         "service with no page"}, why="vendors")
+        r = core.ops_deps(self.c, "site")
+        self.assertEqual([(d["name"], d["status"], d["check"]) for d in r["dependencies"]],
+                         [("stripe", "https://status.stripe.com", None),
+                          ("postmark", "https://status.postmarkapp.com", None),
+                          ("an-internal-service-with-no-page", None, None)])
+        self.assertEqual(r["dependencies"][0]["names"], ["api.stripe.com", "status.stripe.com", "stripe"])
+        r = core.ops_deps(self.c, "site", add=True, actor="dev")
+        self.assertEqual(r["added"], ["stripe", "postmark"])
+        c = core.ops_find(self.c, "site", "stripe")
+        self.assertEqual((c["form"], c["layer"], c["config"]["url"]), ("url", "dependency", "https://status.stripe.com"))
+        self.assertEqual(core.ops_deps(self.c, "site", add=True, actor="dev")["added"], [])
 
     def test_rule_5_a_lower_layer_that_failed_first_gives_its_kind_and_its_item_the_notes(self):
         self.check("disk", layer="capacity")
