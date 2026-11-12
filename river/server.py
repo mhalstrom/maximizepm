@@ -5293,6 +5293,10 @@ def serve(port: int, open_browser=False, dev=False):
     try:
         runners = core.setting(conn, "serve_runners") == "on"
         child = core.setting(conn, "serve_loop_process") == "on"
+        # Before the loop process, the runners and any pane start: they inherit this PATH (#5611).
+        added = core.adopt_login_path(conn)
+        if added:
+            print(f"maxpm serve: the PATH of a new terminal adds {os.pathsep.join(added)}", flush=True)
     finally:
         conn.close()
     LOOP_THREAD.update(thread=None, proc=None, stop=stop, child=child, restart=None)

@@ -2167,6 +2167,7 @@ def run(argv=None):
         from . import notify
         conn = core.connect()
         try:
+            core.adopt_login_path(conn, max_age=24 * 3600)  # launchd's short PATH: the checks need a terminal's (#5611)
             res = core.ops_outside(conn, lambda title, body: notify.direct(conn, title, body))
         finally:
             conn.close()

@@ -11054,6 +11054,78 @@ def this_host():
     return _HOST[0]
 
 
+# The PATH of a new terminal for the commands that maxpm serve and the watchdog run (#5611). The desktop app and
+# launchd start a program with the short PATH of macOS (/usr/bin:/bin:/usr/sbin:/sbin), so a check, hook or repair
+# that called cargo, pulumi or kache ended with exit 127 when the app had started serve.
+LOGIN_PATH_FILE = "login-path.txt"  # beside the queue: what serve read, for the watchdog's runs
+LOGIN_PATH_RUNNER = None  # tests: () -> the login shell's PATH, or None
+SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def login_path():
+    """The PATH of a new terminal: the person's login shell ($SHELL -ilc), started as Terminal starts it, with the
+    short system PATH (its profile files build the rest). None when it gives none in 8 s."""
+    import subprocess
+    if LOGIN_PATH_RUNNER is not None:
+        return LOGIN_PATH_RUNNER()
+    if os.name == "nt":
+        return None
+    shell = os.environ.get("SHELL") or ("/bin/zsh" if PLATFORM == "darwin" else "/bin/bash")
+    env = {k: os.environ[k] for k in ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR") if k in os.environ}
+    env.update(PATH=":".join(SYSTEM_PATH), TERM="dumb")
+    try:
+        r = subprocess.run([shell, "-ilc", 'printf "\\n@@PATH=%s\\n" "$PATH"'], capture_output=True, text=True,
+                           timeout=8, stdin=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    got = [x[len("@@PATH="):] for x in r.stdout.splitlines() if x.startswith("@@PATH=")]
+    return got[-1].strip() or None if got else None
+
+
+def merge_path(current, login):
+    """current with the folders of login that it lacks: the starter's own folders first (a venv, the app's Python),
+    then the login shell's, then the system folders. current as it is when it has every folder of login (serve
+    started from a terminal)."""
+    cur = [p for p in (current or "").split(os.pathsep) if p]
+    new = [p for p in (login or "").split(os.pathsep) if p and p not in cur]
+    if not new:
+        return os.pathsep.join(cur)
+    own = [p for p in cur if p not in SYSTEM_PATH]
+    return os.pathsep.join(dict.fromkeys(own + [p for p in login.split(os.pathsep) if p]
+                                         + [p for p in cur if p in SYSTEM_PATH]))
+
+
+def adopt_login_path(conn=None, max_age=None):
+    """Give this process (and so each command it starts) the folders of a new terminal's PATH that its own PATH
+    lacks. maxpm serve reads the login shell at its start and keeps it beside the queue; the watchdog, which runs
+    every minute, reads that file when it is younger than max_age seconds. Returns the folders it added."""
+    import time
+    p = _beside_queue(conn, LOGIN_PATH_FILE)
+    login = None
+    if max_age and p is not None:
+        try:
+            if time.time() - p.stat().st_mtime < max_age:
+                login = p.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            pass
+    if login is None:
+        login = login_path()
+        if login and p is not None:
+            try:
+                tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+                tmp.write_text(login + "\n", encoding="utf-8")
+                os.replace(tmp, p)
+            except OSError:
+                pass
+    if not login:
+        return []
+    old = os.environ.get("PATH", "")
+    new = merge_path(old, login)
+    os.environ["PATH"] = new
+    had = set(old.split(os.pathsep))
+    return [x for x in new.split(os.pathsep) if x not in had]
+
+
 def pid_alive(pid):
     try:
         os.kill(int(pid), 0)

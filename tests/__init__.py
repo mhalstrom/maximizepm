@@ -24,6 +24,7 @@ for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("
         os.environ.pop(_name, None)
 
 core.tmux_path = lambda: None
+core.LOGIN_PATH_RUNNER = lambda: None  # a test never starts the person's login shell (#5611); a test sets its own
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin
 from river.agents import codex as codex_adapter  # noqa: E402
 codex_adapter.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them
