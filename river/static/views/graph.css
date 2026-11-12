@@ -4,7 +4,8 @@
 #graph.pz:focus-visible { box-shadow: 0 0 0 var(--hair-2) var(--accent); }
 #graph.pz.dragging { cursor: grabbing; }
 .pz-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
-.pz-tools { position: absolute; right: var(--sp-3); top: var(--sp-3); display: flex; gap: var(--sp-1); }
+/* The zoom buttons sit on a bar of their own, so a part of the drawing that moves under them does not show between them (#5331). */
+.pz-tools { position: absolute; right: var(--sp-3); top: var(--sp-3); display: flex; gap: var(--sp-1); padding: var(--sp-0); background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-m); }
 .pz-tools .btn { min-width: var(--w-tool); padding: var(--sp-1) var(--sp-3); background: var(--panel); }
 #graphNote { margin-bottom: var(--sp-3); }
 /* The graph's colors come from the page's tokens, not from Mermaid's theme, so they follow light and dark (#5330).

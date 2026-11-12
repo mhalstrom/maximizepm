@@ -20,8 +20,11 @@ export function makePanZoom(el) {
   // The scale at which the whole drawing shows. A drawing of many hundred boxes needs less than MIN,
   // so the lower limit of the zoom follows it.
   const PAD = 16;
+  // The top of the drawing when it starts or fits: below the zoom buttons, so they cover no part of it (#5331).
+  const tools = el.querySelector(".pz-tools");
+  const top = () => Math.max(PAD, tools.offsetTop + tools.offsetHeight + PAD / 2);
   const fitK = () => {
-    const W = el.clientWidth - 2 * PAD, H = el.clientHeight - 2 * PAD;
+    const W = el.clientWidth - 2 * PAD, H = el.clientHeight - top() - PAD;
     return W > 0 && H > 0 ? Math.min(1, W / size.w, H / size.h) : MIN;  // a hidden box has no size
   };
   const clampK = (k) => Math.min(MAX, Math.max(Math.min(MIN, fitK()), k));
@@ -33,7 +36,7 @@ export function makePanZoom(el) {
   }
   function fit() {
     const W = el.clientWidth, H = el.clientHeight, k = fitK();
-    v = { k, x: (W - size.w * k) / 2, y: Math.max(PAD, (H - size.h * k) / 2) };
+    v = { k, x: (W - size.w * k) / 2, y: top() + Math.max(0, (H - top() - PAD - size.h * k) / 2) };
     apply();
   }
   // A new drawing shows whole (Fit). In a narrow box (a phone, #4890) Fit can make the text too small to read: there
@@ -43,7 +46,7 @@ export function makePanZoom(el) {
     const W = el.clientWidth;
     if (W >= NARROW || fitK() >= READ) return fit();
     const k = clampK(READ);
-    v = { k, x: size.w * k <= W - 2 * PAD ? (W - size.w * k) / 2 : PAD, y: PAD };
+    v = { k, x: size.w * k <= W - 2 * PAD ? (W - size.w * k) / 2 : PAD, y: top() };
     apply();
   }
 
