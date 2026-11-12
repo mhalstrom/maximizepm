@@ -9651,3 +9651,119 @@ class Ops(Base):
             self.assertIn("the beat to https://hc-ping.example/abc failed", out.getvalue())
             clock[0] += 5
             self.assertIsNone(core.ops_deadman(self.c))  # no retry in a loop: the next beat waits for the interval
+
+    # A profile: every check of a project or a deploy target, and its ops_* settings, as one JSON file (#5436).
+    PROFILE = {"maxpm_ops_profile": 1, "scope": "project:site", "checks": [
+        {"name": "home", "form": "url", "url": "https://example.com/", "body": "Welcome", "every": "1m",
+         "timeout": "10s", "severity": "page", "runbook": "the site is down: read the server log"},
+        {"name": "nightly", "form": "beat", "period": "26h"},
+        {"name": "errors", "form": "log", "command": "tail -n 500 app.log", "pattern": "ERROR", "limit": 5,
+         "subject": True, "repair": "restart-app"}]}
+
+    def checks(self, scope="site"):
+        return {c["name"]: c for c in core.ops_list(self.c, scope)["checks"]}
+
+    def test_the_file_format_export_then_apply_elsewhere_gives_the_same_checks(self):
+        core.ops_profile_apply(self.c, self.PROFILE, yes=True, actor="mark")
+        out = core.ops_profile_export(self.c, "site")
+        self.assertEqual(out, {"maxpm_ops_profile": 1, "scope": "project:site", "checks": [
+            {"name": "errors", "form": "log", "command": "tail -n 500 app.log", "pattern": "ERROR", "limit": 5,
+             "window": "15m", "every": "5m", "fail_after": 3, "recover_after": 2, "timeout": "30s",
+             "severity": "item", "repair": "restart-app", "subject": True},
+            {"name": "home", "form": "url", "url": "https://example.com/", "statuses": "200-399", "body": "Welcome",
+             "every": "1m", "fail_after": 3, "recover_after": 2, "timeout": "10s", "severity": "page",
+             "runbook": "the site is down: read the server log"},
+            {"name": "nightly", "form": "beat", "period": "26h", "every": "5m", "fail_after": 3, "recover_after": 2,
+             "timeout": "30s", "severity": "item"}]})
+        core.project_add(self.c, "shop")
+        r = core.ops_profile_apply(self.c, json.loads(json.dumps(out)), scope="shop", yes=True, actor="mark")
+        self.assertEqual(([x["name"] for x in r["add"]], r["written"]), (["errors", "home", "nightly"], True))
+        strip = lambda cs: {n: {k: c[k] for k in core._OPS_COLS} for n, c in cs.items()}  # noqa: E731
+        self.assertEqual(strip(self.checks("shop")), strip(self.checks("site")))
+
+    def test_apply_shows_the_plan_first_writes_with_yes_and_a_second_apply_changes_nothing(self):
+        core.ops_add(self.c, "site", "old", "url", {"url": "https://old.example.com/"}, actor="mark")
+        core.ops_add(self.c, "site", "nightly", "beat", {"period": "26h"}, actor="mark")
+        core.ops_pause(self.c, "site", "nightly", "2h", actor="mark")
+        plan = core.ops_profile_apply(self.c, self.PROFILE, actor="mark")
+        self.assertEqual(([x["name"] for x in plan["add"]], plan["change"], plan["remove"], plan["same"],
+                          plan["written"]), (["home", "errors"], [], ["old"], ["nightly"], False))
+        self.assertEqual(sorted(self.checks()), ["nightly", "old"])  # nothing written
+        r = core.ops_profile_apply(self.c, self.PROFILE, yes=True, actor="mark")
+        self.assertTrue(r["written"])
+        self.assertEqual(sorted(self.checks()), ["errors", "home", "nightly"])
+        self.assertEqual(self.checks()["nightly"]["state"], "paused")  # a check that stays keeps its pause
+        again = core.ops_profile_apply(self.c, self.PROFILE, yes=True, actor="mark")
+        self.assertEqual((again["add"], again["change"], again["remove"], again["written"]), ([], [], [], False))
+        changed = json.loads(json.dumps(self.PROFILE))
+        changed["checks"][0]["every"] = "2m"
+        del changed["checks"][0]["runbook"]  # left out: no runbook
+        r = core.ops_profile_apply(self.c, changed, yes=True, actor="mark")
+        self.assertEqual(r["change"][0]["name"], "home")
+        self.assertEqual(r["change"][0]["fields"], ["every", "runbook"])
+        self.assertIsNone(self.checks()["home"]["runbook"])
+
+    def test_one_check_the_actor_may_not_set_refuses_the_whole_profile_before_any_write(self):
+        with self.assertRaisesRegex(RiverError, r"check errors \(to add\): dev is an agent; only a person or the "
+                                                r"manager .* nothing was written"):
+            core.ops_profile_apply(self.c, self.PROFILE, yes=True, actor="dev")
+        self.assertEqual(self.checks(), {})  # not even the url and beat checks
+        safe = {"maxpm_ops_profile": 1, "scope": "site", "checks": self.PROFILE["checks"][:2]}
+        core.ops_profile_apply(self.c, safe, yes=True, actor="dev")  # an agent may set url and beat checks
+        core.ops_add(self.c, "site", "jobs", "cmd", {"command": "true"}, actor="boss")
+        with self.assertRaisesRegex(RiverError, "a cmd check"):
+            core.ops_profile_apply(self.c, safe, yes=True, actor="dev")  # it would remove the cmd check
+        self.assertIn("jobs", self.checks())
+        target = {"maxpm_ops_profile": 1, "checks": [{"name": "api", "form": "url", "url": "https://x.io/",
+                                                      "repair": "restart"}]}
+        with self.assertRaisesRegex(RiverError, "only a person .* deploy target prod"):
+            core.ops_profile_apply(self.c, target, scope="prod", yes=True, actor="boss")
+        core.ops_profile_apply(self.c, target, scope="prod", yes=True, actor="mark")
+
+    def test_a_bad_file_or_a_bad_setting_is_refused_before_any_write(self):
+        bad = [({"checks": []}, "not an ops profile"),
+               ({"maxpm_ops_profile": 1, "checks": [{"name": "a", "form": "beat", "period": "1h"},
+                                                    {"name": "a", "form": "beat", "period": "2h"}]}, "two times: a"),
+               ({"maxpm_ops_profile": 1, "checks": [{"name": "a", "form": "beat", "period": "1h", "colour": "red"}]},
+                "no field colour"),
+               ({"maxpm_ops_profile": 1, "checks": [{"name": "a"}]}, "has no form"),
+               ({"maxpm_ops_profile": 1, "checks": [], "settings": {"review": "on"}}, "start with ops_"),
+               ({"maxpm_ops_profile": 1, "checks": [{"name": "a", "form": "beat", "period": "1h"}],
+                 "settings": {"ops_nothing": "x"}}, "ops_nothing")]
+        for profile, why in bad:
+            with self.assertRaisesRegex(RiverError, why):
+                core.ops_profile_apply(self.c, profile, scope="site", yes=True, actor="mark")
+        self.assertEqual(self.checks(), {})
+        with self.assertRaisesRegex(RiverError, "names no scope"):
+            core.ops_profile_apply(self.c, {"maxpm_ops_profile": 1, "checks": []}, actor="mark")
+
+    def test_the_settings_of_the_scope_go_with_the_profile(self):
+        with mock.patch.dict(core.DEFAULT_SETTINGS, {"ops_page": "unhealed 15m"}):
+            p = {"maxpm_ops_profile": 1, "scope": "site", "checks": [], "settings": {"ops_page": "always"}}
+            self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {"ops_page": "always"})
+            core.ops_profile_apply(self.c, p, yes=True, actor="mark")
+            self.assertEqual(core.setting(self.c, "ops_page", project_id=core._project(self.c, "site")["id"]), "always")
+            self.assertEqual(core.ops_profile_export(self.c, "site")["settings"], {"ops_page": "always"})
+            self.assertEqual(core.ops_profile_apply(self.c, p, actor="mark")["settings"], {})
+
+    def test_the_command_line_exports_to_a_file_and_applies_it_with_yes(self):
+        from river import cli
+        core.ops_profile_apply(self.c, self.PROFILE, yes=True, actor="mark")
+        path = os.path.join(self.dir.name, "site.json")
+        core.project_add(self.c, "shop")
+
+        def run(*words):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.run(list(words))
+            return code, out.getvalue()
+        self.assertIn("(3 checks) is in", run("--as", "mark", "ops", "profile", "export", "site", "--out", path)[1])
+        code, out = run("--as", "mark", "ops", "profile", "apply", path, "--scope", "shop")
+        self.assertIn("nothing written yet", out)
+        self.assertIn(f"write it: maxpm ops profile apply {path} --scope shop --yes", out)
+        self.assertEqual(self.checks("shop"), {})
+        code, out = run("--as", "mark", "ops", "profile", "apply", path, "--scope", "shop", "--yes")
+        self.assertIn("profile for project:shop: written", out)
+        self.assertEqual(sorted(self.checks("shop")), ["errors", "home", "nightly"])
+        code, out = run("--as", "mark", "ops", "profile", "apply", path, "--scope", "shop", "--yes")
+        self.assertIn("nothing to change (3 the same)", out)

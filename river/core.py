@@ -3306,67 +3306,234 @@ def _ops_summary(c):
     return f"{c['form']} {what[c['form']]()}; every {c['every']}, fault after {c['fail_after']}, {c['severity']}"
 
 
+_OPS_COLS = ("form", "config", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "subject",
+             "repair")
+
+
+def _ops_name(name):
+    if not _OPS_NAME.match(name or ""):
+        raise RiverError("check names use lower-case letters, digits, '.', '_', '-'")
+    return name
+
+
+def _ops_refuse(conn, actor, *checks):
+    for c in checks:
+        why = may_set_check(conn, actor, c)
+        if why:
+            raise RiverError(why)
+
+
+def _ops_insert(conn, kind, scope, name, col, actor):
+    """Write a new check (inside the caller's tx; the caller checked the rights)."""
+    conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
+                 "severity,runbook,subject,repair,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (kind, scope, name, col["form"], json.dumps(col["config"]), col["every"], col["fail_after"],
+                  col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
+                  col["repair"], actor, iso(now())))
+    c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
+    _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
+           + (f"; repair: {c['repair']}" if c["repair"] else ""))
+    return c
+
+
+def _ops_update(conn, old, col, actor):
+    """Write the new columns of a check (inside the caller's tx). Returns the changed columns and the check."""
+    changed = [k for k in _OPS_COLS if col[k] != old[k]]
+    if not changed:
+        return [], old
+    conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
+                 " runbook=?, subject=?, repair=?, changed_by=?, changed_at=? WHERE id=?",
+                 (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
+                  col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"], actor,
+                  iso(now()), old["id"]))
+    c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
+    _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} changed ({', '.join(changed)}): {_ops_summary(c)}"
+           + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
+    return changed, c
+
+
+def _ops_delete(conn, c, actor):
+    conn.execute("DELETE FROM checks WHERE id=?", (c["id"],))
+    _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} removed (was: {_ops_summary(c)})")
+
+
 def ops_add(conn, scope, name, form, fields=None, actor=None):
     """maxpm ops add: a new check of a project or a deploy target (OPS_FORMS). It does not run yet: maxpm serve
     runs the checks that are due (#5430)."""
-    if not _OPS_NAME.match(name or ""):
-        raise RiverError("check names use lower-case letters, digits, '.', '_', '-'")
+    _ops_name(name)
     with tx(conn):
         kind, scope = _ops_scope(conn, scope)
         if conn.execute("SELECT 1 FROM checks WHERE scope_kind=? AND scope=? AND name=?", (kind, scope, name)).fetchone():
             raise RiverError(f"{scope} has a check {name!r}; change it: maxpm ops edit {scope} {name} ...")
         col = _ops_build(form, fields or {})
-        why = may_set_check(conn, actor, dict(col, scope_kind=kind, scope=scope))
-        if why:
-            raise RiverError(why)
-        conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
-                     "severity,runbook,subject,repair,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                     (kind, scope, name, form, json.dumps(col["config"]), col["every"], col["fail_after"],
-                      col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
-                      col["repair"], actor, iso(now())))
-        c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
-        _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
-               + (f"; repair: {c['repair']}" if c["repair"] else ""))
+        _ops_refuse(conn, actor, dict(col, scope_kind=kind, scope=scope))
+        c = _ops_insert(conn, kind, scope, name, col, actor)
     return {"changed": "added", "check": c}
 
 
 def ops_edit(conn, scope, name, fields=None, form=None, actor=None):
     """maxpm ops edit: change the settings of a check. The rights hold for the check before and after the change,
     so an agent cannot turn a url check into a command, nor change a command check."""
-    fields = fields or {}
     with tx(conn):
         old = _ops_row(_ops_check(conn, scope, name))
-        col = _ops_build(form or old["form"], fields, old)
-        for c in (old, dict(col, scope_kind=old["scope_kind"], scope=old["scope"])):
-            why = may_set_check(conn, actor, c)
-            if why:
-                raise RiverError(why)
-        cols = ("form", "config", "every", "fail_after", "recover_after", "timeout", "severity", "runbook",
-                "subject", "repair")
-        changed = [k for k in cols if col[k] != old[k]]
-        if not changed:
-            return {"changed": None, "check": old}
-        conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
-                     " runbook=?, subject=?, repair=?, changed_by=?, changed_at=? WHERE id=?",
-                     (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
-                      col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"], actor,
-                      iso(now()), old["id"]))
-        c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
-        _event(conn, None, actor, f"ops check {c['scope']}/{name} changed ({', '.join(changed)}): {_ops_summary(c)}"
-               + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
-    return {"changed": "changed", "fields": changed, "check": c}
+        col = _ops_build(form or old["form"], fields or {}, old)
+        _ops_refuse(conn, actor, old, dict(col, scope_kind=old["scope_kind"], scope=old["scope"]))
+        changed, c = _ops_update(conn, old, col, actor)
+    return {"changed": "changed" if changed else None, "fields": changed, "check": c}
 
 
 def ops_rm(conn, scope, name, actor=None):
     """maxpm ops rm: remove a check. Its runs and its events stay, so the history of faults stays whole."""
     with tx(conn):
         c = _ops_row(_ops_check(conn, scope, name))
-        why = may_set_check(conn, actor, c)
-        if why:
-            raise RiverError(why)
-        conn.execute("DELETE FROM checks WHERE id=?", (c["id"],))
-        _event(conn, None, actor, f"ops check {c['scope']}/{name} removed (was: {_ops_summary(c)})")
+        _ops_refuse(conn, actor, c)
+        _ops_delete(conn, c, actor)
     return {"changed": "removed", "check": c}
+
+
+# A profile is every check of one project or deploy target, and its ops_* settings, as one JSON file (#5436):
+#
+#   {"maxpm_ops_profile": 1,
+#    "scope": "target:web",                          the project or target (apply --scope names another)
+#    "settings": {"ops_page": "..."},                optional: settings of the scope, only keys that start with ops_
+#    "checks": [{"name": "home", "form": "url", "url": "https://...", "statuses": "200-399", "body": "Welcome",
+#                "every": "1m", "fail_after": 3, "recover_after": 2, "timeout": "10s", "severity": "page",
+#                "runbook": "...", "repair": "...", "subject": true}, ...]}
+#
+# A check holds its name, its form, the settings of the form (OPS_FORM_FIELDS) and the common fields; a field it
+# leaves out takes its default, as in maxpm ops add. The file is the whole profile: apply adds the checks that are
+# new, changes the ones that differ, and removes the checks of the scope that the file does not name. Apply is
+# idempotent, and it keeps the state and the pause of a check that stays.
+OPS_PROFILE_VERSION = 1
+_OPS_CHECK_KEYS = ({"name", "form", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "repair",
+                    "subject"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
+
+
+def _ops_settings_scope(conn, kind, scope):
+    """The project whose settings the profile's settings are: the project, or the deploy project of a target."""
+    if kind == "project":
+        return scope
+    if _deploy_project_id(conn, scope) is None:
+        raise RiverError(f"target {scope} has no deploy project (deploy-{scope}) to hold settings; a ship of one of "
+                         f"its projects makes it")
+    return f"deploy-{scope}"
+
+
+def ops_profile_export(conn, scope):
+    """maxpm ops profile export: the profile of a project or a target, in the format above."""
+    kind, name = _ops_scope(conn, scope)
+    checks = []
+    for r in conn.execute("SELECT * FROM checks WHERE scope_kind=? AND scope=? ORDER BY name", (kind, name)):
+        c = _ops_row(r)
+        d = {"name": c["name"], "form": c["form"], **c["config"]}
+        d.update({k: c[k] for k in ("every", "fail_after", "recover_after", "timeout", "severity")})
+        d.update({k: c[k] for k in ("runbook", "repair") if c[k]})
+        if c["subject"]:
+            d["subject"] = True
+        checks.append(d)
+    out = {"maxpm_ops_profile": OPS_PROFILE_VERSION, "scope": f"{kind}:{name}", "checks": checks}
+    sp = name if kind == "project" else f"deploy-{name}" if _deploy_project_id(conn, name) else None
+    if sp is not None:
+        settings = {r["key"]: r["value"] for r in conn.execute(
+            "SELECT key, value FROM settings WHERE scope=? AND key LIKE 'ops\\_%' ESCAPE '\\' ORDER BY key",
+            (f"project:{sp}",))}
+        if settings:
+            out["settings"] = settings
+    return out
+
+
+def _ops_profile_read(profile):
+    if not isinstance(profile, dict) or profile.get("maxpm_ops_profile") != OPS_PROFILE_VERSION:
+        raise RiverError(f"not an ops profile: the file needs \"maxpm_ops_profile\": {OPS_PROFILE_VERSION} "
+                         f"(maxpm ops profile export <scope> writes one)")
+    checks = profile.get("checks", [])
+    if not isinstance(checks, list) or not all(isinstance(c, dict) for c in checks):
+        raise RiverError("\"checks\" is a list of checks, each an object with its name and form")
+    names = [c.get("name") for c in checks]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise RiverError(f"the profile names a check two times: {', '.join(map(str, dup))}")
+    for c in checks:
+        _ops_name(c.get("name"))
+        extra = set(c) - _OPS_CHECK_KEYS
+        if extra:
+            raise RiverError(f"check {c['name']}: no field {', '.join(sorted(extra))}; the fields: "
+                             f"{', '.join(sorted(_OPS_CHECK_KEYS))}")
+        if "form" not in c:
+            raise RiverError(f"check {c['name']} has no form: one of {', '.join(OPS_FORMS)}")
+    settings = profile.get("settings") or {}
+    if not isinstance(settings, dict) or any(not str(k).startswith("ops_") for k in settings):
+        raise RiverError("\"settings\" holds only settings whose names start with ops_ (for example ops_page)")
+    return checks, {str(k): str(v) for k, v in settings.items()}
+
+
+def ops_profile_apply(conn, profile, scope=None, yes=False, actor=None):
+    """maxpm ops profile apply: make the checks of the scope what the profile says. Without yes it writes nothing
+    and returns the plan: the checks it adds, changes and removes, and the settings it sets. Every check it
+    touches follows may_set_check, before and after; one refusal refuses the whole profile, before any write."""
+    checks, settings = _ops_profile_read(profile)
+    scope = scope or profile.get("scope")
+    if not scope:
+        raise RiverError("the profile names no scope: give one, maxpm ops profile apply <file> --scope <project|target>")
+    with tx(conn):
+        kind, name = _ops_scope(conn, scope)
+        old = {r["name"]: _ops_row(r) for r in conn.execute(
+            "SELECT * FROM checks WHERE scope_kind=? AND scope=?", (kind, name))}
+        plan = {"add": [], "change": [], "remove": [], "same": [], "settings": {}}
+
+        def named(n, what, fn):
+            """A refusal names the check, so a profile of many checks shows which one it is."""
+            try:
+                return fn()
+            except RiverError as e:
+                raise RiverError(f"check {n} ({what}): {e}; nothing was written")
+
+        for c in checks:
+            fields = {k: v for k, v in c.items() if k not in ("name", "form")}
+            for k in ("runbook", "repair"):
+                fields.setdefault(k, "")  # left out: none, also when the check has one now
+            fields.setdefault("subject", False)
+            col = named(c["name"], "in the profile", lambda: _ops_build(c["form"], fields))
+            new = dict(col, scope_kind=kind, scope=name, name=c["name"])
+            if c["name"] not in old:
+                named(c["name"], "to add", lambda: _ops_refuse(conn, actor, new))
+                plan["add"].append((c["name"], col))
+                continue
+            was = old[c["name"]]
+            diff = [k for k in _OPS_COLS if col[k] != was[k]]
+            if diff:
+                named(c["name"], "to change", lambda: _ops_refuse(conn, actor, was, new))
+                plan["change"].append((c["name"], col, diff))
+            else:
+                plan["same"].append(c["name"])
+        for n in sorted(set(old) - {c["name"] for c in checks}):
+            named(n, "to remove", lambda: _ops_refuse(conn, actor, old[n]))
+            plan["remove"].append(n)
+        if settings:
+            sp = _ops_settings_scope(conn, kind, name)
+            for k, v in settings.items():
+                if k not in DEFAULT_SETTINGS:
+                    setting_default(k)  # an unknown setting is refused before any write
+                r = conn.execute("SELECT value FROM settings WHERE scope=? AND key=?", (f"project:{sp}", k)).fetchone()
+                if r is None or r["value"] != v:
+                    plan["settings"][k] = v
+        out = {"scope": f"{kind}:{name}", "written": False,
+               "add": [{"name": n, "summary": _ops_summary(dict(col, scope=name, name=n))} for n, col in plan["add"]],
+               "change": [{"name": n, "fields": d, "summary": _ops_summary(dict(col, scope=name, name=n))}
+                          for n, col, d in plan["change"]],
+               "remove": plan["remove"], "same": plan["same"], "settings": plan["settings"]}
+        if not yes or not (plan["add"] or plan["change"] or plan["remove"] or plan["settings"]):
+            return out
+        for n, col in plan["add"]:
+            _ops_insert(conn, kind, name, n, col, actor)
+        for n, col, _ in plan["change"]:
+            _ops_update(conn, old[n], col, actor)
+        for n in plan["remove"]:
+            _ops_delete(conn, old[n], actor)
+        out["written"] = True
+    for k, v in plan["settings"].items():
+        config_set(conn, k, v, project=_ops_settings_scope(conn, kind, name), actor=actor)
+    return out
 
 
 def ops_pause(conn, scope, name, until=None, resume=False, actor=None):

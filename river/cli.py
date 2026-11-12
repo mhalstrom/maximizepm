@@ -1007,6 +1007,17 @@ def build_parser():
     x = ops.add_parser("history", help="the last runs of a check and its changes of state, also of its subjects")
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("-n", type=int, default=20, help="how many runs and changes (default 20)")
+    x = ops.add_parser("profile", help="every check of a project or a deploy target, and its ops_* settings, as one "
+                       "JSON file: export it, keep it in the project's repository, apply it on another machine")
+    pps = x.add_subparsers(dest="opcmd", required=True)
+    y = pps.add_parser("export", help="print the profile of a project or a deploy target")
+    y.add_argument("scope"); y.add_argument("--out", help="write it to this file instead")
+    y = pps.add_parser("apply", help="make the checks of the scope what the file says: it shows the checks it adds, "
+                       "changes and removes, and writes them only with --yes. Each check keeps the rights of "
+                       "maxpm ops add")
+    y.add_argument("file", help="the profile file, or - to read it from stdin")
+    y.add_argument("--scope", help="apply it to this project or target instead of the one the file names")
+    y.add_argument("--yes", action="store_true", help="write the change")
 
     tg = sub.add_parser("target", help="deploy targets: where projects ship to")
     tgs = tg.add_subparsers(dest="tcmd", required=True)
@@ -2398,6 +2409,17 @@ _OPS_FIELDS = ("url", "statuses", "body", "command", "pattern", "limit", "window
                "recover_after", "timeout", "severity", "runbook", "repair")
 
 
+def _ops_profile_file(path):
+    try:
+        text = sys.stdin.read() if path == "-" else Path(path).read_text()
+    except OSError as e:
+        raise RiverError(f"cannot read the profile {path}: {e.strerror}")
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        raise RiverError(f"the profile {path} is no JSON: {e}")
+
+
 def _dispatch_ops(conn, a, actor):
     if a.ocmd == "list":
         return core.ops_list(conn, a.scope)
@@ -2410,9 +2432,18 @@ def _dispatch_ops(conn, a, actor):
     if a.ocmd == "run":
         core.ops_find(conn, a.scope, a.name)  # a wrong name says so here, not after a trip to maxpm serve
         return ask_server(conn, "ops_run", {"scope": a.scope, "name": a.name}, actor)
+    if a.ocmd == "profile" and a.opcmd == "export":
+        res = core.ops_profile_export(conn, a.scope)
+        if a.out:
+            Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
+        return {"profile": res, "out": a.out}
+    if a.ocmd == "profile" and not a.yes:
+        return core.ops_profile_apply(conn, _ops_profile_file(a.file), a.scope, False, actor)
     if not actor and core.agent_type_from_env(os.environ):
         raise RiverError(f"name yourself: maxpm --as <name> ops {a.ocmd} ... (an agent may add or change a url or "
                          f"beat check; a person or the manager the others)")
+    if a.ocmd == "profile":
+        return core.ops_profile_apply(conn, _ops_profile_file(a.file), a.scope, True, actor)
     if a.ocmd == "rm":
         return core.ops_rm(conn, a.scope, a.name, actor)
     if a.ocmd == "pause":
@@ -4169,7 +4200,33 @@ def _ops_run_line(r):
         (f" | {r['perfdata']}" if r.get("perfdata") else "")
 
 
+def render_ops_profile(a, res):
+    if a.opcmd == "export":
+        if res["out"]:
+            n = len(res["profile"]["checks"])
+            print(f"the profile of {res['profile']['scope']} ({n} check{'' if n == 1 else 's'}) is in {res['out']}")
+        else:
+            print(json.dumps(res["profile"], indent=2))
+        return
+    lines = ([f"  add {x['name']}: {x['summary']}" for x in res["add"]]
+             + [f"  change {x['name']} ({', '.join(x['fields'])}): {x['summary']}" for x in res["change"]]
+             + [f"  remove {n}" for n in res["remove"]]
+             + [f"  set {k} = {v}" for k, v in res["settings"].items()])
+    if not lines:
+        print(f"the checks of {res['scope']} are as the profile says: nothing to change"
+              + (f" ({len(res['same'])} the same)" if res["same"] else ""))
+        return
+    print(f"profile for {res['scope']}: " + ("written" if res["written"] else "the change it makes (nothing written yet)"))
+    print("\n".join(lines))
+    if res["same"]:
+        print(f"  the same: {', '.join(res['same'])}")
+    if not res["written"]:
+        print(f"  write it: maxpm ops profile apply {a.file}" + (f" --scope {a.scope}" if a.scope else "") + " --yes")
+
+
 def render_ops(a, res):
+    if a.ocmd == "profile":
+        return render_ops_profile(a, res)
     if a.ocmd == "run":
         print(f"check {res['check']}: run {res['run']} started" + (" and read (a beat check runs no process)"
               if res["form"] == "beat" else " in maxpm serve")
