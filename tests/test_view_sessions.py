@@ -1498,42 +1498,52 @@ try {
 '''
         result = drive_page(self, driver)
         self.assertEqual(result["path"], f"/sessions/ag/items/{self.it}")
-        self.assertEqual(result["tabs"], ["Items", "Artifacts", f"◇ #{self.it} header"])
+        self.assertEqual(result["tabs"], ["Items", "Artifacts", "Browser", f"◇ #{self.it} header"])
 
 
 class PanelOneTab(Base):
-    """#5000: the same claude.ai artifact, opened from two links of different form and from another session's link,
-    is one tab in the side panel; a second open shows that tab, and its label names who opened it last."""
+    """#5628 (was #5000): an outside address, here a claude.ai artifact from two links of different form and from
+    another session's link, opens in the session's project browser: the fixed tab Browser shows, the browser goes to
+    the address, and no tab of its own opens. The browser's requests answer from a stand-in: no Chrome, no network."""
 
-    def test_one_tab_for_one_artifact(self):
+    def test_an_outside_address_opens_in_the_browser(self):
         self.write(claude_line("assistant", [{"type": "text", "text": "Published [the page](https://claude.ai/artifact/AbC12?v=1) "
                                                                       "and see https://claude.ai/artifact/AbC12 too"}],
                                "end_turn", at="2026-11-08T10:05:00Z"))
         core.register(self.c, "boss")
         driver = DRIVE_HEAD + r'''
+const opened = [], f0 = window.fetch;
+window.fetch = (u, o) => {
+  const b = o && o.body && JSON.parse(o.body);
+  if (b && b.op === "browser") {
+    if (b.args.action === "open") opened.push(b.args.url);
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { project: "site", running: false, tabs: [] } }),
+                                        { headers: { "Content-Type": "application/json" } }));
+  }
+  return f0(u, o);
+};
 const links = () => [...document.querySelectorAll('#sessCol a[href*="claude.ai/artifact"]')];
-const arts = () => [...document.querySelectorAll(".sp-tab:not(.sp-tab-list)")].filter(t => t.title.includes("claude.ai/artifact"));
-const onArt = () => q(".sp-tab.on") && q(".sp-tab.on").title.includes("claude.ai/artifact");
+const arts = () => [...document.querySelectorAll(".sp-tab:not(.sp-tab-list)")].filter(t => t.title.includes("claude.ai"));
+const onBrowser = () => q(".sp-tab.on [data-sp-brtab]");
 try {
   await until(() => q("#sessTitle").textContent === "ag" && links().length >= 2, "two links to the artifact in the chat");
   links()[0].click();
-  await until(() => arts().length === 1, "a tab for the artifact");
+  await until(() => onBrowser() && opened.length === 1, "the Browser tab, at the artifact");
   window.riverOpenInPanel("ag", "#ITEM");
-  await until(() => q(".sp-tab.on") && !onArt(), "another tab on top");
+  await until(() => q(".sp-tab.on") && !onBrowser(), "another tab on top");
   links()[1].click();
-  await until(onArt, "the second link shows the artifact's tab");
-  check(arts().length === 1, "one tab for the artifact, opened from two links: " + arts().map(t => t.title));
-  window.riverOpenInPanel("ag", "#ITEM");
-  await until(() => q(".sp-tab.on") && !onArt(), "the item on top again");
-  window.riverOpenInPanel(null, "http://Claude.AI/artifact/AbC12#x");
-  await until(onArt, "a third address of it shows its tab");
-  post({ arts: arts().map(t => t.title), by: q(".sp-tab.on .sp-tab-l").dataset.by || "",
+  await until(() => onBrowser() && opened.length === 2, "the second link goes to the same Browser tab");
+  q('[data-sp-list="items"]').click();
+  await until(() => q('.sp-list[data-list="items"]') && !onBrowser(), "the Items list on top");
+  q("[data-sp-brtab]").click();
+  await until(onBrowser, "the fixed tab Browser shows it again");
+  post({ opened, arts: arts().length, browsers: document.querySelectorAll("[data-sp-brtab]").length,
          fits: document.documentElement.scrollWidth <= window.innerWidth });
 } catch (e) { post({ error: String(e.stack || e) }); }
 '''.replace("ITEM", str(self.it))
         result = drive_page(self, driver)
-        self.assertEqual(result["arts"], ["https://claude.ai/artifact/AbC12"])
-        self.assertEqual(result["by"], "ag")
+        self.assertEqual(result["opened"], ["https://claude.ai/artifact/AbC12?v=1", "https://claude.ai/artifact/AbC12"])
+        self.assertEqual((result["arts"], result["browsers"]), (0, 1))
         self.assertTrue(result["fits"])
 
 

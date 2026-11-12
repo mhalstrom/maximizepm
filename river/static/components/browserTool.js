@@ -22,10 +22,12 @@ async function call(action, args = {}) {
   return j.result;
 }
 
-// The browser of the session's project: the tab "Browser · <project>" in the panel.
-export async function openBrowser(session) {
+// The browser of the session's project: the tab "Browser · <project>" in the panel; with url, it opens that address
+// (an outside address of the side panel, #5628).
+export async function openBrowser(session, url) {
   const info = await call("status", session ? { agent: session } : {});
   openTool("browser:" + info.project, "Browser · " + info.project, (box) => render(box, info.project));
+  if (url) await call("open", { project: info.project, url });
 }
 
 // maxpm browser open (#4631): a session asks the page to show its browser. The request comes in the state; the tab

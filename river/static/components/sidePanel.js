@@ -1,8 +1,8 @@
 // The side panel of the Sessions tab (#4619): what a session points to, beside its chat. A local page (localhost,
 // 127.0.0.1) in a frame; a local file (image, PDF, HTML, Markdown, text) that maxpm serve gives read only
 // (GET /api/file, with the page's token, only under the project folders, their worktrees, and uploads); an outside
-// page in a frame when the site allows it (GET /api/frame-check), else its title and Open in a new tab. Tabs for
-// several, an address bar, Reload, Open in a new tab, Close, and a handle to resize it (the width stays).
+// page in the browser of the session's project (#5628: the fixed tab Browser, components/browserTool.js), so every
+// site shows and works, also one that refuses a frame. Tabs for several, an address bar, Reload, Open in a new tab, Close, and a handle to resize it (the width stays).
 // Each session has its own tabs (#4632), kept in this browser across reloads; each tab shows what it holds (file,
 // image, page, site, tool). A tool (#4631) opens as a tab too: openTool(key, title, render); the first tool is the
 // browser of the session's project (components/browserTool.js).
@@ -40,6 +40,10 @@ let tabs = [], on = null, n = 0, session = "";
 const bySession = {};  // name -> {tabs, on}
 const LISTS = { items: "Items", artifacts: "Artifacts" };
 const isList = (x) => x === "items" || x === "artifacts";
+const isBrowser = (target) => String(target || "").startsWith("tool:browser:");
+// A page of maxpm serve itself (the relay's address, #4711) stays in a frame; any other outside page goes to the browser.
+const ownPage = (target) => target === location.origin || target.startsWith(location.origin + "/");
+const isWeb = (target) => /^https?:\/\//i.test(target) && !LOCAL.test(target) && !ownPage(target);
 const tools = {};      // key -> render(box): the tool tabs of #4631
 const panel = () => $("#sessPanel");
 // What the panel shows changed (#4653): fn(session, target or null). The page puts it in its address.
@@ -93,10 +97,12 @@ function save() {
 }
 
 function renderTabs() {
-  // The two lists first, without an X (#4685); then a tab for each thing opened.
+  // The two lists and the project's browser first, without an X (#4685, #5628); then a tab for each thing opened.
+  const br = isBrowser((tabs.find(t => t.id === on) || {}).target);
   $("#spTabs").innerHTML = Object.entries(LISTS).map(([k, title]) => `<span class="sp-tab sp-tab-list${on === k ? " on" : ""}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${on === k}" data-sp-list="${k}">${title}</button></span>`).join("")
-    + tabs.map(t => { const k = kindOf(t.target);
+    + `<span class="sp-tab sp-tab-list${br ? " on" : ""}"><button type="button" class="sp-tab-l" role="tab" aria-selected="${br}" data-sp-brtab>Browser</button></span>`
+    + tabs.filter(t => !isBrowser(t.target)).map(t => { const k = kindOf(t.target);
     const tip = itemOf(t.target) ? t.title || label(t.target) : t.target;  // who opened it last, on the label (#5000)
     return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(tip)}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}" title="${esc(tip + (t.by ? `\nopened by ${t.by}` : ""))}"${t.by ? ` data-by="${esc(t.by)}"` : ""}><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
@@ -181,15 +187,17 @@ async function show(t) {
     });
     return;
   }
-  note(`<div class="muted">Asking whether ${esc(label(t.target))} lets this page show it…</div>`);
-  const r = await fetch(`api/frame-check?url=${encodeURIComponent(t.target)}&token=${encodeURIComponent(await pageToken())}`);
-  const j = r.ok ? await r.json() : { frame: false };
-  if (on !== t.id) return;
-  if (j.title) { t.title = j.title; renderTabs(); }
-  box.replaceChildren();
-  if (j.frame) return frame(t.target);
-  note(`<div class="sp-card"><b>${esc(j.title || label(t.target))}</b><div class="muted">This site does not let another page show it in a frame.</div>
-    <a class="btn primary" href="${esc(t.target)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></div>`);
+  if (ownPage(t.target)) return frame(t.target);
+  // A site tab kept from before #5628: the browser opens it, and the tab goes.
+  tabs = tabs.filter(x => x.id !== t.id);
+  openBrowserTab(t.target);
+}
+
+// The fixed tab Browser (#5628): the browser of the session's project, at url when one is given (it opens there).
+function openBrowserTab(url) {
+  const t = tabs.find(x => isBrowser(x.target));
+  if (t && !url) { reveal(true); return show(t); }
+  return import("./browserTool.js").then(m => m.openBrowser(session, url)).catch(() => {});
 }
 
 // A canvas's frame loads with a full-screen key for "canvas:<id>", never with the page's token: the canvas can read
@@ -819,6 +827,7 @@ export function openInPanel(target, by) {
   if (!target) return;
   if (!isFile(target) && !itemOf(target) && !canvasOf(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https), a full file path, an item (#12), or a canvas (canvas:3)", true);
   reveal(true);
+  if (isWeb(target)) return openBrowserTab(target);  // every site shows and works there (#5628)
   // The same thing again, from any link, list, or session: its tab shows and reads it again (#5000).
   let t = tabOf(tabs, target);
   if (!t) { t = { id: ++n, target: firstTarget(target), title: "" }; tabs.push(t); }
@@ -881,6 +890,7 @@ export function wirePanel() {
   $("#spTabs").addEventListener("click", (e) => {
     const x = e.target.closest("[data-close]"); if (x) return close(+x.dataset.close);
     const l = e.target.closest("[data-sp-list]"); if (l) return showList(l.dataset.spList);
+    if (e.target.closest("[data-sp-brtab]")) return openBrowserTab();
     // data-sp-tab, not data-tab: the page's own click handler reads data-tab as a tab of the page (#4652).
     const t = e.target.closest("[data-sp-tab]"); if (t) show(tabs.find(z => z.id === +t.dataset.spTab));
   });
