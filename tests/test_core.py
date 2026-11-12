@@ -5022,6 +5022,19 @@ class ReleaseWatch(ReleaseBase):
         self.assertNotIn("watch", x)
         self.assertEqual(x["items"][0]["item"], it["id"])
 
+    def test_a_check_of_kind_release_is_a_fault_at_one_failed_run_in_the_watch_and_after_fail_after_outside_it(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/", "errors": "release"}, actor="dev")
+        t = self.release() + timedelta(seconds=1)
+        r = self.run_at("home", t, 503)  # the first run after the release, and the run that confirms it
+        self.assertEqual((core.ops_show(self.c, "site", "home")["state"], r["items"][0]["action"]), ("fault", "opened"))
+        self.assertEqual(core.item_show(self.c, r["items"][0]["item"])["found_during"], self.deploy)
+        core.ops_add(self.c, "site", "api", "url", {"url": "https://api.example.test/", "errors": "release"},
+                     actor="dev")
+        for k in range(3):  # the three runs of its watch pass
+            self.run_at("api", t + timedelta(seconds=61 * k))
+        self.run_at("api", t + timedelta(hours=3), 503)  # after the watch, fail_after (3) counts
+        self.assertEqual(core.ops_show(self.c, "site", "api")["state"], "failing")
+
     def test_a_check_added_after_the_release_runs_on_its_own_schedule(self):
         t = self.release() + timedelta(seconds=5)
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
@@ -10054,6 +10067,74 @@ class Ops(Base):
                          "2 lines match in 15m (limit 3)")
         self.run_at("site", "errors", t + timedelta(minutes=25), self.proc(1, ""))
         self.assertIn("could not run", core.ops_history(self.c, "site", "errors", 1)["runs"][0]["summary"])
+
+    def seq(self, *results):
+        """A fake runner that answers each run with the next (code, output)."""
+        left = list(results)
+
+        def runner(cmd, folder, limit, env):
+            code, out = left.pop(0)
+            r = subprocess.CompletedProcess(cmd, code, out, "")
+            r.timed_out = False
+            return r
+        return runner
+
+    def test_before_a_new_fault_opens_an_item_the_check_runs_once_again_and_a_pass_opens_nothing(self):
+        core.ops_add(self.c, "site", "api", "cmd", {"command": "check_api", "fail_after": 1}, actor="boss")
+        t = core.now()
+        r = self.run_at("site", "api", t, self.seq((2, "down"), (0, "up")))  # a blip: the run again passes
+        self.assertEqual((self.state("site", "api"), r["items"], r["confirms"]), ("healthy", [], r["run"] - 1))
+        runs = core.ops_history(self.c, "site", "api")["runs"]
+        self.assertEqual([(x["status"], x["confirms"]) for x in runs], [("ok", runs[1]["id"]), ("critical", None)])
+        self.assertFalse([e for e in self.events("site", "api") if e[1] == "fault"])
+        r = self.run_at("site", "api", t + timedelta(minutes=5), self.seq((2, "down"), (2, "still down")))
+        self.assertEqual((self.state("site", "api"), r["items"][0]["action"]), ("fault", "opened"))
+        self.assertEqual(r["changes"], [{"key": "ops:site:api", "from": "healthy", "to": "fault"}])
+        core.config_set(self.c, "ops_confirm", "off")  # off: the run that makes the fault opens the item
+        core.ops_add(self.c, "site", "db", "cmd", {"command": "check_db", "fail_after": 1}, actor="boss")
+        r = self.run_at("site", "db", t, self.seq((2, "down")))
+        self.assertEqual((self.state("site", "db"), "confirms" in r), ("fault", False))
+
+    def test_a_check_of_kind_never_is_a_fault_at_its_first_failed_run(self):
+        core.ops_add(self.c, "site", "leak", "cmd", {"command": "find_secrets", "errors": "never"}, actor="boss")
+        c = core.ops_show(self.c, "site", "leak")
+        self.assertEqual((c["fail_after"], c["errors"]), (3, "never"))
+        self.assertIn("fault at the first failed run", self.history()[-1])
+        self.run_at("site", "leak", core.now(), self.proc(2, "a key in the log"))
+        self.assertEqual(self.state("site", "leak"), "fault")
+        self.assertEqual(core.ops_profile_export(self.c, "site")["checks"][0]["errors"], "never")
+
+    def test_a_log_check_of_kind_outside_counts_the_different_sources_not_the_lines(self):
+        with self.assertRaisesRegex(RiverError, "needs a group that names the source"):
+            core.ops_add(self.c, "site", "bad", "log", {"command": "tail_new", "pattern": "ERROR", "errors": "outside"},
+                         actor="boss")
+        with self.assertRaisesRegex(RiverError, "it needs a log check"):
+            core.ops_add(self.c, "site", "bad", "cmd", {"command": "x", "errors": "outside"}, actor="boss")
+        core.ops_add(self.c, "site", "4xx", "log", {"command": "tail_new", "pattern": r"400 from (\S+)", "limit": 3,
+                                                   "fail_after": 1, "errors": "outside"}, actor="boss")
+        t = core.now()
+        self.run_at("site", "4xx", t, self.proc(0, "400 from bot\n" * 50 + "400 from a\n"))
+        run = core.ops_history(self.c, "site", "4xx", 1)["runs"][0]
+        self.assertEqual((run["status"], run["summary"]), ("ok", "2 different sources in 15m (limit 3; 51 lines)"))
+        self.run_at("site", "4xx", t + timedelta(minutes=5), self.proc(0, "400 from b\n"))
+        run = core.ops_history(self.c, "site", "4xx", 1)["runs"][0]
+        self.assertEqual((run["status"], run["summary"]), ("critical", "3 different sources in 15m (limit 3; 52 lines)"))
+        self.assertEqual(self.state("site", "4xx"), "fault")
+
+    def test_a_log_check_of_kind_ours_fails_only_over_its_normal_rate(self):
+        with self.assertRaisesRegex(RiverError, "needs --normal"):
+            core.ops_add(self.c, "site", "bad", "log", {"command": "tail_new", "pattern": "ERROR", "errors": "ours"},
+                         actor="boss")
+        core.ops_add(self.c, "site", "500", "log", {"command": "tail_new", "pattern": "ERROR", "normal": 8,
+                                                   "fail_after": 1, "errors": "ours"}, actor="boss")
+        t = core.now()
+        self.run_at("site", "500", t, self.proc(0, "ERROR a\nERROR b\n"))  # 8 an hour is 2 in 15m: normal
+        run = core.ops_history(self.c, "site", "500", 1)["runs"][0]
+        self.assertEqual((run["status"], run["summary"]), ("ok", "2 lines match in 15m; normal 8 an hour, 2.0 in 15m "
+                                                                 "(limit 1)"))
+        self.run_at("site", "500", t + timedelta(minutes=5), self.proc(0, "ERROR c\n"))
+        self.assertEqual(core.ops_history(self.c, "site", "500", 1)["runs"][0]["status"], "critical")
+        self.assertEqual(self.state("site", "500"), "fault")
 
     def test_with_subject_on_each_line_of_the_output_has_its_own_state(self):
         core.ops_add(self.c, "site", "queues", "cmd", {"command": "check_queues", "subject": True, "fail_after": 2},

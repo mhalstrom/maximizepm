@@ -1020,6 +1020,12 @@ def build_parser(only=None):
         x.add_argument("--pattern", help="log: a regular expression; the lines that match count")
         x.add_argument("--limit", type=int, help="log: the count of lines in the window that is a failure (default 1)")
         x.add_argument("--window", help="log: the time the count covers (default 15m)")
+        x.add_argument("--normal", type=float, help="log, with --errors ours: the usual count of matching lines in "
+                       "one hour; the check fails when its window holds more than that rate")
+        x.add_argument("--errors", choices=tuple(core.OPS_ERRORS), help="the kind of error, when failures are a "
+                       "fault: runs (fail-after failed runs in a row, the default), never (the first failed run), "
+                       "ours (log: more lines than the normal rate), outside (log: limit different sources, the first "
+                       "group of the pattern), release (one failed run after a release)")
         x.add_argument("--period", help="beat: the longest time between two beats, for example 1h")
         d = core.OPS_DEFAULTS
         x.add_argument("--every", help="how often it runs" + (f" (default {d['every']})" if add else ""))
@@ -2663,7 +2669,7 @@ def _expert_cmd(conn, a, actor):
 
 
 _OPS_FIELDS = ("url", "statuses", "body", "command", "pattern", "limit", "window", "period", "every", "fail_after",
-               "recover_after", "timeout", "severity", "runbook", "repair", "layer", "cron")
+               "recover_after", "timeout", "severity", "runbook", "repair", "layer", "cron", "normal", "errors")
 
 
 def _ops_profile_file(path):
@@ -4974,6 +4980,8 @@ def render_ops(a, res):
         print("runs, newest first:" if res["runs"] else "no runs yet: maxpm serve runs it when it is due")
         for r in res["runs"]:
             print(f"    {_ops_run_line(r)}")
+            if r.get("confirms"):
+                print(f"        it confirms the new fault of run {r['confirms']}, at once")
             if r.get("missed"):
                 m = json.loads(r["missed"])
                 print(f"        after a stop: {m['count']} times were due between {core.show_time(m['since'])} and "

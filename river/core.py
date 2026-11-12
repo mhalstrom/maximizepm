@@ -265,6 +265,9 @@ DEFAULT_SETTINGS = {
     # in the watch is linked to the deploy item. A shipped fix whose check this is gets its verdict at the watch's
     # end (#5461).
     "ops_watch_every": "1m",
+    # Before a new fault opens an item, maxpm serve runs the check once again at once (#5505): the fault comes only
+    # when that run fails too. off: the run that makes the fault opens the item.
+    "ops_confirm": "on",
     "ops_reopen_within": "24h",
     "ops_storm_count": "3",
     "ops_storm_window": "5m",
@@ -1011,6 +1014,7 @@ CREATE TABLE IF NOT EXISTS checks (
   layer         TEXT NOT NULL DEFAULT 'app',  -- what it watches (OPS_LAYERS): a fault of a lower layer gives the kind
   cron          TEXT,                    -- a cron expression (five fields): it runs then, not every N (#5506)
   outside       INTEGER NOT NULL DEFAULT 0,  -- 1: the watchdog runs it (maxpm ops check --outside), not maxpm serve
+  errors        TEXT NOT NULL DEFAULT 'runs',  -- the kind of error (OPS_ERRORS): when failures are a fault (#5505)
   paused_until  TEXT,
   last_beat     TEXT,                    -- beat: when the project's own job last sent one (maxpm ops beat)
   state         TEXT NOT NULL DEFAULT 'new',  -- new, healthy, failing, fault, recovered, paused
@@ -1037,7 +1041,8 @@ CREATE TABLE IF NOT EXISTS ops_runs (
   evidence    TEXT,                      -- one JSON object from the later lines of a plugin's output, if any
   output      TEXT,                      -- the last lines
   subjects    TEXT,                      -- subject on: each subject's status in this run, as JSON
-  missed      TEXT                       -- after a stop: {"count", "since", "until"}: the times due that ran once (#5506)
+  missed      TEXT,                      -- after a stop: {"count", "since", "until"}: the times due that ran once (#5506)
+  confirms    INTEGER                    -- the run whose new fault this run confirms (ops_confirm, #5505)
 );
 
 -- One row for each change of the state of a check, or of one subject of it (#5336 reads it: faults per week, the
@@ -1468,6 +1473,11 @@ def _migrate(conn):
     # The watchdog (#5441): a check marked outside runs in maxpm ops check --outside, not in maxpm serve.
     if "outside" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
         conn.execute("ALTER TABLE checks ADD COLUMN outside INTEGER NOT NULL DEFAULT 0")
+    # The kind of error of a check (#5505), and the run that confirms a new fault before it opens an item.
+    if "errors" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
+        conn.execute("ALTER TABLE checks ADD COLUMN errors TEXT NOT NULL DEFAULT 'runs'")
+    if "confirms" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
+        conn.execute("ALTER TABLE ops_runs ADD COLUMN confirms INTEGER")
     if "backlog_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN backlog_at TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN backlog_note TEXT")
@@ -1892,7 +1902,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_runners", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "web_terminal",
+    elif key in ("fresh_sessions", "serve_runners", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "web_terminal",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -3334,7 +3344,7 @@ OPS_FORMS = {
               "2 CRITICAL, 3 UNKNOWN; the first line is the status, later lines may hold one JSON object of evidence",
 }
 OPS_FORM_FIELDS = {"url": ("url", "statuses", "body"), "beat": ("period",), "cmd": ("command",),
-                   "log": ("command", "pattern", "limit", "window"), "plugin": ("command",)}
+                   "log": ("command", "pattern", "limit", "window", "normal"), "plugin": ("command",)}
 OPS_COMMAND_FORMS = ("cmd", "log", "plugin")  # they run a command outside the sandbox (decision 2 of #5380)
 OPS_SEVERITIES = ("page", "item", "note")
 # What a check watches (#5509). app: the project itself (the default). dependency: an outside vendor; while it is in
@@ -3342,6 +3352,16 @@ OPS_SEVERITIES = ("page", "item", "note")
 # a quota) and service (a process, a container, the database service): a lower layer; a fault of it that came first
 # gives the faults of the other checks its kind (capacity or service down).
 OPS_LAYERS = {"app": None, "dependency": "dependency", "capacity": "capacity", "service": "service-down"}
+# The kind of error of a check (#5505, decision 2 of canvas problem-kinds): when its failures are a fault. runs: the
+# default, fail_after failed runs in a row (a log check fails at limit lines in its window). never: a thing that
+# must never happen; the first failed run is a fault. ours: our own errors, a log check whose count is normal at a
+# rate (normal lines an hour); it fails when the lines in its window pass that rate and reach limit. outside:
+# errors that people or sources outside cause, a log check that counts the different sources (the first group of
+# its pattern), not the lines; it fails at limit sources in its window. release: a check that watches a release;
+# one failed run in the release watch is a fault, and outside the watch it counts as runs.
+OPS_ERRORS = {"runs": "fail_after failed runs in a row", "never": "the first failed run is a fault",
+              "ours": "log: more lines in the window than the normal rate an hour", "outside":
+              "log: limit different sources in the window, not lines", "release": "one failed run after a release"}
 OPS_DEFAULTS = {"every": "5m", "fail_after": 3, "recover_after": 2, "timeout": "30s", "severity": "item",
                 "statuses": "200-399"}
 _OPS_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -3459,6 +3479,17 @@ def _ops_build(form, fields, old=None):
             raise RiverError("--limit is at least 1: the check is healthy while the count stays below it")
         cfg["window"] = cfg.get("window") or "15m"
         parse_duration(cfg["window"])
+        if cfg.get("normal") is not None:
+            try:
+                cfg["normal"] = float(cfg["normal"])
+            except (TypeError, ValueError):
+                raise RiverError(f"bad --normal {cfg['normal']!r}: the usual count of matching lines in one hour")
+            if cfg["normal"] < 0:
+                raise RiverError("--normal is 0 or more: the usual count of matching lines in one hour")
+            if cfg["normal"] == int(cfg["normal"]):
+                cfg["normal"] = int(cfg["normal"])
+        else:
+            cfg.pop("normal", None)
     if form == "beat":
         if not cfg.get("period"):
             raise RiverError("a beat check needs --period: the longest time between two beats, for example 1h")
@@ -3494,6 +3525,17 @@ def _ops_build(form, fields, old=None):
     if col["layer"] not in OPS_LAYERS:
         raise RiverError(f"no layer {col['layer']!r}: app (the project itself), dependency (an outside vendor), "
                          f"capacity (a disk, memory, a quota) or service (a process, the database service)")
+    col["errors"] = fields.get("errors") or old.get("errors") or "runs"
+    if col["errors"] not in OPS_ERRORS:
+        raise RiverError(f"no kind of error {col['errors']!r}: " + "; ".join(f"{k} ({v})" for k, v in OPS_ERRORS.items()))
+    if col["errors"] in ("ours", "outside") and form != "log":
+        raise RiverError(f"--errors {col['errors']} counts log lines: it needs a log check, and this is a {form} check")
+    if col["errors"] == "ours" and cfg.get("normal") is None:
+        raise RiverError("--errors ours needs --normal: the usual count of matching lines in one hour (the check "
+                         "fails when the window holds more than that rate)")
+    if col["errors"] == "outside" and not re.compile(cfg["pattern"]).groups:
+        raise RiverError("--errors outside counts different sources: the --pattern needs a group that names the "
+                         "source, for example 'from (\\S+)'")
     col["subject"] = bool(fields["subject"]) if fields.get("subject") is not None else bool(old.get("subject"))
     col["outside"] = bool(fields["outside"]) if fields.get("outside") is not None else bool(old.get("outside"))
     if col["subject"] and form not in OPS_COMMAND_FORMS:
@@ -3506,15 +3548,25 @@ def _ops_summary(c):
     what = {"url": lambda: f"GET {cfg['url']} ({cfg['statuses']}" + (f", body has {cfg['body']!r})" if cfg.get("body") else ")"),
             "beat": lambda: f"a beat at least every {cfg['period']}",
             "cmd": lambda: cfg["command"], "plugin": lambda: cfg["command"],
-            "log": lambda: f"{cfg['command']}: fewer than {cfg['limit']} lines match {cfg['pattern']!r} in {cfg['window']}"}
+            "log": lambda: f"{cfg['command']}: " + (
+                f"fewer than {cfg['limit']} different sources match {cfg['pattern']!r} in {cfg['window']}"
+                if c.get("errors") == "outside" else
+                f"lines that match {cfg['pattern']!r} in {cfg['window']} stay at the normal {cfg.get('normal')} an hour"
+                f" or below {cfg['limit']}" if c.get("errors") == "ours" else
+                f"fewer than {cfg['limit']} lines match {cfg['pattern']!r} in {cfg['window']}")}
     when = f"at cron '{c['cron']}'" if c.get("cron") else f"every {c['every']}"
-    return (f"{c['form']} {what[c['form']]()}; {when}, fault after {c['fail_after']}, {c['severity']}"
+    errors = c.get("errors") or "runs"
+    fault = (f"fault after {c['fail_after']}" if errors in ("runs", "ours", "outside") else
+             "fault at the first failed run" if errors == "never" else
+             f"fault at one failed run after a release, else after {c['fail_after']}")
+    return (f"{c['form']} {what[c['form']]()}; {when}, {fault}, {c['severity']}"
+            + (f", errors {errors}" if errors != "runs" else "")
             + (f", layer {c['layer']}" if c.get("layer", "app") != "app" else "")
             + ("; outside serve (the watchdog runs it)" if c.get("outside") else ""))
 
 
 _OPS_COLS = ("form", "config", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "subject",
-             "repair", "layer", "outside", "cron")
+             "repair", "layer", "outside", "cron", "errors")
 
 
 def _ops_name(name):
@@ -3533,12 +3585,12 @@ def _ops_refuse(conn, actor, *checks):
 def _ops_insert(conn, kind, scope, name, col, actor):
     """Write a new check (inside the caller's tx; the caller checked the rights)."""
     conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
-                 "severity,runbook,subject,repair,layer,outside,cron,created_by,created_at) "
-                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 "severity,runbook,subject,repair,layer,outside,cron,errors,created_by,created_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (kind, scope, name, col["form"], json.dumps(col["config"]), col["every"], col["fail_after"],
                   col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
-                  col["repair"], col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"), actor,
-                  iso(now())))
+                  col["repair"], col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"),
+                  col.get("errors") or "runs", actor, iso(now())))
     c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
     _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else ""))
@@ -3550,15 +3602,17 @@ def _ops_update(conn, old, col, actor):
     col = dict(col, layer=col.get("layer") or old.get("layer") or "app")  # a proposal from before #5509 has none
     col.setdefault("outside", False)  # and one from before #5441
     col.setdefault("cron", old.get("cron"))  # and one from before #5506
+    col.setdefault("errors", old.get("errors") or "runs")  # and one from before #5505
     changed = [k for k in _OPS_COLS if col[k] != old[k]]
     if not changed:
         return [], old
     conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
-                 " runbook=?, subject=?, repair=?, layer=?, outside=?, cron=?, changed_by=?, changed_at=? WHERE id=?",
+                 " runbook=?, subject=?, repair=?, layer=?, outside=?, cron=?, errors=?, changed_by=?, changed_at=?"
+                 " WHERE id=?",
                  (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
                   col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"],
-                  col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"), actor, iso(now()),
-                  old["id"]))
+                  col.get("layer") or "app", int(bool(col.get("outside"))), col.get("cron"), col["errors"], actor,
+                  iso(now()), old["id"]))
     c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
     _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} changed ({', '.join(changed)}): {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
@@ -3619,7 +3673,7 @@ def ops_rm(conn, scope, name, actor=None):
 # idempotent, and it keeps the state and the pause of a check that stays.
 OPS_PROFILE_VERSION = 1
 _OPS_CHECK_KEYS = ({"name", "form", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "repair",
-                    "layer", "subject", "outside", "cron"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
+                    "layer", "subject", "outside", "cron", "errors"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
 
 
 def _ops_settings_scope(conn, kind, scope):
@@ -3645,6 +3699,8 @@ def ops_profile_export(conn, scope):
             d["layer"] = c["layer"]
         if c.get("cron"):
             d["cron"] = c["cron"]
+        if c.get("errors", "runs") != "runs":
+            d["errors"] = c["errors"]
         if c["subject"]:
             d["subject"] = True
         if c["outside"]:
@@ -4563,13 +4619,16 @@ def ops_execute(run, at=None):
                 res.update(status="ok", matches=len(hits), evidence={"lines": hits[-20:]} if hits else None)
                 if quiet:
                     res["evidence"] = dict(res["evidence"] or {}, noise=len(quiet))
-                if c["subject"]:
+                if c["subject"] or c.get("errors") == "outside":
                     per = {}
                     for x in hits:
                         m = pat.search(x)
                         name = (m.group(1) if m.re.groups and m.group(1) else (x.split() or ["-"])[0])
                         per[name] = per.get(name, 0) + 1
-                    res["subjects"] = {k: {"matches": n} for k, n in per.items()}
+                    if c["subject"]:
+                        res["subjects"] = {k: {"matches": n} for k, n in per.items()}
+                    if c.get("errors") == "outside" and per:  # the sources of this run, for the count in the window
+                        res["evidence"] = dict(res["evidence"] or {}, sources=per)
         if c["subject"] and form in ("cmd", "plugin") and code is not None and not timed_out:
             res["subjects"] = _ops_subjects(lines, res["status"])
     res["seconds"] = round(time.monotonic() - t0, 2)
@@ -4609,29 +4668,58 @@ def _ops_subject_state(conn, check_id, key):
     return r["state"] if r else "new"
 
 
-def ops_record(conn, run, res, at=None):
+def _ops_fail_after(conn, cur, run):
+    """The failed runs in a row that make a fault, by the check's kind of error (OPS_ERRORS): 1 for never, 1 for
+    release in a run of the release watch, else fail_after."""
+    errors = cur["errors"] if "errors" in cur.keys() else "runs"
+    if errors == "never" or (errors == "release" and _ops_watch_of_run(conn, run)):
+        return 1
+    return cur["fail_after"]
+
+
+def ops_record(conn, run, res, at=None, hold=False):
     """Close a run: its row in ops_runs, the state of the check and of each subject, and one ops_events row for
-    each change of state. A log check counts the matching lines of every run in its window."""
+    each change of state. A log check counts the matching lines of every run in its window, or by its kind of
+    error the different sources (outside) or the lines over the normal rate (ours). hold: a key that would go to
+    fault now stays failing, and out["confirm"] says so: ops_finish runs the check once again at once, and that run
+    decides (#5505)."""
     at = at or now()
     c = run["check"]
     out = {"run": run["id"], "check": f"{c['scope']}/{c['name']}", "status": res["status"], "changes": []}
     with tx(conn):
         cur = conn.execute("SELECT * FROM checks WHERE id=?", (c["id"],)).fetchone()
         cfg = json.loads(cur["config"]) if cur else c["config"]
+        errors = (cur["errors"] if cur is not None else c.get("errors")) or "runs"
         if c["form"] == "log" and res["matches"] is not None and cur is not None:
             since = iso(at - parse_duration(cfg.get("window") or "15m"))
             total, subj = res["matches"], dict(res["subjects"] or {})
+            sources = set(((res["evidence"] or {}).get("sources") or {}))
             for r in conn.execute("SELECT evidence, subjects FROM ops_runs WHERE check_id=? AND id<>? AND started_at>=? "
                                   "AND ended_at IS NOT NULL", (c["id"], run["id"], since)):
                 ev = json.loads(r["evidence"]) if r["evidence"] else {}
                 total += int(ev.get("matches") or 0)
+                sources |= set(ev.get("sources") or {})
                 for k, v in (json.loads(r["subjects"]) if r["subjects"] else {}).items():
                     subj.setdefault(k, {"matches": 0})
                     subj[k] = {"matches": subj[k]["matches"] + int(v.get("matches") or 0)}
             limit = int(cfg.get("limit") or 1)
-            res["status"] = "critical" if total >= limit else "ok"
-            res["summary"] = f"{total} line{'s' if total != 1 else ''} match in {cfg.get('window')} (limit {limit})"
+            window = cfg.get("window")
+            if errors == "outside":
+                res["status"] = "critical" if len(sources) >= limit else "ok"
+                res["summary"] = (f"{len(sources)} different source{'s' if len(sources) != 1 else ''} in {window} "
+                                  f"(limit {limit}; {total} line{'s' if total != 1 else ''})")
+            elif errors == "ours":
+                normal = float(cfg.get("normal") or 0)
+                rate = normal * parse_duration(window or "15m").total_seconds() / 3600
+                res["status"] = "critical" if total > rate and total >= limit else "ok"
+                res["summary"] = (f"{total} line{'s' if total != 1 else ''} match in {window}; normal "
+                                  f"{cfg.get('normal')} an hour, {round(rate, 1)} in {window} (limit {limit})")
+            else:
+                res["status"] = "critical" if total >= limit else "ok"
+                res["summary"] = f"{total} line{'s' if total != 1 else ''} match in {window} (limit {limit})"
             res["evidence"] = {**(res["evidence"] or {}), "matches": res["matches"], "in_window": total}
+            if errors == "outside":
+                res["evidence"]["sources_in_window"] = len(sources)
             if c["subject"]:
                 res["subjects"] = {k: {"status": "critical" if v["matches"] >= limit else "ok",
                                        "matches": res["subjects"].get(k, {}).get("matches", 0) if res["subjects"] else 0,
@@ -4645,10 +4733,12 @@ def ops_record(conn, run, res, at=None):
                       run["id"]))
         if cur is None:  # removed while it ran: the run stays in the history
             return out
-        fa, ra = cur["fail_after"], cur["recover_after"]
+        fa, ra = _ops_fail_after(conn, cur, run), cur["recover_after"]
         runs = conn.execute("SELECT status, subjects FROM ops_runs WHERE check_id=? AND ended_at IS NOT NULL "
-                            "ORDER BY id DESC LIMIT ?", (c["id"], max(fa, ra) + 50)).fetchall()
+                            "ORDER BY id DESC LIMIT ?", (c["id"], max(cur["fail_after"], ra) + 50)).fetchall()
         new = ops_next_state(cur["state"], [r["status"] for r in runs], fa, ra)
+        if hold and new == "fault" and cur["state"] != "fault":
+            new, out["confirm"] = "failing", True
         changes = []
         if new != cur["state"]:
             conn.execute("UPDATE checks SET state=? WHERE id=?", (new, c["id"]))
@@ -4666,6 +4756,8 @@ def ops_record(conn, run, res, at=None):
                         hist.append(s.get(name, {}).get("status", "ok"))
                 old = _ops_subject_state(conn, c["id"], key)
                 nxt = ops_next_state(old, hist, fa, ra)
+                if hold and nxt == "fault" and old != "fault":
+                    nxt, out["confirm"] = "failing", True
                 if nxt != old and not (old == "new" and nxt == "healthy"):
                     changes.append((key, old, nxt, (res["subjects"].get(name) or {}).get("text") or "not in the output"))
         for key, old, nxt, note in changes:
@@ -4677,9 +4769,37 @@ def ops_record(conn, run, res, at=None):
 
 def ops_finish(conn, run, at=None):
     """Run an open run and record it (a thread of maxpm serve calls it), then keep its fault items (ops_faults).
-    Never an error: a failure to record leaves the run open, and ops_close_lost closes it later as unknown."""
+    Never an error: a failure to record leaves the run open, and ops_close_lost closes it later as unknown.
+    Before a new fault of a url, cmd or plugin check opens an item, the check runs once again at once (setting
+    ops_confirm, #5505): the fault and its item come only when that run fails too, and nothing opens when it
+    passes."""
     res = ops_execute(run, at)
-    rec = ops_record(conn, run, res, at)
+    # A log check's window already holds the earlier runs, and a beat check reads a time, so a second run of
+    # either at once gives the same answer: only url, cmd and plugin checks run again.
+    confirm = run["check"]["form"] in ("url", "cmd", "plugin") and \
+        setting(conn, "ops_confirm", project_id=_ops_scope_project_id(conn, run["check"])) == "on"
+    rec = ops_record(conn, run, res, at, hold=confirm)
+    if rec.pop("confirm", False):
+        again = ops_start(conn, dict(run["check"], missed=None), at, run.get("actor"))
+        if again is not None:
+            with tx(conn):
+                conn.execute("UPDATE ops_runs SET confirms=? WHERE id=?", (run["id"], again["id"]))
+            first, found = rec, run
+            run, res = again, ops_execute(again, at)
+            rec = ops_record(conn, again, res, at)
+            rec["confirms"] = first["run"]
+            # One change for each key across both runs: healthy, then failing, then fault is healthy to fault.
+            merged = {}
+            for ch in first["changes"] + rec["changes"]:
+                merged[ch["key"]] = {"key": ch["key"], "from": merged.get(ch["key"], ch)["from"], "to": ch["to"]}
+            rec["changes"] = [ch for ch in merged.values() if ch["from"] != ch["to"]]
+            # The release watch is the one of the run that found the fault: the confirming run may be one past it.
+            watch = _ops_watch_of_run(conn, again) or _ops_watch_of_run(conn, found)
+            rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at, watch)
+            if watch:
+                rec["watch"] = _ops_watch_end(conn, again if again["id"] in watch["runs"] else found, rec, watch,
+                                              rec["items"])
+            return rec
     watch = _ops_watch_of_run(conn, run)
     rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at, watch)
     if watch:
