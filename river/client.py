@@ -206,8 +206,8 @@ def run_remote(words, env=None, cwd=None):
 
 
 # mark 2026-11-12: MaximizePM runs on Windows only inside WSL 2 (a Linux system); native Windows is not supported.
-WSL_ONLY = ("MaximizePM runs on Windows only inside WSL 2. Install WSL 2 (wsl --install; "
-            "https://learn.microsoft.com/windows/wsl/install), then install and run maxpm in its Linux terminal")
+WSL_ONLY = ("MaximizePM runs on Windows only inside WSL 2. Install WSL 2, then install and run maxpm in its Linux "
+            "terminal: https://github.com/mhalstrom/maximizepm#windows")
 
 
 def refuse_native_windows():
