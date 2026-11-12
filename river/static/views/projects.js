@@ -41,11 +41,12 @@ export function renderProjects() {
     // The folder, the target and the tracker are a hover on the counts (#5082): nobody acts on them here.
     const meta = [home ? "folder " + home : "no folder", p.target ? "deploys to " + p.target : "", p.tracker ? "tracker " + p.tracker : ""].filter(Boolean);
     const me = actor();
+    // One + goal in one place: the goal box, under the goal cards, also when the project has none yet (#5423).
     return projCard(p, isClosed, `<div class="pcounts" title="${esc(meta.join(" · ") + (closedN ? ` · ${closedN} done` : "") + (backlog.length ? ` · ${backlog.length} in backlog` : ""))}">${countChip(ready, "ready", "c-ready")}${countChip(prog, "in progress", "c-in_progress")}${who.length ? `<span class="muted t-s">${who.map(esc).join(", ")}</span>` : ""}</div>
       <div class="pbody">
         <div class="pdesc t-s">${p.notes ? noteLine(p) : `<span class="link" data-describe="${esc(p.name)}">+ description</span>`}</div>
-        ${pg.length ? `<div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<div class="gc-add">${button("+ goal", { cls: "plain", data: { addgoal: p.name } })}</div></div>` : ""}
-        <div class="psec">${open.length} open${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}${pg.length ? "" : ` <span class="link t-s" data-addgoal="${esc(p.name)}">+ goal</span>`}</div>
+        <div class="goals">${pg.map(g => goalCard(g, { selected: G === g.name, me })).join("")}<div class="gc-add">${button("+ goal", { cls: "plain", data: { addgoal: p.name } })}</div></div>
+        <div class="psec">${open.length} open${showDone && closed.length ? `, ${closed.length} done` : ""}${showBacklog && backlog.length ? `, ${backlog.length} in backlog` : ""}</div>
         <div class="ptable" data-ptable="${esc(p.name)}"></div>
       </div>`);
   }).join("");
