@@ -253,6 +253,10 @@ DEFAULT_SETTINGS = {
     # A noise rule (#5504, maxpm ops noise add) ends after at most ops_noise_max when an agent adds it (decision 1 of
     # canvas problem-kinds: the investigating agent adds a rule with a 30-day end, and the manager sees each one).
     "ops_noise_max": "30d",
+    # The kinds of problems (#5509): a fault whose first failed run comes within this time after a release of its
+    # target, and that did not fail in the 30 days before it, is of the kind release regression. A project's system
+    # description can set its own (rules.release_window).
+    "ops_release_window": "2h",
     # The release watch (#5459): after each release of a deploy target (its deploy item is done), each check of the
     # target and of its projects runs at once, then every ops_watch_every (when its own every is longer) until
     # fail_after runs (or recover_after, when larger) have ended since the release; then on its own schedule. A fault
@@ -994,6 +998,7 @@ CREATE TABLE IF NOT EXISTS checks (
   runbook       TEXT,                    -- for the agent that investigates a fault
   subject       INTEGER NOT NULL DEFAULT 0,  -- 1: each line of the output names a subject with its own fault
   repair        TEXT,                    -- a command that fixes a known fault
+  layer         TEXT NOT NULL DEFAULT 'app',  -- what it watches (OPS_LAYERS): a fault of a lower layer gives the kind
   paused_until  TEXT,
   last_beat     TEXT,                    -- beat: when the project's own job last sent one (maxpm ops beat)
   state         TEXT NOT NULL DEFAULT 'new',  -- new, healthy, failing, fault, recovered, paused
@@ -1401,6 +1406,9 @@ def _migrate(conn):
     # Operations checks (#5430): a check of the form beat keeps its last beat; a run keeps each subject's status.
     if "last_beat" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
         conn.execute("ALTER TABLE checks ADD COLUMN last_beat TEXT")
+    # The kinds of problems (#5509): a check's layer says what a fault of it means for the other checks.
+    if "layer" not in {r["name"] for r in conn.execute("PRAGMA table_info(checks)")}:
+        conn.execute("ALTER TABLE checks ADD COLUMN layer TEXT NOT NULL DEFAULT 'app'")
     if "subjects" not in {r["name"] for r in conn.execute("PRAGMA table_info(ops_runs)")}:
         conn.execute("ALTER TABLE ops_runs ADD COLUMN subjects TEXT")
     if "backlog_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
@@ -1752,7 +1760,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_watch_every", "ops_noise_max", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_watch_every", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -3268,6 +3276,11 @@ OPS_FORM_FIELDS = {"url": ("url", "statuses", "body"), "beat": ("period",), "cmd
                    "log": ("command", "pattern", "limit", "window"), "plugin": ("command",)}
 OPS_COMMAND_FORMS = ("cmd", "log", "plugin")  # they run a command outside the sandbox (decision 2 of #5380)
 OPS_SEVERITIES = ("page", "item", "note")
+# What a check watches (#5509). app: the project itself (the default). dependency: an outside vendor; while it is in
+# fault, the faults of the other checks of the project are of the kind outside dependency. capacity (a disk, memory,
+# a quota) and service (a process, a container, the database service): a lower layer; a fault of it that came first
+# gives the faults of the other checks its kind (capacity or service down).
+OPS_LAYERS = {"app": None, "dependency": "dependency", "capacity": "capacity", "service": "service-down"}
 OPS_DEFAULTS = {"every": "5m", "fail_after": 3, "recover_after": 2, "timeout": "30s", "severity": "item",
                 "statuses": "200-399"}
 _OPS_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -3410,6 +3423,10 @@ def _ops_build(form, fields, old=None):
     for k in ("runbook", "repair"):
         v = fields.get(k)
         col[k] = (v.strip() or None) if v is not None else old.get(k)
+    col["layer"] = fields.get("layer") or old.get("layer") or "app"
+    if col["layer"] not in OPS_LAYERS:
+        raise RiverError(f"no layer {col['layer']!r}: app (the project itself), dependency (an outside vendor), "
+                         f"capacity (a disk, memory, a quota) or service (a process, the database service)")
     col["subject"] = bool(fields["subject"]) if fields.get("subject") is not None else bool(old.get("subject"))
     if col["subject"] and form not in OPS_COMMAND_FORMS:
         raise RiverError(f"a {form} check has no subjects: only a cmd, log, or plugin check names them in its output")
@@ -3422,11 +3439,12 @@ def _ops_summary(c):
             "beat": lambda: f"a beat at least every {cfg['period']}",
             "cmd": lambda: cfg["command"], "plugin": lambda: cfg["command"],
             "log": lambda: f"{cfg['command']}: fewer than {cfg['limit']} lines match {cfg['pattern']!r} in {cfg['window']}"}
-    return f"{c['form']} {what[c['form']]()}; every {c['every']}, fault after {c['fail_after']}, {c['severity']}"
+    return (f"{c['form']} {what[c['form']]()}; every {c['every']}, fault after {c['fail_after']}, {c['severity']}"
+            + (f", layer {c['layer']}" if c.get("layer", "app") != "app" else ""))
 
 
 _OPS_COLS = ("form", "config", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "subject",
-             "repair")
+             "repair", "layer")
 
 
 def _ops_name(name):
@@ -3445,10 +3463,11 @@ def _ops_refuse(conn, actor, *checks):
 def _ops_insert(conn, kind, scope, name, col, actor):
     """Write a new check (inside the caller's tx; the caller checked the rights)."""
     conn.execute("INSERT INTO checks(scope_kind,scope,name,form,config,every,fail_after,recover_after,timeout,"
-                 "severity,runbook,subject,repair,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 "severity,runbook,subject,repair,layer,created_by,created_at) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (kind, scope, name, col["form"], json.dumps(col["config"]), col["every"], col["fail_after"],
                   col["recover_after"], col["timeout"], col["severity"], col["runbook"], int(col["subject"]),
-                  col["repair"], actor, iso(now())))
+                  col["repair"], col.get("layer") or "app", actor, iso(now())))
     c = _ops_row(_ops_check(conn, f"{kind}:{scope}", name))
     _event(conn, None, actor, f"ops check {scope}/{name} added: {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else ""))
@@ -3457,14 +3476,15 @@ def _ops_insert(conn, kind, scope, name, col, actor):
 
 def _ops_update(conn, old, col, actor):
     """Write the new columns of a check (inside the caller's tx). Returns the changed columns and the check."""
+    col = dict(col, layer=col.get("layer") or old.get("layer") or "app")  # a proposal from before #5509 has none
     changed = [k for k in _OPS_COLS if col[k] != old[k]]
     if not changed:
         return [], old
     conn.execute("UPDATE checks SET form=?, config=?, every=?, fail_after=?, recover_after=?, timeout=?, severity=?,"
-                 " runbook=?, subject=?, repair=?, changed_by=?, changed_at=? WHERE id=?",
+                 " runbook=?, subject=?, repair=?, layer=?, changed_by=?, changed_at=? WHERE id=?",
                  (col["form"], json.dumps(col["config"]), col["every"], col["fail_after"], col["recover_after"],
-                  col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"], actor,
-                  iso(now()), old["id"]))
+                  col["timeout"], col["severity"], col["runbook"], int(col["subject"]), col["repair"],
+                  col.get("layer") or "app", actor, iso(now()), old["id"]))
     c = _ops_row(conn.execute("SELECT * FROM checks WHERE id=?", (old["id"],)).fetchone())
     _event(conn, None, actor, f"ops check {c['scope']}/{c['name']} changed ({', '.join(changed)}): {_ops_summary(c)}"
            + (f"; repair: {c['repair']}" if c["repair"] else "") + f" (was: {_ops_summary(old)})")
@@ -3525,7 +3545,7 @@ def ops_rm(conn, scope, name, actor=None):
 # idempotent, and it keeps the state and the pause of a check that stays.
 OPS_PROFILE_VERSION = 1
 _OPS_CHECK_KEYS = ({"name", "form", "every", "fail_after", "recover_after", "timeout", "severity", "runbook", "repair",
-                    "subject"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
+                    "layer", "subject"} | {f for fs in OPS_FORM_FIELDS.values() for f in fs})
 
 
 def _ops_settings_scope(conn, kind, scope):
@@ -3547,6 +3567,8 @@ def ops_profile_export(conn, scope):
         d = {"name": c["name"], "form": c["form"], **c["config"]}
         d.update({k: c[k] for k in ("every", "fail_after", "recover_after", "timeout", "severity")})
         d.update({k: c[k] for k in ("runbook", "repair") if c[k]})
+        if c.get("layer", "app") != "app":
+            d["layer"] = c["layer"]
         if c["subject"]:
             d["subject"] = True
         checks.append(d)
@@ -4440,11 +4462,13 @@ def _ops_tell_manager(conn, kind, body, item_id=None):
             _send(conn, kind, "maxpm", body, to=m, item_id=item_id)
 
 
-def _ops_fault_item(conn, c, key, res, at, new, watch=None):
+def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
     """The item of one fault key: the open one (a note), one closed within ops_reopen_within (open again), the
     storm item of the scope, or a new one. Returns {"key", "item", "action"}. In the watch of a release, a new item
-    is found during the deploy item, and every note names the release."""
+    is found during the deploy item, and every note names the release. kind (ops_kind): a new item starts with it
+    (its doer, its wait, its context); an item opened again gets it as a line."""
     summary = res.get("summary") or res.get("status")
+    kind = kind or {"kind": "unknown", "rule": 8, "why": "no rule matched"}
     if watch:
         summary += (f" (in the watch of release #{watch['deploy']} to {watch['target']}, "
                     f"done {show_time(watch['released_at'])})")
@@ -4460,6 +4484,8 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None):
     if old and old["closed_at"] and at - parse_iso(old["closed_at"]) < within:
         reopen(conn, old["id"], actor="maxpm")
         _ops_note(conn, old["id"], f"ops fault again at {show_time(iso(at))}: {summary}", at, force=True)
+        with tx(conn):
+            _event(conn, old["id"], "maxpm", f"ops kind: {kind['kind']} (rule {kind['rule']}: {kind['why']})")
         _ops_tell_manager(conn, "alert", f"fault again: {key} ({summary}); #{old['id']} is open again", old["id"])
         return {"key": key, "item": old["id"], "action": "reopened"}
     # Storm: more than ops_storm_count keys of the scope went to fault within ops_storm_window: one item holds them.
@@ -4491,10 +4517,20 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None):
     if watch:
         ctx = (f"The fault came in the watch of release #{watch['deploy']} to {watch['target']} (done "
                f"{show_time(watch['released_at'])}, run {watch['n']} since): that release is the first suspect.\n" + ctx)
+    spec = ops_kinds()["kinds"][kind["kind"]]
     r = item_add(conn, _ops_project(conn, c), f"{key} {res.get('summary') or res.get('status')}"[:300], priority=1,
-                 doer="ai", actor="maxpm", context=ctx, goals=[], kind="operational", short=f"Fault: {c['name']}"[:60],
-                 found_during=watch["deploy"] if watch else None)
-    _ops_tell_manager(conn, "alert", f"new fault: {key} ({summary}): #{r['id']}", r["id"])
+                 doer="ai", actor="maxpm", context=_ops_kind_text(kind, c) + ctx, goals=[],
+                 kind="operational", short=f"Fault: {c['name']}"[:60], found_during=watch["deploy"] if watch else None,
+                 models=spec.get("sort"))
+    with tx(conn):
+        conn.execute("UPDATE items SET context=? WHERE id=?", (_ops_kind_text(kind, c, r["id"]) + ctx, r["id"]))
+        _event(conn, r["id"], "maxpm", f"ops kind: {kind['kind']} (rule {kind['rule']}: {kind['why']})")
+    if spec.get("wait"):
+        block(conn, r["id"], reason=f"outside dependency: waits on the vendor until {c['scope']}/{c['name']} passes "
+                                    f"again", actor="maxpm")
+    if _ops_kind_doer(kind["kind"], c) == "human":
+        _ops_person_step(conn, r["id"], kind["kind"], c, summary)
+    _ops_tell_manager(conn, "alert", f"new fault: {key} ({summary}; kind {kind['kind']}): #{r['id']}", r["id"])
     return {"key": key, "item": r["id"], "action": "opened"}
 
 
@@ -4613,6 +4649,246 @@ def ops_fault_brief(conn, item):
     return {"key": key, "storm": not name, "checks": checks}
 
 
+# ---- the kinds of problems (#5509, canvas problem-kinds v3 of #5464): each fault gets one kind before an agent
+# starts, by eight rules in order with no model, and the kind decides what happens. The kinds, the rules and the
+# shipped known messages are in river/kinds.json, which holds nothing about any one project; a project's own known
+# messages are in its system description (rules.known_messages), its release window there too (rules.release_window).
+
+KINDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kinds.json")
+_KINDS_CACHE = {}
+
+
+def ops_kinds():
+    """The kinds data file (KINDS_FILE), read once per path."""
+    if KINDS_FILE not in _KINDS_CACHE:
+        with open(KINDS_FILE, encoding="utf-8") as f:
+            _KINDS_CACHE[KINDS_FILE] = json.load(f)
+    return _KINDS_CACHE[KINDS_FILE]
+
+
+def ops_kind_id(word):
+    """The kind that a word names: its id (service-down) or its name (service down, outside dependency), any case.
+    None when it names no kind."""
+    w = re.sub(r"[\s_]+", "-", (word or "").strip().lower())
+    for k, v in ops_kinds()["kinds"].items():
+        if w in (k, re.sub(r"\s+", "-", v["name"])):
+            return k
+    return None
+
+
+def _ops_system_rules(conn, project):
+    """The part rules of the project's system description in force, or {} (no project, no description)."""
+    r = conn.execute("SELECT s.body FROM ops_systems s JOIN projects p ON p.id=s.project_id WHERE p.name=? AND "
+                     "s.state='accepted' ORDER BY s.seq DESC LIMIT 1", (project,)).fetchone()
+    return (json.loads(r["body"]).get("rules") or {}) if r else {}
+
+
+def ops_known_messages(conn, project):
+    """The known messages that rule 6 tries, the project's own first: [(compiled pattern, kind, where)]. A line of the
+    project's rules.known_messages reads '<kind>: <text>', or '<kind>: /<regular expression>/'; a line that names
+    no kind, or a bad expression, is skipped."""
+    out = []
+    for line in (_ops_system_rules(conn, project).get("known_messages") or "").splitlines():
+        word, sep, text = line.strip().lstrip("-* ").partition(":")
+        kind, text = ops_kind_id(word), text.strip()
+        if not sep or not kind or not text:
+            continue
+        pat = text[1:-1] if len(text) > 2 and text[0] == "/" and text[-1] == "/" else re.escape(text)
+        try:
+            out.append((re.compile(pat, re.I), kind, f"{project}'s known message"))
+        except re.error:
+            continue
+    for m in ops_kinds()["known_messages"]:
+        out.append((re.compile(m["pattern"], re.I), m["kind"], "a known message"))
+    return out
+
+
+def _ops_related(conn, c):
+    """The checks of the same system as c: its own scope, the target of its project, and the target's projects."""
+    target = _ops_target(conn, c)
+    return [_ops_row(r) for r in conn.execute(
+        "SELECT * FROM checks WHERE (scope_kind=? AND scope=?) OR (scope_kind='target' AND scope=?) OR (scope_kind="
+        "'project' AND scope IN (SELECT name FROM projects WHERE target=?)) ORDER BY id",
+        (c["scope_kind"], c["scope"], target, target))]
+
+
+def _ops_first_failure(conn, key, at):
+    """When the failure of a key that lasts at `at` began: its first failing or fault event after it last passed."""
+    ok = conn.execute("SELECT MAX(at) t FROM ops_events WHERE key=? AND state IN ('healthy','recovered','resumed',"
+                      "'paused','new') AND at<=?", (key, iso(at))).fetchone()["t"]
+    r = conn.execute("SELECT MIN(at) t FROM ops_events WHERE key=? AND state IN ('failing','fault') AND at>? AND at<=?",
+                     (key, ok or "", iso(at))).fetchone()["t"]
+    return parse_iso(r) if r else at
+
+
+def ops_kind(conn, c, key, res, at=None, noise=None):
+    """The kind of the fault of key (check c, its last result res) at `at`, by the eight rules of kinds.json in order:
+    {"kind", "rule" (1-8), "why", and "from": the other check whose fault gives the kind (rules 4 and 5), "noise":
+    the noise rule (rule 2), "release": the deploy item (rule 7)}. No model, no write. noise: the noise rules of c in
+    force (ops_noise_rules), when the caller has them."""
+    at = at or now()
+    text = "\n".join(x for x in (res.get("summary"), res.get("output"),
+                                 json.dumps(res["evidence"]) if res.get("evidence") else None) if x)
+    project = _ops_project(conn, c)
+    known = ops_known_messages(conn, project)
+    # 1. The check itself failed.
+    if res.get("status") == "unknown":
+        return {"kind": "broken-check", "rule": 1,
+                "why": f"the check ended UNKNOWN: {res.get('summary') or 'no status'}"}
+    if c["form"] in OPS_COMMAND_FORMS and (res.get("timed_out") or res.get("exit_code") is None):
+        return {"kind": "broken-check", "rule": 1, "why": "the check's command " + (
+            f"ran past its timeout {c['timeout']}" if res.get("timed_out") else "did not start")}
+    for pat, kind, where in known:
+        if kind == "broken-check" and pat.search(text):
+            return {"kind": kind, "rule": 1, "why": f"the output names {where}: {pat.search(text).group(0)!r}"}
+    # 2. Noise.
+    rules = noise if noise is not None else ops_noise_rules(conn, c, at)
+    rule = _ops_noise_match(c, key, rules, res.get("summary")) if rules else None
+    if rule:
+        return {"kind": "noise", "rule": 2, "why": f"noise rule n{rule['id']}: {rule['reason']}", "noise": rule}
+    related = _ops_related(conn, c)
+    # 3. Planned: a pause of a check of the same system covers the time.
+    for o in related:
+        if o["paused_until"] and o["paused_until"] > iso(at):
+            return {"kind": "planned", "rule": 3, "why": f"{o['scope']}/{o['name']} is paused until "
+                                                        f"{show_time(o['paused_until'])} for planned work"}
+    first = _ops_first_failure(conn, key, at)
+    # 4. An outside dependency is in fault (the check itself, when it watches one).
+    for o in related:
+        if o["layer"] == "dependency" and (o["id"] == c["id"] or o["state"] in ("fault", "failing")):
+            own = o["id"] == c["id"]
+            return {"kind": "dependency", "rule": 4, "from": None if own else o, "why": (
+                "the check watches an outside dependency" if own else
+                f"the dependency check {o['scope']}/{o['name']} is {o['state']}")}
+    # 5. A lower layer failed first.
+    for o in sorted(related, key=lambda o: o["id"] != c["id"]):
+        if OPS_LAYERS.get(o["layer"]) and o["layer"] != "dependency":
+            if o["id"] == c["id"]:
+                return {"kind": OPS_LAYERS[o["layer"]], "rule": 5, "why": f"the check watches a lower layer "
+                                                                          f"({o['layer']})"}
+            if o["state"] in ("fault", "failing") and _ops_first_failure(conn, o["key"], at) <= first:
+                return {"kind": OPS_LAYERS[o["layer"]], "rule": 5, "from": o,
+                        "why": f"the {o['layer']} check {o['scope']}/{o['name']} failed first "
+                               f"({show_time(iso(_ops_first_failure(conn, o['key'], at)))})"}
+    # 6. A known message.
+    for pat, kind, where in known:
+        m = pat.search(text)
+        if m and kind != "broken-check":
+            return {"kind": kind, "rule": 6, "why": f"the output names {where}: {m.group(0)!r}"}
+    # 7. After a release, and not before it.
+    target = _ops_target(conn, c)
+    if target:
+        d = conn.execute("SELECT id, closed_at FROM items WHERE kind='deploy' AND target=? AND status='done' AND "
+                         "closed_at IS NOT NULL AND closed_at<=? ORDER BY closed_at DESC, id DESC LIMIT 1",
+                         (target, iso(first))).fetchone()
+        try:
+            window = parse_duration(_ops_system_rules(conn, project).get("release_window") or "")
+        except (RiverError, ValueError):
+            window = parse_duration(setting(conn, "ops_release_window"))
+        if d and first - parse_iso(d["closed_at"]) <= window:
+            before = conn.execute("SELECT 1 FROM ops_events WHERE key=? AND state IN ('failing','fault') AND at<? AND "
+                                  "at>=? LIMIT 1", (key, d["closed_at"], iso(parse_iso(d["closed_at"]) - timedelta(
+                                      days=30)))).fetchone()
+            if not before:
+                return {"kind": "release-regression", "rule": 7, "release": d["id"],
+                        "why": f"the first failed run ({show_time(iso(first))}) came within {_short(window)} after "
+                               f"release #{d['id']} to {target}, and it did not fail in the 30 days before"}
+    # 8. Nothing matched.
+    return {"kind": "unknown", "rule": 8, "why": "no rule matched"}
+
+
+def _ops_kind_text(k, c, item_id=None):
+    """The kind's part of a fault item's context: the kind, why, what happens and what never."""
+    d = ops_kinds()["kinds"][k["kind"]]
+    sort = (f"\nSort it: read the evidence below, then give its kind: maxpm ops kind {item_id or '<id>'} <kind> --why "
+            f"\"<what shows it>\" --message \"<the text in the output that shows it>\" (the message becomes a known "
+            f"message of the project, so the next fault of this kind needs no session). The kinds: maxpm ops kinds. "
+            f"Then stop: the kind decides who takes the item next.") if k["kind"] == "unknown" else ""
+    return (f"Kind: {d['name']} (rule {k['rule']}: {k['why']}).\nWhat happens: {d['action']}.\nNever: {d['never']}."
+            + sort + "\n")
+
+
+def _ops_kind_doer(kind, c):
+    """Who acts first on a fault of this kind: ai, or human (a person's step; the agent's task waits on it). repair:
+    the agent when the check has a repair command set in advance, else the person."""
+    doer = ops_kinds()["kinds"][kind]["doer"]
+    return ("ai" if (c.get("repair") or "").strip() else "human") if doer == "repair" else doer
+
+
+def _ops_person_step(conn, fault_id, kind, c, summary, actor="maxpm"):
+    """A fault whose first step is the person's (an expired item, a configuration, a full disk with no repair): an
+    item for the person at once, which the fault item waits on, so no agent starts before it. The fault item stays an
+    agent's task for what follows (an operational task is for an agent session, #4973). Returns the person's item, or
+    the open one that the fault item waits on already."""
+    have = conn.execute("SELECT i.id FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND "
+                        f"i.doer='human' AND i.status IN {OPEN_STATES}", (fault_id,)).fetchone()
+    if have:
+        return have["id"]
+    d = ops_kinds()["kinds"][kind]
+    where = f"{c['scope']}/{c['name']}" if c else f"fault #{fault_id}"
+    r = item_add(conn, _ops_project(conn, c) if c else _item(conn, fault_id)["project"], f"{d['name'].capitalize()} at "
+                 f"{where}: {summary}"[:300], priority=1, doer="human", actor=actor, blocks=fault_id, goals=[],
+                 short=f"Fix: {c['name'] if c else 'fault'} ({d['name']})"[:60],
+                 context=f"The check {where} found a fault of the kind {d['name']}: {summary}. What to do: "
+                         f"{d['action']}. Never: {d['never']}. The evidence and the history: maxpm show {fault_id}. When it is done, "
+                         f"mark this item done: the fault's task (#{fault_id}) then goes to an agent, which checks the "
+                         f"result and makes sure it does not happen again.")
+    return r["id"]
+
+
+def ops_kind_set(conn, item_id, kind, why, message=None, actor=None):
+    """maxpm ops kind: give a fault item its kind (the sorting session of an unknown fault, or a person or the manager
+    who corrects one). The kind decides the doer and the wait; the session that holds the item releases it, so the
+    right one takes it next. message: the text of the output that shows the kind; it becomes a known message of the
+    project (an agent's change of the system description is proposed until a person or the manager accepts it)."""
+    it = _item(conn, item_id)
+    if it["kind"] != "operational" or not it["title"].startswith("ops:"):
+        raise RiverError(f"#{item_id} is not a fault item (an operational item whose title starts with ops:)")
+    if it["status"] not in OPEN_STATES:
+        raise RiverError(f"#{item_id} is {it['status']}: maxpm reopen {item_id} first")
+    k = ops_kind_id(kind)
+    if k is None:
+        raise RiverError(f"no kind {kind!r}: one of {', '.join(ops_kinds()['kinds'])} (maxpm ops kinds)")
+    if k in ("noise", "planned"):
+        raise RiverError(f"a {k} fault needs no item: " + (
+            "maxpm ops noise add <scope> <check> --reason \"...\"" if k == "noise" else "pause the check") +
+            f", then close it: maxpm done {item_id} --note \"<why>\"")
+    why = (why or "").strip()
+    if not why:
+        raise RiverError(f"say why: maxpm ops kind {item_id} {k} --why \"<what shows it>\"")
+    a = conn.execute("SELECT kind, role FROM agents WHERE name=?", (actor,)).fetchone() if actor else None
+    if a is not None and a["kind"] != "human" and a["role"] != "manager" and it["assignee"] != actor:
+        raise RiverError(f"only the session that holds #{item_id}, the manager or a person gives its kind")
+    c = None
+    parts = it["title"].split(" ", 1)[0].split(":")
+    if len(parts) >= 3:
+        r = conn.execute("SELECT * FROM checks WHERE scope=? AND name=? ORDER BY scope_kind='project' DESC LIMIT 1",
+                         (parts[1], parts[2])).fetchone()
+        c = _ops_row(r) if r else None
+    doer = _ops_kind_doer(k, c or {})
+    held = it["assignee"] == actor and it["status"] in ("in_progress", "held")
+    with tx(conn):
+        _event(conn, item_id, actor or "person", f"ops kind: {k} (given by {actor or 'a person'}: {why[:300]})")
+    item_edit(conn, item_id, models={"model": "", "effort": ""}, actor=actor or "person")
+    person = _ops_person_step(conn, item_id, k, c, it["title"].split(" ", 1)[-1], actor or "person") \
+        if doer == "human" else None
+    if held:
+        release(conn, item_id, note=f"sorted: kind {k}; the kind decides who takes it", actor=actor)
+    if ops_kinds()["kinds"][k].get("wait") and c:
+        block(conn, item_id, reason=f"outside dependency: waits on the vendor until {c['scope']}/{c['name']} passes "
+                                    f"again", actor="maxpm")
+    out = {"item": item_id, "kind": k, "doer": doer, "person": person, "released": held, "known": None}
+    message = (message or "").strip()
+    if message and c:
+        project = _ops_project(conn, c)
+        old = (_ops_system_rules(conn, project).get("known_messages") or "").rstrip()
+        line = f"{k}: {message}"
+        r = ops_system_edit(conn, project, {"rules.known_messages": (old + "\n" + line).strip()},
+                            why=f"the message of fault #{item_id}: {why[:200]}", actor=actor, item_id=item_id)
+        out["known"] = {"line": line, "state": r.get("state")}
+    return out
+
+
 def ops_faults(conn, check_id, rec, res, at=None, watch=None):
     """After a run (ops_record): each key of the check in fault has its one operational item (_ops_fault_item); a
     key that recovered adds 'recovered at' to its open item and leaves it open, for the investigator to close with
@@ -4638,28 +4914,45 @@ def ops_faults(conn, check_id, rec, res, at=None, watch=None):
     rules = ops_noise_rules(conn, c, at)
     for key in faulted:
         new = to.get(key) == "fault"
-        rule = _ops_noise_match(c, key, rules, res.get("summary")) if rules else None
-        if rule:  # noise (#5504): the record only; no item, no agent
+        k = ops_kind(conn, c, key, res, at, rules)  # the kind first (#5509): it decides what happens
+        summary = res.get("summary") or res.get("status")
+        if k["kind"] == "noise":  # noise (#5504): the record only; no item, no agent
+            rule = k["noise"]
             if new:
                 with tx(conn):
                     conn.execute("UPDATE ops_noise SET hits=hits+1, last_hit=? WHERE id=?", (iso(at), rule["id"]))
                     _event(conn, None, "maxpm", f"ops noise: {key} in fault, kept out of the queue by rule n{rule['id']} "
-                                                f"({rule['reason']}): {res.get('summary') or res.get('status')}")
-            out.append({"key": key, "item": None, "action": "noise", "rule": rule["id"]})
+                                                f"({rule['reason']}): {summary}")
+            out.append({"key": key, "item": None, "action": "noise", "rule": rule["id"], "kind": "noise"})
+            continue
+        if k["kind"] == "planned":  # the record only
+            if new:
+                with tx(conn):
+                    _event(conn, None, "maxpm", f"ops planned: {key} in fault while {k['why']}: {summary}")
+            out.append({"key": key, "item": None, "action": "planned", "kind": "planned"})
             continue
         if c["severity"] == "note":
             if new:
-                _ops_tell_manager(conn, "note", f"fault: {key} ({res.get('summary') or res.get('status')}); the check "
-                                  f"is of severity note, so no item")
-                out.append({"key": key, "item": None, "action": "manager-note"})
+                _ops_tell_manager(conn, "note", f"fault: {key} ({summary}; kind {k['kind']}); the check is of severity "
+                                  f"note, so no item")
+                out.append({"key": key, "item": None, "action": "manager-note", "kind": k["kind"]})
             continue
-        out.append(_ops_fault_item(conn, c, key, res, at, new, watch))
+        other = _ops_fault_items(conn, k["from"]) if k.get("from") else []
+        if other and not _ops_item(conn, key):  # the fault of another check is the cause: its item gets the evidence
+            if new:
+                _ops_note(conn, other[0]["id"], f"ops {key} in fault too at {show_time(iso(at))} (kind {k['kind']}, "
+                                                f"{k['why']}): {summary}", at, force=True)
+            out.append({"key": key, "item": other[0]["id"], "action": "cause-note", "kind": k["kind"]})
+            continue
+        out.append(dict(_ops_fault_item(conn, c, key, res, at, new, watch, k), kind=k["kind"]))
     for key, state in to.items():
         if state == "recovered":
             it = _ops_item(conn, key)
             if it:
                 _ops_note(conn, it["id"], f"ops recovered at {show_time(iso(at))}: {key} passed {c['recover_after']} runs "
                                           f"in a row; close this item with the cause", at, force=True)
+                if (it["blocked_reason"] or "").startswith("outside dependency:"):
+                    unblock(conn, it["id"], actor="maxpm")  # the vendor is back: the task can go on
                 out.append({"key": key, "item": it["id"], "action": "recovered"})
     return out
 
@@ -4996,7 +5289,8 @@ OPS_SYSTEM_FIELDS = {
         "normal": "what is normal: the usual error rate per hour, the usual traffic, planned jobs and their times",
     },
     "rules": {
-        "known_messages": "known messages: an error text and its kind",
+        "known_messages": "known messages, one per line: '<kind>: <text>' or '<kind>: /<regular expression>/' (the "
+                          "kinds: maxpm ops kinds)",
         "noise": "noise rules: what is not a problem, and why",
         "release_window": "the time after a release in which a new error counts as a release regression (e.g. 2h)",
     },

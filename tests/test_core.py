@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -9677,7 +9678,7 @@ class Ops(Base):
         self.assertEqual(self.ops_items(), [])  # failing, not a fault yet
         r = self.run_at("site", "job", at(5), bad)
         (it,) = self.ops_items()
-        self.assertEqual(r["items"], [{"key": "ops:site:job", "item": it["id"], "action": "opened"}])
+        self.assertEqual(r["items"], [{"key": "ops:site:job", "item": it["id"], "action": "opened", "kind": "unknown"}])
         self.assertTrue(it["title"].startswith("ops:site:job JOB CRITICAL - no run for 2h"))
         self.assertEqual((it["priority"], it["doer"], it["status"]), (1, "ai", "open"))
         for want in ("Key: ops:site:job", "last run failed", "Runbook: read the job log", "maxpm ops history site job"):
@@ -9697,7 +9698,7 @@ class Ops(Base):
         # Closed with the cause, then a fault within 24h: the same item again.
         core.done(self.c, it["id"], actor="boss", output="the job's disk was full")
         self.run_at("site", "job", at(60), bad); r = self.run_at("site", "job", at(65), bad)
-        self.assertEqual(r["items"][0], {"key": "ops:site:job", "item": it["id"], "action": "reopened"})
+        self.assertEqual(r["items"][0], {"key": "ops:site:job", "item": it["id"], "action": "reopened", "kind": "unknown"})
         self.assertEqual([x["status"] for x in self.ops_items()], ["open"])
         # After ops_reopen_within, a new item.
         core.done(self.c, it["id"], actor="boss", output="again the disk")
@@ -9794,7 +9795,7 @@ class Ops(Base):
         self.assertEqual(sorted(x["key"] for x in r["items"]), ["ops:site:jobs:backup", "ops:site:jobs:mail_sync"])
         self.assertEqual(len(self.ops_items()), 2)  # none for ops:site:jobs itself
         r = self.run_at("site", "soft", t, self.proc(2, "SOFT CRITICAL - slow"))
-        self.assertEqual(r["items"], [{"key": "ops:site:soft", "item": None, "action": "manager-note"}])
+        self.assertEqual(r["items"], [{"key": "ops:site:soft", "item": None, "action": "manager-note", "kind": "unknown"}])
         self.assertEqual(len(self.ops_items()), 2)
 
     def test_a_storm_of_one_scope_shares_one_item(self):
@@ -10355,7 +10356,8 @@ class OpsNoise(Base):
         self.assertLessEqual(core.parse_iso(r["until"]), core.now() + timedelta(days=30))
         self.assertTrue([m for m in core.inbox(self.c, "boss") if f"dev added noise rule n{r['id']}" in m["body"]])
         res = self.run_at("site", "job", core.now(), self.proc(2, "JOB CRITICAL - down"))
-        self.assertEqual(res["items"], [{"key": "ops:site:job", "item": None, "action": "noise", "rule": r["id"]}])
+        self.assertEqual(res["items"], [{"key": "ops:site:job", "item": None, "action": "noise", "rule": r["id"],
+                                         "kind": "noise"}])
         self.assertEqual(self.items(), [])
         self.assertEqual(core.ops_noise_list(self.c, "site")[0]["hits"], 1)
         self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE change LIKE 'ops noise: ops:site:job in fault, kept "
@@ -10390,6 +10392,189 @@ class OpsNoise(Base):
         self.assertEqual(res["status"], "ok")  # one line counts (Traceback), the limit is 2
         run = core.ops_history(self.c, "site", "errs", 1)["runs"][0]
         self.assertEqual(json.loads(run["evidence"])["noise"], 2)
+
+
+class OpsKinds(Base):
+    """The kinds of problems (#5509): each fault gets one kind before an agent starts, by eight rules in order with
+    no model (river/kinds.json), and the kind decides what happens."""
+
+    run_at, proc = Ops.run_at, staticmethod(Ops.proc)
+
+    def setUp(self):
+        super().setUp()
+        core.target_add(self.c, "prod", "the servers")
+        core.project_add(self.c, "site", target="prod")
+        for n in ("dev", "boss"):
+            core.register(self.c, n)
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        core.register(self.c, "mark", human=True)
+
+    def check(self, name, **f):
+        core.ops_add(self.c, f.pop("scope", "site"), name, "plugin", {"command": "x", "fail_after": 1, **f}, actor="boss")
+
+    def fault(self, name, code=2, out="CRITICAL - down", at=None, scope="site", timed_out=False):
+        return self.run_at(scope, name, at or core.now(), self.proc(code, out, timed_out))["items"]
+
+    def item(self, i):
+        return core._item(self.c, i)
+
+    def person(self, i):
+        r = self.c.execute("SELECT i.* FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND "
+                           "i.doer='human'", (i,)).fetchone()
+        return dict(r) if r else None
+
+    def test_the_data_file_names_every_kind_of_the_design_and_each_known_message_has_a_kind(self):
+        k = core.ops_kinds()
+        self.assertEqual(list(k["kinds"]), ["broken-check", "noise", "planned", "dependency", "capacity", "service-down",
+                                            "expired", "configuration", "data", "release-regression", "code-defect",
+                                            "unknown"])
+        self.assertEqual(len(k["rules"]), 8)
+        for m in k["known_messages"]:
+            self.assertIn(m["kind"], k["kinds"])
+            re.compile(m["pattern"])
+        self.assertTrue(all(d["doer"] in ("ai", "human", "repair", "none") for d in k["kinds"].values()))
+        self.assertEqual([x for x, d in k["kinds"].items() if d.get("code")], ["release-regression", "code-defect"])
+        self.assertEqual((core.ops_kind_id("Service down"), core.ops_kind_id("outside dependency"),
+                          core.ops_kind_id("expired item"), core.ops_kind_id("bogus")),
+                         ("service-down", "dependency", "expired", None))
+
+    def test_rule_1_a_check_that_failed_itself_is_a_broken_check_also_when_a_noise_rule_matches(self):
+        self.check("job")
+        core.ops_noise_add(self.c, "site", "job", "a test host", actor="boss")
+        [x] = self.fault("job", 3, "JOB UNKNOWN - no access")
+        self.assertEqual((x["action"], x["kind"]), ("opened", "broken-check"))
+        it = self.item(x["item"])
+        self.assertEqual(it["doer"], "ai")
+        self.assertTrue(it["context"].startswith("Kind: broken check (rule 1: the check ended UNKNOWN: JOB UNKNOWN - no "
+                                                 "access).\nWhat happens: fix the check"), it["context"])
+        self.check("logs")
+        [x] = self.fault("logs", 2, "ssh: connect to host edge-1 port 22: Connection refused")
+        self.assertEqual(x["kind"], "broken-check")
+        self.check("slow")
+        [x] = self.fault("slow", 2, "", timed_out=True)
+        self.assertEqual(x["kind"], "broken-check")
+
+    def test_rule_2_noise_opens_no_item(self):
+        self.check("job")
+        core.ops_noise_add(self.c, "site", "job", "bots", actor="boss")
+        self.assertEqual(self.fault("job")[0]["kind"], "noise")
+        self.assertIsNone(self.fault("job", at=core.now() + timedelta(minutes=5))[0]["item"])
+
+    def test_rule_3_a_pause_of_a_check_of_the_same_system_makes_a_fault_planned(self):
+        self.check("db", scope="prod")
+        self.check("job")
+        core.ops_pause(self.c, "prod", "db", until="2h", actor="boss")
+        [x] = self.fault("job")
+        self.assertEqual((x["action"], x["item"], x["kind"]), ("planned", None, "planned"))
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE change LIKE 'ops planned: ops:site:job in fault while "
+                                       "prod/db is paused until %'").fetchone())
+
+    def test_rule_4_an_outside_dependency_waits_on_the_vendor_and_takes_the_other_faults_as_notes(self):
+        self.check("stripe", layer="dependency")
+        self.check("pay")
+        [d] = self.fault("stripe", out="STRIPE CRITICAL - 503")
+        it = self.item(d["item"])
+        self.assertEqual(d["kind"], "dependency")
+        self.assertTrue(it["blocked_reason"].startswith("outside dependency: waits on the vendor until site/stripe"))
+        [p] = self.fault("pay", out="PAY CRITICAL - timeouts")
+        self.assertEqual((p["action"], p["item"], p["kind"]), ("cause-note", d["item"], "dependency"))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind='operational'").fetchone()[0], 1)
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'ops ops:site:pay in fault "
+                                       "too at %'", (d["item"],)).fetchone())
+        later = core.now() + timedelta(minutes=10)
+        for n in range(2):
+            self.run_at("site", "stripe", later + timedelta(minutes=n), self.proc(0, "STRIPE OK"))
+        self.assertIsNone(self.item(d["item"])["blocked_reason"])  # the vendor is back
+
+    def test_rule_5_a_lower_layer_that_failed_first_gives_its_kind_and_its_item_the_notes(self):
+        self.check("disk", layer="capacity")
+        self.check("restart", layer="service", repair="systemctl restart app")
+        self.check("app")
+        [d] = self.fault("disk", out="DISK CRITICAL - 99% used")
+        self.assertEqual(d["kind"], "capacity")
+        p = self.person(d["item"])  # no repair: the person's step first, and the fault's task waits on it
+        self.assertTrue(p["title"].startswith("Capacity at site/disk: DISK CRITICAL"), p["title"])
+        self.assertEqual(core.item_show(self.c, d["item"])["ready"], False)
+        [s] = self.fault("restart", out="APP CRITICAL - stopped", at=core.now() + timedelta(minutes=1))
+        self.assertEqual((s["kind"], self.person(s["item"])), ("service-down", None))  # its repair is set
+        [a] = self.fault("app", out="APP CRITICAL - 500s", at=core.now() + timedelta(minutes=2))
+        self.assertEqual((a["action"], a["item"], a["kind"]), ("cause-note", d["item"], "capacity"))
+
+    def test_rule_6_a_known_message_shipped_or_the_projects_own_gives_the_kind(self):
+        self.check("job")
+        [x] = self.fault("job", out="JOB CRITICAL\nOSError: [Errno 28] No space left on device")
+        self.assertEqual(x["kind"], "capacity")
+        self.assertIn("rule 6: the output names a known message: 'No space left on device'", self.item(x["item"])["context"])
+        core.ops_system_edit(self.c, "site", {"rules.known_messages": "expired item: token revoked\nnot a kind: x\n"
+                                              "data: /workspace \\d+ is broken/"}, why="seen", actor="mark")
+        self.check("api")
+        [x] = self.fault("api", out="API CRITICAL - token revoked by vendor")
+        self.assertEqual(x["kind"], "expired")
+        self.assertEqual(self.person(x["item"])["doer"], "human")
+        self.check("ws")
+        [x] = self.fault("ws", out="WS CRITICAL - workspace 42 is broken")
+        self.assertEqual(x["kind"], "data")
+
+    def test_rule_8_unknown_starts_a_short_sorting_session_that_gives_the_kind_and_adds_the_rule(self):
+        self.check("job")
+        [x] = self.fault("job", out="JOB CRITICAL - KeyError: 'plan'")
+        it = self.item(x["item"])
+        self.assertEqual((x["kind"], it["model"], it["effort"]), ("unknown", "sonnet", "low"))
+        self.assertIn(f"maxpm ops kind {x['item']} <kind> --why", it["context"])
+        with self.assertRaisesRegex(RiverError, "only the session that holds"):
+            core.ops_kind_set(self.c, x["item"], "code defect", "a stack trace", actor="dev")
+        core.claim(self.c, x["item"], "dev")
+        with self.assertRaisesRegex(RiverError, "no kind 'bug'"):
+            core.ops_kind_set(self.c, x["item"], "bug", "x", actor="dev")
+        with self.assertRaisesRegex(RiverError, "maxpm ops noise add"):
+            core.ops_kind_set(self.c, x["item"], "noise", "x", actor="dev")
+        r = core.ops_kind_set(self.c, x["item"], "code defect", "a KeyError with a stack trace",
+                              message="KeyError: 'plan'", actor="dev")
+        self.assertEqual((r["kind"], r["doer"], r["person"], r["released"], r["known"]),
+                         ("code-defect", "ai", None, True, {"line": "code-defect: KeyError: 'plan'", "state": "proposed"}))
+        it = self.item(x["item"])
+        self.assertEqual((it["status"], it["model"], it["effort"]), ("open", None, None))
+        core.ops_system_accept(self.c, "site", actor="boss")
+        self.check("job2")
+        self.assertEqual(self.fault("job2", out="JOB CRITICAL - KeyError: 'plan'")[0]["kind"], "code-defect")
+
+    def test_the_cli_lists_the_kinds_and_a_check_takes_a_layer(self):
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "ops", "kinds"])
+        self.assertIn("  service-down: a process stopped", out.getvalue())
+        with self.assertRaisesRegex(RiverError, "no layer 'disk'"):
+            core.ops_add(self.c, "site", "d", "url", {"url": "https://x.test/", "layer": "disk"}, actor="dev")
+        core.ops_add(self.c, "site", "d", "url", {"url": "https://x.test/", "layer": "dependency"}, actor="dev")
+        self.assertEqual(core.ops_profile_export(self.c, "site")["checks"][0]["layer"], "dependency")
+        core.ops_edit(self.c, "site", "d", {"severity": "note"}, actor="dev")
+        self.assertEqual(core.ops_find(self.c, "site", "d")["layer"], "dependency")  # an edit keeps it
+
+
+class OpsKindRelease(ReleaseBase):
+    """Rule 7 of the kinds (#5509): a fault that starts within the release window after a release, and did not occur
+    in the 30 days before it, is a release regression."""
+
+    def test_a_new_fault_soon_after_a_release_is_a_release_regression_and_an_old_one_is_not(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/", "fail_after": 1}, actor="dev")
+        core.ops_add(self.c, "site", "api", "url", {"url": "https://example.test/api", "fail_after": 1}, actor="dev")
+        t0 = core.now() - timedelta(hours=1)
+        self.run_at("api", t0, 500)  # api failed before the release
+        self.run_at("api", t0 + timedelta(minutes=1), 200)
+        self.run_at("home", t0, 200)
+        released = self.release()
+        r = self.run_at("home", released + timedelta(minutes=5), 500)
+        [x] = [i for i in r["items"] if i["key"] == "ops:site:home"]
+        self.assertEqual(x["kind"], "release-regression")
+        self.assertIn(f"after release #{self.deploy} to web", core._item(self.c, x["item"])["context"])
+        r = self.run_at("api", released + timedelta(minutes=5), 500)
+        self.assertEqual(r["items"][0]["kind"], "unknown")
+        core.config_set(self.c, "ops_release_window", "1m")
+        core.ops_add(self.c, "site", "late", "url", {"url": "https://example.test/late", "fail_after": 1}, actor="dev")
+        r = self.run_at("late", released + timedelta(minutes=5), 500)
+        self.assertEqual(r["items"][0]["kind"], "unknown")
 
 
 class Speed(Base):

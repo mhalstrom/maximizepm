@@ -1035,6 +1035,10 @@ def build_parser(only=None):
                        "subject, and each subject has its own fault")
         x.add_argument("--repair", help="a command that fixes a known fault (a person or the manager sets it; on a "
                        "deploy target, a person); empty removes it")
+        x.add_argument("--layer", choices=list(core.OPS_LAYERS), help="what it watches: app (the project itself, the "
+                       "default); dependency (an outside vendor), capacity (a disk, memory, a quota) or service (a "
+                       "process, the database service): while it fails, the faults of the other checks of the project "
+                       "get its kind")
 
     x = ops.add_parser("add", help="add a check: maxpm ops add <project|target> <name> <form> --url ... "
                        "(forms: " + "; ".join(f"{k}: {v}" for k, v in core.OPS_FORMS.items()) + ")")
@@ -1128,6 +1132,13 @@ def build_parser(only=None):
     x.add_argument("scope"); x.add_argument("name")
     x.add_argument("--until", help="a duration (2h) or a time (tomorrow 7:00)")
     x.add_argument("--resume", action="store_true", help="start the check again now")
+    x = ops.add_parser("kinds", help="the kinds of problems, and the eight rules that give each fault its kind")
+    x = ops.add_parser("kind", help="give a fault item its kind (the sorting session of an unknown fault, or a person "
+                       "or the manager who corrects one); the session that holds it releases it")
+    x.add_argument("id", type=int, help="the fault item"); x.add_argument("kind", help="the kind (maxpm ops kinds)")
+    x.add_argument("--why", required=True, help="what shows the kind")
+    x.add_argument("--message", help="the text of the output that shows it: it becomes a known message of the "
+                   "project, so the next fault of this kind needs no session")
     x = ops.add_parser("repair", help="ask maxpm serve to run the repair command set on a check: the session that "
                        "holds its fault item, at most ops_repair_max times in ops_repair_window; a person at any time")
     x.add_argument("scope", help="a project or a deploy target, or the check's name when it is the only one of "
@@ -2611,7 +2622,7 @@ def _expert_cmd(conn, a, actor):
 
 
 _OPS_FIELDS = ("url", "statuses", "body", "command", "pattern", "limit", "window", "period", "every", "fail_after",
-               "recover_after", "timeout", "severity", "runbook", "repair")
+               "recover_after", "timeout", "severity", "runbook", "repair", "layer")
 
 
 def _ops_profile_file(path):
@@ -2835,6 +2846,10 @@ def _dispatch_ops(conn, a, actor):
     if a.ocmd == "run":
         core.ops_find(conn, a.scope, a.name)  # a wrong name says so here, not after a trip to maxpm serve
         return ask_server(conn, "ops_run", {"scope": a.scope, "name": a.name}, actor)
+    if a.ocmd == "kinds":
+        return {"kinds": core.ops_kinds()}
+    if a.ocmd == "kind":
+        return core.ops_kind_set(conn, a.id, a.kind, a.why, a.message, actor)
     if a.ocmd == "noise":
         if a.oncmd == "add":
             return core.ops_noise_add(conn, a.scope, a.name, a.reason, a.pattern, a.subject, a.until, a.fault, actor)
@@ -4807,6 +4822,21 @@ def render_ops(a, res):
         print(f"check {res['check']}: run {res['run']} started" + (" and read (a beat check runs no process)"
               if res["form"] == "beat" else " in maxpm serve")
               + f". The result: maxpm ops history {res['check'].replace('/', ' ', 1)}")
+        return
+    if a.ocmd == "kinds":
+        k = res["kinds"]
+        print("The rules, in order (the first that matches gives the kind):")
+        for r in k["rules"]:
+            print(f"  {r}")
+        print("The kinds (maxpm ops kind <item> <kind> --why \"...\"):")
+        for kid, d in k["kinds"].items():
+            print(f"  {kid}: {d['signs']}. What happens: {d['action']}. Never: {d['never']}.")
+        return
+    if a.ocmd == "kind":
+        print(f"#{res['item']} is of the kind {res['kind']}"
+              + (f"; it waits on the person's step #{res['person']}" if res.get("person") else "")
+              + ("; you released it, so the right session takes it next" if res["released"] else "")
+              + (f". Known message {res['known']['line']!r}: {res['known']['state']}" if res.get("known") else ""))
         return
     if a.ocmd == "repair":
         print(f"repair of {res['check']} started in maxpm serve: {res['command']}. Its result goes on "

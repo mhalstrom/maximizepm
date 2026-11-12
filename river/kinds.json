@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "about": "The kinds of operational problems (#5509, canvas problem-kinds v3 of #5464). Each fault gets one kind before an agent starts, by eight rules in order with no model, and the kind decides what happens. It ships with MaximizePM and holds nothing about any one project; a project adds its own known messages in its system description (maxpm ops system edit <project> --set rules.known_messages=\"<kind>: <text>\").",
+  "rules": [
+    "1 broken check: the check itself failed: its command exited UNKNOWN (3), timed out or did not start, or its output names a known message of the kind broken check (it could not reach its host)",
+    "2 noise: a noise rule of the check matches (maxpm ops noise)",
+    "3 planned: a check of the same scope is paused at that time (maxpm ops pause)",
+    "4 outside dependency: a check of layer dependency of the same project or target is in fault",
+    "5 a lower layer failed first: a check of layer capacity or service of the same project or target went to fault before this fault's first failed run; the kind is that check's",
+    "6 a known message: the output names a text of the known messages (the project's own first, then these)",
+    "7 release regression: the first failed run came within the release window after a release, and this fault did not occur in the 30 days before the release",
+    "8 unknown: nothing matched; one short sorting session gives the kind and adds the rule that would have found it"
+  ],
+  "kinds": {
+    "broken-check": {
+      "name": "broken check",
+      "signs": "exit UNKNOWN, a timeout of the command, an SSH or network error of the check",
+      "proof": "the check fails on a host that other checks reach",
+      "action": "fix the check (its command, its address, its access); production is not touched",
+      "never": "a fix in the product",
+      "doer": "ai"
+    },
+    "noise": {
+      "name": "noise",
+      "signs": "bots, scanners, paths that do not exist, one source with many lines",
+      "proof": "a noise rule matches",
+      "action": "a record only",
+      "never": "a task, an agent",
+      "doer": "none"
+    },
+    "planned": {
+      "name": "planned",
+      "signs": "maintenance, a pause that a person set",
+      "proof": "the pause covers the time",
+      "action": "a record only",
+      "never": "a task",
+      "doer": "none"
+    },
+    "dependency": {
+      "name": "outside dependency",
+      "signs": "vendor errors, timeouts to one vendor address, the vendor's status page",
+      "proof": "the dependency check fails",
+      "action": "one task, which waits on the vendor (blocked until the dependency check passes again); the faults of other checks meanwhile go to it as notes",
+      "never": "a code fix during the outage",
+      "doer": "ai",
+      "wait": true
+    },
+    "capacity": {
+      "name": "capacity",
+      "signs": "disk, memory, connections, a quota or a rate limit",
+      "proof": "df, the memory or the quota check is over its limit",
+      "action": "the repair set in advance (maxpm ops repair), or a task for the person; then an ordinary task so that it does not happen again",
+      "never": "a code fix for the errors that the full disk caused",
+      "doer": "repair"
+    },
+    "service-down": {
+      "name": "service down",
+      "signs": "a process stopped, a container restarts again and again",
+      "proof": "the service check fails",
+      "action": "the restart repair set in advance (maxpm ops repair), at most ops_repair_max in ops_repair_window, then the person",
+      "never": "more than the set number of restarts",
+      "doer": "repair"
+    },
+    "expired": {
+      "name": "expired item",
+      "signs": "a certificate, a domain, a key or a token, a card at a vendor",
+      "proof": "the expiry date has passed",
+      "action": "a task for the person, at once; then a scheduled task before the next expiry",
+      "never": "an agent that renews an account",
+      "doer": "human"
+    },
+    "configuration": {
+      "name": "configuration",
+      "signs": "a missing setting or permission, a wrong address after a change",
+      "proof": "the setting check fails",
+      "action": "a task for the person or the manager",
+      "never": "an agent that changes production settings",
+      "doer": "human"
+    },
+    "data": {
+      "name": "data",
+      "signs": "one record or one customer's input causes the error",
+      "proof": "the error follows one record or one workspace",
+      "action": "a task to investigate; a change of production data only with the person's yes",
+      "never": "a deletion without the person's yes",
+      "doer": "ai"
+    },
+    "release-regression": {
+      "name": "release regression",
+      "signs": "it starts within the release window after a release; this fault did not occur before it",
+      "proof": "the first failed run comes after the release time",
+      "action": "propose the rollback at once; then an agent fixes the code, with a test that fails before the fix",
+      "never": "a fix while the bad release stays live and the rollback is cheap",
+      "doer": "ai",
+      "code": true
+    },
+    "code-defect": {
+      "name": "code defect",
+      "signs": "a repeated error with no other cause, a crash with a stack trace",
+      "proof": "a test reproduces it",
+      "action": "an agent fixes the code, with a test that fails before the fix, through normal review and release",
+      "never": "more fixes after 2 released fixes did not clear it: then the manager decides",
+      "doer": "ai",
+      "code": true
+    },
+    "unknown": {
+      "name": "unknown",
+      "signs": "no rule matched",
+      "proof": "none",
+      "action": "one short sorting session gives a kind (maxpm ops kind) and adds the rule that would have found it",
+      "never": "a code fix before a kind is given",
+      "doer": "ai",
+      "sort": {"model": "sonnet", "effort": "low"}
+    }
+  },
+  "known_messages": [
+    {"pattern": "No space left on device", "kind": "capacity"},
+    {"pattern": "\\b53100\\b|could not extend file|disk_full|disk is full", "kind": "capacity"},
+    {"pattern": "database is locked", "kind": "capacity"},
+    {"pattern": "Cannot allocate memory|Out of memory|OOMKilled|MemoryError", "kind": "capacity"},
+    {"pattern": "too many connections|remaining connection slots are reserved|\\b53300\\b", "kind": "capacity"},
+    {"pattern": "429 Too Many Requests|rate limit(ed)? exceeded|quota exceeded", "kind": "capacity"},
+    {"pattern": "certificate has expired|CERT_HAS_EXPIRED|certificate is expired", "kind": "expired"},
+    {"pattern": "ssh: connect to host \\S+ port \\d+: (Connection refused|Connection timed out|Operation timed out|No route to host)|ssh: Could not resolve hostname|Permission denied \\(publickey", "kind": "broken-check"}
+  ]
+}
