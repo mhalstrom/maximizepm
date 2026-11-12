@@ -245,8 +245,8 @@ def install_hooks(folder, report):
         d.mkdir(parents=True, exist_ok=True)
         for fname, text in plugin_files(words, d).items():
             f = d / fname
-            if not f.exists() or f.read_text() != text:
-                f.write_text(text)
+            if not f.exists() or f.read_text(encoding="utf-8") != text:
+                f.write_text(text, encoding="utf-8")
     except OSError as e:
         raise RiverError(f"cannot write the Copilot hook plugin in {d}: {e}")
     return ["--plugin-dir", str(d)]
@@ -568,7 +568,7 @@ def write_mcp_config(path=None, remove=False):
     from . import setup_entry
     from ..core import RiverError
     f = Path(path).expanduser() if path else home() / "mcp-config.json"
-    old = f.read_text() if f.exists() else ""
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
     try:
         data = json.loads(old) if old.strip() else {}
     except ValueError as e:
@@ -588,9 +588,9 @@ def write_mcp_config(path=None, remove=False):
             return f"MaximizePM is already in {f}; nothing changed"
         servers["maxpm"] = entry
     if old:
-        f.with_name(f.name + ".bak").write_text(old)
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(data, indent=2) + "\n")
+    f.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     if remove:
         return f"took MaximizePM out of {f} (the old file: {f.name}.bak). A new Copilot session has no maxpm tools."
     return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") +

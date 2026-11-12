@@ -136,9 +136,9 @@ TERMINAL_RUNNER = None
 
 def _can_open_terminal(runner, hint):
     """Refuse a start that cannot open: every agent starts in a pane of the tmux session maxpm (#5105), on any
-    system and over SSH, so one terminal (maxpm view) and the page's chats show them all. Windows, where tmux
-    does not run, opens a console window. A test's runner opens nothing."""
-    if (runner or TERMINAL_RUNNER) is not None or core.PLATFORM == "win32" or TMUX_RUNNER is not None:
+    system and over SSH, so one terminal (maxpm view) and the page's chats show them all. A test's runner opens
+    nothing."""
+    if (runner or TERMINAL_RUNNER) is not None or TMUX_RUNNER is not None:
         return
     if not _tmux_cmd():
         raise RiverError(f"every agent starts in tmux, and tmux is not installed: {core.tmux_install()}; "
@@ -577,9 +577,8 @@ def _started(conn, name, t):
 
 def _open_terminal(t, env, runner=None):
     """Run the agent command (t["command"]) in the project folder (t["path"]) with env set, in a new pane of the
-    maxpm tmux session (#5105); on Windows, where tmux does not run, in a new console window. runner (tests) gets
-    the command line that would go into the pane, and {"args", "cwd", "env"} on Windows; TMUX_RUNNER gets the
-    tmux commands."""
+    maxpm tmux session (#5105). runner (tests) gets the command line that would go into the pane; TMUX_RUNNER gets
+    the tmux commands."""
     import os
     import shlex
     import subprocess
@@ -587,16 +586,6 @@ def _open_terminal(t, env, runner=None):
     # The agent uses the same queue as this page: a page on a MAXPM_DB queue starts agents on it too.
     if os.environ.get("MAXPM_DB"):
         env = {"MAXPM_DB": str(core.db_path()), **env}
-    if core.PLATFORM == "win32":
-        # cmd /k keeps the window open when the agent ends; the command line goes to cmd as written.
-        title = f"title {t['session_title']} & " if t.get("session_title") else ""
-        spec = {"args": f"cmd /k {title}{t['command']}", "cwd": t["path"], "env": dict(env)}
-        try:
-            (runner or (lambda s: subprocess.Popen(s["args"], cwd=s["cwd"], env={**os.environ, **s["env"]},
-                                                   creationflags=subprocess.CREATE_NEW_CONSOLE)))(spec)
-        except OSError as e:
-            raise RiverError(f"could not open a console window in {t['path']}: {e}")
-        return
     assign = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
     if "|" in t["command"] and assign:
         # A variable before a pipeline goes to its first command only: Amp's 'printf <prompt> | amp' ran with no
@@ -836,7 +825,7 @@ def _main_db():
     try:
         import pwd
         home = pwd.getpwuid(os.getuid()).pw_dir
-    except (ImportError, KeyError):  # Windows
+    except KeyError:  # a user with no passwd entry
         home = os.path.expanduser("~")
     return str(Path(home, ".maximizepm", "maxpm.db").resolve())
 
@@ -1147,8 +1136,6 @@ def tmux_orphans():
     each process below it is a shell. So never the default tmux server (where maxpm serve starts agents), a server
     a tmux command still reaches, or one with an agent CLI or another command in a pane. RiverError with no ps."""
     import subprocess
-    if core.PLATFORM == "win32" and ORPHAN_PS is None:
-        return []
     try:
         text = ORPHAN_PS() if ORPHAN_PS else subprocess.run(
             ["ps", "-A", "-ww", "-o", "pid=,ppid=,etime=,args="], capture_output=True, text=True, timeout=10,
@@ -1164,7 +1151,6 @@ def tmux_orphans():
             continue
         procs[pid] = {"age": age, "args": f[3] if len(f) > 3 else ""}
         below.setdefault(ppid, []).append(pid)
-    # normpath: on Windows the command line has D/tmux.sock, and os.path joins with a backslash.
     inside, out = tuple(os.path.join(os.path.normpath(r), "") for r in _temp_folders()), []
     for pid, p in procs.items():
         a = p["args"].split()
@@ -1351,7 +1337,7 @@ def adopt_sessions(conn, runner=None, end=None):
     agents = [a for a in sessions.running(conn, terminals) if not terminals.get(a["name"])]
     # Never end a process that runs in a tmux pane, whatever name the queue gives it: look at its terminal device
     # itself. When ps gives no answer, nothing moves (#5060).
-    ttys = _pid_ttys(sorted({str(a["pid"]) for a in agents if a.get("pid")})) if agents and core.PLATFORM != "win32" else {}
+    ttys = _pid_ttys(sorted({str(a["pid"]) for a in agents if a.get("pid")})) if agents else {}
     if ttys is None:
         return {}
     try:
@@ -1401,7 +1387,7 @@ def revive_sessions(conn, runner=None):
     is active, and only one that ran a river command or a hook in the last revive_within. A session resumes at
     most once per REVIVE_RETRY. Returns {agent: pane}."""
     from . import sessions
-    if core.setting(conn, "revive_sessions") != "on" or core.PLATFORM == "win32" or (
+    if core.setting(conn, "revive_sessions") != "on" or (
             TMUX_RUNNER is None and not _tmux_cmd()):
         return {}
     since = core.iso(core.now() - core.parse_duration(core.setting(conn, "revive_within")))
@@ -1464,11 +1450,7 @@ def revive_sessions(conn, runner=None):
 
 
 def _end_process(pid, grace=5.0):
-    """End a process: taskkill on Windows; SIGTERM then SIGKILL on Unix. True when it has ended."""
-    if os.name == "nt":
-        import subprocess
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
-        return not core.pid_alive(pid)
+    """End a process: SIGTERM, then SIGKILL. True when it has ended."""
     import signal
     try:
         os.kill(pid, signal.SIGTERM)
@@ -1704,7 +1686,7 @@ def agent_terminals(conn):
     for a in agents:
         if a["pid"] and a["host"] == core.this_host():
             pids.setdefault(str(a["pid"]), []).append(a["name"])
-    if pids and core.PLATFORM != "win32":
+    if pids:
         by_tty = {p["tty"]: p["pane"] for p in panes}
         for pid, tty in (_pid_ttys(sorted(pids)) or {}).items():
             pane = by_tty.get(tty)
@@ -3377,7 +3359,7 @@ def _worktrees_of(p):
         for d in names:
             g = d / "gitdir"
             if g.is_file():
-                f = Path(g.read_text().strip())
+                f = Path(g.read_text(encoding="utf-8").strip())
                 if f.name == ".git" and f.parent.is_dir():
                     out.append(f.parent)
     except OSError:
@@ -3391,11 +3373,9 @@ CLAUDE_TMP = None  # tests: the folder of Claude Code's session scratchpads (cla
 def claude_tmps():
     """The folders where Claude Code keeps each session's scratchpad: /tmp/claude-<uid>/<project slug>/<session id>/
     scratchpad (on macOS /private/tmp), and CLAUDE_CODE_TMPDIR: a session sees the claude-<uid> folder itself there,
-    a person may set its parent. None on Windows."""
+    a person may set its parent."""
     if CLAUDE_TMP:
         return [Path(CLAUDE_TMP)]
-    if not hasattr(os, "getuid"):
-        return []
     own = f"claude-{os.getuid()}"
     env = os.environ.get("CLAUDE_CODE_TMPDIR")
     bases = [Path("/tmp") / own] + ([Path(env) if Path(env).name == own else Path(env) / own] if env else [])
@@ -3471,10 +3451,7 @@ def _check_path(conn, p, cwd, named):
         if u.netloc not in ("", "localhost"):
             return {"target": None, "ok": False, "why": "the link names a file on another computer"}
         t = urllib.parse.unquote(u.path)
-        # A Windows file URL (file:///C:/Users/...) has its drive after the first "/": the path is C:\Users\...
-        if core.PLATFORM == "win32" and re.match(r"^/[a-zA-Z]:[/\\]", t):
-            t = str(Path(t[1:]))
-    if not (t.startswith(("/", "~", "\\\\")) or re.match(r"^[a-zA-Z]:[/\\]", t)):
+    if not t.startswith(("/", "~")):
         found = None
         if cwd and Path(cwd, t).is_file():
             found = str(Path(cwd, t))
@@ -3522,9 +3499,8 @@ def view_ok(conn, target, end, key):
 
 
 def _file_target(target):
-    """A full Unix, Windows drive or UNC path, including a home-relative path."""
-    from pathlib import PureWindowsPath
-    return str(target).startswith(("/", "~/", "~\\")) or PureWindowsPath(str(target)).is_absolute()
+    """A full path, including a home-relative path."""
+    return str(target).startswith(("/", "~/"))
 
 
 def _canvas_target(target):
@@ -3871,7 +3847,7 @@ def _agent_cmd(cmd):
     """A KNOWN_AGENTS command with {maxpm_dir} filled in for this computer."""
     import shlex
     d = core.river_dir()
-    return cmd.replace("{maxpm_dir}", f'"{d}"' if core.PLATFORM == "win32" else shlex.quote(d))
+    return cmd.replace("{maxpm_dir}", shlex.quote(d))
 
 
 def _shown_cmd(conn, cmd):
@@ -3885,7 +3861,7 @@ def _block_state(path):
     from .cli import AGENT_SNIPPET, _imports_agents
     if not path.exists():
         return "missing"
-    text = path.read_text(errors="replace")
+    text = path.read_text(errors="replace", encoding="utf-8")
     own, shared, _, _ = agents.instruction_files()
     if path.name == own and _imports_agents(text):
         return _block_state(path.with_name(shared))  # Claude Code reads AGENTS.md through the import
@@ -3907,9 +3883,9 @@ def setup_status(conn):
     agents = core.parse_launch_agents(core.setting(conn, "launch_agents"))
     have = {label for label, _ in agents}
     # Agent programs as a new terminal finds them (the app itself has only Finder's short PATH).
-    # Agents start in a new tmux pane, whose login shell must find their programs (on Windows: PATH).
+    # Agents start in a new tmux pane, whose login shell must find their programs.
     exes = sorted({exe for _, exe, _ in KNOWN_AGENTS} | {core.entry_exe(c) for _, c in agents})
-    term = _login_shell_which(exes) if core.PLATFORM != "win32" else {e: shutil.which(e) for e in exes}
+    term = _login_shell_which(exes)
     return {
         "done": core.setting(conn, "setup_done") == "on",
         "folders": [{"path": d, "projects": names, "exists": Path(d).is_dir(),
@@ -3921,7 +3897,7 @@ def setup_status(conn):
         "claude_home": Path("~/.claude").expanduser().is_dir(),
         "skills": {n: ("installed" if (skills / n / "SKILL.md").is_file() else "missing") for n in ("maxpm", "maxpm-manager")},
         "launch_agents": [label for label, _ in agents],
-        "tmux": core.can_start_agents(),  # every agent starts in tmux (Windows: a console window)
+        "tmux": core.can_start_agents(),  # every agent starts in tmux
         "tmux_install": core.tmux_install(),
         # Each Start button agent, and whether its program is on this computer (the first word of its command).
         "start_agents": [{"label": label, "found": bool(term.get(core.entry_exe(cmd)))} for label, cmd in agents],
@@ -4015,10 +3991,8 @@ def _login_shell_maxpm():
 def command_status():
     """ok: `maxpm` works in a new terminal. ours: it is this launcher. launcher: the launcher's state
     (current / old / missing). shell_path: what a new terminal finds. where: where the launcher goes."""
-    if core.PLATFORM == "win32":
-        return {"ok": True, "unsupported": True}
     lp = _launcher_path()
-    text = lp.read_text(errors="replace") if lp.is_file() else ""
+    text = lp.read_text(errors="replace", encoding="utf-8") if lp.is_file() else ""
     launcher = "missing" if not text else "current" if text == _launcher_text() else "old" if LAUNCHER_MARK in text else "other"
     found = _login_shell_maxpm()
     # A maxpm command that the setup guide did not write (a link to a clone, pip) is the person's own: fine.
@@ -4048,9 +4022,6 @@ def _launcher_text():
 def install_command():
     """Write the launcher, and put ~/.local/bin on PATH in the login profile when a new terminal would not
     find it. A maxpm command that is not ours (a clone or pip) is left alone. Returns what changed."""
-    if core.PLATFORM == "win32":
-        raise RiverError("the maxpm command installer works on macOS for now; on Windows, add the bin folder of "
-                         "MaximizePM to PATH")
     st = command_status()
     if st["in_app_image"]:
         raise RiverError("the app runs from its download image: drag MaximizePM to Applications, open it "
@@ -4061,16 +4032,16 @@ def install_command():
     if lp.exists() and st["launcher"] == "other":
         raise RiverError(f"{lp} exists and is not the launcher of MaximizePM; move it away first")
     lp.parent.mkdir(parents=True, exist_ok=True)
-    lp.write_text(_launcher_text())
+    lp.write_text(_launcher_text(), encoding="utf-8")
     lp.chmod(0o755)
     changed.append(f"{lp}: runs MaximizePM from {Path(__file__).resolve().parent.parent}")
     if not _login_shell_maxpm():
         shell = Path(os.environ.get("SHELL") or "/bin/zsh").name
         prof = Path("~/.zprofile" if shell == "zsh" else "~/.bash_profile" if shell == "bash" else "~/.profile").expanduser()
-        old = prof.read_text() if prof.exists() else ""
+        old = prof.read_text(encoding="utf-8") if prof.exists() else ""
         line = 'export PATH="$HOME/.local/bin:$PATH"  # MaximizePM: the maxpm command'
         if line not in old:
-            prof.write_text(old + ("\n" if old and not old.endswith("\n") else "") + line + "\n")
+            prof.write_text(old + ("\n" if old and not old.endswith("\n") else "") + line + "\n", encoding="utf-8")
             changed.append(f"{prof}: adds ~/.local/bin to PATH for new terminals")
     return {"changed": changed, "status": command_status()}
 
@@ -4090,7 +4061,7 @@ def setup_agent_add(conn, label, actor=None):
         # The first agent is the Start button's default: when its program is not on this computer (the
         # default Claude Code on a Mac that has only Codex), the agent added now becomes the default.
         first = core.entry_exe(agents[0][1]) if agents else None
-        missing = first and core.PLATFORM != "win32" and not _login_shell_which([first])[first]
+        missing = first and not _login_shell_which([first])[first]
         agents = [(label, cmd)] + agents if missing else agents + [(label, cmd)]
         core.config_set(conn, "launch_agents", "; ".join(f"{a}={c}" for a, c in agents), actor=actor)
     return [a for a, _ in agents]
@@ -4856,7 +4827,7 @@ def write_serve_file(port):
 
 def remove_serve_file(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             mine = json.load(f).get("pid") == os.getpid()
         if mine:
             os.remove(path)
@@ -4885,7 +4856,7 @@ def serve(port: int, open_browser=False, dev=False):
     keep_loop()
     relay.start(stop, port)  # keeps the relay socket open while relay.json exists (maxpm connect)
     serve_file = None
-    if os.name != "nt" and runners:
+    if runners:
         start_runners(str(core.db_path()))
         serve_file = write_serve_file(port)
     if open_browser:

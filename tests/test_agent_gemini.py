@@ -125,7 +125,7 @@ class Identity(Home):
         shutil.copy(DONE, d / DONE.name)
         other = self.chats("other")
         # A file of another session with the same first 8 characters is not it.
-        (other / "session-2026-11-11T08-00-a64cec76.jsonl").write_text(json.dumps({"sessionId": "a64cec76-0000"}) + "\n")
+        (other / "session-2026-11-11T08-00-a64cec76.jsonl").write_text(json.dumps({"sessionId": "a64cec76-0000"}) + "\n", encoding="utf-8")
         sid = "a64cec76-7a53-4be3-aa01-16aa3c4060ce"
         self.assertEqual(gemini.chat_path(sid), d / DONE.name)
         self.assertEqual(agents.get("gemini").chat_path(sid, None, str(self.home / ".gemini" / "tmp")), d / DONE.name)
@@ -140,7 +140,7 @@ class Identity(Home):
         project = self.home / "work" / "demo"
         project.mkdir(parents=True)
         (self.home / ".gemini" / "projects.json").parent.mkdir(parents=True, exist_ok=True)
-        (self.home / ".gemini" / "projects.json").write_text(json.dumps({"projects": {str(project): "demo-2"}}))
+        (self.home / ".gemini" / "projects.json").write_text(json.dumps({"projects": {str(project): "demo-2"}}), encoding="utf-8")
         mine, other = self.chats("demo-2"), self.chats("demo")
         for d in (mine, other):
             shutil.copy(DONE, d / DONE.name)
@@ -273,11 +273,11 @@ class Commands(Home):
     def test_the_built_in_commands_and_the_custom_ones_of_both_folders(self):
         user = self.home / ".gemini" / "commands"
         (user / "git").mkdir(parents=True)
-        (user / "git" / "commit.toml").write_text('description = "Write a commit message"\nprompt = "..."\n')
-        (user / "review.toml").write_text('prompt = "Review {{args}}"\n')
+        (user / "git" / "commit.toml").write_text('description = "Write a commit message"\nprompt = "..."\n', encoding="utf-8")
+        (user / "review.toml").write_text('prompt = "Review {{args}}"\n', encoding="utf-8")
         project = self.home / "p"
         (project / ".gemini" / "commands").mkdir(parents=True)
-        (project / ".gemini" / "commands" / "review.toml").write_text("description = 'Review this project'\nprompt = 'x'\n")
+        (project / ".gemini" / "commands" / "review.toml").write_text("description = 'Review this project'\nprompt = 'x'\n", encoding="utf-8")
         got = {c["name"]: c for c in agents.get("gemini").read_commands(str(project))}
         self.assertEqual(got["git:commit"]["description"], "Write a commit message")
         self.assertEqual(got["review"]["description"], "Review this project")
@@ -293,7 +293,7 @@ class Commands(Home):
         text = 'prompt = "x"\ndescription = "Say \\"hi\\""\n'
         self.assertEqual(gemini._toml_description(text), 'Say "hi"')
         with mock.patch.dict("sys.modules", {"tomllib": None}):
-            self.assertEqual(gemini._toml_description(text), 'Say \\"hi\\"')
+            self.assertEqual(gemini._toml_description(text), 'Say "hi"')
             self.assertEqual(gemini._toml_description("description = 'plain'"), "plain")
 
 
@@ -302,29 +302,29 @@ class Setup(Home):
         path = self.home / ".gemini" / "settings.json"
         a = agents.get("gemini")
         self.assertIn("added MaximizePM", a.write_mcp_config())
-        entry = json.loads(path.read_text())["mcpServers"]["maxpm"]
+        entry = json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["maxpm"]
         self.assertEqual(entry["args"][-1], "mcp")
         self.assertEqual(entry["env"], {"MAXPM_DB": str(core.db_path().expanduser().resolve())})  # no MAXPM_CHAT
         self.assertIn("nothing changed", a.write_mcp_config())
-        path.write_text(json.dumps({"theme": "Dark", "mcpServers": {"other": {"command": "x"}}}))
+        path.write_text(json.dumps({"theme": "Dark", "mcpServers": {"other": {"command": "x"}}}), encoding="utf-8")
         a.write_mcp_config()
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual((data["theme"], data["mcpServers"]["other"]), ("Dark", {"command": "x"}))
         self.assertTrue(path.with_name("settings.json.bak").exists())
         self.assertIn("took MaximizePM out", a.write_mcp_config(remove=True))
-        self.assertEqual(json.loads(path.read_text())["mcpServers"], {"other": {"command": "x"}})
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["mcpServers"], {"other": {"command": "x"}})
         self.assertIn("nothing changed", a.write_mcp_config(remove=True))
         other = self.home / "elsewhere.json"
         a.write_mcp_config(other)
-        self.assertIn("maxpm", json.loads(other.read_text())["mcpServers"])
+        self.assertIn("maxpm", json.loads(other.read_text(encoding="utf-8"))["mcpServers"])
 
     def test_a_settings_file_with_comments_is_left_as_it_is(self):
         path = self.home / ".gemini" / "settings.json"
         path.parent.mkdir(parents=True)
-        path.write_text('{\n  // mine\n  "theme": "Dark"\n}\n')
+        path.write_text('{\n  // mine\n  "theme": "Dark"\n}\n', encoding="utf-8")
         with self.assertRaisesRegex(RiverError, "gemini mcp add --scope user -e MAXPM_DB=.* maxpm .* mcp"):
             agents.get("gemini").write_mcp_config()
-        self.assertIn("// mine", path.read_text())
+        self.assertIn("// mine", path.read_text(encoding="utf-8"))
 
     def test_the_setup_names_gemini_md(self):
         self.assertEqual(gemini.SETUP["instructions"], "GEMINI.md")
@@ -345,20 +345,20 @@ class InitFile(unittest.TestCase):
         self.assertIn(("GEMINI.md", "@AGENTS.md", "Gemini CLI"), agents.import_files())
         lines = cli.setup_instructions(self.d)
         g = self.d / "GEMINI.md"
-        self.assertEqual(g.read_text(), "@AGENTS.md\n")
+        self.assertEqual(g.read_text(encoding="utf-8"), "@AGENTS.md\n")
         self.assertIn("GEMINI.md: created as the one line @AGENTS.md, so Gemini CLI reads AGENTS.md too", lines)
         self.assertEqual(cli.setup_instructions(self.d), ["AGENTS.md: already has the work queue block"])
 
     def test_a_gemini_md_with_rules_keeps_them_and_gets_the_block(self):
         from river import cli
         g = self.d / "GEMINI.md"
-        g.write_text("# Gemini rules\n")
+        g.write_text("# Gemini rules\n", encoding="utf-8")
         cli.setup_instructions(self.d)
-        self.assertTrue(g.read_text().startswith("# Gemini rules\n"))
-        self.assertEqual(g.read_text().count("## Work queue"), 1)
-        g.write_text(cli.AGENT_SNIPPET)  # only the block, from an older init: it becomes the import
+        self.assertTrue(g.read_text(encoding="utf-8").startswith("# Gemini rules\n"))
+        self.assertEqual(g.read_text(encoding="utf-8").count("## Work queue"), 1)
+        g.write_text(cli.AGENT_SNIPPET, encoding="utf-8")  # only the block, from an older init: it becomes the import
         cli.setup_instructions(self.d)
-        self.assertEqual(g.read_text(), "@AGENTS.md\n")
+        self.assertEqual(g.read_text(encoding="utf-8"), "@AGENTS.md\n")
 
 
 if __name__ == "__main__":

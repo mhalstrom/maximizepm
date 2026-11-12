@@ -16,7 +16,7 @@ SESSION_ID = "01a1c9a9-ece6-719c-93fd-20aeef4f656d"  # recorded from Pi 1.5.2 (#
 
 
 def lines(name="session.jsonl"):
-    return (FIX / name).read_text().splitlines()
+    return (FIX / name).read_text(encoding="utf-8").splitlines()
 
 
 class Env(unittest.TestCase):
@@ -83,7 +83,7 @@ class Launch(Env):
         i = argv.index("--append-system-prompt")
         f = Path(argv[i + 1])
         self.assertTrue(f.is_file())
-        self.assertIn("# The maxpm skill (already loaded)", f.read_text())
+        self.assertIn("# The maxpm skill (already loaded)", f.read_text(encoding="utf-8"))
         self.assertEqual(f.parent, Path(core.river_dir()) / "prompts")
 
     def test_fork_and_resume(self):
@@ -213,10 +213,10 @@ class Chat(Env):
         first = self.root / "first.jsonl"
         shutil.copy(FIX / "session.jsonl", first)
         fork = self.root / "fork.jsonl"
-        fork.write_text((FIX / "fork.jsonl").read_text().replace("PARENT", str(first)))
+        fork.write_text((FIX / "fork.jsonl").read_text(encoding="utf-8").replace("PARENT", str(first)), encoding="utf-8")
         self.assertEqual(pi.chat_chain(fork), [fork])
         self.assertEqual(pi.chat_chain(first), [first])
-        entries, turn = self.a.parse_chat(fork.read_text().splitlines())
+        entries, turn = self.a.parse_chat(fork.read_text(encoding="utf-8").splitlines())
         self.assertEqual([e["text"] for e in entries if e["role"] == "assistant"][-2:],
                          ["The file missing.md does not exist.", "go on."])
         self.assertEqual(turn, "idle")
@@ -230,10 +230,10 @@ class Chat(Env):
             {"type": "session", "version": 3, "id": "c1", "timestamp": "2026-11-11T09:00:00.000Z", "cwd": "/work/demo",
              "parentSession": str(first)},
             {"type": "message", "id": "c0000001", "parentId": None, "timestamp": "2026-11-11T09:00:01.000Z",
-             "message": {"role": "user", "content": "go on"}})) + "\n")
+             "message": {"role": "user", "content": "go on"}})) + "\n", encoding="utf-8")
         self.assertEqual(pi.chat_chain(child), [first, child])
         gone = self.root / "gone.jsonl"
-        gone.write_text(child.read_text().replace(str(first), str(self.root / "missing.jsonl")))
+        gone.write_text(child.read_text(encoding="utf-8").replace(str(first), str(self.root / "missing.jsonl")), encoding="utf-8")
         self.assertEqual(pi.chat_chain(gone), [gone])  # a parent that is gone is left out
 
 
@@ -243,15 +243,15 @@ class Commands(Env):
         (proj / ".git").mkdir(parents=True)
         (self.root / "pi-agent" / "prompts").mkdir(parents=True)
         (self.root / "pi-agent" / "prompts" / "review.md").write_text(
-            "---\ndescription: Review staged changes\nargument-hint: \"<PR-URL>\"\n---\nReview it.\n")
+            "---\ndescription: Review staged changes\nargument-hint: \"<PR-URL>\"\n---\nReview it.\n", encoding="utf-8")
         (proj / ".pi" / "prompts").mkdir(parents=True)
-        (proj / ".pi" / "prompts" / "wr.md").write_text("Finish the task end to end.\n")
+        (proj / ".pi" / "prompts" / "wr.md").write_text("Finish the task end to end.\n", encoding="utf-8")
         (home / ".agents" / "skills" / "pdf").mkdir(parents=True)
-        (home / ".agents" / "skills" / "pdf" / "SKILL.md").write_text("---\nname: pdf-tools\ndescription: PDFs\n---\n")
+        (home / ".agents" / "skills" / "pdf" / "SKILL.md").write_text("---\nname: pdf-tools\ndescription: PDFs\n---\n", encoding="utf-8")
         (proj / ".agents" / "skills" / "deploy").mkdir(parents=True)
-        (proj / ".agents" / "skills" / "deploy" / "SKILL.md").write_text("---\ndescription: Deploy it\n---\n")
+        (proj / ".agents" / "skills" / "deploy" / "SKILL.md").write_text("---\ndescription: Deploy it\n---\n", encoding="utf-8")
         (self.root / "pi-agent" / "skills").mkdir(parents=True)
-        (self.root / "pi-agent" / "skills" / "notes.md").write_text("---\ndescription: Notes\n---\n")
+        (self.root / "pi-agent" / "skills" / "notes.md").write_text("---\ndescription: Notes\n---\n", encoding="utf-8")
         got = {c["name"]: c for c in self.a.read_commands(str(proj))}
         self.assertEqual(got["review"], {"name": "review", "description": "Review staged changes", "hint": "<PR-URL>"})
         self.assertEqual(got["wr"]["description"], "Finish the task end to end.")
@@ -267,7 +267,7 @@ class State(Env):
         words = self.a.install_hooks("/work/demo", report)
         f = Path(core.river_dir()) / "pi" / pi.EXTENSION_NAME
         self.assertEqual(words, ["-e", str(f)])
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         self.assertIn('const REPORT: string[] = ["maxpm", "report"];', text)
         self.assertIn(json.dumps(str(f)), text)
         for event in ("session_start", "agent_start", "agent_end", "session_shutdown"):
@@ -282,7 +282,7 @@ class State(Env):
         f = str(Path(core.river_dir()) / "pi" / pi.EXTENSION_NAME)
         self.assertEqual(core.build_command("pi", {"prompt": "go"}, "opus"), f"pi -e {f} --model opus go")
         self.assertEqual(core.with_hooks(self.a, ["pi", "--session", "7f3c"]), ["pi", "-e", f, "--session", "7f3c"])
-        self.assertIn("pi.on(\"agent_start\"", Path(f).read_text())
+        self.assertIn("pi.on(\"agent_start\"", Path(f).read_text(encoding="utf-8"))
         # Claude Code takes its hooks file as a setting (LAUNCH hooks_file), and Codex reads the screen: no words.
         self.assertEqual(core.hook_words(agents.get("claude")), [])
         self.assertEqual(core.hook_words(agents.get("codex")), [])
@@ -316,7 +316,7 @@ class State(Env):
             await handlers.session_shutdown?.({ reason: "reload" }, ctx);
             await handlers.session_shutdown?.({ reason: "quit" }, ctx);
             console.log(JSON.stringify({ calls, name }));
-        """)
+        """, encoding="utf-8")
         env = {**os.environ, "MAXPM_AGENT": "w1"}
         out = subprocess.run(["node", str(harness), f.as_uri()], capture_output=True, text=True, env=env, timeout=60)
         if out.returncode and "Unknown file extension" in out.stderr:

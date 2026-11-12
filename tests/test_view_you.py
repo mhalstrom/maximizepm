@@ -151,7 +151,7 @@ class PageMessages(unittest.TestCase):
         self.assertEqual(self.get("/api/search?q=login&n=x")[0], 400)
 
     def test_page_has_the_search_field(self):
-        html = (Path(server.__file__).parent / "static" / "index.html").read_text()
+        html = (Path(server.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
         for el in ('id="search"', 'id="searchDlg"', 'id="searchText"', 'id="searchStatus"', 'id="searchProject"'):
             self.assertIn(el, html)
-        self.assertIn('fetch("api/search?"', (Path(server.__file__).parent / "static" / "app.js").read_text())
+        self.assertIn('fetch("api/search?"', (Path(server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8"))

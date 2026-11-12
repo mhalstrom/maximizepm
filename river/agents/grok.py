@@ -51,7 +51,7 @@ def grok_home(env=None):
 def _models_cache(env=None):
     """Grok's model list as it fetched it last (models_cache.json: {"models": {id: {"info": {...}}}}), or {}."""
     try:
-        got = json.loads((grok_home(env) / "models_cache.json").read_text())
+        got = json.loads((grok_home(env) / "models_cache.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     models = got.get("models") if isinstance(got, dict) else None
@@ -282,13 +282,13 @@ def agent_definition(python, script):
 def _write(path, text):
     """Write path when its text differs; True when it wrote."""
     try:
-        if path.read_text() == text:
+        if path.read_text(encoding="utf-8") == text:
             return False
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
     return True
 
@@ -380,7 +380,7 @@ def _exec(argv, data, env):
 
 def _locked(path):
     """An open file of path, locked for this process (fcntl where it exists)."""
-    f = open(path, "a+")
+    f = open(path, "a+", encoding="utf-8")
     try:
         import fcntl
         fcntl.flock(f, fcntl.LOCK_EX)
@@ -463,7 +463,7 @@ def hook_main(argv, report, stdin=None, env=None, now=None, run=None, state_dir=
             f.write(json.dumps(st))
             f.flush()
             if env.get("MAXPM_HOOK_LOG"):
-                with open(env["MAXPM_HOOK_LOG"], "a") as log:
+                with open(env["MAXPM_HOOK_LOG"], "a", encoding="utf-8") as log:
                     log.write(json.dumps({"at": now, "event": event, "state": state, "cmd": cmd}) + "\n")
             if release or (not existed and not cmd):
                 try:  # the session ended, or a late hook of an ended session (the Stop of its shutdown) made the file

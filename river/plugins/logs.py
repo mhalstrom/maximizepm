@@ -155,7 +155,7 @@ def run(name=None, file=None, ssh=None, command=None, pattern=None, ignore=None,
         critical = 1  # no limit given: one matching line is a fault
     sf = _state_file(name or os.environ.get("MAXPM_CHECK_KEY"))
     try:
-        state = json.loads(sf.read_text())
+        state = json.loads(sf.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         state = {}
     at = core.now()
@@ -176,7 +176,7 @@ def run(name=None, file=None, ssh=None, command=None, pattern=None, ignore=None,
                 "skipped_bytes": 0}
     minutes = max((at - core.parse_iso(state["at"])).total_seconds() / 60, 1 / 60) if state.get("at") else None
     sf.parent.mkdir(parents=True, exist_ok=True)
-    sf.write_text(json.dumps(dict(new_state, at=core.iso(at), source=source)))
+    sf.write_text(json.dumps(dict(new_state, at=core.iso(at), source=source)), encoding="utf-8")
     if first:
         return {"status": 0, "summary": f"{source}: the first read found the end of the log; from the next run on, "
                                         f"new lines count", "perf": "", "matches": [], "count": 0, "lines": 0,

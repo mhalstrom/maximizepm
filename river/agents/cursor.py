@@ -425,7 +425,7 @@ def meta(session_ref, folder=None, env=None):
     paths += sorted(base.glob(f"*/{ref}/meta.json"))
     for p in paths:
         try:
-            got = json.loads(p.read_text())
+            got = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if isinstance(got, dict):
@@ -471,7 +471,7 @@ def _commands(d):
     out = []
     for f in sorted(Path(d).glob("*.md")) if Path(d).is_dir() else ():
         try:
-            m, body = _front(f.read_text(errors="replace"))
+            m, body = _front(f.read_text(errors="replace", encoding="utf-8"))
         except OSError:
             continue
         first = next((ln.strip().lstrip("#").strip() for ln in body.splitlines() if ln.strip()), "")
@@ -485,7 +485,7 @@ def _skills(d):
     out = []
     for f in sorted(Path(d).glob("*/SKILL.md")) if Path(d).is_dir() else ():
         try:
-            m, _ = _front(f.read_text(errors="replace"))
+            m, _ = _front(f.read_text(errors="replace", encoding="utf-8"))
         except OSError:
             continue
         out.append({"name": m.get("name") or f.parent.name, "description": m.get("description", ""), "hint": ""})

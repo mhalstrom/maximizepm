@@ -157,8 +157,8 @@ def install_hooks(folder, report):
     f = Path(river_dir()) / HOOK_FILE
     text = json.dumps(hook_settings(report), indent=2) + "\n"
     try:
-        if not f.exists() or f.read_text() != text:
-            f.write_text(text)
+        if not f.exists() or f.read_text(encoding="utf-8") != text:
+            f.write_text(text, encoding="utf-8")
     except OSError as e:
         raise RiverError(f"cannot write the activity hook file {f}: {e}; turn the hooks off: "
                          f"maxpm config set claude_activity_hooks off")
@@ -485,7 +485,7 @@ def read_transcript(path):
     (its time inside the snapshot). Not the file's birth time: files are written again."""
     reqs, first, fork, dequeued, leading, users = {}, None, False, None, True, 0
     slack = _timedelta(seconds=FORK_SLACK)
-    with open(path, errors="replace") as f:
+    with open(path, errors="replace", encoding="utf-8") as f:
         for line in f:
             if not leading and ('"usage"' not in line or '"assistant"' not in line):
                 continue
@@ -767,14 +767,10 @@ SETUP = {
 
 def desktop_config_path():
     """Where the Claude desktop app keeps its MCP servers."""
-    import os
     import sys
     from pathlib import Path
     if sys.platform == "darwin":
         return Path("~/Library/Application Support/Claude/claude_desktop_config.json").expanduser()
-    if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA") or Path("~/AppData/Roaming").expanduser(), "Claude",
-                    "claude_desktop_config.json")
     return Path("~/.config/Claude/claude_desktop_config.json").expanduser()
 
 
@@ -786,7 +782,7 @@ def write_mcp_config(path=None, remove=False):
     from . import setup_entry
     from ..core import RiverError
     f = Path(path).expanduser() if path else desktop_config_path()
-    old = f.read_text() if f.exists() else ""
+    old = f.read_text(encoding="utf-8") if f.exists() else ""
     try:
         data = json.loads(old) if old.strip() else {}
     except ValueError as e:
@@ -805,9 +801,9 @@ def write_mcp_config(path=None, remove=False):
         servers["maxpm"] = entry
     new = json.dumps(data, indent=2) + "\n"
     if old:
-        f.with_name(f.name + ".bak").write_text(old)
+        f.with_name(f.name + ".bak").write_text(old, encoding="utf-8")
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(new)
+    f.write_text(new, encoding="utf-8")
     if remove:
         return f"took MaximizePM out of {f} (the old file: {f.name}.bak). Quit and reopen the Claude desktop app."
     return (f"added MaximizePM to {f}" + (f" (the old file: {f.name}.bak)" if old else "") + ".\n"

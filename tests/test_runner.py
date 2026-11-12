@@ -21,7 +21,7 @@ class Client(unittest.TestCase):
         self.env = {"MAXPM_DB": self.db, "PATH": os.environ.get("PATH", "")}
 
     def serve_file(self):
-        with open(self.db + "-serve.json", "w") as f:
+        with open(self.db + "-serve.json", "w", encoding="utf-8") as f:
             json.dump({"port": 1, "token": "t"}, f)
 
     def test_commands_that_stay_in_their_own_process(self):
@@ -123,7 +123,7 @@ class LeanStart(unittest.TestCase):
 
     def test_bin_maxpm_starts_python_without_site(self):
         path = os.path.join(ROOT, "bin", "maxpm")
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             self.assertEqual(f.readline().strip(), "#!/usr/bin/env -S python3 -S")
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)

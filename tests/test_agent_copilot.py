@@ -162,8 +162,8 @@ class Hooks(Env):
         words = a.install_hooks("/p", MAXPM + ["report"])
         d = Path(core.river_dir()) / copilot.PLUGIN_DIR
         self.assertEqual(words, ["--plugin-dir", str(d)])
-        self.assertEqual(json.loads((d / "plugin.json").read_text())["name"], "maxpm")
-        hooks = json.loads((d / "hooks.json").read_text())
+        self.assertEqual(json.loads((d / "plugin.json").read_text(encoding="utf-8"))["name"], "maxpm")
+        hooks = json.loads((d / "hooks.json").read_text(encoding="utf-8"))
         self.assertEqual(hooks["version"], 1)
         self.assertEqual(sorted(hooks["hooks"]), sorted(copilot.HOOK_EVENTS))
         h = hooks["hooks"]["agentStop"][0]
@@ -296,7 +296,7 @@ class Chat(Env):
         self.assertIsNone(a.chat_path(sid))
         f = Path(os.environ["COPILOT_HOME"]) / "session-state" / sid / "events.jsonl"
         f.parent.mkdir(parents=True)
-        f.write_text("")
+        f.write_text("", encoding="utf-8")
         self.assertEqual(a.chat_path(sid), f)
         self.assertIsNone(a.chat_path("../" + sid))
 
@@ -326,16 +326,16 @@ class Commands(Env):
         proj = self.root / "proj"
         (proj / ".claude" / "commands").mkdir(parents=True)
         (proj / ".claude" / "commands" / "count-files.md").write_text(
-            "---\ndescription: Count the files\nargument-hint: <folder>\n---\nCount files in $ARGUMENTS\n")
+            "---\ndescription: Count the files\nargument-hint: <folder>\n---\nCount files in $ARGUMENTS\n", encoding="utf-8")
         (proj / ".github" / "skills" / "greet-me").mkdir(parents=True)
         (proj / ".github" / "skills" / "greet-me" / "SKILL.md").write_text(
-            "---\nname: greet-me\ndescription: Say a greeting to the user\n---\nSay hello.\n")
+            "---\nname: greet-me\ndescription: Say a greeting to the user\n---\nSay hello.\n", encoding="utf-8")
         mine = Path(os.environ["COPILOT_HOME"]) / "skills" / "tidy"
         mine.mkdir(parents=True)
-        (mine / "SKILL.md").write_text("---\ndescription: Tidy the folder\n---\n")
+        (mine / "SKILL.md").write_text("---\ndescription: Tidy the folder\n---\n", encoding="utf-8")
         claude_own = Path(os.environ["HOME"]) / ".claude" / "commands"  # Copilot does not read ~/.claude
         claude_own.mkdir(parents=True)
-        (claude_own / "secret.md").write_text("x")
+        (claude_own / "secret.md").write_text("x", encoding="utf-8")
         got = a.read_commands(proj)[len(a.commands):]
         self.assertEqual(got, [
             {"name": "count-files", "description": "Count the files", "hint": "<folder>"},
@@ -347,10 +347,10 @@ class Setup(Env):
     def test_the_mcp_server_goes_into_copilots_list_and_other_servers_stay(self):
         f = Path(os.environ["COPILOT_HOME"]) / "mcp-config.json"
         f.parent.mkdir(parents=True)
-        f.write_text(json.dumps({"mcpServers": {"other": {"type": "local", "command": "x"}}}))
+        f.write_text(json.dumps({"mcpServers": {"other": {"type": "local", "command": "x"}}}), encoding="utf-8")
         a = agents.get("copilot")
         self.assertIn("added MaximizePM", a.write_mcp_config())
-        data = json.loads(f.read_text())
+        data = json.loads(f.read_text(encoding="utf-8"))
         entry = data["mcpServers"]["maxpm"]
         self.assertEqual((entry["type"], entry["tools"], entry["args"][-1]), ("local", ["*"], "mcp"))
         self.assertNotIn("MAXPM_CHAT", entry["env"])
@@ -358,11 +358,11 @@ class Setup(Env):
         self.assertTrue(f.with_name("mcp-config.json.bak").exists())
         self.assertIn("nothing changed", a.write_mcp_config())
         self.assertIn("took MaximizePM out", a.write_mcp_config(remove=True))
-        self.assertEqual(list(json.loads(f.read_text())["mcpServers"]), ["other"])
-        f.write_text("{not json")
+        self.assertEqual(list(json.loads(f.read_text(encoding="utf-8"))["mcpServers"]), ["other"])
+        f.write_text("{not json", encoding="utf-8")
         with self.assertRaises(core.RiverError):
             a.write_mcp_config()
-        self.assertEqual(f.read_text(), "{not json")
+        self.assertEqual(f.read_text(encoding="utf-8"), "{not json")
 
 
 if __name__ == "__main__":

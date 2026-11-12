@@ -100,7 +100,7 @@ class Mcp(unittest.TestCase):
 
 
 def load(path):
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -167,7 +167,7 @@ class ChatApp(unittest.TestCase):
         from river import agents  # the MCP config writers are in the adapters' setup part (#5184)
         f = os.path.join(self.dir.name, "Claude", "claude_desktop_config.json")
         os.makedirs(os.path.dirname(f))
-        with open(f, "w") as fh:
+        with open(f, "w", encoding="utf-8") as fh:
             json.dump({"mcpServers": {"other": {"command": "x"}}, "theme": "dark"}, fh)
         self.assertIn("added MaximizePM", agents.get("claude").write_mcp_config(f))
         data = load(f)
@@ -181,7 +181,7 @@ class ChatApp(unittest.TestCase):
         self.assertIn("nothing changed", agents.get("claude").write_mcp_config(f))
         self.assertIn("took MaximizePM out", agents.get("claude").write_mcp_config(f, remove=True))
         self.assertEqual(load(f)["mcpServers"], {"other": {"command": "x"}})
-        with open(f, "w") as fh:
+        with open(f, "w", encoding="utf-8") as fh:
             fh.write("{broken")
         with self.assertRaisesRegex(core.RiverError, "not valid JSON"):
             agents.get("claude").write_mcp_config(f)
@@ -196,10 +196,10 @@ class ChatApp(unittest.TestCase):
         os.makedirs(os.path.dirname(f))
         old = ('model = "sol"\n\n[mcp_servers.node_repl]\ncommand = "/x/node"\nargs = []\n\n'
                '[mcp_servers.node_repl.env]\nA = "1"\n\n[apps.x.tools."y.z"]\napproval_mode = "approve"\n')
-        with open(f, "w") as fh:
+        with open(f, "w", encoding="utf-8") as fh:
             fh.write(old)
         self.assertIn("Work or Codex mode", agents.get("codex").write_mcp_config(f))
-        with open(f) as fh:
+        with open(f, encoding="utf-8") as fh:
             text = fh.read()
         self.assertTrue(text.startswith(old.rstrip("\n")))  # every other line stays as it was
         import tomllib
@@ -209,18 +209,18 @@ class ChatApp(unittest.TestCase):
         self.assertEqual(data["mcp_servers"]["maxpm"]["args"][-1], "mcp")
         self.assertIn("nothing changed", agents.get("codex").write_mcp_config(f))
         # A changed river entry is replaced, not doubled.
-        with open(f, "w") as fh:
+        with open(f, "w", encoding="utf-8") as fh:
             fh.write(text.replace('"MAXPM_CHAT" = "1"', "").replace("MAXPM_CHAT = \"1\"", 'MAXPM_CHAT = "0"'))
         agents.get("codex").write_mcp_config(f)
-        with open(f) as fh:
+        with open(f, encoding="utf-8") as fh:
             text = fh.read()
         self.assertEqual(text.count("[mcp_servers.maxpm]"), 1)
         self.assertIn('MAXPM_CHAT = "1"', text)
         self.assertIn("took MaximizePM out", agents.get("codex").write_mcp_config(f, remove=True))
-        with open(f) as fh:
+        with open(f, encoding="utf-8") as fh:
             self.assertEqual(fh.read().rstrip("\n"), old.rstrip("\n"))
         self.assertIn("nothing changed", agents.get("codex").write_mcp_config(f, remove=True))
-        with open(f, "w") as fh:
+        with open(f, "w", encoding="utf-8") as fh:
             fh.write("[broken")
         with self.assertRaisesRegex(core.RiverError, "not valid TOML"):
             agents.get("codex").write_mcp_config(f)

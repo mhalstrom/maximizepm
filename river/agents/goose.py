@@ -299,17 +299,14 @@ def _hidden_text(row):
 
 
 class _Lock:
-    """An exclusive lock on a file while a copy is brought up to date (two page requests at once); none on Windows."""
+    """An exclusive lock on a file while a copy is brought up to date (two page requests at once)."""
 
     def __init__(self, path):
         self.path, self.f = path, None
 
     def __enter__(self):
-        try:
-            import fcntl
-        except ImportError:
-            return self
-        self.f = open(self.path, "a")
+        import fcntl
+        self.f = open(self.path, "a", encoding="utf-8")
         fcntl.flock(self.f, fcntl.LOCK_EX)
         return self
 
@@ -335,7 +332,7 @@ def copy_session(db, session_ref, out_dir):
         out_dir.mkdir(parents=True, exist_ok=True)
         path, state_file = out_dir / f"{s['id']}.jsonl", out_dir / f"{s['id']}.state.json"
         with _Lock(out_dir / f"{s['id']}.lock"):
-            state = _loads(state_file.read_text() if state_file.exists() else "{}", {})
+            state = _loads(state_file.read_text(encoding="utf-8") if state_file.exists() else "{}", {})
             size = path.stat().st_size if path.exists() else 0
             if size < state.get("size", 0) or not path.exists():
                 state, size = {}, 0
@@ -355,7 +352,7 @@ def copy_session(db, session_ref, out_dir):
                     f.write("".join(json.dumps(x) + "\n" for x in lines))
                 state = {"session": session, "last": rows[-1]["id"] if rows else state.get("last", 0),
                          "size": path.stat().st_size}
-                state_file.write_text(json.dumps(state))
+                state_file.write_text(json.dumps(state), encoding="utf-8")
         return path
     except sqlite3.Error:
         return None
@@ -664,7 +661,7 @@ def _recipes():
     """The recipe slash commands of config.yaml: slash_commands is a list of {command, recipe_path}. A small reader of
     that one key, as goose writes it, with no YAML parser."""
     try:
-        text = (config_dir() / "config.yaml").read_text()
+        text = (config_dir() / "config.yaml").read_text(encoding="utf-8")
     except OSError:
         return []
     out, inside, cur = [], False, None
@@ -715,7 +712,7 @@ def read_commands(folder):
             continue
         for f in files:
             try:
-                meta = _front(f.read_text(errors="replace"))
+                meta = _front(f.read_text(errors="replace", encoding="utf-8"))
             except OSError:
                 continue
             name = (meta.get("name") or f.parent.name).strip().lower().replace(" ", "-")

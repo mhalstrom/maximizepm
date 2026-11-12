@@ -103,7 +103,7 @@ class UiParts(unittest.TestCase):
             css = Path(d, "x.css")
             css.write_text(".row:not(:hover) .pin { display: none; }\n.row:hover .end { opacity: 1; visibility: visible; }\n"
                            "@media (hover: hover) { .b:hover { padding-left: var(--sp-1); color: red; } }\n"
-                           "/* .c:hover { width: 0 } */ .d:hover{border:1px solid}\n.e .f { display: none; }\n")
+                           "/* .c:hover { width: 0 } */ .d:hover{border:1px solid}\n.e .f { display: none; }\n", encoding="utf-8")
             self.assertEqual([p for _, p in hover_shifts(css)], ["display", "padding-left", "border"])
 
     def test_views_use_the_parts_and_the_allow_list_only_shrinks(self):
@@ -131,12 +131,12 @@ class UiParts(unittest.TestCase):
             js.write_text('// <button> in a comment\nconst b = document.createElement("button");\n'
                           'el.innerHTML = `<button class="btn">x</button>`; el.style.color = "#ff0000";\n'
                           'const t = "see #4955"; d.setAttribute("role", "dialog"); x = `<div role="dialog">`;\n'
-                          'url = "https://a.b/c"; w = "12px";\n')
+                          'url = "https://a.b/c"; w = "12px";\n', encoding="utf-8")
             html.write_text('<!-- <button> --><button class="btn">ok</button><button id="raw">raw</button>'
-                            '<div style="margin:8px"></div>')
+                            '<div style="margin:8px"></div>', encoding="utf-8")
             css.write_text("/* #fff 9px */ .a { color: #fff; margin: 8px; background: rgba(0,0,0,.4); }\n"
                            "@media (max-width: 600px) { .b { padding: 0; } }\n"
-                           ".scrim { position: fixed; inset: 0; }\n")
+                           ".scrim { position: fixed; inset: 0; }\n", encoding="utf-8")
             self.assertEqual(counts(js), {"button": 2, "dialog": 1, "color": 1, "px": 1})
             self.assertEqual(counts(html), {"button": 1, "dialog": 0, "color": 0, "px": 1})
             self.assertEqual(counts(css), {"button": 0, "dialog": 1, "color": 2, "px": 1})
@@ -150,7 +150,7 @@ class TimeTexts(unittest.TestCase):
     def test_no_text_puts_ago_after_ago(self):
         # lib.js ago() ends with 'ago' itself; an ended session's hover read 'ended 3h ago ago' (#5395).
         bad = [f"{p.relative_to(STATIC)}:{n}" for p in sorted(STATIC.rglob("*.js")) if "vendor" not in p.parts
-               for n, line in enumerate(p.read_text().splitlines(), 1)
+               for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
                if re.search(r"\bago\([^`]*?\)\)?\}?\s*ago\b", line)]
         self.assertEqual(bad, [])
 
@@ -158,7 +158,7 @@ class TimeTexts(unittest.TestCase):
 class Dialogs(unittest.TestCase):
     def test_every_dialog_of_the_part_is_a_modal_dialog(self):
         # The page's keys and refreshes wait while a [role=dialog] shows; the End dialog had no role (#5403).
-        text = (STATIC / "components" / "dialog.js").read_text()
+        text = (STATIC / "components" / "dialog.js").read_text(encoding="utf-8")
         self.assertIn('if (!el.hasAttribute("role")) el.setAttribute("role", "dialog");', text)
         self.assertIn('el.setAttribute("aria-modal", "true");', text)
 

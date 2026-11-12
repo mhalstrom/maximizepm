@@ -821,9 +821,9 @@ class Kit(Base):
         os.makedirs(os.path.join(d, "img"))
         with open(os.path.join(d, "img", "shot.png"), "wb") as f:
             f.write(png)
-        with open(os.path.join(d, "notes.md"), "w") as f:
+        with open(os.path.join(d, "notes.md"), "w", encoding="utf-8") as f:
             f.write("# Notes\n\n![The page](img/shot.png \"title\")\n\n![Gone](gone.png)\n\n![Web](https://x.test/a.png)\n")
-        with open(os.path.join(d, "page.html"), "w") as f:
+        with open(os.path.join(d, "page.html"), "w", encoding="utf-8") as f:
             f.write("<html><body><img alt=x src='img/shot.png'><img src=\"data:image/png;base64,AA\"></body></html>")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

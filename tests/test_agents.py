@@ -33,7 +33,7 @@ class Env(unittest.TestCase):
 
     def user_module(self, mid, text):
         self.dir.mkdir(exist_ok=True)
-        (self.dir / f"{mid}.py").write_text(textwrap.dedent(text))
+        (self.dir / f"{mid}.py").write_text(textwrap.dedent(text), encoding="utf-8")
         agents.load(refresh=True)
 
 
@@ -215,7 +215,7 @@ class Overrides(Env):
         self.user_module("toy", "DESCRIBE = {'id': 'toy', 'label': 'Toy', 'exe': 'toy', 'family': 'multi'}\n")
         self.assertEqual(agents.get("toy").label, "Toy")
         f = self.dir / "toy.py"
-        f.write_text("DESCRIBE = {'id': 'toy', 'label': 'Toy 2', 'exe': 'toy', 'family': 'multi'}\n")
+        f.write_text("DESCRIBE = {'id': 'toy', 'label': 'Toy 2', 'exe': 'toy', 'family': 'multi'}\n", encoding="utf-8")
         os.utime(f, ns=(1, 1))
         self.assertEqual(agents.get("toy").label, "Toy 2")
         f.unlink()
@@ -538,7 +538,7 @@ class PaneState(Env):
         fix = Path(__file__).resolve().parent / "fixtures" / "goose"
         name, pane = self.start("goose")
         pane["running"] = "goose"
-        pane["history"] = (fix / "pane_idle.txt").read_text() + "\n" + "older line\n" * 50  # the header scrolled away
+        pane["history"] = (fix / "pane_idle.txt").read_text(encoding="utf-8") + "\n" + "older line\n" * 50  # the header scrolled away
         pane["screen"] = "( O)> Press Enter to send"
         sids = lambda: [r[0] for r in self.c.execute("SELECT session_id FROM agent_sessions WHERE agent=? ORDER BY rowid",
                                                      (name,))]
@@ -555,7 +555,7 @@ class PaneState(Env):
         core.register(self.c, other)
         self.c.execute("UPDATE agents SET agent_type=NULL WHERE name=?", (other,))  # a custom command: no type known
         p2 = self.server.TMUX_RUNNER.panes[-1]
-        p2.update(running="goose", history=(fix / "pane_resumed.txt").read_text(), screen="( O)>")
+        p2.update(running="goose", history=(fix / "pane_resumed.txt").read_text(encoding="utf-8"), screen="( O)>")
         self.assertEqual(self.server.watch_prompts(self.c)["session_ids"].get(other), "20261111_1")
         # With the setting prompt_pattern empty (no prompt watch), the watcher still reads the ids.
         core.config_set(self.c, "prompt_pattern", "")
@@ -571,7 +571,7 @@ class PaneState(Env):
         name = self.server.launch_agent(self.c)["session_name"]
         self.assertEqual(core.state_adapter(self.c, name).id, "goose")
         pane = self.server.TMUX_RUNNER.panes[-1]
-        pane.update(running="goose", screen=(fix / "pane_blocked_tool.txt").read_text())
+        pane.update(running="goose", screen=(fix / "pane_blocked_tool.txt").read_text(encoding="utf-8"))
         self.assertEqual(self.server.watch_prompts(self.c)["reported"], {name: "blocked"})
         card = next(c for c in sessions.views(self.c, self.server.agent_terminals(self.c), self.tmp.name,
                                              self.tmp.name) if c["name"] == name)
@@ -599,7 +599,7 @@ class PaneState(Env):
         from river import sessions
         name, pane = self.start("hermes")
         fix = Path(__file__).resolve().parent / "fixtures" / "hermes" / "pane_blocked_clarify.txt"
-        pane["screen"] = fix.read_text()
+        pane["screen"] = fix.read_text(encoding="utf-8")
         p = self.server.pane_prompts(self.c, {name: pane["id"]})[name]
         self.assertEqual(p["options"][p["tell"]], "3. Other (type your answer)")
         with mock.patch.object(self.server, "PROMPT_PAUSE", 0):
@@ -779,7 +779,7 @@ class ChatLog(Env):
                            (core.iso(core.now()),))
         lines = [{"t": "2026-11-11T10:00:00Z", "who": "me", "text": "draw /tmp/plan.png"},
                  {"t": "2026-11-11T10:00:05Z", "who": "toy", "text": "Done: /tmp/plan.png"}]
-        (logs / "p1.log").write_text("".join(json.dumps(d) + "\n" for d in lines))
+        (logs / "p1.log").write_text("".join(json.dumps(d) + "\n" for d in lines), encoding="utf-8")
         self.assertEqual(sessions.transcript(self.c, "w")[0], "toy")
         v = sessions.view(self.c, "w")
         self.assertEqual([(e["role"], e["text"]) for e in v["entries"]],
@@ -1109,7 +1109,7 @@ class SessionFromEnv(Env):
     def test_a_command_records_it_and_the_sessions_tab_finds_the_chat(self):
         logs = Path(self.tmp.name) / "hermes"
         logs.mkdir()
-        (logs / "local-abc.jsonl").write_text("{}\n")
+        (logs / "local-abc.jsonl").write_text("{}\n", encoding="utf-8")
         self.user_module("hermes", self.HERMES)
         core.register(self.c, "w")
         clean = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "CODEX", "MAXPM_AGENT"))}
@@ -1144,7 +1144,7 @@ class Setup(Env):
         d = Path(self.tmp.name, "proj")
         d.mkdir()
         lines = cli.setup_instructions(d)
-        self.assertEqual((d / "CLAUDE.local.md").read_text(), "@AGENTS.md\n")
+        self.assertEqual((d / "CLAUDE.local.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
         self.assertFalse((d / "CLAUDE.md").exists())
         self.assertTrue(any("CLAUDE.local.md: created" in x for x in lines))
         self.assertEqual(cli.instructions_layout(d), "shared")
@@ -1160,7 +1160,7 @@ class Setup(Env):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             cli.run(["setup-agent", "--claude-desktop", "--config", str(f)])
         self.assertIn("added MaximizePM", out.getvalue())
-        self.assertEqual(json.loads(f.read_text())["mcpServers"]["maxpm"], agents.setup_entry())
+        self.assertEqual(json.loads(f.read_text(encoding="utf-8"))["mcpServers"]["maxpm"], agents.setup_entry())
         self.assertFalse(hasattr(cli, "setup_claude_desktop"))  # moved, not copied
         with self.assertRaisesRegex(RiverError, "no MCP config writer"):
             agents.Adapter(module(DESCRIBE=GOOD), "builtin").write_mcp_config()
@@ -1299,7 +1299,7 @@ class ChatPathType(Env):
 
     def test_a_str_from_a_user_module_becomes_a_path(self):
         log = Path(self.tmp.name) / "s1.log"
-        log.write_text("{}\n")
+        log.write_text("{}\n", encoding="utf-8")
         self.user_module("strlog", f"""
             DESCRIBE = {{"id": "strlog", "label": "Str", "exe": "strlog", "family": "multi"}}
             CHAT = {{"compressed": False, "file_tools": [], "ref": "session", "cache_write": False}}

@@ -61,7 +61,7 @@ class Windows(unittest.TestCase):
 
     def test_grok_reads_its_models_cache(self):
         (self.home / "models_cache.json").write_text(json.dumps({"models": {
-            "grok-4.7": {"info": {"id": "grok-4.7", "context_window": 256000}}}}))
+            "grok-4.7": {"info": {"id": "grok-4.7", "context_window": 256000}}}}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"GROK_HOME": str(self.home)}):
             self.assertEqual(agents.get("grok").context_window("grok-4.7"), 256000)
             self.assertIsNone(agents.get("grok").context_window("grok-9"))
@@ -72,7 +72,7 @@ class Windows(unittest.TestCase):
         (store / "models-store.json").write_text(json.dumps({
             "openai-codex": {"models": [{"id": "gpt-6.1-sol", "contextWindow": 500000}]},
             "openai": {"models": [{"id": "gpt-6.1-sol", "contextWindow": 272000},
-                                  {"id": "gpt-5.6-luna", "contextWindow": 272000}]}}))
+                                  {"id": "gpt-5.6-luna", "contextWindow": 272000}]}}), encoding="utf-8")
         with mock.patch.object(Path, "home", classmethod(lambda cls: self.home)):
             pi = agents.get("pi")
             self.assertEqual(pi.context_window("openai-codex/gpt-6.1-sol"), 500000)
@@ -115,7 +115,7 @@ class LastCall(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         home = Path(tmp.name)
-        (home / "models_cache.json").write_text(json.dumps({"models": {"grok-4.7": {"info": {"context_window": 256000}}}}))
+        (home / "models_cache.json").write_text(json.dumps({"models": {"grok-4.7": {"info": {"context_window": 256000}}}}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"GROK_HOME": str(home), "MAXPM_DB": str(home / "t.db")}):
             conn = core.connect()
             self.addCleanup(conn.close)
@@ -154,7 +154,7 @@ class Group2(unittest.TestCase):
             "context_lengths:\n  stealth/missingno@https://inference-api.nousresearch.com/v1: 262144\n"
             "  reflection/beam-1.0:free@https://inference-api.nousresearch.com/v1: \n    262144\n"
             "  gpt-6.1-terra@https://chatgpt.com/backend-api/codex: 500000\n"
-            "  gpt-6.1-sol@https://chatgpt.com/backend-api/codex: 500000\n  gpt-6.1-sol@https://api.openai.com/v1: 272000\n")
+            "  gpt-6.1-sol@https://chatgpt.com/backend-api/codex: 500000\n  gpt-6.1-sol@https://api.openai.com/v1: 272000\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"HERMES_HOME": tmp.name}):
             h = agents.get("hermes")
             self.assertEqual((h.context_window("gpt-6.1-terra"), h.context_window("reflection/beam-1.0:free"),

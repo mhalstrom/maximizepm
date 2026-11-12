@@ -328,8 +328,8 @@ def _parts_text(content, kinds):
 def _user_turn(at, text, images=0):
     """A person's turn, including saved uploads and how many image blocks the CLI put in it."""
     import re
-    root = re.escape(str(Path(core.river_dir()) / "uploads").replace("\\", "/"))
-    found = re.findall(root + r"/([^/\s]+)/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}(?:-[a-zA-Z0-9_.-]+|\.(?:png|jpg|gif|webp)))", text.replace("\\", "/"))
+    root = re.escape(str(Path(core.river_dir()) / "uploads"))
+    found = re.findall(root + r"/([^/\s]+)/([0-9]{8}-[0-9]{6}-[0-9a-f]{8}(?:-[a-zA-Z0-9_.-]+|\.(?:png|jpg|gif|webp)))", text)
     e = {"at": at, "role": "user", "text": _clip(text, TEXT_MAX)}
     for a, f in dict.fromkeys(found):
         path = f"{a}/{f}"
@@ -598,7 +598,7 @@ def adopt_check(conn, a, kind, path, turn, cwd, waiting=None):
     ("later", why) when it moves after its turn, or ("never", why)."""
     if core.setting(conn, "tmux_adopt", agent=a["name"]) != "on":
         return "never", "tmux_adopt is off"
-    if os.name == "nt" or not core.tmux_path():
+    if not core.tmux_path():
         return "never", "tmux is not installed"
     ad = _adapter(kind)
     if not path or ad is None or not ad.supports("resume"):
@@ -1087,7 +1087,7 @@ def artifact_key(target):
 def _hits_in(text, at, how):
     import re
     global _FILE_RX, _URL_RX
-    _FILE_RX = _FILE_RX or re.compile(r"(?<![\w.:/\\-])((?:[a-zA-Z]:[/\\]|\\\\|~/|/)(?:[\w.@~+-]+[/\\])*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md))\b")
+    _FILE_RX = _FILE_RX or re.compile(r"(?<![\w.:/\\-])((?:~/|/)(?:[\w.@~+-]+/)*[\w@~+-][\w.@~+-]*\.(?:png|jpe?g|gif|webp|svg|pdf|html?|md))\b")
     _URL_RX = _URL_RX or re.compile(r"https?://(?:(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:/[^\s)\]>'\"`\\]*)?"
                                     r"|(?i:claude\.ai/(?:code/)?artifact/)[\w-]+)")
     out = [{"target": m, "kind": "file", "how": how, "at": at} for m in _FILE_RX.findall(text or "")]

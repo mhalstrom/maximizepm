@@ -68,10 +68,6 @@ def chrome_path():
         p = shutil.which(name)
         if p:
             return p
-    for p in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-              r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"):
-        if Path(p).exists():
-            return p
     return None
 
 
@@ -420,14 +416,14 @@ class Browser:
     # state.json: the controller, the window mode, Chrome's pid and the proxy port (to attach after a restart)
     def _load(self):
         try:
-            return json.loads((self.dir / "state.json").read_text())
+            return json.loads((self.dir / "state.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
     def _save(self):
         self.dir.mkdir(parents=True, exist_ok=True)
         tmp = self.dir / "state.json.tmp"
-        tmp.write_text(json.dumps(self.state))
+        tmp.write_text(json.dumps(self.state), encoding="utf-8")
         tmp.replace(self.dir / "state.json")
 
     # ---- start, attach, stop
@@ -487,7 +483,7 @@ class Browser:
 
     def _active_port(self):
         try:
-            return int((self.dir / "profile" / "DevToolsActivePort").read_text().split()[0])
+            return int((self.dir / "profile" / "DevToolsActivePort").read_text(encoding="utf-8").split()[0])
         except (OSError, ValueError, IndexError):
             return None
 
@@ -922,7 +918,7 @@ def mcp_config_file(conn, project_id, agent):
                                      "args": words[1:] + ["--cdp-endpoint", cdp_url(conn, project, agent)]}}}
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
     tmp.replace(path)
     return str(path)

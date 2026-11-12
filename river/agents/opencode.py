@@ -480,7 +480,7 @@ def _user_cli_plugins(env=None):
     env = os.environ if env is None else env
     texts = [env.get(CLI_CONFIG_VAR) or ""]
     try:
-        texts.append((config_dir(env) / "cli.json").read_text())
+        texts.append((config_dir(env) / "cli.json").read_text(encoding="utf-8"))
     except OSError:
         pass
     for t in texts:
@@ -510,13 +510,13 @@ def install_hooks(folder, report):
     text = plugin_text(report, ["env", cli, "opencode", "--standalone", "--session"])
     path = d / "tui.js"
     try:
-        same = path.read_text() == text
+        same = path.read_text(encoding="utf-8") == text
     except OSError:
         same = False
     if not same:
         d.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-        tmp.write_text(text)
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(path)
     return ["env", cli]
 
@@ -623,7 +623,7 @@ def chat_path(session_ref, folder=None, root=None):
         return out if out.is_file() else None
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + f".{os.getpid()}.tmp")
-    tmp.write_text("\n".join(lines) + "\n")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tmp.replace(out)
     return out
 
@@ -763,7 +763,7 @@ def chat_chain(path, refs=None):
     while p is not None and p not in out:
         out.append(p)
         try:
-            with open(p) as f:
+            with open(p, encoding="utf-8") as f:
                 head = _header([f.readline()])
         except OSError:
             break
@@ -839,7 +839,7 @@ def _commands_in(base):
             continue
         for f in sorted(d.rglob("*.md")):
             try:
-                meta, body = _front(f.read_text(errors="replace"))
+                meta, body = _front(f.read_text(errors="replace", encoding="utf-8"))
             except OSError:
                 continue
             first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")

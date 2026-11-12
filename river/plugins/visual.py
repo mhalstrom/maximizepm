@@ -133,7 +133,7 @@ class _Chrome:
         end, port = time.monotonic() + START_WAIT, None
         while time.monotonic() < end and port is None:
             try:
-                port = int((self.dir / "DevToolsActivePort").read_text().split()[0])
+                port = int((self.dir / "DevToolsActivePort").read_text(encoding="utf-8").split()[0])
             except (OSError, ValueError, IndexError):
                 if self.proc.poll() is not None:
                     self.close()
@@ -304,7 +304,7 @@ def run(name, url, widths="1440,390", themes="light,dark", threshold=0.01, wait=
     perf = " ".join(f"{s}={r['diff']}%;{threshold}" for s, r in res.items() if r["diff"] is not None)
     out = {"name": name, "url": url, "status": status, "summary": summary, "shots": res, "perf": perf,
            "threshold": threshold, "at": core.iso(core.now())}
-    (d / "last.json").write_text(json.dumps(out, indent=1))
+    (d / "last.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     return out
 
 
@@ -328,7 +328,7 @@ def show(name):
     """The last run of a visual check, with the three pictures of each shot (maxpm ops visual show)."""
     d = folder(name)
     try:
-        last = json.loads((d / "last.json").read_text())
+        last = json.loads((d / "last.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise RiverError(f"the visual check {name!r} has not run yet: maxpm ops visual run {name} --url <address>")
     return last
