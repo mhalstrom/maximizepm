@@ -6933,6 +6933,17 @@ class Operational(Base):
         core.item_edit(self.c, w, kind="work", actor="mark")
         self.assertEqual(core._item(self.c, w)["kind"], "work")
 
+    def test_after_its_operational_task_a_session_takes_no_work_of_another_kind(self):
+        op = core.item_add(self.c, "a", "Find the cause of the failing checks", kind="operational")["id"]
+        w = self.add("a", "Build the error counts")
+        core.claim(self.c, op, "w1")
+        core.done(self.c, op, "the cause", "w1")
+        skipped = []
+        self.assertEqual(core.next_item(self.c, None, claim=True, actor="w1", limit=5, skipped=skipped), [])
+        self.assertIn((w, f"this session started for operational task #{op} on its own model; other work starts in "
+                          f"a new session"), [(i["id"], i["why"]) for i in skipped])
+        self.assertEqual(core.next_item(self.c, None, claim=True, actor="w2")[0]["id"], w)  # another session takes it
+
     def test_it_starts_in_a_new_session(self):
         op = core.item_add(self.c, "a", "Read the production logs for the failed login", kind="operational")["id"]
         x = self.add("a", "other work")

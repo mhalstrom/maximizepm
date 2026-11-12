@@ -11957,12 +11957,21 @@ def next_item(conn, project=None, unblocks=None, claim=False, actor=None, limit=
                                 else f"{'a review' if a['kind'] == 'review' else 'an operational task'} starts in "
                                      f"a new session; this one held a task"})
             pool.remove(a)
+        ops_first = operational_session(conn, actor)
+        if ops_first:  # a session started for an operational task takes no other work (#5546)
+            for a in [a for a in pool if a["kind"] != "operational"]:
+                if skipped is not None and a["id"] not in {x["id"] for x in skipped}:
+                    skipped.append({"id": a["id"], "title": a["title"],
+                                    "why": f"this session started for operational task #{ops_first} on its own model; "
+                                           f"other work starts in a new session"})
+                pool.remove(a)
         # The agent's own queue comes first, in its order and from any project; then items pushed to it.
         # The sort is stable, so graph order holds inside each group.
         qpos = {r["item_id"]: n for n, r in enumerate(conn.execute(
             "SELECT item_id FROM queue_entries WHERE agent=? AND item_id IS NOT NULL ORDER BY pos", (actor,)))}
         have = {a["id"] for a in pool}
-        pool = [a for a in _queue_ready(conn, actor) if a["id"] not in have and not reviewer_refusal(conn, a, actor)] + pool
+        pool = [a for a in _queue_ready(conn, actor) if a["id"] not in have and not reviewer_refusal(conn, a, actor)
+                and not (ops_first and a["kind"] != "operational")] + pool
         pool = fits(pool)
         if folderless:
             for a in [a for a in pool if needs_folder(a)]:
@@ -16617,6 +16626,20 @@ def used_session(conn, agent, item_id=None):
 
 
 FRESH_KINDS = ("review", "operational")  # a task of these kinds starts in a new session (#4968, #4973)
+
+
+def operational_session(conn, agent):
+    """The operational task that this agent session started for, or None (#5546). An operational task starts in a
+    new session on its own default model (sonnet, medium effort); after it, that session took a build task and built
+    it on the light model (maximizepm-b616 took #5505 after #5543, 2026-11-12). So it takes no task of another kind:
+    go gives it none, and the work starts in a new session with its own model. A person may still push one to it."""
+    if not agent or not _is_ai(conn, agent):
+        return None
+    first = used_session(conn, agent)
+    if first is None:
+        return None
+    r = conn.execute("SELECT kind FROM items WHERE id=?", (first,)).fetchone()
+    return first if r and r["kind"] == "operational" else None
 
 
 CLEANUP_TITLE = "Clean up the list of {person}"
