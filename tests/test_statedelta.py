@@ -301,6 +301,19 @@ class KeptDoneRows(Base):
         self.assertIs({r["id"]: r for r in st4["items"]}[self.old], {r["id"]: r for r in st3["items"]}[self.old])
 
 
+class Timing(Base):
+    def test_each_state_answer_records_its_wait_and_build(self):
+        server.STATE_TIMES.clear()
+        wire("/api/state?since=&closed=1", {})
+        wire("/api/state?since=", {})
+        got = self.get("/api/state-timing")
+        self.assertEqual([t["closed"] for t in got], [True, False])
+        for t in got:
+            self.assertGreaterEqual(t["total_ms"], t["build_ms"])
+            self.assertIn("wait_ms", t)
+            self.assertTrue(t["whole"])
+
+
 class Limits(Base):
     """The speed test of the page's data (#5590, p147): on a queue of the size of mark's (300 open items, 5,000 done,
     long notes and output), the first answer is under 1 MB gzipped, a poll after one change under 50 KB, and the

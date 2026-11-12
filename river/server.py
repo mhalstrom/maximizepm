@@ -4499,16 +4499,21 @@ def _page_agents(st, running):
     st["queues"] = {k: v for k, v in (st.get("queues") or {}).items() if k in keep}
 
 
-def page_state(closed):
-    """The state for /api/state: closed says whether done and dropped items are in it. The callers only read it."""
+def page_state(closed, timing=None):
+    """The state for /api/state: closed says whether done and dropped items are in it. The callers only read it.
+    timing: a dict that gets wait_ms (for the build lock) and build_ms when this call built the state."""
     key = bool(closed)
     hit = _state_hit(key)
     if hit is not None:
         return hit
+    t0 = time.perf_counter()
     with _state_build:
         hit = _state_hit(key)
+        if timing is not None:
+            timing["wait_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         if hit is not None:
             return hit
+        t1 = time.perf_counter()
         gen = _state_gen[0]  # an action during the build makes this build old at once
         conn = core.connect()
         # The build reads the item graph once (#5465), and only the items that changed since the last build or
@@ -4542,6 +4547,8 @@ def page_state(closed):
             st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
             st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
             _state_cache[key] = (time.time(), gen, st)
+            if timing is not None:
+                timing["build_ms"] = round((time.perf_counter() - t1) * 1000, 1)
             return st
         finally:
             core.BUILD_MEMO.reset(memo)
@@ -4555,11 +4562,17 @@ _answers = {}  # closed -> (the built state, its slim form, the encoded answers 
 _answers_lock = threading.Lock()
 
 
-def page_answer(closed):
+# The last state answers of this server, newest last (#5596): when each came, for which view, how long it waited for
+# another build, how long its own build took, and the whole answer. GET /api/state-timing gives them, so a slow
+# refresh of the live page can be measured where it happens.
+STATE_TIMES = __import__("collections").deque(maxlen=200)
+
+
+def page_answer(closed, timing=None):
     """The slim state for /api/state (statedelta.slim), and a dict that keeps the answers made from it, encoded
     and gzipped: once for each built state, not for each request. The done view's 5,300 rows took 30 ms to slim,
     30 to encode and 30 to gzip on every request (#5591)."""
-    st = page_state(closed)
+    st = page_state(closed, timing)
     with _answers_lock:
         hit = _answers.get(bool(closed))
         if hit is None or hit[0] is not st:
@@ -4630,17 +4643,25 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs, urlsplit
             from . import statedelta
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query, keep_blank_values=True).items()}
-            st, packed = page_answer(q.get("closed") == "1")
-            if "since" not in q:
-                return self._send(200, st)
-            ans = statedelta.answer(st, q["since"] or None)
-            if "state" not in ans:
-                return self._send(200, ans)
-            # A whole state (a page that starts, or comes back): the same bytes for every page of this version.
-            body = packed.get(ans["v"])
-            if body is None:
-                body = packed[ans["v"]] = json.dumps(ans, default=str).encode()
-            return self._send(200, body)
+            t0, timing = time.perf_counter(), {"at": core.iso(core.now()), "closed": q.get("closed") == "1"}
+            try:
+                st, packed = page_answer(timing["closed"], timing)
+                if "since" not in q:
+                    return self._send(200, st)
+                ans = statedelta.answer(st, q["since"] or None)
+                if "state" not in ans:
+                    return self._send(200, ans)
+                # A whole state (a page that starts, or comes back): the same bytes for every page of this version.
+                body = packed.get(ans["v"])
+                if body is None:
+                    body = packed[ans["v"]] = json.dumps(ans, default=str).encode()
+                timing["whole"] = True
+                return self._send(200, body)
+            finally:
+                timing["total_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+                STATE_TIMES.append(timing)
+        if path == "/api/state-timing":
+            return self._send(200, list(STATE_TIMES))
         if path == "/api/terminal":
             from urllib.parse import parse_qs, urlsplit
             conn = core.connect()
