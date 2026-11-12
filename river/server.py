@@ -4487,6 +4487,15 @@ def page_state(closed, timing=None):
             return hit
         t1, c1 = time.perf_counter(), time.thread_time()
         g1, f1 = GC_SPENT["ms"], GC_SPENT["full"]
+        prof = None
+        if PROFILE_NEXT[0] and timing is not None:
+            import cProfile
+            PROFILE_NEXT[0] = False
+            prof = cProfile.Profile()
+            try:
+                prof.enable()
+            except ValueError:  # another profiler runs in this process
+                prof = None
         parts, cpu = {}, {}
         mark = [t1, c1]
 
@@ -4546,6 +4555,13 @@ def page_state(closed, timing=None):
                 timing["cpu_parts"] = cpu
                 timing["gc_ms"] = round(GC_SPENT["ms"] - g1, 1)  # the collector, in any thread, during the build
                 timing["gc_full"] = GC_SPENT["full"] - f1
+                if prof is not None:
+                    import io
+                    import pstats
+                    prof.disable()
+                    out = io.StringIO()
+                    pstats.Stats(prof, stream=out).sort_stats("tottime").print_stats(30)
+                    timing["profile"] = [x.strip()[:200] for x in out.getvalue().splitlines() if x.strip()][-32:]
                 try:  # the peak memory of this process: a large heap makes each full collection slow
                     import resource
                     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -4572,6 +4588,7 @@ STATE_TIMES = __import__("collections").deque(maxlen=200)
 # The time of Python's garbage collector in this process (#5597), summed by a gc callback: a build records how much
 # of its time went to it. Live, a build took 4 times the CPU of the same build on a copy of the queue.
 GC_SPENT = {"ms": 0.0, "full": 0, "t": 0.0}
+PROFILE_NEXT = [False]  # GET /api/state-timing?profile=1: the next build runs under cProfile (#5597)
 
 
 def _gc_watch(phase, info):
@@ -4678,6 +4695,9 @@ class Handler(BaseHTTPRequestHandler):
                 timing["total_ms"] = round((time.perf_counter() - t0) * 1000, 1)
                 STATE_TIMES.append(timing)
         if path == "/api/state-timing":
+            if "profile=1" in self.path:  # the next build runs under cProfile; its record keeps the top lines (#5597)
+                PROFILE_NEXT[0] = True
+                return self._send(200, {"profile": "the next build"})
             return self._send(200, list(STATE_TIMES))
         if path == "/api/terminal":
             from urllib.parse import parse_qs, urlsplit

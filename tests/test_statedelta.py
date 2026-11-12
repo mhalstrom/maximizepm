@@ -347,6 +347,19 @@ class Timing(Base):
         self.assertEqual(core._item(self.c, self.one)["status"], "open")  # the loop's first step ends the lease
 
 
+    def test_one_build_can_run_under_the_profiler(self):
+        """#5597: GET /api/state-timing?profile=1 profiles the next build; its record keeps the top functions."""
+        server.STATE_TIMES.clear()
+        self.assertEqual(self.get("/api/state-timing?profile=1"), {"profile": "the next build"})
+        server.state_changed()
+        wire("/api/state?since=", {})
+        (t,) = [x for x in self.get("/api/state-timing") if x.get("build_ms")]
+        self.assertTrue(any("tottime" in line for line in t["profile"]), t["profile"])
+        server.state_changed()
+        wire("/api/state?since=", {})
+        self.assertNotIn("profile", [x for x in self.get("/api/state-timing") if x.get("build_ms")][-1])
+
+
 class Limits(Base):
     """The speed test of the page's data (#5590, p147): on a queue of the size of mark's (300 open items, 5,000 done,
     long notes and output), the first answer is under 1 MB gzipped, a poll after one change under 50 KB, and the
