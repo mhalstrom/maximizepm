@@ -1125,14 +1125,18 @@ def project_of(conn, project=None, agent=None, cwd=None):
     if project:
         return core._project(conn, project)["name"]
     if agent:
-        r = conn.execute("""SELECT p.name FROM items i JOIN projects p ON p.id=i.project_id
-                            WHERE i.assignee=? AND i.status IN ('in_progress','held') ORDER BY i.claimed_at DESC LIMIT 1""",
-                         (agent,)).fetchone()
-        if not r:
-            r = conn.execute("""SELECT p.name FROM events e JOIN items i ON i.id=e.item_id JOIN projects p ON p.id=i.project_id
-                                WHERE e.actor=? ORDER BY e.id DESC LIMIT 1""", (agent,)).fetchone()
-        if r:
-            return r[0]
+        # A project with a folder first (#5478): a deploy-* project has none, and a session whose last item was a
+        # deploy check works in the folder of a real project.
+        for folder in ("AND p.path IS NOT NULL", ""):
+            r = conn.execute(f"""SELECT p.name FROM items i JOIN projects p ON p.id=i.project_id
+                                 WHERE i.assignee=? AND i.status IN ('in_progress','held') {folder}
+                                 ORDER BY i.claimed_at DESC LIMIT 1""", (agent,)).fetchone()
+            if not r:
+                r = conn.execute(f"""SELECT p.name FROM events e JOIN items i ON i.id=e.item_id
+                                     JOIN projects p ON p.id=i.project_id WHERE e.actor=? {folder}
+                                     ORDER BY e.id DESC LIMIT 1""", (agent,)).fetchone()
+            if r:
+                return r[0]
     if cwd:
         found = core.projects_for_dir(conn, cwd)
         if len(found) == 1:

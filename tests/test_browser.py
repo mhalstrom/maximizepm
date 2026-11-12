@@ -213,6 +213,22 @@ class ProjectOf(Base):
             browser.project_of(self.c, project="nope")
 
 
+    def test_a_project_with_a_folder_before_a_deploy_project(self):
+        # #5478: a session whose last item was a deploy check got the browser of the deploy project (no folder).
+        core.register(self.c, "ag1")
+        core.project_add(self.c, "build", path=self.tmp.name)
+        core.project_add(self.c, "deploy-prod")
+        a = core.item_add(self.c, "build", "Build it")["id"]
+        core.claim(self.c, a, "ag1"); core.done(self.c, a, "ag1")
+        d = core.item_add(self.c, "deploy-prod", "Check the release")["id"]
+        core.claim(self.c, d, "ag1"); core.done(self.c, d, "ag1")
+        self.assertEqual(browser.project_of(self.c, agent="ag1"), "build")  # its last item with a folder
+        core.claim(self.c, core.item_add(self.c, "deploy-prod", "Check again")["id"], "ag1")
+        self.assertEqual(browser.project_of(self.c, agent="ag1"), "build")  # also while it holds a deploy item
+        core.register(self.c, "ag2")
+        core.claim(self.c, core.item_add(self.c, "deploy-prod", "Only this")["id"], "ag2")
+        self.assertEqual(browser.project_of(self.c, agent="ag2"), "deploy-prod")  # no project with a folder: as before
+
 class Command(Base):
     def run_cli(self, *words):
         out = io.StringIO()
