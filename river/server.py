@@ -4514,13 +4514,14 @@ def page_state(closed, timing=None):
         if hit is not None:
             return hit
         t1, c1 = time.perf_counter(), time.thread_time()
-        parts = {}
-        mark = [t1]
+        parts, cpu = {}, {}
+        mark = [t1, c1]
 
-        def part(name):  # the time of each part of the build, for STATE_TIMES (#5596)
-            now_t = time.perf_counter()
+        def part(name):  # the time of each part of the build, for STATE_TIMES (#5596), and its CPU time (#5597)
+            now_t, now_c = time.perf_counter(), time.thread_time()
             parts[name] = round((now_t - mark[0]) * 1000, 1)
-            mark[0] = now_t
+            cpu[name] = round((now_c - mark[1]) * 1000, 1)
+            mark[0], mark[1] = now_t, now_c
         gen = _state_gen[0]  # an action during the build makes this build old at once
         conn = core.connect()
         # The build reads the item graph once (#5465), and only the items that changed since the last build or
@@ -4567,6 +4568,9 @@ def page_state(closed, timing=None):
                 # serve hold the interpreter lock, or the disk).
                 timing["cpu_ms"] = round((time.thread_time() - c1) * 1000, 1)
                 timing["parts"] = parts
+                # The CPU time of each part (#5597): live, a build took 5 times the CPU of the same build on a copy
+                # of the queue; this says which part spends it.
+                timing["cpu_parts"] = cpu
             return st
         finally:
             core.BUILD_MEMO.reset(memo)

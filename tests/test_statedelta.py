@@ -327,6 +327,8 @@ class Timing(Base):
             self.assertTrue(t["whole"])
             self.assertIn("cpu_ms", t)
             self.assertEqual(set(t["parts"]), {"start", "activity", "state", "goals", "terminals", "sessions", "rest"})
+            self.assertEqual(set(t["cpu_parts"]), set(t["parts"]))  # the CPU of each part too (#5597)
+            self.assertLessEqual(sum(t["cpu_parts"].values()), t["cpu_ms"] + 1)
 
 
 class Limits(Base):
