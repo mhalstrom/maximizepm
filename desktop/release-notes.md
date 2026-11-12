@@ -1,4 +1,4 @@
-MaximizePM now tells you when a new version is out, and updates in one click.
+Fixes: when you start MaximizePM from the app, its checks and hooks find the same commands as in your terminal.
 
 ## Download
 
