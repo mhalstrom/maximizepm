@@ -4402,6 +4402,25 @@ def page_state(closed):
             conn.close()
 
 
+_gzipped = [None]  # (bytes, their gzip): the last large answer that went gzipped, for the next page that asks it
+GZIP_KEEP = 64 * 1024
+_answers = {}  # closed -> (the built state, its slim form, the encoded answers of it), see page_answer
+_answers_lock = threading.Lock()
+
+
+def page_answer(closed):
+    """The slim state for /api/state (statedelta.slim), and a dict that keeps the answers made from it, encoded
+    and gzipped: once for each built state, not for each request. The done view's 5,300 rows took 30 ms to slim,
+    30 to encode and 30 to gzip on every request (#5591)."""
+    st = page_state(closed)
+    with _answers_lock:
+        hit = _answers.get(bool(closed))
+        if hit is None or hit[0] is not st:
+            from . import statedelta
+            hit = _answers[bool(closed)] = (st, statedelta.slim(st), {})
+    return hit[1], hit[2]
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet
         pass
@@ -4424,7 +4443,14 @@ class Handler(BaseHTTPRequestHandler):
         data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
         level = self._gzip_level(ctype, data, headers)
         if level is not None:
-            data = gzip.compress(data, level, mtime=0)
+            hit = _gzipped[0]
+            if hit is not None and hit[0] is data:  # the same bytes object again: a state answer of page_answer
+                data = hit[1]
+            else:
+                z = gzip.compress(data, level, mtime=0)
+                if len(data) > GZIP_KEEP:
+                    _gzipped[0] = (data, z)
+                data = z
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -4457,10 +4483,17 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs, urlsplit
             from . import statedelta
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query, keep_blank_values=True).items()}
-            st = statedelta.slim(page_state(q.get("closed") == "1"))
-            if "since" in q:
-                return self._send(200, statedelta.answer(st, q["since"] or None))
-            return self._send(200, st)
+            st, packed = page_answer(q.get("closed") == "1")
+            if "since" not in q:
+                return self._send(200, st)
+            ans = statedelta.answer(st, q["since"] or None)
+            if "state" not in ans:
+                return self._send(200, ans)
+            # A whole state (a page that starts, or comes back): the same bytes for every page of this version.
+            body = packed.get(ans["v"])
+            if body is None:
+                body = packed[ans["v"]] = json.dumps(ans, default=str).encode()
+            return self._send(200, body)
         if path == "/api/terminal":
             from urllib.parse import parse_qs, urlsplit
             conn = core.connect()

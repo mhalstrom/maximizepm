@@ -1,6 +1,8 @@
 """The page's state as versions and changes (#4709): /api/state?since=<v> answers only what changed."""
+import gzip
 import json
 import os
+import unittest.mock
 import shutil
 import subprocess
 import tempfile
@@ -54,7 +56,8 @@ class Base(unittest.TestCase):
     def get(self, path):
         h = server.Handler.__new__(server.Handler)
         h.path, h.client_address, h.headers, out = path, ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}, {}
-        h._send = lambda code, body, ctype=None: out.update(code=code, body=json.loads(json.dumps(body, default=str)))
+        h._send = lambda code, body, ctype=None: out.update(
+            code=code, body=json.loads(body if isinstance(body, bytes) else json.dumps(body, default=str)))
         h.do_GET()
         self.assertEqual(out["code"], 200, out)
         return out["body"]
@@ -186,6 +189,41 @@ class Gzip(Base):
         _, heads, body = wire("/api/token", {"Accept-Encoding": "gzip"})
         self.assertNotIn("content-encoding", heads)
         self.assertIn("token", json.loads(body))
+
+
+class Shared(Base):
+    """One built state, many requests: the slim state, the row hashes, the encoded answer and its gzip are made
+    once (#5591: the done view of 5,300 rows took 130 ms on each request, the build aside)."""
+
+    def test_the_second_page_gets_the_same_bytes_without_new_work(self):
+        server.STATE_TTL = 60
+        self.addCleanup(setattr, server, "STATE_TTL", 0)
+        server.state_changed()
+        calls = {"slim": 0, "sig": 0}
+        slim, sig = statedelta.slim, statedelta._signature
+
+        def count(name, f):
+            def run(*a):
+                calls[name] += 1
+                return f(*a)
+            return run
+        with unittest.mock.patch.object(statedelta, "slim", count("slim", slim)), \
+                unittest.mock.patch.object(statedelta, "_signature", count("sig", sig)):
+            _, _, one = wire("/api/state?since=&closed=1", {"Accept-Encoding": "gzip"})
+            _, _, two = wire("/api/state?since=&closed=1", {"Accept-Encoding": "gzip"})
+            v = json.loads(gzip.decompress(two))["v"]
+            _, _, poll = wire(f"/api/state?since={v}&closed=1", {"Accept-Encoding": "gzip"})
+        self.assertEqual(one, two)
+        self.assertEqual(calls, {"slim": 1, "sig": 1})
+        self.assertLess(len(poll), 1024, "a poll with no change goes plain")
+        ans = json.loads(poll)
+        self.assertEqual((ans["v"], ans["rows"]), (v, {}))
+        # An action builds the state anew, and the answer follows it.
+        core.item_add(self.c, "a", "three")
+        server.state_changed()
+        _, heads, three = wire(f"/api/state?since={v}&closed=1", {"Accept-Encoding": "gzip"})
+        three = json.loads(gzip.decompress(three) if heads.get("content-encoding") else three)
+        self.assertEqual([r["title"] for r in three["rows"]["items"]["set"]], ["three"])
 
 
 class Limits(Base):

@@ -41,14 +41,13 @@ def slim(state):
     and with long text cut."""
     items = []
     for it in state.get("items") or []:
-        closed = it.get("status") in ("done", "dropped")
-        row = {}
-        for k, v in it.items():
-            if k in ITEM_LEFT_OUT or (closed and v is None):
-                continue
-            if closed and isinstance(v, str) and len(v) > CLOSED_TEXT:
-                v = v[:CLOSED_TEXT] + "…"
-            row[k] = v
+        if it.get("status") in ("done", "dropped"):
+            row = {k: (v[:CLOSED_TEXT] + "…" if v.__class__ is str and len(v) > CLOSED_TEXT else v)
+                   for k, v in it.items() if v is not None and k not in ITEM_LEFT_OUT}
+        else:
+            row = dict(it)
+            for k in ITEM_LEFT_OUT:
+                row.pop(k, None)
         items.append(row)
     return dict(state, items=items)
 
@@ -76,12 +75,24 @@ def _signature(state, last):
     return sig
 
 
+# The signatures of the last states answered, by the state object: the server shares one built state between the
+# pages that poll within its STATE_TTL, and a hash of every row of the done view is 35 ms (#5591).
+_sigs: "OrderedDict[int, tuple]" = OrderedDict()
+
+
 def answer(state, since=None):
     """The answer to a page that has the version since (None or unknown: the whole state)."""
     with _lock:
         last_v = next(reversed(_versions)) if _versions else None
         last = _versions[last_v] if last_v else None
-        sig = _signature(state, last)
+        memo = _sigs.get(id(state))
+        if memo is not None and memo[0] is state:
+            sig = memo[1]
+        else:
+            sig = _signature(state, last)
+            _sigs[id(state)] = (state, sig)
+            while len(_sigs) > 2:
+                _sigs.popitem(last=False)
         if last is not None and sig == last:
             v = last_v
         else:
@@ -122,3 +133,4 @@ def reset():
     """Forgets every version (tests)."""
     with _lock:
         _versions.clear()
+        _sigs.clear()
