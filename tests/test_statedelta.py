@@ -360,6 +360,18 @@ class Timing(Base):
         self.assertNotIn("profile", [x for x in self.get("/api/state-timing") if x.get("build_ms")][-1])
 
 
+    def test_the_computer_name_is_read_once_a_minute(self):
+        """#5597: a build asked for it about 2,500 times, and each socket.gethostname gave up the interpreter lock."""
+        from unittest import mock
+        calls = []
+        self.addCleanup(core._HOST.__setitem__, 0, None)
+        core._HOST[0] = None
+        with mock.patch("socket.gethostname", lambda: calls.append(1) or "box"), \
+                mock.patch("time.monotonic", side_effect=[100.0, 130.0, 161.0]):
+            self.assertEqual([core.this_host() for _ in range(3)], ["box", "box", "box"])
+        self.assertEqual(len(calls), 2)  # at 100 s, and again at 161 s, after HOST_TTL
+
+
 class Limits(Base):
     """The speed test of the page's data (#5590, p147): on a queue of the size of mark's (300 open items, 5,000 done,
     long notes and output), the first answer is under 1 MB gzipped, a poll after one change under 50 KB, and the

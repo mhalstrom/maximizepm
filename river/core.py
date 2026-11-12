@@ -11007,9 +11007,20 @@ def _drop_queue(conn, agent, why, items_only=False):
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "env", "timeout", "sandbox-exec", "script"}
 
 
+_HOST = [None, 0.0]  # this computer's name, and when it was read (time.monotonic)
+HOST_TTL = 60.0
+
+
 def this_host():
+    """This computer's name, read again each HOST_TTL seconds. A page build asked for it about 2,500 times (each
+    agent's status), and socket.gethostname gives up Python's interpreter lock on each call, so the build waited for
+    the other threads of serve each time: 287 ms of a live profile (#5597)."""
     import socket
-    return socket.gethostname()
+    import time
+    t = time.monotonic()
+    if _HOST[0] is None or t - _HOST[1] >= HOST_TTL:
+        _HOST[0], _HOST[1] = socket.gethostname(), t
+    return _HOST[0]
 
 
 def pid_alive(pid):
