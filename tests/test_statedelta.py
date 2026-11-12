@@ -1,4 +1,5 @@
 """The page's state as versions and changes (#4709): /api/state?since=<v> answers only what changed."""
+import threading
 import gzip
 import json
 import os
@@ -348,13 +349,18 @@ class Timing(Base):
 
 
     def test_one_build_can_run_under_the_profiler(self):
-        """#5597: GET /api/state-timing?profile=1 profiles the next build; its record keeps the top functions."""
+        """#5597: GET /api/state-timing?profile=1 samples the next build's thread; its record keeps the top lines and
+        functions of MaximizePM's code where the build was."""
         server.STATE_TIMES.clear()
         self.assertEqual(self.get("/api/state-timing?profile=1"), {"profile": "the next build"})
         server.state_changed()
         wire("/api/state?since=", {})
         (t,) = [x for x in self.get("/api/state-timing") if x.get("build_ms")]
-        self.assertTrue(any("tottime" in line for line in t["profile"]), t["profile"])
+        prof = t["profile"]
+        self.assertEqual(set(prof), {"samples", "sample_ms", "lines", "functions"})
+        if prof["samples"]:  # a fast machine can build before the first sample
+            self.assertTrue(any(" state" in f for f in prof["functions"]), prof)
+        self.assertFalse(any(th.name == "maxpm-build-sampler" for th in threading.enumerate()))
         server.state_changed()
         wire("/api/state?since=", {})
         self.assertNotIn("profile", [x for x in self.get("/api/state-timing") if x.get("build_ms")][-1])

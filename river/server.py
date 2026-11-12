@@ -4518,13 +4518,8 @@ def page_state(closed, timing=None):
         g1, f1 = GC_SPENT["ms"], GC_SPENT["full"]
         prof = None
         if PROFILE_NEXT[0] and timing is not None:
-            import cProfile
             PROFILE_NEXT[0] = False
-            prof = cProfile.Profile()
-            try:
-                prof.enable()
-            except ValueError:  # another profiler runs in this process
-                prof = None
+            prof = _BuildSampler()
         parts, cpu = {}, {}
         mark = [t1, c1]
 
@@ -4585,12 +4580,7 @@ def page_state(closed, timing=None):
                 timing["gc_ms"] = round(GC_SPENT["ms"] - g1, 1)  # the collector, in any thread, during the build
                 timing["gc_full"] = GC_SPENT["full"] - f1
                 if prof is not None:
-                    import io
-                    import pstats
-                    prof.disable()
-                    out = io.StringIO()
-                    pstats.Stats(prof, stream=out).sort_stats("tottime").print_stats(30)
-                    timing["profile"] = [x.strip()[:200] for x in out.getvalue().splitlines() if x.strip()][-32:]
+                    timing["profile"] = prof.stop()
                 try:  # the peak memory of this process: a large heap makes each full collection slow
                     import resource
                     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -4618,6 +4608,45 @@ STATE_TIMES = __import__("collections").deque(maxlen=200)
 # of its time went to it. Live, a build took 4 times the CPU of the same build on a copy of the queue.
 GC_SPENT = {"ms": 0.0, "full": 0, "t": 0.0}
 PROFILE_NEXT = [False]  # GET /api/state-timing?profile=1: the next build runs under cProfile (#5597)
+
+
+class _BuildSampler:
+    """GET /api/state-timing?profile=1 (#5597): samples the stack of the thread that builds the state, every
+    SAMPLE_EVERY seconds, until stop(). cProfile watches every thread of the process (sys.monitoring, Python 3.12+):
+    its record of a live build counted the tmux and ps processes of other requests. A sample counts the time where
+    the build is, also while it waits for the interpreter lock or for SQLite (its line is the call that waits)."""
+    SAMPLE_EVERY = 0.0005
+
+    def __init__(self):
+        import collections
+        self.tid, self.n, self.done = threading.get_ident(), 0, threading.Event()
+        self.own, self.within = collections.Counter(), collections.Counter()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="maxpm-build-sampler")
+        self.thread.start()
+
+    def _run(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        while not self.done.wait(self.SAMPLE_EVERY):
+            f = sys._current_frames().get(self.tid)
+            names = []
+            while f is not None:
+                c = f.f_code
+                if c.co_filename.startswith(here):
+                    names.append(f"{os.path.basename(c.co_filename)}:{f.f_lineno} {c.co_name}")
+                f = f.f_back
+            if names:
+                self.n += 1
+                self.own[names[0]] += 1  # the innermost line of MaximizePM's code: there the build is now
+                for k in {x.rsplit(":", 1)[0] + " " + x.split(" ", 1)[1] for x in names}:
+                    self.within[k] += 1  # each function on the stack once: the time in it and what it calls
+
+    def stop(self):
+        self.done.set()
+        self.thread.join()
+        ms = self.SAMPLE_EVERY * 1000
+        return {"samples": self.n, "sample_ms": ms,
+                "lines": [f"{n} {k}" for k, n in self.own.most_common(25)],
+                "functions": [f"{n} {k}" for k, n in self.within.most_common(30)]}
 
 
 def _gc_watch(phase, info):
