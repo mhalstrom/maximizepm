@@ -935,7 +935,7 @@ class Kinds(Base):
         root = os.path.join(self.dir.name, "big")
         os.makedirs(os.path.join(root, "src"))
         for name, n in (("big.py", 2001), ("small.py", 2000)):
-            with open(os.path.join(root, "src", name), "w") as f:
+            with open(os.path.join(root, "src", name), "w", encoding="utf-8") as f:
                 f.write("x\n" * n)
         core.project_add(self.c, "b", path=root)
         one = core.item_add(self.c, "b", "one", touches=["src/big.py"])["id"]
@@ -954,7 +954,7 @@ class Kinds(Base):
     def test_the_one_time_pass_removes_the_conflicts_of_a_large_file(self):
         root = os.path.join(self.dir.name, "big")
         os.makedirs(root)
-        with open(os.path.join(root, "big.py"), "w") as f:
+        with open(os.path.join(root, "big.py"), "w", encoding="utf-8") as f:
             f.write("x\n" * 3000)
         core.project_add(self.c, "b", path=root)
         core.config_set(self.c, "conflict_max_lines", "0", project="b")
