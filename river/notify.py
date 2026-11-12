@@ -123,6 +123,49 @@ def _mac_channel(conn):
 register_channel("mac", _mac_channel)
 
 
+# Windows PowerShell's own app id: a notice needs the id of an app that Windows knows, and PowerShell 5.1 is on
+# every Windows 10 and 11. A click on the notice opens its launch address (the page) in the Windows browser.
+WINDOWS_APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def toast_command(ps, title, body, url):
+    """The powershell.exe command that shows one Windows notice. The notice XML goes in as base64 inside a script
+    that goes in as -EncodedCommand (base64 of UTF-16LE), so no shell or PowerShell parser reads the texts."""
+    import base64
+    from xml.sax.saxutils import escape, quoteattr
+    launch = f' activationType="protocol" launch={quoteattr(url)}' if url else ""
+    xml = (f"<toast{launch}><visual><binding template=\"ToastGeneric\"><text>{escape(title[:200])}</text>"
+           f"<text>{escape(body[:1000])}</text></binding></visual></toast>")
+    script = (
+        "$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]\n"
+        "$null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]\n"
+        "$x = New-Object Windows.Data.Xml.Dom.XmlDocument\n"
+        f"$x.LoadXml([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{base64.b64encode(xml.encode()).decode()}')))\n"
+        f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{WINDOWS_APP_ID}')"
+        ".Show([Windows.UI.Notifications.ToastNotification]::new($x))\n")
+    return [ps, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+            base64.b64encode(script.encode("utf-16-le")).decode()]
+
+
+def _windows_channel(conn):
+    """A Windows notice from MaximizePM in WSL 2, the one way it runs on Windows (#5180): Windows PowerShell shows
+    it, and a click opens the page in the Windows browser."""
+    if not core.is_wsl():
+        raise RiverError("the windows channel needs WSL; remove windows from notify_channels on this machine")
+    ps = core.windows_exe("powershell.exe")
+    if not ps:
+        raise RiverError("the windows channel found no powershell.exe; in WSL, keep appendWindowsPath on in /etc/wsl.conf")
+
+    def send(title, body, url):
+        r = core.windows_run(toast_command(ps, title, body, url), timeout=30)
+        if r.returncode != 0:
+            raise OSError(f"powershell.exe exited {r.returncode}: {(r.stderr or '').strip()[:200]}")
+    return send
+
+
+register_channel("windows", _windows_channel)
+
+
 # The first characters that NSUserDefaults misreads in a terminal-notifier value: [ ( { < and a double quote
 # start a property list, and a - starts the next option, so every batch ("- one\n- two") failed (#5042).
 # A single quote is safe, but the escape does no harm; a backslash gets one more, as terminal-notifier

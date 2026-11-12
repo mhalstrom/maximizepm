@@ -2637,6 +2637,80 @@ class Mac(Base):
             notify.ADAPTERS["mac"](self.c)
 
 
+class Wsl(Base):
+    """MaximizePM in WSL 2, the supported way on Windows (#5180): the page and notices open on the Windows side."""
+
+    class Done:
+        def __init__(self, code=0):
+            self.returncode, self.stderr = code, "boom"
+
+    def wsl(self):
+        return mock.patch.multiple(core, PLATFORM="linux"), mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu"})
+
+    def test_wsl_is_linux_with_the_wsl_variables_or_a_microsoft_kernel(self):
+        with mock.patch.object(core, "PLATFORM", "darwin"), mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu"}):
+            self.assertFalse(core.is_wsl())
+        with mock.patch.object(core, "PLATFORM", "linux"), mock.patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu"}):
+            self.assertTrue(core.is_wsl())
+        env = {k: v for k, v in os.environ.items() if k not in ("WSL_DISTRO_NAME", "WSL_INTEROP")}
+        for release, want in (("5.15.153.1-microsoft-standard-WSL2", True), ("6.8.0-45-generic", False)):
+            with self.subTest(release=release), mock.patch.object(core, "PLATFORM", "linux"), \
+                    mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(core.Path, "read_text", lambda self, *a, **k: release):
+                self.assertEqual(core.is_wsl(), want)
+
+    def test_the_page_opens_in_the_windows_browser(self):
+        seen = []
+        run = lambda cmd, **kw: seen.append((cmd, kw)) or self.Done()
+        a, b = self.wsl()
+        with a, b, mock.patch("shutil.which", lambda name: "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe"
+                                if name == "powershell.exe" else None):
+            self.assertTrue(core.open_in_browser("http://127.0.0.1:8765/#item-3'x", run=run))
+        cmd, kw = seen[0]
+        self.assertTrue(cmd[0].endswith("powershell.exe"))
+        self.assertEqual(cmd[-1], "Start-Process 'http://127.0.0.1:8765/#item-3''x'")
+        with a, b, mock.patch("shutil.which", lambda name: "/usr/bin/wslview" if name == "wslview" else None):
+            core.open_in_browser("http://127.0.0.1:8765/", run=run)
+        self.assertEqual(seen[1][0], ["/usr/bin/wslview", "http://127.0.0.1:8765/"])
+        with a, b, mock.patch("shutil.which", lambda name: None), mock.patch("os.access", lambda p, m: False):
+            self.assertFalse(core.open_in_browser("http://127.0.0.1:8765/", run=run))
+        with mock.patch.object(core, "PLATFORM", "darwin"), mock.patch("webbrowser.open", lambda url: seen.append(url) or True):
+            self.assertTrue(core.open_in_browser("http://127.0.0.1:8765/"))
+        self.assertEqual(seen[-1], "http://127.0.0.1:8765/")
+
+    def test_a_windows_notice_carries_the_texts_as_data(self):
+        import base64
+        import re
+        from river import notify
+        seen = []
+        a, b = self.wsl()
+        with a, b, mock.patch("shutil.which", lambda name: "/mnt/c/ps/powershell.exe" if name == "powershell.exe" else None), \
+                mock.patch("subprocess.run", lambda cmd, **kw: seen.append(cmd) or self.Done()):
+            notify.ADAPTERS["windows"](self.c)('Say "yes" & <go>', "#3 sign; $(rm -rf ~)", "http://127.0.0.1:8765/#item-3")
+        cmd = seen[0]
+        self.assertEqual(cmd[:4], ["/mnt/c/ps/powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand"])
+        script = base64.b64decode(cmd[4]).decode("utf-16-le")
+        self.assertNotIn("Say", script)
+        self.assertIn(notify.WINDOWS_APP_ID, script)
+        xml = base64.b64decode(re.search(r"FromBase64String\('([^']+)'\)", script).group(1)).decode()
+        self.assertIn("<text>Say \"yes\" &amp; &lt;go&gt;</text>", xml)
+        self.assertIn("<text>#3 sign; $(rm -rf ~)</text>", xml)
+        self.assertIn('activationType="protocol" launch="http://127.0.0.1:8765/#item-3"', xml)
+        self.assertNotIn("launch=", notify.toast_command("ps", "t", "b", None)[4])
+
+    def test_a_windows_notice_fails_aloud(self):
+        from river import notify
+        a, b = self.wsl()
+        with a, b, mock.patch("shutil.which", lambda name: "/mnt/c/ps/powershell.exe"), \
+                mock.patch("subprocess.run", lambda cmd, **kw: self.Done(1)), self.assertRaises(OSError):
+            notify.ADAPTERS["windows"](self.c)("t", "b", None)
+        with mock.patch.object(core, "PLATFORM", "darwin"), self.assertRaises(RiverError):
+            notify.ADAPTERS["windows"](self.c)
+        with a, b, mock.patch("shutil.which", lambda name: None), mock.patch("os.access", lambda p, m: False), \
+                self.assertRaisesRegex(RiverError, "appendWindowsPath"):
+            notify.ADAPTERS["windows"](self.c)
+
+
 class AddingWork(Base):
     def test_found_during_links_and_project_inference(self):
         core.project_add(self.c, "a", path=self.dir.name)

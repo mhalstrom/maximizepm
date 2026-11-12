@@ -11,7 +11,6 @@ import secrets
 import sys
 import threading
 import time
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -4889,7 +4888,7 @@ def serve(port: int, open_browser=False, dev=False):
         start_runners(str(core.db_path()))
         serve_file = write_serve_file(port)
     if open_browser:
-        webbrowser.open(url)
+        core.open_in_browser(url)  # in WSL: the Windows browser, through WSL's localhost forwarding (#5180)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -16564,6 +16564,64 @@ def tmux_path():
                                                      "/opt/local/bin/tmux") if os.access(p, os.X_OK)), None)
 
 
+def is_wsl():
+    """Whether this Linux runs in WSL (Windows Subsystem for Linux), the one way MaximizePM runs on Windows
+    (#5180): the page and a notice then open on the Windows side. WSL sets WSL_DISTRO_NAME in every shell; a
+    process with a cleared environment still finds "microsoft" in the kernel release."""
+    if PLATFORM != "linux":
+        return False
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+
+
+def windows_exe(name):
+    """A Windows program as WSL runs it (powershell.exe), or None. WSL puts the Windows PATH after the Linux one;
+    with appendWindowsPath off in /etc/wsl.conf, the program is still in its usual folder on drive C."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in ("/mnt/c/Windows/System32/WindowsPowerShell/v1.0", "/mnt/c/Windows/System32", "/mnt/c/Windows"):
+        p = os.path.join(d, name)
+        if os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def windows_run(cmd, run=None, timeout=20):
+    """Run a Windows program from WSL; the CompletedProcess. cwd /mnt/c: a Windows program that starts in a
+    Linux folder prints a warning that it cannot use a UNC path."""
+    import subprocess
+    return (run or subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout,
+                                   cwd="/mnt/c" if os.path.isdir("/mnt/c") else None)
+
+
+def open_in_browser(url, run=None):
+    """Open a page in the person's browser. In WSL that is the Windows browser: wslview (the wslu package) when
+    it is there, else PowerShell's Start-Process; WSL 2 forwards localhost, so the Windows browser reaches a serve
+    in WSL at the same address. Elsewhere Python's webbrowser. True when a program took the address."""
+    import subprocess
+    if not is_wsl():
+        import webbrowser
+        return webbrowser.open(url)
+    view = shutil.which("wslview")
+    if view:
+        cmd = [view, url]
+    else:
+        ps = windows_exe("powershell.exe")
+        if not ps:
+            return False
+        # The address goes in as a PowerShell string with its single quotes doubled: no shell reads it.
+        cmd = [ps, "-NoProfile", "-NonInteractive", "-Command", "Start-Process '" + url.replace("'", "''") + "'"]
+    try:
+        return windows_run(cmd, run).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def tmux_install():
     """The command that installs tmux on this system: every agent starts in a tmux pane (#5105)."""
     return "brew install tmux" if PLATFORM == "darwin" else "sudo apt install tmux (Fedora: sudo dnf install tmux)"

@@ -4,7 +4,7 @@ Decided by mark, 2026-11-11 ("1-3 are good"):
 
 1. tmux stays the one terminal layer. Every agent runs its real CLI in a tmux window. There is no second backend and no fallback path (mark: "I don't want to have a fallback"). ACP, codex app-server and the Claude Agent SDK were rejected for now: Claude Code reaches them only through adapters that do not accept a claude.ai plan login, and the person loses the terminal. herdr was looked at: its ideas are copied (agent detection as data, one state report per agent), not the program.
 2. Every agent is one adapter. The adapters replace all platform tables and all name checks.
-3. WSL is the supported way to run maxpm on Windows (separate item).
+3. maxpm runs on Windows only inside WSL 2 (#5180).
 
 Multi-provider models (OpenCode, Pi, Goose and others): option A. The model of such an agent is a free "provider/model" text. An item's min-model and max-model limits apply only to the families maxpm knows (claude, openai).
 
@@ -99,7 +99,7 @@ the items of one row run in parallel.
    (#5174), #5192 Cursor CLI (#5175), #5193 GitHub Copilot CLI (#5176), #5194 Aider (#5177), #5195 Goose (#5178),
    #5196 Amp (#5179).
 
-Separate: #5180 makes WSL 2 the supported way to run maxpm on Windows (decision 3 above); it waits on none of these.
+Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 above).
 
 ## As built in #5167
 

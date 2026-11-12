@@ -3668,9 +3668,8 @@ def connect_command(args):
     print(f"Approve this computer on the relay:\n  {dev['verification_uri_complete']}\n"
           f"Code: {dev['user_code']} (the page must show the same code)")
     if not args.no_browser:
-        import webbrowser
         try:
-            webbrowser.open(dev["verification_uri_complete"])
+            core.open_in_browser(dev["verification_uri_complete"])  # in WSL: the Windows browser (#5180)
         except Exception:
             pass
     print("Waiting for the approval (10 minutes at most)...", flush=True)
