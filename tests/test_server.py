@@ -2674,10 +2674,19 @@ class LaunchInTmux(unittest.TestCase):
         pane["keys"].clear()
         # The turn runs: a look types nothing. Its end: the oldest goes, one in each look.
         self.assertEqual(server.paste_pending(self.c), {})
+        long_ago = lambda: self.c.execute("UPDATE agents SET typed_at='2000-01-01T00:00:00Z' WHERE name='w'")
+        long_ago()  # the /compact went in TURN_GRACE ago
         pane["screen"] = idle
         self.assertEqual(server.paste_pending(self.c), {"w": pane["id"]})
         self.assertEqual(pane["keys"], ["first", "Enter"])
         self.assertEqual([p["text"] for p in core.pending_list(self.c, "w")], ["second", "third"])
+        # Right after a text went in, the screen can still look idle: the next look waits TURN_GRACE.
+        self.assertEqual(server.paste_pending(self.c), {})
+        long_ago()
+        # While a Send now types one message, a look types no other into the same box (the live test of #5587).
+        sending = core.pending_take(self.c, second["waiting"]["id"])
+        self.assertEqual(server.paste_pending(self.c), {})
+        core.pending_end(self.c, sending["id"], False)
         # Send now under the third: the turn stops, the third goes at once, the second keeps waiting.
         pane["screen"] = working
         pane["keys"].clear()

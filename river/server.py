@@ -3129,17 +3129,25 @@ def paste_pending(conn, only=None):
     """One look of maxpm serve (each pass; at once after a Stop hook's idle report, a held message and a Stop: 
     deliver_soon): type the oldest held message of each agent (pending_sends, #5587) whose agent CLI stands at its
     idle prompt, into its pane, then Enter. One message for each agent in a look: the next one waits for the end of
-    the turn that this one starts. The messages of an agent that is no more go. Returns {agent: pane} of what it
-    typed."""
-    rows = [r for r in core.pending_list(conn, only) if r["state"] == "waiting"]
+    the turn that this one starts. Not while a Send now types one of its messages, and not for TURN_GRACE after a
+    text went into its pane: its Esc, or the text before the CLI shows the new turn, leaves the screen idle for a
+    moment (the live test of #5587 typed a second message into the box between Send now's text and its Enter).
+    The messages of an agent that is no more go. Returns {agent: pane} of what it typed."""
+    rows = core.pending_list(conn, only)
+    seen = {r["agent"] for r in rows if r["state"] == "sending"}  # a Send now or another look types one now
+    rows = [r for r in rows if r["state"] == "waiting" and r["agent"] not in seen]
     if not rows or not core.tmux_path() and TMUX_RUNNER is None:
         return {}
-    terminals, seen, done = agent_terminals(conn), set(), {}
+    terminals, done = agent_terminals(conn), {}
+    lately = core.iso(core.now() - core.timedelta(seconds=TURN_GRACE))
     for r in rows:
         agent = r["agent"]
         if agent in seen:
             continue
         seen.add(agent)
+        typed = conn.execute("SELECT typed_at FROM agents WHERE name=?", (agent,)).fetchone()
+        if typed and typed["typed_at"] and typed["typed_at"] > lately:
+            continue  # a text went into its pane a moment ago: its new turn may not show yet
         if not conn.execute("SELECT 1 FROM agents WHERE name=?", (agent,)).fetchone():
             core.pending_forget(conn, agent)
             continue
@@ -3177,7 +3185,11 @@ def deliver_soon(agent, pause=DELIVER_PAUSE):
         time.sleep(pause)
         conn = core.connect()
         try:
-            paste_pending(conn, agent)
+            # A turn shorter than TURN_GRACE ends inside the grace of its own message: look again after it.
+            for wait in (0, 4, TURN_GRACE - 3):
+                time.sleep(wait)
+                if paste_pending(conn, agent) or not core.pending_waits(conn, agent):
+                    break
         except Exception as e:  # noqa: BLE001 - a thread of serve must not end serve
             print(f"maxpm serve: a held message for {agent} was not typed: {e}", file=sys.stderr)
         finally:
