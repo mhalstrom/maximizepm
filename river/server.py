@@ -3207,14 +3207,37 @@ def file_roots(conn):
         if not p.is_dir():
             continue
         roots.add(p.resolve())
-        try:
-            out = subprocess.run(["git", "-C", str(p), "worktree", "list", "--porcelain"], capture_output=True,
-                                 text=True, timeout=5).stdout
-        except (OSError, subprocess.SubprocessError):
-            out = ""
-        roots.update(Path(x[9:]).resolve() for x in out.splitlines() if x.startswith("worktree "))
+        got = _worktrees_of(p)
+        if got is None:
+            try:
+                out = subprocess.run(["git", "-C", str(p), "worktree", "list", "--porcelain"], capture_output=True,
+                                     text=True, timeout=5).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            got = [Path(x[9:]) for x in out.splitlines() if x.startswith("worktree ")]
+        roots.update(x.resolve() for x in got)
     _ROOTS.update(at=time.time(), roots=sorted(roots))
     return _ROOTS["roots"]
+
+
+def _worktrees_of(p):
+    """The worktrees of the repository in folder p, read from its .git/worktrees/<name>/gitdir files, or None when
+    p is no main checkout (git then answers). One git process for each project took 0.2 s of maxpm show (#5491)."""
+    wt = p / ".git" / "worktrees"
+    if not (p / ".git").is_dir():
+        return None
+    out = []
+    try:
+        names = list(wt.iterdir()) if wt.is_dir() else []
+        for d in names:
+            g = d / "gitdir"
+            if g.is_file():
+                f = Path(g.read_text().strip())
+                if f.name == ".git" and f.parent.is_dir():
+                    out.append(f.parent)
+    except OSError:
+        return None
+    return out
 
 
 CLAUDE_TMP = None  # tests: the folder of Claude Code's session scratchpads (claude_tmps)

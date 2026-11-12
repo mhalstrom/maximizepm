@@ -767,14 +767,75 @@ BLOCKED_HELP = ("your item cannot move until the answer: you have no other part 
                 "the next step; it wakes the manager's watch at once")
 
 
-def build_parser():
-    p = argparse.ArgumentParser(prog=core.COMMAND, description="MaximizePM: a dependency-ordered work queue for agents and people.")
+class _Null:
+    """Stands in for the parser of a command that does not run: every call on it does nothing."""
+
+    def __getattr__(self, name):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+
+class _OneCommand(argparse._SubParsersAction):
+    """The commands, of which only `only` gets its parser: the others are names. Building all of them took 25 ms
+    of each maxpm command (#5491)."""
+    only = None
+
+    def add_parser(self, name, **kwargs):
+        if self.only is not None and name != self.only:
+            self.choices[name] = None
+            return _Null()
+        return super().add_parser(name, **kwargs)
+
+
+class _Retry(Exception):
+    """The parser of one command could not read the words: the whole parser reads them again."""
+
+
+class _QuietParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _Retry(message)
+
+
+def _command_word(words):
+    """The command in the words (after the global options), or None when they ask for help or the version."""
+    it = iter(words)
+    for w in it:
+        if w in ("-h", "--help", "--version"):
+            return None
+        if w == "--as":
+            next(it, None)
+        elif not w.startswith("-"):
+            return w if not {"-h", "--help"} & set(words) else None
+    return None
+
+
+def parse_args(argv=None):
+    """The parsed words: with the parser of their command alone, else (help, a mistake) with the whole one."""
+    words = sys.argv[1:] if argv is None else list(argv)
+    cmd = _command_word(words)
+    if cmd:
+        try:
+            args = build_parser(only=cmd).parse_args(words)
+            if args.cmd == cmd:
+                return args
+        except _Retry:
+            pass
+    return build_parser().parse_args(words)
+
+
+def build_parser(only=None):
+    """The parser of every command; only: the name of the one command that gets its arguments (parse_args)."""
+    p = (_QuietParser if only else argparse.ArgumentParser)(
+        prog=core.COMMAND, description="MaximizePM: a dependency-ordered work queue for agents and people.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--as", dest="actor", default=os.environ.get("MAXPM_AGENT"), help="agent name (default $MAXPM_AGENT)")
     p.add_argument("--quiet", "-q", action="store_true", default=bool(os.environ.get("MAXPM_QUIET")),
                    help="no hint lines")
-    sub = p.add_subparsers(dest="cmd")
+    sub = p.add_subparsers(dest="cmd", action=_OneCommand)
+    sub.only = only
 
     pr = sub.add_parser("project", help="add, rank, list, or archive projects")
     prs = pr.add_subparsers(dest="pcmd", required=True)
@@ -1830,7 +1891,7 @@ def run(argv=None):
         return activity_command()  # first: a hook runs on every tool call, so it skips the parser and the briefing
     if words[:2] == ["report", "--hook"] and len(words) == 3:
         return activity_command(agent_id=words[2])
-    args = build_parser().parse_args(argv)
+    args = parse_args(argv)
     if args.cmd is None:
         print(QUICKSTART)
         return 0
@@ -1908,10 +1969,21 @@ def run(argv=None):
         print(f"added the work queue block to {f}")
         return 0
     conn = core.connect()
+    # One command reads the item graph once while it writes nothing (#5491). serve keeps its own (page_state).
+    share = core.ANN_SHARE.set({}) if args.cmd not in LONG_COMMANDS else None
     try:
         return _run(args, conn)
     finally:
+        if share is not None:
+            core.ANN_SHARE.reset(share)
         conn.close()
+
+
+LONG_COMMANDS = ("serve",)
+# The commands whose answer reads the needs-you rows: activity brings them up to date first (maxpm needs-you syncs
+# them itself). Every other command syncs them only when the sweep or the command itself changed the queue (#5491);
+# maxpm serve syncs them every notify_interval.
+READS_NEEDS_YOU = ("cleanup", "health")
 
 
 def _run(args, conn):
@@ -1944,12 +2016,13 @@ def _run(args, conn):
     actor = args.actor
     for_other = _for_other(conn, actor)
     if args.cmd not in ("go", "plan"):
-        core.activity(conn, actor)
+        core.activity(conn, actor, sync=args.cmd in READS_NEEDS_YOU)
     st = core.stop_request(conn, actor) if args.cmd not in ("go", "wait", "stop") else None
     if st and not args.json:
         print(_stop_banner(actor, st), file=sys.stderr)
     if not for_other:  # the manager's session stays the manager's (#5060)
         core.record_session(conn, actor, core.session_from_env())  # before done measures the item
+    changes = conn.total_changes
     try:
         res = dispatch(conn, args, actor)
     except RiverError:
@@ -1965,7 +2038,8 @@ def _run(args, conn):
     if not for_other:
         core.record_session_url(conn, me, core.session_url_from_env())
         core.record_session(conn, me, core.session_from_env())
-    core.sync_needs_you_now(conn)  # the command may have made a human item ready, or sent a question to a person
+    if conn.total_changes != changes:  # the command may have made a human item ready, or sent a question to a person
+        core.sync_needs_you_now(conn)
     if (args.cmd == "view" and args.layout and res.get("show") and res["panes"] and not args.json
             and sys.stdin.isatty() and sys.stdout.isatty()):
         conn.close()

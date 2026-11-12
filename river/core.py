@@ -6,19 +6,35 @@ plain dicts and lists, so the CLI and the web server share one code path.
 
 from __future__ import annotations
 
+import collections
 import contextvars
-import hashlib
+import functools
+import importlib
 import json
 import math
 import os
 import re
-import shutil
 import sqlite3
-import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic as _monotonic
+
+
+class _OnUse:
+    """A module that is imported when the code first uses it: hashlib, shutil and statistics took 8 ms of the start
+    of each maxpm command, and most commands use none of them (#5491)."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __getattr__(self, attr):
+        mod = importlib.import_module(self._name)
+        globals()[self._name] = mod
+        return getattr(mod, attr)
+
+
+hashlib, shutil, statistics = _OnUse("hashlib"), _OnUse("shutil"), _OnUse("statistics")
 
 # One database per user, in the home folder (sandboxed agents must be allowed to write there).
 # The product: an instructions file that names it has its block.
@@ -1046,6 +1062,7 @@ CREATE INDEX IF NOT EXISTS session_samples_at ON session_samples(at);
 CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
+CREATE INDEX IF NOT EXISTS items_kind_target ON items(kind, target);
 CREATE INDEX IF NOT EXISTS deps_blocked_by ON deps(blocked_by);
 CREATE INDEX IF NOT EXISTS events_item ON events(item_id);
 CREATE INDEX IF NOT EXISTS messages_to ON messages(to_agent, read_at);
@@ -1604,6 +1621,16 @@ def setting(conn, key: str, item_id: int | None = None, agent: str | None = None
         scopes.append(f"agent:{agent}")
     if kind:
         scopes.append(f"kind:{kind}")
+    snap = _settings_rows(conn)
+    if snap:
+        rows, names = snap
+        if project_id is not None and project_id in names:
+            scopes.append(f"project:{names[project_id]}")
+        scopes.append("global")
+        for sc in scopes:
+            if (sc, key) in rows:
+                return rows[(sc, key)]
+        return default
     if project_id is not None:
         r = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
         if r:
@@ -2665,11 +2692,11 @@ def _done_when_question(g, backlog=()):
 
 
 def _goal_view(conn, g, ann=None):
-    ann = ann if ann is not None else annotate(conn)
+    ann = ann if ann is not None else annotate(conn, closed=False)
     d = dict(g)
     d["project"] = _project_name(conn, g["project_id"])
     ids = [r["item_id"] for r in conn.execute("SELECT item_id FROM item_goals WHERE goal_id=?", (g["id"],))]
-    items = [ann[i] for i in ids if i in ann]
+    items = [ann.light(i) if isinstance(ann, OpenAnn) else ann[i] for i in ids if i in ann]
     d["items_open"] = sorted(a["id"] for a in items if a["status"] in OPEN_STATES and not a["backlog"])
     d["items_backlog"] = sorted(a["id"] for a in items if a["backlog"])
     d["items_done"] = sorted(a["id"] for a in items if a["status"] == "done")
@@ -2810,7 +2837,7 @@ def goal_add(conn, project, name, outcome="", done_when="", actor=None, rank=Non
 
 def goal_list(conn, project=None, include_complete=False):
     """Goals in order: project rank, then goal rank. Each with its owner and tagged-item progress."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)
     project = _project(conn, project)["name"] if project else None
     sql = ("SELECT g.* FROM goals g JOIN projects p ON p.id=g.project_id WHERE p.archived=0"
            + ("" if include_complete else " AND g.status='open'") + (" AND p.name=?" if project else "")
@@ -5726,7 +5753,12 @@ def targets_view(conn, ann=None):
     for t in target_list(conn):
         deploys = [a for a in ann.values() if a["kind"] == "deploy" and a["target"] == t["name"]]
         pending = sorted((a for a in deploys if a["status"] in OPEN_STATES), key=lambda a: a["id"])
-        done = sorted((a for a in deploys if a["status"] == "done"), key=lambda a: a["closed_at"] or "")
+        if isinstance(ann, OpenAnn):  # the last ten releases only, not every done item (#5491)
+            done = [ann[r[0]] for r in reversed(conn.execute(
+                "SELECT id FROM items WHERE kind='deploy' AND target=? AND status='done' "
+                "ORDER BY COALESCE(closed_at, '') DESC, id DESC LIMIT 10", (t["name"],)).fetchall())]
+        else:
+            done = sorted((a for a in deploys if a["status"] == "done"), key=lambda a: a["closed_at"] or "")
         last = done[-1] if done else None
         out.append(dict(t,
             project_names=[r["name"] for r in conn.execute(
@@ -7057,6 +7089,7 @@ SIMILAR_BATCH = timedelta(hours=2)  # items one author added this close together
 RELATED_MIN = 0.3                   # the score from which show and go list an item as related
 
 
+@functools.lru_cache(maxsize=65536)
 def _stem(w):
     for s in ("ing", "ed", "es", "s"):
         if len(w) > len(s) + 3 and w.endswith(s):
@@ -7064,35 +7097,83 @@ def _stem(w):
     return w
 
 
+_WORD = re.compile(r"[a-z0-9_]+")
+
+
 def _words(text):
     """The words of a text that tell items apart: lower case, no common words, a light stem (tests -> test)."""
-    return [_stem(w) for w in re.findall(r"[a-z0-9_]+", (text or "").lower())
-            if w not in _STOP_WORDS and (len(w) > 2 or w.isdigit())]
+    return list(_words_of(text or ""))
 
 
-def _text_rows(conn, where="1", params=()):
+@functools.lru_cache(maxsize=16384)
+def _words_of(text):
+    # One command reads the same titles and contexts more than once (_idf, then _text_rows): each text once (#5491).
+    return tuple(x for x in map(_word, _WORD.findall(text.lower())) if x)
+
+
+@functools.lru_cache(maxsize=65536)
+def _word(w):
+    """The stem of a word that tells items apart, or '' for a common or short word."""
+    return _stem(w) if w not in _STOP_WORDS and (len(w) > 2 or w.isdigit()) else ""
+
+
+def _text_rows(conn, where="1", params=(), full=True):
     """Items with their words: `key` (title twice, context once) for the score, `all` (title, context, notes,
-    output) for a search."""
+    output) for a search. full=False leaves `all` out: the notes and outputs are most of the text (#5491)."""
     rows = []
-    for r in conn.execute("SELECT i.id, i.project_id, p.name project, p.path, i.title, i.context, i.notes, i.output, "
+    for r in conn.execute("SELECT i.id, i.project_id, p.name project, p.path, i.title, i.context, "
+                          + ("i.notes, i.output, " if full else "NULL notes, i.output, ") +
                           "i.status, i.kind, i.doer, i.assignee, i.touches, i.created_at, i.closed_at, i.backlog_at, "
                           "i.found_during FROM items i JOIN projects p ON p.id=i.project_id WHERE " + where, params):
         d = dict(r)
         title, context = _words(d["title"]), _words(d["context"])
         d["key"] = title + title + sorted(set(context))
-        d["all"] = set(title) | set(context) | set(_words(d["notes"])) | set(_words(d["output"]))
+        if full:
+            d["all"] = set(title) | set(context) | set(_words(d["notes"])) | set(_words(d["output"]))
         rows.append(d)
     return rows
 
 
 def _idf(conn):
     """How rare each word is among the work items' titles and contexts."""
-    df, n = {}, 0
-    for r in conn.execute("SELECT title, context FROM items WHERE kind='work'"):
+    df, n = _df(conn)
+    memo = {}
+
+    def idf(w):
+        v = memo.get(w)
+        if v is None:
+            v = memo[w] = math.log((n + 1) / (df.get(w, 0) + 1)) + 1
+        return v
+    return idf
+
+
+def _df(conn):
+    """(document frequency of each word, number of work items), from the cache file beside the database while its
+    key matches: the count, the last id and the length of the work items' titles and contexts. Counting the words
+    of every work item took 0.2 s of each maxpm show, add and search (#5491)."""
+    key = list(conn.execute("SELECT count(*), max(id), total(length(title) + coalesce(length(context), 0)) "
+                            "FROM items WHERE kind='work'").fetchone())
+    f = conn.execute("PRAGMA database_list").fetchone()[2]
+    path = Path(f + "-words.json") if f else None
+    if path:
+        try:
+            got = json.loads(path.read_text())
+            if got["key"] == key:
+                return got["df"], got["n"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    df, n = collections.Counter(), 0
+    for title, context in conn.execute("SELECT title, context FROM items WHERE kind='work'").fetchall():
         n += 1
-        for w in set(_words(r["title"]) + _words(r["context"])):
-            df[w] = df.get(w, 0) + 1
-    return lambda w: math.log((n + 1) / (df.get(w, 0) + 1)) + 1
+        df.update(set(_words_of(title or "")).union(_words_of(context or "")))
+    if path:
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps({"key": key, "n": n, "df": df}))
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+    return df, n
 
 
 def _vector(words, idf):
@@ -7214,7 +7295,12 @@ def search(conn, text, project=None, status=None, since=None, limit=20, kinds=Fa
         t = _since(conn, since)
         where.append("(i.created_at>=? OR i.closed_at>=?)")
         params += [t, t]
-    rows = _text_rows(conn, " AND ".join(where), params)
+    # First the rows whose text holds each word (a stem is the start of every word that has it): the words of
+    # every note and output of the queue took 0.3 s of each search (#5491).
+    text_sql = ("(COALESCE(i.title,'') || ' ' || COALESCE(i.context,'') || ' ' || COALESCE(i.notes,'') || ' ' || "
+                "COALESCE(i.output,'')) LIKE ? ESCAPE '\\'")
+    pats = ["%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for w in want]
+    rows = _text_rows(conn, " AND ".join(where + [text_sql] * len(want)), params + pats)
     hits = sorted((d for d in rows if all(w in d["all"] for w in want)), key=lambda d: (d["created_at"], d["id"]),
                   reverse=True)
     res = {"query": text, "words": want, "total": len(hits), "items": [_match(d, 1) for d in hits[:limit]],
@@ -7222,6 +7308,7 @@ def search(conn, text, project=None, status=None, since=None, limit=20, kinds=Fa
     for m in res["items"]:
         del m["score"]
     if not hits:
+        rows = _text_rows(conn, " AND ".join(where), params, full=False)
         idf = _idf(conn)
         q = _vector(want, idf)
         near = sorted(((_cosine(q, _vector(d["key"], idf)), d) for d in rows), key=lambda x: -x[0])
@@ -7294,7 +7381,8 @@ def related(conn, item_id, n=3):
     t = _words(it["title"])
     q = _vector(t + t + sorted(set(_words(it["context"]))), idf)
     scored = sorted(((_cosine(q, _vector(d["key"], idf)), d) for d in _text_rows(
-        conn, "i.project_id=? AND i.kind='work'", (it["project_id"],)) if d["id"] not in skip), key=lambda x: -x[0])
+        conn, "i.project_id=? AND i.kind='work'", (it["project_id"],), full=False) if d["id"] not in skip),
+        key=lambda x: -x[0])
     return [_match(d, s) for s, d in scored[:n] if s >= RELATED_MIN]
 
 
@@ -7451,7 +7539,12 @@ def merge(conn, keep, other, note, actor=None):
 
 # ---------------------------------------------------------------- graph
 
-def _load_graph(conn):
+# The columns of a done or dropped item that the computation of the open items reads (annotate closed=False).
+LIGHT_COLUMNS = "id, project_id, status, priority, due, backlog_at, assignee"
+
+
+def _load_graph(conn, closed=True):
+    """closed=False: the done and dropped items with LIGHT_COLUMNS only; their full rows are most of the read."""
     # One view for the three reads. As separate statements, another session's new item and its links could
     # come between them: a link then named an item this read did not have, and the command stopped (KeyError).
     # A plain BEGIN holds one view of the database (WAL) and keeps no writer out; inside the caller's
@@ -7461,7 +7554,14 @@ def _load_graph(conn):
         conn.execute("BEGIN")
     try:
         projects = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM projects")}
-        items = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM items")}
+        # dict(zip()) of each row: dict() of a sqlite3.Row took two thirds of this read (#5491).
+        rows = list(conn.execute("SELECT * FROM items" + ("" if closed else f" WHERE status IN {OPEN_STATES}")))
+        cols = rows[0].keys() if rows else []
+        items = {r[0]: dict(zip(cols, r)) for r in rows}
+        if not closed:
+            rows = list(conn.execute(f"SELECT {LIGHT_COLUMNS} FROM items WHERE status NOT IN {OPEN_STATES}"))
+            cols = rows[0].keys() if rows else []
+            items.update((r[0], dict(zip(cols, r))) for r in rows)
         deps = conn.execute("SELECT item_id, blocked_by, kind FROM deps").fetchall()
     finally:
         if own:
@@ -7482,26 +7582,100 @@ def _load_graph(conn):
     return projects, items, waits_on, waited_by, conflicts, feeds
 
 
-# One build of the page's state (server.page_state) reads the item graph once (#5465): inside it, annotate keeps its
-# result for a connection while no write changed the database (the connection's own writes, or another
-# connection's: PRAGMA data_version). Its callers there only read the result. Outside a build each call computes anew.
+# One build of the page's state (server.page_state, #5465) and one maxpm command (cli._run, #5491) read the item
+# graph once: inside them, annotate keeps its result for a connection while no write changed the database (the
+# connection's own writes, or another connection's: PRAGMA data_version). Each call gets its own copy of each item's
+# dict, so a caller that changes a field changes it for itself only. Outside them each call computes anew.
 ANN_SHARE = contextvars.ContextVar("ann_share", default=None)
+ANN_SHARE_SECS = 10
 
 
-def annotate(conn):
-    """Compute readiness, effective priority, unblock counts, and sort keys for every item."""
+class OpenAnn(dict):
+    """annotate(conn, closed=False): the open items, computed; a done or dropped item is computed when a caller
+    asks for it by id (ann[i], ann.get(i), i in ann), and it is not in the iteration. For the callers that look
+    only at open items: computing the 5,000 closed items of a large queue took 90% of annotate (#5491)."""
+
+    def __init__(self, rows, closed_rows, one, links=None):
+        super().__init__(rows)
+        self._closed, self._one, self._extra, self._links = closed_rows, one, {}, links
+
+    def light(self, i):
+        """Item i with at least id, status, backlog, project_id, priority, due and assignee; a closed item without
+        computing it."""
+        if dict.__contains__(self, i):
+            return self[i]
+        if i in self._extra:
+            return self._extra[i]
+        return {"backlog": False, **self._closed[i]}
+
+    def copy_rows(self):
+        return OpenAnn({i: dict(a) for i, a in self.items()}, self._closed, self._one, self._links)
+
+    def neighbors(self, i):
+        """The items i waits on and the items that wait on it, without computing a closed one."""
+        if self._links:
+            return self._links[0][i] + self._links[1][i]
+        return self[i]["waits_on"] + self[i]["unblocks"]
+
+    def __missing__(self, k):
+        if k in self._closed:
+            v = self._extra.get(k)
+            if v is None:
+                v = self._extra[k] = self._one(k)
+            return v
+        raise KeyError(k)
+
+    def __contains__(self, k):
+        return dict.__contains__(self, k) or k in self._closed
+
+    def get(self, k, default=None):
+        return self[k] if k in self else default
+
+
+def annotate(conn, closed=True):
+    """Compute readiness, effective priority, unblock counts, and sort keys for every item. closed=False: an
+    OpenAnn, for a caller that looks only at open items (it iterates over the open ones)."""
     share = ANN_SHARE.get()
     if share is None:
-        return _annotate(conn)
+        return _annotate(conn, closed)
+    # The time is in the key too: readiness and reservations change with the clock (a goal owner's claim ends),
+    # and a wait runs for many minutes.
+    key = (id(conn), conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0],
+           int(_monotonic() // ANN_SHARE_SECS))
+    got = share.get("ann")
+    if closed or not (got and got[0] == key):  # a whole result serves an OpenAnn caller too
+        name = "ann" if closed else "ann_open"
+        got = share.get(name)
+        if not got or got[0] != key:
+            got = share[name] = (key, _annotate(conn, closed))
+    if isinstance(got[1], OpenAnn):
+        return got[1].copy_rows()
+    rows = {i: dict(a) for i, a in got[1].items()}
+    if closed:
+        return rows
+    return OpenAnn({i: a for i, a in rows.items() if a["status"] in OPEN_STATES},
+                   {i: a for i, a in rows.items() if a["status"] not in OPEN_STATES}, rows.__getitem__,
+                   ({i: a["waits_on"] for i, a in rows.items()}, {i: a["unblocks"] for i, a in rows.items()}))
+
+
+def _settings_rows(conn):
+    """{(scope, key): value} of the settings table and {project id: name}, read once for a command or a page build
+    (ANN_SHARE) while nothing writes: one command asked for the same setting hundreds of times (#5491). None
+    outside them."""
+    share = ANN_SHARE.get()
+    if share is None:
+        return None
     key = (id(conn), conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
-    if key not in share:
-        share.clear()
-        share[key] = _annotate(conn)
-    return share[key]
+    got = share.get("settings")
+    if not got or got[0] != key:
+        rows = {(r[0], r[1]): r[2] for r in conn.execute("SELECT scope, key, value FROM settings")}
+        names = {r[0]: r[1] for r in conn.execute("SELECT id, name FROM projects")}
+        got = share["settings"] = (key, rows, names)
+    return got[1], got[2]
 
 
-def _annotate(conn):
-    projects, items, waits_on, waited_by, conflicts, feeds = _load_graph(conn)
+def _annotate(conn, closed=True):
+    projects, items, waits_on, waited_by, conflicts, feeds = _load_graph(conn, closed)
     is_open = {i: items[i]["status"] in OPEN_STATES for i in items}
     zone = setting(conn, "timezone")
     tags: dict[int, list] = {}
@@ -7546,8 +7720,7 @@ def _annotate(conn):
         depth_memo[i] = max(ds) if ds else 0
         return depth_memo[i]
 
-    out = {}
-    for i, it in items.items():
+    def one(i, it):
         p = projects[it["project_id"]]
         open_blockers = [b for b in waits_on[i] if is_open[b]]
         deps_i = dependents(i) if is_open[i] else frozenset()
@@ -7606,8 +7779,19 @@ def _annotate(conn):
             f" until {a['blocked_until_text']}" if it["blocked_until"] else "") + f": {it['blocked_reason']}")
         a["reason"] = _reason(a)
         a["sort_key"] = (eff, p["rank"], -len(deps_i), it["rank"], it["created_at"], i)
-        out[i] = a
-    return out
+        return a
+
+    if closed:
+        return {i: one(i, it) for i, it in items.items()}
+
+    def more(i):  # a closed item that a caller asks for: its whole row now
+        r = conn.execute("SELECT * FROM items WHERE id=?", (i,)).fetchone()
+        if r is None:
+            raise KeyError(i)
+        return one(i, dict(r))
+    return OpenAnn({i: one(i, it) for i, it in items.items() if is_open[i]},
+                   {i: it for i, it in items.items() if not is_open[i]}, more,
+                   ({i: sorted(v) for i, v in waits_on.items()}, {i: sorted(v) for i, v in waited_by.items()}))
 
 
 def _reason(a):
@@ -7647,7 +7831,7 @@ def session_tree(conn, actor, ann=None):
                                            (actor,))}
     if not held:
         return None
-    ann = ann if ann is not None else annotate(conn)
+    ann = ann if ann is not None else annotate(conn, closed=False)
     found = {}
     for r in conn.execute("SELECT id, found_during FROM items WHERE found_during IS NOT NULL"):
         found.setdefault(r["found_during"], set()).add(r["id"])
@@ -7686,8 +7870,9 @@ def _graph_distances(ann, starts):
     frontier = list(starts)
     while frontier:
         nxt = []
+        links = ann.neighbors if isinstance(ann, OpenAnn) else (lambda i: ann[i]["waits_on"] + ann[i]["unblocks"])
         for x in frontier:
-            for y in ann[x]["waits_on"] + ann[x]["unblocks"]:
+            for y in links(x):
                 if y not in dist:
                     dist[y] = dist[x] + 1
                     nxt.append(y)
@@ -7726,7 +7911,7 @@ def ready_list(conn, project=None, unblocks=None, doer_for=None, ann=None, near=
     first). Inside the area the graph order applies. With no area, the pool
     is every project.
     """
-    ann = ann or annotate(conn)
+    ann = ann or annotate(conn, closed=False)
     pool = [a for a in ann.values() if ready_for(a, actor) and not a["project_archived"]]
     if actor:
         # An expert-tier task goes to a session started for it (launch --item, maxpm expert start), not to a worker
@@ -7953,7 +8138,7 @@ def queue_instructions(conn, agent, mark=True):
 
 def _queue_ready(conn, agent, ann=None):
     """The agent's queued items that are ready now, in queue order."""
-    ann = ann or annotate(conn)
+    ann = ann or annotate(conn, closed=False)
     return [ann[r["item_id"]] for r in conn.execute(
         "SELECT item_id FROM queue_entries WHERE agent=? AND item_id IS NOT NULL ORDER BY pos", (agent,))
         if r["item_id"] in ann and ann[r["item_id"]]["ready"]]
@@ -8852,12 +9037,18 @@ def still_worked(conn):
     return out
 
 
-def activity(conn, actor, tries=None):
-    """Run at the start of every command: expire old leases, then renew the actor's own."""
+def activity(conn, actor, tries=None, sync=True):
+    """Run at the start of every command: expire old leases, then renew the actor's own. sync: run
+    sync_needs_you always (True), or only when the sweep changed the queue (False: a command whose answer does not
+    read the needs-you rows; maxpm serve syncs them every notify_interval, and each command that writes syncs them
+    after it, #5491)."""
     with tx(conn, tries):
+        before = conn.total_changes
         expired = _sweep(conn)
+        swept = conn.total_changes != before
         _touch_agent(conn, actor)
-    sync_needs_you_now(conn, tries)
+    if sync or swept:
+        sync_needs_you_now(conn, tries)
     return expired
 
 
@@ -8969,7 +9160,7 @@ def sync_needs_you(conn):
     """
     humans = {r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human'")}
     _release_held(conn)
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)
     _hold_items(conn, ann)
     want_items = {a["id"]: a for a in ann.values()
                   if a["ready"] and a["doer"] == "human" and not a["project_archived"] and not a["held_for"]}
@@ -9064,7 +9255,7 @@ def needs_you(conn, human=None, include_closed=False, limit=100, sync=True):
         sql += " AND (n.human IS NULL OR n.human=?)"
         args.append(human)
     rows = [dict(r) for r in conn.execute(sql + " ORDER BY n.id DESC", args)]
-    ann = annotate(conn)
+    ann = annotate(conn, closed=include_closed)  # open rows name open items, or a closed one now and then
     for r in rows:
         a = ann.get(r["item_id"]) if r["kind"] == "item" else None
         r["priority"] = a["effective_priority"] if a else None
@@ -9559,7 +9750,7 @@ def claim(conn, item_id, actor=None):
     _prime_release_commits(conn, item_id)
     with tx(conn, claims=True):
         _sweep(conn)
-        a = annotate(conn)[_item(conn, item_id)["id"]]
+        a = annotate(conn, closed=False)[_item(conn, item_id)["id"]]
         if a["backlog"]:
             raise RiverError(_backlog_claim_refusal(a))
         if not ready_for(a, actor):
@@ -9627,7 +9818,7 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
         newly, resumed = [], []
         if status in CLOSED_STATES:
             resumed = _resume_holds(conn, it["id"])
-            ann = annotate(conn)
+            ann = annotate(conn, closed=False)
             newly = [d for d in ann[it["id"]]["unblocks"] if ann[d]["ready"]]
             # An item that waited on an item nobody needs now is ready only because of the close: its real
             # precondition may still be false (#3292). The close check says so, and the closer relinks it.
@@ -9861,7 +10052,7 @@ def unsynced(conn, actor=None):
         "SELECT DISTINCT i.id FROM items i JOIN item_refs r ON r.item_id=i.id WHERE r.synced_at IS NULL "
         f"AND i.status IN {CLOSED_STATES}" + (" AND i.assignee=?" if actor else "") + " ORDER BY i.closed_at",
         (actor,) if actor else ()).fetchall()
-    ann = annotate(conn) if rows else {}
+    ann = annotate(conn, closed=False) if rows else {}
     return [{"id": r["id"], "title": ann[r["id"]]["title"], "status": ann[r["id"]]["status"],
              "project": ann[r["id"]]["project"], "output": ann[r["id"]]["output"],
              "tracker": setting(conn, "tracker", item_id=r["id"]),
@@ -11492,7 +11683,7 @@ def context_wanted(conn):
 
 
 def item_show(conn, item_id, ann=None):
-    ann = ann or annotate(conn)
+    ann = ann or annotate(conn, closed=False)
     iid = int(item_id)
     if iid not in ann:
         raise RiverError(f"no item {item_id}")
@@ -11525,7 +11716,7 @@ def item_show(conn, item_id, ann=None):
 
 def item_list(conn, project=None, status=None, include_closed=False, goal=None, ref=None):
     """Items in order. With ref: the items linked to that tracker issue, closed ones too (an import checks it)."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=include_closed or status is not None or ref is not None)
     rows = [a for a in ann.values() if not a["project_archived"]]
     if ref is not None:
         rows = [a for a in rows if any(r["ref"] == ref.strip() for r in a["refs"])]
@@ -11547,7 +11738,7 @@ def item_list(conn, project=None, status=None, include_closed=False, goal=None, 
 
 def blockers(conn, item_id):
     """Tree of open prerequisites with status and holder."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)
     root = _item(conn, item_id)["id"]
 
     def node(i, trail):
@@ -13250,7 +13441,7 @@ def capacity(conn, ann=None):
     so every ready item nobody holds is a slot for one session, except that of
     two ready items that conflict (same files) only one can run.
     """
-    ann = ann or annotate(conn)
+    ann = ann or annotate(conn, closed=False)
     live = [a for a in ann.values() if not a["project_archived"]]
     ready = [a for a in live if a["ready"]]
     ready_ai = [a for a in ready if a["doer"] in ("any", "ai")]
@@ -13313,6 +13504,11 @@ def capacity(conn, ann=None):
     }
 
 
+DONE_SQL = ("SELECT i.id, i.title, i.short, i.output, i.closed_at, p.name project, "
+            "(SELECT e.actor FROM events e WHERE e.item_id=i.id AND e.change LIKE 'done%' ORDER BY e.id DESC LIMIT 1) "
+            "by_agent FROM items i JOIN projects p ON p.id=i.project_id WHERE i.status='done' AND p.archived=0")
+
+
 def completed(conn, project=None, since="7d"):
     """Done items with their output, who finished them, and when; grouped by day, with progress per project.
 
@@ -13322,9 +13518,7 @@ def completed(conn, project=None, since="7d"):
     cutoff = iso(now() - parse_duration(since)) if since else None
     if project is not None:
         project = _project(conn, project)["name"]
-    sql = ("SELECT i.id, i.title, i.short, i.output, i.closed_at, p.name project, "
-           "(SELECT e.actor FROM events e WHERE e.item_id=i.id AND e.change LIKE 'done%' ORDER BY e.id DESC LIMIT 1) by_agent "
-           "FROM items i JOIN projects p ON p.id=i.project_id WHERE i.status='done' AND p.archived=0")
+    sql = DONE_SQL
     args = []
     if cutoff:
         sql += " AND i.closed_at >= ?"
@@ -13355,13 +13549,18 @@ def completed(conn, project=None, since="7d"):
 
 def status(conn, recent=10):
     """One overview: every project's counts, the latest completions, who is working, and open slots."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)  # the open items; the done ones are counted (#5491)
+    done = {r[0]: r[1] for r in conn.execute("SELECT project_id, count(*) FROM items WHERE status='done' "
+                                             "GROUP BY project_id")}
+    by_project = {}
+    for a in ann.values():
+        by_project.setdefault(a["project"], []).append(a)
     projects = []
     for p in project_list(conn):
-        mine = [a for a in ann.values() if a["project"] == p["name"]]
+        mine = by_project.get(p["name"], [])
         projects.append({
             "project": p["name"], "rank": p["rank"], "target": p.get("target"),
-            "done": sum(a["status"] == "done" for a in mine),
+            "done": done.get(p["id"], 0),
             "open": sum(a["status"] in OPEN_STATES and not a["backlog"] for a in mine),
             "backlog": sum(a["backlog"] for a in mine),
             "ready": sum(a["ready"] for a in mine),
@@ -13374,7 +13573,8 @@ def status(conn, recent=10):
     return {
         "now": iso(now()),
         "projects": projects,
-        "recent": completed(conn, since=None)["items"][:recent],
+        "recent": [dict(r) for r in conn.execute(DONE_SQL + " ORDER BY i.closed_at DESC, i.id DESC LIMIT ?",
+                                                  (recent,))],
         "agents": [{"name": a["name"], "kind": a["kind"], "state": a["state"], "note": a["note"],
                     "holds": a["holds"], "owns": [o["name"] for o in a["owns"]]}
                    for a in agents if not ended(a)],
@@ -14236,7 +14436,7 @@ def covered_projects(conn, ann=None):
 
 def project_sessions(conn, ann=None):
     """{project: [the sessions that cover it, as covered_projects counts them]}."""
-    ann = ann if ann is not None else annotate(conn)
+    ann = ann if ann is not None else annotate(conn, closed=False)
     live = {r["name"] for r in conn.execute("SELECT * FROM agents WHERE kind='ai'")
             if _agent_state(conn, r) not in ("gone", "stopped") and not not_connected(conn, r)}
     covered = {}
@@ -14264,7 +14464,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
 
     The one item named can be reserved for the actor (given to a manager, who takes no work): the new
     session gets it. prompt: maxpm launch --prompt, after the profile's first prompt."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)
     project = _project(conn, project)["name"] if project else None
     own = conn.execute("SELECT 1 FROM items WHERE id=? AND reserved_for=? AND status='open'",
                        (int(item), actor)).fetchone() if item is not None and actor else None
@@ -14757,10 +14957,14 @@ def state(conn, closed=True):
 
     closed: False leaves done and dropped items out (the page asks for them only while a view shows them, #4709);
     closed_counts then still says how many each project has."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=closed)
     items = sorted(ann.values(), key=lambda a: a["sort_key"])
     shown = [a for a in items if not a["project_archived"]]
     closed_counts = {}
+    if not closed:  # the open items only were computed (#5491)
+        closed_counts = {r[0]: r[1] for r in conn.execute(
+            f"SELECT p.name, count(*) FROM items i JOIN projects p ON p.id=i.project_id WHERE i.status IN "
+            f"{CLOSED_STATES} AND p.archived=0 GROUP BY p.name")}
     for a in shown:
         if a["status"] in CLOSED_STATES:
             closed_counts[a["project"]] = closed_counts.get(a["project"], 0) + 1
@@ -15097,7 +15301,7 @@ def _owned_goal(conn, actor, names):
 
 def _goal_brief(conn, name, actor):
     """What a goal owner needs in the briefing: the outcome, the test, its items, and who holds its blockers."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)
     g = _goal_view(conn, _goal(conn, name), ann)
     open_items = sorted((ann[i] for i in g["items_open"]), key=lambda a: a["sort_key"])
     blockers, seen = [], set()
@@ -15243,7 +15447,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
     with tx(conn):
         conn.execute("UPDATE agents SET role=NULL WHERE name=? AND role='planner'", (actor,))
 
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)
     descs = {p["name"]: p["notes"] for p in project_list(conn) if p["name"] in names}
     trackers = {p["name"]: p["tracker"] for p in project_list(conn) if p["name"] in names and p["tracker"]}
     in_area = [a for a in ann.values() if a["project"] in names]
@@ -15305,7 +15509,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
     if held and role in (None, "worker", "unblocker"):
         parent = _item(conn, held[0]["id"])
         if parent["status"] == "held":
-            ann = annotate(conn)
+            ann = annotate(conn, closed=False)
             mine = sorted((ann[b] for b in _open_prereqs(conn, parent["id"])
                            if ready_for(ann[b], actor) and ann[b]["reserved_for"] == actor), key=lambda a: a["sort_key"])
             if mine:
@@ -15377,7 +15581,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                      why=f"the page opened this session to work through what waits on {person}, with them")
         _set_role_note(conn, actor, "helper", None)
         return brief
-    if role is None and fid.isdigit() and int(fid) in annotate(conn):
+    if role is None and fid.isdigit() and int(fid) in annotate(conn, closed=False):
         f = item_show(conn, int(fid))
         if f["status"] in OPEN_STATES and kind == "help" and (f["doer"] == "human" or (person and f["assignee"] == person)):
             person = _person(conn, person or None)
@@ -15407,7 +15611,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             brief["focus_note"] = (f"The page opened this session to unblock #{f['id']}, but nothing that blocks it "
                                    f"is ready for an agent now (maxpm blockers {f['id']}).")
     if role in (None, "worker"):
-        ann = annotate(conn)
+        ann = annotate(conn, closed=False)
         pushed = sorted((a for a in ann.values() if a["reserved_for"] == actor and a["reserved_until"] and ready_for(a, actor)),
                         key=lambda a: a["sort_key"])
         for a in pushed:
@@ -15465,7 +15669,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                     best = []
                 serves = set()
                 if best:
-                    ann = annotate(conn)
+                    ann = annotate(conn, closed=False)
                     serves = set(best[0].get("goals") or [])
                     for a in ann.values():
                         if a["goals"] and a["status"] in OPEN_STATES and best[0]["id"] in _prereq_closure(ann, a["id"]):
@@ -15482,7 +15686,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                 break
         if g is not None:
             gb = brief["goal"] = _goal_brief(conn, g["name"], actor)
-            ann = annotate(conn)
+            ann = annotate(conn, closed=False)
             tagged = sorted((a for a in ann.values() if g["name"] in a["goals"] and ready_for(a, actor) and a["doer"] != "human"
                              and a["kind"] not in ("deploy", "review") and a["reserved_for"] in (None, actor)), key=lambda a: a["sort_key"])
             for a in tagged:  # (1) the next ready item of the goal
@@ -15682,7 +15886,7 @@ def _work_for(conn, actor, names, role=None, seen=None):
     if role:
         if note:
             return f"your queue has {'a stop request' if note['kind'] == 'stop' else 'an instruction'}: {note['body']}"
-        ann = annotate(conn)
+        ann = annotate(conn, closed=False)
         if role == "deployer":
             targets = {r["name"] for r in conn.execute("SELECT name FROM targets WHERE owner=?", (actor,))} | {
                 r["name"] for r in conn.execute(
@@ -15702,7 +15906,7 @@ def _work_for(conn, actor, names, role=None, seen=None):
     pushed = [r["id"] for r in conn.execute("SELECT id FROM items WHERE reserved_for=? AND reserved_until IS NOT NULL "
                                             "AND status='open'", (actor,))]
     if pushed:
-        ann = annotate(conn)
+        ann = annotate(conn, closed=False)
         got = next((i for i in pushed if i in ann and ready_for(ann[i], actor)), None)
         if got:
             return f"#{got} was pushed to you"

@@ -8941,27 +8941,49 @@ class Policies(Base):
 
 
 class AnnotateOnce(Base):
-    """Inside one build of the page's state, annotate reads the item graph once while nothing writes (#5465)."""
+    """Inside one build of the page's state and one command, annotate reads the item graph once while nothing
+    writes (#5465, #5491)."""
 
     def test_one_read_until_a_write(self):
         core.project_add(self.c, "web")
         self.add("web", "First")
         runs = []
         real = core._annotate
-        with mock.patch.object(core, "_annotate", side_effect=lambda c: runs.append(1) or real(c)):
+        with mock.patch.object(core, "_annotate", side_effect=lambda c, closed=True: runs.append(1) or real(c, closed)):
             tok = core.ANN_SHARE.set({})
             try:
                 a = core.annotate(self.c)
-                self.assertIs(core.annotate(self.c), a)
+                b = core.annotate(self.c)
+                self.assertEqual(b, a)
                 self.assertEqual(len(runs), 1)
+                b[1]["title"] = "changed"  # each call has its own copy of an item (#5491)
+                self.assertEqual(core.annotate(self.c)[1]["title"], "First")
                 self.add("web", "Second")  # a write: the next read sees it
+                n = len(runs)
                 self.assertEqual(len(core.annotate(self.c)), 2)
-                self.assertEqual(len(runs), 2)
+                self.assertEqual(len(runs), n + 1)
+                # A whole result serves a caller of the open items too; it computes them anew only after a write.
+                self.assertEqual(list(core.annotate(self.c, closed=False)), [1, 2])
+                self.assertEqual(len(runs), n + 1)
             finally:
                 core.ANN_SHARE.reset(tok)
+            n = len(runs)
             core.annotate(self.c)
             core.annotate(self.c)  # outside a build: each call reads anew
-            self.assertEqual(len(runs), 4)
+            self.assertEqual(len(runs), n + 2)
+
+    def test_the_open_items_and_a_closed_one_on_request(self):
+        core.project_add(self.c, "web")
+        a, b = self.add("web", "First"), self.add("web", "Second")
+        self.c.execute("UPDATE items SET status='done', closed_at='2026-01-01T00:00:00Z' WHERE id=?", (a,))
+        full = core.annotate(self.c)
+        part = core.annotate(self.c, closed=False)
+        self.assertEqual(list(part), [b])  # the iteration: open items only
+        self.assertIn(a, part)
+        self.assertEqual(part[a], full[a])  # a closed item, computed when asked for, is the same
+        self.assertEqual(part.get(a), full[a])
+        self.assertIsNone(part.get(999))
+        self.assertEqual(part.light(a)["status"], "done")
 
 
 class OpsProbes(Base):
@@ -10223,3 +10245,29 @@ class Ops(Base):
                                       "Why is it needed? (one line for the manager) "])
         self.assertIn("proposed check_jobs to the manager", out)
         self.assertEqual([p["name"] for p in core.ops_proposals(self.c, "site")], ["check_jobs"])
+
+
+class Speed(Base):
+    """The shortcuts of #5491 give the same answers as the long way."""
+
+    def test_the_parser_of_one_command_reads_as_the_whole_one(self):
+        from river import cli
+        for words in (["show", "3", "--brief"], ["--as", "ag", "release", "4", "--note", "x"], ["--json", "next", "-n", "2"],
+                      ["project", "add", "web", "--rank", "2"], ["list", "--project", "web"]):
+            self.assertEqual(vars(cli.parse_args(words)), vars(cli.build_parser().parse_args(words)), words)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            cli.parse_args(["show", "--bogus", "3"])  # a mistake: the whole parser says what is wrong
+        self.assertIn("unrecognized arguments: --bogus", err.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            cli.parse_args(["show", "-h"])
+        self.assertIn("usage: maxpm show", out.getvalue())
+
+    def test_a_search_finds_a_word_with_an_underscore_and_a_stem(self):
+        core.project_add(self.c, "web")
+        a = self.add("web", "Fix page_state answers")
+        b = self.add("web", "Tests for the pagexstate answer")  # an underscore is no wildcard
+        core.item_edit(self.c, b, notes="it answered", actor="t")
+        self.assertEqual([m["id"] for m in core.search(self.c, "page_state")["items"]], [a])
+        self.assertEqual(sorted(m["id"] for m in core.search(self.c, "answer")["items"]), [a, b])
+        self.assertEqual(core.search(self.c, "zzz nothing here")["items"], [])
