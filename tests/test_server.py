@@ -1665,6 +1665,18 @@ class LaunchInTmux(unittest.TestCase):
         h.path = "/api/artifacts"
         artifacts.artifacts(h, "/api/artifacts")
         self.assertEqual((sent["code"], calls), (200, []))
+        from river.routes import you  # Needs you reads the graph that the last build kept, as a build does
+        reads, read = [], core._graph_read
+        core._graph_read = lambda conn, closed: reads.append(closed) or read(conn, closed)
+        self.addCleanup(setattr, core, "_graph_read", read)
+        server._kept_graph.clear()  # a graph that another test kept is not this queue's
+        self.addCleanup(server._kept_graph.clear)
+        server.state_changed()
+        server.page_state(False)
+        n = len(reads)
+        h.path = "/api/needs-you?human=mark"
+        you.needs_you(h, "/api/needs-you")
+        self.assertEqual((sent["code"], len(reads)), (200, n))
 
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]

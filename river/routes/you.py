@@ -15,7 +15,11 @@ def needs_you(h, path):
     q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
     conn = core.connect()
     try:
-        return h._send(200, {"events": server.needs_you_view(conn, q.get("human"), sync=False)})
+        # It writes nothing (sync=False): the item graph that the last build kept, and not at the same time as a build
+        # (#5597: two of these read the whole graph each while a build waited, 435 ms for its 182 ms of CPU).
+        with server.read_memo():
+            events = server.needs_you_view(conn, q.get("human"), sync=False)
+        return h._send(200, {"events": events})
     finally:
         conn.close()
 

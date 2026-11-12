@@ -1877,7 +1877,14 @@ class WorkNames(Base):
     """#4695: a session shows what it works on; its agent id stays its address."""
 
     def name(self, who="ag"):
-        return sessions.work_name(self.c, core.agent_status(self.c, who), root=self.root, croot=self.croot)
+        out = sessions.work_name(self.c, core.agent_status(self.c, who), root=self.root, croot=self.croot)
+        tok = core.BUILD_MEMO.set({})  # in a page state build: the last done items of all agents in one read (#5597)
+        try:
+            self.assertEqual(sessions.work_name(self.c, core.agent_status(self.c, who), root=self.root,
+                                                croot=self.croot), out)
+        finally:
+            core.BUILD_MEMO.reset(tok)
+        return out
 
     def test_the_order_of_the_names(self):
         from river import notify
