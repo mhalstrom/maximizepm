@@ -117,3 +117,57 @@ try {
         got = self.tvs.drive_page(self.base, driver, wait=90)
         self.assertNotIn("error", got, got)
         self.assertEqual((got["open"], got["on"][0], got["off"][0]), (1, 1501, 1))
+
+
+class HiddenViews(unittest.TestCase):
+    """#5556: a view that shows again draws only what changed. On a copy of the live queue a switch to Sessions took
+    537 ms (the inbox's 562 rows drawn again), the Items view 137 ms (its 27 tables drawn again, 470 ms on a phone),
+    the first open of Done 844 ms (1,061 rows), and each switch to Graph 90 ms (Mermaid drew the same graph again).
+    Now a hidden table keeps the rows that come until it shows, a table with a largest height draws only the rows in
+    sight, the Items view builds its tables only while it shows, and the graph keeps its drawing. Drives the page in
+    Chrome."""
+
+    def setUp(self):
+        from tests import test_view_sessions as tvs
+        self.tvs = tvs
+        self.base = tvs.Base("run")
+        self.base.setUp()
+        self.addCleanup(self.base.tearDown)
+
+    def test_a_view_that_shows_again_draws_only_what_changed(self):
+        driver = self.tvs.DRIVE_HEAD + r'''
+const rows = () => document.querySelectorAll('#projects [data-ptable="site"] .tabulator-row');
+try {
+  const lib = await import("/lib.js");
+  q('nav button[data-tab="plan"]').click();
+  q('[data-plan-view="overview"]').click();
+  await lib.hooks.refresh();
+  const out = { builtHidden: document.querySelectorAll('#projects .tabulator').length };
+  q('[data-plan-view="items"]').click();
+  await until(() => rows().length === 1, "the open item of site");
+  q('[data-plan-view="overview"]').click();
+  await lib.act("item_add", { project: "site", title: "footer links", new: "a test" });
+  out.whileHidden = rows().length;
+  q('[data-plan-view="items"]').click();
+  await until(() => rows().length === 2, "the new item when the view shows");
+  out.heights = [...rows()].map(r => r.offsetHeight > 0);
+  let draws = 0; const render = mermaid.render.bind(mermaid);
+  mermaid.render = (...a) => { draws++; return render(...a); };
+  q('[data-plan-view="graph"]').click();
+  await until(() => q("#graph svg"), "the graph");
+  q('[data-plan-view="overview"]').click();
+  q('[data-plan-view="graph"]').click();
+  await sleep(300);
+  out.draws = draws;
+  q('[data-plan-view="done"]').click();
+  await until(() => Tabulator.findTable("#log")[0], "the Done table");
+  out.doneRender = Tabulator.findTable("#log")[0].options.renderVertical;
+  post(out);
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        for size in ("1500,900", "390,844"):  # p57: a phone too
+            got = self.tvs.drive_page(self.base, driver, wait=90, size=size)
+            self.assertNotIn("error", got, got)
+            self.assertEqual(got, {"builtHidden": 0, "whileHidden": 1, "heights": [True, True], "draws": 1,
+                                   "doneRender": "virtual"}, size)
+            core.drop(self.base.c, core.search(self.base.c, "footer links")["items"][0]["id"], "mark", note="again")

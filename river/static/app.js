@@ -327,7 +327,7 @@ $("#actor").addEventListener("change", () => { store("river.actor", $("#actor").
 // Plan's scope and view (#5102 step 4): every view draws again; the address names them (a new entry, so Back returns).
 function planDraw() {
   plan.renderPlanViews(); plan.renderPlanSide(); overview.renderOverview(); projects.renderProjects(); goals.renderGoals(); targets.renderTargets();
-  renderGraph(true); renderLog(true); renderHealth(true); ops.renderOps(true); renderEvents();
+  renderGraph(false); renderLog(true); renderHealth(true); ops.renderOps(true); renderEvents();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});
 }
 function setScope(project, goal) {
@@ -441,7 +441,7 @@ function setTab(name, push = true) {
   if (tab === "sessions") sessionsTab.refresh();
   if (tab === "terminal") terminalTab.refresh();
   if (S && wantClosed() !== stateClosed) refresh().catch(() => {});  // this view shows done items, or no more
-  return renderGraph(true);
+  return renderGraph(false);  // the same graph keeps its drawing (#5556)
 }
 // A session the person picks is a new entry; one the tab picks by itself replaces the address.
 const sessionsTab = makeSessions({ isShown: () => tab === "sessions",

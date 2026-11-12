@@ -6,7 +6,7 @@ import { nyCard, goalCard, projCard } from "../components/card.js";
 import { itemTableRows, itemTableColumns } from "../components/itemRow.js";
 import { makeTable } from "../components/table.js";
 import { button } from "../components/button.js";
-import { S, goalSel, inGoal, scope } from "../page.js";
+import { S, goalSel, inGoal, scope, planShown } from "../page.js";
 import { openAdd } from "./plan.js";
 import { nav } from "../page.js";
 
@@ -23,6 +23,9 @@ function noteLine(p) {
 // Projects folded closed on the Projects tab, remembered in this browser.
 function projClosed() { try { return JSON.parse(store("river.projClosed") || "[]"); } catch (e) { return []; } }
 export function renderProjects() {
+  // Only while the Items view shows: tables built in a hidden view have no layout and draw again when it opens, which
+  // took 500 ms on a phone (#5556). Opening the view draws it (planDraw).
+  if (!planShown("items")) return;
   const showDone = $("#showDone").checked, showBacklog = $("#showBacklog").checked;
   const G = goalSel(), goals = S.goals || [];
   const html = S.projects.filter(p => !scope.project || p.name === scope.project).map(p => {
@@ -60,21 +63,41 @@ export function renderProjects() {
   const box = $("#projects"), full = html || `<div class="muted">No projects yet.</div>`;
   if (box.dataset.sig !== full) {
     box.innerHTML = full; box.dataset.sig = full;
+    tablesDue = [];
     box.querySelectorAll("[data-ptable]").forEach(ph => {
-      const name = ph.dataset.ptable, known = projTables.get(name);
-      if (known) ph.replaceWith(known.el);
-      else projTables.set(name, { el: ph, table: makeTable(ph, { key: "proj:" + name, sort: [{ column: "order", dir: "asc" }],
-        columns: itemTableColumns((it) => ["done", "dropped"].includes(it.status) ? it.output : it.notes),
-        placeholder: "No open items.", onRow: (r) => nav.openDrawer(r.id) }) });
+      const known = projTables.get(ph.dataset.ptable);
+      if (known) ph.replaceWith(known.el); else tablesDue.push(ph);
     });
   }
   for (const [name, t] of projTables) {
     if (!box.contains(t.el)) { t.table.tabulator.destroy(); projTables.delete(name); continue; }
-    t.table.set(itemTableRows(S.items.filter(i => i.project === name && inGoal(i) && (showDone || !["done", "dropped"].includes(i.status))
-      && (showBacklog || !i.backlog))));
+    t.table.set(projRows(name));
   }
+  buildTables();
 }
 const projTables = new Map();
+const projRows = (name) => itemTableRows(S.items.filter(i => i.project === name && inGoal(i)
+  && ($("#showDone").checked || !["done", "dropped"].includes(i.status)) && ($("#showBacklog").checked || !i.backlog)));
+// The new tables of the cards, a few in each frame from the top (#5556): the cards show at once, and the first open of
+// the view does not wait for every table (27 tables took 110 ms to build, and 200 ms on a phone).
+const TABLES_PER_FRAME = 3;
+let tablesDue = [], building = 0;
+function buildTables() {
+  cancelAnimationFrame(building);
+  if (!planShown("items")) return;  // the view closed: the rest is built when it opens again
+  const box = $("#projects");
+  for (let n = 0; n < TABLES_PER_FRAME && tablesDue.length;) {
+    const ph = tablesDue.shift(), name = ph.dataset.ptable;
+    if (!box.contains(ph) || projTables.has(name)) continue;
+    const table = makeTable(ph, { key: "proj:" + name, sort: [{ column: "order", dir: "asc" }],
+      columns: itemTableColumns((it) => ["done", "dropped"].includes(it.status) ? it.output : it.notes),
+      placeholder: "No open items.", onRow: (r) => nav.openDrawer(r.id) });
+    projTables.set(name, { el: ph, table });
+    table.set(projRows(name));
+    n++;
+  }
+  if (tablesDue.length) building = requestAnimationFrame(buildTables);
+}
 
 export function renderBlocked() {
   const B = S.items.filter(i => i.blocked_reason && !["done", "dropped"].includes(i.status));

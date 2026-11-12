@@ -50,13 +50,15 @@ export async function renderGraph(force) {
   const items = S.items.filter(i => (withDone || !["done", "dropped"].includes(i.status)));
   const G = scope.goal;
   const { show, total, hidden } = graphItems(items, proj || G ? items.filter(i => (!proj || i.project === proj) && inGoal(i)) : null);
-  const sig = JSON.stringify([proj, G, withDone, items.filter(i => show.has(i.id)).map(i => [i.id, i.status, i.ready, i.waits_on])]);
+  // The drawing's own text is the signature: a view that shows again with the same graph keeps its drawing, since
+  // Mermaid took about 90 ms at each switch to Graph (#5556). force (a new theme) draws it again.
+  const { text, nodes, edges } = graphText(S.projects, items, show);
+  const sig = JSON.stringify([proj, G, withDone, text]);
   if (!force && sig === graphSig) return;
   graphSig = sig;
   const note = $("#graphNote");
   note.textContent = hidden ? `${hidden} of ${total} items left out: finished, and next to no open item.` : "";
   note.classList.toggle("hidden", !hidden);
-  const { text, nodes, edges } = graphText(S.projects, items, show);
   // Above its limits Mermaid draws its own error picture and reports no error: say it here, with the counts.
   if (text.length > GRAPH_LIMITS.maxTextSize || edges > GRAPH_LIMITS.maxEdges) {
     graphView.show(`<div class="muted">The graph is too large to draw: ${nodes} items and ${edges} links. Choose a project or a goal.</div>`, null);
@@ -69,6 +71,6 @@ export async function renderGraph(force) {
     const stage = graphView.show(svg, JSON.stringify([proj, G, withDone]));
     bindFunctions && bindFunctions(stage);
     stage.querySelectorAll(".edgePaths").forEach(e => e.parentNode.appendChild(e));
-  } catch (e) { graphView.show(`<div class="muted">Graph failed to draw: ${esc(e.message || e)}</div>`, null); }
+  } catch (e) { graphSig = ""; graphView.show(`<div class="muted">Graph failed to draw: ${esc(e.message || e)}</div>`, null); }
 }
 $("#graphDone").addEventListener("change", () => renderGraph(true));

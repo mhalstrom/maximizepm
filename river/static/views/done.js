@@ -13,7 +13,9 @@ const logDay = (d) => new Date(d + "T12:00:00Z").toLocaleDateString([], { weekda
 // the hover of its title, and the drawer shows it (#5082).
 function makeLogTable() {
   return makeTable($("#log"), {
-    key: "done", sort: [{ column: "closed_at", dir: "desc" }], placeholder: "Nothing done in this period.",
+    // maxHeight: the log scrolls inside itself and draws only the rows in sight; a month of 1,061 rows took 850 ms
+    // to draw when the view opened (#5556).
+    key: "done", sort: [{ column: "closed_at", dir: "desc" }], placeholder: "Nothing done in this period.", maxHeight: "70vh",
     onRow: (r) => nav.openDrawer(r.id),
     groupBy: "day", groupHeader: (day, count) => `<b>${esc(logDay(day))}</b> <span class="muted">${count} done</span>`,
     columns: [

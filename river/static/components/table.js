@@ -63,8 +63,9 @@ export function makeTable(el, { key, columns, index = "id", sort = [], onRow, pl
     // Under the row it lists only the columns that have a value (#5085): no 'Due', 'Waits on' or 'Goals' with nothing.
     ...(window.innerWidth < 760 ? { responsiveLayout: "collapse", responsiveLayoutCollapseStartOpen: true,
                                     responsiveLayoutCollapseFormatter: collapsed } : {}),
-    // Without a fixed height the table grows with its rows: draw them all (no virtual scrolling).
-    renderVertical: height ? "virtual" : "basic", ...options,
+    // Without a fixed or largest height the table grows with its rows: draw them all (no virtual scrolling). With
+    // one, it scrolls inside itself and draws only the rows in sight: the inbox drew all its 562 rows (#5556).
+    renderVertical: height || options.maxHeight ? "virtual" : "basic", ...options,
     columns: columns.map(column),
     initialSort: keep.sort || sort,
     initialHeaderFilter: keep.filter || [],
@@ -75,17 +76,26 @@ export function makeTable(el, { key, columns, index = "id", sort = [], onRow, pl
     filter: t.getHeaderFilters().map((f) => ({ field: f.field, value: f.value })),
   }));
   built.then(() => { t.on("dataSorted", remember); t.on("dataFiltered", remember); });
-  // A table built while hidden (another tab, a folded card) has no height: redraw it when it shows.
-  let shown = el.offsetWidth > 0;
+  // A table built while hidden (another tab, a folded card) has no layout: redraw it when it shows, and when it shows
+  // at another width. Rows that come while it is hidden wait (pending) and go in when it shows, as changes of single
+  // rows. A full redraw lays out every row again: the inbox's 562 rows took 500 ms at each switch to Sessions, and the
+  // tables of the Items view 470 ms on a phone (#5556).
+  let shown = el.offsetWidth > 0, stale = !shown, width = el.offsetWidth, pending = null;
   new ResizeObserver(() => {
     const now = el.offsetWidth > 0;
-    if (now && !shown) built.then(() => t.redraw(true));
+    if (now && !shown) {
+      if (stale || el.offsetWidth !== width) built.then(() => t.redraw(true));
+      if (pending) { const rows = pending; pending = null; set(rows); }
+    }
+    if (now) { stale = false; width = el.offsetWidth; }
     shown = now;
   }).observe(el);
   if (onRow) t.on("rowClick", (e, row) => { if (!e.target.closest("a, button, input, select, textarea, .link")) onRow(row.getData()); });
 
   let last = null, loaded = false, seen = new Map();
   async function set(rows) {
+    if (loaded && !el.offsetWidth) { pending = rows; return; }  // hidden: the rows go in when it shows
+    pending = null;
     const sig = JSON.stringify(rows);
     if (sig === last) return;
     last = sig;
