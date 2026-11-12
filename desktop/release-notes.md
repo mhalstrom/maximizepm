@@ -1,19 +1,4 @@
-MaximizePM desktop app {TAG}. The app carries its own Python, so you do not have to install anything else.
-
-## MaximizePM {TAG}: latest stable release
-
-MaximizePM runs your coding agents as a team. You say what to build. It keeps the work in one queue, gives each agent the next task, and brings you only what needs you.
-
-- **Your agents are chats.** Each agent is a chat that you can read and type into. Stop it mid-turn, or send a message that goes in when its turn ends.
-- **Works with the agents you use.** Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor, Grok, OpenCode, Pi, Hermes, Aider, Goose and Amp.
-- **One queue for all the work.** Tasks, goals and what waits on what. Each agent takes the most important task that's ready.
-- **A manager that handles the small stuff.** It answers what it can and brings you only what needs you.
-- **Pages you can comment on.** An agent shows you a plan or a draft as a page, and you comment right on it.
-- **Releases that check themselves.** Each release gets a review before it ships. After it ships, MaximizePM checks your site, your logs and your pages. When something breaks, it opens a task with the error and where it came from.
-- **It keeps itself running.** A small background job restarts MaximizePM if it stops, and tells you if it can't.
-- **Tasks that come back.** Taxes, renewals, an annual report: add one once, and it shows up each time it's due.
-- **Works on your phone.**
-- **Windows:** run MaximizePM inside WSL 2.
+First Stable Release for MaximizePM
 
 ## Download
 
