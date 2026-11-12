@@ -58,6 +58,11 @@ jobs:
       - name: Install
         working-directory: desktop
         run: npm ci
+      # An old Electron carries an old Chromium without its security fixes (#5623): a warning in the release when the
+      # app's Electron is more than two major versions behind the newest stable one. It never stops the release.
+      - name: The app's Electron is current
+        working-directory: desktop
+        run: node scripts/electron-age.js
       - name: Smoke test (maxpm serve starts and stops)
         working-directory: desktop
         run: npm test

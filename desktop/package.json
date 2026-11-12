@@ -17,7 +17,7 @@
     "predist:signed": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/shell-id.js --write"
   },
   "devDependencies": {
-    "electron": "^38.0.0",
+    "electron": "^45.3.1",
     "electron-builder": "^26.15.3"
   },
   "build": {
