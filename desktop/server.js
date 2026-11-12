@@ -48,6 +48,53 @@ function get(url) {
   });
 }
 
+function getJson(url) {
+  return new Promise((resolve) => {
+    const req = http.get(url, (res) => {
+      let b = "";
+      res.on("data", (d) => { b += d; });
+      res.on("end", () => { try { resolve(res.statusCode === 200 ? JSON.parse(b) : null); } catch (e) { resolve(null); } });
+    });
+    req.on("error", () => resolve(null));
+    req.setTimeout(1000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+// Whether a port on 127.0.0.1 is free to listen on.
+function portFree(port) {
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.unref();
+    s.once("error", () => resolve(false));
+    s.listen(port, "127.0.0.1", () => s.close(() => resolve(true)));
+  });
+}
+
+const real = (p) => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };
+
+// The queue of this app and its serve (#5618): {db, port (the setting serve_port), running: {port, pid} or null},
+// read by the Python that the app runs, from the code it runs.
+function queueInfo({ riverRoot, python, env = process.env }) {
+  const [cmd, ...args] = python;
+  const code = "import json, sys; sys.path.insert(0, sys.argv[1]); from river import core; c = core.connect(); "
+    + "print(json.dumps({'db': str(core.db_path()), 'port': int(core.setting(c, 'serve_port')), "
+    + "'running': core.running_serve(c)}))";
+  const out = execFileSync(cmd, [...args, "-c", code, riverRoot], { encoding: "utf8", timeout: 20000, env,
+    stdio: ["ignore", "pipe", "pipe"] });
+  return JSON.parse(out.trim().split("\n").pop());
+}
+
+// A maxpm serve that answers for this queue already (the login serve, or one a person started from a terminal):
+// {url, port}, or null. It must name the same queue in GET /api/queue.
+async function runningServe(info) {
+  const ports = [...new Set([info.running && info.running.port, info.port].filter(Boolean))];
+  for (const port of ports) {
+    const q = await getJson(`http://127.0.0.1:${port}/api/queue`);
+    if (q && q.db && real(q.db) === real(info.db)) return { url: `http://127.0.0.1:${port}/`, port };
+  }
+  return null;
+}
+
 // The app's own folder for versions of the code (#5601): versions/<version>, which an Update of the page unpacks
 // (river/release.py), current (the folder the app and the maxpm launcher run) and trying (a version that an Update
 // started and that has not answered yet).
@@ -102,14 +149,17 @@ function pickRoot({ bundle, dir }) {
 // Start the server from the river folder (the repo, the app's bundled copy, or a version in the app's folder).
 // pythonRoot: the folder that holds the app's own Python (the bundle), when it is not riverRoot. Resolves to
 // { url, port, child, stop } once /api/state answers; rejects with a message a person can act on.
-async function startRiver({ riverRoot, pythonRoot, python, env = process.env, timeoutMs = 20000, find = findPython } = {}) {
+async function startRiver({ riverRoot, pythonRoot, python, env = process.env, timeoutMs = 20000, find = findPython,
+  port: want } = {}) {
   const own = python ? null : bundledPython(pythonRoot || riverRoot);
   const py = python || own || find();
   if (!py) throw new Error("MaximizePM needs Python 3.10 or newer. Install it (for example: brew install python), then open the app again.");
   const [pyCmd, ...pyArgs] = Array.isArray(py) ? py : [py];
   const bin = path.join(riverRoot, "bin", "maxpm");
   if (!fs.existsSync(bin)) throw new Error(`MaximizePM is missing from ${riverRoot}`);
-  const port = await freePort();
+  // The queue's serve_port when it is free (#5618), else any free port: serve names the port it took in
+  // <queue>-serve.json, where every maxpm command reads it.
+  const port = want && await portFree(want) ? want : await freePort();
   const child = spawn(pyCmd, [...pyArgs, bin, "serve", "--port", String(port)],
     { cwd: riverRoot, env: { ...env, MAXPM_DESKTOP: "1", PYTHONFAULTHANDLER: "1",
       // The app's own Python writes no .pyc files into the app bundle (they would break its signature).
@@ -138,4 +188,22 @@ async function startRiver({ riverRoot, pythonRoot, python, env = process.env, ti
   throw new Error(`maxpm serve did not answer on ${url} within ${timeoutMs / 1000}s:\n${log.trim().slice(0, 4000)}`);
 }
 
-module.exports = { findPython, bundledPython, freePort, startRiver, appDir, codeVersion, markBad, pickRoot };
+// The app's server (#5618): a serve that answers for the queue already is opened as it is (the app is then only a
+// window, and quitting it leaves that serve running: stop does nothing); else the app starts its own, on the queue's
+// serve_port when it is free. Resolves to { url, port, child (null for a serve the app did not start), stop, external }.
+async function openRiver(opts = {}) {
+  const own = opts.python ? null : bundledPython(opts.pythonRoot || opts.riverRoot);
+  const py = opts.python || own || (opts.find || findPython)();
+  let info = null;
+  if (py) {
+    try { info = queueInfo({ riverRoot: opts.riverRoot, python: Array.isArray(py) ? py : [py], env: opts.env || process.env }); }
+    catch (e) { /* the code does not load: startRiver says why */ }
+  }
+  const running = info && await runningServe(info);
+  if (running) return { ...running, child: null, external: true, stop: () => Promise.resolve() };
+  const r = await startRiver({ ...opts, port: info ? info.port : undefined });
+  return { ...r, external: false };
+}
+
+module.exports = { findPython, bundledPython, freePort, portFree, startRiver, openRiver, runningServe, queueInfo,
+  appDir, codeVersion, markBad, pickRoot };

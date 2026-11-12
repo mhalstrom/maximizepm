@@ -221,3 +221,60 @@ class ServeRoute(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServeFile(unittest.TestCase):
+    """#5618: serve always names its port and pid beside the queue, so every maxpm command finds a serve that the
+    desktop app started on a port of its own; the runners' token only while runners run."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.db = os.path.join(self.dir.name, "q.db")
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": self.db})
+        env.start()
+        self.addCleanup(env.stop)
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+
+    def test_without_runners_the_file_names_the_port_and_no_token(self):
+        path = server.write_serve_file(54321, runners=False)
+        self.addCleanup(server.remove_serve_file, path)
+        with open(path, encoding="utf-8") as f:
+            info = json.load(f)
+        self.assertEqual((info["port"], info["pid"], "token" in info), (54321, os.getpid(), False))
+        with mock.patch.object(client, "_post", side_effect=AssertionError("asked a runner")):
+            self.assertIsNone(client.run_remote(["show", "3"], {"MAXPM_DB": self.db}))  # no token: it runs here
+        self.assertEqual(core.running_serve(self.c), {"port": 54321, "pid": os.getpid()})
+        self.assertEqual(core.serve_port_now(self.c), 54321)
+
+    def test_a_file_of_a_serve_that_is_gone_is_the_setting(self):
+        with open(self.db + "-serve.json", "w", encoding="utf-8") as f:
+            json.dump({"port": 54321, "pid": 2 ** 22 + 12345}, f)
+        self.assertIsNone(core.running_serve(self.c))
+        self.assertEqual(core.serve_port_now(self.c), int(core.setting(self.c, "serve_port")))
+
+    def test_page_actions_and_links_go_to_the_running_port(self):
+        from river import cli, notify
+        path = server.write_serve_file(54321, runners=False)
+        self.addCleanup(server.remove_serve_file, path)
+        hosts = []
+
+        class Opener:
+            def open(self, req, timeout=None):
+                hosts.append(req.host)
+                raise OSError("no serve in a test")
+        with mock.patch("urllib.request.build_opener", return_value=Opener()):
+            with self.assertRaises(core.RiverError):
+                cli.ask_server(self.c, "launch", {}, retries=1)
+        self.assertEqual(hosts[0], "127.0.0.1:54321")
+        with mock.patch.dict(notify.SERVE_PORT, {"port": None}):  # a command, not serve itself
+            self.assertTrue(notify.page_url(self.c, 3).startswith("http://127.0.0.1:54321/"))
+
+    def test_the_queue_route_names_the_queue(self):
+        sent = {}
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.headers = "/api/queue", ("127.0.0.1", 1), {"Host": "127.0.0.1"}
+        h._send = lambda code, body, *a, **k: sent.update(code=code, body=body)
+        h.do_GET()
+        self.assertEqual((sent["code"], sent["body"]["db"], sent["body"]["pid"]), (200, str(core.db_path()), os.getpid()))

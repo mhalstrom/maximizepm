@@ -4208,7 +4208,7 @@ def _probe_serve(conn):
     pass in serve-loop.json against ops_serve_late passes of notify_interval (at least one minute)."""
     import urllib.request
     import time
-    port = int(setting(conn, "serve_port"))
+    port = serve_port_now(conn)
     t0 = time.monotonic()
     try:
         with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/",
@@ -11124,6 +11124,27 @@ def adopt_login_path(conn=None, max_age=None):
     os.environ["PATH"] = new
     had = set(old.split(os.pathsep))
     return [x for x in new.split(os.pathsep) if x not in had]
+
+
+def running_serve(conn=None):
+    """{port, pid} of the maxpm serve that runs for this queue on this computer (#5618): it names its port in
+    <queue>-serve.json while it runs. None when no serve wrote it, or its process is gone."""
+    db = conn.execute("PRAGMA database_list").fetchone()[2] if conn is not None else str(db_path())
+    path = f"{db}-serve.json"
+    try:
+        with open(path, encoding="utf-8") as f:
+            info = json.load(f)
+        port, pid = int(info["port"]), int(info["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return {"port": port, "pid": pid} if pid_alive(pid) else None
+
+
+def serve_port_now(conn):
+    """The port of this queue's maxpm serve: the one that runs (the desktop app may run it on a port of its own),
+    else the setting serve_port."""
+    r = running_serve(conn)
+    return r["port"] if r else int(setting(conn, "serve_port"))
 
 
 def pid_alive(pid):

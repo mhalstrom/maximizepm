@@ -110,3 +110,61 @@ test("the shell id ignores the version of package.json", () => {
   const { shellId } = require("../scripts/shell-id");
   assert.match(shellId(), /^[0-9a-f]{16}$/);
 });
+
+// #5618: the app opens a serve that answers for its queue already, and else starts its own on serve_port (or a free
+// port), which every maxpm command then finds in <queue>-serve.json.
+const { openRiver, freePort: freePortOf } = require("../server");
+const net = require("node:net");
+const setPort = (db, port) => require("node:child_process").execFileSync(findPython()[0],
+  [path.join(repo, "bin", "maxpm"), "config", "set", "serve_port", String(port)],
+  { env: { ...process.env, MAXPM_DB: db, MAXPM_LOCAL: "1", MAXPM_AGENT: "" }, stdio: "ignore" });
+
+test("the app opens a serve that runs for its queue, and quitting it leaves that serve running", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "river-open-"));
+  const env = { ...process.env, MAXPM_DB: path.join(dir, "q.db") };
+  const login = await startRiver({ riverRoot: repo, env });  // the login serve (random port, its serve file names it)
+  try {
+    const r = await openRiver({ riverRoot: repo, env });
+    assert.strictEqual(r.external, true);
+    assert.strictEqual(r.port, login.port);
+    assert.strictEqual(r.child, null);
+    await r.stop();
+    assert.strictEqual(login.child.exitCode, null, "the serve the app did not start still runs");
+    // Another queue's serve is not opened: that app starts its own.
+    const other = { ...process.env, MAXPM_DB: path.join(dir, "other.db") };
+    const o = await openRiver({ riverRoot: repo, env: other });
+    try {
+      assert.strictEqual(o.external, false);
+      assert.notStrictEqual(o.port, login.port);
+    } finally { await o.stop(); }
+  } finally {
+    await login.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("alone, the app starts its serve on serve_port, or on a free port that its serve file names", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "river-own-"));
+  const db = path.join(dir, "q.db"), env = { ...process.env, MAXPM_DB: db };
+  const want = await freePortOf();
+  setPort(db, want);
+  let r = await openRiver({ riverRoot: repo, env });
+  try {
+    assert.strictEqual(r.external, false);
+    assert.strictEqual(r.port, want);
+    assert.strictEqual(JSON.parse(fs.readFileSync(db + "-serve.json", "utf8")).port, want);
+  } finally { await r.stop(); }
+  // serve_port taken by another program: a free port, named in the serve file.
+  const blocker = net.createServer().listen(want, "127.0.0.1");
+  await new Promise((res) => blocker.once("listening", res));
+  r = await openRiver({ riverRoot: repo, env });
+  try {
+    assert.strictEqual(r.external, false);
+    assert.notStrictEqual(r.port, want);
+    assert.strictEqual(JSON.parse(fs.readFileSync(db + "-serve.json", "utf8")).port, r.port);
+  } finally {
+    await r.stop();
+    blocker.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -4894,6 +4894,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": str(e)})
             finally:
                 conn.close()
+        if path == "/api/queue":
+            # The queue this serve serves (#5618): the desktop app opens a serve that runs for its queue in its window
+            # instead of starting a second one.
+            return self._send(200, {"db": str(core.db_path()), "pid": os.getpid(), "desktop": DESKTOP})
         if path == "/api/update":
             conn = core.connect()
             try:
@@ -5257,13 +5261,15 @@ def start_runners(db):
     threading.Thread(target=warm, daemon=True).start()
 
 
-def write_serve_file(port):
-    """<queue>-serve.json: the port and the token of this serve, for river/client.py; only this user can read it."""
+def write_serve_file(port, runners=True):
+    """<queue>-serve.json: the port and pid of this serve, for every maxpm command that asks it something
+    (core.running_serve, #5618: the desktop app may run it on a port of its own), and with runners the token of
+    river/client.py, which runs commands in serve; only this user can read it."""
     path = str(core.db_path()) + "-serve.json"
     tmp = f"{path}.{os.getpid()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump({"port": port, "token": RUN_TOKEN, "pid": os.getpid()}, f)
+        json.dump({"port": port, "pid": os.getpid(), **({"token": RUN_TOKEN} if runners else {})}, f)
     os.replace(tmp, path)
     return path
 
@@ -5305,10 +5311,9 @@ def serve(port: int, open_browser=False, dev=False):
     if DESKTOP:
         from . import release
         release.started()  # an update to this code started it: the app keeps this version (#5601)
-    serve_file = None
     if runners:
         start_runners(str(core.db_path()))
-        serve_file = write_serve_file(port)
+    serve_file = write_serve_file(port, runners)
     if open_browser:
         core.open_in_browser(url)  # in WSL: the Windows browser, through WSL's localhost forwarding (#5180)
     try:

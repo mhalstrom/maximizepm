@@ -281,7 +281,7 @@ def page_url(conn, item_id=None, terminal=None, person=None, art=None):
     a question (/sessions/<name>, where the person answers it, #4653), or on one of its artifacts
     (/sessions/<name>/artifacts/<id>, #4689); ?as=<person> for the person it is for."""
     import urllib.parse
-    base = f"http://127.0.0.1:{SERVE_PORT['port'] or core.setting(conn, 'serve_port')}/"
+    base = f"http://127.0.0.1:{SERVE_PORT['port'] or core.serve_port_now(conn)}/"
     path = f"sessions/{urllib.parse.quote(terminal, safe='')}" + (f"/artifacts/{art}" if art else "") if terminal else ""
     q = urllib.parse.urlencode([(k, v) for k, v in (("item", item_id if not terminal else None), ("as", person)) if v])
     return base + path + (f"?{q}" if q else "")

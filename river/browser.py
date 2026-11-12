@@ -887,7 +887,7 @@ def cdp_token(project, agent):
 
 def cdp_url(conn, project, agent):
     from urllib.parse import quote
-    return (f"ws://127.0.0.1:{core.setting(conn, 'serve_port')}/cdp/{quote(agent, safe='')}"
+    return (f"ws://127.0.0.1:{core.serve_port_now(conn)}/cdp/{quote(agent, safe='')}"
             f"?project={quote(project, safe='')}&token={cdp_token(project, agent)}")
 
 

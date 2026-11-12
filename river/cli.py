@@ -2419,7 +2419,7 @@ def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     import urllib.error
     import urllib.request
     from urllib.parse import unquote, urlsplit
-    port = core.setting(conn, "serve_port")
+    port = core.serve_port_now(conn)  # the app's serve may run on a port of its own (#5618)
     host = f"127.0.0.1:{port}"
     body = json.dumps({"op": op, "actor": actor, "args": {**args, "db": str(core.db_path())}}).encode()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # this computer: no proxy by itself
