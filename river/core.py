@@ -273,6 +273,9 @@ DEFAULT_SETTINGS = {
     "ops_confirm": "on",
     # The time limit of a command that proves the cause of a fault (maxpm ops cause --proof "<command>", #5513).
     "ops_proof_timeout": "60s",
+    # After this many released fixes of one fault did not clear it, MaximizePM starts no more agents for the fault:
+    # its items wait for the manager (#5514). 0: no limit.
+    "ops_fix_max": "2",
     "ops_reopen_within": "24h",
     "ops_storm_count": "3",
     "ops_storm_window": "5m",
@@ -1940,7 +1943,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_fix_max", "ops_storm_count", "ops_serve_late", "ops_max_investigations", "ops_repair_max", "ops_outside_repair_max", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -4354,8 +4357,42 @@ def _ops_verify(conn, run, watch, state):
                    + f"\nThe runs: maxpm ops history {c['scope']} {c['name']}")
         _ops_tell_manager(conn, "alert", f"fix #{x['id']} failed its check {c['key']} after release "
                           f"#{watch['deploy']}: it is open again", x["id"])
-        out.append({"item": x["id"], "verified": False})
+        out.append({"item": x["id"], "verified": False, "held": _ops_fix_limit(conn, c, x["id"])})
     return out
+
+
+def _ops_fix_limit(conn, c, fix_id):
+    """After a released fix failed its check (#5514): when ops_fix_max (2) released fixes of the fault of check c
+    did not clear it, MaximizePM starts no more agents for it: the open fault items of c and the fix that opened
+    again are blocked for the manager, who gets one alert and decides the next step. Returns the ids blocked."""
+    faults = _ops_fault_items(conn, c)
+    since = min((f["created_at"] for f in faults), default=None)
+    if since is None:  # no open fault item: count the failures since the oldest fault item of the check
+        r = conn.execute("SELECT MIN(created_at) t FROM items WHERE kind='operational' AND (substr(title, 1, ?)=? OR "
+                         "substr(title, 1, ?)=?)", (len(c["key"]) + 1, c["key"] + " ", len(c["key"]) + 1,
+                                                     c["key"] + ":")).fetchone()
+        since = r["t"]
+    pid = _ops_scope_project_id(conn, c)
+    most = int(setting(conn, "ops_fix_max", project_id=pid))
+    failed = conn.execute("SELECT COUNT(*) n FROM events WHERE actor='maxpm' AND change LIKE ? AND at>=?",
+                          (f"verification failed, open again: {c['scope']}/{c['name']} %", since or "")).fetchone()["n"]
+    if not most or failed < most:
+        return []
+    reason = (f"the manager decides: {failed} released fixes did not clear {c['key']}; MaximizePM starts no more "
+              f"agents for it (ops_fix_max {most})")
+    held = []
+    for i in [f["id"] for f in faults] + [fix_id]:
+        it = _item(conn, i)
+        if it["status"] in OPEN_STATES and not it["blocked_reason"]:
+            block(conn, i, reason=reason, actor="maxpm")
+            with tx(conn):
+                _event(conn, i, "maxpm", f"ops fix limit: {reason}")
+            held.append(i)
+    if held:
+        _ops_tell_manager(conn, "alert", f"{failed} released fixes did not clear {c['key']}: no more agents start for "
+                          f"it. Decide the next step (a person, a rollback, a new look at the cause), then maxpm unblock "
+                          f"{' '.join(str(i) for i in held)} or drop them", held[0])
+    return held
 
 
 # ---- cron schedules (#5506): a check may run on a cron expression instead of every N. MaximizePM owns all timing as

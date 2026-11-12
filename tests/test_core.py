@@ -5212,6 +5212,34 @@ class FixVerify(ReleaseBase):
         self.assertFalse([e for e in self.events(other) if "verif" in e])
 
 
+    def test_after_two_released_fixes_did_not_clear_a_fault_no_more_agents_start_and_the_manager_decides(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
+        t0 = core.now() - timedelta(minutes=30)
+        for k in range(3):
+            r = self.run_at("home", t0 + timedelta(minutes=5 * k), 503)
+        fault = r["items"][0]["item"]
+        x = self.ship_fix("Fix the home page", found_during=fault)
+        t = self.release() + timedelta(seconds=1)
+        for k in range(3):
+            r = self.run_at("home", t + timedelta(seconds=61 * k), 503)
+        self.assertEqual(core._item(self.c, x)["status"], "open")  # one failed fix: it opens again, agents go on
+        self.assertIsNone(core._item(self.c, fault)["blocked_reason"])
+        core.claim(self.c, x, "dev")
+        core.done(self.c, x, "fixed again", "dev", ship_it=True)
+        second = self.c.execute("SELECT id FROM items WHERE kind='deploy' AND status='open'").fetchone()["id"]
+        core.claim(self.c, second, "ops")
+        with mock.patch.object(core, "now", lambda: t + timedelta(minutes=10)):
+            core.done(self.c, second, "v2 out", "ops")
+        t2 = core.parse_iso(core._item(self.c, second)["closed_at"]) + timedelta(seconds=1)
+        for k in range(3):
+            r = self.run_at("home", t2 + timedelta(seconds=61 * k), 503)
+        for i in (fault, x):
+            self.assertTrue(core._item(self.c, i)["blocked_reason"].startswith(
+                "the manager decides: 2 released fixes did not clear ops:site:home"), i)
+        self.assertTrue(self.c.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'ops fix limit: the manager "
+                                       "decides: 2 released fixes%'", (fault,)).fetchone())
+
+
 class SharedGoalHandoff(Base):
     """A shared goal keeps a handoff (#4974): the worker that finishes a task of it brings the handoff up to date,
     and each session that starts on the goal reads it, with a word when it is older than the last finished task."""
