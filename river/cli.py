@@ -1003,6 +1003,23 @@ def build_parser(only=None):
     x.add_argument("--drop-open", action="store_true", help="drop the goal's open items, with the result as the note")
     x = gls.add_parser("reopen"); x.add_argument("name")
 
+    sc = sub.add_parser("schedule", help="scheduled tasks: a repeating obligation (an annual report, taxes, a "
+                        "renewal, an access review) adds its item at each due time, less its lead time")
+    scs = sc.add_subparsers(dest="schcmd", required=True)
+    x = scs.add_parser("add", help="add a schedule: maxpm schedule add <project> \"<title>\" --yearly 03-15 --lead 30d")
+    x.add_argument("project"); x.add_argument("title", help="the title of each item it adds")
+    x.add_argument("--cron", help="the due times, five fields in the project's time zone: '0 9 1 * *' (09:00 on the "
+                   "first of each month)")
+    x.add_argument("--yearly", help="a yearly due date, MM-DD: due by the end of that day")
+    x.add_argument("--lead", default="0s", help="the item comes this long before its due time, for example 30d "
+                   "(default 0s: at the due time)")
+    x.add_argument("--doer", choices=core.DOERS, default="any", help="who does each item (default any)")
+    x.add_argument("-p", "--priority", type=int, default=2, choices=range(5), help="0 highest, 4 lowest (default 2)")
+    x.add_argument("--context", default="", help="why, where, and what to do: it goes into each item")
+    x = scs.add_parser("list", help="the schedules, and when each one adds its next item")
+    x.add_argument("--project")
+    x = scs.add_parser("rm", help="remove a schedule; the items it added stay")
+    x.add_argument("id", help="the schedule, s<n> or <n>")
     op = sub.add_parser("ops", help="operations checks of a project or a deploy target: what MaximizePM watches "
                         "(a url, a beat, a command, a log, or a Monitoring Plugins executable), when it is a fault, "
                         "and who is told. Any session adds a url or beat check; a cmd, log, or plugin check and a "
@@ -3013,6 +3030,13 @@ def _dispatch_ops(conn, a, actor):
 
 def dispatch(conn, a, actor):
     c = a.cmd
+    if c == "schedule":
+        if a.schcmd == "add":
+            return core.schedule_add(conn, a.project, a.title, cron=a.cron, yearly=a.yearly, lead=a.lead, doer=a.doer,
+                                     priority=a.priority, context=a.context, actor=actor)
+        if a.schcmd == "list":
+            return core.schedule_list(conn, a.project)
+        return core.schedule_rm(conn, a.id, actor)
     if c == "ops":
         return _dispatch_ops(conn, a, actor)
     if c == "project":
@@ -4926,6 +4950,27 @@ def _noise_line(r):
             + f"; by {r['created_by'] or 'a person'})")
 
 
+def _schedule_line(x):
+    zone = x.get("zone") or ""
+    nxt = (f"next due {core.show_time(x['next_due'], zone)}" + (
+        f", its item comes {core.show_time(x['next_add'], zone)}" if x["next_add"] != x["next_due"] else "")
+           if x["next_due"] else "no due time within 5 years")
+    return (f"s{x['id']} {x['project']}: {x['title']}  [cron '{x['cron']}', lead {x['lead']}, doer {x['doer']}, "
+            f"P{x['priority']}]; {nxt}" + (f"; last item #{x['last_item']}" if x.get("last_item") else ""))
+
+
+def render_schedule(a, res):
+    if a.schcmd == "list":
+        if not res["schedules"]:
+            print("no schedules: maxpm schedule add <project> \"<title>\" --yearly MM-DD --lead 30d")
+        for x in res["schedules"]:
+            print(_schedule_line(x))
+        return
+    print(f"schedule {res['changed']}: {_schedule_line(res['schedule'])}")
+    if res["changed"] == "added":
+        print("maxpm serve adds each item at its time; maxpm schedule list shows them")
+
+
 def render_ops(a, res):
     if a.ocmd == "noise":
         if a.oncmd == "list":
@@ -5044,6 +5089,8 @@ def render_ops(a, res):
 
 def render(a, res):
     c = a.cmd
+    if c == "schedule":
+        return render_schedule(a, res)
     if c == "ops":
         return render_ops(a, res)
     if c == "wait":

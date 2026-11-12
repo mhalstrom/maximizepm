@@ -1026,6 +1026,23 @@ CREATE TABLE IF NOT EXISTS checks (
 );
 
 -- One row for each run of a check. check_id stays when the check is removed, so the history stays readable.
+-- A scheduled task (#5507): a repeating obligation (an annual report, taxes, a renewal, an access review). At each
+-- time of its cron expression, less its lead time, maxpm serve adds one item due at that time.
+CREATE TABLE IF NOT EXISTS schedules (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  title       TEXT NOT NULL,
+  cron        TEXT NOT NULL,             -- when it is due, five fields in the project's time zone (a yearly date too)
+  lead        TEXT NOT NULL DEFAULT '0s',  -- a duration: the item comes this long before its due time
+  doer        TEXT NOT NULL DEFAULT 'any',
+  priority    INTEGER NOT NULL DEFAULT 2,
+  context     TEXT NOT NULL DEFAULT '',
+  last_due    TEXT,                      -- the due time of the newest item it added
+  last_item   INTEGER,                   -- that item
+  created_by  TEXT,
+  created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ops_runs (
   id          INTEGER PRIMARY KEY,
   check_id    INTEGER NOT NULL,
@@ -4304,6 +4321,136 @@ def _ops_zone(conn, c):
     r = conn.execute("SELECT id FROM projects WHERE name=?", (_ops_project(conn, c),)).fetchone()
     name = setting(conn, "timezone", project_id=r["id"] if r else None)
     return local_zone(name) if name else None
+
+
+def cron_next(spec, at, zone=None):
+    """The first time after `at` (UTC) that the cron spec (cron_parse) names, in UTC; None within 5 years."""
+    (mins, hours, _, _, _), _, _ = spec
+    t = _local(at, zone).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    for fwd in range(366 * 5):
+        d = (t + timedelta(days=fwd)).date()
+        if not _cron_day(spec, d):
+            continue
+        for h in sorted(h for h in hours if fwd or h >= t.hour):
+            ms = [m for m in mins if fwd or h > t.hour or m >= t.minute]
+            if ms:
+                return _utc(datetime(d.year, d.month, d.day, h, min(ms)), zone)
+    return None
+
+
+# ---- scheduled tasks (#5507): repeating obligations. The scheduler of the checks (cron_parse, in the project's time
+# zone) also adds items: at each time of a schedule, less its lead time, one item due at that time. After a stop,
+# the times that passed add one item, due at the newest of them, never one item for each.
+
+def _yearly_cron(text):
+    """A yearly date MM-DD as a cron expression: due by the end of that day (23:59), as a due date alone is."""
+    m = re.match(r"^(\d{1,2})-(\d{1,2})$", (text or "").strip())
+    if not m or not 1 <= int(m.group(1)) <= 12 or not 1 <= int(m.group(2)) <= 31:
+        raise RiverError(f"bad --yearly {text!r}: a month and a day, MM-DD, for example 03-15")
+    month, day = int(m.group(1)), int(m.group(2))
+    if day > (29 if month == 2 else 30 if month in (4, 6, 9, 11) else 31):
+        raise RiverError(f"bad --yearly {text!r}: month {month} has no day {day}")
+    return f"59 23 {day} {month} *"
+
+
+def _schedule_zone(conn, project_id):
+    name = setting(conn, "timezone", project_id=project_id)
+    return local_zone(name) if name else None
+
+
+def _schedule_row(conn, r, at=None):
+    d = dict(r)
+    d["project"] = conn.execute("SELECT name FROM projects WHERE id=?", (r["project_id"],)).fetchone()["name"]
+    spec, zone = cron_parse(r["cron"]), _schedule_zone(conn, r["project_id"])
+    nxt = cron_next(spec, max(parse_iso(r["last_due"] or r["created_at"]), at or now()), zone)
+    d["next_due"] = iso(nxt) if nxt else None
+    d["next_add"] = iso(nxt - parse_duration(r["lead"])) if nxt else None
+    d["zone"] = setting(conn, "timezone", project_id=r["project_id"])
+    return d
+
+
+def schedule_add(conn, project, title, cron=None, yearly=None, lead="0s", doer="any", priority=2, context="",
+                 actor=None):
+    """maxpm schedule add: a repeating obligation of a project. cron (five fields) or yearly (MM-DD, due by the end
+    of that day) names its due times; each item comes `lead` before its due time."""
+    if bool(cron) == bool(yearly):
+        raise RiverError("name when it is due: --cron '<five fields>' or --yearly MM-DD (one of them)")
+    expr = (cron or "").strip() or _yearly_cron(yearly)
+    cron_parse(expr)
+    parse_duration(lead or "0s")
+    if doer not in DOERS:
+        raise RiverError(f"no doer {doer!r}: one of {', '.join(DOERS)}")
+    if not (title or "").strip():
+        raise RiverError("a schedule needs a title: the title of each item it adds")
+    with tx(conn):
+        p = _project(conn, project)
+        cur = conn.execute("INSERT INTO schedules(project_id,title,cron,lead,doer,priority,context,created_by,created_at)"
+                           " VALUES (?,?,?,?,?,?,?,?,?)", (p["id"], title.strip(), expr, lead or "0s", doer,
+                                                            int(priority), context or "", actor, iso(now())))
+        r = conn.execute("SELECT * FROM schedules WHERE id=?", (cur.lastrowid,)).fetchone()
+        d = _schedule_row(conn, r)
+        _event(conn, None, actor, f"schedule s{r['id']} added to {p['name']}: {title.strip()!r} at cron '{expr}', lead "
+                                  f"{lead or '0s'}, doer {doer}")
+    return {"changed": "added", "schedule": d}
+
+
+def schedule_list(conn, project=None):
+    q, args = "SELECT * FROM schedules", ()
+    if project:
+        q, args = q + " WHERE project_id=?", (_project(conn, project)["id"],)
+    return {"schedules": [_schedule_row(conn, r) for r in conn.execute(q + " ORDER BY id", args).fetchall()]}
+
+
+def schedule_rm(conn, sid, actor=None):
+    """maxpm schedule rm: the schedule adds no more items; the items it added stay."""
+    sid = int(str(sid).lstrip("s"))
+    with tx(conn):
+        r = conn.execute("SELECT * FROM schedules WHERE id=?", (sid,)).fetchone()
+        if r is None:
+            raise RiverError(f"no schedule s{sid}: maxpm schedule list")
+        d = _schedule_row(conn, r)
+        conn.execute("DELETE FROM schedules WHERE id=?", (sid,))
+        _event(conn, None, actor, f"schedule s{sid} removed: {r['title']!r} at cron '{r['cron']}'")
+    return {"changed": "removed", "schedule": d}
+
+
+def schedule_due(conn, at=None):
+    """One pass of maxpm serve: each schedule whose next due time, less its lead, has come adds its item, due at
+    that time. Due times that passed with no item (maxpm serve did not run) add one item, due at the newest of
+    them, and its context says how many passed. Returns the items it added."""
+    at = at or now()
+    out = []
+    for r in conn.execute("SELECT * FROM schedules ORDER BY id").fetchall():
+        spec, zone = cron_parse(r["cron"]), _schedule_zone(conn, r["project_id"])
+        base = parse_iso(r["last_due"] or r["created_at"])
+        due, missed = cron_prev(spec, at, zone), 0
+        if due is not None and due > base:
+            missed = cron_count(spec, base, at, zone)
+        else:
+            due = cron_next(spec, base, zone)
+            if due is None or due - parse_duration(r["lead"]) > at:
+                continue
+        project = conn.execute("SELECT name FROM projects WHERE id=?", (r["project_id"],)).fetchone()["name"]
+        zname = setting(conn, "timezone", project_id=r["project_id"])
+        context = "\n".join(x for x in (
+            r["context"],
+            f"From schedule s{r['id']} (cron '{r['cron']}', lead {r['lead']}): due {show_time(iso(due), zname)}.",
+            f"{missed} due times passed while maxpm serve did not run; this one item stands for them, due at the "
+            f"newest." if missed > 1 else "") if x)
+        with tx(conn):
+            # The schedule moves first, inside the tx, so two passes never add the same item.
+            moved = conn.execute("UPDATE schedules SET last_due=? WHERE id=? AND last_due IS ?",
+                                 (iso(due), r["id"], r["last_due"])).rowcount
+        if not moved:
+            continue
+        it = item_add(conn, project, r["title"], priority=r["priority"], doer=r["doer"], context=context,
+                      actor="maxpm")
+        with tx(conn):
+            conn.execute("UPDATE items SET due=? WHERE id=?", (iso(due), it["id"]))
+            conn.execute("UPDATE schedules SET last_item=? WHERE id=?", (it["id"], r["id"]))
+            _event(conn, it["id"], "maxpm", f"due {show_time(iso(due), zname)} (schedule s{r['id']})")
+        out.append({"schedule": r["id"], "item": it["id"], "due": iso(due), "missed": missed})
+    return out
 
 
 def ops_due(conn, at=None, outside=False, slack=None):

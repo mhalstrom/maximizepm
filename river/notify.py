@@ -479,6 +479,7 @@ def loop(stop, interval_s=None):
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
                 server.hooks_soon,  # a hook whose command ended before it ran it
                 server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
+                core.schedule_due,  # a scheduled task whose time, less its lead, has come adds its item (#5507)
                 ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
             )

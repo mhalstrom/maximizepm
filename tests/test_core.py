@@ -11063,3 +11063,57 @@ class GraphVersion(Base):
             self.assertEqual(core.annotate(self.c)[a]["title"], "First")
         finally:
             core.ANN_SHARE.reset(tok)
+
+
+class Schedules(Base):
+    """Scheduled tasks (#5507): a repeating obligation adds its item at each due time, less its lead time; times that
+    passed while serve did not run add one item, due at the newest of them."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "office")
+        core.config_set(self.c, "timezone", "UTC")
+
+    def items(self):
+        return self.c.execute("SELECT id, title, doer, due, context FROM items ORDER BY id").fetchall()
+
+    def test_a_yearly_obligation_adds_its_item_lead_before_its_due_date_once(self):
+        s = core.schedule_add(self.c, "office", "File the annual report", yearly="03-15", lead="30d", doer="human",
+                              context="The state's form; the numbers are in the books")["schedule"]
+        self.assertEqual(s["cron"], "59 23 15 3 *")
+        due = core.parse_iso(s["next_due"])
+        self.assertEqual((due.month, due.day, due.hour, due.minute), (3, 15, 23, 59))
+        self.assertEqual(core.parse_iso(s["next_add"]), due - timedelta(days=30))
+        self.assertEqual(core.schedule_due(self.c, due - timedelta(days=30, minutes=1)), [])
+        added = core.schedule_due(self.c, due - timedelta(days=29))
+        self.assertEqual([(x["schedule"], x["due"], x["missed"]) for x in added], [(s["id"], s["next_due"], 0)])
+        it = self.items()[-1]
+        self.assertEqual((it["title"], it["doer"], it["due"]), ("File the annual report", "human", s["next_due"]))
+        self.assertIn("The state's form", it["context"])
+        self.assertIn(f"From schedule s{s['id']}", it["context"])
+        self.assertEqual(core.schedule_due(self.c, due - timedelta(days=28)), [])  # once for each due time
+        nxt = core.schedule_list(self.c)["schedules"][0]
+        self.assertEqual((core.parse_iso(nxt["next_due"]).year, nxt["last_item"]), (due.year + 1, it["id"]))
+
+    def test_due_times_that_passed_while_serve_did_not_run_add_one_item_due_at_the_newest(self):
+        s = core.schedule_add(self.c, "office", "Check the backups", cron="0 9 * * *")["schedule"]
+        first = core.parse_iso(s["next_due"])
+        added = core.schedule_due(self.c, first + timedelta(days=3, hours=1))
+        self.assertEqual([(x["due"], x["missed"]) for x in added], [(core.iso(first + timedelta(days=3)), 4)])
+        self.assertEqual(len(self.items()), 1)
+        self.assertIn("4 due times passed while maxpm serve did not run", self.items()[0]["context"])
+        self.assertEqual(core.schedule_due(self.c, first + timedelta(days=3, hours=2)), [])
+        self.assertEqual(len(core.schedule_due(self.c, first + timedelta(days=4))), 1)  # the next day, on time
+
+    def test_a_schedule_needs_one_time_and_rm_keeps_its_items(self):
+        for kw in ({}, {"cron": "0 9 * * *", "yearly": "03-15"}):
+            with self.assertRaisesRegex(RiverError, "--cron .* or --yearly"):
+                core.schedule_add(self.c, "office", "x", **kw)
+        with self.assertRaisesRegex(RiverError, "month 2 has no day 30"):
+            core.schedule_add(self.c, "office", "x", yearly="02-30")
+        s = core.schedule_add(self.c, "office", "Renew the domain", cron="0 9 * * *")["schedule"]
+        core.schedule_due(self.c, core.parse_iso(s["next_due"]))
+        self.assertEqual(core.schedule_rm(self.c, f"s{s['id']}")["changed"], "removed")
+        self.assertEqual((core.schedule_list(self.c)["schedules"], len(self.items())), ([], 1))
+        with self.assertRaisesRegex(RiverError, "no schedule"):
+            core.schedule_rm(self.c, s["id"])
