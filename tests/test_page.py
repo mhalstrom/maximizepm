@@ -517,9 +517,13 @@ try {
               "the message box has its microphone");
   box().focus();
   mic().click();
-  await until(() => /heard \d+ bytes/.test(box().value), "words not final yet show in the box");
+  // A failure says what the box and the microphone showed (#5583: on the Intel runner of a release, no words came in 15 s).
+  const seen = () => " (box " + JSON.stringify(box().value) + ", microphone " + (mic().classList.contains("on") ? "on" : "off")
+    + ", line " + JSON.stringify(q("#sessDictate").textContent) + ", box " + (box().disabled ? "disabled" : "enabled") + ")";
+  await until(() => /heard \d+ bytes/.test(box().value), "words not final yet show in the box").catch(e => { throw new Error(e.message + seen()); });
   enter();
-  await until(() => box().value === "" && !mic().classList.contains("on"), "Enter sent the text and stopped the microphone");
+  await until(() => box().value === "" && !mic().classList.contains("on"), "Enter sent the text and stopped the microphone")
+    .catch(e => { throw new Error(e.message + seen()); });
   await sleep(2000);  // the fake microphone goes on; eight flushes of audio would have come
   const out = { empty: box().value === "", off: !mic().classList.contains("on") };
   enter();  // an empty box sends nothing

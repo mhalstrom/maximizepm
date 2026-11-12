@@ -4595,8 +4595,11 @@ class StaticFiles(unittest.TestCase):
 
 
 def _chrome():
-    """A Chrome (or Chromium, or Edge) on this computer, or None. MAXPM_CHROME names one."""
+    """A Chrome (or Chromium, or Edge) on this computer, or None. MAXPM_CHROME names one; MAXPM_NO_BROWSER=1 gives None,
+    so the page tests skip (the Intel job of a release, #5583: the page tests gate the release on Linux)."""
     import shutil
+    if os.environ.get("MAXPM_NO_BROWSER"):
+        return None
     for c in (os.environ.get("MAXPM_CHROME"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
               "/Applications/Chromium.app/Contents/MacOS/Chromium",
               "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
