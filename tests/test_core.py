@@ -11334,3 +11334,86 @@ class BuildMemo(Base):
         core.queue_add(self.c, "ag", x, actor="mark")
         core.queue_add(self.c, "ag", message="do this", actor="mark")
         self.assertEqual(core.state(self.c)["queues"], {"ag": core.queue_list(self.c, "ag")["entries"]})
+
+
+class EvidencePack(Base):
+    """The evidence pack of a new fault item (#5512): lower layers, error groups, the code location (a stack frame of
+    the project, else the message found in the repository), the release before the first error with its commits that
+    changed those files, and the items that touch them. No model."""
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@example.test", *args],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def commit(self, body, msg):
+        with open(os.path.join(self.repo, "app", "pay.py"), "w") as f:
+            f.write(body)
+        self.git("add", "app/pay.py")
+        self.git("commit", "-q", "-m", msg)
+        return self.git("rev-parse", "HEAD")
+
+    def release(self, rev, at):
+        d = self.add("site", f"deploy {rev[:7]}")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET kind='deploy', target='prod', status='done', closed_at=?, cut_rev=? "
+                           "WHERE id=?", (core.iso(at), rev, d))
+        return d
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.dir.name, "repo")
+        os.makedirs(os.path.join(self.repo, "app"))
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        core.target_add(self.c, "prod", "the servers")
+        core.project_add(self.c, "site", target="prod", path=self.repo)
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        self.t = core.now()
+        r1 = self.commit("def charge():\n    return 1\n", "first")
+        self.release(r1, self.t - timedelta(hours=3))
+        r2 = self.commit("def charge():\n    raise ValueError('could not reach the ledger service')\n", "call the ledger")
+        self.r2 = self.release(r2, self.t - timedelta(hours=1))
+        self.other = self.add("site", "Retry the ledger call")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET touches='app/pay.py' WHERE id=?", (self.other,))
+        core.ops_add(self.c, "site", "pay", "cmd", {"command": "check_pay", "fail_after": 1}, actor="boss")
+
+    def fault(self, out):
+        r = Ops.run_at(self, "site", "pay", self.t, Ops.proc(1, out))
+        return core._item(self.c, r["items"][0]["item"])["context"]
+
+    def test_a_python_traceback_gives_the_frame_the_release_its_commit_and_the_items_that_touch_the_file(self):
+        ctx = self.fault('Traceback (most recent call last):\n  File "/srv/site/app/pay.py", line 2, in charge\n'
+                         'ValueError: could not reach the ledger service 42')
+        pack = ctx[ctx.index("EVIDENCE PACK"):]
+        self.assertIn("1. Lower layers:\n  none in fault", pack)
+        self.assertIn("2x  ValueError: could not reach the ledger service N", pack)  # the run and the one that confirms it
+        self.assertIn("  app/pay.py:2 (python)", pack)
+        self.assertIn(f"4. Release before the first error: #{self.r2} to prod", pack)
+        self.assertIn("call the ledger", pack)
+        self.assertNotIn("first", pack.split("its commits")[1].split("5.")[0])
+        self.assertIn(f"#{self.other} [open] Retry the ledger call (touches app/pay.py)", pack)
+
+    def test_with_no_frame_the_message_is_found_in_the_repository_at_the_commit_in_production(self):
+        pack = self.fault("ERROR could not reach the ledger service (attempt 3)")
+        self.assertIn("message found in the repository at", pack)
+        self.assertIn("app/pay.py:2 holds 'could not reach the ledger service'", pack)
+        self.assertIn(f"#{self.other} [open]", pack)
+
+    def test_a_lower_layer_in_fault_comes_first(self):
+        core.ops_add(self.c, "site", "db", "cmd", {"command": "check_db", "fail_after": 1, "layer": "service"},
+                     actor="boss")
+        Ops.run_at(self, "site", "db", self.t - timedelta(minutes=5), Ops.proc(2, "DB CRITICAL - down"))
+        Ops.run_at(self, "site", "pay", self.t, Ops.proc(1, "ERROR something else"))  # its fault goes to db's item
+        pack = core.ops_evidence_pack(self.c, core.ops_find(self.c, "site", "pay"), "ops:site:pay", self.t)
+        self.assertIn("1. Lower layers:\n  service: site/db fault since", pack)
+
+    def test_rust_and_javascript_frames_of_the_project_are_read(self):
+        for f in ("src/api.rs", "web/app.js"):
+            os.makedirs(os.path.dirname(os.path.join(self.repo, f)), exist_ok=True)
+            open(os.path.join(self.repo, f), "w").close()
+        text = ("thread 'main' panicked at src/api.rs:41:9:\nindex out of bounds\n"
+                "TypeError: x is undefined\n    at load (https://example.test/web/app.js:12:5)\n"
+                "    at run (node:internal/main:3:1)")
+        self.assertEqual(core._ops_frames(text, self.repo), [("src/api.rs", 41, "rust"), ("web/app.js", 12, "javascript")])

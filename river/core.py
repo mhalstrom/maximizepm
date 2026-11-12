@@ -5116,6 +5116,158 @@ def _ops_evidence(c, key, res, at, since=None, project=None):
             f"\"<why nobody needs to act>\" (it ends within 30 days), then close this item with the reason.")
 
 
+# ---- the evidence pack (#5512): what the agent of a new fault item reads first, made with no model. Lower layers
+# first (service, capacity, dependencies), then the error groups, the code location, the release before the first
+# error with its commits that changed those files, and the items whose touches name them.
+OPS_FRAMES = (  # (language, pattern of a stack frame: file, line; True: the deepest frame comes last)
+    ("python", re.compile(r'File "([^"]+)", line (\d+)'), True),
+    ("rust", re.compile(r"(?:panicked at |\bat )(?:\./)?([\w./-]+\.rs):(\d+)(?::\d+)?"), False),
+    ("javascript", re.compile(r"\bat (?:[^\s(]+ \()?(?:\w+://[^/\s]*)?/?([\w./@-]+\.(?:js|mjs|cjs|ts|jsx|tsx)):(\d+):\d+"),
+     False),
+)
+_OPS_LAYER_ORDER = ("service", "capacity", "dependency")
+
+
+def _ops_group_text(line):
+    """An error line as its group: numbers, hex ids and quoted values made general, so the same error groups."""
+    t = re.sub(r"^\S*\d{4}-\d{2}-\d{2}[T ]\S+\s*", "", line.strip())  # a leading time stamp
+    t = re.sub(r"\b[0-9a-f]{8,}\b", "X", t, flags=re.I)
+    t = re.sub(r"(['\"]).*?\1", r"\1…\1", t)
+    return re.sub(r"\d+", "N", t)[:200]
+
+
+def _ops_git(folder, *args):
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _ops_frames(text, folder):
+    """The stack frames of the text that are in the project's repository: [(file relative to the folder, line,
+    language)], the deepest first. A path outside the folder counts when its end is a file of the folder."""
+    out = []
+    for lang, pat, deepest_last in OPS_FRAMES:
+        found = [(m.group(1), int(m.group(2))) for m in pat.finditer(text or "")]
+        if deepest_last:
+            found.reverse()
+        for path, line in found:
+            rel = path
+            if folder and os.path.isabs(path) and path.startswith(folder.rstrip("/") + "/"):
+                rel = path[len(folder.rstrip("/")) + 1:]
+            parts = rel.lstrip("./").split("/")
+            hit = None
+            for i in range(len(parts)):
+                cand = "/".join(parts[i:])
+                if folder and os.path.isfile(os.path.join(folder, cand)):
+                    hit = cand
+                    break
+            if hit and (hit, line, lang) not in out:
+                out.append((hit, line, lang))
+    return out
+
+
+def ops_evidence_pack(conn, c, key, at=None):
+    """The evidence pack of a new fault of check c (#5512): a text in five parts, from the queue, the check's runs
+    and the project's git folder, with no model. Each part says when it found nothing."""
+    at = at or now()
+    first = _ops_first_failure(conn, key, at)
+    out = ["EVIDENCE PACK (made by MaximizePM with no model; lower layers first):"]
+    # 1. Lower layers: a fault there is likely the cause.
+    lower = []
+    for o in sorted(_ops_related(conn, c), key=lambda o: _OPS_LAYER_ORDER.index(o["layer"])
+                    if o["layer"] in _OPS_LAYER_ORDER else 9):
+        if o["id"] != c["id"] and o["layer"] in _OPS_LAYER_ORDER and o["state"] in ("fault", "failing"):
+            last = conn.execute("SELECT summary FROM ops_runs WHERE check_id=? AND ended_at IS NOT NULL ORDER BY id DESC "
+                                "LIMIT 1", (o["id"],)).fetchone()
+            lower.append(f"  {o['layer']}: {o['scope']}/{o['name']} {o['state']} since "
+                         f"{show_time(iso(_ops_first_failure(conn, o['key'], at)))}: {(last or {})['summary'] if last else ''}")
+    out += ["1. Lower layers:"] + (lower or ["  none in fault (service, capacity, dependency checks of this system)"])
+    # 2. The error groups of the runs since the first failure.
+    texts, groups = [], {}
+    for r in conn.execute("SELECT started_at, output, evidence FROM ops_runs WHERE check_id=? AND started_at>=? AND "
+                          "ended_at IS NOT NULL ORDER BY id", (c["id"], iso(first))).fetchall():
+        ev = json.loads(r["evidence"]) if r["evidence"] else {}
+        text = "\n".join([r["output"] or ""] + [str(x) for x in ev.get("lines") or []])
+        texts.append(text)
+        for line in text.splitlines():
+            if not re.search(r"[A-Za-z]{3}", line) or any(p.search(line) for _, p, _ in OPS_FRAMES) or \
+                    line.strip().startswith(("Traceback", "^", "|")):
+                continue
+            g = groups.setdefault(_ops_group_text(line), {"count": 0, "first": r["started_at"], "line": line.strip()})
+            g["count"] += 1
+            g["last"] = r["started_at"]
+    top = sorted(groups.items(), key=lambda kv: -kv[1]["count"])[:5]
+    out += ["2. Error groups (lines of the runs since the first failure, " + show_time(iso(first)) + "):"] + (
+        [f"  {g['count']}x  {k}  (first {show_time(g['first'])}, last {show_time(g['last'])})" for k, g in top]
+        or ["  none: the runs printed no error lines"])
+    # 3. The code location: a frame of the project, else the message found in the repository.
+    folder = _ops_folder(conn, c)
+    folder = folder if folder and _git_commit(folder) else None
+    target = _ops_target(conn, c)
+    rel = [dict(r) for r in conn.execute("SELECT id, closed_at, cut_rev FROM items WHERE kind='deploy' AND target=? "
+                                          "AND status='done' AND closed_at IS NOT NULL ORDER BY closed_at DESC, id DESC "
+                                          "LIMIT 20", (target,))] if target else []
+    prod = next((r for r in rel if r["closed_at"] <= iso(at) and r["cut_rev"]), None)
+    rev = (_git_commit(folder, prod["cut_rev"]) if folder and prod else None) or (_git_commit(folder) if folder else None)
+    frames = _ops_frames("\n".join(texts), folder) if folder else []
+    files = []
+    if not folder:
+        out += ["3. Code location: the project has no git folder (maxpm project path <project> <folder>)"]
+    elif frames:
+        files = list(dict.fromkeys(f for f, _, _ in frames))[:5]
+        out += ["3. Code location (stack frames of the project, the deepest first):"] + [
+            f"  {f}:{n} ({lang})" for f, n, lang in frames[:5]]
+    else:
+        hits = []
+        for k, g in top:
+            words = max(re.split(r"\d+|['\"()\[\]{}]|:\s", g["line"]), key=len).strip(" :-,.")
+            words = re.sub(r"^(?:error|warn(?:ing)?|info|critical|fatal|panic)\b[\s:]*", "", words, flags=re.I)
+            if len(words) < 12:
+                continue
+            found = _ops_git(folder, "grep", "-n", "-F", "-e", words, rev or "HEAD", "--") or ""
+            for line in found.splitlines()[:3]:
+                path, _, rest = line.split(":", 1)[1].partition(":") if line.count(":") >= 2 else ("", "", "")
+                if path:
+                    hits.append(f"  {path}:{rest.split(':', 1)[0]} holds {words!r}")
+                    files.append(path)
+            if hits:
+                break
+        files = list(dict.fromkeys(files))[:5]
+        out += [f"3. Code location (no stack frame of the project; the message found in the repository at "
+                f"{(rev or 'HEAD')[:12]}):"] + (hits or ["  not found: no error line of 12 or more letters is in the code"])
+    # 4. The release before the first error, and its commits that changed those files.
+    before = next((r for r in rel if r["closed_at"] <= iso(first)), None)
+    if not target:
+        out += ["4. Release: the check watches no deploy target"]
+    elif before is None:
+        out += [f"4. Release: no release of {target} before the first failure"]
+    else:
+        prev = next((r for r in rel if r["closed_at"] < before["closed_at"] and r["cut_rev"]), None)
+        line = (f"4. Release before the first error: #{before['id']} to {target}, done {show_time(before['closed_at'])}"
+                + (f", {_short(first - parse_iso(before['closed_at']))} before it" if first >= parse_iso(before["closed_at"])
+                   else ""))
+        log = None
+        if folder and before["cut_rev"] and prev:
+            log = _ops_git(folder, "log", "--oneline", "-n", "10", f"{prev['cut_rev']}..{before['cut_rev']}", "--", *files)
+        out += [line] + ([f"  its commits{' that changed ' + ', '.join(files) if files else ''}:"]
+                         + ["    " + x for x in log.strip().splitlines()] if log and log.strip() else
+                         ["  its commits: " + ("none changed those files" if log is not None else
+                                               "unknown (no pinned commit of it and of the release before)")])
+    # 5. Items whose touches name those files.
+    items = []
+    for f in files:
+        for r in conn.execute("SELECT id, title, status FROM items WHERE touches LIKE ? AND kind<>'operational' ORDER BY "
+                              "status IN ('open','in_progress','held') DESC, id DESC LIMIT 3", (f"%{f}%",)):
+            if r["id"] not in [x[0] for x in items]:
+                items.append((r["id"], f"  #{r['id']} [{r['status']}] {r['title'][:90]} (touches {f})"))
+    out += ["5. Items that touch those files:"] + ([x for _, x in items[:5]] or
+                                                   ["  none" + ("" if files else " (no file found)")])
+    return "\n".join(out)[:4000] + "\n"
+
+
 def _ops_note(conn, item_id, text, at, force=False):
     """Add evidence to a fault item as a line of its history, at most every ops_note_every unless force."""
     every = parse_duration(setting(conn, "ops_note_every"))
@@ -5187,6 +5339,10 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
         return {"key": key, "item": r["id"], "action": "storm"}
     since = conn.execute("SELECT MAX(at) t FROM ops_events WHERE key=? AND state='fault'", (key,)).fetchone()["t"]
     ctx = _ops_evidence(c, key, res, at, parse_iso(since) if since else at, _ops_project(conn, c))
+    try:
+        ctx += "\n" + ops_evidence_pack(conn, c, key, at)
+    except Exception as e:  # the pack helps; a fault item never waits on it
+        ctx += f"\nEVIDENCE PACK: not made ({type(e).__name__}: {e})\n"
     if watch:
         ctx = (f"The fault came in the watch of release #{watch['deploy']} to {watch['target']} (done "
                f"{show_time(watch['released_at'])}, run {watch['n']} since): that release is the first suspect.\n" + ctx)
