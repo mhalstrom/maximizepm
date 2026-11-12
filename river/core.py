@@ -236,8 +236,9 @@ DEFAULT_SETTINGS = {
     "ops_repair_window": "6h",
     # The release watch (#5459): after each release of a deploy target (its deploy item is done), each check of the
     # target and of its projects runs at once, then every ops_watch_every (when its own every is longer) until
-    # fail_after runs have ended since the release; then on its own schedule. A fault in the watch is linked to the
-    # deploy item.
+    # fail_after runs (or recover_after, when larger) have ended since the release; then on its own schedule. A fault
+    # in the watch is linked to the deploy item. A shipped fix whose check this is gets its verdict at the watch's
+    # end (#5461).
     "ops_watch_every": "1m",
     "ops_reopen_within": "24h",
     "ops_storm_count": "3",
@@ -3751,12 +3752,17 @@ def _ops_watch(conn, c, at):
             "last_start": runs[-1]["started_at"] if runs else None, "fault_at": fault}
 
 
+def _ops_watch_len(c):
+    """The runs of a release watch: enough to call a fault (fail_after) and a recovery (recover_after)."""
+    return max(c["fail_after"], c["recover_after"])
+
+
 def _ops_watch_due(conn, c, at):
     """True when the release watch of a check makes it due now: its first run after the release, or the next one
-    ops_watch_every (or its own every, when shorter) after the last. The watch is open while fewer than fail_after
-    runs started since the release and no fault came since."""
+    ops_watch_every (or its own every, when shorter) after the last. The watch is open while fewer than
+    _ops_watch_len runs started since the release and no new fault came since."""
     w = _ops_watch(conn, c, at)
-    if w is None or len(w["runs"]) >= c["fail_after"] or w["fault_at"]:
+    if w is None or len(w["runs"]) >= _ops_watch_len(c) or w["fault_at"]:
         return False
     if not w["runs"]:
         return True
@@ -3766,31 +3772,96 @@ def _ops_watch_due(conn, c, at):
 
 def _ops_watch_of_run(conn, run):
     """The release watch that a run belongs to, with its place in it ("n"), or None: the run is one of the first
-    fail_after runs since the release, and no fault came before it in the watch."""
+    _ops_watch_len runs since the release, and no fault came before it in the watch."""
     c = run["check"]
     r = conn.execute("SELECT started_at FROM ops_runs WHERE id=?", (run["id"],)).fetchone()
     w = _ops_watch(conn, c, parse_iso(r["started_at"])) if r else None
     if w is None or run["id"] not in w["runs"]:
         return None
     n = w["runs"].index(run["id"]) + 1
-    if n > c["fail_after"] or (w["fault_at"] and w["fault_at"] < r["started_at"]):
+    if n > _ops_watch_len(c) or (w["fault_at"] and w["fault_at"] < r["started_at"]):
         return None
     return dict(w, n=n)
 
 
 def _ops_watch_end(conn, run, rec, watch, items):
-    """A line on the deploy item when the watch of one check ends: its last watch run, or a fault in the watch."""
+    """When the watch of one check ends (its last watch run, or a new fault in the watch): a line on the deploy
+    item, and the verdict on each fix that the release ships and this check proves (_ops_verify)."""
     c = run["check"]
     row = conn.execute("SELECT state FROM checks WHERE id=?", (c["id"],)).fetchone()
-    faults = [x["item"] for x in items if x.get("item")]
-    if row is None or (watch["n"] < c["fail_after"] and not faults):
+    new_fault = any(ch["to"] == "fault" for ch in rec.get("changes") or [])
+    if row is None or (watch["n"] < _ops_watch_len(c) and not new_fault):
         return None
+    faults = [x["item"] for x in items if x.get("item")]
     line = f"release watch: {c['scope']}/{c['name']} " + (
         f"in fault after {watch['n']} run(s) since the release: " + ", ".join(f"#{x}" for x in faults) if faults
         else f"{row['state']} after {watch['n']} run(s) since the release (last run {rec['status']})")
     with tx(conn):
         _event(conn, watch["deploy"], "maxpm", line)
+    _ops_verify(conn, run, watch, row["state"])
     return line
+
+
+def _check_named(conn, text):
+    """The check that a text names: its key ops:<scope>:<check>, a key of one of its subjects, or <scope>/<check>."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    for r in conn.execute("SELECT * FROM checks ORDER BY id").fetchall():
+        c = _ops_row(r)
+        if t in (c["key"], f"{c['scope']}/{c['name']}") or t.startswith(c["key"] + ":"):
+            return c
+    return None
+
+
+def fix_check(conn, item_id):
+    """The check that proves a fix (#5461), and where it came from: the item's --check when it names an operations
+    check, else the check of the fault item it fixes (the fault it was found during, or a fault item that waits on
+    it). (None, None) when there is none. A --check that is a command is never run by maxpm serve: serve runs only
+    the checks that a person or the manager may set outside the sandbox (decision 2 of #5380)."""
+    it = _item(conn, item_id)
+    c = _check_named(conn, it["check"])
+    if c:
+        return c, "its --check"
+    for f in conn.execute("SELECT id, title FROM items WHERE kind='operational' AND substr(title, 1, 4)='ops:' AND "
+                          "(id=? OR id IN (SELECT item_id FROM deps WHERE blocked_by=?)) ORDER BY id",
+                          (it["found_during"] or 0, it["id"])).fetchall():
+        c = _check_named(conn, f["title"].split(" ", 1)[0])
+        if c:
+            return c, f"the check of fault #{f['id']}"
+    return None, None
+
+
+def _ops_verify(conn, run, watch, state):
+    """The verdict on each done item that the release ships and whose check (fix_check) is this one: healthy or
+    recovered at the end of the watch is a line 'verified' on the item; any other state opens it again with the
+    evidence, and the active manager gets an alert."""
+    c = run["check"]
+    shipped = conn.execute("SELECT i.id FROM deps d JOIN items i ON i.id=d.blocked_by WHERE d.item_id=? AND "
+                           "i.kind<>'review' AND i.status='done' ORDER BY i.id", (watch["deploy"],)).fetchall()
+    last = conn.execute("SELECT summary, status, output FROM ops_runs WHERE id=?", (run["id"],)).fetchone()
+    out = []
+    for x in shipped:
+        k, src = fix_check(conn, x["id"])
+        if not k or k["id"] != c["id"]:
+            continue
+        what = f"{c['scope']}/{c['name']} ({src}) is {state} after {watch['n']} run(s) since release #{watch['deploy']}"
+        if state in ("healthy", "recovered"):
+            with tx(conn):
+                _event(conn, x["id"], "maxpm", f"verified: {what}")
+            out.append({"item": x["id"], "verified": True})
+            continue
+        reopen(conn, x["id"], actor="maxpm")
+        tail = "\n".join((last["output"] or "").splitlines()[-10:]) if last else ""
+        with tx(conn):
+            _event(conn, x["id"], "maxpm", f"verification failed, open again: {what}; last run "
+                   f"{last['status'] if last else '?'}: {last['summary'] if last else ''}"
+                   + (f"\nLast output:\n{tail}" if tail else "")
+                   + f"\nThe runs: maxpm ops history {c['scope']} {c['name']}")
+        _ops_tell_manager(conn, "alert", f"fix #{x['id']} failed its check {c['key']} after release "
+                          f"#{watch['deploy']}: it is open again", x["id"])
+        out.append({"item": x["id"], "verified": False})
+    return out
 
 
 def ops_due(conn, at=None):

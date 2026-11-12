@@ -1123,7 +1123,8 @@ def build_parser():
     x.add_argument("--doer", default="any", choices=core.DOERS, help="who can do it (default any)")
     x.add_argument("--context", default="", help="what a new agent must know to start: why, where, decisions made")
     x.add_argument("--touches", nargs="*", default=[], help="files or directories it changes")
-    x.add_argument("--check", default="", help="command that shows it works (tests, a build)")
+    x.add_argument("--check", default="", help="command that shows it works (tests, a build); for a fix, the "
+                   "operations check that proves it, ops:<scope>:<check>: it runs after the release that ships it")
     _model_args(x)
     x.add_argument("--blocks", type=int, help="item that must wait on this new one (usually the one you hold)")
     x.add_argument("--found-during", type=int, dest="found_during",

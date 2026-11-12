@@ -4947,10 +4947,8 @@ class Models(Base):
         self.assertIn("--model opus ", core.build_command("claude-code", {"prompt": "go"}, model="opus"))
 
 
-class ReleaseWatch(Base):
-    """After each release of a target, its checks run at once as the watch of the release (#5459): then every
-    ops_watch_every until fail_after runs ended since the release, then on their own schedule. A fault in the watch
-    opens its item found during the deploy item. The target's free monitor text is gone."""
+class ReleaseBase(Base):
+    """A target web with the project site, one shipped item in its deploy item, and the owner ops."""
 
     def setUp(self):
         super().setUp()
@@ -4981,6 +4979,12 @@ class ReleaseWatch(Base):
     def deploy_lines(self):
         return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=? AND change LIKE 'release watch%' "
                                              "ORDER BY id", (self.deploy,))]
+
+
+class ReleaseWatch(ReleaseBase):
+    """After each release of a target, its checks run at once as the watch of the release (#5459): then every
+    ops_watch_every until fail_after (or recover_after) runs ended since the release, then on their own schedule. A fault in the watch
+    opens its item found during the deploy item. The target's free monitor text is gone."""
 
     def test_the_checks_run_at_once_after_the_release_then_every_minute_then_on_their_schedule(self):
         core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
@@ -5045,6 +5049,56 @@ class ReleaseWatch(Base):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
             cli.build_parser().parse_args(["target", "monitor", "web", "watch it"])
+
+
+class FixVerify(ReleaseBase):
+    """A fix is done when its check passes where it runs (#5461): the check that its --check names, or the check
+    of the fault it fixes, gives the verdict at the end of the watch of the release that ships it."""
+
+    def ship_fix(self, title, check="", found_during=None):
+        x = core.item_add(self.c, "site", title, check=check, found_during=found_during, actor="dev")["id"]
+        core.claim(self.c, x, "dev")
+        core.done(self.c, x, "fixed", "dev", ship_it=True)
+        self.assertIn(x, core.item_show(self.c, self.deploy)["waits_on"])
+        return x
+
+    def events(self, x):
+        return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=? ORDER BY id", (x,))]
+
+    def test_a_fix_of_a_fault_is_verified_when_the_check_recovers_after_the_release(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
+        t0 = core.now() - timedelta(minutes=30)
+        for k in range(3):
+            r = self.run_at("home", t0 + timedelta(minutes=5 * k), 503)
+        fault = r["items"][0]["item"]
+        x = self.ship_fix("Fix the home page", found_during=fault)
+        self.assertEqual(core.fix_check(self.c, x)[1], f"the check of fault #{fault}")
+        t = self.release() + timedelta(seconds=1)
+        for k in range(3):
+            r = self.run_at("home", t + timedelta(seconds=61 * k))
+        self.assertIn("watch", r)
+        self.assertEqual(core._item(self.c, x)["status"], "done")
+        self.assertEqual([e for e in self.events(x) if e.startswith("verified")],
+                         [f"verified: site/home (the check of fault #{fault}) is healthy after 3 run(s) since release "
+                          f"#{self.deploy}"])
+
+    def test_a_fix_whose_check_fails_after_the_release_is_open_again_with_the_evidence(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
+        x = self.ship_fix("Fix the home page", check="ops:site:home")
+        other = self.ship_fix("Fix the footer", check="pytest tests/test_footer.py")
+        self.assertEqual(core.fix_check(self.c, other), (None, None))  # a command is never run by serve
+        t = self.release() + timedelta(seconds=1)
+        for k in range(3):
+            self.run_at("home", t + timedelta(seconds=61 * k), 503)
+        it = core._item(self.c, x)
+        self.assertEqual((it["status"], it["assignee"]), ("open", None))
+        ev = self.events(x)
+        self.assertEqual(ev[-2], "reopened")
+        self.assertTrue(ev[-1].startswith(f"verification failed, open again: site/home (its --check) is fault after 3 "
+                                          f"run(s) since release #{self.deploy}; last run critical: HTTP 503"), ev[-1])
+        self.assertIn("maxpm ops history site home", ev[-1])
+        self.assertEqual(core._item(self.c, other)["status"], "done")
+        self.assertFalse([e for e in self.events(other) if "verif" in e])
 
 
 class SharedGoalHandoff(Base):

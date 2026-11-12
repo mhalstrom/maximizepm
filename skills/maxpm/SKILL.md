@@ -137,7 +137,10 @@ your type from your CLI's environment.
    After the deploy, `maxpm serve` runs the checks of the target and of its
    projects (`maxpm ops list`) at once, as the watch of the release: a fault
    opens its own item, found during the deploy item. The deploy task ends
-   with the deploy.
+   with the deploy. A fix is verified in that watch: name the check that
+   proves it (`--check ops:<scope>:<check>`; a fix found during a fault item
+   has the fault's check). When the check fails, the fix opens again with the
+   evidence.
    A target can have hooks (`maxpm target hook <target>` lists them): commands
    that MaximizePM runs by itself when a release is cut, when its review passes
    or fails, and when its deploy item is done. The reply of your command shows
