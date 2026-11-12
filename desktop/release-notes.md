@@ -1,4 +1,4 @@
-First Stable Release for MaximizePM
+MaximizePM now tells you when a new version is out, and updates in one click.
 
 ## Download
 
