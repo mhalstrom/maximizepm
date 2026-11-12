@@ -312,6 +312,8 @@ class Timing(Base):
             self.assertGreaterEqual(t["total_ms"], t["build_ms"])
             self.assertIn("wait_ms", t)
             self.assertTrue(t["whole"])
+            self.assertIn("cpu_ms", t)
+            self.assertEqual(set(t["parts"]), {"start", "activity", "state", "goals", "terminals", "sessions", "rest"})
 
 
 class Limits(Base):

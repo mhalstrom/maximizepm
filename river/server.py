@@ -4513,7 +4513,14 @@ def page_state(closed, timing=None):
             timing["wait_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         if hit is not None:
             return hit
-        t1 = time.perf_counter()
+        t1, c1 = time.perf_counter(), time.thread_time()
+        parts = {}
+        mark = [t1]
+
+        def part(name):  # the time of each part of the build, for STATE_TIMES (#5596)
+            now_t = time.perf_counter()
+            parts[name] = round((now_t - mark[0]) * 1000, 1)
+            mark[0] = now_t
         gen = _state_gen[0]  # an action during the build makes this build old at once
         conn = core.connect()
         # The build reads the item graph once (#5465), and only the items that changed since the last build or
@@ -4523,9 +4530,13 @@ def page_state(closed, timing=None):
         memo = core.BUILD_MEMO.set({})  # and each agent's status and the launch platforms once (#5524)
         _ask_tmux_early(core.BUILD_MEMO.get())
         try:
+            part("start")
             core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
+            part("activity")
             st = core.state(conn, closed=key)
+            part("state")
             st["goals"] = core.goal_list(conn, include_complete=True)
+            part("goals")
             if DEV["on"]:
                 st["dev_build"] = _build_id()
             st["page_build"] = page_build()
@@ -4534,6 +4545,7 @@ def page_state(closed, timing=None):
             st["dictation"] = dictation.engine()  # "mac": speech to text on this Mac (#5107); else the browser's
             st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
             st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
+            part("terminals")
             from . import sessions
             # The agents whose session the Sessions tab shows: the Board's Open session goes there (#4687).
             run = sessions.running(conn, st["terminals"])
@@ -4541,6 +4553,7 @@ def page_state(closed, timing=None):
             # What each running session works on, the name the page shows for it (#4695).
             st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
             _page_agents(st, set(st["sessions"]))
+            part("sessions")
             st["relay"] = relay.status()
             st["canvas_opens"] = canvas_opens()  # maxpm canvas open: the page opens the canvas (#4783)
             from .routes import browser as browser_routes
@@ -4548,7 +4561,12 @@ def page_state(closed, timing=None):
             st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
             _state_cache[key] = (time.time(), gen, st)
             if timing is not None:
+                part("rest")
                 timing["build_ms"] = round((time.perf_counter() - t1) * 1000, 1)
+                # The CPU time of this thread: much less than build_ms means the build waited (other threads of
+                # serve hold the interpreter lock, or the disk).
+                timing["cpu_ms"] = round((time.thread_time() - c1) * 1000, 1)
+                timing["parts"] = parts
             return st
         finally:
             core.BUILD_MEMO.reset(memo)
