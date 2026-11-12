@@ -7635,6 +7635,43 @@ class Hooks(Base):
         self.assertEqual(self.c.execute("SELECT COUNT(*) FROM hook_runs").fetchone()[0], 0)
         self.assertEqual(core.run_hooks(self.c), [])
 
+    def test_a_busy_hook_runs_again_until_hook_timeout(self):
+        """#5605: build-sweep.sh mark refused at 5 of 37 cuts because a check ran in the tree, and nothing ran it
+        again. A hook that exits 75 (busy) is queued again; maxpm serve runs it after HOOK_ORPHAN_AFTER."""
+        count = os.path.join(self.dir.name, "n")
+        busy = self.script("busy.py", "import os, sys\n"
+                           f"p = {count!r}\nn = int(open(p).read()) + 1 if os.path.exists(p) else 1\n"
+                           "open(p, 'w').write(str(n))\nprint('check-all runs' if n < 3 else 'marked')\n"
+                           "sys.exit(75 if n < 3 else 0)\n")
+        core.target_hook(self.c, "web", "release-cut", busy, actor="mark")
+        core.target_cut(self.c, "web", "abc1234", "ops")
+        first = core.run_hooks(self.c)[0]
+        self.assertEqual((first["exit_code"], first["ok"]), (75, None))
+        self.assertIn("runs it again", first["result"])
+        self.assertEqual([m for m in core.inbox(self.c, "ops") if "hook" in m["body"]], [])  # no failure yet
+        self.assertEqual(core.run_hooks(self.c, orphans=True), [])  # it waits HOOK_ORPHAN_AFTER for serve
+
+        def later():  # the queued run is old enough for the orphan pass of maxpm serve
+            with core.tx(self.c):
+                self.c.execute("UPDATE hook_runs SET queued_at=? WHERE started_at IS NULL",
+                               (core.iso(core.now() - core.timedelta(seconds=core.HOOK_ORPHAN_AFTER + 1)),))
+            return core.run_hooks(self.c, orphans=True)
+        (second,) = later()
+        self.assertEqual((second["id"], second["ok"]), (first["again"], None))
+        (third,) = later()
+        self.assertEqual((third["exit_code"], third["ok"], third["output"]), (0, True, "marked"))
+        self.assertEqual(later(), [])
+        history = [e["change"] for e in core.item_show(self.c, self.deploy)["events"] if e["change"].startswith("hook")]
+        self.assertEqual(sum("busy (exit 75)" in h for h in history), 2, history)
+        # Busy until hook_timeout from its first run: a failure, with the alert.
+        os.remove(count)
+        core.config_set(self.c, "hook_timeout", "1m")  # shorter than HOOK_ORPHAN_AFTER: no time for another run
+        core.target_cut(self.c, "web", "abc1235", "ops")
+        (r,) = core.run_hooks(self.c)
+        self.assertEqual((r["ok"], r.get("again")), (False, None))
+        self.assertIn("still busy", r["result"])
+        self.assertTrue(any("still busy" in e["change"] for e in core.item_show(self.c, r["deploy"])["events"]))
+
     def test_a_failing_hook_does_not_stop_the_event_and_alerts_the_owner(self):
         bad = self.script("bad.py", "import sys\nprint('no build folder')\nsys.exit(3)\n")
         core.target_hook(self.c, "web", "release-cut", bad, actor="mark")

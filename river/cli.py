@@ -1322,7 +1322,8 @@ def build_parser(only=None):
                        "returns (maxpm serve runs it when that command is in the sandbox of an agent session), in "
                        "the folder of the target's project, with MAXPM_EVENT, MAXPM_TARGET, MAXPM_REV, MAXPM_ITEM, "
                        "and MAXPM_AGENT in its environment, for at most hook_timeout. A hook never undoes and never "
-                       "refuses its event; a failure alerts the target owner. Only a person or the manager sets, "
+                       "refuses its event; a failure alerts the target owner. A hook that exits 75 (busy) runs again "
+                       "about every 2 minutes until hook_timeout. Only a person or the manager sets, "
                        "changes, or removes a hook")
     x.add_argument("name")
     x.add_argument("event", nargs="?", help="one of " + ", ".join(core.HOOK_EVENTS) + "; none lists the hooks")

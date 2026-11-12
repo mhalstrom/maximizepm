@@ -3464,6 +3464,11 @@ HOOK_EVENTS = {
               "adds a fix item, and the release starts again: a new cut, a new review, then this hook again",
 }
 HOOK_ORPHAN_AFTER = 120  # seconds after which maxpm serve runs a queued hook whose command did not (it ended early)
+# A hook that exits HOOK_BUSY says 'busy, run me again later' (#5605; the exit code of the gate's busy refusals, #5387):
+# maxpm queues it again, maxpm serve runs it after HOOK_ORPHAN_AFTER, and so on until hook_timeout from its first run.
+# build-sweep.sh mark refused at 5 of 37 cuts because a check ran in the tree, and nothing ran it again.
+HOOK_BUSY = 75
+HOOK_AGAIN = "again:"  # queued_by of a run that a busy run queued: again:<the id of the first run>
 HOOK_TAIL = 15  # the lines of a hook's output that the command prints and the run keeps
 HOOK_RUNNER = None  # a test hook: (command, folder, limit, renew, env) -> a result like _run_command's
 
@@ -7183,17 +7188,34 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
     ok = code == 0 and not timed_out
     result = (f"stopped at {limit_key} ({limit_text}) after {took}" if timed_out
               else f"exit {code}, {took}" if code is not None else "not started")
+    again = None
+    if code == HOOK_BUSY and not timed_out and event != "deploy":
+        by = run.get("queued_by") or ""
+        first = int(by[len(HOOK_AGAIN):]) if by.startswith(HOOK_AGAIN) and by[len(HOOK_AGAIN):].isdigit() else run["id"]
+        r = conn.execute("SELECT started_at FROM hook_runs WHERE id=?", (first,)).fetchone()
+        began = parse_iso(r["started_at"]) if r and r["started_at"] else now()
+        if (now() - began).total_seconds() + HOOK_ORPHAN_AFTER < limit:
+            again = first
+            result = (f"busy (exit {HOOK_BUSY}), {took}: maxpm serve runs it again in about "
+                      f"{HOOK_ORPHAN_AFTER // 60} minutes, until {limit_key} ({limit_text}) from its first run")
+        else:
+            result = f"still busy (exit {HOOK_BUSY}) at {limit_key} ({limit_text}) from its first run"
     out = {"id": run["id"], "target": target, "event": event, "command": cmd, "item": run["item_id"],
            "deploy": run["deploy_id"], "rev": run["rev"], "folder": where, "exit_code": code, "timed_out": timed_out,
-           "seconds": round(secs, 1), "ok": ok, "result": result, "output": tail, "alerted": None,
+           "seconds": round(secs, 1), "ok": None if again else ok, "result": result, "output": tail, "alerted": None,
            "sandbox": bool(sandbox)}
     with tx(conn):
         conn.execute("UPDATE hook_runs SET ended_at=?, exit_code=?, timed_out=?, seconds=?, output=? WHERE id=?",
                      (iso(now()), code, int(timed_out), round(secs, 1), tail, run["id"]))
+        if again:  # not a failure yet: no alert; the new run waits HOOK_ORPHAN_AFTER for maxpm serve
+            out["again"] = conn.execute(
+                "INSERT INTO hook_runs(target,event,command,item_id,deploy_id,rev,actor,queued_at,queued_by) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", (target, event, cmd, run["item_id"], run["deploy_id"], run["rev"], actor,
+                                               iso(now()), f"{HOOK_AGAIN}{again}")).lastrowid
         if run["deploy_id"] and conn.execute("SELECT 1 FROM items WHERE id=?", (run["deploy_id"],)).fetchone():
             _event(conn, run["deploy_id"], actor or "maxpm", f"hook {event}: {result}"
                    + (" (in the sandbox of an agent session)" if sandbox and not ok else "") + f": {cmd}")
-        if not ok and event != "deploy":  # a failed deploy has its own alert (_deploy_hook_end)
+        if not ok and not again and event != "deploy":  # a failed deploy has its own alert (_deploy_hook_end)
             tg = conn.execute("SELECT owner FROM targets WHERE name=?", (target,)).fetchone()
             to = (tg["owner"] if tg and tg["owner"] else None) or active_manager(conn)
             if to and to != actor:
