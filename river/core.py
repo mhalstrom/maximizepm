@@ -10140,8 +10140,10 @@ def _settings_rows(conn):
     share = ANN_SHARE.get()
     if share is None:
         return None
-    key = (id(conn), conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
     got = share.get("settings")
+    if got and BUILD_MEMO.get() is not None and got[0][0] == id(conn):  # a page build writes nothing (#5597)
+        return got[1], got[2]
+    key = (id(conn), conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
     if not got or got[0] != key:
         rows = {(r[0], r[1]): r[2] for r in conn.execute("SELECT scope, key, value FROM settings")}
         names = {r[0]: r[1] for r in conn.execute("SELECT id, name FROM projects")}
@@ -16830,9 +16832,17 @@ def _shell_quote(s):
     return shlex.quote(s)
 
 
+_RIVER_DIRS = {}  # the database path as given -> its folder, resolved
+
+
 def river_dir():
-    """The folder of the queue, which an agent's sandbox must let it write (Codex --add-dir)."""
-    return str(db_path().expanduser().resolve().parent)
+    """The folder of the queue, which an agent's sandbox must let it write (Codex --add-dir). Resolved once for each
+    database path (#5597): a page state build asked 164 times, and each resolve made 7 lstat calls."""
+    p = str(db_path().expanduser())
+    d = _RIVER_DIRS.get(p)
+    if d is None:
+        d = _RIVER_DIRS[p] = str(Path(p).resolve().parent)
+    return d
 
 
 def profile_options(conn, platform, inline=None, project_id=None, chosen=None):

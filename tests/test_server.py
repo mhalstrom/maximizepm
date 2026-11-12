@@ -1640,6 +1640,28 @@ class LaunchInTmux(unittest.TestCase):
         routes.running(h, "/api/sessions")
         self.assertEqual([x["id"] for x in sent["body"]["proposals"]], [r["id"]])
 
+    def test_the_sessions_tab_reads_all_agents_at_once(self):
+        """#5597: GET /api/sessions read each of the 834 agents of the live queue with its own queries (3,600 queries,
+        50 ms every 3 s, while the page's state build waited for the interpreter). It reads them as a build does."""
+        from river.routes import sessions as routes
+        for n in range(30):
+            core.register(self.c, f"ag{n}")
+        x = core.item_add(self.c, "shop", "work")["id"]
+        core.claim(self.c, x, "ag3")
+        one, calls = core._agent, []
+        core._agent = lambda conn, name: calls.append(name) or one(conn, name)
+        self.addCleanup(setattr, core, "_agent", one)
+        sent = {}
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/sessions"
+        h._send = lambda code, body, *a, **k: sent.update(code=code, body=body)
+        routes.running(h, "/api/sessions")
+        self.assertEqual(sent["code"], 200)
+        self.assertEqual(calls, [])  # no agent read alone
+        card = next(s for s in sent["body"]["sessions"] if s["name"] == "ag3")
+        self.assertEqual([i["id"] for i in card["holds"]], [x])
+        self.assertIsNone(core.BUILD_MEMO.get())  # the memo ends with the request
+
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]
         y = core.item_add(self.c, "shop", "second")["id"]

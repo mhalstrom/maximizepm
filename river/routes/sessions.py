@@ -132,18 +132,23 @@ def running(h, path):
     q = parse_qs(urlsplit(h.path).query)
     conn = core.connect()
     try:
-        terminals = server.agent_terminals(conn)
         if path == "/api/sessions":
-            try:
-                ended = {p["pane"] for p in server._tmux_panes(everywhere=True) if p["ended"]} if terminals else set()
-            except RiverError:
-                ended = set()
-            rows = sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals), ended_panes=ended)
-            for r in rows:  # its first Stop waits for a second one (#5563): the page keeps Stop while it is idle
-                does = server.stop_waits(conn, r["name"]) if r["name"] in server.STOPPED else None
-                if does:
-                    r["stop_again"] = does
-            return h._send(200, {"sessions": rows, "proposals": core.expert_proposals(conn)})
+            # It writes nothing: the agents' statuses, the settings and the tmux pane list once, as in a page state
+            # build (#5597). Without it, the 834 agents cost 3,600 queries and 50 ms of the interpreter every 3 s.
+            with server.read_memo():
+                terminals = server.agent_terminals(conn)
+                try:
+                    ended = {p["pane"] for p in server._tmux_panes(everywhere=True) if p["ended"]} if terminals else set()
+                except RiverError:
+                    ended = set()
+                rows = sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals), ended_panes=ended)
+                for r in rows:  # its first Stop waits for a second one (#5563): the page keeps Stop while it is idle
+                    does = server.stop_waits(conn, r["name"]) if r["name"] in server.STOPPED else None
+                    if does:
+                        r["stop_again"] = does
+                body = {"sessions": rows, "proposals": core.expert_proposals(conn)}
+            return h._send(200, body)
+        terminals = server.agent_terminals(conn)
         cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
         if "file" in q:  # scrolling up: the page of lines before a byte of one of its transcripts (#5120)
             before = q.get("before", [""])[0]

@@ -755,9 +755,17 @@ def _tmux_env():
 def _tmux_panes(everywhere=False):
     """The panes of the maxpm tmux session (everywhere: of every session); [] when there is none. "ended": only
     a shell runs there, and the pane is older than START_GRACE ("starting": it is not)."""
-    early = (core.BUILD_MEMO.get() or {}).get(("tmux_panes", bool(everywhere)))
-    if early is not None:  # a page state build asked tmux at its start (_ask_tmux_early)
-        early[0].join()
+    memo = core.BUILD_MEMO.get()
+    early = (memo or {}).get(("tmux_panes", bool(everywhere)))
+    if early is None and memo is not None and TMUX_RUNNER is None:  # one tmux process per list in a request (#5597)
+        early = memo[("tmux_panes", bool(everywhere))] = [None, None, None]
+        try:
+            early[1] = _tmux_panes_now(everywhere)
+        except Exception as e:  # noqa: BLE001 - each caller gets it, as without the memo
+            early[2] = e
+    if early is not None:  # a page state build asked tmux at its start (_ask_tmux_early), or a caller before
+        if early[0] is not None:
+            early[0].join()
         if early[2] is not None:
             raise early[2]
         return [dict(p) for p in early[1]]
@@ -4438,6 +4446,19 @@ def graph_share():
             if g is not None and (old is None or g.get("n", 0) >= old.get("n", 0)):
                 _kept_graph[k] = g
         core.ANN_SHARE.reset(tok)
+
+
+@contextlib.contextmanager
+def read_memo():
+    """A read-only request computes as a page state build does (#5597): the settings and the item graph once
+    (graph_share), every agent's status in four queries and each tmux pane list once (BUILD_MEMO). Only for a request
+    that writes nothing: an answer is not read again after a write."""
+    with graph_share():
+        tok = core.BUILD_MEMO.set({})
+        try:
+            yield
+        finally:
+            core.BUILD_MEMO.reset(tok)
 
 
 def state_changed():
