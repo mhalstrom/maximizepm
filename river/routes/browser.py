@@ -31,6 +31,18 @@ def _ask_open(project, session, by):
         BROWSER_OPENS.append({"seq": _open_seq[0], "project": project, "session": session, "by": by, "at": time.time()})
 
 
+# The sessions whose side panel was asked to show the browser at their first input (#5616): (project, session).
+SHOWN = set()
+
+
+def first_input(project, session):
+    """A session's first click or key in a project's browser opens the browser in its side panel, once; the person
+    closes it and it stays closed."""
+    if session and (project, session) not in SHOWN:
+        SHOWN.add((project, session))
+        _ask_open(project, session, session)
+
+
 def frame(h, path):
     """GET /api/browser/frame?project=<name>&after=<seq>&token=<page token>: the newest frame after that seq, or the
     status alone after a few seconds with nothing new."""
@@ -68,6 +80,8 @@ def act(conn, a, who):
     person = _person(conn, who)
     if action in CHANGES:
         browser.may_change(conn, b, who, person)
+        if not person and action in ("click", "type", "key"):
+            first_input(project, who)
     if action == "status":
         return b.info()
     if action == "walk":  # a page walk check (#5516): its own background tab, so it changes nothing the person sees
@@ -86,11 +100,12 @@ def act(conn, a, who):
         return out
     if action == "click":
         x, y = a.get("x"), a.get("y")
-        return browser.click(b, a.get("selector"), None if x is None else float(x), None if y is None else float(y))
+        return browser.click(b, a.get("selector"), None if x is None else float(x), None if y is None else float(y),
+                             who=None if person else who)
     if action == "type":
-        return browser.type_text(b, a.get("text") or "", a.get("selector"))
+        return browser.type_text(b, a.get("text") or "", a.get("selector"), who=None if person else who)
     if action == "key":
-        return browser.press(b, a.get("key") or "")
+        return browser.press(b, a.get("key") or "", who=None if person else who)
     if action in ("back", "forward"):
         return browser.history(b, -1 if action == "back" else 1)
     if action == "reload":
@@ -102,7 +117,7 @@ def act(conn, a, who):
     if action == "text":
         return {**b.info(), "text": b.evaluate("document.body ? document.body.innerText : ''")}
     if action == "screenshot":
-        return browser.screenshot(b, bool(a.get("full")))
+        return browser.screenshot(b, bool(a.get("full")), bool(a.get("cursor")))
     if action == "tab":
         return browser.switch_tab(b, a.get("target") or "")
     if action == "new_tab":
@@ -154,6 +169,35 @@ def person_input(conn, a, who):
     return out
 
 
+HAND_TEXT = "The browser is at {title} ({url}). Take it from here."
+
+
+def hand(conn, a, who):
+    """Hand to <session> in the panel (#5616): the person gives the browser to the session whose side panel shows it,
+    and its chat gets one message with the page, so it goes on from there (the same tab, the person's sign-in). A
+    typing op: it types into the session's chat, so it needs the page's token."""
+    project, to = a.get("project") or "", (a.get("to") or "").strip()
+    if not to:
+        raise RiverError("name the session to hand the browser to")
+    r = conn.execute("SELECT kind FROM agents WHERE name=?", (to,)).fetchone()
+    if not r or r["kind"] != "ai":
+        raise RiverError(f"no session {to}: pick a session that runs now")
+    if not _person(conn, who):
+        raise RiverError("only a person hands the browser on; a session takes it with maxpm browser control")
+    b = browser.BROWSERS.get(project)
+    if b is None or not b.running():
+        raise RiverError("the browser is not running: open a page first")
+    server._typing_pane(conn, to, who)  # the chat can take the message: else the control stays with the person
+    info = browser.hand(conn, b, who, to)
+    text = HAND_TEXT.format(title=info.get("title") or "a page with no title", url=info.get("url") or "about:blank")
+    try:
+        server.session_send(conn, to, text, who=who, hold=True)
+    except RiverError as e:
+        raise RiverError(f"{to} controls the browser now, but its chat did not get the message: {e}")
+    SHOWN.add((project, to))
+    return {**info, "told": to, "text": text}
+
+
 def cdp(h, path):
     """GET /cdp/<agent>?project=<name>&token=<t>, a WebSocket: one session's CDP connection to its project's browser
     (#5405). serve opens a CDP connection to Chrome for it and relays each message after browser.cdp_refusal. The
@@ -188,7 +232,7 @@ def cdp(h, path):
         h.end_headers()
         h.wfile.flush()
         h.close_connection = True
-        browser.cdp_session(conn, b, agent, h.rfile, h.connection, upstream)
+        browser.cdp_session(conn, b, agent, h.rfile, h.connection, upstream, on_input=lambda: first_input(project, agent))
     finally:
         conn.close()
 
@@ -201,4 +245,5 @@ GET = [
 OPS = {
     "browser": act,
     "browser_input": person_input,
+    "browser_hand": hand,
 }

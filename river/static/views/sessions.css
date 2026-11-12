@@ -294,6 +294,23 @@ button.srow-it { cursor: pointer; }
 .br-keys { position: absolute; left: 0; top: 0; width: var(--hair); height: var(--hair); opacity: 0; border: 0; padding: 0; resize: none; }
 .br-msg { position: absolute; inset: 0; display: flex; gap: var(--sp-3); align-items: center; justify-content: center; padding: var(--sp-6); text-align: center; background: var(--bg); }
 .br-msg.hidden { display: none; }
+/* #5616: the pointer of the session that drives, a ring at each press, its name, and the keys it types. They lie over
+   the page and take no click; the pointer moves by transform only, so it glides (browserTool.js sets the time). */
+.br-over { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.br-ptr { position: absolute; left: 0; top: 0; transition-property: transform; transition-timing-function: ease-out; }
+.br-arrow { display: block; width: calc(var(--sp-6) + var(--sp-1)); height: calc(var(--sp-7) - var(--sp-1)); margin: calc(-1 * var(--hair)) 0 0 calc(-1 * var(--hair)); fill: var(--ptr); stroke: var(--ptr-edge); stroke-width: 1.6; stroke-linejoin: round; }
+.br-tag { position: absolute; left: var(--sp-5); top: calc(var(--sp-7) - var(--sp-2)); white-space: nowrap; font-size: var(--fs-xs); line-height: 1.5; padding: 0 var(--sp-2); border-radius: var(--r-pill); background: var(--ptr-mark); color: var(--ptr-edge); }
+.br-ring { position: absolute; left: 0; top: 0; width: var(--sp-7); height: var(--sp-7); margin: calc(var(--sp-7) / -2) 0 0 calc(var(--sp-7) / -2); box-sizing: border-box; border: var(--hair-2) solid var(--ptr-mark); border-radius: 50%; opacity: 0; }
+.br-ring.br-pulse { animation: br-pulse .8s ease-out; }
+@keyframes br-pulse { from { opacity: 1; scale: .4; } to { opacity: 0; scale: 1.8; } }
+.br-typed { position: absolute; left: var(--sp-3); right: var(--sp-3); bottom: var(--sp-3); display: flex; gap: var(--sp-2); align-items: baseline; padding: var(--sp-2) var(--sp-4); border-radius: var(--r-m); background: var(--ptr); color: var(--ptr-edge); opacity: .9; font-size: var(--fs-m); }
+.br-typed.hidden { display: none; }
+.br-tw { flex: none; white-space: nowrap; opacity: .8; }
+/* The newest keys stay in sight: the text runs from the right edge, so a long text loses its start, not its end. */
+.br-tt { flex: 1; min-width: 0; overflow: hidden; white-space: pre; direction: rtl; text-align: left; font-family: ui-monospace, Menlo, monospace; }
+.br-tt bdi { direction: ltr; }
+.br-tt bdi::after { content: "▍"; animation: br-caret 1s steps(1) infinite; }
+@keyframes br-caret { 50% { opacity: 0; } }
 /* A canvas tab (#4768): the version menu over the page. */
 .sp-cbar { display: flex; gap: var(--sp-3); align-items: center; flex: none; flex-wrap: wrap; padding: var(--sp-2) var(--sp-3); border-bottom: var(--hair) solid var(--line); background: var(--panel); font-size: var(--fs-s); position: sticky; top: 0; z-index: 1; }
 .sp-cbar select { font-size: var(--fs-s); max-width: 100%; }

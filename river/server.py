@@ -3835,7 +3835,8 @@ def frame_check(url):
 PAGE_TOKEN = secrets.token_urlsafe(24)
 TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "pending_send_now", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
               "shell_open", "shell_keys", "shell_close",  # the Terminal tab's shells (#4803)
-              "browser_input")  # the person's mouse and keys in a project's browser (#4631)
+              "browser_input",  # the person's mouse and keys in a project's browser (#4631)
+              "browser_hand")  # Hand to <session>: it types a line into that session's chat (#5616)
 
 
 REPO = PKG.parent

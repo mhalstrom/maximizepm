@@ -412,6 +412,10 @@ class Browser:
         self.attached = None # the debugging port of a Chrome that serve did not start (browser_source cdp:<port>)
         self.mine = set()    # attached: the tabs serve opened in it, and the tabs that they opened
         self.listeners = {}  # CDP session -> fn(method, params): the events of a tab that a page walk opened
+        self.pointer = None  # the driving session's mouse (#5616): {x, y, who, target, n, press, px, py}
+        self.typed = None    # what it types now: {who, target, text, secret, n, at, done}
+        self.watched = 0.0   # when the panel last asked for a frame: someone watches (browser_pace watch)
+        self.watching = 0    # frame polls that wait now
         self.state = self._load()
 
     # state.json: the controller, the window mode, Chrome's pid and the proxy port (to attach after a restart)
@@ -788,9 +792,11 @@ class Browser:
     def info(self):
         cur = self.targets.get(self.target) or {}
         c = self.state.get("controller") or {}
+        before = self.state.get("before") or {}
         return {"project": self.project, "running": self.running(), "window": bool(self.state.get("window")),
                 "source": f"cdp:{self.attached}" if self.attached else None,
                 "url": cur.get("url", ""), "title": cur.get("title", ""), "controller": c or None,
+                "before": before.get("who"),
                 "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target}
                          for k, v in self.targets.items()]}
 
@@ -1030,11 +1036,53 @@ def cdp_refusal(conn, b, agent, msg, worlds=()):
     return None
 
 
-def cdp_session(conn, b, agent, rfile, sock, upstream):
+def track_targets(tabs, msg):
+    """Keep tabs (CDP sessionId -> targetId of this connection) up to date with one message from Chrome."""
+    method, p = msg.get("method"), msg.get("params") or {}
+    if method == "Target.attachedToTarget" and p.get("sessionId"):
+        tabs[p["sessionId"]] = (p.get("targetInfo") or {}).get("targetId")
+    elif method == "Target.detachedFromTarget":
+        tabs.pop(p.get("sessionId"), None)
+
+
+def relay_input(b, agent, msg, tabs):
+    """Record one Input.* message of a session's CDP connection for the panel (#5616): the pointer of a mouse event,
+    the text of a key or of insertText. Keys of a tab that the panel does not show are not kept."""
+    method, p = msg.get("method"), msg.get("params") or {}
+    target = tabs.get(msg.get("sessionId"))
+    if not target:
+        return
+    who = driver(b, agent)
+    if method == "Input.dispatchMouseEvent" and p.get("type") in ("mouseMoved", "mousePressed", "mouseReleased"):
+        x, y = p.get("x"), p.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            note_pointer(b, who, x, y, press=p["type"] == "mousePressed", target=target)
+        return
+    if target != b.target:
+        return
+    hide = lambda: secret(b)  # noqa: E731
+    if method == "Input.insertText" and isinstance(p.get("text"), str):
+        # A fill can focus another field with no press (a script's focus()): look at the field each time.
+        note_keys(b, who, p["text"], secret=secret(b))
+    elif method == "Input.dispatchKeyEvent" and p.get("type") in ("keyDown", "rawKeyDown", "char"):
+        key, text = p.get("key") or "", p.get("text") or ""
+        if key in KEY_SIGNS and p["type"] != "char":
+            note_keys(b, who, key=key, hidden=hide)
+        elif text and text not in "\r\n" and p["type"] in ("keyDown", "char") and not (p.get("modifiers", 0) & 6):
+            # The keys of one text come close together; after a pause the focus may be in another field.
+            t = b.typed
+            again = not t or time.time() - t["at"] > KEY_PAUSE
+            note_keys(b, who, text, secret=secret(b) if again else None, hidden=hide)
+
+
+def cdp_session(conn, b, agent, rfile, sock, upstream, on_input=None):
     """Relay one session's CDP connection until either side closes it. rfile and sock: the session's WebSocket (the
     server side: frames out are not masked); upstream: a WS to Chrome of this connection only, so the ids and events
-    of two sessions never mix. A refused message gets a CDP error from serve and never reaches Chrome."""
-    wlock, worlds = threading.Lock(), set()
+    of two sessions never mix. A refused message gets a CDP error from serve and never reaches Chrome.
+    on_input: called at each input that passes (the page shows the browser in the session's side panel). The
+    session's input goes to the panel too (relay_input), and with the setting browser_shot_cursor on, a screenshot of
+    the shown tab has the pointer drawn in (#5616)."""
+    wlock, worlds, tabs, shots = threading.Lock(), set(), {}, set()
 
     def out(op, data):
         with wlock:
@@ -1049,6 +1097,19 @@ def cdp_session(conn, b, agent, rfile, sock, upstream):
                         track_worlds(worlds, json.loads(text))
                     except (ValueError, AttributeError):
                         pass
+                elif '"Target.attachedToTarget"' in text or '"Target.detachedFromTarget"' in text:
+                    try:
+                        track_targets(tabs, json.loads(text))
+                    except (ValueError, AttributeError):
+                        pass
+                elif shots and text.startswith('{"id":'):
+                    try:
+                        i = json.loads(text).get("id")
+                    except ValueError:
+                        i = None
+                    if i in shots:
+                        shots.discard(i)
+                        cursor_off(b)
                 out(0x1, text.encode())
         except (EOFError, OSError):
             pass
@@ -1087,6 +1148,18 @@ def cdp_session(conn, b, agent, rfile, sock, upstream):
                     reply["sessionId"] = msg["sessionId"]
                 out(0x1, json.dumps(reply).encode())
                 continue
+            method = msg.get("method") or ""
+            if method.startswith("Input.") or method == "Page.captureScreenshot":
+                try:
+                    if method.startswith("Input."):
+                        relay_input(b, agent, msg, tabs)
+                        if on_input:
+                            on_input()
+                    elif (tabs.get(msg.get("sessionId")) == b.target and msg.get("id") is not None
+                          and setting_of(b.project, "browser_shot_cursor") == "on" and cursor_on(b)):
+                        shots.add(msg["id"])
+                except Exception:  # the panel's view never stops the session's input
+                    pass
             upstream.send(json.dumps(msg))
     except (EOFError, OSError):
         pass
@@ -1300,6 +1373,27 @@ def give_back(conn, b, who):
     return b.info()
 
 
+def hand(conn, b, who, to):
+    """The person hands the browser to a session (Hand to in the panel, #5616): that session controls it now."""
+    c = b.state.get("controller")
+    if c and c["kind"] == "person" and c["who"] != (who or "person"):
+        raise RiverError(f"{c['who']} controls the browser of {b.project}")
+    if c:
+        _give_lock(conn, b, c["who"])
+    b.state.pop("before", None)
+    b.state.pop("controller", None)
+    try:
+        _take_lock(conn, b, to)
+    except RiverError:
+        b._save()
+        _notify(b)
+        raise
+    b.state["controller"] = {"who": to, "kind": "session", "sub": None, "since": core.iso(core.now())}
+    b._save()
+    _notify(b)
+    return b.info()
+
+
 def _notify(b):
     with b.cond:
         b.seq += 1
@@ -1311,15 +1405,22 @@ def _notify(b):
 def frame(b, after, timeout=8):
     """The newest frame after seq `after` (a long poll); with no new frame within timeout, the status only."""
     end = time.time() + timeout
+    b.watched = time.time()
     with b.cond:
-        while b.seq <= after and time.time() < end:
-            b.cond.wait(max(0.05, end - time.time()))
+        b.watching += 1
+        try:
+            while b.seq <= after and time.time() < end:
+                b.cond.wait(max(0.05, end - time.time()))
+        finally:
+            b.watching -= 1
         f = b.frame
         seq = b.seq
+    b.watched = time.time()
     out = b.info()
     out["seq"] = seq
     if f and (not after or f["seq"] > after):
         out["frame"] = {"data": f["data"], "w": f["w"], "h": f["h"]}
+    out.update(drawn(b))
     return out
 
 
@@ -1347,9 +1448,140 @@ def person_input(b, ev):
     return {"ok": True}
 
 
+# ---- what the panel draws over the page (#5616): the driving session's pointer and the keys it types
+
+GLIDE_TIME = 0.5    # seconds that a click of maxpm browser moves the pointer before it presses, while someone watches
+GLIDE_STEPS = 14
+KEY_TIME = 0.06     # seconds between two keys of maxpm browser type, while someone watches
+TYPE_MAX = 8.0      # seconds that one maxpm browser type takes at most: a long text goes faster
+TYPED_GAP = 4.0     # seconds after a key that the panel still shows the text
+TYPED_KEEP = 48     # the characters of the text that the panel shows
+KEY_PAUSE = 0.3     # seconds between two keys of the relay after which the focused field is looked at again
+WATCH_GAP = 4.0     # seconds after the panel's last frame poll that someone still watches
+# What the panel shows for a key that types no text.
+KEY_SIGNS = {"Enter": "⏎", "Tab": "⇥", "Backspace": "⌫", "Delete": "⌦", "Escape": "⎋", "ArrowLeft": "←",
+             "ArrowRight": "→", "ArrowUp": "↑", "ArrowDown": "↓", "Home": "⇱", "End": "⇲", "PageUp": "⇞",
+             "PageDown": "⇟"}
+# Is the focused field secret (a password or a one-time code)? Through open shadow roots and same-origin frames.
+SECRET_JS = ("(() => { let e = document.activeElement; try { for (let i = 0; i < 20 && e; i++) { "
+             "const n = (e.shadowRoot && e.shadowRoot.activeElement) || (e.contentDocument && e.contentDocument.activeElement); "
+             "if (!n) break; e = n; } } catch (x) {} if (!e) return false; "
+             "const t = (e.getAttribute && (e.getAttribute('type') || '')).toLowerCase(), "
+             "a = (e.getAttribute && (e.getAttribute('autocomplete') || '')).toLowerCase(); "
+             "return t === 'password' || /password|one-time-code/.test(a) || "
+             "(e.style && /disc|circle|square/.test(getComputedStyle(e).webkitTextSecurity || '')); })()")
+
+
+def driver(b, who):
+    """The name that the panel shows beside the pointer: the session, and the subagent it named."""
+    c = b.state.get("controller") or {}
+    return f"{who} · {c['sub']}" if who and c.get("who") == who and c.get("sub") else (who or "a session")
+
+
+def pace(b):
+    """True: move and type at a person's pace (the setting browser_pace: watch, while the panel shows the browser;
+    person, always; fast, never)."""
+    v = setting_of(b.project, "browser_pace")
+    if v == "person":
+        return True
+    if v == "fast":
+        return False
+    return b.watching > 0 or time.time() - b.watched < WATCH_GAP
+
+
+def secret(b):
+    """Whether the focused field of the shown tab hides its text; True when the page does not answer."""
+    try:
+        return b.evaluate(SECRET_JS, 5) is not False
+    except RiverError:
+        return True
+
+
+def note_pointer(b, who, x, y, press=False, target=None):
+    p = b.pointer or {}
+    n = {"x": round(float(x), 1), "y": round(float(y), 1), "who": who, "target": target or b.target,
+         "n": p.get("n", 0) + 1, "press": p.get("press", 0), "px": p.get("px"), "py": p.get("py")}
+    if press:
+        n.update(press=n["press"] + 1, px=n["x"], py=n["y"])
+        if b.typed:  # a press can move the focus to another field: the next key looks at its field again
+            b.typed["done"] = True
+    b.pointer = n
+    _notify(b)
+
+
+def note_keys(b, who, text="", key=None, hidden=None, target=None, secret=None):
+    """One key or a text of the driving session. hidden: a function that says whether the field is secret; it runs
+    when a new run of keys starts (after a gap, a press, Enter or Tab). secret: known already (maxpm browser type
+    looked); a run of another kind starts a new one. A secret field's text is never kept: the panel shows dots."""
+    now, target = time.time(), target or b.target
+    t = b.typed
+    if (not t or t["who"] != who or t["target"] != target or t.get("done") or now - t["at"] > TYPED_GAP
+            or (secret is not None and t["secret"] != bool(secret))):
+        hide = bool(secret) if secret is not None else bool(hidden and hidden())
+        t = {"who": who, "target": target, "text": "", "secret": hide, "n": (t or {}).get("n", 0)}
+    if key and key in KEY_SIGNS:
+        add = KEY_SIGNS[key]
+        t["done"] = key in ("Enter", "Tab")  # the focus may move: the next key looks at its field again
+    else:
+        add = "•" * len(text) if t["secret"] else text.replace("\r", "").replace("\n", "⏎")
+    t.update(text=(t["text"] + add)[-TYPED_KEEP:], at=now, n=t["n"] + 1)
+    b.typed = t
+    _notify(b)
+
+
+def drawn(b):
+    """What the panel draws over the frame: the pointer and the keys of the shown tab."""
+    out = {}
+    p = b.pointer
+    if p and p["target"] == b.target:
+        out["pointer"] = {k: v for k, v in p.items() if k != "target"}
+    t = b.typed
+    if t and t["target"] == b.target:
+        out["typed"] = {"who": t["who"], "text": t["text"], "secret": t["secret"], "n": t["n"],
+                        "age": round(time.time() - t["at"], 2)}
+    return out
+
+
+def glide(b, who, x, y):
+    """Move the pointer to (x, y): along a short curve in steps while someone watches, so hover menus open on the
+    way and the panel shows the move; else at once."""
+    p = b.pointer if b.pointer and b.pointer["target"] == b.target else None
+    if pace(b):
+        if p:
+            x0, y0 = p["x"], p["y"]
+        else:  # the first move comes from up and to the left
+            x0, y0 = max(0.0, x - 160), max(0.0, y - 90)
+        dx, dy = x - x0, y - y0
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist > 4:
+            bend = min(80.0, dist * 0.15)  # the control point stands beside the middle of the line
+            cx, cy = x0 + dx / 2 - dy / dist * bend, y0 + dy / 2 + dx / dist * bend
+            for i in range(1, GLIDE_STEPS):
+                u = i / GLIDE_STEPS
+                u = u * u * (3 - 2 * u)  # slow at the start and at the end
+                px = (1 - u) ** 2 * x0 + 2 * (1 - u) * u * cx + u * u * x
+                py = (1 - u) ** 2 * y0 + 2 * (1 - u) * u * cy + u * u * y
+                b.page("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": px, "y": py})
+                note_pointer(b, who, px, py)
+                time.sleep(GLIDE_TIME / GLIDE_STEPS)
+    b.page("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": float(x), "y": float(y)})
+    note_pointer(b, who, x, y)
+
+
+def char_events(ch):
+    """The CDP key events that type one character, as a person's key press."""
+    if ch in "\r\n":
+        return key_events("Enter")
+    if ch == "\t":
+        return key_events("Tab")
+    vk = ord(ch.upper()) if ch.isascii() and ch.isalnum() else 0
+    return [{"type": "keyDown", "key": ch, "text": ch, "unmodifiedText": ch, "windowsVirtualKeyCode": vk},
+            {"type": "keyUp", "key": ch, "windowsVirtualKeyCode": vk}]
+
+
 # ---- what a session does (maxpm browser ...)
 
-def click(b, selector=None, x=None, y=None):
+def click(b, selector=None, x=None, y=None, who=None):
     if selector:
         pos = b.evaluate("(() => { const e = document.querySelector(%s); if (!e) return null; "
                          "e.scrollIntoView({block: 'center', inline: 'center'}); const r = e.getBoundingClientRect(); "
@@ -1359,26 +1591,46 @@ def click(b, selector=None, x=None, y=None):
         x, y = pos
     if x is None or y is None:
         raise RiverError("name what to click: --selector '<css>', or x and y")
-    for t in ("mouseMoved", "mousePressed", "mouseReleased"):
-        p = {"type": t, "x": float(x), "y": float(y)}
-        if t != "mouseMoved":
-            p.update(button="left", clickCount=1)
-        b.page("Input.dispatchMouseEvent", p)
+    who = driver(b, who)
+    glide(b, who, x, y)
+    for t in ("mousePressed", "mouseReleased"):
+        b.page("Input.dispatchMouseEvent", {"type": t, "x": float(x), "y": float(y), "button": "left", "clickCount": 1})
+        if t == "mousePressed":
+            note_pointer(b, who, x, y, press=True)
     time.sleep(0.3)
     b.settle(5)
     return {**b.info(), "clicked": selector or [x, y]}
 
 
-def type_text(b, text, selector=None):
+def type_text(b, text, selector=None, who=None):
+    """Type text where the focus is (after a click on selector). While someone watches, key by key at a pace a
+    person can follow (TYPE_MAX at most), and the panel shows the keys; else all at once."""
     if selector:
-        click(b, selector)
-    b.page("Input.insertText", {"text": text})
+        click(b, selector, who=who)
+    who = driver(b, who)
+    hide = secret(b)
+    if not pace(b) or not text:
+        b.page("Input.insertText", {"text": text})
+        note_keys(b, who, text, secret=hide)
+        return {**b.info(), "typed": len(text)}
+    wait = min(KEY_TIME, TYPE_MAX / len(text))
+    for ch in text:
+        for p in char_events(ch):
+            b.page("Input.dispatchKeyEvent", p)
+        if ch in "\r\n\t":
+            note_keys(b, who, key="Tab" if ch == "\t" else "Enter", secret=hide)
+        else:
+            note_keys(b, who, ch, secret=hide)
+        time.sleep(wait)
     return {**b.info(), "typed": len(text)}
 
 
-def press(b, key):
+def press(b, key, who=None):
     for p in key_events(key):
         b.page("Input.dispatchKeyEvent", p)
+    if len(key) == 1 or key in KEY_SIGNS:
+        note_keys(b, driver(b, who), key if len(key) == 1 else "", key=key, secret=secret(b) if len(key) == 1 else None,
+                  hidden=lambda: secret(b))
     time.sleep(0.2)
     b.settle(5)
     return b.info()
@@ -1401,14 +1653,53 @@ def reload(b):
     return b.info()
 
 
-def screenshot(b, full=False):
+# The pointer and the last click ring of a screenshot with --cursor (#5616): an element in a closed shadow root at
+# the page's coordinates, which the screenshot draws at the page's own size and device scale; it goes right after.
+CURSOR_ID = "__maxpm_cursor"
+CURSOR_JS = """((x, y, px, py) => {
+  const old = document.getElementById(%(id)s); if (old) old.remove();
+  const h = document.createElement('div'); h.id = %(id)s; h.setAttribute('aria-hidden', 'true');
+  h.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;overflow:visible;z-index:2147483647;pointer-events:none';
+  const s = h.attachShadow({mode: 'closed'}), sx = scrollX, sy = scrollY;
+  const ring = px === null ? '' : `<div style="position:absolute;left:${px + sx - 14}px;top:${py + sy - 14}px;width:24px;height:24px;border:2px solid #e8590c;border-radius:50%%;background:rgba(232,89,12,.18)"></div>`;
+  s.innerHTML = ring + `<svg style="position:absolute;left:${x + sx - 1}px;top:${y + sy - 1}px" width="20" height="28" viewBox="0 0 20 28"><path d="M1 1 L1 22 L6.5 17 L10 26 L13.5 24.5 L10 16 L17.5 16 Z" fill="#111" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+  document.documentElement.appendChild(h);
+  setTimeout(() => h.remove(), 15000);
+})""" % {"id": json.dumps(CURSOR_ID)}
+CURSOR_OFF = "(() => { const e = document.getElementById(%s); if (e) e.remove(); })()" % json.dumps(CURSOR_ID)
+
+
+def cursor_on(b):
+    """Draw the pointer into the shown tab for a screenshot; False when no session pointed in it."""
+    p = b.pointer
+    if not p or p["target"] != b.target:
+        return False
+    args = [p["x"], p["y"], p.get("px"), p.get("py")]
+    b.evaluate(CURSOR_JS + "(" + ",".join(json.dumps(a) for a in args) + ")")
+    return True
+
+
+def cursor_off(b):
+    try:
+        b.evaluate(CURSOR_OFF, 5)
+    except RiverError:
+        pass  # it goes by itself after 15 s
+
+
+def screenshot(b, full=False, cursor=False):
+    """A PNG of the shown tab; cursor: with the driving session's pointer and its last click ring."""
     p = {"format": "png"}
     if full:
         p["captureBeyondViewport"] = True
         m = b.page("Page.getLayoutMetrics")
         size = m.get("cssContentSize") or m.get("contentSize")
         p["clip"] = {"x": 0, "y": 0, "width": size["width"], "height": size["height"], "scale": 1}
-    return {**b.info(), "png": b.page("Page.captureScreenshot", p, timeout=60)["data"]}
+    drew = cursor and cursor_on(b)
+    try:
+        return {**b.info(), "png": b.page("Page.captureScreenshot", p, timeout=60)["data"], "cursor": bool(drew)}
+    finally:
+        if drew:
+            cursor_off(b)
 
 
 def switch_tab(b, target):

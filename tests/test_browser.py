@@ -252,6 +252,12 @@ class Command(Base):
         with open(target, "rb") as f:
             self.assertEqual(f.read(), png)
         self.assertEqual((asked[0][0], asked[0][1]["action"], asked[0][2]), ("browser", "screenshot", "ag1"))
+        self.assertFalse(asked[0][1]["cursor"])
+        err = io.StringIO()
+        with mock.patch.object(cli, "ask_server", fake), contextlib.redirect_stderr(err):
+            self.run_cli("-q", "--as", "ag1", "browser", "screenshot", "--cursor", "--out", target)
+        self.assertTrue(asked[1][1]["cursor"])
+        self.assertIn("no session pointed in this tab", err.getvalue())  # the fake drew no pointer
 
     def test_click_needs_a_selector_or_a_point(self):
         core.register(self.c, "ag1")
@@ -267,6 +273,212 @@ class Command(Base):
             out = self.run_cli("-q", "--as", "ag1", "browser", "status")
         self.assertIn("controlled by ag1 (subagent browser)", out)
         self.assertIn("Example  https://example.com/", out)
+
+
+class Watch(Base):
+    """#5616: the panel draws the driving session's pointer and keys; a click glides and a text goes key by key while
+    someone watches; a secret field shows dots; the person hands the browser to a session."""
+
+    def fake(self, watched=True):
+        b = browser.get("web")
+        b.target = "T1"
+        sent = []
+        b.page = lambda method, params=None, timeout=None: sent.append((method, params or {})) or {}
+        b.evaluate = lambda expr, timeout=None: False  # no secret field, and nothing else to read
+        b.settle = lambda timeout=None: None
+        b.info = lambda: {"project": "web", "url": "https://example.com/", "title": "Example"}
+        if watched:
+            b.watched = __import__("time").time()
+        self.sleeps = []
+        p = mock.patch.object(browser.time, "sleep", lambda s: self.sleeps.append(s))
+        p.start()
+        self.addCleanup(p.stop)
+        return b, sent
+
+    def test_a_click_glides_on_a_curve_then_presses_while_someone_watches(self):
+        core.register(self.c, "ag1")
+        b, sent = self.fake()
+        browser.click(b, x=400, y=300, who="ag1")
+        moves = [p for m, p in sent if p.get("type") == "mouseMoved"]
+        self.assertEqual(len(moves), browser.GLIDE_STEPS)
+        self.assertEqual((moves[-1]["x"], moves[-1]["y"]), (400.0, 300.0))
+        # Not on the straight line: the middle of the move stands beside it.
+        mid = moves[len(moves) // 2]
+        x0, y0 = 400 - 160, 300 - 90
+        across = abs((mid["x"] - x0) * (300 - y0) - (mid["y"] - y0) * (400 - x0)) / ((160 ** 2 + 90 ** 2) ** 0.5)
+        self.assertGreater(across, 5)
+        self.assertEqual([p["type"] for m, p in sent if m == "Input.dispatchMouseEvent"][-2:],
+                         ["mousePressed", "mouseReleased"])
+        self.assertAlmostEqual(sum(self.sleeps[:browser.GLIDE_STEPS - 1]), browser.GLIDE_TIME * (13 / 14), 3)
+        d = browser.drawn(b)["pointer"]
+        self.assertEqual((d["x"], d["y"], d["press"], d["px"], d["py"], d["who"]), (400, 300, 1, 400, 300, "ag1"))
+        # Another tab shows: nothing is drawn over it.
+        b.target = "T2"
+        self.assertNotIn("pointer", browser.drawn(b))
+
+    def test_nobody_watches_so_it_clicks_and_types_at_once(self):
+        b, sent = self.fake(watched=False)
+        browser.click(b, x=10, y=20, who="ag1")
+        self.assertEqual([p["type"] for m, p in sent], ["mouseMoved", "mousePressed", "mouseReleased"])
+        sent.clear()
+        browser.type_text(b, "hello", who="ag1")
+        self.assertEqual(sent, [("Input.insertText", {"text": "hello"})])
+        self.assertEqual(browser.drawn(b)["typed"]["text"], "hello")
+
+    def test_browser_pace_person_and_fast(self):
+        b, sent = self.fake(watched=False)
+        core.config_set(self.c, "browser_pace", "person", project="web")
+        self.assertTrue(browser.pace(b))
+        core.config_set(self.c, "browser_pace", "fast", project="web")
+        b.watched = __import__("time").time()
+        self.assertFalse(browser.pace(b))
+        with self.assertRaisesRegex(RiverError, "browser_pace is watch"):
+            core.config_set(self.c, "browser_pace", "slow", project="web")
+        with self.assertRaisesRegex(RiverError, "browser_shot_cursor is on or off"):
+            core.config_set(self.c, "browser_shot_cursor", "yes", project="web")
+
+    def test_typing_goes_key_by_key_and_the_panel_shows_the_keys(self):
+        b, sent = self.fake()
+        browser.type_text(b, "hi\n", who="ag1")
+        keys = [(p["type"], p["key"]) for m, p in sent if m == "Input.dispatchKeyEvent"]
+        self.assertEqual(keys, [("keyDown", "h"), ("keyUp", "h"), ("keyDown", "i"), ("keyUp", "i"),
+                                ("keyDown", "Enter"), ("keyUp", "Enter")])
+        self.assertEqual([p.get("text") for m, p in sent if p["type"] == "keyDown"], ["h", "i", "\r"])
+        self.assertEqual(browser.drawn(b)["typed"]["text"], "hi⏎")
+        self.assertTrue(all(s <= browser.KEY_TIME for s in self.sleeps))
+        # A long text takes TYPE_MAX at most.
+        self.sleeps.clear()
+        browser.type_text(b, "x" * 400, who="ag1")
+        self.assertLessEqual(sum(self.sleeps), browser.TYPE_MAX + 0.01)
+        self.assertEqual(len(browser.drawn(b)["typed"]["text"]), browser.TYPED_KEEP)
+
+    def test_a_secret_field_shows_dots_and_its_text_is_never_kept(self):
+        b, sent = self.fake()
+        b.evaluate = lambda expr, timeout=None: expr == browser.SECRET_JS or None
+        browser.type_text(b, "hunter2", who="ag1")
+        t = browser.drawn(b)["typed"]
+        self.assertEqual((t["text"], t["secret"]), ("•" * 7, True))
+        self.assertNotIn("hunter2", json.dumps(b.typed))
+        # A page that does not answer counts as secret.
+
+        def broken(expr, timeout=None):
+            raise RiverError("no answer")
+        b.evaluate = broken
+        self.assertTrue(browser.secret(b))
+
+    def test_a_password_after_an_email_shows_dots(self):
+        # The recording of #5616 showed the password: its keys went on the run of the email, which was not secret.
+        b, sent = self.fake()
+        field = ["email"]
+        b.evaluate = lambda expr, timeout=None: (field[0] == "pw") if expr == browser.SECRET_JS else [5, 5]
+        browser.type_text(b, "me@x.test", who="ag1")
+        field[0] = "pw"
+        browser.type_text(b, "hunter2", who="ag1")
+        self.assertEqual(browser.drawn(b)["typed"]["text"], "•" * 7)
+        # Through the relay: a press ends the run, so the next key looks at its field again.
+        field[0] = "email"
+        tabs = {"S1": "T1"}
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.insertText", "params": {"text": "me"}}, tabs)
+        field[0] = "pw"
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.dispatchMouseEvent",
+                                       "params": {"type": "mousePressed", "x": 5, "y": 5}}, tabs)
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.insertText", "params": {"text": "pw"}}, tabs)
+        self.assertEqual(browser.drawn(b)["typed"]["text"], "••")
+        self.assertNotIn("hunter2", json.dumps(b.typed))
+        # A fill with no press (a script focused the field) is looked at each time.
+        field[0] = "email"
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.insertText", "params": {"text": "me"}}, tabs)
+        field[0] = "pw"
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.insertText", "params": {"text": "pw"}}, tabs)
+        self.assertEqual(browser.drawn(b)["typed"]["text"], "••")
+
+    def test_enter_ends_a_run_of_keys_so_the_next_field_is_looked_at_again(self):
+        b, _ = self.fake()
+        looks = []
+        browser.note_keys(b, "ag1", "me", hidden=lambda: looks.append(1) or False)
+        browser.note_keys(b, "ag1", key="Tab", hidden=lambda: looks.append(1) or False)
+        browser.note_keys(b, "ag1", "pw", hidden=lambda: looks.append(1) or True)
+        self.assertEqual((len(looks), browser.drawn(b)["typed"]["text"]), (2, "••"))
+
+    def test_the_relay_records_the_input_of_a_session_for_the_shown_tab(self):
+        b, _ = self.fake()
+        tabs = {}
+        browser.track_targets(tabs, {"method": "Target.attachedToTarget",
+                                     "params": {"sessionId": "S1", "targetInfo": {"targetId": "T1"}}})
+        browser.track_targets(tabs, {"method": "Target.attachedToTarget",
+                                     "params": {"sessionId": "S2", "targetInfo": {"targetId": "T2"}}})
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.dispatchMouseEvent",
+                                       "params": {"type": "mousePressed", "x": 5, "y": 6}}, tabs)
+        for k in ("a", "b"):
+            browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.dispatchKeyEvent",
+                                           "params": {"type": "keyDown", "key": k, "text": k}}, tabs)
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.dispatchKeyEvent",
+                                       "params": {"type": "keyDown", "key": "c", "text": "c", "modifiers": 4}}, tabs)
+        browser.relay_input(b, "ag1", {"sessionId": "S2", "method": "Input.insertText", "params": {"text": "other tab"}}, tabs)
+        browser.relay_input(b, "ag1", {"sessionId": "S1", "method": "Input.insertText", "params": {"text": "!"}}, tabs)
+        d = browser.drawn(b)
+        self.assertEqual((d["pointer"]["x"], d["pointer"]["press"], d["typed"]["text"]), (5, 1, "ab!"))
+        browser.track_targets(tabs, {"method": "Target.detachedFromTarget", "params": {"sessionId": "S1"}})
+        self.assertEqual(tabs, {"S2": "T2"})
+
+    def test_the_frame_poll_carries_the_pointer_and_counts_as_watching(self):
+        b, _ = self.fake(watched=False)
+        b.watched = 0
+        browser.note_pointer(b, "ag1", 1, 2)
+        f = browser.frame(b, 0, 0.01)
+        self.assertEqual((f["pointer"]["x"], f["pointer"]["y"]), (1, 2))
+        self.assertTrue(browser.pace(b))
+
+    def test_a_session_s_first_input_opens_the_browser_in_its_panel_once(self):
+        routes.SHOWN.clear()
+        self.addCleanup(routes.SHOWN.clear)
+        n = len(routes.browser_opens())
+        routes.first_input("web", "ag1")
+        routes.first_input("web", "ag1")
+        opens = routes.browser_opens()
+        self.assertEqual(len(opens), n + 1)
+        self.assertEqual((opens[-1]["session"], opens[-1]["project"]), ("ag1", "web"))
+
+    def test_hand_to_a_session_gives_it_control_and_tells_its_chat(self):
+        core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
+        self.assertIn("browser_hand", server.TYPING_OPS)
+        b, _ = self.fake()
+        b.running = lambda: True
+        browser.control(self.c, b, "ag1")
+        browser.take(self.c, b, "mark")
+        told = []
+        with mock.patch.object(server, "_typing_pane", side_effect=RiverError("ag1 has no pane")):
+            with self.assertRaisesRegex(RiverError, "no pane"):
+                server.OPS["browser_hand"](self.c, {"project": "web", "to": "ag1"}, "mark")
+        self.assertEqual(b.state["controller"]["who"], "mark")  # it stays with the person
+        with mock.patch.object(server, "_typing_pane", lambda *a, **k: "%1"), \
+                mock.patch.object(server, "session_send", lambda conn, agent, text, who=None, hold=False:
+                                  told.append((agent, text, who, hold))):
+            with self.assertRaisesRegex(RiverError, "only a person"):
+                server.OPS["browser_hand"](self.c, {"project": "web", "to": "ag1"}, "ag1")
+            out = server.OPS["browser_hand"](self.c, {"project": "web", "to": "ag1"}, "mark")
+        self.assertEqual(b.state["controller"]["who"], "ag1")
+        self.assertEqual(told, [("ag1", "The browser is at Example (https://example.com/). Take it from here.",
+                                 "mark", True)])
+        self.assertEqual(out["told"], "ag1")
+        with self.assertRaisesRegex(RiverError, "no session nobody"):
+            server.OPS["browser_hand"](self.c, {"project": "web", "to": "nobody"}, "mark")
+
+    def test_screenshot_cursor_draws_the_pointer_in_and_takes_it_out(self):
+        b, sent = self.fake()
+        js = []
+        b.evaluate = lambda expr, timeout=None: js.append(expr)
+        b.page = lambda method, params=None, timeout=None: {"data": "PNG"}
+        self.assertEqual(browser.screenshot(b, cursor=True)["cursor"], False)  # nobody pointed yet
+        self.assertEqual(js, [])
+        browser.note_pointer(b, "ag1", 50, 60, press=True)
+        out = browser.screenshot(b, cursor=True)
+        self.assertEqual((out["png"], out["cursor"]), ("PNG", True))
+        self.assertTrue(js[0].startswith(browser.CURSOR_JS) and js[0].endswith("(50.0,60.0,50.0,60.0)"))
+        self.assertEqual(js[1], browser.CURSOR_OFF)
+        js.clear()
+        self.assertFalse(browser.screenshot(b)["cursor"])
+        self.assertEqual(js, [])
 
 
 class FakeHandler:
@@ -371,6 +583,19 @@ class RealChrome(Base):
         self.assertTrue(base64.b64decode(browser.screenshot(b)["png"]).startswith(b"\x89PNG"))
         f = browser.frame(b, 0, 5)
         self.assertEqual((f["frame"]["w"], f["frame"]["h"]), (640, 480))
+        # #5616: while someone watches, a click glides and a text goes in key by key; the page gets both the same way.
+        b.evaluate("document.getElementById('q').value = ''")
+        b.watched = __import__("time").time()
+        browser.type_text(b, "slow", "#q", who="ag1")
+        browser.click(b, "#b", who="ag1")
+        self.assertEqual(b.evaluate("document.title"), "clicked slow")
+        self.assertEqual(browser.frame(b, 0, 1)["typed"]["text"], "slow")
+        plain = browser.screenshot(b)
+        drawn = browser.screenshot(b, cursor=True)
+        self.assertEqual((plain["cursor"], drawn["cursor"]), (False, True))
+        self.assertNotEqual(plain["png"], drawn["png"])
+        self.assertIsNone(b.evaluate("document.getElementById('__maxpm_cursor')"))  # it went right after
+        self.assertEqual(browser.screenshot(b)["png"], plain["png"])
         # A page of an allowed address still cannot reach another loopback port through the proxy.
         core.config_unset(self.c, "browser_allow", project="web")
         got = b.evaluate(f"fetch('http://127.0.0.1:{port}/sneak').then(r => 'got ' + r.status).catch(e => 'ERR')")

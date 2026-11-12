@@ -490,8 +490,12 @@ Each project has one browser that `maxpm serve` runs (headless Google Chrome, it
 and uses it in the side panel of your session (Browser), and you drive the same browser:
 
 - `maxpm browser open <address>` (it also shows the browser in your side panel), `text`, `html [--out f]`,
-  `screenshot [--out f] [--full]` (prints the PNG's path: read it), `click --selector '<css>'` (or `click <x> <y>`),
-  `type "<text>" [--selector '<css>']`, `key Enter`, `eval "<js>"`, `back`, `reload`, `status`.
+  `screenshot [--out f] [--full] [--cursor]` (prints the PNG's path: read it; `--cursor` draws your pointer and
+  last click in), `click --selector '<css>'` (or `click <x> <y>`), `type "<text>" [--selector '<css>']`,
+  `key Enter`, `eval "<js>"`, `back`, `reload`, `status`.
+- The user watches you: your first click or key opens the browser in your side panel, which draws your pointer
+  and the keys you type. While it shows, a click glides to its point and a text goes in key by key.
+- The user can hand you the browser (Hand to in the panel): you control it then, and your chat gets its address.
 - One controller at a time. `maxpm browser control` takes it for your session; `maxpm browser give <label>` says
   that your subagent (for example `browser`) drives it now; `maxpm browser release` gives it up. While the user
   holds it (Take control in the panel), commands that change the page are refused: wait, and read

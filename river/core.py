@@ -172,6 +172,13 @@ DEFAULT_SETTINGS = {
     # controller rule and the sandbox. A command instead of on starts another Playwright MCP (a pinned version):
     # npx -y @playwright/mcp@0.0.40. Off by default: each session then runs one more Node process.
     "browser_mcp": "off",
+    # How fast a session moves and types in the project's browser (#5616): watch, at a person's pace while the side
+    # panel shows the browser (a click glides to its point in about half a second, a text goes in key by key, and the
+    # panel shows both), at once while nobody watches; person, always at a person's pace; fast, always at once.
+    "browser_pace": "watch",
+    # on: a screenshot that a session takes with the Playwright tools has the session's pointer and its last click
+    # ring drawn in (#5616), as maxpm browser screenshot --cursor; off: a clean picture of the page.
+    "browser_shot_cursor": "off",
     # The Terminal tab (#4803): a plain shell on this computer in the page, for a person (never an agent). On for
     # the page on this computer; through the relay only when web_terminal_relay is on too, because whoever holds
     # the relay sign-in could then run any command here.
@@ -2084,6 +2091,10 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     elif key == "browser_mcp":
         from .browser import mcp_command
         mcp_command(value)
+    elif key == "browser_pace" and value not in ("watch", "person", "fast"):
+        raise RiverError("browser_pace is watch (a person's pace while the panel shows the browser), person or fast")
+    elif key == "browser_shot_cursor" and value not in ("on", "off"):
+        raise RiverError("browser_shot_cursor is on or off")
     elif key in ("browser_lock", "browser_unlock"):
         if value.strip() and "{who}" not in value:
             raise RiverError(f"{key} names the holder as {{who}}: bash scripts/test-browser.sh "

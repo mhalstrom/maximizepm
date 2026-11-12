@@ -884,6 +884,7 @@ def build_parser(only=None):
     x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab; prints the file's path")
     x.add_argument("--out", help="the file to write (default: a new file in the temporary folder)")
     x.add_argument("--full", action="store_true", help="the whole page, not only what shows")
+    x.add_argument("--cursor", action="store_true", help="draw the driving session's pointer and its last click ring in")
     x = brs.add_parser("html", parents=[bp], help="the HTML of the page (the DOM as it is now)")
     x.add_argument("--out", help="write it to this file")
     x = brs.add_parser("text", parents=[bp], help="the text of the page as a person reads it")
@@ -2379,7 +2380,7 @@ def _browser_cmd(conn, a, actor):
     if b == "open":
         args.update(url=a.url, show=not a.no_show)
     elif b == "screenshot":
-        args["full"] = a.full
+        args.update(full=a.full, cursor=a.cursor)
     elif b == "click":
         if a.selector is None and (a.x is None or a.y is None):
             raise RiverError("name what to click: maxpm browser click --selector '<css>', or maxpm browser click <x> <y>")
@@ -2406,6 +2407,8 @@ def _browser_cmd(conn, a, actor):
             f"maxpm-browser-{res['project']}-{time.strftime('%Y%m%d-%H%M%S')}.png")
         out.write_bytes(base64.b64decode(res.pop("png")))
         res["file"] = str(out.resolve())
+        if a.cursor and not res.get("cursor"):
+            print("maxpm: no session pointed in this tab yet: the picture has no pointer", file=sys.stderr)
     if b == "html" and a.out:
         Path(a.out).expanduser().write_text(res.pop("html"), encoding="utf-8")
         res["file"] = str(Path(a.out).expanduser().resolve())

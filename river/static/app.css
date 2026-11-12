@@ -74,6 +74,7 @@
   --h-text-min: 60px;  /* a text field of a few lines */
   /* The same in both themes: a page in a frame is white, and the marks of Find are the marks of a browser. */
   --frame-bg: #fff; --find: #ffe066; --find-on: #ff9632; --find-ink: #000; --flash: #d29922;
+  --ptr: #111; --ptr-edge: #fff; --ptr-mark: #e8590c;
 }
 :root { color-scheme: light dark; }
 :root[data-theme="light"] { color-scheme: light; }

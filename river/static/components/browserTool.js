@@ -5,6 +5,9 @@
 // person (Take control, Give back), or a session (maxpm browser control) and the subagent it names. While a session
 // controls it, the person's input waits until Take control. "Open as a window" shows the same browser as a normal
 // window, for a site that refuses a headless browser (a sign-in); "Back to the panel" ends that.
+// #5616: over the page it draws the pointer of the session that drives (it glides to each point, a ring marks each
+// press, a tag names the session) and the keys it types (dots in a password field); serve records them. "Hand to
+// <session>" gives the browser to the session of this panel and puts the page's address in its chat.
 import { esc, toast, actor, pageToken, typeAction } from "../lib.js";
 import { button } from "./button.js";
 import { openTool, panelSession } from "./sidePanel.js";
@@ -54,12 +57,17 @@ function render(box, project) {
     </form>
     <div class="br-ctl"><span class="br-who muted t-s"></span><span class="br-sp"></span>
       ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
-      ${button("Give back", { cls: "br-back hidden", title: "Give control back to the session", data: { br: "give_back" } })}
+      ${button("Give back", { cls: "br-back hidden", title: "Hand the browser on", data: { br: "give_back" } })}
       ${button("Open as a window", { cls: "br-win", title: "Show it as a normal window", data: { br: "window" } })}
       ${button("Close", { kind: "warn", title: "Close it; the sign-ins stay", data: { br: "close" } })}
     </div>
     <div class="br-stage" tabindex="-1">
       <img class="br-img" alt="The page of the browser" draggable="false">
+      <div class="br-over" aria-hidden="true">
+        <div class="br-ring"></div>
+        <div class="br-ptr hidden"><svg class="br-arrow" viewBox="0 0 20 28"><path d="M1 1 L1 22 L6.5 17 L10 26 L13.5 24.5 L10 16 L17.5 16 Z"/></svg><span class="br-tag"></span></div>
+        <div class="br-typed hidden"><span class="br-tw"></span> <span class="br-tt"><bdi></bdi></span></div>
+      </div>
       <textarea class="br-keys" aria-label="Keys for the browser" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
       <div class="br-msg muted t-m">Starting the browser of ${esc(project)}…</div>
     </div>
@@ -67,6 +75,7 @@ function render(box, project) {
   const $$ = (s) => box.querySelector(s);
   const stage = $$(".br-stage"), img = $$(".br-img"), keys = $$(".br-keys"), msg = $$(".br-msg"), addr = $$(".br-addr");
   const v = { seq: 0, w: 0, h: 0, mine: true, running: false, window: false };
+  const ptr = $$(".br-ptr"), ring = $$(".br-ring"), typed = $$(".br-typed");
   // One request at a time; what the person types or clicks while it runs goes in the next one, in order (#5479: one
   // request for each key took about 0.7 s a key when serve was busy).
   let pending = [], busy = false, token = null;
@@ -91,7 +100,11 @@ function render(box, project) {
       : c.kind === "person" ? (c.who === me || !me ? "You control it." : `${c.who} controls it.`)
       : `${c.who}${c.sub ? " (subagent " + c.sub + ")" : ""} controls it. Take control to use it yourself.`;
     $$(".br-take").classList.toggle("hidden", !c || c.kind === "person");
-    $$(".br-back").classList.toggle("hidden", !(c && c.kind === "person"));
+    const back = $$(".br-back"), to = handTo(j);
+    back.classList.toggle("hidden", !(c && c.kind === "person"));
+    back.textContent = to ? "Hand to " + to : "Give back";
+    back.dataset.br = to ? "hand" : "give_back";
+    back.dataset.to = to || "";
     const win = $$(".br-win");
     win.textContent = j.window ? "Back to the panel" : "Open as a window";
     win.dataset.br = j.window ? "headless" : "window";
@@ -108,6 +121,41 @@ function render(box, project) {
       v.w = j.frame.w || img.naturalWidth; v.h = j.frame.h || img.naturalHeight;
       msg.classList.add("hidden");
     }
+    draw(j);
+  }
+
+  // The session of this panel, else the one that held the browser before the person took it.
+  const handTo = (j) => panelSession() || j.before || "";
+
+  // The driving session's pointer and keys over the frame (#5616), in the stage's pixels.
+  let last = null, presses = null, hideTyped = null;
+  const spot = (x, y) => { const s = stage.getBoundingClientRect(), r = img.getBoundingClientRect();
+    return v.w && r.width ? [r.left - s.left + x * r.width / v.w, r.top - s.top + y * r.height / v.h] : null; };
+  function draw(j) {
+    const p = j.pointer, c = j.controller, xy = p && spot(p.x, p.y);
+    if (!xy || (c && c.kind === "person")) { ptr.classList.add("hidden"); last = null; }
+    else {
+      // A long jump glides longer; the steps of a click of maxpm browser come close together and follow at once.
+      const d = last ? Math.hypot(xy[0] - last[0], xy[1] - last[1]) : 0;
+      ptr.style.transitionDuration = last ? Math.round(Math.min(450, Math.max(60, d * 1.2))) + "ms" : "0ms";
+      ptr.style.transform = `translate(${xy[0]}px, ${xy[1]}px)`;
+      ptr.querySelector(".br-tag").textContent = p.who || "";
+      ptr.classList.remove("hidden"); last = xy;
+      if (presses !== null && p.press > presses && p.px != null) {
+        const r = spot(p.px, p.py);
+        ring.style.translate = `${r[0]}px ${r[1]}px`;  // not transform: the pulse's scale would scale the move too
+        ring.classList.remove("br-pulse"); void ring.offsetWidth; ring.classList.add("br-pulse");
+      }
+      presses = p.press;
+    }
+    const t = j.typed;
+    clearTimeout(hideTyped);
+    if (t && t.age < 4 && t.text) {
+      typed.querySelector(".br-tw").textContent = t.who + (t.secret ? " types a secret:" : " types:");
+      typed.querySelector(".br-tt bdi").textContent = t.text;
+      typed.classList.remove("hidden");
+      hideTyped = setTimeout(() => typed.classList.add("hidden"), (4 - t.age) * 1000);
+    } else typed.classList.add("hidden");
   }
 
   // The page takes the size of the stage (headless only).
@@ -178,12 +226,16 @@ function render(box, project) {
     e.preventDefault();
     const what = b.dataset.br;
     try {
+      if (what === "hand") {  // #5616: the session controls it now, and its chat has the page's address
+        const r = await typeAction("browser_hand", { project, to: b.dataset.to });
+        toast(`${r.told} has the browser`); return show(r);
+      }
       if (what === "window" || what === "headless") { msg.classList.remove("hidden"); msg.textContent = what === "window" ? "Opening a window…" : "Back to the panel…"; }
       const args = { project };
       if (what === "window" || what === "headless") args.window = what === "window";
       show(await call(what === "headless" ? "window" : what, args));
       if (what === "start") { sized = ""; fit(); }
-    } catch (err) { /* call showed it */ }
+    } catch (err) { if (what === "hand") toast(err.message, true); }
   });
   $$(".br-bar").addEventListener("submit", async (e) => {
     e.preventDefault(); const url = addr.value.trim(); if (!url) return;
