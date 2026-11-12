@@ -4844,3 +4844,21 @@ class Ops(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "runs now"):
             server.OPS["ops_run"](self.c, {"scope": "site", "name": "hang"}, "boss")
         self.wait_runs(2)
+
+
+class PageAgents(unittest.TestCase):
+    """The page's state names the agents it shows, not every agent that ever ran (#5491)."""
+
+    def test_the_live_ones_the_people_the_holders_and_the_newest_ended(self):
+        ag = lambda name, state, seen, kind="ai": {"name": name, "kind": kind, "state": state, "last_seen": seen}
+        ended = [ag(f"old-{n:02d}", "stopped", f"2026-10-{n:02d}T00:00:00Z") for n in range(1, 41)]
+        st = {"agents": [ag("mark", "gone", "2026-01-01T00:00:00Z", "human"), ag("live", "active", "x"),
+                         ag("holder", "gone", "2026-01-01T00:00:00Z"), ag("pane", "stopped", "2026-01-01T00:00:00Z")]
+              + ended,
+              "items": [{"id": 1, "assignee": None, "reserved_for": "holder"}],
+              "queues": {"old-01": [1], "old-40": [2], "live": [3]}}
+        server._page_agents(st, {"pane"})
+        names = {a["name"] for a in st["agents"]}
+        self.assertTrue({"mark", "live", "holder", "pane"} <= names)
+        self.assertEqual(sorted(n for n in names if n.startswith("old-")), [f"old-{n:02d}" for n in range(11, 41)])
+        self.assertEqual(sorted(st["queues"]), ["live", "old-40"])

@@ -4161,6 +4161,21 @@ def _state_hit(key):
     return None
 
 
+ENDED_SHOWN = 30  # the Sessions tab lists the newest 30 ended sessions (static/views/sessions-work.js)
+
+
+def _page_agents(st, running):
+    """The agents the page shows, and their queues: the people, every agent that is not stopped or gone, those
+    with a running session or with an item of the state, and the ENDED_SHOWN that ended last. The 800 ended
+    agents of a long-used queue were half of the page's first answer (1.1 of 2.2 MB, #5491)."""
+    ended = lambda a: a["kind"] != "human" and a["state"] in ("stopped", "gone") and a["name"] not in running
+    last = sorted((a for a in st["agents"] if ended(a)), key=lambda a: str(a.get("last_seen") or ""), reverse=True)
+    keep = {a["name"] for a in st["agents"] if not ended(a)} | {a["name"] for a in last[:ENDED_SHOWN]}
+    keep |= {x for it in st.get("items") or [] for x in (it.get("assignee"), it.get("reserved_for")) if x}
+    st["agents"] = [a for a in st["agents"] if a["name"] in keep]
+    st["queues"] = {k: v for k, v in (st.get("queues") or {}).items() if k in keep}
+
+
 def page_state(closed):
     """The state for /api/state: closed says whether done and dropped items are in it. The callers only read it."""
     key = bool(closed)
@@ -4192,6 +4207,7 @@ def page_state(closed):
             st["sessions"] = [a["name"] for a in run]
             # What each running session works on, the name the page shows for it (#4695).
             st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
+            _page_agents(st, set(st["sessions"]))
             st["relay"] = relay.status()
             st["canvas_opens"] = canvas_opens()  # maxpm canvas open: the page opens the canvas (#4783)
             from .routes import browser as browser_routes
