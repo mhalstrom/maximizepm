@@ -496,6 +496,13 @@ def sweep(conn):
     core.poll_activity(conn, None)
 
 
+def release_check(conn):
+    """maxpm serve only: ask GitHub once a day for the latest release (river/release.py)."""
+    if SERVE_PORT.get("port"):
+        from . import release
+        release.loop_step(conn)
+
+
 def loop(stop, interval_s=None):
     """Run the dispatcher until stop (a threading.Event) is set. For maxpm serve and maxpm notify run.
     No error of a pass ends the loop: the next pass tries again. After each pass it records the time and the
@@ -534,6 +541,7 @@ def loop(stop, interval_s=None):
                 server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
                 core.schedule_due,  # a scheduled task whose time, less its lead, has come adds its item (#5507)
                 ops_deadman,  # the beat to ops_deadman_url, so an outside service sees that serve runs (#5435)
+                release_check,  # once a day: is a newer MaximizePM out (update_check, #5601)
                 lambda c: core._channels(core.setting(c, "notify_channels")) and run(c),  # the notices
             )
             failed = []

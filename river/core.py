@@ -380,6 +380,9 @@ DEFAULT_SETTINGS = {
     # and a busy day had a commit to the code every 7 minutes. New code waits until serve has run this long. 0s: at
     # once.
     "serve_reload_min": "15m",
+    # maxpm serve asks GitHub for the latest MaximizePM release once a day (river/release.py): a newer version shows
+    # a bar on the page and a line in the manager's briefing, with its notes and the Update button. off: no request.
+    "update_check": "on",
     # While this computer is connected to the relay (maxpm connect), maxpm serve keeps it from idle sleep
     # (macOS caffeinate -i), so the tunnel answers while the person is away. The display still sleeps; the cost
     # is the power of a computer that stays on (a few watts for a Mac mini or a MacBook on its charger). off:
@@ -2113,7 +2116,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal",
+    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -19903,7 +19906,9 @@ def manage(conn, cwd, actor=None, takeover=None):
     with tx(conn):  # what the manager has seen: manage --watch reports what is new after this
         conn.execute("UPDATE agents SET manage_seen=? WHERE name=?", (json.dumps(_finding_keys(f)), actor))
     pol = policies_for(conn, role="manager")
+    from . import release
     return {"agent": actor, "new_name": new_name, "role": "manager", "status": status(conn), "findings": f,
+            "release": release.notice(conn),  # a newer MaximizePM is out: tell the person (#5601)
             "policies": pol, "other_policies": len(policy_list(conn)) - len(pol),
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
             "wait_high": setting(conn, "manage_wait_high", agent=actor),

@@ -340,6 +340,18 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .fpath-no { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; cursor: help; }
 /* MaximizePM was updated while the person was busy (#4690): the page loads again when the work ends, or now. */
 .newcode { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 30; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.18); font-size: 13px; display: flex; gap: 10px; align-items: center; }
+/* A new release (#5601, components/releaseUpdate.js): the bar at the foot of the page, above the code bar, and its dialog. */
+.relbar { position: fixed; left: 50%; bottom: calc(var(--sp-7) + var(--sp-6) + var(--sp-6)); transform: translateX(-50%); z-index: 30; background: var(--panel); border: var(--hair) solid var(--accent); border-radius: var(--r-m); padding: var(--sp-3) var(--sp-5); box-shadow: var(--shadow-pop); font-size: var(--fs-m); display: flex; gap: var(--sp-4); align-items: center; width: max-content; max-width: calc(100vw - 2 * var(--sp-6)); box-sizing: border-box; }
+.relbar > span { flex: 1 1 auto; min-width: 0; }
+.relbar .btn { white-space: nowrap; flex: none; }
+body:has(#relDlg:not(.hidden)) .relbar { visibility: hidden; }  /* the dialog says the same */
+#relDlg { --dlg-w: var(--w-dlg-m); }
+.rel-box h2 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }
+.rel-box > p { margin: var(--sp-2) 0; }
+.rel-notes { max-height: var(--h-pre); overflow: auto; border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-3) var(--sp-5); margin: var(--sp-4) 0; font-size: var(--fs-m); }
+.rel-notes h2, .rel-notes h3 { font-size: var(--fs-base); margin: var(--sp-4) 0 var(--sp-2); }
+.rel-notes ul { padding-left: var(--sp-7); margin: var(--sp-2) 0; }
+.rel-box > .actions { justify-content: flex-end; margin-top: var(--sp-5); }
 /* The work name of a session, and its agent id in small text (#4695): Sessions tab and the Board's Agents. */
 .sid { color: var(--muted); font-size: 11.5px; font-weight: 400; overflow-wrap: anywhere; }
 

@@ -3900,6 +3900,38 @@ def _restart_soon(why="updated"):
     threading.Thread(target=go, daemon=True).start()
 
 
+def _restart_into(root):
+    """The app's Update (#5601): after the reply goes out, replace this process with a maxpm serve from the new code
+    folder root, with the same Python, port and arguments. The process stays the one that the app started, so the
+    app still stops it when it quits."""
+    def go():
+        time.sleep(0.8)
+        print(f"updated; restarting from {root}", flush=True)
+        stop_loop_process()
+        os.chdir(root)
+        os.execv(sys.executable, [sys.executable, str(Path(root) / "bin" / "maxpm")]
+                 + [a for a in sys.argv[1:] if a != "--open"])
+    threading.Thread(target=go, daemon=True).start()
+
+
+def release_status(conn):
+    """The page's bar of a new version (#5601): release.status, read from the last check (no network)."""
+    from . import release
+    return release.status(conn)
+
+
+def release_update(conn, restart=None):
+    """The one button of the bar: the app swaps its code and starts again; a clone runs the git Update."""
+    from . import release
+    st = release.status(conn)
+    if st["kind"] == "app":
+        return {"kind": "app", **release.apply_code(conn, restart or _restart_into)}
+    if st["kind"] == "git":
+        return {"kind": "git", **update_apply()}
+    raise RiverError(f"this copy of MaximizePM is not the app or a git clone; update it the way you installed it "
+                     f"(the release: {st.get('url') or release.RELEASES})")
+
+
 def _code_loads():
     """None when the river code on disk loads in a new Python, else the last line of its error: a restart
     onto code that does not start would leave no page at all."""
@@ -4164,10 +4196,18 @@ def command_status():
 
 def _launcher_text():
     import shlex
-    root = Path(__file__).resolve().parent.parent
+    # The app names its bundle (#5601): the code may run from a newer version in the app's folder, but the
+    # launcher names the bundle, so it stays the same text after an update.
+    bundle = os.environ.get("MAXPM_APP_BUNDLE") if DESKTOP else None
+    root = Path(bundle) if bundle else Path(__file__).resolve().parent.parent
     py, script = shlex.quote(sys.executable), shlex.quote(str(root / "bin" / "maxpm"))
     lines = [f"#!/bin/sh", f"{LAUNCHER_MARK}: runs the MaximizePM that the setup guide found ({root}).",
              "# The setup guide rewrites it (Add the maxpm command); delete it to remove it."]
+    if bundle:
+        # The version that the app runs now: an Update puts newer code in the app's folder and names it in current.
+        lines += ['d="${MAXPM_APP_DIR:-$HOME/.maximizepm/app}"',
+                  'c=$(head -n 1 "$d/current" 2>/dev/null)',
+                  f'if [ -n "$c" ] && [ -f "$c/bin/maxpm" ] && [ -x {py} ]; then exec {py} "$c/bin/maxpm" "$@"; fi']
     if DESKTOP:
         # An app opened from Downloads and then moved to Applications: use the copy in Applications.
         app = "/Applications/MaximizePM.app/Contents/Resources/river-app"
@@ -4387,6 +4427,10 @@ OPS = {
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],
     "serve_status": lambda c, a, who: {"boot": BOOT, "stale": code_stale()},
     "update": lambda c, a, who: _no_update_in_app() or update_apply(),
+    "release_update": lambda c, a, who: release_update(c),  # the bar of a new version (#5601)
+    "release_download": lambda c, a, who: __import__("river.release", fromlist=["x"]).download_shell(c),
+    "release_check": lambda c, a, who: (__import__("river.release", fromlist=["x"]).check(c, force=True),
+                                        release_status(c))[1],
     "restart": lambda c, a, who: _no_update_in_app() or (_restart_soon(), {"restarting": True})[1],
 }
 
@@ -4851,11 +4895,16 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
         if path == "/api/update":
+            conn = core.connect()
+            try:
+                rel = release_status(conn)  # a new release (#5601), from the last check of serve
+            finally:
+                conn.close()
             if DESKTOP:  # the page hides the button when git is false
-                return self._send(200, {"git": False, "desktop": True, "boot": BOOT})
+                return self._send(200, {"git": False, "desktop": True, "boot": BOOT, "release": rel})
             try:
                 return self._send(200, {**update_status(fetch="fetch=0" not in self.path), "boot": BOOT,
-                                        "stale": code_stale()})
+                                        "stale": code_stale(), "release": rel})
             except RiverError as e:
                 return self._send(409, {"error": str(e)})
         if path == "/api/agents":  # each agent's describe part, the parts it supports, and its setup texts (#5184)
@@ -5249,6 +5298,9 @@ def serve(port: int, open_browser=False, dev=False):
     LOOP_THREAD.update(thread=None, proc=None, stop=stop, child=child, restart=None)
     keep_loop()
     relay.start(stop, port)  # keeps the relay socket open while relay.json exists (maxpm connect)
+    if DESKTOP:
+        from . import release
+        release.started()  # an update to this code started it: the app keeps this version (#5601)
     serve_file = None
     if runners:
         start_runners(str(core.db_path()))

@@ -55,3 +55,58 @@ test("a packaged app starts MaximizePM with the Python it carries, without looki
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// The Update of the page (#5601) puts newer code in the app's folder; the app starts the newest good version.
+test("the app starts the newest good version of the code, and never one that failed", () => {
+  const { pickRoot, markBad } = require("../server");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "river-versions-"));
+  const code = (root, v) => {
+    fs.mkdirSync(path.join(root, "river"), { recursive: true });
+    fs.mkdirSync(path.join(root, "bin"), { recursive: true });
+    fs.writeFileSync(path.join(root, "river", "__init__.py"), `__version__ = "${v}"\n`);
+    fs.writeFileSync(path.join(root, "bin", "maxpm"), "");
+    return root;
+  };
+  try {
+    const bundle = code(path.join(tmp, "bundle"), "1.0.0"), dir = path.join(tmp, "app");
+    assert.strictEqual(pickRoot({ bundle, dir }), bundle);  // no updates yet
+    assert.strictEqual(fs.readFileSync(path.join(dir, "current"), "utf8").trim(), bundle);
+    const v11 = code(path.join(dir, "versions", "1.1.0"), "1.1.0"), v12 = code(path.join(dir, "versions", "1.2.0"), "1.2.0");
+    code(path.join(dir, "versions", "1.10.0-half"), "1.10.0");
+    fs.rmSync(path.join(dir, "versions", "1.10.0-half", "bin"), { recursive: true });  // no bin/maxpm: skipped
+    assert.strictEqual(pickRoot({ bundle, dir }), v12);
+    // An Update to 1.2.0 that never answered (trying is still there): 1.2.0 is bad, 1.1.0 starts.
+    fs.writeFileSync(path.join(dir, "trying"), v12 + "\n");
+    assert.strictEqual(pickRoot({ bundle, dir }), v11);
+    assert.ok(fs.existsSync(path.join(v12, ".bad")) && !fs.existsSync(path.join(dir, "trying")));
+    assert.strictEqual(fs.readFileSync(path.join(dir, "current"), "utf8").trim(), v11);
+    // A new app with newer code than the versions: its own copy wins.
+    fs.writeFileSync(path.join(bundle, "river", "__init__.py"), '__version__ = "2.0.0"\n');
+    assert.strictEqual(pickRoot({ bundle, dir }), bundle);
+    assert.strictEqual(markBad(bundle, dir), false);  // the app's own copy is never marked bad
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a version in the app's folder starts with the Python of the app's bundle", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "river-split-"));
+  const bundle = path.join(tmp, "bundle");
+  fs.mkdirSync(path.join(bundle, "python", "bin"), { recursive: true });
+  const real = require("node:child_process").execFileSync(findPython()[0], ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
+  fs.symlinkSync(real, path.join(bundle, "python", "bin", "python3"));
+  const r = await startRiver({ riverRoot: repo, pythonRoot: bundle, find: () => null,
+    env: { ...process.env, MAXPM_DB: path.join(tmp, "t.db") } });
+  try {
+    assert.strictEqual(r.child.spawnargs[0], path.join(bundle, "python", "bin", "python3"));
+    assert.strictEqual((await fetchJson(r.url + "api/update")).release.current.split(".").length, 3);
+  } finally {
+    await r.stop();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the shell id ignores the version of package.json", () => {
+  const { shellId } = require("../scripts/shell-id");
+  assert.match(shellId(), /^[0-9a-f]{16}$/);
+});

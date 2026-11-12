@@ -1,5 +1,5 @@
 # The desktop app: on a version tag (v0.1.0), build the macOS .dmg files (Apple silicon and Intel) and attach
-# them to a GitHub Release for that tag. Not signed or notarized yet (item #249 adds that): the first open
+# them to a GitHub Release for that tag, with the code archive and manifest.json that the app's Update reads (#5601). Not signed or notarized yet (item #249 adds that): the first open
 # needs Open Anyway in System Settings (macOS 15+) or right-click, Open (older macOS).
 name: desktop-release
 on:
@@ -89,10 +89,34 @@ jobs:
             // find: () => null proves the app does not fall back to a Python on the runner.
             startRiver({ riverRoot: process.argv[1], find: () => null }).then(async (r) => { console.log("MaximizePM answers on", r.url, "with", r.child.spawnargs[0]); await r.stop(); })
               .catch((e) => { console.error(e.message); process.exit(1); });' "$PWD/out/mac-arm64/MaximizePM.app/Contents/Resources/river-app"
+      # The Update of the app (#5601, river/release.py) downloads this archive: the same bin and river as the app
+      # carries, with the dictation helper. manifest.json names it with its sha256 and the shell id of these apps.
+      - name: The code archive and manifest.json for the app's Update
+        run: |
+          v="${TAG#v}"
+          grep -qx "__version__ = \"$v\"" river/__init__.py || { echo "river/__init__.py does not say version $v"; exit 1; }
+          d="$RUNNER_TEMP/code/maximizepm-$v"
+          mkdir -p "$d"
+          cp -R bin "$d/bin"
+          rsync -a --exclude '__pycache__' --exclude '*.pyc' river "$d/"
+          [ -x "$d/river/bin/maxpm-dictate" ] || { echo "the dictation helper is missing"; exit 1; }
+          tar -C "$RUNNER_TEMP/code" -czf "desktop/out/MaximizePM-$v-code.tar.gz" "maximizepm-$v"
+          node desktop/scripts/manifest.js "$v" "desktop/out/MaximizePM-$v-code.tar.gz" > desktop/out/manifest.json
+          [ "$(jq -r .shell desktop/out/manifest.json)" = "$(cat desktop/build/shell-id.txt)" ] || { echo "the shell id differs from the app's"; exit 1; }
+          cat desktop/out/manifest.json
+      - name: The code archive passes the start check of an Update, with the app's own Python
+        run: |
+          v="${TAG#v}"; t="$RUNNER_TEMP/unpack"; mkdir -p "$t"
+          tar -C "$t" -xzf "desktop/out/MaximizePM-$v-code.tar.gz"
+          py=desktop/out/mac-arm64/MaximizePM.app/Contents/Resources/river-app/python/bin/python3
+          PYTHONPATH= "$py" -c 'import sys; sys.path.insert(0, sys.argv[1]); from river import release; why = release.start_check(sys.argv[1], sys.argv[2]); print(why or "start check OK"); sys.exit(1 if why else 0)' "$t/maximizepm-$v" "$v"
       - uses: actions/upload-artifact@v4
         with:
           name: mac
-          path: desktop/out/*.dmg
+          path: |
+            desktop/out/*.dmg
+            desktop/out/*-code.tar.gz
+            desktop/out/manifest.json
           if-no-files-found: error
   # The x64 .dmg is built on an Apple silicon runner; run it on an Intel Mac before it is published.
   mac-intel:

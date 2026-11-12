@@ -14,6 +14,7 @@ import { browserOpens } from "./components/browserTool.js";
 import { wireArtLinks } from "./components/artLinks.js";
 import { wireItemPop } from "./components/itemPop.js";
 import { installMics } from "./components/dictate.js";
+import { showRelease, openRelease } from "./components/releaseUpdate.js";
 import { S, tab, setState, setTabName, nav, goalSel, setPlan, planView, scope, planShown } from "./page.js";
 import { makeStateClient } from "./state.js";
 // The views (#4656): each tab of the page has a file of its own in views/.
@@ -863,6 +864,7 @@ $("#relayBtn").onclick = async () => {
 // or the server is too old to know the update route (mode "old": only a manual restart helps).
 const RESTART_BY_HAND = "This page is newer than its server. Stop maxpm serve (Ctrl-C in its terminal) and start it again.";
 let updateMode = "update";
+const bootNow = async () => (await (await fetch("api/update?fetch=0")).json()).boot;
 async function checkUpdate() {
   const r = await fetch("api/update"), b = $("#updateBtn");
   const u = r.ok ? await r.json() : {};
@@ -870,6 +872,13 @@ async function checkUpdate() {
     updateMode = "old";
     b.classList.remove("hidden"); b.classList.add("primary");
     b.textContent = "Restart needed"; b.title = RESTART_BY_HAND;
+    return;
+  }
+  // A new release (#5601): the bar at the foot, and this button opens its dialog (also in the app, which has no git).
+  if (showRelease(u.release, { boot: bootNow, waitForRestart }) && !u.stale) {
+    updateMode = "release";
+    b.classList.remove("hidden"); b.classList.add("primary");
+    b.textContent = `Update to ${u.release.version}`; b.title = "What is new";
     return;
   }
   if (!u.git && !u.stale) return b.classList.add("hidden");
@@ -892,6 +901,7 @@ async function waitForRestart(boot) {
 }
 $("#updateBtn").onclick = async () => {
   if (updateMode === "old") return toast(RESTART_BY_HAND, true);
+  if (updateMode === "release") return openRelease();
   const b = $("#updateBtn"); b.disabled = true; b.textContent = updateMode === "restart" ? "Restarting…" : "Updating…";
   try {
     const boot = (await (await fetch("api/update?fetch=0")).json()).boot;
@@ -909,7 +919,7 @@ $("#updateBtn").onclick = async () => {
 };
 $("#loopLate").onclick = () => {
   if (S.desktop) return toast("Quit the app and open it again: that starts its automatic work again", true);
-  if (updateMode !== "old") updateMode = "restart";
+  if (updateMode !== "old") updateMode = "restart";  // also over "release": the loop's restart comes first
   $("#updateBtn").onclick();
 };
 // The header on a phone and a tablet. The ⋯ (#4885) shows the controls that do not fit: on a phone (#4903) as a menu

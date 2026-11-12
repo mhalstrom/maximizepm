@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const http = require("node:http");
+const os = require("node:os");
 
 // Each candidate is a command and its first arguments. An app started from the Dock gets a short
 // PATH, so on macOS look in the usual places too.
@@ -47,10 +48,62 @@ function get(url) {
   });
 }
 
-// Start the server from the river folder (the repo, or the app's bundled copy). Resolves to
+// The app's own folder for versions of the code (#5601): versions/<version>, which an Update of the page unpacks
+// (river/release.py), current (the folder the app and the maxpm launcher run) and trying (a version that an Update
+// started and that has not answered yet).
+function appDir(env = process.env) {
+  return env.MAXPM_APP_DIR || path.join(os.homedir(), ".maximizepm", "app");
+}
+
+// The version a code folder says it is (river/__init__.py), or null.
+function codeVersion(root) {
+  try {
+    const m = fs.readFileSync(path.join(root, "river", "__init__.py"), "utf8").match(/__version__\s*=\s*"(\d+)\.(\d+)\.(\d+)"/);
+    return m ? [+m[1], +m[2], +m[3]] : null;
+  } catch (e) { return null; }
+}
+const cmp = (a, b) => (a[0] - b[0]) || (a[1] - b[1]) || (a[2] - b[2]);
+
+// A version that failed: the app does not start it again. Only a folder in versions/, never the app's own copy.
+function markBad(root, dir) {
+  const rel = path.relative(path.join(dir, "versions"), root);
+  if (!root || rel.startsWith("..") || path.isAbsolute(rel) || !fs.existsSync(root)) return false;
+  fs.writeFileSync(path.join(root, ".bad"), new Date().toISOString() + "\n");
+  return true;
+}
+
+function firstLine(file) {
+  try { return fs.readFileSync(file, "utf8").split("\n")[0].trim() || null; } catch (e) { return null; }
+}
+
+// The code folder to start: the newest of the app's own copy (bundle) and the good versions in dir/versions. A
+// version that an Update tried and that never answered (dir/trying is still there) is bad first. Writes dir/current,
+// which the maxpm launcher reads.
+function pickRoot({ bundle, dir }) {
+  const tried = firstLine(path.join(dir, "trying"));
+  if (tried) { markBad(tried, dir); fs.rmSync(path.join(dir, "trying"), { force: true }); }
+  let best = { root: bundle, v: codeVersion(bundle) || [0, 0, 0] };
+  let names = [];
+  try { names = fs.readdirSync(path.join(dir, "versions")); } catch (e) { /* no updates yet */ }
+  for (const name of names) {
+    const root = path.join(dir, "versions", name);
+    if (name.startsWith(".") || fs.existsSync(path.join(root, ".bad")) || !fs.existsSync(path.join(root, "bin", "maxpm"))) continue;
+    const v = codeVersion(root);
+    if (v && cmp(v, best.v) > 0) best = { root, v };
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, ".current.tmp"), best.root + "\n");
+    fs.renameSync(path.join(dir, ".current.tmp"), path.join(dir, "current"));
+  } catch (e) { /* the launcher then runs the bundle */ }
+  return best.root;
+}
+
+// Start the server from the river folder (the repo, the app's bundled copy, or a version in the app's folder).
+// pythonRoot: the folder that holds the app's own Python (the bundle), when it is not riverRoot. Resolves to
 // { url, port, child, stop } once /api/state answers; rejects with a message a person can act on.
-async function startRiver({ riverRoot, python, env = process.env, timeoutMs = 20000, find = findPython } = {}) {
-  const own = python ? null : bundledPython(riverRoot);
+async function startRiver({ riverRoot, pythonRoot, python, env = process.env, timeoutMs = 20000, find = findPython } = {}) {
+  const own = python ? null : bundledPython(pythonRoot || riverRoot);
   const py = python || own || find();
   if (!py) throw new Error("MaximizePM needs Python 3.10 or newer. Install it (for example: brew install python), then open the app again.");
   const [pyCmd, ...pyArgs] = Array.isArray(py) ? py : [py];
@@ -85,4 +138,4 @@ async function startRiver({ riverRoot, python, env = process.env, timeoutMs = 20
   throw new Error(`maxpm serve did not answer on ${url} within ${timeoutMs / 1000}s:\n${log.trim().slice(0, 4000)}`);
 }
 
-module.exports = { findPython, bundledPython, freePort, startRiver };
+module.exports = { findPython, bundledPython, freePort, startRiver, appDir, codeVersion, markBad, pickRoot };

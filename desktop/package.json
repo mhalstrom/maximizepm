@@ -11,7 +11,7 @@
     "test": "node --test",
     "dist": "electron-builder --mac dmg --arm64 --x64 --publish never",
     "python": "node scripts/fetch-python.js",
-    "predist": "node scripts/fetch-python.js mac-arm64 mac-x64",
+    "predist": "node scripts/fetch-python.js mac-arm64 mac-x64 && node scripts/shell-id.js --write",
     "icon": "electron scripts/make-icon.js"
   },
   "devDependencies": {
@@ -48,6 +48,10 @@
       {
         "from": "build/python/${os}-${arch}/python",
         "to": "river-app/python"
+      },
+      {
+        "from": "build/shell-id.txt",
+        "to": "shell-id.txt"
       }
     ],
     "mac": {

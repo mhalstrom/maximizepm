@@ -12,7 +12,7 @@ import os
 from river import core, dictation, server
 
 for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS", "MAXPM_FORK_OF",
-              "MAXPM_MODEL", "MAXPM_QUIET"):
+              "MAXPM_MODEL", "MAXPM_QUIET", "MAXPM_APP_BUNDLE", "MAXPM_APP_DIR", "MAXPM_APP_SHELL"):
     os.environ.pop(_name, None)
 # Nor the agent session that runs the tests: a command records the session's id and web link from these, and that
 # write made a read command (maxpm show) sync the needs-you rows in a Claude Code session with Remote Control only,
@@ -32,6 +32,14 @@ server.DELIVER_RUNNER = lambda agent: None  # no thread types a held message (#5
 server.STATE_TTL = 0  # each /api/state of a test builds anew; StateCache tests the shared build (#5428)
 from river.agents import opencode as opencode_adapter  # noqa: E402
 opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
+from river import release as _release  # noqa: E402
+
+
+def _no_network(url, timeout):
+    raise OSError("the tests ask GitHub for no release (#5601); a test sets release.FETCH itself")
+
+
+_release.FETCH = _no_network
 
 
 def chrome():

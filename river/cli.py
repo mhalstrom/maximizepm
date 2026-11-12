@@ -3923,6 +3923,8 @@ def render_manage(b):
     if b["new_name"]:
         out.append(f"Pass --as {me} on every maxpm command.")
     out += _tmux_line()
+    if b.get("release"):
+        out += ["", "NEW VERSION: " + b["release"]]
     st = b["status"]
     out += ["", "Projects: " + ", ".join(f"{p['project']} {p['ready']} ready/{p['open']} open"
                                           + (f" ({p['backlog']} in backlog)" if p.get("backlog") else "")

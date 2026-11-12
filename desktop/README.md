@@ -27,6 +27,27 @@ A `maxpm` command you installed yourself (a clone or pip) is left alone.
 Inside the app the page's git Update button is hidden: the server runs with
 `MAXPM_DESKTOP=1`, and the app gets its updates as a new release.
 
+## Updates
+
+Once a day `maxpm serve` asks GitHub for the latest release
+(`river/release.py`; setting `update_check`). When a newer version is out, the
+page shows a bar with its notes and one button:
+
+- Most releases change only the MaximizePM code. Update downloads the
+  release's code archive, checks its sha256 (from the release's
+  `manifest.json`), unpacks it to `~/.maximizepm/app/versions/<version>`,
+  checks that it loads, and starts `maxpm serve` again on it. The `.app` does
+  not change, so macOS asks nothing. At each start the app runs the newest
+  good version: a version that does not start is marked `.bad`, and the app
+  goes back to the one before (in the end, its own copy).
+- A release whose app shell changed (Electron, `main.js`, `server.js`,
+  `preload.js`, the build settings or the Python: `scripts/shell-id.js`) has
+  another shell id in its manifest. Then the button downloads the new `.dmg`
+  to Downloads and opens it.
+
+The `maxpm` launcher in `~/.local/bin` runs the version that
+`~/.maximizepm/app/current` names.
+
 ## Release
 
 `npm run dist` builds `out/MaximizePM-<version>-arm64.dmg` and `-x64.dmg`
