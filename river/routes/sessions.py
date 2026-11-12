@@ -152,7 +152,7 @@ def running(h, path):
         prompt = server.pane_prompts(conn, {agent: pane}).get(agent) if pane else None
         return h._send(200, dict(sessions.view(conn, agent, int(cursor) if cursor.isdigit() else None, prompt=prompt,
                                                pane=bool(pane)),
-                                    terminal=bool(pane)))
+                                    terminal=bool(pane), pending=core.pending_list(conn, agent)))
     except RiverError as e:
         return h._send(409, {"error": str(e)})
     finally:
@@ -174,7 +174,9 @@ GET = [
 
 OPS = {
     "session_send": lambda c, a, who: server.session_send(c, a["agent"], a.get("text", ""), who, a.get("images"),
-                                                          a.get("files")),
+                                                          a.get("files"), hold=bool(a.get("hold"))),
+    # Send now under a held message in the chat (#5587).
+    "pending_send_now": lambda c, a, who: server.pending_send_now(c, a["agent"], a["id"], who),
     "session_upload": lambda c, a, who: server.session_upload(c, a["agent"], a.get("data"), a.get("name"), who),
     "session_upload_drop": lambda c, a, who: server.session_upload_drop(c, a["agent"], a.get("id"), who),
     "session_setting": lambda c, a, who: server.session_setting_live(c, a["agent"], a["key"], a.get("value"), who),

@@ -8,7 +8,7 @@
 // page's token: typeAction).
 import { $, esc, ago, clip, store, toast, typeAction, act, actor, shortTitle, getJson } from "../lib.js";
 import { chip } from "../components/chip.js";
-import { appendEntries, prependEntries, agePending, wireCopy, plainText } from "../components/chat.js";
+import { appendEntries, prependEntries, agePending, wireCopy, plainText, drawWaiting } from "../components/chat.js";
 import { openTerminal } from "../components/terminalDialog.js";
 import { openWaiting, closeWaiting } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
@@ -218,6 +218,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   let pane = null;
   const PANES = { you: "#sessYou", arts: "#sessArts" };
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null, lastRead = null;
+  // The messages that maxpm serve holds for this session until its turn ends (#5587), under the chat.
+  let waiting = [];
+  const drawPend = (rows) => { waiting = rows; drawWaiting($("#sessPend"), rows); };
   let older = null, readingOlder = false;  // where the earlier lines of the chat start (#5120), and a read of them
   let pinned = false;  // chosen by the person: it stays on screen when it is not running (read only, #4622)
   const side = $("#sessions"), mgr = $("#sessMgr"), bar = side.closest(".sess-side");
@@ -415,6 +418,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       else appendEntries(col, j.entries, j.refs);
       checkPaths(col, agent);  // what each path means for this session; a refused one says why (#4689)
       agePending(col);
+      drawPend(j.pending || []);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
       lastRead = { agent, provider: j.provider, state: j.state, state_label: j.state_label, terminal: j.terminal };
@@ -497,6 +501,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
     for (const id of ["#sessState", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
     $("#sessBar").classList.remove("can-now");  // the next read of the session says whether it can stop
+    drawPend([]);
     renderGive(name);
     loadPrompts(name);
     loadDraft(name);
@@ -585,7 +590,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // The composer (components/composer.js, #5078) grows with the text; Enter sends, Shift+Enter starts a new line.
   $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message for the session's terminal",
     attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line.",
-    nowTitle: "Stop and send now", stopTitle: "Stop its turn" });
+    stopTitle: "Stop its turn" });
   const text = $("#sessText");
   // The box grows with its text, up to a third of the window, upward over the chat (#5111): the chat keeps its frame
   // and its scroll, so nothing in it moves while the person types. A hidden copy of the box measures the text, so the
@@ -613,12 +618,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   };
   // Empty messages send nothing. Files being read reserve a slot, and Send waits until they are ready.
   const FILE_MAX = 10 * 1024 * 1024, FILE_COUNT = 5;
-  let files = [], sending = false, nowNext = false;
-  // Send now (#5547): the bolt beside the arrow ends the session's turn, then sends; the arrow queues as before.
-  $("#sessNow").addEventListener("click", () => { if (!empty()) { nowNext = true; $("#sessBar").requestSubmit(); } });
+  let files = [], sending = false;
   const empty = () => !text.value.trim() && !files.length;
   const sendState = () => {
-    $("#sessSend").disabled = $("#sessNow").disabled = text.disabled || sending || empty() || files.some(f => f.reading);
+    $("#sessSend").disabled = text.disabled || sending || empty() || files.some(f => f.reading);
     composerState($("#sessBar"), !empty());
     $("#sessAttach").disabled = $("#sessPickFiles").disabled = text.disabled || sending;
   };
@@ -638,8 +641,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (slash.keydown(e)) { e.preventDefault(); e.stopPropagation(); return; }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault(); slash.close();
-      // Ctrl+Enter (Cmd+Enter on a Mac) is Send now while the session runs a turn (#5547); Enter sends as before.
-      nowNext = (e.ctrlKey || e.metaKey) && $("#sessBar").classList.contains("can-now");
       if (!empty()) $("#sessBar").requestSubmit();
     }
     else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && recall(e.key === "ArrowUp" ? 1 : -1, e)) e.preventDefault();
@@ -816,8 +817,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // transcript has it too when the session reads it as a prompt.
   $("#sessBar").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const input = $("#sessText"), btn = $("#sessSend"), to = agent, now = nowNext;
-    nowNext = false;
+    const input = $("#sessText"), btn = $("#sessSend"), to = agent;
     // A command whose view the Usage panel gives (#5224: /usage, /context, /cost, /status, /stats with no argument):
     // the panel only reads, so it opens also for a session that the page cannot type into; nothing goes to it.
     if (to && !sending && !files.length && /^\/\S+\s*$/.test(input.value)) {
@@ -866,11 +866,15 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     let ok = true;
     try {
       const sent = files, typed = input.value;
-      const got = await typeAction(now ? "session_interrupt" : "session_send", { agent: to, text: typed,
+      // While the session runs a turn (the Stop square shows), maxpm serve holds the message and types it when the
+      // turn has ended; it shows under the chat with its own Send now (#5587).
+      const r = await typeAction("session_send", { agent: to, text: typed, hold: $("#sessBar").classList.contains("can-now"),
         ...(sent.length ? { files: sent.map(f => f.id ? { name: f.name, id: f.id } : { name: f.name, data: f.data }) } : {}) });
-      const r = now ? got.sent || {} : got;  // Send now: the interrupt's keys, then the message as Send sends it
-      if (now) toast(`${to}: its turn stopped; your message went at once`);
-      if (to === agent) {
+      if (to === agent && r.waiting) {
+        drawPend([...waiting.filter(p => p.id !== r.waiting.id), r.waiting]);
+        clearFiles(); sentPrompt(to, typed); body.scrollTop = body.scrollHeight;
+        input.value = ""; slash.close(); grow(); saveDraft();
+      } else if (to === agent) {
         col.querySelector(".sl-none")?.remove();
         // A slash command to an agent whose chat log does not record one (CHAT['commands'], #5253: Hermes) never
         // shows in the chat: the turn says "sent to its terminal" and does not wait to be taken.
@@ -919,6 +923,18 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (name === agent) poll();
   }
   $("#sessStop").addEventListener("click", () => { if (agent) stopIt(agent); });
+  // Send now under a held message (#5587): its turn stops, and that message goes at once; the others keep waiting.
+  $("#sessPend").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-now]"); if (!b || !agent) return;
+    const name = agent;
+    b.disabled = true;
+    try { await typeAction("pending_send_now", { agent: name, id: +b.dataset.now }); }
+    catch (err) { b.disabled = false; return toast(err.message, true); }
+    toast(`${name}: its turn stopped; your message went at once`);
+    drawPend(waiting.filter(p => p.id !== +b.dataset.now));
+    await refresh();
+    if (name === agent) poll();
+  });
   $("#sessOpen").addEventListener("click", (e) => {
     const stp = e.target.closest("[data-stop]"); if (stp) return stopIt(stp.dataset.stop);
     const end = e.target.closest("[data-end]"); if (end) return endIt(end.dataset.end);

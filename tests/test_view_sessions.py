@@ -459,6 +459,9 @@ class Sessions(Base):
         code, body = get(f"/api/session?agent=ag&cursor={body['cursor']}")
         self.assertEqual((code, body["entries"]), (200, []))
         self.assertEqual(get("/api/session?agent=ghost")[0], 409)
+        # A message held until the turn ends (#5587) comes with the chat, so a reload shows it again.
+        core.pending_add(self.c, "ag", "after your turn", [], "mark")
+        self.assertEqual([p["text"] for p in get("/api/session?agent=ag")[1]["pending"]], ["after your turn"])
 
 
 @unittest.skipIf(os.name == "nt", "tmux adoption uses Unix terminals and signals")
@@ -1158,7 +1161,11 @@ try {
         self.assertEqual(result["files"], ["table.csv", "report.pdf"])
         paths = list(server.uploads_dir().glob("ag/*"))
         self.assertEqual(len(paths), 2)
-        self.assertEqual([c[0] for c in self.tmux.calls].count("paste-buffer"), 1)
+        # ag runs a turn (its chat log ends in a tool call): the message and its files wait for the turn's end, and
+        # nothing goes into the pane yet (#5587).
+        self.assertEqual([c[0] for c in self.tmux.calls].count("paste-buffer"), 0)
+        (held,) = core.pending_list(self.c, "ag")
+        self.assertEqual(sorted(Path(p).name.split("-", 3)[-1] for p in held["files"]), ["report.pdf", "table.csv"])
 
 
 class PromptHistory(TmuxBase):

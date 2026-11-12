@@ -596,9 +596,10 @@ try {
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         got = self.drive(driver, "/", flags=("--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"))
         self.assertEqual(got, {"empty": True, "off": True})
-        typed = [c for c in self.tmux.calls if any("bytes" in str(x) for x in c)]
-        self.assertEqual(len(typed), 1, typed)
-        self.assertRegex(next(str(x) for x in typed[0] if "bytes" in str(x)), r"^\d+ bytes in [a-z]{2}(-[A-Z]{2})?\.$")
+        # ag runs a turn (a permission prompt in its pane): the message waits for its end, once (#5587).
+        held = [p["text"] for p in core.pending_list(self.c, "ag")]
+        self.assertEqual(len(held), 1, held)
+        self.assertRegex(held[0], r"^\d+ bytes in [a-z]{2}(-[A-Z]{2})?\.$")
 
     def test_the_chat_scrolls_up_through_two_compactions_to_the_start(self):
         """#5120: a compaction is a thin divider with its summary folded closed under it; scrolling up loads the earlier
@@ -807,46 +808,70 @@ try {
         got = self.drive(driver, "/sessions/ag")
         same = {"text": "first line for ag", "at": 5, "file": True}
         self.assertEqual(got, {"back": same, "ag": same, "wt": "a note for wt", "after": None})
-        sent = [c[-1] for c in self.tmux.calls if c[0] == "set-buffer"]
-        self.assertTrue(any(x.startswith(" Attached files:") and "notes.txt\n\nfirst line for ag" in x for x in sent), sent)
+        # ag runs a turn (a permission prompt in its pane): the message and its file wait for the turn's end (#5587).
+        (held,) = core.pending_list(self.c, "ag")
+        self.assertEqual((held["text"], [n.endswith("notes.txt") for n in held["names"]]), ("first line for ag", [True]))
 
     def _stop_and_send_now(self, size):
-        """#5547, #5587 (mark 2026-11-12: 'the stop button should not be up at the top'): ag waits at a permission
-        prompt in its pane, so it can be stopped. With the box empty, a Stop square stands in the send arrow's place in
-        the message bar, and the head has no Stop; with text, the arrow and the bolt (Send now) show instead. Both fit
-        the box at this width, and the square reads in light and in dark."""
+        """#5547, #5587 (mark 2026-11-12: 'the stop button should not be up at the top'; 'the send now should not be
+        a lightning bolt, instead it should be a little small button under the messages that are waiting'). ag waits
+        at a permission prompt in its pane, so its turn runs. With the box empty, a Stop square stands in the send
+        arrow's place, and the head has no Stop; with text, only the arrow shows. A message sent now waits under the
+        chat, muted, with 'Waits for the turn · Send now'; nothing goes into the pane. It is there again after a
+        reload; its Send now stops the turn and sends it. The square reads in light and dark, and fits."""
         driver = r'''try {
-  await until(() => window.__appReady && q("#sessTitle").textContent === "ag" && !q("#sessText").disabled
-                    && q("#sessBar").classList.contains("can-now"), "the chat of ag that can stop");
-  const box = (s) => q(s).getBoundingClientRect(), head = q(".sess-head");
-  const reads = () => { const cs = getComputedStyle(q("#sessStop")); return cs.color !== cs.backgroundColor; };
-  const out = { headFits: head.scrollWidth <= head.clientWidth + 1, headStop: !!head.querySelector(":scope > [data-stop], :scope > * > [data-stop]:not(.sess-mi)"),
-                stopIn: box("#sessStop").width > 0 && box("#sessStop").right <= q("#sessText").parentElement.getBoundingClientRect().right,
-                arrowHidden: box("#sessSend").width === 0 && box("#sessNow").width === 0, light: reads() };
-  document.documentElement.dataset.theme = "dark"; out.dark = reads(); delete document.documentElement.dataset.theme;
-  const x = q("#sessText"); x.focus(); x.setRangeText("use the other file", 0, 0, "end");
-  x.dispatchEvent(new Event("input", { bubbles: true }));
-  await until(() => box("#sessNow").width > 0, "Send now shows with text");
-  out.nowIn = box("#sessNow").right <= box("#sessSend").left + 1 && box("#sessSend").right <= innerWidth;
-  out.stopHidden = box("#sessStop").width === 0;
-  q("#sessNow").click();
-  await until(() => x.value === "" && box("#sessStop").width > 0, "Send now empties the box; Stop is back");
-  await fetch("/__step/after_now");
-  await until(() => q("#sessOpen [data-stop]"), "Stop its turn in the menu");
-  out.menu = [...q("#sessOpen").querySelectorAll("button, a")].map(b => b.childNodes[0].textContent.trim());
-  q("#sessStop").click();
-  await sleep(400);
-  post(out);
+  const box = (s) => q(s).getBoundingClientRect();
+  if (!sessionStorage.getItem("held")) {
+    await until(() => window.__appReady && q("#sessTitle").textContent === "ag" && !q("#sessText").disabled
+                      && q("#sessBar").classList.contains("can-now"), "the chat of ag that can stop");
+    const head = q(".sess-head"), pill = q("#sessText").parentElement.getBoundingClientRect();
+    const reads = () => { const cs = getComputedStyle(q("#sessStop")); return cs.color !== cs.backgroundColor; };
+    const out = { headFits: head.scrollWidth <= head.clientWidth + 1,
+                  headStop: !!head.querySelector(":scope > [data-stop], :scope > * > [data-stop]:not(.sess-mi)"),
+                  stopIn: box("#sessStop").width > 0 && box("#sessStop").right <= pill.right,
+                  arrowHidden: box("#sessSend").width === 0, bolt: !!q("#sessNow"), light: reads() };
+    document.documentElement.dataset.theme = "dark"; out.dark = reads(); delete document.documentElement.dataset.theme;
+    const x = q("#sessText"); x.focus(); x.setRangeText("use the other file", 0, 0, "end");
+    x.dispatchEvent(new Event("input", { bubbles: true }));
+    await until(() => box("#sessSend").width > 0, "the arrow shows with text");
+    out.stopHidden = box("#sessStop").width === 0;
+    out.arrowIn = box("#sessSend").right <= pill.right;
+    q("#sessBar").requestSubmit();
+    await until(() => x.value === "" && q("#sessPend [data-now]"), "the message waits under the chat");
+    out.note = q("#sessPend .msg-note").textContent.trim();
+    out.muted = getComputedStyle(q("#sessPend .bubble")).opacity < 1;
+    sessionStorage.setItem("held", JSON.stringify(out));
+    location.reload();
+  } else {
+    const out = JSON.parse(sessionStorage.getItem("held"));
+    await until(() => window.__appReady && q("#sessPend [data-now]"), "the waiting message after a reload");
+    out.afterReload = q("#sessPend .bubble").textContent.trim();
+    await fetch("/__step/before_now");
+    q("#sessPend [data-now]").click();
+    await until(() => !q("#sessPend [data-now]"), "Send now sends it");
+    await fetch("/__step/after_now");
+    await until(() => q("#sessOpen [data-stop]") && box("#sessStop").width > 0, "Stop in the bar and in the menu");
+    out.menu = [...q("#sessOpen").querySelectorAll("button, a")].map(b => b.childNodes[0].textContent.trim());
+    q("#sessStop").click();
+    await sleep(400);
+    post(out);
+  }
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         keys = {}
         self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
         self.pane["keys"].clear()
-        got = self.drive(driver, "/sessions/ag", size=size, steps={"after_now": lambda: keys.update(now=list(self.pane["keys"]))})
-        self.assertEqual(got, {"headFits": True, "headStop": False, "stopIn": True, "arrowHidden": True, "light": True,
-                               "dark": True, "nowIn": True, "stopHidden": True,
+        got = self.drive(driver, "/sessions/ag", size=size,
+                         steps={"before_now": lambda: keys.update(held=list(self.pane["keys"])),
+                                "after_now": lambda: keys.update(now=list(self.pane["keys"]))})
+        self.assertEqual(got, {"headFits": True, "headStop": False, "stopIn": True, "arrowHidden": True, "bolt": False,
+                               "light": True, "dark": True, "stopHidden": True, "arrowIn": True,
+                               "note": "Waits for the turn · Send now", "muted": True,
+                               "afterReload": "use the other file",
                                "menu": ["Open on claude.ai", "Stop its turn", "Pin to the top", "Settings", "End"]})
+        self.assertEqual(keys["held"], [])  # nothing went into the pane while it waited
         self.assertEqual(keys["now"], ["Escape", "use the other file", "Enter"])
         self.assertEqual(self.pane["keys"][3:], ["Escape"])  # Stop
+        self.assertEqual(core.pending_list(self.c, "ag"), [])
 
     def test_stop_and_send_now_at_desktop_width(self):
         self._stop_and_send_now("1280,900")

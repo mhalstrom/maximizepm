@@ -2642,6 +2642,60 @@ class LaunchInTmux(unittest.TestCase):
         core.send(self.c, "question", "which header?", to="dev", item=x, actor=name)
         self.assertEqual(core.waits_on_person(self.c), {})
 
+    def test_a_message_sent_during_a_turn_waits_and_goes_when_the_turn_ends(self):
+        """#5587, mark 2026-11-12: 'the send now should not be a lightning bolt, instead it should be a little small
+        button under the messages that are waiting'. A message sent while the session runs a turn is held (nothing
+        goes into the pane); maxpm serve types the oldest one when the agent CLI stands at its idle prompt, one each
+        look; Send now under a held message stops the turn (Esc) and types that one; the others keep waiting."""
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "w")
+        core.set_agent_type(self.c, "w", "claude-code")
+        self.tmux.session = True
+        self.tmux._pane(name="w")
+        pane = self.tmux.panes[-1]
+        pane["agent"] = "w"
+        working = "⏺ Reading the files.\n\n✻ Thinking… (esc to interrupt)\n────\n❯ \n────"
+        idle = "⏺ Done.\n\n────\n❯ \n────"
+        pane["screen"], pane["running"] = working, "claude"
+        soon = []
+        self.addCleanup(setattr, server, "DELIVER_RUNNER", server.DELIVER_RUNNER)
+        server.DELIVER_RUNNER = soon.append
+        pane["keys"].clear()
+        send = lambda text, hold=True: server.OPS["session_send"](self.c, {"agent": "w", "text": text, "hold": hold}, "mark")
+        first, second, third = send("first"), send("second"), send("third")
+        self.assertEqual(pane["keys"], [])  # nothing goes into the pane during the turn
+        self.assertEqual([p["text"] for p in core.pending_list(self.c, "w")], ["first", "second", "third"])
+        self.assertEqual((first["waiting"]["by"], soon), ("mark", ["w", "w", "w"]))
+        from river import sessions
+        self.assertEqual(sessions.sent_prompts(self.c, "w")[:3], ["third", "second", "first"])  # Up brings them back
+        # A slash command is not held: the agent CLI runs it at once.
+        send("/compact")
+        self.assertEqual(pane["keys"], ["/compact", "Enter"])
+        pane["keys"].clear()
+        # The turn runs: a look types nothing. Its end: the oldest goes, one in each look.
+        self.assertEqual(server.paste_pending(self.c), {})
+        pane["screen"] = idle
+        self.assertEqual(server.paste_pending(self.c), {"w": pane["id"]})
+        self.assertEqual(pane["keys"], ["first", "Enter"])
+        self.assertEqual([p["text"] for p in core.pending_list(self.c, "w")], ["second", "third"])
+        # Send now under the third: the turn stops, the third goes at once, the second keeps waiting.
+        pane["screen"] = working
+        pane["keys"].clear()
+        r = server.OPS["pending_send_now"](self.c, {"agent": "w", "id": third["waiting"]["id"]}, "mark")
+        self.assertEqual((pane["keys"], r["sent"]["text"]), (["Escape", "third", "Enter"], "third"))
+        self.assertEqual([p["text"] for p in core.pending_list(self.c, "w")], ["second"])
+        with self.assertRaisesRegex(RiverError, "went to the session already"):
+            server.OPS["pending_send_now"](self.c, {"agent": "w", "id": third["waiting"]["id"]}, "mark")
+        self.assertIn("pending_send_now", server.TYPING_OPS)
+        # A plain Stop ends the turn: the oldest held message goes soon (Claude Code runs no Stop hook for an Esc).
+        soon.clear()
+        server.OPS["session_interrupt"](self.c, {"agent": "w"}, "mark")
+        self.assertEqual(soon, ["w"])
+        # An agent that ran no tmux pane here cannot hold one; an agent that is no more loses its held messages.
+        core.unregister(self.c, "w")
+        self.assertEqual(server.paste_pending(self.c), {})
+        self.assertEqual(core.pending_list(self.c, "w"), [])
+
     def test_an_answer_reaches_the_asker_that_waits_at_its_prompt(self):
         """#5303: markhalstrom-site-3a49 asked mark a question and waited at its prompt; the manager answered with
         maxpm answer, and the session sat there for an hour until the manager typed the answer into its pane by hand.

@@ -8582,6 +8582,29 @@ class Activity(Base):
         self.assertEqual((m["from_agent"], m["native_status"], core.message_show(self.c, q3)["state"]),
                          ("mark", "in the chat", "answered"))
 
+    def test_the_stop_hook_asks_serve_to_type_a_held_message(self):
+        """#5587: a message that the person sent during the turn waits (pending_sends); the turn's Stop hook asks
+        maxpm serve to type it at the idle prompt (op pending_deliver), with a short limit, and a serve that does not
+        answer fails nothing. A turn that goes on, or no held message, asks nothing."""
+        from river import cli
+        asked = []
+        fake = lambda conn, op, args, **kw: asked.append((op, args, kw))
+        run = lambda event: cli.activity_command(io.StringIO(json.dumps({"hook_event_name": event, "session_id": self.SID})))
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), mock.patch.object(cli, "ask_server", fake), \
+                contextlib.redirect_stdout(io.StringIO()):
+            run("Stop")
+            core.pending_add(self.c, "w", "after this turn", [], "mark")
+            run("PreToolUse")
+            self.assertEqual(asked, [])
+            run("Stop")
+            self.assertEqual(asked, [("pending_deliver", {"agent": "w"}, {"timeout": 1, "retries": 0})])
+
+        def down(*a, **k):
+            raise RiverError("maxpm serve does not answer")
+        with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}), mock.patch.object(cli, "ask_server", down), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run("Stop"), 0)
+
     def test_the_asker_is_reminded_to_close_its_open_questions_until_it_does(self):
         """#5001 (mark: 'the session should try to close them'): go, the line after each command, and the Stop hook
         (once for each question, not at the turn end right after the question) remind the asker; answer --self and

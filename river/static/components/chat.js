@@ -6,6 +6,7 @@
 import { marked } from "../vendor/marked/marked.esm.js";
 import DOMPurify from "../vendor/dompurify/purify.es.mjs";
 import { copyText, toast } from "../lib.js";
+import { button } from "./button.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 const PURIFY = { FORBID_TAGS: ["img", "style", "form", "input", "button", "textarea", "select", "iframe", "video", "audio", "svg", "math"],
@@ -246,6 +247,25 @@ function commandNote(m, c, agent) {
 // A sent message that the transcript has not shown after PENDING_MAX says so; not a slash command (#5220), whose note
 // says what it did.
 const PENDING_MAX = 30000;
+// Messages that maxpm serve holds while the session runs a turn (#5587, mark 2026-11-12: 'a little small button under
+// the messages that are waiting'): each as a muted bubble, with 'Waits for the turn · Send now' under it. Send now
+// (data-now: the message's id) stops the turn and sends that message at once; the others keep waiting. They come
+// from the server (GET /api/session: pending), so a reload shows them again.
+export function drawWaiting(host, rows) {
+  host.replaceChildren(...rows.map((p) => {
+    const files = (p.files || []).map(f => ({ path: f.split(/[\\/]/).slice(-2).join("/"),
+                                              name: f.split(/[\\/]/).pop().replace(/^\d{8}-\d{6}-[a-f0-9]{8}-/, "") }));
+    const m = entryNode({ role: "user", text: p.text, files });
+    m.classList.add("waiting");
+    m.dataset.wait = p.id;
+    const n = el("div", "msg-note");
+    n.innerHTML = p.state === "sending" ? "goes to its terminal now"
+      : "Waits for the turn · " + button("Send now", { cls: "msg-now", data: { now: p.id }, title: "Stop and send this" });
+    m.append(n);
+    return m;
+  }));
+}
+
 export function agePending(col) {
   for (const m of col.querySelectorAll(".msg-user[data-pending]:not([data-command])")) {
     const note = m.querySelector(".msg-note");

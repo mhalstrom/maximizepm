@@ -982,6 +982,22 @@ CREATE TABLE IF NOT EXISTS sent_prompts (
 );
 CREATE INDEX IF NOT EXISTS sent_prompts_agent ON sent_prompts(agent, id);
 
+-- A message that a person sent from the Sessions tab while the session ran a turn (#5587, mark 2026-11-12): maxpm
+-- serve holds it and types it into the session's pane when the turn has ended, oldest first (server.paste_pending),
+-- or at once with its Send now (server.pending_send_now). Readers: the chat of the Sessions tab (GET /api/session:
+-- pending), paste_pending, and the Stop hook's report (cli.activity_command). files: a JSON list of the saved
+-- uploads' paths. state: waiting, or sending while a pass or a Send now types it. A typed row goes.
+CREATE TABLE IF NOT EXISTS pending_sends (
+  id          INTEGER PRIMARY KEY,
+  agent       TEXT NOT NULL,
+  body        TEXT NOT NULL,
+  files       TEXT,
+  author      TEXT,
+  sent_at     TEXT NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'waiting'
+);
+CREATE INDEX IF NOT EXISTS pending_sends_agent ON pending_sends(agent, id);
+
 -- User policies (#5308): the rules a person sets for the sessions of this queue, so each agent (Claude Code, Codex,
 -- any other) reads the ones that apply to it in its briefing. Scope: the whole queue (no project, no role), a project,
 -- a role, or a role in a project. Retire deletes the row: no tombstones. The global policies that ship with
@@ -19016,6 +19032,58 @@ def typed_to(conn, agent):
     foreground maxpm wait of the agent ends at its next poll, so the agent reads the text at once (#5256)."""
     with tx(conn):
         conn.execute("UPDATE agents SET typed_at=? WHERE name=?", (iso(now()), agent))
+
+
+def _pending_row(r):
+    files = json.loads(r["files"] or "[]")
+    return {"id": r["id"], "agent": r["agent"], "text": r["body"], "files": files,
+            "names": [Path(f).name for f in files], "by": r["author"], "at": r["sent_at"], "state": r["state"]}
+
+
+def pending_add(conn, agent, text, files, who):
+    """Hold a message for the agent's next idle prompt (pending_sends, #5587). Returns the row."""
+    with tx(conn):
+        pid = conn.execute("INSERT INTO pending_sends (agent, body, files, author, sent_at) VALUES (?,?,?,?,?)",
+                           (agent, text, json.dumps(list(files or [])), who, iso(now()))).lastrowid
+    return _pending_row(conn.execute("SELECT * FROM pending_sends WHERE id=?", (pid,)).fetchone())
+
+
+def pending_list(conn, agent=None):
+    """The held messages of the agent (of every agent: None), oldest first."""
+    rows = conn.execute("SELECT * FROM pending_sends" + (" WHERE agent=?" if agent else "") + " ORDER BY id",
+                        (agent,) if agent else ()).fetchall()
+    return [_pending_row(r) for r in rows]
+
+
+def pending_take(conn, pid, agent=None):
+    """Mark a held message as being typed now, once: its row, or None when a pass or a Send now took it already
+    (or it went)."""
+    with tx(conn):
+        if not conn.execute("UPDATE pending_sends SET state='sending' WHERE id=? AND state='waiting'"
+                            + (" AND agent=?" if agent else ""), (pid, agent) if agent else (pid,)).rowcount:
+            return None
+        return _pending_row(conn.execute("SELECT * FROM pending_sends WHERE id=?", (pid,)).fetchone())
+
+
+def pending_end(conn, pid, typed):
+    """After pending_take: when it was typed, the row goes; else it waits again."""
+    with tx(conn):
+        if typed:
+            conn.execute("DELETE FROM pending_sends WHERE id=?", (pid,))
+        else:
+            conn.execute("UPDATE pending_sends SET state='waiting' WHERE id=?", (pid,))
+
+
+def pending_forget(conn, agent):
+    """The held messages of an agent that is no more go."""
+    with tx(conn):
+        conn.execute("DELETE FROM pending_sends WHERE agent=?", (agent,))
+
+
+def pending_waits(conn, agent):
+    """Whether a held message waits for the agent's idle prompt."""
+    return bool(agent and conn.execute("SELECT 1 FROM pending_sends WHERE agent=? AND state='waiting' LIMIT 1",
+                                       (agent,)).fetchone())
 
 
 # ---------------------------------------------------------------- fresh sessions

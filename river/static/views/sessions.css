@@ -129,6 +129,10 @@ button.srow-it { cursor: pointer; }
 .msg-user .bubble code { background: var(--panel); color: var(--ink); }
 .msg-user .bubble.md pre { background: var(--panel); }
 .msg-user.sent .bubble { opacity: .8; }
+/* A message held until the turn ends (#5587): muted, with a small Send now in its note. */
+.msg-user.waiting .bubble { opacity: .55; }
+.sess-pend:empty { display: none; }
+.msg-now { font-size: var(--fs-xs); padding: 0 var(--sp-2); margin-left: var(--sp-1); }
 .msg-note { font-size: var(--fs-xs); color: var(--muted); margin-top: var(--sp-0); }
 .msg-agent { overflow-wrap: anywhere; background: var(--bubble); border-radius: var(--r-bubble); padding: var(--sp-2) var(--sp-5); width: fit-content; max-width: 100%; }
 /* Higher than .md code, which comes later: the code stands apart from the gray bubble (#5321). */

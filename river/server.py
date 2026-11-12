@@ -675,17 +675,7 @@ def paste_answers(conn):
         agent, pane = r["to_agent"], terminals.get(r["to_agent"])
         if not pane or pane in done.values():
             continue  # one answer for each pane in a pass: the next one waits for the idle prompt again
-        try:
-            screen = _pane_screen(agent, pane)
-        except RiverError:
-            continue  # the pane closed since the list
-        if screen["ended"]:
-            continue  # only a shell runs there: a text would run as a command (#5298)
-        rx, layout, ad = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
-        tail = _prompt_tail(_plain(screen["text"]))
-        if rx and _prompt_found(tail, rx, layout):
-            continue
-        if not (ad and ad.detect) or _screen_state(tail, ad.detect) != "idle":
+        if not _idle_prompt(conn, agent, pane):
             continue
         q = core._message(conn, r["reply_to"])
         text = core.answer_text(q, r["from_agent"], r["body"], core.answered_for(conn, q, r["from_agent"]))
@@ -3004,47 +2994,29 @@ def _uploaded(agent, fid):
     return str(path)
 
 
-def session_send(conn, agent, text, who=None, images=None, files=None, manager=False):
+def session_send(conn, agent, text, who=None, images=None, files=None, manager=False, hold=False):
     """The composer of the Sessions tab (#4596, #4604): a person's text, typed into the agent's tmux pane, then
     Enter; text of several lines goes as one bracketed paste. An empty message sends nothing (#4617): the ! dialog
-    answers a prompt. The text comes from the person: river types nothing by itself."""
+    answers a prompt. The text comes from the person: river types nothing by itself.
+    hold (#5587, mark 2026-11-12): the session runs a turn now, so maxpm serve holds the message (pending_sends) and
+    types it when the turn has ended (paste_pending); its Send now in the chat stops the turn and sends it at once
+    (pending_send_now). A slash command is not held: the agent CLI runs it at once."""
     if not isinstance(text, str) or len(text) > 4000:
         raise RiverError("text is at most 4000 characters")
     text = text.replace("\r\n", "\n").strip()
     attachments = files if files is not None else images  # accept the previous image-only page too
     if attachments is not None and (not isinstance(attachments, list) or len(attachments) > UPLOADS_PER_SEND):
         raise RiverError(f"at most {UPLOADS_PER_SEND} files go with one message")
+    if hold and (text or attachments) and not text.startswith("/"):
+        _typing_pane(conn, agent, who, manager=manager)  # who may type there, and the pane is there
+        row = core.pending_add(conn, agent, text, _save_attachments(agent, attachments or []), who)
+        from . import sessions
+        sessions.record_prompt(conn, agent, text, who)
+        deliver_soon(agent)  # the turn may have ended since the page's last look
+        return {"agent": agent, "waiting": row}
     if attachments:
         pane = _typing_pane(conn, agent, who, manager=manager)
-        paths, saved = [], []
-        try:
-            for f in attachments:
-                if not isinstance(f, dict):
-                    raise RiverError("a file needs its name and base64 data")
-                if f.get("id") is not None:  # saved before, with the draft (#5112)
-                    paths.append(_uploaded(agent, f["id"]))
-                else:
-                    saved.append(save_upload(agent, f.get("data"), f.get("name")))
-                    paths.append(saved[-1])
-        except (RiverError, OSError):
-            for path in saved:
-                Path(path).unlink(missing_ok=True)
-            raise
-        image_paths = [p for p in paths if Path(p).suffix.lower() in UPLOAD_TYPES]
-        other_paths = [p for p in paths if p not in image_paths]
-        # Images must be pasted alone to become [Image #1] (#4618). Non-images are paths the agent reads with
-        # its file tools (both Claude Code and Codex); explicit newlines keep several paths from joining.
-        prompt = ("Attached files:\n" + "\n".join(other_paths)) if other_paths else ""
-        if text:
-            prompt += ("\n\n" if prompt else "") + text
-        for part in image_paths + ([" " + prompt] if prompt else []):
-            _tmux("set-buffer", "-b", "maxpm-send", "--", part)
-            _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
-            time.sleep(PROMPT_PAUSE)
-        time.sleep(ENTER_PAUSE)
-        _tmux("send-keys", "-t", pane, "Enter")
-        _keep_prompt(conn, agent, text, who)
-        return {"agent": agent, "pane": pane, "sent": 2, "text": prompt, "images": image_paths, "files": paths}
+        return _type_files(conn, agent, pane, text, _save_attachments(agent, attachments), who)
     if not text:
         raise RiverError("the message is empty: type a message first (the ! dialog answers a prompt)")
     if "\n" not in text:
@@ -3080,13 +3052,163 @@ def session_send(conn, agent, text, who=None, images=None, files=None, manager=F
     return {"agent": agent, "pane": pane, "sent": 2, "text": text}
 
 
-def session_interrupt(conn, agent, who=None, message=None, files=None, manager=False):
+def _save_attachments(agent, attachments):
+    """The paths of a message's files: saved now, or saved before with the draft (#5112)."""
+    paths, saved = [], []
+    try:
+        for f in attachments:
+            if not isinstance(f, dict):
+                raise RiverError("a file needs its name and base64 data")
+            if f.get("id") is not None:  # saved before, with the draft (#5112)
+                paths.append(_uploaded(agent, f["id"]))
+            else:
+                saved.append(save_upload(agent, f.get("data"), f.get("name")))
+                paths.append(saved[-1])
+    except (RiverError, OSError):
+        for path in saved:
+            Path(path).unlink(missing_ok=True)
+        raise
+    return paths
+
+
+def _type_files(conn, agent, pane, text, paths, who, held=False):
+    """A message with files into the pane: each image as a paste of its own, then the other files' paths and the
+    text, then Enter. held: a message that waited (its prompt is in the Up list already)."""
+    image_paths = [p for p in paths if Path(p).suffix.lower() in UPLOAD_TYPES]
+    other_paths = [p for p in paths if p not in image_paths]
+    # Images must be pasted alone to become [Image #1] (#4618). Non-images are paths the agent reads with
+    # its file tools (both Claude Code and Codex); explicit newlines keep several paths from joining.
+    prompt = ("Attached files:\n" + "\n".join(other_paths)) if other_paths else ""
+    if text:
+        prompt += ("\n\n" if prompt else "") + text
+    for part in image_paths + ([" " + prompt] if prompt else []):
+        _tmux("set-buffer", "-b", "maxpm-send", "--", part)
+        _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
+        time.sleep(PROMPT_PAUSE)
+    time.sleep(ENTER_PAUSE)
+    _tmux("send-keys", "-t", pane, "Enter")
+    (_typed if held else _keep_prompt)(conn, agent, text, who)
+    return {"agent": agent, "pane": pane, "sent": 2, "text": prompt, "images": image_paths, "files": paths}
+
+
+def _type_held(conn, agent, pane, row, who=None):
+    """A held message (pending_sends) into the pane, as session_send types one."""
+    if row["files"]:
+        return _type_files(conn, agent, pane, row["text"], row["files"], who, held=True)
+    text = row["text"]
+    if "\n" not in text:
+        send_keys(pane, [{"text": text}])
+        time.sleep(ENTER_PAUSE)
+        send_keys(pane, [{"key": "Enter"}])
+    else:
+        _tmux("set-buffer", "-b", "maxpm-send", "--", text)
+        _tmux("paste-buffer", "-p", "-d", "-b", "maxpm-send", "-t", pane)
+        time.sleep(ENTER_PAUSE)
+        _tmux("send-keys", "-t", pane, "Enter")
+    _typed(conn, agent, text)
+    return {"agent": agent, "pane": pane, "sent": 2, "text": text}
+
+
+def _idle_prompt(conn, agent, pane):
+    """Whether the agent CLI in the pane stands at its idle prompt now: not a shell (its agent ended there, #5298),
+    not a permission prompt (a person answers that first), not a running turn (its adapter's DETECT rules)."""
+    try:
+        screen = _pane_screen(agent, pane)
+    except RiverError:
+        return False  # the pane closed since the list
+    if screen["ended"]:
+        return False
+    rx, layout, ad = _pane_rule(conn, agent, screen.get("running"), screen.get("tty"))
+    tail = _prompt_tail(_plain(screen["text"]))
+    if rx and _prompt_found(tail, rx, layout):
+        return False
+    return bool(ad and ad.detect) and _screen_state(tail, ad.detect) == "idle"
+
+
+def paste_pending(conn, only=None):
+    """One look of maxpm serve (each pass; at once after a Stop hook's idle report, a held message and a Stop: 
+    deliver_soon): type the oldest held message of each agent (pending_sends, #5587) whose agent CLI stands at its
+    idle prompt, into its pane, then Enter. One message for each agent in a look: the next one waits for the end of
+    the turn that this one starts. The messages of an agent that is no more go. Returns {agent: pane} of what it
+    typed."""
+    rows = [r for r in core.pending_list(conn, only) if r["state"] == "waiting"]
+    if not rows or not core.tmux_path() and TMUX_RUNNER is None:
+        return {}
+    terminals, seen, done = agent_terminals(conn), set(), {}
+    for r in rows:
+        agent = r["agent"]
+        if agent in seen:
+            continue
+        seen.add(agent)
+        if not conn.execute("SELECT 1 FROM agents WHERE name=?", (agent,)).fetchone():
+            core.pending_forget(conn, agent)
+            continue
+        pane = terminals.get(agent)
+        if not pane or not _idle_prompt(conn, agent, pane):
+            continue
+        row = core.pending_take(conn, r["id"])
+        if not row:
+            continue  # a Send now took it
+        typed = False
+        try:
+            _type_held(conn, agent, pane, row, row["by"])
+            typed = True
+            done[agent] = pane
+        except RiverError:
+            pass  # the pane went: it waits for the next look
+        finally:
+            core.pending_end(conn, row["id"], typed)
+    return done
+
+
+# Tests set DELIVER_RUNNER to a function of the agent's name: deliver_soon calls it instead of a thread.
+DELIVER_RUNNER = None
+DELIVER_PAUSE = 1.5  # seconds: the agent CLI draws its idle prompt after its Stop hook has run
+
+
+def deliver_soon(agent, pause=DELIVER_PAUSE):
+    """paste_pending for one agent, in a thread of its own after a short pause, so the request that asked for it
+    answers at once (p147)."""
+    if DELIVER_RUNNER is not None:
+        return DELIVER_RUNNER(agent)
+    import threading
+
+    def run():
+        time.sleep(pause)
+        conn = core.connect()
+        try:
+            paste_pending(conn, agent)
+        except Exception as e:  # noqa: BLE001 - a thread of serve must not end serve
+            print(f"maxpm serve: a held message for {agent} was not typed: {e}", file=sys.stderr)
+        finally:
+            conn.close()
+    threading.Thread(target=run, daemon=True).start()
+    return {"agent": agent, "soon": True}
+
+
+def pending_send_now(conn, agent, pid, who=None):
+    """Send now under a held message in the chat (#5587): the agent's turn stops (session_interrupt), and that
+    message goes at once; the others keep waiting."""
+    row = core.pending_take(conn, int(pid), agent)
+    if not row:
+        raise RiverError("this message went to the session already")
+    typed = False
+    try:
+        out = session_interrupt(conn, agent, who, row["text"], pending=row)
+        typed = True
+    finally:
+        core.pending_end(conn, row["id"], typed)
+    return out
+
+
+def session_interrupt(conn, agent, who=None, message=None, files=None, manager=False, pending=None):
     """Stop on the Sessions tab and maxpm interrupt (#5547, mark 2026-11-12: 'no way to stop a session like hitting
     ctrl c in the terminal or to instantly send a message, they just get queued'): the agent's own interrupt keys
     (its adapter's INPUT['interrupt']: Esc for Claude Code) go into its tmux pane, as a person presses them there. The
     turn ends; the session keeps its context and its item. A second Stop sends the keys again (a tool call that did
-    not stop at the first). With a message (Send now), the message goes after INTERRUPT_PAUSE, as session_send sends
-    it, so the agent reads it at once instead of after its turn. Who: a person, or the active manager (manager).
+    not stop at the first). With a message (maxpm interrupt), or a held one (pending: Send now under it in the chat,
+    #5587), the message goes after INTERRUPT_PAUSE, as session_send sends it, so the agent reads it at once instead
+    of after its turn. Who: a person, or the active manager (manager).
 
     An agent with INPUT['interrupt_again'] (Codex: /stop, #5563) has a second step: its first Stop records the agent
     in STOPPED and says 'Stop again to <does>'; a second Stop before its next turn types that command and Enter
@@ -3138,9 +3260,14 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
         out["did"] = again["does"]
     elif again:
         out["again"] = f"Stop again to {again['does']}"
-    if message is not None and (str(message).strip() or files):
+    if pending is not None:  # Send now under a held message (#5587)
+        time.sleep(INTERRUPT_PAUSE)
+        out["sent"] = _type_held(conn, agent, pane, pending, who)
+    elif message is not None and (str(message).strip() or files):
         time.sleep(INTERRUPT_PAUSE)
         out["sent"] = session_send(conn, agent, message, who, files=files, manager=manager)
+    elif core.pending_waits(conn, agent):
+        deliver_soon(agent)  # the turn ended: the oldest held message goes (Claude Code runs no Stop hook for Esc)
     return out
 
 
@@ -3207,8 +3334,13 @@ def _keep_prompt(conn, agent, text, who):
     """After a message went into the pane: the box's Up arrow brings the prompt back (#4855): the person's text,
     without the attached files; and a foreground maxpm wait of the agent ends, so it reads the text now (#5256)."""
     from . import sessions
-    STOPPED.pop(agent, None)  # a new turn: its next Stop is a first one again (#5563)
     sessions.record_prompt(conn, agent, text, who)
+    _typed(conn, agent, text)
+
+
+def _typed(conn, agent, text, who=None):
+    """A message went into the pane: a new turn starts."""
+    STOPPED.pop(agent, None)  # a new turn: its next Stop is a first one again (#5563)
     core.typed_to(conn, agent)
     turn_started(conn, agent, text)
 
@@ -3696,7 +3828,7 @@ def frame_check(url):
 # A POST that types into a terminal needs this token, which only the page of this server reads (GET /api/token,
 # for this computer only, and no other site may read the answer). A new one each start of maxpm serve.
 PAGE_TOKEN = secrets.token_urlsafe(24)
-TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
+TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "pending_send_now", "session_upload", "session_upload_drop", "prompt_answer", "session_setting", "session_restart",
               "shell_open", "shell_keys", "shell_close",  # the Terminal tab's shells (#4803)
               "browser_input")  # the person's mouse and keys in a project's browser (#4631)
 
@@ -4248,6 +4380,8 @@ OPS = {
     "terminal_keys": lambda c, a, who: terminal_keys(c, a["agent"], a.get("keys"), who),
     # Stop and Send now of the Sessions tab (#5547); agent_interrupt is maxpm interrupt (a person, or the manager).
     "session_interrupt": lambda c, a, who: session_interrupt(c, a["agent"], who, a.get("text"), a.get("files")),
+    # The Stop hook of a session with held messages (cli.activity_command, #5587): the oldest goes soon.
+    "pending_deliver": lambda c, a, who: (_same_queue(a.get("db")), deliver_soon(a["agent"]))[1],
     "agent_interrupt": lambda c, a, who: (_same_queue(a.get("db")),
                                           session_interrupt(c, a["agent"], who, a.get("text"), manager=True))[1],
     "serve_restart": lambda c, a, who: (_same_queue(a.get("db")), serve_restart(c))[1],

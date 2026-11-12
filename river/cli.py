@@ -1972,6 +1972,12 @@ def activity_command(stdin=None, agent_id="claude"):
         res = core.hook_report(conn, agent_id, payload if isinstance(payload, dict) else {})
         if res["prompt"] or res["state"] == "idle":
             _record_hook_process(conn, res["agent"])
+        if res["state"] == "idle" and core.pending_waits(conn, res["agent"]):
+            # A message that the person sent during this turn waits (#5587): maxpm serve types it at the idle prompt.
+            try:
+                ask_server(conn, "pending_deliver", {"agent": res["agent"]}, timeout=1, retries=0)
+            except Exception:  # noqa: BLE001 - its next pass types it
+                pass
         if res.get("deny"):
             # A push or a launch while an alert is unread (#5381): Claude Code refuses the call and shows the reason.
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
