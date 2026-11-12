@@ -4403,6 +4403,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._mcp("POST")
         if self._refuse():
             return
+        if self.path == "/api/run":  # a maxpm command (river/client.py, #5501)
+            if self.headers.get("Origin") or not hmac.compare_digest(self.headers.get("X-Maxpm-Token") or "", RUN_TOKEN):
+                return self._send(403, {"error": "a maxpm command with the token of the serve file only"})
+            try:
+                req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            except ValueError:
+                return self._send(400, {"error": "a bad request"})
+            if not isinstance(req, dict) or not isinstance(req.get("argv"), list):
+                return self._send(400, {"error": "a bad request"})
+            ans = run_command(req)
+            if ans.get("busy"):
+                return self._send(503, {"error": "every runner is busy"})
+            if ans.get("refused"):
+                return self._send(409, {"error": ans["refused"]})
+            if ans.get("error"):
+                return self._send(500, ans)
+            return self._send(200, ans)
         if self.path != "/api/action":
             return self._send(404, {"error": "not found"})
         # Same-origin check: of the pages on this computer, only river's own acts (a river command sends no Origin).
@@ -4496,6 +4513,99 @@ def keep_loop():
     return True
 
 
+# ---------------------------------------------------------------- runners (#5501)
+# A maxpm command hands its words to serve (river/client.py, POST /api/run), and one of RUNNERS runs it: a process
+# that keeps the code, one connection to the queue and its caches (river/runner.py). A command then takes tens of
+# milliseconds instead of a new Python process each time. With every runner busy the caller runs it itself.
+RUNNERS_MAX = 3
+RUN_TOKEN = secrets.token_hex(16)  # in the serve file: only a process that can read it hands serve a command
+RUNNERS = []
+
+
+class _Runner:
+    def __init__(self, db):
+        self.db, self.lock, self.proc = db, threading.Lock(), None
+
+    def start(self):
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {k: v for k, v in os.environ.items() if k != "MAXPM_LOCAL"}
+        self.proc = subprocess.Popen([sys.executable, "-m", "river.runner", self.db], cwd=root, env=env,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
+
+    def stop(self):
+        p, self.proc = self.proc, None
+        if p and p.poll() is None:
+            try:
+                p.stdin.close()
+                p.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                p.kill()
+
+    def ask(self, req):
+        """Inside the lock: the runner's answer, or None when it stopped during the command."""
+        if self.proc is None or self.proc.poll() is not None:
+            self.start()
+        try:
+            self.proc.stdin.write(json.dumps(req) + "\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline()
+        except (OSError, ValueError):
+            line = ""
+        if not line:
+            self.stop()
+            return None
+        return json.loads(line)
+
+
+def run_command(req):
+    """The answer of an idle runner to a command request; {"busy": True} when every runner is busy."""
+    for r in RUNNERS:
+        if not r.lock.acquire(blocking=False):
+            continue
+        try:
+            ans = r.ask(req)
+            if ans and ans.get("refused") == "stale":  # the code changed: the next runner of this slot reads it anew
+                r.stop()
+            return ans if ans is not None else {"error": "the runner stopped during the command"}
+        finally:
+            r.lock.release()
+    return {"busy": True}
+
+
+def start_runners(db):
+    """Make the runners and start them in the background, so the first command finds one ready."""
+    RUNNERS[:] = [_Runner(db) for _ in range(RUNNERS_MAX)]
+
+    def warm():
+        for r in RUNNERS:
+            with r.lock:
+                if r.proc is None:
+                    r.start()
+    threading.Thread(target=warm, daemon=True).start()
+
+
+def write_serve_file(port):
+    """<queue>-serve.json: the port and the token of this serve, for river/client.py; only this user can read it."""
+    path = str(core.db_path()) + "-serve.json"
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"port": port, "token": RUN_TOKEN, "pid": os.getpid()}, f)
+    os.replace(tmp, path)
+    return path
+
+
+def remove_serve_file(path):
+    try:
+        with open(path) as f:
+            mine = json.load(f).get("pid") == os.getpid()
+        if mine:
+            os.remove(path)
+    except (OSError, ValueError):
+        pass
+
+
 def serve(port: int, open_browser=False, dev=False):
     httpd = _Server(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
@@ -4510,6 +4620,15 @@ def serve(port: int, open_browser=False, dev=False):
     LOOP_THREAD.update(thread=None, stop=stop)
     keep_loop()
     relay.start(stop, port)  # keeps the relay socket open while relay.json exists (maxpm connect)
+    serve_file = None
+    conn = core.connect()
+    try:
+        runners = core.setting(conn, "serve_runners") == "on"
+    finally:
+        conn.close()
+    if os.name != "nt" and runners:
+        start_runners(str(core.db_path()))
+        serve_file = write_serve_file(port)
     if open_browser:
         webbrowser.open(url)
     try:
@@ -4518,6 +4637,10 @@ def serve(port: int, open_browser=False, dev=False):
         pass
     finally:
         stop.set()
+        if serve_file:
+            remove_serve_file(serve_file)
+        for r in RUNNERS:
+            r.stop()
 
 
 VIEW_GET = _view_routes()

@@ -291,6 +291,11 @@ DEFAULT_SETTINGS = {
     # (river unregisters it and closes the tmux pane river started for it). 0s: never.
     "idle_after": "2m",
     "fresh_sessions": "on",
+    # serve_runners on: maxpm serve keeps a few runner processes with the code and the queue in memory, and a maxpm
+    # command hands its words to one of them (river/client.py), so it answers in tens of milliseconds (#5501). off:
+    # every command runs in its own process. MAXPM_LOCAL=1 does that for one command or shell. It counts when serve
+    # starts.
+    "serve_runners": "on",
     # tmux_adopt on: maxpm serve moves an agent session that runs outside tmux (a Terminal tab) into a tmux pane, so
     # the Sessions page can type into it (#4598). It waits until the session's turn has ended and it has written
     # nothing for ADOPT_QUIET, with no prompt, question or background work open; then it ends the old process and
@@ -1301,10 +1306,35 @@ def queue_note():
     return "" if p == home else f"QUEUE: {p} (set by MAXPM_DB), not the main queue {home}"
 
 
+# A runner of maxpm serve (river/runner.py, #5501) keeps one connection to its queue for all the commands it runs:
+# connect() gives it, and its close() does nothing. {"conn": the connection, "path": the resolved queue file,
+# "share": the ANN_SHARE dict that lives as long as the runner}. Empty in every other process.
+RESIDENT = {}
+# The parent process of the command that a runner runs now: the caller's shell or agent CLI (agent_process).
+CALLER_PPID = None
+
+
+class _ResidentConnection(sqlite3.Connection):
+    def close(self):
+        pass
+
+
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
     p = Path(path) if path else db_path()
+    if RESIDENT.get("conn") is not None:
+        try:
+            if str(p.expanduser().resolve()) == RESIDENT["path"]:
+                return RESIDENT["conn"]
+        except OSError:
+            pass
+    elif RESIDENT.get("open"):  # the runner's own connection, made once
+        conn = sqlite3.connect(p, timeout=10, isolation_level=None, factory=_ResidentConnection)
+        return _setup(conn)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(p, timeout=10, isolation_level=None)
+    return _setup(sqlite3.connect(p, timeout=10, isolation_level=None))
+
+
+def _setup(conn):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -1793,7 +1823,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "web_terminal",
+    elif key in ("fresh_sessions", "serve_runners", "serve_reload", "tmux_adopt", "revive_sessions", "relay_keep_awake", "web_terminal",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -7487,7 +7517,7 @@ def _word(w):
     return _stem(w) if w not in _STOP_WORDS and (len(w) > 2 or w.isdigit()) else ""
 
 
-def _text_rows(conn, where="1", params=(), full=True):
+def _text_rows(conn, where="1", params=(), full=True, keys=True):
     """Items with their words: `key` (title twice, context once) for the score, `all` (title, context, notes,
     output) for a search. full=False leaves `all` out: the notes and outputs are most of the text (#5491)."""
     rows = []
@@ -7496,6 +7526,9 @@ def _text_rows(conn, where="1", params=(), full=True):
                           "i.status, i.kind, i.doer, i.assignee, i.touches, i.created_at, i.closed_at, i.backlog_at, "
                           "i.found_during FROM items i JOIN projects p ON p.id=i.project_id WHERE " + where, params):
         d = dict(r)
+        if not keys:  # the caller makes the key when it needs it (_item_vector)
+            rows.append(d)
+            continue
         title, context = _words(d["title"]), _words(d["context"])
         d["key"] = title + title + sorted(set(context))
         if full:
@@ -7506,7 +7539,7 @@ def _text_rows(conn, where="1", params=(), full=True):
 
 def _idf(conn):
     """How rare each word is among the work items' titles and contexts."""
-    df, n = _df(conn)
+    df, n, key = _df(conn)
     memo = {}
 
     def idf(w):
@@ -7514,6 +7547,7 @@ def _idf(conn):
         if v is None:
             v = memo[w] = math.log((n + 1) / (df.get(w, 0) + 1)) + 1
         return v
+    idf.key = key
     return idf
 
 
@@ -7529,7 +7563,7 @@ def _df(conn):
         try:
             got = json.loads(path.read_text())
             if got["key"] == key:
-                return got["df"], got["n"]
+                return got["df"], got["n"], key
         except (OSError, ValueError, KeyError, TypeError):
             pass
     df, n = collections.Counter(), 0
@@ -7543,17 +7577,33 @@ def _df(conn):
             os.replace(tmp, path)
         except OSError:
             tmp.unlink(missing_ok=True)
-    return df, n
+    return df, n, key
 
 
-def _vector(words, idf):
-    v = {}
-    for w in words:
-        v[w] = v.get(w, 0) + idf(w)
+_VECTORS = {}  # item id -> (word table key, title, context, vector): a runner of serve keeps them (#5501)
+
+
+def _item_vector(d, idf):
+    """The vector of a row of _text_rows, kept while its title, its context and the word table are the same."""
+    k = getattr(idf, "key", None)
+    got = _VECTORS.get(d["id"])
+    if got and got[0] == k and got[1] == d["title"] and got[2] == d["context"]:
+        return got[3]
+    if "key" not in d:
+        title = _words(d["title"])
+        d["key"] = title + title + sorted(set(_words(d["context"])))
+    v = _vector(d["key"], idf)
+    _VECTORS[d["id"]] = (k, d["title"], d["context"], v)
     return v
 
 
+def _vector(words, idf):
+    return {w: n * idf(w) for w, n in collections.Counter(words).items()}
+
+
 def _cosine(a, b):
+    if len(a) > len(b):
+        a, b = b, a
     dot = sum(x * b[w] for w, x in a.items() if w in b)
     if not dot:
         return 0.0
@@ -7750,8 +7800,8 @@ def related(conn, item_id, n=3):
     idf = _idf(conn)
     t = _words(it["title"])
     q = _vector(t + t + sorted(set(_words(it["context"]))), idf)
-    scored = sorted(((_cosine(q, _vector(d["key"], idf)), d) for d in _text_rows(
-        conn, "i.project_id=? AND i.kind='work'", (it["project_id"],), full=False) if d["id"] not in skip),
+    scored = sorted(((_cosine(q, _item_vector(d, idf)), d) for d in _text_rows(
+        conn, "i.project_id=? AND i.kind='work'", (it["project_id"],), full=False, keys=False) if d["id"] not in skip),
         key=lambda x: -x[0])
     return [_match(d, s) for s, d in scored[:n] if s >= RELATED_MIN]
 
@@ -8759,7 +8809,7 @@ def agent_process(start=None, terminal=False, climb=False):
     (process_on_terminal, #5247): a Hermes command runs under the gateway that every Hermes session shares.
     climb: go on upward to the first process that runs on a terminal (#5283: an OpenCode command runs under the
     TUI's private server, which has none; the TUI is the session's own process)."""
-    pid = start or os.getppid()
+    pid = start or CALLER_PPID or os.getppid()
     for _ in range(12):
         info = proc_info(pid)
         if info is None:

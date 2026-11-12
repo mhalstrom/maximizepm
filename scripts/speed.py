@@ -51,6 +51,46 @@ COMMANDS = [
 ]
 
 
+def reset_held(db, fill, name):
+    """With --serve every run uses the one queue: before each run of release, done and claim, the test agent holds
+    its item again (claim: it holds nothing)."""
+    if name not in ("release", "done", "claim", "go"):
+        return
+    from river import core
+    conn = core.connect(db)
+    try:
+        it = core.item_show(conn, fill["held"])
+        if it["status"] == "done":
+            core.reopen(conn, fill["held"], "speed-test")
+            it = core.item_show(conn, fill["held"])
+        if name in ("claim", "go") and it["assignee"] == fill["agent"]:
+            core.release(conn, fill["held"], note="speed test", actor="speed-test")
+        elif name in ("release", "done") and it["assignee"] != fill["agent"]:
+            core.claim(conn, fill["held"], fill["agent"])
+        if name == "claim":
+            o = core.item_show(conn, fill["open"])
+            if o["assignee"] == fill["agent"]:
+                core.release(conn, fill["open"], note="speed test", actor="speed-test")
+    finally:
+        conn.close()
+
+
+def start_server(db):
+    """The page server and its runners on the copy, in threads of this process (#5501)."""
+    import threading
+    os.environ["MAXPM_DB"] = db
+    from river import server
+    httpd = server._Server(("127.0.0.1", 0), server.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    server.start_runners(db)
+    server.write_serve_file(httpd.server_address[1])
+    for r in server.RUNNERS:  # until each runner has the code loaded
+        with r.lock:
+            if r.proc is None:
+                r.start()
+            r.ask({"argv": ["--version"], "cwd": ROOT, "env": dict(os.environ), "stamp": -1})
+
+
 def make_queue(path, items, open_items):
     from seed import large
     from river import core
@@ -128,6 +168,9 @@ def main():
     ap.add_argument("--only", help="a comma-separated list of command names")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--repo", help="the checkout whose code it measures (default: this one)")
+    ap.add_argument("--serve", action="store_true",
+                    help="the commands go to runners of a server on the copy (#5501): its page server and runners "
+                         "only, not the passes of maxpm serve (no notice goes out, no session starts)")
     a = ap.parse_args()
     tmp = tempfile.mkdtemp(prefix="maxpm-speed-")
     try:
@@ -143,6 +186,10 @@ def main():
         fill = prepare(base)
         env = {k: v for k, v in os.environ.items() if not k.startswith("MAXPM_")}
         env.update(MAXPM_AGENT=fill["agent"], MAXPM_QUIET="1")
+        if a.serve:
+            start_server(base)
+        else:
+            env["MAXPM_LOCAL"] = "1"
         only = set(a.only.split(",")) if a.only else None
         rows, failed = [], []
         load = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
@@ -153,7 +200,7 @@ def main():
             walls, cpus, err = [], [], []
             for k in range(a.runs):
                 db = base
-                if writes or name == "claim":
+                if (writes or name == "claim") and not a.serve:
                     db = os.path.join(tmp, "run.db")
                     for ext in ("", "-wal", "-shm"):
                         if os.path.exists(db + ext):
@@ -161,6 +208,8 @@ def main():
                     shutil.copy(base, db)
                     if name == "claim":
                         run_once(db, ["release", str(fill["held"]), "--note", "probe"], env)
+                if a.serve:
+                    reset_held(base, fill, name)
                 wall, cpu, rc, e = run_once(db, argv, env)
                 walls.append(wall)
                 cpus.append(cpu)

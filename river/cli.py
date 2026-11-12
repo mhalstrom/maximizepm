@@ -2007,7 +2007,10 @@ def run(argv=None):
         return 0
     conn = core.connect()
     # One command reads the item graph once while it writes nothing (#5491). serve keeps its own (page_state).
-    share = core.ANN_SHARE.set({}) if args.cmd not in LONG_COMMANDS else None
+    # In a runner of maxpm serve the share lives as long as the runner: its keys check the connection's writes,
+    # other connections' writes and the clock, so a result serves the next command while nothing changed (#5501).
+    share = (core.ANN_SHARE.set(core.RESIDENT.setdefault("share", {}) if core.RESIDENT else {})
+             if args.cmd not in LONG_COMMANDS else None)
     try:
         return _run(args, conn)
     finally:
