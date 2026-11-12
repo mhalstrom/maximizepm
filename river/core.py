@@ -1117,6 +1117,14 @@ CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
 CREATE INDEX IF NOT EXISTS items_kind_target ON items(kind, target);
+
+-- One number that grows with each change of the item graph by any connection (triggers of _graph_triggers): the
+-- cache of annotate holds while it is the same. A lease renewal is no change of the graph (#5521).
+CREATE TABLE IF NOT EXISTS graph_version (
+  id  INTEGER PRIMARY KEY CHECK (id = 1),
+  n   INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO graph_version (id, n) VALUES (1, 0);
 CREATE INDEX IF NOT EXISTS deps_blocked_by ON deps(blocked_by);
 CREATE INDEX IF NOT EXISTS events_item ON events(item_id);
 CREATE INDEX IF NOT EXISTS messages_to ON messages(to_agent, read_at);
@@ -1365,7 +1373,7 @@ def schema_print():
     """One short id of the schema and of the migrations that this code runs. A change to SCHEMA or to a
     migration gives a new id, so the next connect runs them; nobody has to count versions by hand (#5396)."""
     h = hashlib.sha1(SCHEMA.encode())
-    for f in (_migrate, _migrate_launch_agents, _migrate_levels):
+    for f in (_migrate, _migrate_launch_agents, _migrate_levels, _graph_triggers):
         h.update(_code_print(f.__code__))
     return h.hexdigest()[:16]
 
@@ -1385,10 +1393,38 @@ def _upgrade(conn):
     conn.executescript(SCHEMA)  # CREATE ... IF NOT EXISTS only; executescript ends an open transaction itself
     with tx(conn):
         _migrate(conn)
+        _graph_triggers(conn)
     _migrate_launch_agents(conn)
     _migrate_levels(conn)
     with tx(conn):
         conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", (key, iso(now())))
+
+
+# The tables annotate reads, and their columns that a command renews without a change of the graph.
+GRAPH_TABLES = {"items": ("lease_expires_at", "hold_expires_at"), "deps": (), "projects": (),
+                "goals": ("owner_expires_at",), "item_goals": (), "queue_entries": (), "item_refs": (), "settings": ()}
+
+
+def _graph_triggers(conn):
+    """Inside a tx: the triggers that add 1 to graph_version on each insert, delete and change of GRAPH_TABLES,
+    but for a change of the renewal columns only. Made again with each schema id, so a column that a migration
+    adds is in them."""
+    for table, skip in GRAPH_TABLES.items():
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})") if r["name"] not in skip]
+        for when, of in (("INSERT", ""), ("DELETE", ""), ("UPDATE", " OF " + ", ".join(f'"{c}"' for c in cols))):
+            name = f"graph_{table}_{when.lower()}"
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            conn.execute(f"CREATE TRIGGER {name} AFTER {when}{of} ON {table} BEGIN "
+                         f"UPDATE graph_version SET n = n + 1 WHERE id = 1; END")
+
+
+def graph_version(conn):
+    """The number of graph_version, or None (a queue whose schema predates it)."""
+    try:
+        r = conn.execute("SELECT n FROM graph_version WHERE id=1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return r[0] if r else None
 
 
 def _migrate(conn):
@@ -1598,7 +1634,11 @@ class tx:
 
     def __exit__(self, exc_type, exc, tb):
         _PROCS.reset(self.procs)
-        self.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        if exc_type:
+            self.conn.execute("ROLLBACK")
+            forget_graph()
+        else:
+            self.conn.execute("COMMIT")
         held = _monotonic() - self.t0
         if held >= LOCK_SLOW:
             _log_held(self.conn, held, sys._getframe(1))
@@ -8354,8 +8394,11 @@ def annotate(conn, closed=True):
         return _annotate(conn, closed)
     # The time is in the key too: readiness and reservations change with the clock (a goal owner's claim ends),
     # and a wait runs for many minutes.
-    key = (id(conn), conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0],
-           int(_monotonic() // ANN_SHARE_SECS))
+    gv = graph_version(conn)
+    # A rollback forgets the results (forget_graph): one made from changes that are then rolled back never
+    # serves a reader after another connection's change that gives graph_version the same number.
+    key = (id(conn), int(_monotonic() // ANN_SHARE_SECS)) + (
+        (gv,) if gv is not None else (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0]))
     got = share.get("ann")
     if closed or not (got and got[0] == key):  # a whole result serves an OpenAnn caller too
         name = "ann" if closed else "ann_open"
@@ -8363,13 +8406,31 @@ def annotate(conn, closed=True):
         if not got or got[0] != key:
             got = share[name] = (key, _annotate(conn, closed))
     if isinstance(got[1], OpenAnn):
-        return got[1].copy_rows()
-    rows = {i: dict(a) for i, a in got[1].items()}
+        return _fresh_renewals(conn, got[1].copy_rows())
+    rows = _fresh_renewals(conn, {i: dict(a) for i, a in got[1].items()})
     if closed:
         return rows
     return OpenAnn({i: a for i, a in rows.items() if a["status"] in OPEN_STATES},
                    {i: a for i, a in rows.items() if a["status"] not in OPEN_STATES}, rows.__getitem__,
                    ({i: a["waits_on"] for i, a in rows.items()}, {i: a["unblocks"] for i, a in rows.items()}))
+
+
+def forget_graph():
+    """After a rollback: the cached results of annotate may hold changes that are gone."""
+    share = ANN_SHARE.get()
+    if share:
+        share.pop("ann", None)
+        share.pop("ann_open", None)
+
+
+def _fresh_renewals(conn, rows):
+    """The renewal columns of the open items as they are now: a cached result keeps them from when it was made."""
+    for i, lease, hold in conn.execute(f"SELECT id, lease_expires_at, hold_expires_at FROM items WHERE status IN "
+                                       f"{OPEN_STATES}"):
+        a = dict.get(rows, i)
+        if a is not None:
+            a["lease_expires_at"], a["hold_expires_at"] = lease, hold
+    return rows
 
 
 def _settings_rows(conn):
@@ -9927,10 +9988,12 @@ def sync_needs_you_now(conn, tries=None):
         sync_needs_you(conn)
     except sqlite3.OperationalError as e:
         conn.execute("ROLLBACK")
+        forget_graph()
         if "database is locked" not in str(e):
             raise
     except BaseException:
         conn.execute("ROLLBACK")
+        forget_graph()
         raise
     else:
         conn.execute("COMMIT")

@@ -10601,3 +10601,49 @@ class Speed(Base):
         self.assertEqual([m["id"] for m in core.search(self.c, "page_state")["items"]], [a])
         self.assertEqual(sorted(m["id"] for m in core.search(self.c, "answer")["items"]), [a, b])
         self.assertEqual(core.search(self.c, "zzz nothing here")["items"], [])
+
+
+class GraphVersion(Base):
+    """graph_version grows with each change of the item graph, not with a renewal (#5521)."""
+
+    def test_a_renewal_leaves_it_and_a_link_raises_it(self):
+        core.project_add(self.c, "web")
+        a, b = self.add("web", "First"), self.add("web", "Second")
+        core.register(self.c, "ag")
+        core.claim(self.c, a, "ag")
+        n = core.graph_version(self.c)
+        core.activity(self.c, "ag")  # renews the lease of #a and records that ag was seen
+        self.assertEqual(core.graph_version(self.c), n)
+        core.dep_add(self.c, b, [a], actor="ag")
+        self.assertGreater(core.graph_version(self.c), n)
+        n = core.graph_version(self.c)
+        core.config_set(self.c, "timezone", "Europe/Paris")
+        self.assertGreater(core.graph_version(self.c), n)
+
+    def test_a_cached_result_shows_the_lease_as_it_is_now(self):
+        core.project_add(self.c, "web")
+        a = self.add("web", "First")
+        core.register(self.c, "ag")
+        core.claim(self.c, a, "ag")
+        tok = core.ANN_SHARE.set({})
+        try:
+            before = core.annotate(self.c, closed=False)[a]["lease_expires_at"]
+            self.c.execute("UPDATE items SET lease_expires_at='2099-01-01T00:00:00Z' WHERE id=?", (a,))
+            self.assertNotEqual(before, "2099-01-01T00:00:00Z")
+            self.assertEqual(core.annotate(self.c, closed=False)[a]["lease_expires_at"], "2099-01-01T00:00:00Z")
+        finally:
+            core.ANN_SHARE.reset(tok)
+
+    def test_a_rollback_forgets_the_cached_graph(self):
+        core.project_add(self.c, "web")
+        a = self.add("web", "First")
+        tok = core.ANN_SHARE.set({})
+        try:
+            with self.assertRaises(ZeroDivisionError):
+                with core.tx(self.c):
+                    self.c.execute("UPDATE items SET title='Changed' WHERE id=?", (a,))
+                    self.assertEqual(core.annotate(self.c)[a]["title"], "Changed")
+                    1 / 0
+            self.assertEqual(core.annotate(self.c)[a]["title"], "First")
+        finally:
+            core.ANN_SHARE.reset(tok)

@@ -114,6 +114,8 @@ def run_one(cli, core, conn, req, env):
         core.CALLER_PPID = None
         if conn.in_transaction:  # a command that stopped inside a transaction: none stays open for the next
             conn.rollback()
+            for k in ("ann", "ann_open"):  # its results may hold the changes that are gone
+                core.RESIDENT.get("share", {}).pop(k, None)
     if isinstance(code, str):  # sys.exit("text")
         err.write(code + "\n")
         code = 1
