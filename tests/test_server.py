@@ -4232,6 +4232,14 @@ class StateCache(unittest.TestCase):
         self.assertEqual(titles[ids[1]], "work one, renamed")
         self.assertIn("work three", titles.values())
         self.assertTrue(next(i for i in st["items"] if i["title"] == "work three")["ready"])
+        # #5585: the open items annotate computed live on too; the next action computes only the changed one again.
+        self.assertIn("ann_kept", server._kept_graph)
+        redo = []
+        real_redo = core._ann_redo
+        mock.patch.object(core, "_ann_redo", lambda *a: (lambda r: redo.append(r) or r)(real_redo(*a))).start()
+        code, _ = post("item_edit", {"id": ids[2], "title": "work two, renamed"})
+        self.assertEqual(code, 200)
+        self.assertTrue(redo and redo[0] == {ids[2]}, redo)
 
     def test_pages_share_one_build_until_an_action(self):
         built = []

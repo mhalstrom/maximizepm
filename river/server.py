@@ -4297,7 +4297,7 @@ _state_cache = {}
 _state_build = threading.Lock()
 _state_gen = [0]
 _kept_graph = {}  # the newest item graph that a page build or an action read: ANN_SHARE's ("graph", closed) entries
-_GRAPH_KEYS = (("graph", True), ("graph", False))
+_GRAPH_KEYS = (("graph", True), ("graph", False), "ann_kept")  # and the open items annotate computed on it (#5585)
 
 
 @contextlib.contextmanager
@@ -4305,8 +4305,9 @@ def graph_share():
     """An ANN_SHARE for one page build or one action, as a maxpm command has (#5574): its calls of annotate read the
     item graph once, from the graph that the last build or action kept, and read again only the items that changed
     since (graph_changes, #5577). An action read the whole graph two times (item_show, then sync_needs_you): 31 ms of
-    its 50. Only the graph lives on: the other entries are keyed by a connection, and each request has its own. A
-    kept graph is never changed in place (_graph_changed makes a new one), so threads share it."""
+    its 50. Only the graph and the open items computed on it (ann_kept, #5585) live on: the other entries are keyed
+    by a connection, and each request has its own. A kept graph is never changed in place (_graph_changed makes a
+    new one), so threads share it; so is a kept result (its rows are copied before a caller gets them)."""
     tok = core.ANN_SHARE.set(dict(_kept_graph))
     try:
         yield

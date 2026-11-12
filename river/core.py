@@ -1304,8 +1304,21 @@ _MACHINE_ZONE = {}
 def _machine_zone():
     """The machine's own zone with its rules, so a date in summer gets the summer offset (#5549): the zone that TZ
     names, else the one /etc/localtime links to (macOS, most Linux), else that file read as a zone. Only when none
-    of them works (Windows), the offset that holds now, as before. Kept by the link it came from: a cheap
-    readlink on each call, and a person who moves the machine's zone gets the new one."""
+    of them works (Windows), the offset that holds now, as before. Kept by the link it came from, which is read
+    again after MACHINE_ZONE_SECS: a person who moves the machine's zone gets the new one. A readlink on each call
+    took up to 12 ms for one page build on a busy machine (#5585)."""
+    hit = _MACHINE_ZONE.get(None)
+    if hit and _monotonic() - hit[0] < MACHINE_ZONE_SECS and hit[1] == (os.environ.get("TZ") or ""):
+        return hit[2]
+    tz = _machine_zone_now()
+    _MACHINE_ZONE[None] = (_monotonic(), os.environ.get("TZ") or "", tz)
+    return tz
+
+
+MACHINE_ZONE_SECS = 60
+
+
+def _machine_zone_now():
     key = os.environ.get("TZ") or ""
     if not key:
         try:
@@ -9851,9 +9864,12 @@ class OpenAnn(dict):
     asks for it by id (ann[i], ann.get(i), i in ann), and it is not in the iteration. For the callers that look
     only at open items: computing the 5,000 closed items of a large queue took 90% of annotate (#5491)."""
 
-    def __init__(self, rows, closed_rows, one, links=None):
+    def __init__(self, rows, closed_rows, one, links=None, cache=None):
         super().__init__(rows)
         self._closed, self._one, self._extra, self._links = closed_rows, one, {}, links
+        # The closed items computed for any copy of this result (and kept for the next build, #5585): each copy
+        # gets its own dict of them, so a caller that changes a field changes it for itself only.
+        self._cache = {} if cache is None else cache
 
     def light(self, i):
         """Item i with at least id, status, backlog, project_id, priority, due and assignee; a closed item without
@@ -9865,7 +9881,7 @@ class OpenAnn(dict):
         return {"backlog": False, **self._closed[i]}
 
     def copy_rows(self):
-        return OpenAnn({i: dict(a) for i, a in self.items()}, self._closed, self._one, self._links)
+        return OpenAnn({i: dict(a) for i, a in self.items()}, self._closed, self._one, self._links, self._cache)
 
     def neighbors(self, i):
         """The items i waits on and the items that wait on it, without computing a closed one."""
@@ -9877,7 +9893,10 @@ class OpenAnn(dict):
         if k in self._closed:
             v = self._extra.get(k)
             if v is None:
-                v = self._extra[k] = self._one(k)
+                c = self._cache.get(k)
+                if c is None:
+                    c = self._cache[k] = self._one(k)
+                v = self._extra[k] = dict(c)
             return v
         raise KeyError(k)
 
@@ -9923,6 +9942,7 @@ def forget_graph():
     if share:
         share.pop("ann", None)
         share.pop("ann_open", None)
+        share.pop("ann_kept", None)
         share.pop(("graph", True), None)
         share.pop(("graph", False), None)
 
@@ -10068,9 +10088,90 @@ def _annotate(conn, closed=True):
         if r is None:
             raise KeyError(i)
         return one(i, dict(r))
-    return OpenAnn({i: one(i, it) for i, it in items.items() if is_open[i]},
-                   {i: it for i, it in items.items() if not is_open[i]}, more,
-                   ({i: sorted(v) for i, v in waits_on.items()}, {i: sorted(v) for i, v in waited_by.items()}))
+
+    share = ANN_SHARE.get()
+    graph = share.get(("graph", False)) if share is not None else None
+    inputs = (zone, model_defaults, ladder_text, projects, goal_owners)  # the clock: _ann_times
+    redo = _ann_redo(conn, share.get("ann_kept"), graph, inputs, tags, queued, refs) if graph and "n" in graph else None
+    if redo is None:
+        rows, cache = {i: one(i, it) for i, it in items.items() if is_open[i]}, {}
+        links = ({i: sorted(v) for i, v in waits_on.items()}, {i: sorted(v) for i, v in waited_by.items()})
+    else:
+        kept, rows = share["ann_kept"], {}
+        for i, it in items.items():
+            if not is_open[i]:
+                continue
+            a = kept["rows"].get(i)
+            if a is None or i in redo:
+                rows[i] = one(i, it)
+            elif a["effective_due"] or it["blocked_until"]:  # its texts and due state change with the clock
+                rows[i] = _ann_times(dict(a), it, zone, now_s, soon_s)
+            else:
+                rows[i] = a
+        cache = {i: a for i, a in kept["cache"].items() if i not in redo}
+        old = kept["links"]  # the sorted links of the items the change did not reach stay
+        links = tuple({i: (o[i] if i not in redo and i in o else sorted(v)) for i, v in new.items()}
+                      for o, new in zip(old, (waits_on, waited_by)))
+    if graph and "n" in graph:
+        share["ann_kept"] = {"db": graph["db"], "n": graph["n"], "lists": (waits_on, waited_by, conflicts),
+                             "inputs": inputs, "tags": tags, "queued": queued, "refs": refs, "rows": rows,
+                             "cache": cache, "links": links}
+    return OpenAnn(rows, {i: it for i, it in items.items() if not is_open[i]}, more, links, cache)
+
+
+ANN_REDO_SHARE = 0.5  # a change that reaches more than this share of the open items: compute all of them again
+
+
+def _ann_redo(conn, kept, graph, inputs, tags, queued, refs):
+    """The items whose computed fields a change since the kept result can change (#5585), or None: compute all.
+    A change of an item or a link (graph_changes) reaches the item, every item it waits on and every item that waits
+    on it, over any number of links, in the links before and after, and the items it conflicts with: their
+    readiness, effective priority and due, unblock counts, depth and sort keys. A changed goal tag, queue entry or
+    tracker link reaches its own item; a change of a project, a goal owner or a setting, all items."""
+    if not kept or kept["db"] != graph["db"] or kept["inputs"] != inputs or graph["n"] < kept["n"]:
+        return None
+    ids = set()
+    if graph["n"] > kept["n"]:
+        low = conn.execute("SELECT min(n) FROM graph_changes").fetchone()[0]
+        if low is None or low > kept["n"] + 1:
+            return None  # activity removed log rows that the kept result did not see
+        ids = {r[0] for r in conn.execute("SELECT DISTINCT item_id FROM graph_changes WHERE n > ?", (kept["n"],))}
+        if len(ids) > GRAPH_CHANGED_MAX:
+            return None
+    for new, old in ((tags, kept["tags"]), (queued, kept["queued"]), (refs, kept["refs"])):
+        if new != old:
+            ids |= {i for i in new.keys() | old.keys() if new.get(i) != old.get(i)}
+    if not ids:
+        return ids
+    lists = (graph["lists"][0], graph["lists"][1], graph["lists"][2]), kept["lists"]
+    redo = set(ids)
+    for k in (0, 1):  # up the prerequisites, down the dependents
+        seen, todo = set(ids), list(ids)
+        while todo:
+            x = todo.pop()
+            for links in lists:
+                for y in links[k].get(x, ()):
+                    if y not in seen:
+                        seen.add(y)
+                        todo.append(y)
+        redo |= seen
+    for x in ids:
+        for links in lists:
+            redo.update(links[2].get(x, ()))
+    if len(redo) > ANN_REDO_SHARE * len(kept["rows"]) + 20:
+        return None
+    return redo
+
+
+def _ann_times(a, it, zone, now_s, soon_s):
+    """The fields of a computed item that change with the clock alone: its due and blocked texts and due state."""
+    a["due_text"] = show_time(a["effective_due"], zone)
+    a["due_state"] = (None if not a["effective_due"] else "overdue" if a["effective_due"] <= now_s
+                      else "soon" if a["effective_due"] <= soon_s else None)
+    a["blocked_until_text"] = show_time(it["blocked_until"], zone)
+    a["blocked_text"] = ("" if not it["blocked_reason"] else "blocked" + (
+        f" until {a['blocked_until_text']}" if it["blocked_until"] else "") + f": {it['blocked_reason']}")
+    return a
 
 
 def _reason(a):

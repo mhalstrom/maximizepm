@@ -11973,3 +11973,103 @@ class SessionSelf(Base):
         self.assertIn("is no agent", self.run_cli("", "", "session", "--move", self.W1, "--to", "nobody"))
         self.assertIn("--move <session id> --to <agent>", self.run_cli("", "", "session", "--move", self.W1))
 
+
+
+class AnnotateKept(Base):
+    """#5585: annotate keeps its open items between page builds and commands (ann_kept) and computes again only what a
+    change reaches. After every kind of change the kept result equals a full computation."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        core.project_add(self.c, "b")
+        for n in ("s1", "s2"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+        self.share = {}
+        tok = core.ANN_SHARE.set(self.share)
+        self.addCleanup(core.ANN_SHARE.reset, tok)
+
+    def same(self, what):
+        kept = core.annotate(self.c, closed=False)
+        tok = core.ANN_SHARE.set(None)
+        try:
+            full = core._annotate(self.c, closed=False)
+        finally:
+            core.ANN_SHARE.reset(tok)
+        self.assertEqual(sorted(kept), sorted(full), what)
+        for i in full:
+            self.assertEqual(kept[i], full[i], f"{what}: #{i}")
+        self.assertEqual(kept._links, full._links, f"{what}: the links")
+        closed = [r[0] for r in self.c.execute("SELECT id FROM items WHERE status IN ('done','dropped') ORDER BY id")]
+        for i in closed[-3:]:
+            self.assertEqual(kept[i], full[i], f"{what}: closed #{i}")
+        self.c.execute("UPDATE graph_version SET n = n")  # nothing; the next call reads the log
+        return kept
+
+    def test_the_kept_result_equals_a_full_one_after_each_change(self):
+        a, b, c, d = (self.add("a", t) for t in ("a", "b", "c", "d"))
+        e = core.item_add(self.c, "b", "e", after=[c])["id"]
+        core.dep_add(self.c, b, [a])
+        core.dep_add(self.c, c, [b])
+        core.goal_add(self.c, "a", "g")
+        self.same("first")
+        seen = []
+        real = core._ann_redo
+        core._ann_redo = lambda *x: (lambda r: (seen.append(r), r)[1])(real(*x))
+        self.addCleanup(setattr, core, "_ann_redo", real)
+        steps = [
+            ("a title", lambda: core.item_edit(self.c, d, title="d two", actor="s1")),
+            ("a priority up the chain", lambda: core.item_prio(self.c, e, 0)),
+            ("a link", lambda: core.dep_add(self.c, d, [c])),
+            ("a link removed", lambda: core.dep_remove(self.c, d, [c])),
+            ("a conflict", lambda: core.dep_add(self.c, d, [a], kind="conflicts")),
+            ("a claim beside the conflict", lambda: core.claim(self.c, a, "s1")),
+            ("a close", lambda: core.done(self.c, a, output="x", actor="s1")),
+            ("a reopen", lambda: core.reopen(self.c, a, actor="s1")),
+            ("a goal tag", lambda: core.item_edit(self.c, b, goals=["g"], actor="s1")),
+            ("a goal owner", lambda: core.goal_own(self.c, "g", "s2")),
+            ("a queue entry", lambda: core.queue_add(self.c, "s1", d, actor="mark")),
+            ("an outside blocker", lambda: core.block(self.c, c, "waits on a vendor", "s1", until="2h")),
+            ("a due date down the chain", lambda: core.item_edit(self.c, e, due="2030-01-01T00:00:00Z", actor="s1")),
+            ("a project rank", lambda: core.project_rank(self.c, "b", 0)),
+            ("a new item", lambda: core.item_add(self.c, "a", "f", after=[d])),
+            ("a drop", lambda: core.drop(self.c, d, actor="s1", note="no")),
+        ]
+        for what, step in steps:
+            step()
+            self.same(what)
+        self.assertTrue(any(r is not None and len(r) <= 2 for r in seen), seen)  # a title: its own item only
+
+    def test_random_changes(self):
+        import random
+        rnd = random.Random(5585)
+        ids = [self.add(rnd.choice("ab"), f"t{n}") for n in range(25)]
+        self.same("first")
+        for step in range(80):
+            i, j = rnd.sample(ids, 2)
+            op = rnd.choice(["prio", "dep", "undep", "conflict", "done", "reopen", "title", "block", "unblock", "add"])
+            try:
+                if op == "prio":
+                    core.item_prio(self.c, i, rnd.randint(0, 4))
+                elif op == "dep":
+                    core.dep_add(self.c, i, [j])
+                elif op == "undep":
+                    core.dep_remove(self.c, i, [j])
+                elif op == "conflict":
+                    core.dep_add(self.c, i, [j], kind="conflicts")
+                elif op == "done":
+                    core.done(self.c, i, output="x", actor="s1", force="test")
+                elif op == "reopen":
+                    core.reopen(self.c, i, actor="s1")
+                elif op == "title":
+                    core.item_edit(self.c, i, title=f"t{i} {step}", actor="s1")
+                elif op == "block":
+                    core.block(self.c, i, "outside", "s1")
+                elif op == "unblock":
+                    core.unblock(self.c, i, "s1")
+                else:
+                    ids.append(core.item_add(self.c, rnd.choice("ab"), f"n{step}", after=[j])["id"])
+            except RiverError:
+                continue  # a refused change changes nothing
+            self.same(f"step {step}: {op} #{i} #{j}")
