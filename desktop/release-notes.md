@@ -14,6 +14,7 @@ About 50 changes since v0.2.0. The main ones:
 - **The system description.** Each project can describe its code, its infrastructure and its rules in one place (`maxpm ops system`). Faults read it. Agents can propose changes, and you or the manager accept them.
 - **Scheduled tasks.** Repeating obligations like an annual report, taxes or a renewal: `maxpm schedule add` adds the task each time it comes due, with the lead time you pick.
 - **Smaller fixes.** With no time zone set, times follow your computer's daylight saving rules. `maxpm done --ship` refuses before it closes an item that can't ship. A review pins the commit it checked, so the release ships exactly that. `maxpm done --changed` keeps one plain line about what changed, for you. Tooltips name what a button does in a few words.
+- **Removed:** the Windows app. On Windows, MaximizePM runs inside WSL 2.
 
 ### Also new since v0.1.8 (v0.2.0 had no download)
 
