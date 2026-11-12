@@ -1195,6 +1195,13 @@ CREATE TABLE IF NOT EXISTS graph_version (
   n   INTEGER NOT NULL
 );
 INSERT OR IGNORE INTO graph_version (id, n) VALUES (1, 0);
+-- The items whose row or links changed, one row a change (the same triggers): a runner of maxpm serve keeps the
+-- item graph between commands and reads again only these items (_load_graph, #5577). activity keeps the last
+-- GRAPH_LOG_KEEP rows.
+CREATE TABLE IF NOT EXISTS graph_changes (
+  n        INTEGER PRIMARY KEY,
+  item_id  INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS deps_blocked_by ON deps(blocked_by);
 CREATE INDEX IF NOT EXISTS events_item ON events(item_id);
 CREATE INDEX IF NOT EXISTS messages_to ON messages(to_agent, read_at);
@@ -1521,7 +1528,18 @@ def _graph_triggers(conn):
             name = f"graph_{table}_{when.lower()}"
             conn.execute(f"DROP TRIGGER IF EXISTS {name}")
             conn.execute(f"CREATE TRIGGER {name} AFTER {when}{of} ON {table} BEGIN "
-                         f"UPDATE graph_version SET n = n + 1 WHERE id = 1; END")
+                         f"UPDATE graph_version SET n = n + 1 WHERE id = 1; {_graph_log(table, when)}END")
+
+
+def _graph_log(table, when):
+    """The statements of a graph trigger that write the changed items into graph_changes (#5577): an item's own
+    row, and for a link both of its items, before and after the change."""
+    rows = {"items": ("id",), "deps": ("item_id", "blocked_by")}.get(table)
+    if not rows:
+        return ""
+    ages = {"INSERT": ("NEW",), "DELETE": ("OLD",), "UPDATE": ("OLD", "NEW")}[when]
+    return "".join(f"INSERT INTO graph_changes (item_id) VALUES ({age}.{col}); " for age in ages for col in rows
+                   if not (table == "items" and age == "OLD" and when == "UPDATE"))
 
 
 def graph_version(conn):
@@ -9672,7 +9690,10 @@ LIGHT_COLUMNS = "id, project_id, status, priority, due, backlog_at, assignee"
 
 
 def _load_graph(conn, closed=True):
-    """closed=False: the done and dropped items with LIGHT_COLUMNS only; their full rows are most of the read."""
+    """closed=False: the done and dropped items with LIGHT_COLUMNS only; their full rows are most of the read.
+    Inside a command or a runner of maxpm serve (ANN_SHARE), the graph stays for the next call, and that call reads
+    again only the items of graph_changes since (#5577: each write command read 5,500 items and 10,000 links two
+    times, 15 ms each). The rows and lists of a returned graph never change: a change replaces them."""
     # One view for the three reads. As separate statements, another session's new item and its links could
     # come between them: a link then named an item this read did not have, and the command stopped (KeyError).
     # A plain BEGIN holds one view of the database (WAL) and keeps no writer out; inside the caller's
@@ -9682,32 +9703,101 @@ def _load_graph(conn, closed=True):
         conn.execute("BEGIN")
     try:
         projects = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM projects")}
-        # dict(zip()) of each row: dict() of a sqlite3.Row took two thirds of this read (#5491).
-        rows = list(conn.execute("SELECT * FROM items" + ("" if closed else f" WHERE status IN {OPEN_STATES}")))
-        cols = rows[0].keys() if rows else []
-        items = {r[0]: dict(zip(cols, r)) for r in rows}
-        if not closed:
-            rows = list(conn.execute(f"SELECT {LIGHT_COLUMNS} FROM items WHERE status NOT IN {OPEN_STATES}"))
-            cols = rows[0].keys() if rows else []
-            items.update((r[0], dict(zip(cols, r))) for r in rows)
-        deps = conn.execute("SELECT item_id, blocked_by, kind FROM deps").fetchall()
+        share = ANN_SHARE.get()
+        top = _graph_log_top(conn) if share is not None else None
+        kept = share.get(("graph", closed)) if top is not None else None
+        if kept and kept["db"] == conn.execute("PRAGMA database_list").fetchone()[2]:
+            kept = _graph_changed(conn, closed, kept, top)
+        else:
+            kept = None
+        if kept is None:
+            kept = _graph_read(conn, closed)
+            if top is not None:
+                kept.update(db=conn.execute("PRAGMA database_list").fetchone()[2], n=top)
+        if top is not None:
+            share[("graph", closed)] = kept
     finally:
         if own:
             conn.execute("COMMIT")
-    waits_on = {i: [] for i in items}     # item -> prerequisites
-    waited_by = {i: [] for i in items}    # item -> dependents
-    conflicts = {i: [] for i in items}   # item -> items it must not run beside
-    feeds = {i: [] for i in items}       # item -> prerequisites whose output it reads
-    for r in deps:
-        if r["kind"] == "conflicts":
-            conflicts[r["item_id"]].append(r["blocked_by"])
-            conflicts[r["blocked_by"]].append(r["item_id"])
+    return (projects, kept["items"], *kept["lists"])
+
+
+GRAPH_LOG_KEEP = 20000  # the rows of graph_changes that activity keeps
+GRAPH_CHANGED_MAX = 400  # more changed items than this since the kept graph: read it whole
+
+
+def _graph_log_top(conn):
+    """The last row of graph_changes (0 when it is empty), or None for a queue whose schema predates it."""
+    try:
+        return conn.execute("SELECT max(n) FROM graph_changes").fetchone()[0] or 0
+    except sqlite3.OperationalError:
+        return None
+
+
+def _graph_read(conn, closed):
+    """The whole item graph: {"items": {id: row}, "lists": (waits_on, waited_by, conflicts, feeds)}."""
+    # dict(zip()) of each row: dict() of a sqlite3.Row took two thirds of this read (#5491).
+    rows = list(conn.execute("SELECT * FROM items" + ("" if closed else f" WHERE status IN {OPEN_STATES}")))
+    cols = rows[0].keys() if rows else []
+    items = {r[0]: dict(zip(cols, r)) for r in rows}
+    if not closed:
+        rows = list(conn.execute(f"SELECT {LIGHT_COLUMNS} FROM items WHERE status NOT IN {OPEN_STATES}"))
+        cols = rows[0].keys() if rows else []
+        items.update((r[0], dict(zip(cols, r))) for r in rows)
+    lists = tuple({i: [] for i in items} for _ in range(4))
+    _graph_links(lists, conn.execute("SELECT item_id, blocked_by, kind FROM deps").fetchall())
+    return {"items": items, "lists": lists}
+
+
+def _graph_links(lists, deps, only=None):
+    """Add the links deps to the lists (waits_on, waited_by, conflicts, feeds); only: of these items only."""
+    waits_on, waited_by, conflicts, feeds = lists  # item -> prerequisites, dependents, items it must not run
+    for r in deps:                                 # beside, prerequisites whose output it reads
+        a, b = r[0], r[1]
+        if r[2] == "conflicts":
+            if only is None or a in only:
+                conflicts[a].append(b)
+            if only is None or b in only:
+                conflicts[b].append(a)
             continue
-        waits_on[r["item_id"]].append(r["blocked_by"])
-        waited_by[r["blocked_by"]].append(r["item_id"])
-        if r["kind"] == "feeds":
-            feeds[r["item_id"]].append(r["blocked_by"])
-    return projects, items, waits_on, waited_by, conflicts, feeds
+        if only is None or a in only:
+            waits_on[a].append(b)
+            if r[2] == "feeds":
+                feeds[a].append(b)
+        if only is None or b in only:
+            waited_by[b].append(a)
+
+
+def _graph_changed(conn, closed, kept, top):
+    """The kept graph with the items of graph_changes after kept["n"] read again, as a new graph; None when the log
+    no longer holds all of them (activity removed old rows) or too many changed."""
+    if top < kept["n"] or kept["n"] < top - GRAPH_LOG_KEEP:
+        return None
+    if top == kept["n"]:
+        return kept
+    ids = {r[0] for r in conn.execute("SELECT DISTINCT item_id FROM graph_changes WHERE n > ?", (kept["n"],))}
+    if len(ids) > GRAPH_CHANGED_MAX:
+        return None
+    marks = ",".join("?" * len(ids))
+    rows = list(conn.execute(f"SELECT * FROM items WHERE id IN ({marks})", list(ids)))
+    items, lists = dict(kept["items"]), tuple(dict(d) for d in kept["lists"])
+    light = [c.strip() for c in LIGHT_COLUMNS.split(",")]
+    for r in rows:
+        row = dict(zip(r.keys(), r))
+        items[r[0]] = row if closed or row["status"] in OPEN_STATES else {c: row[c] for c in light}
+    redo = set(ids)
+    for i in ids - {r[0] for r in rows}:  # removed: its old neighbours lose it too
+        for d in lists:
+            redo.update(d.pop(i, ()))
+        items.pop(i, None)
+    redo &= items.keys()
+    for d in lists:
+        for i in redo:
+            d[i] = []
+    marks = ",".join("?" * len(redo))
+    _graph_links(lists, conn.execute(f"SELECT item_id, blocked_by, kind FROM deps WHERE item_id IN ({marks}) "
+                                     f"OR blocked_by IN ({marks})", [*redo, *redo]).fetchall(), redo)
+    return {"items": items, "lists": lists, "db": kept["db"], "n": top}
 
 
 # One build of the page's state (server.page_state, #5465) and one maxpm command (cli._run, #5491) read the item
@@ -9811,6 +9901,8 @@ def forget_graph():
     if share:
         share.pop("ann", None)
         share.pop("ann_open", None)
+        share.pop(("graph", True), None)
+        share.pop(("graph", False), None)
 
 
 def _fresh_renewals(conn, rows):
@@ -10236,9 +10328,12 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
 
 def queue_list(conn, agent, ann=None, rows=None):
     """rows: the agent's queue_entries rows, in _queue_rows order, when the caller read them already (state, #5524)."""
-    ann = ann or annotate(conn)
+    rows = _queue_rows(conn, agent) if rows is None else rows
+    # The open items, and a closed one when an entry names it: the whole graph took 100 ms of each go (#5577).
+    if ann is None and any(r["item_id"] is not None for r in rows):
+        ann = annotate(conn, closed=False)
     out = []
-    for r in _queue_rows(conn, agent) if rows is None else rows:
+    for r in rows:
         e = {"entry": r["id"], "kind": r["kind"], "added_by": r["added_by"], "created_at": r["created_at"],
              "delivered_at": r["delivered_at"], "native_status": r["native_status"]}
         if r["item_id"] is not None and r["item_id"] in ann:
@@ -11284,6 +11379,8 @@ def activity(conn, actor, tries=None, sync=True):
         expired = _sweep(conn)
         swept = conn.total_changes != before
         _touch_agent(conn, actor)
+        # The log of the kept item graph keeps its last rows (#5577): one indexed delete of the rows that came since.
+        conn.execute("DELETE FROM graph_changes WHERE n <= (SELECT max(n) FROM graph_changes) - ?", (GRAPH_LOG_KEEP,))
     if sync or swept:
         sync_needs_you_now(conn, tries)
     return expired

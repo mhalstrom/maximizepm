@@ -11377,6 +11377,60 @@ class GraphVersion(Base):
         finally:
             core.ANN_SHARE.reset(tok)
 
+    def test_a_kept_graph_reads_again_only_the_changed_items(self):
+        """#5577: inside a command or a runner, the next _load_graph reads only the items of graph_changes since the
+        last one, also after another session's writes, and gives the graph that a whole read gives."""
+        core.project_add(self.c, "web")
+        a, b = self.add("web", "First"), self.add("web", "Second")
+        c = self.add("web", "Third", after=[a])
+        done = self.add("web", "Old")
+        core.done(self.c, done, actor="t", output="x")
+        other = core.connect(self.path)
+        self.addCleanup(other.close)
+        tok = core.ANN_SHARE.set({})
+        self.addCleanup(core.ANN_SHARE.reset, tok)
+
+        def same(closed=False):
+            got = core._load_graph(self.c, closed)
+            whole = core._graph_read(self.c, closed)
+            self.assertEqual(got[1], whole["items"])
+            self.assertEqual([{i: sorted(v) for i, v in d.items()} for d in got[2:]],
+                             [{i: sorted(v) for i, v in d.items()} for d in whole["lists"]])
+            return got
+        first = same()
+        self.assertEqual(first[1][done], {"id": done, "project_id": first[1][a]["project_id"], "status": "done",
+                                          "priority": 2, "due": None, "backlog_at": None, "assignee": None})
+        self.assertIs(core._load_graph(self.c, False)[1], first[1])  # nothing changed: the same graph
+        core.dep_add(other, b, [a], kind="feeds")
+        core.dep_add(other, c, [b], kind="conflicts")
+        core.item_prio(other, c, 0)
+        d = core.item_add(other, "web", "Fourth", after=[b])["id"]
+        got = same()
+        self.assertIs(got[1][done], first[1][done])  # an item that did not change: its row was not read again
+        self.assertIsNot(got[1][c], first[1][c])
+        self.assertEqual(got[1][c]["priority"], 0)
+        core.dep_remove(other, c, [a])
+        core.done(other, b, actor="t", output="x", force="test")
+        self.assertEqual(same()[1][b]["status"], "done")
+        self.assertNotIn("title", same()[1][b])  # closed: LIGHT_COLUMNS only
+        self.assertEqual(same(closed=True)[1][b]["title"], "Second")
+        with core.tx(other):  # a removed item and its links
+            e = other.execute("INSERT INTO items (project_id, title, rank, created_at) SELECT project_id, 'Gone', 0, "
+                              "created_at FROM items WHERE id=?", (a,)).lastrowid
+            other.execute("INSERT INTO deps (item_id, blocked_by) VALUES (?, ?)", (d, e))
+        self.assertEqual(same()[2][d], [b, e])
+        with core.tx(other):
+            other.execute("DELETE FROM deps WHERE blocked_by=?", (e,))
+            other.execute("DELETE FROM items WHERE id=?", (e,))
+        self.assertNotIn(e, same()[1])
+        # activity keeps the last GRAPH_LOG_KEEP rows; a kept graph that is older reads the whole graph again.
+        with mock.patch.object(core, "GRAPH_LOG_KEEP", 1):
+            core.item_prio(other, a, 1)
+            core.item_prio(other, a, 3)
+            core.activity(other, "t")
+            self.assertEqual(other.execute("SELECT count(*) FROM graph_changes").fetchone()[0], 1)
+            self.assertEqual(same()[1][a]["priority"], 3)
+
 
 class Schedules(Base):
     """Scheduled tasks (#5507): a repeating obligation adds its item at each due time, less its lead time; times that
