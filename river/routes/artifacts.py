@@ -48,7 +48,9 @@ def artifacts(h, path):
     try:
         from urllib.parse import parse_qs, urlsplit
         one = parse_qs(urlsplit(h.path).query).get("agent", [""])[0] or None
-        return h._send(200, {"artifacts": listing(conn, one, terminals=None if one else server.agent_terminals(conn))})
+        with server.read_memo():  # it writes nothing: the agents' statuses and the settings once (#5597)
+            rows = listing(conn, one, terminals=None if one else server.agent_terminals(conn))
+        return h._send(200, {"artifacts": rows})
     finally:
         conn.close()
 

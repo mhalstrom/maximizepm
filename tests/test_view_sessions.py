@@ -2164,6 +2164,18 @@ class SideFiles(Base):
                 with self.assertRaisesRegex(core.RiverError, why):
                     server.local_file(self.c, str(bad))
 
+    def test_a_folder_whose_name_starts_with_a_project_folder_is_not_in_it(self):
+        # #5597: the test of a file under a folder is a text test now; /a/shop-old is not in /a/shop.
+        twin = Path(str(self.proj) + "-old")
+        twin.mkdir()
+        (twin / "a.png").write_bytes(b"\x89PNG")
+        (self.proj / "b.png").write_bytes(b"\x89PNG")
+        self.assertEqual(server.local_file(self.c, str(self.proj / "b.png"))[1], "image/png")
+        with self.assertRaisesRegex(core.RiverError, "only from"):
+            server.local_file(self.c, str(twin / "a.png"))
+        self.assertTrue(server._inside(Path("/a/b"), Path("/a/b")) and server._inside(Path("/a/b/c"), Path("/")))
+        self.assertFalse(server._inside(Path("/a/bc"), Path("/a/b")))
+
     def test_the_paths_a_session_names_resolve_or_say_why(self):
         # #4689: a full path, a file:// link, a path relative to the session's folder, a bare name of a file it
         # named, and the reasons for the others.

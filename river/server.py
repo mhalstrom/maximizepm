@@ -3535,10 +3535,18 @@ def claude_tmps():
     return list(dict.fromkeys(b.resolve() for b in bases))
 
 
+def _inside(f, root):
+    """Whether the resolved path f is root or in it: root == f or root in f.parents, as a text test (#5597). The
+    Artifacts tab tested each of its 211 files against every project folder and worktree that way: 35,000 Path
+    objects and 150 ms of the server's interpreter every 10 s."""
+    fs, rs = str(f), str(root)
+    return fs == rs or fs.startswith(rs if rs.endswith(os.sep) else rs + os.sep)
+
+
 def _scratchpad_of(conn, f):
     """The scratchpad folder that holds f, when it is the scratchpad of a Claude Code session in a project folder
     or one of its worktrees (#4683): the screenshots and pages a session makes for the person go there. Else None."""
-    base = next((b for b in claude_tmps() if b in f.parents), None)
+    base = next((b for b in claude_tmps() if b != f and _inside(f, b)), None)
     if base is None:
         return None
     rel = f.relative_to(base).parts
@@ -3557,7 +3565,7 @@ def local_file(conn, path, read=True):
     if not f.is_absolute():
         raise RiverError("the side panel shows a file by its full path")
     f = f.resolve()
-    root = next((r for r in file_roots(conn) if r == f or r in f.parents), None) or _scratchpad_of(conn, f)
+    root = next((r for r in file_roots(conn) if _inside(f, r)), None) or _scratchpad_of(conn, f)
     hidden = [i for i, part in enumerate(f.parts) if i and part.startswith(".")]
     # One hidden folder is allowed: .playwright-mcp right under a project folder, where the Playwright MCP saves
     # the screenshots a session takes (#4683).

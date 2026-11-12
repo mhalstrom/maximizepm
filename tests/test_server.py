@@ -1661,6 +1661,10 @@ class LaunchInTmux(unittest.TestCase):
         card = next(s for s in sent["body"]["sessions"] if s["name"] == "ag3")
         self.assertEqual([i["id"] for i in card["holds"]], [x])
         self.assertIsNone(core.BUILD_MEMO.get())  # the memo ends with the request
+        from river.routes import artifacts  # the Artifacts tab, every 10 s, the same (200-600 ms live)
+        h.path = "/api/artifacts"
+        artifacts.artifacts(h, "/api/artifacts")
+        self.assertEqual((sent["code"], calls), (200, []))
 
     def test_each_agent_starts_in_a_pane_of_the_maxpm_session(self):
         x = core.item_add(self.c, "shop", "first: the work")["id"]
