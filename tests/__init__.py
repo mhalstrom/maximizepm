@@ -14,6 +14,14 @@ from river import core, dictation, server
 for _name in ("MAXPM_AGENT", "MAXPM_AGENT_TYPE", "MAXPM_CHAT", "MAXPM_DESKTOP", "MAXPM_FOCUS", "MAXPM_FORK_OF",
               "MAXPM_MODEL", "MAXPM_QUIET"):
     os.environ.pop(_name, None)
+# Nor the agent session that runs the tests: a command records the session's id and web link from these, and that
+# write made a read command (maxpm show) sync the needs-you rows in a Claude Code session with Remote Control only,
+# so a test passed there and failed in every other shell (#5581).
+from river import agents as _agents  # noqa: E402
+_got = _agents.load()
+for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("env") for m in _agents.env_order()]:
+    if _name:
+        os.environ.pop(_name, None)
 
 core.tmux_path = lambda: None
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin

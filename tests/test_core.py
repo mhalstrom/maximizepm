@@ -8154,6 +8154,7 @@ class CloseCheck(TextQueue):
                          context="Connections > Add connection, account 7be0d4e1, share it with everyone.")
         other = self.add("Look at the new pricing table", doer="human", actor="w2")
         reset = self.add("Reset the demo workspace for a new recording")
+        core.sync_needs_you_now(self.c)  # as maxpm add does: the person items are on the person's list from the add
         self.at(-3 * 3600)
         res = self.finish(reset, "Reset done: automation 4f2a91c3 archived, mail account 7be0d4e1 disconnected")
         got = self.listed(res)
