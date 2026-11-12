@@ -65,6 +65,12 @@ START_WAIT = 20      # seconds for Chrome to write its DevToolsActivePort
 CALL_WAIT = 20       # seconds for one CDP answer
 LOAD_WAIT = 15       # seconds that open() waits for the page's load
 VIEW = (1280, 860)   # the size of the page before the panel says its own
+# The screen that the page sees, when the panel's screen is smaller than the window (a phone through the relay): a
+# headless Chrome says 800x600, smaller than its own window, which no Chrome with a window says (#5625).
+SCREEN = (1512, 982) if sys.platform == "darwin" else (1920, 1080)
+DSF_MAX = 2.0        # a phone's density of 3 sends 2.25 times the pixels of 2 through the relay, for little more
+PANE_GONE = 30.0     # seconds after a panel's last frame poll that it counts as closed
+SHARP_SEEN = 8       # frames whose bytes a sharp frame skips: a screenshot paints the page again, twice (#5625)
 
 
 def chrome_path():
@@ -473,6 +479,14 @@ class Browser:
         self.frame = None    # {seq, data, w, h}
         self.seq = 0
         self.size = None     # (w, h) of the panel, CSS px
+        self.dsf = 1         # the pixel density of the panel's screen (#5625)
+        self.screen = None   # (w, h) of the panel's screen, CSS px
+        self.sharp = threading.Event()  # a sharp frame is due: _sharpen takes a screenshot of the page
+        self.sharp_thread = None
+        self.seen = []       # the bytes (a hash) of the last screencast frames, for the sharp frames
+        self.panes = {}      # the open panels: pane id -> {size, dsf, screen, at}
+        self.driver = None   # the panel where a person last clicked, typed or took control: it sets the size
+        self.pane_lock = threading.Lock()
         self.attached = None # the debugging port of a Chrome that serve did not start (browser_source cdp:<port>)
         self.mine = set()    # attached: the tabs serve opened in it, and the tabs that they opened
         self.attached_window = None  # attached: whether that Chrome has a window (None: not known)
@@ -676,12 +690,47 @@ class Browser:
             pass
 
     def _fit(self):
-        """The page takes the size of the panel (headless only; a window has its own size)."""
+        """The page takes the size of the panel (headless only; a window has its own size), at the pixel density of the
+        panel's screen. Emulation and not Browser.setWindowBounds (#5625): the window keeps its normal size (VIEW), and
+        a window of the panel's size was one of the traits that made Google answer with a CAPTCHA (#5619). The screen
+        is the panel's screen, or a normal one when that is smaller than the window."""
         if not self.size or self._windowed() or not self.session:
             return
         w, h = self.size
-        self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False},
-                  session=self.session)
+        sw, sh = self.screen or (0, 0)
+        if sw < VIEW[0] or sh < VIEW[1]:
+            sw, sh = SCREEN
+        self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": self.dsf,
+                  "mobile": False, "screenWidth": sw, "screenHeight": sh}, session=self.session)
+        self._want_sharp()  # a page that does not paint again after the change sends no frame of its new size
+
+    def _want_sharp(self):
+        if self.sharp_thread is None:
+            self.sharp_thread = threading.Thread(target=self._sharpen, daemon=True, name=f"browser-sharp-{self.project}")
+            self.sharp_thread.start()
+        self.sharp.set()
+
+    def _sharpen(self):
+        """The frames at the panel's pixel density (#5625). A headless Chrome sends its screencast frames at one pixel
+        for each CSS pixel, whatever the emulated density, and with --force-device-scale-factor its screencast stops
+        when the emulation changes the density (Chrome 157). So each new frame is followed by a screenshot of the page,
+        at most one at a time; the next one waits for the next change."""
+        while True:
+            self.sharp.wait()
+            self.sharp.clear()
+            s, size = self.session, self.size
+            if not s or not size or self._windowed():
+                continue
+            try:
+                data = self.call("Page.captureScreenshot", {"format": "jpeg", "quality": 70}, session=s, timeout=10)["data"]
+            except (RiverError, KeyError):
+                continue
+            if s != self.session or size != self.size:
+                continue  # another tab or size: the next frame asks again
+            with self.cond:
+                self.seq += 1
+                self.frame = {"seq": self.seq, "data": data, "w": size[0], "h": size[1], "sharp": True}
+                self.cond.notify_all()
 
     def _kill(self, pid):
         try:
@@ -771,13 +820,22 @@ class Browser:
             fn(method, p)
             return
         if method == "Page.screencastFrame":
+            self.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]}, session=session)
             if session == self.session:
                 m = p.get("metadata") or {}
+                if self.dsf > 1 and self.size and not self._windowed() and self.watched > time.time() - WATCH_GAP:
+                    # Someone watches at a density above 1: a screenshot gives the sharp frame. The screenshot
+                    # paints the page again, which sends frames that it saw already: those ask for none.
+                    h = hashlib.sha1(p["data"].encode()).digest()
+                    if h not in self.seen:
+                        self.seen = (self.seen + [h])[-SHARP_SEEN:]
+                        self._want_sharp()
+                    if self.frame and self.frame.get("sharp"):
+                        return
                 with self.cond:
                     self.seq += 1
                     self.frame = {"seq": self.seq, "data": p["data"], "w": m.get("deviceWidth"), "h": m.get("deviceHeight")}
                     self.cond.notify_all()
-            self.send("Page.screencastFrameAck", {"sessionId": p["sessionId"]}, session=session)
         elif method in ("Target.targetCreated", "Target.targetInfoChanged"):
             t = p["targetInfo"]
             if t["type"] != "page":
@@ -880,6 +938,7 @@ class Browser:
                 "refused": any(r.match(url) for r in REFUSED),  # the site refuses a browser with no window
                 "url": cur.get("url", ""), "title": cur.get("title", ""), "controller": c or None,
                 "before": before.get("who"),
+                "size": list(self.size) if self.size else None,  # the panel's size that serve has (#5625)
                 "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target}
                          for k, v in self.targets.items()]}
 
@@ -919,9 +978,54 @@ class Browser:
         except (RiverError, KeyError, TypeError):
             pass
 
-    def resize(self, w, h):
+    def resize(self, w, h, dpr=1, screen=None, pane=None):
+        """A panel's size in CSS px, the pixel density of its screen, and its screen (w, h). Which panel sets the
+        page's size (mark 2026-11-12, #5625): the panel where a person last clicked, typed or took control (the same
+        person can show the browser on the Mac and on the phone); while a session drives, that panel's size stays;
+        with no such panel open, the largest open panel. The other panels show the frame scaled. With no pane id (an
+        older page), the size holds at once."""
         w, h = max(200, min(int(w), 3000)), max(150, min(int(h), 3000))
-        self.size = (w, h)
+        try:
+            dpr = round(max(1.0, min(float(dpr or 1), DSF_MAX)), 2)
+        except (TypeError, ValueError):
+            dpr = 1
+        try:
+            screen = (max(0, min(int(screen[0]), 10000)), max(0, min(int(screen[1]), 10000))) if screen else None
+        except (TypeError, ValueError, IndexError):
+            screen = None
+        if pane:
+            with self.pane_lock:
+                self.panes[str(pane)[:40]] = {"size": (w, h), "dsf": dpr, "screen": screen, "at": time.time()}
+            return self._choose()
+        self.size, self.dsf, self.screen = (w, h), dpr, screen
+        if self.running():
+            self._fit()
+
+    def pane_seen(self, pane):
+        """A panel polls for frames: it is open. True when serve knows its size."""
+        with self.pane_lock:
+            p = self.panes.get(pane)
+            if p:
+                p["at"] = time.time()
+        self._choose()
+        return p is not None
+
+    def drive(self, pane):
+        """A person clicked, typed or took control in this panel: its size is the page's size from now on."""
+        if pane and pane != self.driver:
+            self.driver = str(pane)[:40]
+            self._choose()
+
+    def _choose(self):
+        now = time.time()
+        with self.pane_lock:
+            for k in [k for k, p in self.panes.items() if now - p["at"] > PANE_GONE]:
+                del self.panes[k]
+            p = self.panes.get(self.driver) or max(self.panes.values(), default=None,
+                                                   key=lambda p: p["size"][0] * p["size"][1])
+            if not p or (p["size"], p["dsf"], p["screen"]) == (self.size, self.dsf, self.screen):
+                return
+            self.size, self.dsf, self.screen = p["size"], p["dsf"], p["screen"]
         if self.running():
             self._fit()
 
@@ -1521,10 +1625,14 @@ def _notify(b):
 
 # ---- the panel's frames and input
 
-def frame(b, after, timeout=8):
-    """The newest frame after seq `after` (a long poll); with no new frame within timeout, the status only."""
+def frame(b, after, timeout=8, pane=None):
+    """The newest frame after seq `after` (a long poll); with no new frame within timeout, the status only. pane: the
+    panel that asks; pane_known says whether serve has its size (after a restart of serve it has none)."""
+    known = b.pane_seen(pane) if pane else None
     end = time.time() + timeout
     b.watched = time.time()
+    if b.dsf > 1 and b.frame and not b.frame.get("sharp"):
+        b._want_sharp()  # the panel watches again: the frame that came while nobody watched is not sharp
     with b.cond:
         b.watching += 1
         try:
@@ -1537,6 +1645,8 @@ def frame(b, after, timeout=8):
     b.watched = time.time()
     out = b.info()
     out["seq"] = seq
+    if pane:
+        out["pane_known"] = known
     if f and (not after or f["seq"] > after):
         out["frame"] = {"data": f["data"], "w": f["w"], "h": f["h"]}
     out.update(drawn(b))
@@ -1808,11 +1918,16 @@ def cursor_off(b):
 def screenshot(b, full=False, cursor=False):
     """A PNG of the shown tab; cursor: with the driving session's pointer and its last click ring."""
     p = {"format": "png"}
+    scale = 1 / b.dsf if b.dsf > 1 and b.size and not b._windowed() else 1  # one pixel for each CSS pixel (#5625)
     if full:
         p["captureBeyondViewport"] = True
         m = b.page("Page.getLayoutMetrics")
         size = m.get("cssContentSize") or m.get("contentSize")
-        p["clip"] = {"x": 0, "y": 0, "width": size["width"], "height": size["height"], "scale": 1}
+        p["clip"] = {"x": 0, "y": 0, "width": size["width"], "height": size["height"], "scale": scale}
+    elif scale != 1:
+        m = b.page("Page.getLayoutMetrics")["cssVisualViewport"]
+        p["clip"] = {"x": m["pageX"], "y": m["pageY"], "width": m["clientWidth"], "height": m["clientHeight"],
+                     "scale": scale}
     drew = cursor and cursor_on(b)
     try:
         return {**b.info(), "png": b.page("Page.captureScreenshot", p, timeout=60)["data"], "cursor": bool(drew)}

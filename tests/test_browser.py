@@ -8,6 +8,7 @@ import io
 import json
 import os
 import socket
+import struct
 import tempfile
 import threading
 import unittest
@@ -679,6 +680,47 @@ def _can_bind():
         return False
 
 
+def jpeg_size(data):
+    """(width, height) of a base64 JPEG, from its frame header."""
+    d, i = base64.b64decode(data), 2
+    while i < len(d):
+        m, n = d[i + 1], struct.unpack(">H", d[i + 2:i + 4])[0]
+        if m in (0xC0, 0xC1, 0xC2):
+            return struct.unpack(">HH", d[i + 5:i + 9])[::-1]
+        i += 2 + n
+    return None
+
+
+class Fit(Base):
+    """#5625: what the panel says of its size, its density and its screen, within limits."""
+
+    def test_resize_limits(self):
+        b = browser.Browser("web")
+        b.resize(100, 5000, 3.5, [390, "844"])
+        self.assertEqual((b.size, b.dsf, b.screen), ((200, 3000), browser.DSF_MAX, (390, 844)))
+        b.resize(800, 600, "x", "bad")
+        self.assertEqual((b.size, b.dsf, b.screen), ((800, 600), 1, None))
+        self.assertEqual(b.info()["size"], [800, 600])
+
+    def test_which_panel_sets_the_size(self):
+        """mark 2026-11-12: the panel where the person last used the browser sets the size, also while a session
+        drives; with none, the largest open panel; the others show the frame scaled and change nothing."""
+        b = browser.Browser("web")
+        b.resize(1000, 800, 2, [1512, 982], pane="mac")
+        b.resize(370, 620, 3, [390, 844], pane="phone")
+        self.assertEqual((b.size, b.dsf), ((1000, 800), 2))  # nobody used it yet: the largest
+        b.drive("phone")  # the person taps in the phone's panel
+        self.assertEqual((b.size, b.dsf), ((370, 620), browser.DSF_MAX))
+        b.resize(1200, 900, 2, None, pane="mac")  # the Mac's panel grows: it changes nothing
+        self.assertEqual(b.size, (370, 620))
+        b.resize(360, 600, 3, None, pane="phone")  # the phone turns: its size holds
+        self.assertEqual(b.size, (360, 600))
+        b.panes["phone"]["at"] -= browser.PANE_GONE + 1  # the phone's panel closed
+        self.assertTrue(b.pane_seen("mac"))
+        self.assertFalse(b.pane_seen("phone"))
+        self.assertEqual(b.size, (1200, 900))
+
+
 class RealChrome(Base):
     """One real headless Chrome: a page through the proxy, the text, a click, typing, and a blocked address."""
 
@@ -738,6 +780,21 @@ class RealChrome(Base):
         self.assertNotEqual(plain["png"], drawn["png"])
         self.assertIsNone(b.evaluate("document.getElementById('__maxpm_cursor')"))  # it went right after
         self.assertEqual(browser.screenshot(b)["png"], plain["png"])
+        # #5625: the page takes the panel's size at its screen's density; the frames are sharp (two pixels for each CSS
+        # pixel), the screen is a normal one when the panel's is smaller than the window, and a session's screenshot
+        # keeps one pixel for each CSS pixel.
+        b.resize(500, 400, 2, [390, 844])
+        b.watched = __import__("time").time()
+        f = browser.frame(b, 0, 5)
+        for _ in range(50):
+            if b.frame.get("sharp"):
+                break
+            f = browser.frame(b, f["seq"], 1)
+        self.assertEqual((b.frame["w"], b.frame["h"], jpeg_size(b.frame["data"])), (500, 400, (1000, 800)))
+        self.assertEqual(b.evaluate("[innerWidth, innerHeight, devicePixelRatio, screen.width >= outerWidth]"),
+                         [500, 400, 2, True])
+        shot = base64.b64decode(browser.screenshot(b)["png"])
+        self.assertEqual(struct.unpack(">II", shot[16:24]), (500, 400))
         # A page of an allowed address still cannot reach another loopback port through the proxy.
         core.config_unset(self.c, "browser_allow", project="web")
         got = b.evaluate(f"fetch('http://127.0.0.1:{port}/sneak').then(r => 'got ' + r.status).catch(e => 'ERR')")

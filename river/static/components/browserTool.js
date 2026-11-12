@@ -76,6 +76,7 @@ function render(box, project) {
   const $$ = (s) => box.querySelector(s);
   const stage = $$(".br-stage"), img = $$(".br-img"), keys = $$(".br-keys"), msg = $$(".br-msg"), addr = $$(".br-addr");
   const v = { seq: 0, w: 0, h: 0, mine: true, running: false, window: false };
+  const pane = Math.random().toString(36).slice(2, 12);  // this panel, for the size rule (#5625)
   const ptr = $$(".br-ptr"), ring = $$(".br-ring"), typed = $$(".br-typed");
   // One request at a time; what the person types or clicks while it runs goes in the next one, in order (#5479: one
   // request for each key took about 0.7 s a key when serve was busy).
@@ -86,7 +87,7 @@ function render(box, project) {
     busy = true;
     while (pending.length) {
       const evs = pending; pending = [];
-      try { await typeAction("browser_input", { project, evs }); } catch (e) { toast(e.message, true); }
+      try { await typeAction("browser_input", { project, pane, evs }); } catch (e) { toast(e.message, true); }
     }
     busy = false;
   }
@@ -167,14 +168,20 @@ function render(box, project) {
     } else typed.classList.add("hidden");
   }
 
-  // The page takes the size of the stage (headless only).
-  let sized = "";
-  const fit = () => {
-    const r = stage.getBoundingClientRect(), key = Math.round(r.width) + "x" + Math.round(r.height);
+  // The page takes the size of the stage, at the pixel density of this screen (#5625; headless only), once the size
+  // holds for 150 ms (a drag of the divider). Each panel says its size; serve uses the size of the panel where the
+  // person last clicked, typed or took control (else the largest), and the other panels show the frame scaled.
+  let sized = "", fitting = null;
+  const fitNow = () => {
+    fitting = null;
+    const r = stage.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+    const w = Math.floor(r.width), h = Math.floor(r.height), key = `${w}x${h}@${dpr}`;
     if (r.width < 50 || key === sized || !v.running) return;
-    sized = key; call("resize", { project, w: Math.round(r.width), h: Math.round(r.height) }).catch(() => {});
+    sized = key;
+    call("resize", { project, pane, w, h, dpr, screen: [window.screen.width, window.screen.height] }).catch(() => { sized = ""; });
   };
-  const ro = new ResizeObserver(() => fit()); ro.observe(stage);
+  const fit = (again) => { if (fitting && !again) return; clearTimeout(fitting); fitting = setTimeout(fitNow, 150); };
+  const ro = new ResizeObserver(() => fit(true)); ro.observe(stage);
 
   async function loop() {
     try { show(await call("start", { project })); } catch (e) { show({ running: false }); }
@@ -183,14 +190,16 @@ function render(box, project) {
       if (document.hidden) { await sleep(1000); continue; }
       try {
         token = token || await pageToken();
-        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&after=${v.seq}&token=${encodeURIComponent(token)}`);
+        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&after=${v.seq}&pane=${pane}&token=${encodeURIComponent(token)}`);
         if (r.status === 403) { token = await pageToken(true); continue; }
         const j = await r.json();
         if (!box.isConnected) break;
         if (j.error) { await sleep(2000); continue; }
         const was = v.running;
         v.seq = j.seq || 0; show(j);
-        if (!was && v.running) { sized = ""; fit(); }
+        // serve started again (it does not know this panel), or the window went to a screen of another density.
+        if ((!was && v.running) || (v.running && !j.window && j.pane_known === false)) sized = "";
+        fit();
         if (!j.running) await sleep(2000);
       } catch (e) { await sleep(2000); }
     }
@@ -240,7 +249,7 @@ function render(box, project) {
         toast(`${r.told} has the browser`); return show(r);
       }
       if (what === "window" || what === "headless") { msg.classList.remove("hidden"); msg.textContent = what === "window" ? "Opening a window…" : "Back to the panel…"; }
-      const args = { project };
+      const args = { project, pane };
       if (what === "window" || what === "headless") args.window = what === "window";
       show(await call(what === "headless" ? "window" : what, args));
       if (what === "start") { sized = ""; fit(); }
@@ -249,10 +258,10 @@ function render(box, project) {
   $$(".br-bar").addEventListener("submit", async (e) => {
     e.preventDefault(); const url = addr.value.trim(); if (!url) return;
     addr.blur();
-    try { show(await call("open", { project, url })); } catch (err) { /* call showed it */ }
+    try { show(await call("open", { project, pane, url })); } catch (err) { /* call showed it */ }
   });
   $$(".br-tabs").addEventListener("change", async (e) => {
-    try { show(await call("tab", { project, target: e.target.value })); } catch (err) { /* call showed it */ }
+    try { show(await call("tab", { project, pane, target: e.target.value })); } catch (err) { /* call showed it */ }
   });
   loop();
 }

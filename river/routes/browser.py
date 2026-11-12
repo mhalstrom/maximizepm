@@ -55,7 +55,8 @@ def frame(h, path):
     if b is None:
         return h._send(200, {"project": project, "running": False, "seq": 0, "tabs": [], "controller": None})
     try:
-        return h._send(200, browser.frame(b, int(q.get("after") or 0), min(float(q.get("wait") or 8), 20)))
+        return h._send(200, browser.frame(b, int(q.get("after") or 0), min(float(q.get("wait") or 8), 20),
+                                          q.get("pane") or None))
     except (RiverError, ValueError) as e:
         return h._send(409, {"error": str(e)})
 
@@ -82,6 +83,8 @@ def act(conn, a, who):
         browser.may_change(conn, b, who, person)
         if not person and action in ("click", "type", "key"):
             first_input(project, who)
+    if person and a.get("pane") and action in CHANGES:
+        b.drive(a.get("pane"))  # the person uses the browser in this panel: its size is the page's size (#5625)
     if action == "status":
         return b.info()
     if action == "walk":  # a page walk check (#5516): its own background tab, so it changes nothing the person sees
@@ -129,7 +132,9 @@ def act(conn, a, who):
         return browser.close_tab(b, a.get("target"))
     if action == "control":
         if person:
-            return browser.take(conn, b, who)
+            out = browser.take(conn, b, who)
+            b.drive(a.get("pane"))
+            return out
         return browser.control(conn, b, who, a.get("sub"))
     if action == "give":
         if person:
@@ -142,7 +147,7 @@ def act(conn, a, who):
     if action == "give_back":
         return browser.give_back(conn, b, who)
     if action == "resize":
-        b.resize(a.get("w") or 0, a.get("h") or 0)
+        b.resize(a.get("w") or 0, a.get("h") or 0, a.get("dpr") or 1, a.get("screen"), a.get("pane"))
         return b.info()
     if action == "window":  # decision 3: a normal window for a site that refuses a headless browser, and back
         url = b.info()["url"] if b.running() else ""
@@ -170,6 +175,7 @@ def person_input(conn, a, who):
     if b is None or not b.running():
         raise RiverError("the browser is not running: open a page first")
     browser.may_change(conn, b, who, True)
+    b.drive(a.get("pane"))
     out = None
     for ev in a.get("evs") or [a.get("ev") or {}]:  # the page sends what came during its last request at once (#5479)
         out = browser.person_input(b, ev or {})
