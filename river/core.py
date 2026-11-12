@@ -1569,6 +1569,17 @@ def _migrate(conn):
     # whole rows: 3 ms instead of 7 on a queue of 5,500 items (#5524). Here, after backlog_at exists.
     conn.execute("CREATE INDEX IF NOT EXISTS items_light ON items(status, id, project_id, priority, due, backlog_at, "
                  "assignee)")
+    # Partial indexes for the columns that commands look up and that most rows leave empty: without them each lookup
+    # read the whole items table (2-5 ms on a queue of 5,500 items), and go, done, claim and add ran them several times
+    # (#5522). Here, after the columns exist on an old queue.
+    for name, sql in (("items_found_during", "items(found_during) WHERE found_during IS NOT NULL"),
+                      ("items_blocked_set_by", "items(blocked_set_by) WHERE blocked_set_by IS NOT NULL"),
+                      ("items_blocked_until", "items(blocked_until) WHERE blocked_until IS NOT NULL"),
+                      ("items_held_for", "items(held_for) WHERE held_for<>''"),
+                      ("items_fresh_start", "items(fresh_start) WHERE fresh_start IS NOT NULL"),
+                      ("messages_held_for", "messages(held_for) WHERE held_for IS NOT NULL"),
+                      ("events_actor", "events(actor, id)")):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {sql}")
     # Items held before the holds table existed: their hold starts at the claim.
     conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
                  "FROM items i WHERE i.status IN ('in_progress','held') AND i.assignee IS NOT NULL AND NOT EXISTS "
@@ -12855,7 +12866,7 @@ def review_fail(conn, item_id, fixes, note=None, project=None, actor=None, ask=F
 
 def _review_claim(conn, actor, names, any_project=False, brief=None):
     """Claim a ready release review that covers items of these projects (or any, with any_project)."""
-    ann = annotate(conn)
+    ann = annotate(conn, closed=False)  # a ready review is open; the done items it waits on come when asked (#5522)
     ready = []
     for a in ann.values():
         if a["kind"] != "review" or not a["ready"] or a["reserved_for"] not in (None, actor):

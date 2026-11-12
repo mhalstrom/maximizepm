@@ -9,6 +9,7 @@ command in its own process.
 
     python3 -m river.runner <queue file>"""
 import contextlib
+import gc
 import io
 import json
 import os
@@ -33,6 +34,10 @@ def serve_requests(db, proto_in, proto_out):
     conn = core.connect(db)
     core.RESIDENT.update(conn=conn, path=str(core.Path(db).expanduser().resolve()))
     warm(core, conn)
+    # Garbage collection (#5522): the caches above make a large heap, and a full collection in the middle of a command
+    # took 15-50 ms of it. The objects of the warm caches are frozen (no collection scans them again), and a command runs
+    # with collection off; the runner collects after it has sent the answer, while the caller reads it.
+    gc.freeze()
     for line in proto_in:
         try:
             req = json.loads(line)
@@ -49,7 +54,11 @@ def serve_requests(db, proto_in, proto_out):
         elif str(want) != core.RESIDENT["path"]:
             ans = {"refused": "another queue"}
         else:
-            ans = run_one(cli, core, conn, req, env)
+            gc.disable()
+            try:
+                ans = run_one(cli, core, conn, req, env)
+            finally:
+                gc.enable()
         os.environ.clear()
         os.environ.update(base_env)
         try:
@@ -58,6 +67,7 @@ def serve_requests(db, proto_in, proto_out):
             pass
         proto_out.write(json.dumps(ans) + "\n")
         proto_out.flush()
+        gc.collect()
 
 
 def warm(core, conn):

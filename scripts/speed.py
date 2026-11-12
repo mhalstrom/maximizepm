@@ -105,6 +105,11 @@ def prepare(path):
     from river import core
     conn = core.connect(path)
     try:
+        # A copy of a live queue is older than its leases: on the live queue the sessions renew them, and an item in
+        # progress whose lease ran out makes each write ask ps for the process list (15-20 ms, #5522). Renew them.
+        with core.tx(conn):
+            conn.execute("UPDATE items SET lease_expires_at=? WHERE status='in_progress'",
+                         (core.iso(core.now() + core.timedelta(hours=4)),))
         agent = "speed-test"
         core.register(conn, agent)
         def ready():
