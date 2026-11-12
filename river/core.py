@@ -12361,6 +12361,11 @@ def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synce
     non-deploy item anyway and records the reason. changed: what changed, one plain line for a person (#5570),
     checked before the close."""
     changed = check_changed(changed) if changed else None
+    if ship_it:  # before the close: a refused ship leaves the item open, as its error says (#5578)
+        try:
+            _ship_check(conn, _item(conn, item_id))
+        except RiverError as e:
+            raise RiverError(f"{e}; #{item_id} stays open (close it without --ship when it does not ship)") from None
     res = _close(conn, item_id, "done", actor, output, note, force)
     if changed:
         with tx(conn):
@@ -12400,6 +12405,18 @@ def _wake_manager(conn, actor, text, item_id=None, level=WAKE_LEVEL):
     return _send(conn, "notice", actor or "maxpm", text, to=manager, item_id=item_id, level=level)
 
 
+def _ship_check(conn, it):
+    """The target that an item ships to; RiverError when it cannot ship (a deploy item, a project with no target).
+    done --ship checks it before the close (#5578): the close happened first, and its error looked like a refused done."""
+    if it["kind"] == "deploy":
+        raise RiverError(f"#{it['id']} is itself a deploy item")
+    proj = conn.execute("SELECT name, target FROM projects WHERE id=?", (it["project_id"],)).fetchone()
+    if not proj["target"]:
+        raise RiverError(f"project {proj['name']} has no deploy target; set one: "
+                         f"maxpm project target {proj['name']} <target>  (maxpm target list)")
+    return proj["target"]
+
+
 def ship(conn, item_id, actor=None):
     """Ask for the item to go out: add it to the deploy item of its target that collects ship requests, or
     start one.
@@ -12411,15 +12428,9 @@ def ship(conn, item_id, actor=None):
     """
     with tx(conn):
         it = _item(conn, item_id)
-        if it["kind"] == "deploy":
-            raise RiverError(f"#{item_id} is itself a deploy item")
         if it["status"] == "dropped":
             raise RiverError(f"#{item_id} is dropped; there is nothing to ship")
-        proj = conn.execute("SELECT name, target FROM projects WHERE id=?", (it["project_id"],)).fetchone()
-        if not proj["target"]:
-            raise RiverError(f"project {proj['name']} has no deploy target; set one: "
-                             f"maxpm project target {proj['name']} <target>  (maxpm target list)")
-        tg = _target(conn, proj["target"])
+        tg = _target(conn, _ship_check(conn, it))
         # A fix that a review of a cut release waits on is part of that release.
         dep = conn.execute(
             "SELECT d.* FROM items d JOIN deps dr ON dr.item_id=d.id JOIN items r ON r.id=dr.blocked_by "

@@ -1466,6 +1466,17 @@ class Ship(Base):
         with self.assertRaises(RiverError):
             core.ship(self.c, d["id"], "dev")
 
+    def test_done_with_ship_refused_leaves_the_item_open(self):
+        """#5578: done --ship in a project with no target printed the error, and the item was done all the same."""
+        core.project_add(self.c, "misc")
+        x = self.add("misc", "x")
+        core.claim(self.c, x, "dev")
+        with self.assertRaisesRegex(RiverError, rf"misc has no deploy target.*#{x} stays open \(close it without --ship"):
+            core.done(self.c, x, "out", "dev", ship_it=True)
+        it = core._item(self.c, x)
+        self.assertEqual((it["status"], it["output"], it["assignee"]), ("in_progress", "", "dev"))
+        self.assertEqual(core.done(self.c, x, "out", "dev")["status"], "done")
+
     def test_a_ship_of_an_open_item_warns_that_the_release_waits_on_it(self):
         # #5386: a walk item, or part 1 of a split build, stays open after its release; ship held the release.
         core.config_set(self.c, "review", "on")
