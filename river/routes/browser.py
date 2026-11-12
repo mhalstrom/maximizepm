@@ -81,6 +81,8 @@ def act(conn, a, who):
     person = _person(conn, who)
     if action in CHANGES:
         browser.may_change(conn, b, who, person)
+        if person:
+            b.person_at = time.time()
         if not person and action in ("click", "type", "key"):
             first_input(project, who)
     if person and a.get("pane") and action in CHANGES:
@@ -135,7 +137,7 @@ def act(conn, a, who):
             out = browser.take(conn, b, who)
             b.drive(a.get("pane"))
             return out
-        return browser.control(conn, b, who, a.get("sub"))
+        return browser.control(conn, b, who, a.get("sub"), bool(a.get("take")))
     if action == "give":
         if person:
             raise RiverError("a person gives the browser back with Give back (action give_back)")
@@ -175,6 +177,7 @@ def person_input(conn, a, who):
     if b is None or not b.running():
         raise RiverError("the browser is not running: open a page first")
     browser.may_change(conn, b, who, True)
+    b.person_at = time.time()
     b.drive(a.get("pane"))
     out = None
     for ev in a.get("evs") or [a.get("ev") or {}]:  # the page sends what came during its last request at once (#5479)

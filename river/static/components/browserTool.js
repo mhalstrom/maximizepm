@@ -104,6 +104,7 @@ function render(box, project) {
     $$(".br-who").textContent = !j.running ? "The browser is not running."
       : !c ? "Nobody controls it: you can use it. A session takes it with maxpm browser control."
       : c.kind === "person" ? (c.who === me || !me ? "You control it." : `${c.who} controls it.`)
+      : c.took ? `${c.who} took control (${c.took}). Take control to get it back.`  // #5629
       : `${c.who}${c.sub ? " (subagent " + c.sub + ")" : ""} controls it. Take control to use it yourself.`;
     $$(".br-take").classList.toggle("hidden", !c || c.kind === "person");
     const back = $$(".br-back"), to = handTo(j);

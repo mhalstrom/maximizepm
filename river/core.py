@@ -181,6 +181,10 @@ DEFAULT_SETTINGS = {
     # panel shows the browser (a click glides to its point in about half a second, a text goes in key by key, and the
     # panel shows both), at once while nobody watches; person, always at a person's pace; fast, always at once.
     "browser_pace": "watch",
+    # A session takes the project's browser from the person (maxpm browser control --take, and its Playwright tools
+    # when they click or type, #5629) when the person's newest message in its chat is newer than their last input in
+    # the browser, or when the person has not used the browser for this long. Until then their input wins.
+    "browser_take_after": "2m",
     # on: a screenshot that a session takes with the Playwright tools has the session's pointer and its last click
     # ring drawn in (#5616), as maxpm browser screenshot --cursor; off: a clean picture of the page.
     "browser_shot_cursor": "off",
@@ -768,6 +772,7 @@ CREATE TABLE IF NOT EXISTS agents (
   expert_topic   TEXT,                       -- an expert session (role expert): what it knows and is for (#4955)
   expert_project TEXT,                       -- the project whose folder it starts in (maxpm expert start)
   talked_at      TEXT,                       -- the last prompt that someone typed or sent to it (its hooks)
+  person_said_at TEXT,                       -- the last prompt that a person typed in its chat (its hooks; #5629)
   assistant_for  TEXT,                       -- an assistant session (role assistant): the person whose list it goes through (#5110)
   registered_at  TEXT NOT NULL,
   last_seen      TEXT NOT NULL
@@ -1762,7 +1767,7 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN model TEXT")
     if "agent_type" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN agent_type TEXT")
-    for col in ("expert_topic", "expert_project", "talked_at", "assistant_for"):
+    for col in ("expert_topic", "expert_project", "talked_at", "assistant_for", "person_said_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at"):
@@ -14140,6 +14145,7 @@ def hook_report(conn, agent_id, payload, env=None):
             conn.execute("UPDATE agents SET talked_at=? WHERE name=? AND role='expert'", (t, agent))
             if not typed.strip().startswith("<"):  # tags: a message of another session, not a person
                 answered = answered_in_chat(conn, agent, typed.strip(), t)
+                conn.execute("UPDATE agents SET person_said_at=? WHERE name=?", (t, agent))
             # A person (or another session) talks with a session that waits for work: wait_max counts from the
             # talk, so maxpm wait does not end the session during it or soon after (#4948).
             conn.execute("UPDATE agents SET waiting_since=? WHERE name=? AND waiting_since IS NOT NULL", (t, agent))

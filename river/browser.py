@@ -496,6 +496,7 @@ class Browser:
         self.typed = None    # what it types now: {who, target, text, secret, n, at, done}
         self.watched = 0.0   # when the panel last asked for a frame: someone watches (browser_pace watch)
         self.watching = 0    # frame polls that wait now
+        self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
         self.state = self._load()
 
     # state.json: the controller, the window mode, Chrome's pid and the proxy port (to attach after a restart)
@@ -1217,7 +1218,7 @@ def cdp_refusal(conn, b, agent, msg, worlds=()):
         return None
     if method in CDP_CHANGES or method.startswith("Input."):
         try:
-            may_change(conn, b, agent, False)
+            may_change(conn, b, agent, False, take=True)
         except RiverError as e:
             return str(e)
     return None
@@ -1470,8 +1471,59 @@ def controller_gone(conn, c):
     return not conn.execute("SELECT 1 FROM agents WHERE name=?", (c["who"],)).fetchone()
 
 
-def may_change(conn, b, who, person):
-    """RiverError when who may not change the page now (navigate, click, type, run a script)."""
+def _ago(sec):
+    sec = int(max(0, sec))
+    return f"{sec}s" if sec < 120 else f"{sec // 60}m"
+
+
+def why_take(conn, b, who):
+    """(True, why) when the session who may take the browser from the person now (#5629): the person's newest
+    message in its chat is newer than their last input in the browser, or they have not used the browser for
+    browser_take_after. Else (False, why not)."""
+    c = b.state.get("controller") or {}
+    since = core.parse_iso(c["since"]).timestamp() if c.get("since") else 0
+    last = max(b.person_at, since)
+    r = conn.execute("SELECT person_said_at FROM agents WHERE name=?", (who,)).fetchone()
+    said = core.parse_iso(r["person_said_at"]).timestamp() if r and r["person_said_at"] else 0
+    if said > last:  # the queue keeps whole seconds: within one second the person's input wins
+        return True, "you asked in its chat"
+    after = core.parse_duration(setting_of(b.project, "browser_take_after")).total_seconds()
+    if time.time() - last >= after:
+        return True, f"you had not used it for {_ago(time.time() - last)}"
+    return False, (f"the person ({c.get('who')}) controls the browser of {b.project} and used it {_ago(time.time() - last)} "
+                   f"ago, with no message in your chat since; ask them there, or wait until they have not used it for "
+                   f"{_ago(after)}")
+
+
+def take_from_person(conn, b, who, sub=None):
+    """The session takes the browser from the person (#5629), when why_take allows it; RiverError with the reason
+    when not. The panel says who took it and why; Take control gives it back to the person."""
+    ok, why = why_take(conn, b, who)
+    if not ok:
+        raise RiverError(why)
+    c = b.state["controller"]
+    _give_lock(conn, b, c["who"])
+    try:
+        _take_lock(conn, b, who)
+    except RiverError:
+        _lock_run(conn, b, "browser_lock", c["who"])
+        raise
+    b.state.pop("before", None)
+    b.state["controller"] = {"who": who, "kind": "session", "sub": (sub or "").strip() or None,
+                             "since": core.iso(core.now()), "took": why, "from": c["who"]}
+    b._save()
+    item = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY claimed_at "
+                        "DESC LIMIT 1", (who,)).fetchone()
+    with core.tx(conn):
+        core._event(conn, item["id"] if item else None, who,
+                    f"took the browser of {b.project} from {c['who']} ({why})")
+    _notify(b)
+    return b.info()
+
+
+def may_change(conn, b, who, person, take=False):
+    """RiverError when who may not change the page now (navigate, click, type, run a script). take: a session's
+    input through its Playwright tools takes the browser from the person when why_take allows it (#5629)."""
     c = b.state.get("controller")
     if controller_gone(conn, c):
         b.state.pop("controller", None)
@@ -1486,22 +1538,28 @@ def may_change(conn, b, who, person):
         raise RiverError(f"{c['who']} controls the browser of {b.project}"
                          f"{' (subagent ' + c['sub'] + ')' if c.get('sub') else ''}: press Take control first")
     if c["kind"] == "person":
-        raise RiverError(f"the person ({c['who']}) controls the browser of {b.project}; wait, and read "
-                         f"maxpm browser status until they give it back")
+        if take:
+            take_from_person(conn, b, who)
+            return
+        raise RiverError(f"the person ({c['who']}) controls the browser of {b.project}: maxpm browser control --take "
+                         f"takes it when they asked you in your chat or stopped using it; else wait")
     if c["who"] != who:
         raise RiverError(f"the browser of {b.project} is controlled by {c['who']}; maxpm browser status")
     _renew(conn, b, c)
 
 
-def control(conn, b, who, sub=None):
-    """The session takes control (sub: the label of the subagent it gives the browser to)."""
+def control(conn, b, who, sub=None, take=False):
+    """The session takes control (sub: the label of the subagent it gives the browser to). take: also from the
+    person, when they asked in the session's chat or stopped using the browser (#5629)."""
     if not who:
         raise RiverError("name the session: maxpm --as <you> browser control")
     c = b.state.get("controller")
     if c and not controller_gone(conn, c) and c["who"] != who:
         if c["kind"] == "person":
-            raise RiverError(f"the person ({c['who']}) controls the browser of {b.project}; wait, and read maxpm browser "
-                             f"status until they give it back")
+            if take:
+                return take_from_person(conn, b, who, sub)
+            raise RiverError(f"the person ({c['who']}) controls the browser of {b.project}: maxpm browser control "
+                             f"--take takes it when they asked you in your chat or stopped using it; else wait")
         raise RiverError(f"the browser of {b.project} is controlled by {c['who']}; maxpm browser status")
     if c and c["who"] != who:  # a gone session's lock goes first
         _give_lock(conn, b, c["who"])
@@ -1538,8 +1596,9 @@ def take(conn, b, who):
     else:
         _take_lock(conn, b, who)
     if c and c["kind"] == "session":
-        b.state["before"] = c
+        b.state["before"] = {k: v for k, v in c.items() if k not in ("took", "from")}
     b.state["controller"] = {"who": who, "kind": "person", "sub": None, "since": core.iso(core.now())}
+    b.person_at = time.time()
     b._save()
     _notify(b)
     return b.info()

@@ -898,11 +898,14 @@ def build_parser(only=None):
     x = brs.add_parser("eval", parents=[bp], help="run JavaScript in the page and print its value (JSON)")
     x.add_argument("js")
     for name, h in (("back", "go back"), ("forward", "go forward"), ("reload", "load the page again"),
-                    ("control", "take control for your session: other sessions and the person's input wait"),
                     ("release", "give control up"), ("close", "close the browser (its profile and sign-ins stay)"),
                     ("window", "show it as a normal window (for a site that refuses a headless browser, a sign-in)"),
                     ("headless", "back into the side panel, with no window")):
         brs.add_parser(name, parents=[bp], help=h)
+    x = brs.add_parser("control", parents=[bp], help="take control for your session: other sessions and the person's "
+                       "input wait")
+    x.add_argument("--take", action="store_true", help="also from the person, when they asked you in your chat or "
+                   "have not used the browser for browser_take_after (2m)")
     x = brs.add_parser("give", parents=[bp], help="say that a subagent of your session drives it now (the panel shows "
                        "its label); your session keeps control")
     x.add_argument("label", help="the subagent, for example browser")
@@ -2393,6 +2396,8 @@ def _browser_cmd(conn, a, actor):
         args["js"] = a.js
     elif b == "give":
         args["sub"] = a.label
+    elif b == "control":
+        args["take"] = a.take
     elif b in ("tab", "close-tab"):
         args["target"] = a.id
     elif b == "new-tab":

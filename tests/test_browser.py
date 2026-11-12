@@ -119,6 +119,45 @@ class Controller(Base):
         browser.release(self.c, b, "ag1")
         self.assertIsNone(b.info()["controller"])
 
+    def test_a_session_takes_it_when_the_person_asked_or_left_it(self):
+        """#5629: --take (and a Playwright input) takes the browser from the person when the person's newest message
+        in the session's chat is newer than their last input in it, or they have not used it for browser_take_after."""
+        core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
+        it = core.item_add(self.c, "web", "Click the story", actor="mark")["id"]
+        core.claim(self.c, it, "ag1")
+        b = browser.get("web")
+        browser.take(self.c, b, "mark")  # mark solves a CAPTCHA in the panel
+        with self.assertRaisesRegex(RiverError, "control --take"):
+            browser.control(self.c, b, "ag1")
+        with self.assertRaisesRegex(RiverError, "used it 0s ago, with no message in your chat since"):
+            browser.control(self.c, b, "ag1", take=True)
+        with self.assertRaisesRegex(RiverError, "no message in your chat since"):  # a Playwright click: refused too
+            browser.may_change(self.c, b, "ag1", False, take=True)
+        b.person_at -= 5  # his last click in the panel, five seconds before he writes
+        b.state["controller"]["since"] = core.iso(core.now() - __import__("datetime").timedelta(seconds=5))
+        # mark asks in ag1's chat: its prompt hook records the time, and the take succeeds.
+        core.activity_event(self.c, {"hook_event_name": "UserPromptSubmit", "prompt": "click the 14th story"},
+                            {"MAXPM_AGENT": "ag1"})
+        info = browser.control(self.c, b, "ag1", take=True)
+        self.assertEqual((info["controller"]["who"], info["controller"]["took"], info["controller"]["from"]),
+                         ("ag1", "you asked in its chat", "mark"))
+        self.assertTrue(any("took the browser of web from mark (you asked in its chat)" in r[0] for r in
+                            self.c.execute("SELECT change FROM events WHERE item_id=? AND actor='ag1'", (it,))))
+        # mark takes it back and types: his input wins again until he asks or leaves it for 2 minutes.
+        browser.take(self.c, b, "mark")
+        self.assertNotIn("took", b.info()["controller"])
+        with self.assertRaisesRegex(RiverError, "no message in your chat since"):
+            browser.may_change(self.c, b, "ag1", False, take=True)
+        self.c.execute("UPDATE agents SET person_said_at=NULL WHERE name='ag1'")
+        b.person_at -= 121
+        b.state["controller"]["since"] = core.iso(core.now() - __import__("datetime").timedelta(seconds=121))
+        browser.may_change(self.c, b, "ag1", False, take=True)  # the Playwright click takes it
+        self.assertEqual(b.info()["controller"]["took"], "you had not used it for 2m")
+        core.config_set(self.c, "browser_take_after", "10m")
+        browser.take(self.c, b, "mark")
+        with self.assertRaisesRegex(RiverError, "wait until they have not used it for 10m"):
+            browser.control(self.c, b, "ag1", take=True)
+
     def test_a_gone_session_holds_it_no_more(self):
         core.register(self.c, "ag1"); core.register(self.c, "ag2")
         b = browser.get("web")
