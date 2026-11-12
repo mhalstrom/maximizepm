@@ -5171,3 +5171,35 @@ class PageAgents(unittest.TestCase):
         self.assertTrue({"mark", "live", "holder", "pane"} <= names)
         self.assertEqual(sorted(n for n in names if n.startswith("old-")), [f"old-{n:02d}" for n in range(11, 41)])
         self.assertEqual(sorted(st["queues"]), ["live", "old-40"])
+
+
+class ItemContext(unittest.TestCase):
+    """GET /api/item/<id>/context (#5571): the work line of the session that owns a task, for the page's task view."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def get(self, path):
+        h, out = server.Handler.__new__(server.Handler), {}
+        h.path, h.client_address, h.headers = path, ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765"}
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        h.do_GET()
+        return out
+
+    def test_the_route_answers_the_line_and_404_for_no_item(self):
+        core.project_add(self.c, "a")
+        core.register(self.c, "s1")
+        x = core.item_add(self.c, "a", "build the cart")["id"]
+        core.claim(self.c, x, "s1")
+        got = self.get(f"/api/item/{x}/context")
+        self.assertEqual((got["code"], got["body"]["owner"], got["body"]["owner_is"]), (200, "s1", "holds"))
+        self.assertEqual([n["id"] for n in got["body"]["now"]], [x])
+        self.assertEqual(self.get("/api/item/999/context")["code"], 404)
+        self.assertEqual(self.get(f"/api/item/{x}")["body"]["id"], x)  # the item route itself is unchanged

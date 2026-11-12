@@ -11704,3 +11704,79 @@ class Changed(Base):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             cli.run(["--as", "w", "done", str(j), "--output", "x"])
         self.assertIn(f"what changed, for a person: maxpm --as w edit {j} --changed", err.getvalue())
+
+
+class WorkLine(Base):
+    """GET /api/item/<id>/context (#5571, design #5560): the clicked task in the work of the session that owns it."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+        for n in ("s1", "s2"):
+            core.register(self.c, n)
+        core.register(self.c, "mark", human=True)
+
+    def test_the_line_of_a_session_done_now_and_next(self):
+        x = core.item_add(self.c, "a", "build the cart for the shop", short="Build the cart")["id"]
+        core.claim(self.c, x, "s1")
+        y = core.item_add(self.c, "a", "fix the price rounding", actor="s1", found_during=x)["id"]
+        core.done(self.c, x, output="abc123", actor="s1", changed="The cart works")
+        z = core.item_add(self.c, "a", "ship the cart page", actor="s1")["id"]  # added while it held nothing
+        w = self.add("a", "write the tests")
+        core.claim(self.c, w, "s1")
+        v = self.add("a", "a prerequisite")
+        core.claim(self.c, v, "s2")
+        core.dep_add(self.c, w, [v], actor="s1", mode="keep")
+        u = self.add("a", "after the tests", after=[w])
+        q = self.add("a", "queued work")
+        core.queue_add(self.c, "s1", q, actor="mark")
+        line = core.work_line(self.c, x)
+        self.assertEqual((line["owner"], line["owner_is"], line["item"]["nobody_holds"]), ("s1", "did", False))
+        self.assertEqual([(d["id"], d["outcome"], d["changed"]) for d in line["done"]], [(x, "done", "The cart works")])
+        self.assertTrue(line["done"][0]["started"] <= line["done"][0]["ended"])
+        self.assertEqual([(f["id"], f["status"]) for f in line["done"][0]["found"]], [(y, "open")])
+        self.assertEqual([a["id"] for a in line["added"]], [z])
+        self.assertEqual([(n["id"], [(o["id"], o["holder"]) for o in n["waits_on"]]) for n in line["now"]],
+                         [(w, [(v, "s2")])])
+        self.assertEqual([(n["id"], n["reason"]) for n in line["next"]],
+                         [(q, "in its queue"), (y, "it added it; nobody holds it"),
+                          (z, "it added it; nobody holds it"), (u, f"waits on its task #{w}")])
+        self.assertEqual(line["people"]["s2"]["doing"], "a prerequisite")  # by what it does, not its name alone
+        self.assertIsNone(line["goal"])
+        # The task it holds gives the same line; a task it added that nobody holds says so.
+        self.assertEqual(core.work_line(self.c, w)["owner_is"], "holds")
+        self.assertEqual([d["id"] for d in core.work_line(self.c, w)["done"]], [x])
+        added = core.work_line(self.c, y)
+        self.assertEqual((added["owner"], added["owner_is"], added["item"]["nobody_holds"]), ("s1", "added", True))
+        # A later registration of the same name starts a new line; the done task keeps the line it was done in.
+        core.register(self.c, "s1")
+        self.assertEqual([d["id"] for d in core.work_line(self.c, x)["done"]], [x])
+
+    def test_an_ended_session_a_person_and_a_goal(self):
+        core.goal_add(self.c, "a", "cart", outcome="people buy things", done_when="an order goes through")
+        k = core.item_add(self.c, "a", "the order form", goals=["cart"])["id"]
+        rest = core.item_add(self.c, "a", "the receipt", goals=["cart"])["id"]
+        core.register(self.c, "s3")
+        core.claim(self.c, k, "s3")
+        core.done(self.c, k, output="x", actor="s3")
+        core.unregister(self.c, "s3")  # an ended session has no agents row; its events stay
+        line = core.work_line(self.c, k)
+        self.assertEqual((line["owner"], [d["id"] for d in line["done"]]), ("s3", [k]))
+        self.assertEqual(line["people"]["s3"]["state"], "ended")
+        g = line["goal"]
+        self.assertEqual((g["name"], g["outcome"], g["done_when"], g["done"], g["open"]),
+                         ("cart", "people buy things", "an order goes through", 1, 1))
+        self.assertEqual([t["id"] for t in g["open_tasks"]], [rest])
+        m = core.item_add(self.c, "a", "sign the contract", doer="human", actor="mark")["id"]
+        core.claim(self.c, m, "mark")
+        person = core.work_line(self.c, m)
+        self.assertEqual((person["owner"], person["done"], person["now"], person["next"]), ("mark", None, None, None))
+
+    def test_the_line_reads_only_the_owners_events(self):
+        # p147: the line reads the owner's events by the events_actor index, not the whole history.
+        x = self.add("a", "x")
+        core.claim(self.c, x, "s1")
+        plan = " ".join(r[3] for r in self.c.execute(
+            "EXPLAIN QUERY PLAN SELECT id, at, item_id, change FROM events WHERE actor=? AND id>=? AND id<? "
+            "AND item_id IS NOT NULL ORDER BY id", ("s1", 0, 1 << 62)))
+        self.assertIn("events_actor", plan)

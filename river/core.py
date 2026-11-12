@@ -10121,6 +10121,238 @@ def tree_mode(conn, actor):
     return session_tree(conn, actor)
 
 
+# The work line of a task's session (#5571, design #5560, mark 2026-11-12; canvas task-context v2): a person clicks a
+# task in any chat and sees it in the work of the session that owns it: what that session did, does and will do.
+# Not session_tree: through hub tasks it reaches about 216 open tasks for 25 of 40 recent sessions; the line reads only
+# the owner's own events (index events_actor) and the few items they name, so it answers in a few milliseconds.
+LINE_END = ("done", "dropped", "released", "given to")  # an own event that ends a session's turn on a task
+
+
+def _line_owner(conn, it):
+    """(owner, why, anchor event id) of the clicked task: the session that holds it, else the one that closed it last
+    with done, else the one that added it; (None, None, None) when no session or person is known."""
+    if it["status"] in ("in_progress", "held") and it["assignee"]:
+        return it["assignee"], "holds", None
+    for why, like in (("did", "done%"), ("added", "added to%")):
+        r = conn.execute("SELECT id, actor FROM events WHERE item_id=? AND change LIKE ? AND actor IS NOT NULL "
+                         "AND actor<>? ORDER BY id DESC LIMIT 1", (it["id"], like, COMMAND)).fetchone()
+        if r:
+            return r["actor"], why, r["id"]
+    return None, None, None
+
+
+def _line_people(conn, names):
+    """name -> {name, kind, role, doing, state}: other sessions are named by what they do (the short title of the task they
+    hold, else what they said with maxpm now), never by their name alone. A session that ended has no row: ended."""
+    names = sorted({n for n in names if n})
+    if not names:
+        return {}
+    marks = ",".join("?" * len(names))
+    rows = {r["name"]: r for r in conn.execute(f"SELECT * FROM agents WHERE name IN ({marks})", names)}
+    held = {}
+    for r in conn.execute(f"SELECT assignee, id, title, short FROM items WHERE assignee IN ({marks}) "
+                          f"AND status IN ('in_progress','held') ORDER BY id", names):
+        held.setdefault(r["assignee"], r)
+    out = {}
+    for n in names:
+        a, h = rows.get(n), held.get(n)
+        out[n] = {"name": n, "kind": a["kind"] if a else "ai", "role": a["role"] if a else None,
+                  "doing": (h["short"] or h["title"]) if h else (a["doing"] if a and "doing" in a.keys() else None),
+                  "state": _agent_state(conn, a) if a else "ended"}
+    return out
+
+
+def _line_row(r):
+    return {"id": r["id"], "title": r["title"], "short": r["short"], "status": r["status"]}
+
+
+def work_line(conn, item_id):
+    """GET /api/item/<id>/context: the clicked task in the work of the session that owns it (#5571).
+
+    owner: the assignee while the task is in progress or held; else the actor of its last done event; else the actor
+    that added it (the task is then 'nobody holds it yet'). The line covers the owner from its registration before
+    that event (as session_tree) to its next registration:
+      done: each task it claimed or closed, in order, with start and end (ISO; the page shows the length), its changed
+        line (#5570), and the tasks it added while it held that task (found), each with its state and who closed it;
+      added: tasks it added while it held none;
+      now: the tasks it holds, each with the open tasks it waits on and their holders;
+      next: a forecast with a reason for each row: its queue, tasks reserved for it, open tasks it added that nobody
+        holds, and what its tasks in hand unblock (empty: nothing planned).
+    goal: the head of the task's goal (else the goal the owner owns): outcome, done-when, parent, done and open counts,
+    the sessions that worked on it, its open tasks, the date of its latest handoff. A person as owner gets the task and
+    the goal head only. people: name -> what each named session does. Times are ISO; the page formats them."""
+    it = _item(conn, item_id)
+    owner, why, anchor = _line_owner(conn, it)
+    goal_ids = [r["goal_id"] for r in conn.execute(
+        "SELECT ig.goal_id FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? ORDER BY g.rank, g.id",
+        (it["id"],))]
+    task = {**_line_row(it), "project": _project_name(conn, it["project_id"]), "kind": it["kind"],
+            "changed": it["changed"], "output": it["output"], "notes": it["notes"], "context": it["context"],
+            "found_during": it["found_during"], "assignee": it["assignee"], "claimed_at": it["claimed_at"],
+            "closed_at": it["closed_at"], "created_at": it["created_at"], "nobody_holds": why == "added"
+            and it["status"] in OPEN_STATES}
+    out = {"item": task, "owner": None, "owner_is": why, "since": None, "done": None, "added": None, "now": None,
+           "next": None, "goal": None, "people": {}}
+    names = {owner}
+    kind = None
+    if owner:
+        a = conn.execute("SELECT kind FROM agents WHERE name=?", (owner,)).fetchone()
+        kind = a["kind"] if a else "ai"
+    if owner and kind == "ai":
+        reg = "SELECT {} FROM events WHERE actor=? AND item_id IS NULL AND change LIKE 'registered as%' AND id{}?"
+        start = conn.execute(reg.format("id, at", "<=") + " ORDER BY id DESC LIMIT 1",
+                             (owner, anchor if anchor is not None else 1 << 62)).fetchone()
+        lo = start["id"] if start else 0
+        nxt = conn.execute(reg.format("MIN(id)", ">"), (owner, lo)).fetchone()[0]
+        hi = nxt if nxt and (anchor is None or nxt > anchor) else 1 << 62
+        out["since"] = start["at"] if start else None
+        evs = conn.execute("SELECT id, at, item_id, change FROM events WHERE actor=? AND id>=? AND id<? "
+                           "AND item_id IS NOT NULL ORDER BY id", (owner, lo, hi)).fetchall()
+        tasks, adds = {}, []
+        for e in evs:
+            c, i = e["change"], e["item_id"]
+            if c.startswith("claimed") or (c.startswith(("done", "dropped")) and i not in tasks):
+                t = tasks.setdefault(i, {"id": i, "started": e["at"], "start_id": e["id"], "ended": None, "end_id": None,
+                                         "outcome": None})
+                if c.startswith("claimed"):
+                    t.update(ended=None, end_id=None, outcome=None)  # claimed again after a release: its first start
+                else:
+                    t.update(ended=e["at"], end_id=e["id"], outcome="dropped" if c.startswith("dropped") else "done")
+            elif i in tasks and c.startswith(LINE_END):
+                t = tasks[i]
+                t.update(ended=e["at"], end_id=e["id"], outcome=next(w for w in LINE_END if c.startswith(w)).split()[0])
+            elif c.startswith("added to"):
+                adds.append((e["id"], i))
+        held = [r["id"] for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
+                                              "ORDER BY id", (owner,))]
+        queued = conn.execute("SELECT item_id, kind, body FROM queue_entries WHERE agent=? ORDER BY kind<>'stop', "
+                              "item_id IS NOT NULL, pos, id", (owner,)).fetchall()
+        reserved = [r["id"] for r in conn.execute("SELECT id FROM items WHERE reserved_for=? AND status='open' ORDER BY id",
+                                                  (owner,))]
+        ids = set(tasks) | {i for _, i in adds} | set(held) | set(reserved) | {r["item_id"] for r in queued if r["item_id"]}
+        waits = conn.execute(f"SELECT item_id, blocked_by FROM deps WHERE kind<>'conflicts' AND item_id IN "
+                             f"({','.join('?' * len(held))})", held).fetchall() if held else []
+        unblocks = conn.execute(f"SELECT item_id, blocked_by FROM deps WHERE kind<>'conflicts' AND blocked_by IN "
+                                f"({','.join('?' * len(held))}) ORDER BY item_id", held).fetchall() if held else []
+        ids |= {r["blocked_by"] for r in waits} | {r["item_id"] for r in unblocks}
+        rows = _line_items(conn, ids)
+        closer = _line_closers(conn, [i for i in {i for _, i in adds} if i in rows and rows[i]["status"] in CLOSED_STATES])
+
+        def found_row(i):
+            r = rows[i]
+            names.update({r["assignee"], closer.get(i)})
+            return {**_line_row(r), "holder": r["assignee"] if r["status"] in ("in_progress", "held") else None,
+                    "closed_by": closer.get(i)}
+
+        order = sorted(tasks.values(), key=lambda t: t["start_id"])
+        found, loose = {}, []
+        for eid, i in adds:
+            if i not in rows or i in tasks:
+                continue
+            r = rows[i]
+            during = r["found_during"] if r["found_during"] in tasks else next(
+                (t["id"] for t in reversed(order) if t["start_id"] < eid and (t["end_id"] is None or t["end_id"] > eid)),
+                None)
+            (found.setdefault(during, []) if during else loose).append(i)
+        out["done"] = [{**_line_row(rows[t["id"]]), "changed": rows[t["id"]]["changed"], "started": t["started"],
+                        "ended": t["ended"], "outcome": t["outcome"],
+                        "found": [found_row(i) for i in found.get(t["id"], [])]}
+                       for t in order if t["id"] in rows and t["id"] not in held]
+        out["added"] = [found_row(i) for i in loose]
+        out["now"] = []
+        for i in held:
+            r = rows[i]
+            on = [rows[w["blocked_by"]] for w in waits if w["item_id"] == i and w["blocked_by"] in rows
+                  and rows[w["blocked_by"]]["status"] in OPEN_STATES]
+            names.update(o["assignee"] for o in on)
+            out["now"].append({**_line_row(r), "started": tasks[i]["started"] if i in tasks else r["claimed_at"],
+                               "blocked_reason": r["blocked_reason"],
+                               "found": [found_row(x) for x in found.get(i, [])],
+                               "waits_on": [{**_line_row(o), "holder": o["assignee"]
+                                             if o["status"] in ("in_progress", "held") else None} for o in on]})
+        nxt_rows, seen = [], set(held)
+
+        def plan(i, reason):
+            if i in rows and i not in seen and rows[i]["status"] in OPEN_STATES:
+                seen.add(i)
+                r = rows[i]
+                names.add(r["assignee"])
+                nxt_rows.append({**_line_row(r), "reason": reason, "holder": r["assignee"]
+                                 if r["status"] in ("in_progress", "held") else None})
+        for q in queued:
+            if q["item_id"]:
+                plan(q["item_id"], "in its queue")
+            else:
+                nxt_rows.append({"id": None, "kind": q["kind"], "body": q["body"],
+                                 "reason": "a stop request" if q["kind"] == "stop" else "an instruction in its queue"})
+        for i in reserved:
+            plan(i, "reserved for it")
+        for i in [i for _, i in adds]:
+            if i in rows and not rows[i]["assignee"]:
+                plan(i, "it added it; nobody holds it")
+        for r in unblocks:
+            plan(r["item_id"], f"waits on its task #{r['blocked_by']}")
+        out["next"] = nxt_rows
+    gid = goal_ids[0] if goal_ids else None
+    if gid is None and owner:
+        g = conn.execute("SELECT id FROM goals WHERE owner=? AND status='open' ORDER BY rank, id LIMIT 1",
+                         (owner,)).fetchone()
+        gid = g["id"] if g else None
+    if gid is not None:
+        out["goal"] = _line_goal(conn, gid, names)
+    out["owner"] = owner
+    out["people"] = _line_people(conn, names)
+    return out
+
+
+def _line_items(conn, ids):
+    """id -> the item columns the line shows, for these ids."""
+    ids = sorted(i for i in ids if i is not None)
+    if not ids:
+        return {}
+    return {r["id"]: r for r in conn.execute(
+        f"SELECT id, title, short, status, assignee, changed, found_during, claimed_at, blocked_reason FROM items "
+        f"WHERE id IN ({','.join('?' * len(ids))})", ids)}
+
+
+def _line_closers(conn, ids):
+    """id -> the actor of the last done or dropped event of each closed task."""
+    if not ids:
+        return {}
+    out = {}
+    for r in conn.execute(f"SELECT item_id, actor FROM events WHERE item_id IN ({','.join('?' * len(ids))}) "
+                          f"AND (change LIKE 'done%' OR change LIKE 'dropped%') ORDER BY id", ids):
+        out[r["item_id"]] = r["actor"]
+    return out
+
+
+def _line_goal(conn, gid, names):
+    """The head of a goal for the work line: outcome, done-when, parent, counts, sessions, open tasks, last handoff."""
+    g = conn.execute("SELECT * FROM goals WHERE id=?", (gid,)).fetchone()
+    parent = conn.execute("SELECT name, outcome FROM goals WHERE id=?", (g["parent_id"],)).fetchone() \
+        if g["parent_id"] else None
+    items = conn.execute("SELECT i.id, i.title, i.short, i.status, i.assignee FROM item_goals ig JOIN items i "
+                         "ON i.id=ig.item_id WHERE ig.goal_id=? ORDER BY i.priority, i.id", (gid,)).fetchall()
+    sessions = {r["by_agent"] for r in conn.execute("SELECT DISTINCT by_agent FROM goal_handoffs WHERE goal_id=? "
+                                                    "AND by_agent IS NOT NULL", (gid,))}
+    sessions |= {r["actor"] for r in conn.execute(
+        "SELECT DISTINCT actor FROM events WHERE item_id IS NULL AND change LIKE ? AND actor IS NOT NULL",
+        (f"owns goal {g['name']} %",))}
+    if g["owner"]:
+        sessions.add(g["owner"])
+    last = conn.execute("SELECT MAX(created_at) FROM goal_handoffs WHERE goal_id=?", (gid,)).fetchone()[0]
+    opened = [r for r in items if r["status"] in OPEN_STATES]
+    names.update(r["assignee"] for r in opened)
+    names.add(g["owner"])
+    return {"name": g["name"], "outcome": g["outcome"], "done_when": g["done_when"], "status": g["status"],
+            "owner": g["owner"], "shared": bool(g["shared"]),
+            "parent": {"name": parent["name"], "outcome": parent["outcome"]} if parent else None,
+            "done": sum(r["status"] == "done" for r in items), "open": len(opened), "sessions": len(sessions),
+            "handoff_at": last,
+            "open_tasks": [{**_line_row(r), "holder": r["assignee"] if r["status"] in ("in_progress", "held") else None}
+                           for r in opened]}
+
+
 def _graph_distances(ann, starts):
     """Distance from the start items over dependency links in both directions."""
     dist = {s: 0 for s in starts}

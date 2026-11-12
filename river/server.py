@@ -4485,6 +4485,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, setup_status(conn))
             finally:
                 conn.close()
+        if path.startswith("/api/item/") and path.endswith("/context"):
+            # The clicked task in the work of the session that owns it (#5571).
+            conn = core.connect()
+            try:
+                return self._send(200, core.work_line(conn, int(path.split("/")[3])))
+            except (RiverError, ValueError) as e:
+                return self._send(404, {"error": str(e)})
+            finally:
+                conn.close()
         if path.startswith("/api/item/"):
             conn = core.connect()
             try:
