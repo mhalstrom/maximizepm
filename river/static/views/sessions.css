@@ -296,6 +296,9 @@ button.srow-it { cursor: pointer; }
 .br-bar, .br-ctl { display: flex; gap: var(--sp-2); align-items: center; flex: none; padding: var(--sp-2) var(--sp-3); background: var(--panel); border-bottom: var(--hair) solid var(--line); }
 .br-ctl { flex-wrap: wrap; font-size: var(--fs-s); }
 .br-ctl .btn { font-size: var(--fs-s); padding: var(--sp-0) var(--sp-3); }
+.br-bar { position: relative; }  /* the address suggestions open under it (#5635) */
+.br-su { font-size: var(--fs-s); color: var(--muted); }
+.sugg-row.on .br-su { color: inherit; opacity: .85; }
 .br-addr { flex: 1 1 var(--w-m); min-width: 0; font-size: calc(var(--fs-s) + var(--hair) / 2); }
 .br-tabs { max-width: var(--w-m); font-size: var(--fs-s); }
 .br-sp { flex: 1; }

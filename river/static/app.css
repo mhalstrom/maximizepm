@@ -457,6 +457,16 @@ button.tc-unfold { display: none; }
 .cmp-stop:disabled { opacity: .45; cursor: default; }
 .composer.can-now:not(.has-text) .cmp-stop { display: inline-flex; }
 .cmp-plus:focus-visible, .cmp-mic:focus-visible, .cmp-send:focus-visible, .cmp-stop:focus-visible { outline: var(--hair-2) solid var(--accent); outline-offset: var(--hair); }
+/* The list under a field that suggests as the person types (components/suggestList.js, #5635): over what is under the
+   field; the chosen row has the accent's background. */
+.sugg-list { position: absolute; left: 0; right: 0; top: calc(100% + var(--sp-0)); z-index: 4; max-height: var(--h-pre);
+  overflow-y: auto; background: var(--panel); border: var(--hair) solid var(--line); border-radius: var(--r-l);
+  box-shadow: var(--shadow-pop); padding: var(--sp-1); }
+.sugg-list.hidden { display: none; }
+.sugg-row { display: flex; flex-direction: column; gap: var(--hair); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-s);
+  cursor: pointer; font-size: var(--fs-m); min-width: 0; }
+.sugg-row > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sugg-row.on { background: var(--accent); color: var(--accent-ink); }
 /* The "/" list of a message box (components/slashList.js, #5186): the matching slash commands of the session's agent, over
    the chat above the pill; the chosen row has the accent's background. */
 .slash-list { position: absolute; left: 0; right: 0; bottom: calc(100% + var(--sp-2)); z-index: 3; max-height: var(--h-pre);

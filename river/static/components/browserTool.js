@@ -8,8 +8,11 @@
 // #5616: over the page it draws the pointer of the session that drives (it glides to each point, a ring marks each
 // press, a tag names the session) and the keys it types (dots in a password field); serve records them. "Hand to
 // <session>" gives the browser to the session of this panel and puts the page's address in its chat.
+// #5635: the address field suggests as the person types: the addresses this browser visited (serve keeps them in
+// memory: Chrome's History and the pages its tabs showed), and a last row that searches Google for the words.
 import { esc, toast, actor, pageToken, typeAction } from "../lib.js";
 import { button } from "./button.js";
+import { makeSuggest } from "./suggestList.js";
 import { openTool, panelSession } from "./sidePanel.js";
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -54,7 +57,8 @@ function render(box, project) {
       ${button("◀", { kind: "icon", label: "Back", title: "Back", data: { br: "back" } })}
       ${button("▶", { kind: "icon", label: "Forward", title: "Forward", data: { br: "forward" } })}
       ${button("↻", { kind: "icon", label: "Reload", title: "Load the page again", data: { br: "reload" } })}
-      <input class="br-addr" placeholder="Address" aria-label="The address of the browser's page">
+      <input class="br-addr" placeholder="Address or search" aria-label="Address or search"
+        autocapitalize="off" spellcheck="false" enterkeyhint="go">
       <select class="br-tabs hidden" aria-label="The tabs of the browser"></select>
     </form>
     <div class="br-ctl"><span class="br-who muted t-s"></span>
@@ -258,10 +262,25 @@ function render(box, project) {
       if (what === "start") { sized = ""; fit(); }
     } catch (err) { if (what === "hand") toast(err.message, true); }
   });
-  $$(".br-bar").addEventListener("submit", async (e) => {
-    e.preventDefault(); const url = addr.value.trim(); if (!url) return;
+  const go = async (url) => {
     addr.blur();
     try { show(await call("open", { project, pane, url })); } catch (err) { /* call showed it */ }
+  };
+  $$(".br-bar").addEventListener("submit", (e) => { e.preventDefault(); const url = addr.value.trim(); if (url) go(url); });
+  // The rows: each address with its title, then "Search Google for <words>" (Enter on words does the same: serve
+  // makes words a search). Not through call(): a failed suggestion shows no toast.
+  makeSuggest(addr, $$(".br-bar"), {
+    label: "Addresses and a search",
+    load: async (text) => {
+      const r = await fetch("api/action", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "browser", args: { action: "suggest", project, text }, actor: actor() }) });
+      const items = r.ok ? ((await r.json()).result || {}).items || [] : [];
+      return items.map(x => ({ value: x.url,
+          html: `<span class="br-st">${esc(x.title || x.url)}</span><span class="br-su">${esc(x.url)}</span>` }))
+        .concat([{ value: "https://www.google.com/search?q=" + encodeURIComponent(text.trim()),
+          html: `<span class="br-st">Search Google for “${esc(text.trim())}”</span>` }]);
+    },
+    pick: (url) => { addr.value = url; go(url); },
   });
   $$(".br-tabs").addEventListener("change", async (e) => {
     try { show(await call("tab", { project, pane, target: e.target.value })); } catch (err) { /* call showed it */ }

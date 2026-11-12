@@ -11,6 +11,7 @@ import socket
 import struct
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -72,6 +73,18 @@ class NetworkRule(unittest.TestCase):
         for bad in ("file:///etc/passwd", "chrome://settings", "javascript:alert(1)"):
             with self.assertRaises(RiverError, msg=bad):
                 browser.norm_url(bad)
+
+    def test_words_are_a_search(self):
+        """#5635: words with a space, or one word with no dot that is no host and port, search Google, as in Chrome."""
+        g = "https://www.google.com/search?q="
+        self.assertEqual(browser.norm_url("two words"), g + "two+words")
+        self.assertEqual(browser.norm_url("python"), g + "python")
+        self.assertEqual(browser.norm_url("what is 3.5 & more"), g + "what+is+3.5+%26+more")
+        self.assertEqual(browser.norm_url("news.ycombinator.com"), "https://news.ycombinator.com")
+        self.assertEqual(browser.norm_url("localhost"), "http://localhost")
+        self.assertEqual(browser.norm_url("my-box:8080/x"), "https://my-box:8080/x")
+        self.assertEqual(browser.norm_url("[::1]:3000"), "http://[::1]:3000")
+        self.assertEqual(browser.norm_url("https://example.com/a?q=1"), "https://example.com/a?q=1")
 
 
 class Keys(unittest.TestCase):
@@ -707,6 +720,75 @@ class Routes(Base):
         routes._ask_open("web", "ag1", "ag1")
         self.assertEqual(routes.browser_opens()[-1], {"seq": routes._open_seq[0], "project": "web", "session": "ag1",
                                                       "by": "ag1"})
+
+
+class Suggest(Base):
+    """#5635: the address bar suggests the addresses that the browser visited: Chrome's History of its profile (read
+    from a copy, kept in memory) and the pages its tabs showed; an address that starts with the text first."""
+
+    def history(self, b, rows):
+        import sqlite3
+        path = b.dir / "profile" / "Default" / "History"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(path)
+        con.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT, visit_count INTEGER, "
+                    "typed_count INTEGER, last_visit_time INTEGER, hidden INTEGER DEFAULT 0)")
+        con.executemany("INSERT INTO urls (url, title, visit_count, typed_count, last_visit_time) VALUES (?, ?, ?, ?, ?)",
+                        rows)
+        con.commit()
+        con.close()
+        return path
+
+    def test_history_and_the_pages_of_the_tabs(self):
+        b = browser.get("web")
+        t0 = 13300000000000000  # Chrome's microseconds since 1601
+        self.history(b, [("https://news.ycombinator.com/", "Hacker News", 30, 2, t0),
+                         ("https://github.com/mhalstrom/maximizepm", "maximizepm on GitHub", 3, 0, t0 + 5),
+                         ("https://www.google.com/search?q=hacker", "hacker - Google Search", 9, 0, t0 + 9),
+                         ("https://example.com/news", "Example news", 1, 0, t0 + 7)])
+        urls = lambda text: [x["url"] for x in browser.suggest(b, text)]
+        # A start of the address comes first (www. and the scheme do not count), then the most visited.
+        self.assertEqual(urls("news"), ["https://news.ycombinator.com/", "https://example.com/news"])
+        self.assertEqual(urls("ex"), ["https://example.com/news"])
+        self.assertEqual(urls("github maximizepm"), ["https://github.com/mhalstrom/maximizepm"])
+        self.assertEqual(urls("hacker"), ["https://news.ycombinator.com/"])  # not Google's search page
+        self.assertEqual(urls("   "), [])
+        # A page that a tab showed counts at once, before Chrome writes its History.
+        b._event("Target.targetInfoChanged", {"targetInfo": {"type": "page", "targetId": "T1",
+                                                              "url": "https://docs.python.org/3/", "title": "Python docs"}}, None)
+        self.assertEqual(browser.suggest(b, "python"), [{"url": "https://docs.python.org/3/", "title": "Python docs"}])
+
+    def test_the_history_is_read_once_and_again_when_it_changed(self):
+        b = browser.get("web")
+        path = self.history(b, [("https://a.example/", "A", 1, 0, 13300000000000000)])
+        reads = []
+        real = browser.read_history
+        with mock.patch.object(browser, "read_history", lambda p: reads.append(p) or real(p)):
+            browser.suggest(b, "a")
+            browser.suggest(b, "a")
+            self.assertEqual(len(reads), 1)  # from memory
+            os.utime(path, (1, 1))
+            b.history["at"] = 0  # the wait between two reads is over
+            browser.suggest(b, "a")
+            for _ in range(200):  # a changed file is read in a thread: the answer came from memory
+                if not b.history["reading"]:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(len(reads), 2)
+
+    def test_a_browser_with_no_profile_suggests_what_its_tabs_showed(self):
+        b = browser.get("web")
+        b.attached = 9222  # a Chrome that serve did not start: its History is its own
+        browser.note_visit(b, "https://example.org/", "Example")
+        browser.note_visit(b, "chrome://settings", "Settings")
+        self.assertEqual(browser.suggest(b, "exam"), [{"url": "https://example.org/", "title": "Example"}])
+        self.assertEqual(browser.suggest(b, "settings"), [])
+
+    def test_the_op_answers_without_chrome(self):
+        browser.note_visit(browser.get("web"), "https://example.org/", "Example")
+        got = server.OPS["browser"](self.c, {"action": "suggest", "project": "web", "text": "example"}, None)
+        self.assertEqual(got, {"items": [{"url": "https://example.org/", "title": "Example"}]})
+        self.assertFalse(browser.get("web").running())
 
 
 def _can_bind():

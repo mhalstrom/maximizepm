@@ -945,6 +945,54 @@ try {
                           "label": "Show the session list", "kept": True, "key": True})
         self.assertEqual(self.drive(driver, "/sessions/ag", size="390,844"), {"phone": True})
 
+    def _address_suggestions(self, size):
+        """#5635: the Browser pane's address field lists the addresses the browser visited that match the typed words,
+        and a last row that searches Google; Down chooses a row, Esc closes the list. It fits a phone (p57)."""
+        from unittest import mock
+        from river import browser
+        project = browser.project_of(self.c, agent="ag")
+        b = browser.get(project)
+        self.addCleanup(browser.BROWSERS.clear)
+        browser.note_visit(b, "https://news.ycombinator.com/", "Hacker News")
+        browser.note_visit(b, "https://example.com/news", "Example news")
+        no = mock.patch.object(browser, "no_chrome", lambda: "no Chrome in this test")  # the pane starts no Chrome
+        no.start()
+        self.addCleanup(no.stop)
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag", "session ag shown");
+  const { openBrowser } = await import("./components/browserTool.js");
+  await openBrowser("ag");
+  await until(() => q(".br-addr"), "the address field");
+  const addr = q(".br-addr"), list = () => q(".sugg-list");
+  await until(() => !q(".br-msg").classList.contains("hidden") && q(".br-msg").textContent.includes("Chrome"), "the pane started");
+  await sleep(300);
+  addr.focus(); addr.value = "news"; addr.dispatchEvent(new Event("input"));
+  await until(() => list() && !list().classList.contains("hidden"), "the list: " + document.activeElement.className);
+  const rows = () => [...document.querySelectorAll(".sugg-row")];
+  const out = { rows: rows().map(r => r.textContent), combo: addr.getAttribute("aria-expanded") };
+  const key = (k) => addr.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  key("ArrowDown"); key("ArrowDown");
+  out.chosen = q(".sugg-row.on").textContent;
+  out.active = addr.getAttribute("aria-activedescendant") === q(".sugg-row.on").id;
+  const r = list().getBoundingClientRect();
+  out.fits = r.left >= 0 && r.right <= innerWidth && r.height > 0;
+  out.wide = document.documentElement.scrollWidth > innerWidth;
+  key("Escape");
+  out.closed = list().classList.contains("hidden") && addr.getAttribute("aria-expanded") === "false";
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag", size=size)
+        self.assertEqual(got, {"rows": ["Hacker Newshttps://news.ycombinator.com/", "Example newshttps://example.com/news",
+                                        "Search Google for \u201cnews\u201d"],
+                               "combo": "true", "chosen": "Example newshttps://example.com/news", "active": True,
+                               "fits": True, "wide": False, "closed": True})
+
+    def test_the_address_bar_suggests_at_desktop_width(self):
+        self._address_suggestions("1280,900")
+
+    def test_the_address_bar_suggests_at_phone_width(self):
+        self._address_suggestions("390,844")
+
     def test_the_you_row_opens_what_waits_on_you(self):
         """#5102 steps 1 and 3 (design #4657): the You row at the top of the Sessions list has a ! badge with what waits on
         the person, and opens the You view (Needs you, the inbox) at /you in place of a session's chat; a session row

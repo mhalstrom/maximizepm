@@ -89,6 +89,8 @@ def act(conn, a, who):
         b.drive(a.get("pane"))  # the person uses the browser in this panel: its size is the page's size (#5625)
     if action == "status":
         return b.info()
+    if action == "suggest":  # the address bar, as the person types (#5635): from memory, no Chrome call
+        return {"items": browser.suggest(b, a.get("text") or "")}
     if action == "walk":  # a page walk check (#5516): its own background tab, so it changes nothing the person sees
         pages = a.get("pages") or []
         if not isinstance(pages, list) or not pages:

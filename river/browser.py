@@ -55,7 +55,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote_plus, urlsplit
 
 from . import core
 from .core import RiverError
@@ -497,6 +497,8 @@ class Browser:
         self.watched = 0.0   # when the panel last asked for a frame: someone watches (browser_pace watch)
         self.watching = 0    # frame polls that wait now
         self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
+        self.visits = {}     # url -> {url, title, n, at}: the pages its tabs showed, for the address bar (#5635)
+        self.history = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's History in memory
         self.state = self._load()
 
     # state.json: the controller, the window mode, Chrome's pid and the proxy port (to attach after a restart)
@@ -668,6 +670,7 @@ class Browser:
             pass
         for t in pages:
             self.targets[t["targetId"]] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
+            note_visit(self, t["url"], t["title"])
         self._attach(pages[0]["targetId"] if pages else self._new_target())
 
     def _attach(self, target):
@@ -847,6 +850,7 @@ class Browser:
                 self.mine.add(t["targetId"])
             new = t["targetId"] not in self.targets
             self.targets[t["targetId"]] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
+            note_visit(self, t["url"], t["title"])
             if new and t.get("openerId") and t["openerId"] == self.target:  # a page opened a new tab: show it
                 threading.Thread(target=self._switch_quiet, args=(t["targetId"],), daemon=True).start()
             with self.cond:
@@ -1031,6 +1035,9 @@ class Browser:
             self._fit()
 
 
+SEARCH_URL = "https://www.google.com/search?q="
+
+
 def norm_url(url):
     url = (url or "").strip()
     if not url:
@@ -1041,11 +1048,125 @@ def norm_url(url):
     if m and m.group(1).lower() not in ("http", "https"):
         raise RiverError(f"the browser opens http and https addresses only, not {m.group(1).lower()}:")
     if not m:
+        # Words are a search, as in Chrome's address bar (#5635): a space, or one word with no dot that is not a host
+        # and port (localhost, my-box:8080, an IPv6 address in brackets).
+        if re.search(r"\s", url) or not re.match(r"^(localhost|\[[0-9a-f:.]+\]|[^/\s:?#]+\.[^/\s:?#]+|[^/\s:?#]+:\d+)"
+                                                r"([/:?#]|$)", url, re.I):
+            return SEARCH_URL + quote_plus(url)
         url = ("http://" if re.match(r"^(localhost|127\.|\[::1\])", url) else "https://") + url
     scheme = urlsplit(url).scheme.lower()
     if scheme not in ("http", "https"):
         raise RiverError(f"the browser opens http and https addresses only, not {scheme}:")
     return url
+
+
+# ---------------------------------------------------------------- what the address bar suggests (#5635)
+
+HISTORY_ROWS = 3000   # the newest addresses of Chrome's History that serve keeps in memory
+HISTORY_AGAIN = 20.0  # seconds before serve reads a History file that changed again
+SUGGEST_MAX = 8       # rows that the address bar shows
+_SKIP = re.compile(r"^https://(www\.)?google\.[a-z.]+/(search|url|sorry)\b|^https://accounts\.google\.com/")
+
+
+def _history_file(b):
+    """Chrome's History of the browser's own profile; None for a Chrome that serve did not start (it has its own)."""
+    return None if b.attached else b.dir / "profile" / "Default" / "History"
+
+
+def read_history(path):
+    """[{url, title, n, at}] of a Chrome History file, newest first. Chrome holds the file open and locked: serve reads a
+    copy (with its journal), in a folder of its own."""
+    import sqlite3
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        copy = Path(d) / "History"
+        shutil.copyfile(path, copy)
+        for extra in ("-journal", "-wal"):
+            if Path(str(path) + extra).exists():
+                shutil.copyfile(str(path) + extra, str(copy) + extra)
+        con = sqlite3.connect(copy)
+        try:
+            rows = con.execute("SELECT url, title, visit_count + 2 * typed_count, last_visit_time FROM urls WHERE hidden = 0 "
+                               "ORDER BY last_visit_time DESC LIMIT ?", (HISTORY_ROWS,)).fetchall()
+        finally:
+            con.close()
+    # last_visit_time: microseconds since 1601-01-01; the same order as Unix time
+    return [{"url": u, "title": ti or "", "n": n or 1, "at": (at or 0) / 1e6 - 11644473600} for u, ti, n, at in rows]
+
+
+def _history(b):
+    """The History rows of b in memory. A changed file is read again at most each HISTORY_AGAIN seconds, in a thread:
+    the address bar answers from memory (p147, under 100 ms); only the first read waits."""
+    path = _history_file(b)
+    h = b.history
+    try:
+        mtime = path.stat().st_mtime if path else None
+    except OSError:
+        mtime = None
+    if mtime is None or mtime == h["mtime"] or h["reading"]:
+        return h["rows"]
+
+    def load():
+        try:
+            rows = read_history(path)
+            h.update(rows=rows, mtime=mtime, at=time.time())
+        except Exception:  # a copy that Chrome was writing: the next suggestion reads it again
+            h["mtime"] = None
+        finally:
+            h["reading"] = False
+
+    if h["at"] and time.time() - h["at"] < HISTORY_AGAIN:
+        return h["rows"]
+    h["reading"] = True
+    if h["rows"] is None:
+        load()
+    else:
+        threading.Thread(target=load, daemon=True).start()
+    return h["rows"]
+
+
+def note_visit(b, url, title):
+    """A page that the browser showed (its tab's address changed): the address bar suggests it at once, before Chrome
+    writes its History, and for a Chrome that serve did not start, whose History serve does not read."""
+    if not url.startswith(("http://", "https://")) or _SKIP.match(url):
+        return
+    v = b.visits.get(url)
+    if v is None:
+        if len(b.visits) >= HISTORY_ROWS:
+            b.visits.pop(next(iter(b.visits)))
+        b.visits[url] = {"url": url, "title": title, "n": 1, "at": time.time()}
+    else:
+        v["at"] = time.time()
+        if title:
+            v["title"] = title
+
+
+def _bare(url):
+    return re.sub(r"^https?://(www\.)?", "", url, flags=re.I)
+
+
+def suggest(b, text, n=SUGGEST_MAX):
+    """[{url, title}]: the addresses this browser visited that hold every word of text (in the address or the title).
+    An address that starts with the text comes first (as Chrome's bar completes it), then the most visited, then the
+    newest. One address once; Google's search and sign-in pages are left out."""
+    words = text.lower().split()
+    if not words:
+        return []
+    rows = {}
+    for r in (_history(b) or []) + list(b.visits.values()):
+        u = r["url"]
+        if _SKIP.match(u) or not u.startswith(("http://", "https://")):
+            continue
+        hay = (u + " " + r["title"]).lower()
+        if not all(w in hay for w in words):
+            continue
+        old = rows.get(u)
+        if old is None or r["at"] > old["at"]:
+            rows[u] = {**r, "n": max(r["n"], old["n"] if old else 0), "title": r["title"] or (old or {}).get("title", "")}
+    head = text.strip().lower()
+    order = sorted(rows.values(), key=lambda r: (not _bare(r["url"]).lower().startswith(_bare(head)),
+                                                 not r["url"].lower().startswith(head), -r["n"], -r["at"]))
+    return [{"url": r["url"], "title": r["title"]} for r in order[:n]]
 
 
 # ---------------------------------------------------------------- the CDP address of a session (#5405)
