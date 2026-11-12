@@ -413,14 +413,15 @@ class AttachedChrome(Base):
                               "--no-first-run", "data:text/html,<title>Theirs</title>"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.addCleanup(self._stop_chrome, p, prof)
-        port = None
-        for _ in range(100):
+        # The first Chrome of a fresh GitHub runner took more than 10 s to write its port (#5602): wait as long as
+        # serve waits for its own Chrome (browser.START_WAIT), and stop at once when Chrome ended.
+        port, end = None, time.monotonic() + browser.START_WAIT
+        while port is None and time.monotonic() < end and p.poll() is None:
             try:
                 port = int(Path(prof, "DevToolsActivePort").read_text(encoding="utf-8").split()[0])
-                break
             except (OSError, ValueError, IndexError):
                 time.sleep(0.1)
-        self.assertTrue(port, "the shared Chrome did not start")
+        self.assertTrue(port, f"the shared Chrome did not start within {browser.START_WAIT}s (exit {p.poll()})")
         core.config_set(self.c, "browser_source", f"cdp:{port}", project="web")
         b = browser.get("web")
         b.start()
@@ -444,6 +445,10 @@ class AttachedChrome(Base):
 if __name__ == "__main__":
     unittest.main()
 
+
+# The CDP route starts the project's Chrome (up to browser.START_WAIT) before it answers the WebSocket upgrade; the
+# client's 10 s ran out on a slow GitHub runner (#5602).
+WS_WAIT = browser.START_WAIT + 10
 
 class CdpAddress(Base):
     """A session's own CDP address for the Playwright MCP tools (#5405): the token, the checks of each message, the
@@ -604,7 +609,7 @@ class CdpAddress(Base):
         self.addCleanup(b.close)
         with self.assertRaisesRegex(OSError, "403"):
             browser.WS(browser.cdp_url(self.c, "web", "ag1").replace("token=", "token=x"))
-        ws = browser.WS(browser.cdp_url(self.c, "web", "ag1"))
+        ws = browser.WS(browser.cdp_url(self.c, "web", "ag1"), timeout=WS_WAIT)
         self.addCleanup(ws.close)
         ws.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
         self.assertIn("Chrome", json.loads(ws.recv())["result"]["product"])
@@ -631,7 +636,7 @@ class CdpAddress(Base):
         core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
         b = browser.get("web")
         self.addCleanup(b.close)
-        ws = browser.WS(browser.cdp_url(self.c, "web", "ag1"))
+        ws = browser.WS(browser.cdp_url(self.c, "web", "ag1"), timeout=WS_WAIT)
         self.addCleanup(ws.close)
         n = iter(range(1, 100))
 

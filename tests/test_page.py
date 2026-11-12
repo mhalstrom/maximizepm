@@ -1114,6 +1114,9 @@ try {
   await until(() => q('#sessions .srow[data-session="ag"] .srow-main'), "the row of ag");
   q('#sessions .srow[data-session="ag"] .srow-main').click();
   await until(() => q("#sessTitle").textContent === "ag" && q("#sessLayout").classList.contains("phone-chat"), "the chat of ag");
+  // The ⋯ card's Open session row comes with the first read of the session: on the macOS runner of GitHub it
+  // answered after the title showed, and the row was empty (#5602).
+  await until(() => q("#sessOpen").childElementCount, "the first read of ag");
   out.head = Math.round(box(".sess-head").height) <= 48 && !shown("#sessMenu") && !shown("#sessItem") && shown("#sessMore")
     && !shown('.sess-lists [data-sp-open="items"]') && box(".sess-head h2").width > 200;
   q("#sessMore").click();

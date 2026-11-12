@@ -4937,6 +4937,22 @@ try {
         self.assertGreater(by["scrolled up"]["toEnd"], 1000)
 
 
+class DroppedConnection(unittest.TestCase):
+    def test_a_browser_that_leaves_prints_no_traceback_and_other_errors_still_print(self):
+        """#5602: socketserver printed a BrokenPipeError traceback for each request that a browser left."""
+        srv = server._Server.__new__(server._Server)
+        out = io.StringIO()
+        with contextlib.redirect_stderr(out):
+            for e in (BrokenPipeError(32, "Broken pipe"), ConnectionResetError(54, "reset"), ValueError("a fault")):
+                try:
+                    raise e
+                except Exception:
+                    srv.handle_error(None, ("127.0.0.1", 1))
+        self.assertNotIn("Broken pipe", out.getvalue())
+        self.assertNotIn("ConnectionResetError", out.getvalue())
+        self.assertIn("ValueError: a fault", out.getvalue())
+
+
 class ServerBind(unittest.TestCase):
     def test_the_server_starts_without_a_dns_lookup_of_its_name(self):
         # HTTPServer asks DNS for the full host name; on a Mac with a slow network that hung for minutes.
