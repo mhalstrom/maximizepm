@@ -1348,7 +1348,9 @@ def build_parser(only=None):
     x.add_argument("--new", metavar="HOW", help="add it although maxpm add found open or lately done items like it: "
                    "say how it differs (the history keeps it)")
     x.add_argument("--tier", choices=core.TIERS, help="expert: a task that a person talks through with an expert "
-                   "session (a session started for it takes it; a worker never does); normal: any worker")
+                   "session (a session started for it takes it; a worker never does); test: the target session of a "
+                   "live test, which waits at its prompt by design (a session started for it takes it; no "
+                   "stand-still alert); normal: any worker")
     x.add_argument("--kind", choices=core.TASK_KINDS, help="operational: work on the operation of the system (a "
                    "cleanup, a change of the order, reading production logs to write a task); it has its own default "
                    "model and starts in a new session. work: any other task")
@@ -1383,7 +1385,9 @@ def build_parser(only=None):
 
     x = sub.add_parser("edit", help="change title, notes, doer, or project")
     x.add_argument("--tier", choices=core.TIERS, help="expert: a task that a person talks through with an expert "
-                   "session (a session started for it takes it; a worker never does); normal: any worker")
+                   "session (a session started for it takes it; a worker never does); test: the target session of a "
+                   "live test, which waits at its prompt by design (a session started for it takes it; no "
+                   "stand-still alert); normal: any worker")
     x.add_argument("--kind", choices=core.TASK_KINDS, help="operational: work on the operation of the system (a "
                    "cleanup, a change of the order, reading production logs to write a task); it has its own default "
                    "model and starts in a new session. work: any other task")

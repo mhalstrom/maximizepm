@@ -2805,6 +2805,23 @@ class Experts(Base):
         with self.assertRaisesRegex(RiverError, "needs a topic"):
             core.expert_make(self.c, "fab", "  ", "a")
 
+    def test_a_test_tier_task_goes_only_to_a_session_started_for_it(self):
+        """#5565: the target session of a live test waits at its prompt by design; no worker takes its task."""
+        core.register(self.c, "w1")
+        t = core.item_add(self.c, "a", "test target: stay at your prompt", 0, tier="test")["id"]
+        self.assertEqual(core._item(self.c, t)["tier"], "test")
+        with self.assertRaisesRegex(RiverError, "a test-tier task is for an agent session"):
+            core.item_add(self.c, "a", "x", doer="human", tier="test")
+        self.assertEqual([i["id"] for i in core.next_item(self.c, "a", actor="w1", limit=5)], [self.ready])
+        with self.assertRaisesRegex(RiverError, "test-tier task, the target of a live test"):
+            core.claim(self.c, t, "w1")
+        self.assertIsNone(core.waiting_agent_for(self.c, "a", t))
+        core.register(self.c, "new1")
+        core.push(self.c, t, "new1", "launched for it", "mark")
+        core.claim(self.c, t, "new1")
+        self.assertEqual(core._item(self.c, t)["assignee"], "new1")
+        self.assertNotEqual(core._agent(self.c, "new1")["role"], "expert")  # a test session is no expert
+
     def test_an_expert_tier_task_goes_only_to_a_session_started_for_it(self):
         """#4959: expert is a tier of a task. A worker never gets it from go, next, wait, or Dispatch; the session
         started for it (pushed: launch --item) takes it and is an expert from its start; it keeps the task while the
@@ -2812,7 +2829,7 @@ class Experts(Base):
         core.register(self.c, "w1")
         t = core.item_add(self.c, "a", "talk through the Teams design", 0, tier="expert")["id"]
         self.assertEqual(core._item(self.c, t)["tier"], "expert")
-        with self.assertRaisesRegex(RiverError, "tier is normal or expert"):
+        with self.assertRaisesRegex(RiverError, "tier is normal or expert or test"):
             core.item_add(self.c, "a", "x", tier="guru")
         with self.assertRaisesRegex(RiverError, "a person's item has no tier"):
             core.item_add(self.c, "a", "x", doer="human", tier="expert")
@@ -8498,6 +8515,18 @@ class Activity(Base):
                     self.assertEqual(cli.run(["activity"]), 0)  # never fails the session, prints nothing
             self.assertEqual(out.getvalue(), "")
         self.assertEqual(self.c.execute("SELECT activity_event FROM agents WHERE name='w'").fetchone()[0], "report:idle")
+
+    def test_a_test_tier_task_waits_at_its_prompt_by_design_and_alerts_nobody(self):
+        # #5565: test sessions of #5552 sent the manager a blocked 'stands still' alert every few minutes.
+        self.c.execute("UPDATE items SET tier='test' WHERE id=?", (self.item,))
+        self.c.commit()
+        self.event("PostToolUse", tool_name="Bash")
+        self.assertIsNone(self.event("Stop")["alert"])
+        self.clock[0] += timedelta(hours=1)
+        self.assertEqual(core.silent_holders(self.c, told_too=True), [])
+        self.c.execute("UPDATE items SET tier=NULL WHERE id=?", (self.item,))
+        self.c.commit()
+        self.assertEqual([s["row"]["name"] for s in core.silent_holders(self.c, told_too=True)], ["w"])
 
     def test_a_turn_end_that_waits_on_its_own_background_work_alerts_nobody(self):
         """#4293: build-loop-513a ended its turn to wait on its background gate run, and the manager heard that it

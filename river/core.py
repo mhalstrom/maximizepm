@@ -7775,7 +7775,9 @@ def touches_list(text):
     return [x for x in (text or "").split("\n") if x]
 
 
-TIERS = ("normal", "expert")
+TIERS = ("normal", "expert", "test")
+# Tiers that a worker never takes: a session started for the task takes it (launch --item, maxpm expert start).
+OWN_SESSION_TIERS = ("expert", "test")
 # The kinds of a task that maxpm add and maxpm edit set (#4973). operational: work on the operation of the system
 # itself (mark: 'cleaning tasks, changing graph orderings, reading prod logs to understand what a task needs to be
 # created with the right context'). It has its own default model (KIND_MODELS), and it starts in a new session.
@@ -7792,14 +7794,16 @@ def _check_kind(kind):
 
 
 def _check_tier(tier):
-    """The tier of a task (#4959): 'expert' (an expert session takes it; the person talks it through with it), or
-    None for a normal task ('normal' or '' clears it)."""
+    """The tier of a task (#4959): 'expert' (an expert session takes it; the person talks it through with it), 'test'
+    (#5565: the target session of a live test, which waits at its prompt by design: a session started for it takes
+    it, and it sends the manager no stand-still or silence alert), or None for a normal task ('normal' or '' clears
+    it)."""
     if tier is None:
         return None
     t = str(tier).strip().lower()
     if t not in TIERS + ("",):
         raise RiverError(f"tier is {' or '.join(TIERS)}")
-    return "expert" if t == "expert" else ""
+    return t if t in OWN_SESSION_TIERS else ""
 
 
 SHORT_WORDS = 8     # a short title or a headline: about 6 words, at most this many (#5086)
@@ -7883,8 +7887,8 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
     if kind == "operational" and doer == "human":
         raise RiverError("an operational task is for an agent session; leave out --kind, or --doer human")
     if tier and doer == "human":
-        raise RiverError("an expert-tier task is for an agent session that a person talks with; a person's item has "
-                         "no tier: leave out --tier, or --doer human")
+        raise RiverError(f"a {tier}-tier task is for an agent session; a person's item has no tier: leave out --tier, "
+                         f"or --doer human")
     if mine:
         if not actor:
             raise RiverError("--mine needs an agent name: set MAXPM_AGENT or pass --as <name>")
@@ -7970,7 +7974,9 @@ def item_add(conn, project, title, priority=2, notes="", doer="any", after=(), a
             _event(conn, iid, actor, f"kind {kind}: work on the operation of the system; it starts in a new session")
         if tier:
             conn.execute("UPDATE items SET tier=? WHERE id=?", (tier, iid))
-            _event(conn, iid, actor, f"tier {tier}: an expert session takes it, and a person talks it through with it")
+            _event(conn, iid, actor, f"tier {tier}: " + ("an expert session takes it, and a person talks it through with it"
+                                                          if tier == "expert" else "a session started for it takes it; "
+                                                          "it waits at its prompt by design, so no stand-still alert"))
         if mine:
             _agent(conn, actor)
             conn.execute("UPDATE items SET reserved_for=?, reserved_until=NULL, reserved_by=? WHERE id=?",
@@ -9949,7 +9955,7 @@ def ready_list(conn, project=None, unblocks=None, doer_for=None, ann=None, near=
     if actor:
         # An expert-tier task goes to a session started for it (launch --item, maxpm expert start), not to a worker
         # that asks for work (#4959): only the session it is reserved for sees it.
-        pool = [a for a in pool if a.get("tier") != "expert" or a["reserved_for"] == actor]
+        pool = [a for a in pool if a.get("tier") not in OWN_SESSION_TIERS or a["reserved_for"] == actor]
     if project:
         names = _names(conn, project)
         pool = [a for a in pool if a["project"] in names]
@@ -11685,6 +11691,9 @@ def _claim_row(conn, item_id, actor):
         raise RiverError(f"refused: #{item_id} is an expert-tier task: a person talks it through with a session of its "
                          f"own, so a worker does not take it. A new session starts for it: maxpm launch --item {item_id}, "
                          f"or maxpm expert start <name> --item {item_id}")
+    if it0["tier"] == "test" and ag["kind"] == "ai" and it0["reserved_for"] != actor:
+        raise RiverError(f"refused: #{item_id} is a test-tier task, the target of a live test: a session started for "
+                         f"it takes it (maxpm launch --item {item_id}), not a worker")
     why = deploy_hook_refusal(conn, it0, actor) or (approval_refusal(conn, it0) if ag["kind"] == "ai" else None)
     if why:
         raise RiverError(f"refused: {why}. Take other work: maxpm go")
@@ -13180,8 +13189,9 @@ def _talk(prompt):
 
 
 def _activity_item(conn, agent):
-    return conn.execute("SELECT id, title FROM items WHERE assignee=? AND status='in_progress' ORDER BY id",
-                        (agent,)).fetchone()
+    """The item whose holder the stand-still and silence alerts are about; a test-tier task waits by design (#5565)."""
+    return conn.execute("SELECT id, title FROM items WHERE assignee=? AND status='in_progress' "
+                        "AND COALESCE(tier, '')<>'test' ORDER BY id", (agent,)).fetchone()
 
 
 def activity_event(conn, payload, env=None):
@@ -16305,8 +16315,8 @@ def waiting_agent_for(conn, project, item_id=None, model=None):
     session that runs that model; else a new session starts on it (#5383: launch --item --model fable gave the item
     to a waiting Opus session). A session that recorded no model gets no item with a min-model of its own."""
     it = _item(conn, item_id) if item_id is not None else None
-    if it is not None and it["tier"] == "expert":
-        return None  # a new session starts for an expert-tier task; a waiting worker does not get it (#4959)
+    if it is not None and it["tier"] in OWN_SESSION_TIERS:
+        return None  # a new session starts for an expert- or test-tier task; a waiting worker does not get it (#4959)
     ladder = parse_ladder(setting(conn, "model_ladder")) if model or (it is not None and it["min_model"]) else None
     want = (ladder_short(ladder, model) or model) if model else None
 
