@@ -105,6 +105,15 @@ class Contract(Env):
             self.assertTrue(any("INPUT['interrupt']" in p for p in got), (bad, got))
         page = {a["id"]: a["interrupt"] for a in agents.page_list()["agents"]}
         self.assertEqual((page["claude"], page["opencode"], page["copilot"]), (["Escape"], ["Escape", "Escape"], ["C-c"]))
+        # A second Stop's command (#5563): Codex's /stop; the check refuses one that is no slash command.
+        again = {a["id"]: a["interrupt_again"] for a in agents.page_list()["agents"]}
+        self.assertEqual((again["codex"], again["claude"]),
+                         ({"text": "/stop", "does": "end its background commands"}, None))
+        self.assertIn("stop", [c["name"] for c in agents.get("codex").commands])
+        for bad in ({"text": "stop", "does": "x"}, {"text": "/stop"}, {"text": "/stop", "does": " "}):
+            got = agents.check(module(DESCRIBE=GOOD, INPUT={"native": None, "interrupt": ["Escape"],
+                                                            "interrupt_again": bad}), "pi")
+            self.assertTrue(any("INPUT['interrupt_again']" in p for p in got), (bad, got))
 
     def test_check_names_each_problem(self):
         self.assertEqual(agents.check(module(DESCRIBE=GOOD), "pi"), [])

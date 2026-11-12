@@ -318,8 +318,12 @@ DETECT_LAYOUT = {
 # codex queue --thread {address} {text}), or None,
 #      "interrupt": the tmux keys (INTERRUPT_KEYS) that end the agent's running turn and keep its session, as a person
 #                   presses them in its terminal (Claude Code: ["Escape"]; OpenCode asks for a second Esc:
-#                   ["Escape", "Escape"]), or None: the agent has no such key, and the page's Stop says so (#5547)}.
-INPUT_KEYS = {"native": (list, tuple, type(None)), "interrupt": (list, tuple, type(None))}
+#                   ["Escape", "Escape"]), or None: the agent has no such key, and the page's Stop says so (#5547),
+#      "interrupt_again": {"text": a slash command, "does": what it does, in a few words}, or None: what a second Stop
+#                   of the same turn types after the keys (Codex: {"text": "/stop", "does": "end its background
+#                   commands"}: its Esc leaves the turn's shell commands running, #5563)}.
+INPUT_KEYS = {"native": (list, tuple, type(None)), "interrupt": (list, tuple, type(None)),
+              "interrupt_again": (dict, type(None))}
 INTERRUPT_KEYS = ("Escape", "C-c")
 
 # 9. Resume. resume_command(session_ref, model, effort, settings, name=None) -> argv, or None when it cannot resume that
@@ -536,6 +540,12 @@ def check(module, mid=None):
         keys = module.INPUT.get("interrupt") if isinstance(module.INPUT, dict) else None
         if keys is not None and (not keys or any(k not in INTERRUPT_KEYS for k in keys)):
             out.append(f"INPUT['interrupt'] is {list(keys)!r}: one or more of {', '.join(INTERRUPT_KEYS)}, or None")
+        again = module.INPUT.get("interrupt_again") if isinstance(module.INPUT, dict) else None
+        if again is not None and not (isinstance(again.get("text"), str) and again["text"].startswith("/")
+                                      and isinstance(again.get("does"), str) and again["does"].strip()
+                                      and set(again) == {"text", "does"}):
+            out.append(f"INPUT['interrupt_again'] is {again!r}: {{'text': '/<command>', 'does': '<a few words>'}}, "
+                       f"or None")
     for i, c in enumerate(getattr(module, "COMMANDS", None) or ()):
         out += _shape(f"COMMANDS[{i}]", c, COMMAND_KEYS, ("name",))
         if isinstance(c, dict) and "run" in c and c["run"] not in COMMAND_RUNS:
@@ -1040,7 +1050,8 @@ def page_list():
                     "parts": {p: a.supports(p) for p in PARTS}, "launch": dict(a.launch),
                     "setup": dict(a.setup or {}), "main": i == 0,
                     "chat_commands": (a.chat or {}).get("commands", True),
-                    "interrupt": list(a.input.get("interrupt") or [])})
+                    "interrupt": list(a.input.get("interrupt") or []),
+                    "interrupt_again": a.input.get("interrupt_again")})
     return {"agents": out, "errors": errors()}
 
 

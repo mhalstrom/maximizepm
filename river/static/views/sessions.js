@@ -47,7 +47,9 @@ function headerOpen(s) {
 // (components/agents.js interrupt); an agent with none says so in the row.
 const STOPS = ["working", "prompt", "stopping"];
 const stopKeys = (s) => (agentOf(s.provider || s.agent_type) || mainAgent() || {}).interrupt || [];
-const canStop = (s, state) => !!(s.running && s.terminal && STOPS.includes(state));
+// After a first Stop of an agent with a second step (Codex: /stop ends its background commands, #5563) the list row
+// says stop_again: Stop stays while it waits at its prompt.
+const canStop = (s, state) => !!(s.running && s.terminal && (STOPS.includes(state) || s.stop_again));
 function stopRow(s) {
   if (!canStop(s, s.state)) return "";
   if (stopKeys(s).length) return button("Stop its turn", { cls: MI, data: { stop: s.name }, title: "End its turn now" });
@@ -898,8 +900,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // Stop (#5547): the agent's interrupt keys go to its pane; the head then says it is at its prompt.
   async function stopIt(name) {
     headMore(false);
-    try { await typeAction("session_interrupt", { agent: name }); } catch (err) { return toast(err.message, true); }
-    toast(`${name}: its turn stopped`);
+    let r;
+    try { r = await typeAction("session_interrupt", { agent: name }); } catch (err) { return toast(err.message, true); }
+    toast(r && r.command ? `${name}: ${r.command} sent, to ${r.did}`
+      : `${name}: its turn stopped${r && r.again ? `. ${r.again}` : ""}`);
     await refresh();
     if (name === agent) poll();
   }

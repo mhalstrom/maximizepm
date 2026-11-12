@@ -5433,8 +5433,12 @@ def render(a, res):
         return
     if c == "interrupt":
         sent = res.get("sent")
+        if res.get("command"):  # a second Stop (#5563): its command, after the keys only when the turn still ran
+            print(f"{res['agent']}: {' '.join(res['keys'] + [res['command']])} in its terminal, to {res['did']}")
+            return
         print(f"{res['agent']}: its turn was stopped ({' '.join(res['keys'])} in its terminal)"
-              + (f"; the message went at once: {sent['text']}" if sent else "; it waits at its prompt"))
+              + (f"; the message went at once: {sent['text']}" if sent else "; it waits at its prompt")
+              + (f". {res['again']}: maxpm interrupt {res['agent']}" if res.get("again") else ""))
         return
     if c == "stop" and "killed" in res:
         print(f"{'killed' if res['killed'] else 'found dead'}: {res['agent']} (PID {res['pid']}); released "

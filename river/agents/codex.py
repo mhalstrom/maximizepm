@@ -125,8 +125,11 @@ DETECT = {
 }
 
 # Its native message command (the default of the native_message setting): codex queue adds a message to a thread.
-# Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt').
-INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{text}"], "interrupt": ["Escape"]}
+# Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'). The turn's shell command keeps running as a
+# background terminal ("1 background terminal running", #5552), so a second Stop of the same turn also types /stop,
+# which ends them all (manager-477c 2026-11-12, #5563).
+INPUT = {"native": ["codex", "queue", "--thread", "{address}", "--message", "{text}"], "interrupt": ["Escape"],
+         "interrupt_again": {"text": "/stop", "does": "end its background commands"}}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -333,6 +336,7 @@ COMMANDS = [
     {"name": "cd", "description": "change the current working directory", "hint": "<path>"},
     {"name": "pwd", "description": "show the current working directory", "hint": ""},
     {"name": "ps", "description": "list background terminals", "hint": ""},
+    {"name": "stop", "description": "stop all background terminals", "hint": ""},
     {"name": "clear", "description": "clear the terminal and start a new chat", "hint": ""},
     {"name": "feedback", "description": "send logs to maintainers", "hint": ""},
     {"name": "logout", "description": "log out of Codex", "hint": ""},

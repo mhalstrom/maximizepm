@@ -2099,6 +2099,61 @@ class LaunchInTmux(unittest.TestCase):
         self.assertIn("session_interrupt", server.TYPING_OPS)
         self.assertNotIn("agent_interrupt", server.TYPING_OPS)
 
+    def test_a_second_stop_of_codex_ends_its_background_commands(self):
+        """#5563 (manager-477c 2026-11-12, option C): Codex's Esc ends the turn and leaves its shell command running as a
+        background terminal. The first Stop types Esc and says 'Stop again to end its background commands'; the page
+        keeps Stop while the session is idle; a second Stop of the same turn types /stop and Enter (Esc before it only
+        while the turn still runs). A new turn makes the next Stop a first one again."""
+        from river.routes import sessions as routes
+        core.register(self.c, "mark", human=True)
+        core.item_add(self.c, "shop", "work")
+        name = server.launch_agent(self.c)["session_name"]
+        pane = self.tmux.panes[0]
+        core.register(self.c, name)
+        self.c.execute("UPDATE agents SET agent_type='codex' WHERE name=?", (name,))
+        self.addCleanup(server.STOPPED.clear)
+        pane["keys"].clear()
+        pane["screen"] = "■ Conversation interrupted\n\n› \n  1 background terminal running"
+        r = server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        self.assertEqual((pane["keys"], r["again"]), (["Escape"], "Stop again to end its background commands"))
+        sent = {}
+        h = server.Handler.__new__(server.Handler)
+        h.path = "/api/sessions"
+        h._send = lambda code, body, *a, **k: sent.update(code=code, body=body)
+        routes.running(h, "/api/sessions")
+        row = next(x for x in sent["body"]["sessions"] if x["name"] == name)
+        self.assertEqual(row["stop_again"], "end its background commands")
+        # The second Stop: the turn ended, so no second Esc (at Codex's empty prompt it starts an edit of the last
+        # message), only /stop and Enter.
+        r = server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        self.assertEqual((pane["keys"][1:], r["keys"], r["command"]), (["/stop", "Enter"], [], "/stop"))
+        ev = self.c.execute("SELECT change FROM events ORDER BY id DESC LIMIT 1").fetchone()["change"]
+        self.assertIn(f"{name} stopped by mark (/stop in its terminal)", ev)
+        self.assertNotIn(name, server.STOPPED)
+        # The next Stop is a first one again; a turn still running gets the Esc before /stop.
+        del pane["keys"][:]
+        server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        pane["screen"] = "• Running the tests\n\n◦ Working (12s • esc to interrupt)\n\n› "
+        r = server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        self.assertEqual((pane["keys"], r["keys"]), (["Escape", "Escape", "/stop", "Enter"], ["Escape"]))
+        # A message, or the pane watcher's report of a new turn, ends the wait for the second Stop.
+        server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        server.session_send(self.c, name, "go on", "mark")
+        self.assertNotIn(name, server.STOPPED)
+        server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        server._pane_reports(self.c, {name: ("working", None)})
+        self.assertNotIn(name, server.STOPPED)
+        # Send now is a first Stop, and Claude Code has no second step.
+        del pane["keys"][:]
+        server.OPS["session_interrupt"](self.c, {"agent": name, "text": "use the other file"}, "mark")
+        server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        self.assertEqual(pane["keys"], ["Escape", "use the other file", "Enter", "Escape"])
+        self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name=?", (name,))
+        server.STOPPED.clear()
+        r = server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        r = server.OPS["session_interrupt"](self.c, {"agent": name}, "mark")
+        self.assertEqual((pane["keys"][-2:], "again" in r, "command" in r), (["Escape", "Escape"], False, False))
+
     def test_maxpm_interrupt_asks_serve(self):
         """maxpm interrupt <agent> [--message] (#5547) asks maxpm serve, which types the keys (a sandbox reaches no
         tmux), and says what it did."""
@@ -2121,6 +2176,17 @@ class LaunchInTmux(unittest.TestCase):
         self.assertIn("w1: its turn was stopped (Escape in its terminal); the message went at once: read the alert",
                       out.getvalue())
         self.assertIn("w1: its turn was stopped (Escape in its terminal); it waits at its prompt", out.getvalue())
+        # Codex (#5563): the first Stop names the second; the second says what its command does.
+        replies = [{"agent": "w1", "keys": ["Escape"], "again": "Stop again to end its background commands"},
+                   {"agent": "w1", "keys": [], "command": "/stop", "did": "end its background commands"}]
+        cli.ask_server = lambda *a, **k: replies.pop(0)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "--as", "boss", "interrupt", "w1"])
+            cli.run(["-q", "--as", "boss", "interrupt", "w1"])
+        self.assertIn("it waits at its prompt. Stop again to end its background commands: maxpm interrupt w1",
+                      out.getvalue())
+        self.assertIn("w1: /stop in its terminal, to end its background commands", out.getvalue())
 
     def test_the_page_shows_an_agents_terminal_and_types_into_it(self):
         core.register(self.c, "mark", human=True)

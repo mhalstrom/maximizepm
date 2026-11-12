@@ -2354,6 +2354,8 @@ def _pane_reports(conn, states):
             core.report(conn, agent, state, message)
         except RiverError:
             continue
+        if state == "working":
+            STOPPED.pop(agent, None)  # it runs a turn again: its next Stop is a first one (#5563)
         out[agent] = state
     return out
 
@@ -3084,7 +3086,12 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
     (its adapter's INPUT['interrupt']: Esc for Claude Code) go into its tmux pane, as a person presses them there. The
     turn ends; the session keeps its context and its item. A second Stop sends the keys again (a tool call that did
     not stop at the first). With a message (Send now), the message goes after INTERRUPT_PAUSE, as session_send sends
-    it, so the agent reads it at once instead of after its turn. Who: a person, or the active manager (manager)."""
+    it, so the agent reads it at once instead of after its turn. Who: a person, or the active manager (manager).
+
+    An agent with INPUT['interrupt_again'] (Codex: /stop, #5563) has a second step: its first Stop records the agent
+    in STOPPED and says 'Stop again to <does>'; a second Stop before its next turn types that command and Enter
+    (after the keys only while the pane still shows the turn running: a second Esc at Codex's empty prompt starts
+    its edit of the last message). Send now is always a first Stop: its message starts a new turn."""
     if message is not None and (not isinstance(message, str) or len(message) > 4000):
         raise RiverError("text is at most 4000 characters")  # before the keys: a refused message stops nothing
     pane = _typing_pane(conn, agent, who, manager=manager)
@@ -3094,23 +3101,52 @@ def session_interrupt(conn, agent, who=None, message=None, files=None, manager=F
         what = ad.label if ad else "its agent CLI"
         raise RiverError(f"{agent} runs {what}, which has no key that stops its turn; type into its terminal "
                          f"(Open in terminal), or end the session")
-    send_keys(pane, [{"key": k} for k in keys])
+    again = (ad.input.get("interrupt_again") if ad else None) if message is None else None
+    second = bool(again) and agent in STOPPED
+    sent = keys
+    if second:
+        working = (ad.detect or {}).get("working")
+        text = _plain(_pane_texts([pane]).get(pane) or "")
+        sent = keys if working and any(re.search(working, x) for x in _prompt_tail(text)) else []
+        if sent:
+            send_keys(pane, [{"key": k} for k in sent])
+            time.sleep(INTERRUPT_PAUSE)
+        send_keys(pane, [{"text": again["text"]}])
+        time.sleep(ENTER_PAUSE)
+        send_keys(pane, [{"key": "Enter"}])
+        STOPPED.pop(agent, None)
+    else:
+        send_keys(pane, [{"key": k} for k in keys])
+        if again:
+            STOPPED[agent] = again["does"]
+    did = " ".join(sent + [again["text"]] if second else sent)
     held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') "
                         "ORDER BY claimed_at DESC LIMIT 1", (agent,)).fetchone()
     with core.tx(conn):
         core._event(conn, held["id"] if held else None, who or "?",
-                    f"{agent} stopped by {who or 'a person'} ({' '.join(keys)} in its terminal)"
+                    f"{agent} stopped by {who or 'a person'} ({did} in its terminal)"
                     + ("; a message followed" if message else ""))
     # Its turn ended: the Sessions tab says 'at its prompt' at once. Claude Code runs no Stop hook for an Esc; the next
     # prompt's hook (or the pane watcher) says working again.
     row = conn.execute("SELECT kind FROM agents WHERE name=?", (agent,)).fetchone()
     if row and row["kind"] == "ai":
         core.report(conn, agent, "idle")
-    out = {"agent": agent, "pane": pane, "keys": keys}
+    out = {"agent": agent, "pane": pane, "keys": sent}
+    if second:
+        out["command"] = again["text"]
+        out["did"] = again["does"]
+    elif again:
+        out["again"] = f"Stop again to {again['does']}"
     if message is not None and (str(message).strip() or files):
         time.sleep(INTERRUPT_PAUSE)
         out["sent"] = session_send(conn, agent, message, who, files=files, manager=manager)
     return out
+
+
+# The agents whose first Stop waits for its second step (#5563): {agent: what the second Stop does}, for the agents
+# with INPUT['interrupt_again']. Their next turn ends the wait: a message into the pane (_keep_prompt) or the pane
+# watcher's report that they work again (_pane_reports). The page shows Stop while an agent is here.
+STOPPED = {}
 
 
 INTERRUPT_PAUSE = 0.5  # after the interrupt keys, before the message of Send now: the agent's prompt comes back (tests: 0)
@@ -3156,6 +3192,7 @@ def _keep_prompt(conn, agent, text, who):
     """After a message went into the pane: the box's Up arrow brings the prompt back (#4855): the person's text,
     without the attached files; and a foreground maxpm wait of the agent ends, so it reads the text now (#5256)."""
     from . import sessions
+    STOPPED.pop(agent, None)  # a new turn: its next Stop is a first one again (#5563)
     sessions.record_prompt(conn, agent, text, who)
     core.typed_to(conn, agent)
     turn_started(conn, agent, text)

@@ -138,9 +138,11 @@ def running(h, path):
                 ended = {p["pane"] for p in server._tmux_panes(everywhere=True) if p["ended"]} if terminals else set()
             except RiverError:
                 ended = set()
-            return h._send(200, {"sessions": sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals),
-                                                               ended_panes=ended),
-                                 "proposals": core.expert_proposals(conn)})
+            rows = sessions.views(conn, terminals, prompts=server.pane_prompts(conn, terminals), ended_panes=ended)
+            for r in rows:  # its first Stop waits for a second one (#5563): the page keeps Stop while it is idle
+                if r["name"] in server.STOPPED:
+                    r["stop_again"] = server.STOPPED[r["name"]]
+            return h._send(200, {"sessions": rows, "proposals": core.expert_proposals(conn)})
         cursor, agent = q.get("cursor", [""])[0], q.get("agent", [""])[0]
         if "file" in q:  # scrolling up: the page of lines before a byte of one of its transcripts (#5120)
             before = q.get("before", [""])[0]
