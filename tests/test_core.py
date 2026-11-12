@@ -11023,6 +11023,40 @@ class OpsKindRelease(ReleaseBase):
         self.assertEqual(r["items"][0]["kind"], "unknown")
 
 
+    def test_a_release_regression_names_the_last_good_release_and_the_rollback_and_waits_on_a_person(self):
+        core.register(self.c, "boss")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        self.c.commit()
+        with self.assertRaisesRegex(RiverError, "only a person sets the rollback command"):
+            core.ops_system_edit(self.c, "site", sets={"infra.rollback": "deploy.sh --to <rev>"}, actor="boss")
+        core.ops_system_edit(self.c, "site", sets={"infra.rollback": "deploy.sh --to <rev>"}, actor="dev",
+                             why="the rollback")  # an agent proposes it
+        with self.assertRaisesRegex(RiverError, "only a person sets the rollback command"):
+            core.ops_system_accept(self.c, "site", actor="boss")
+        core.ops_system_accept(self.c, "site")  # a person
+        first = self.release()
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/", "fail_after": 1}, actor="dev")
+        w = self.add("site", "new page")
+        core.claim(self.c, w, "dev")
+        core.done(self.c, w, "def", "dev", ship_it=True)
+        second = self.c.execute("SELECT id FROM items WHERE kind='deploy' AND status='open'").fetchone()["id"]
+        self.run_at("home", first + timedelta(minutes=1), 200)
+        core.claim(self.c, second, "ops")
+        with mock.patch.object(core, "now", lambda: first + timedelta(minutes=30)):
+            core.done(self.c, second, "v2 out", "ops")
+        r = self.run_at("home", first + timedelta(minutes=35), 500)
+        [x] = [i for i in r["items"] if i["key"] == "ops:site:home"]
+        it = core.item_show(self.c, x["item"])
+        self.assertEqual(x["kind"], "release-regression")
+        self.assertTrue(it["context"].startswith(f"ROLLBACK FIRST: the fault came right after release #{second} to web. "
+                                                 f"The last good release: release #{self.deploy}"), it["context"])
+        self.assertIn("deploy.sh --to <rev>", it["context"])
+        [p] = [core._item(self.c, i) for i in it["waits_on"]]
+        self.assertEqual((p["doer"], p["priority"]), ("human", 0))
+        self.assertTrue(p["title"].startswith(f"Roll back web to release #{self.deploy}: HTTP 500"), p["title"])
+        self.assertIn("deploy.sh --to <rev>", p["context"])
+
+
 class OpsOutside(Base):
     """The watchdog (#5441): checks marked outside run in maxpm ops check --outside, with no maxpm serve; it repairs
     a fault at most ops_outside_repair_max times in ops_outside_repair_window, then sends a notice itself."""

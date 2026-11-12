@@ -5422,8 +5422,47 @@ def _ops_fault_item(conn, c, key, res, at, new, watch=None, kind=None):
                                     f"again", actor="maxpm")
     if _ops_kind_doer(kind["kind"], c) == "human":
         _ops_person_step(conn, r["id"], kind["kind"], c, summary)
+    if kind["kind"] == "release-regression" and kind.get("release"):
+        _ops_rollback_step(conn, r["id"], c, kind["release"], summary)
     _ops_tell_manager(conn, "alert", f"new fault: {key} ({summary}; kind {kind['kind']}): #{r['id']}", r["id"])
     return {"key": key, "item": r["id"], "action": "opened"}
+
+
+def _ops_rollback_step(conn, fault_id, c, release_id, summary):
+    """A release regression (#5515): the fault item names the last good release and the rollback command of the
+    project's system description (infra.rollback) at once, and a step for a person, which the manager sees first,
+    starts the rollback; the fault item waits on it, then the code fix follows through normal review. No session
+    runs the rollback (on production only a person sets its command). Returns the person's item."""
+    rel = _item(conn, release_id)
+    good = conn.execute("SELECT id, closed_at, cut_rev FROM items WHERE kind='deploy' AND target=? AND status='done' AND "
+                        "closed_at<? ORDER BY closed_at DESC, id DESC LIMIT 1", (rel["target"], rel["closed_at"])
+                        ).fetchone()
+    project = _ops_project(conn, c)
+    cmd = (_ops_system_part(conn, project, "infra").get("rollback") or "").strip()
+    good_text = (f"release #{good['id']} (done {show_time(good['closed_at'])}"
+                 + (f", commit {good['cut_rev'][:12]}" if good["cut_rev"] else "") + ")") if good else \
+        "none: this is the first release of the target"
+    line = (f"ROLLBACK FIRST: the fault came right after release #{release_id} to {rel['target']}. The last good release: "
+            f"{good_text}. The rollback command (the system description of {project}, infra.rollback): "
+            + (cmd if cmd else "none set; a person sets it: maxpm ops system edit " + project
+               + " --set infra.rollback=\"<command>\"") + ". A person or the manager starts the rollback (the "
+            f"item this one waits on); then fix the code through normal review, with a test that fails before the fix.\n")
+    with tx(conn):
+        it = _item(conn, fault_id)
+        conn.execute("UPDATE items SET context=? WHERE id=?", (line + (it["context"] or ""), fault_id))
+        _event(conn, fault_id, "maxpm", f"ops rollback proposed: release #{release_id} to {rel['target']}, last good "
+                                        f"{good_text}")
+    r = item_add(conn, project, f"Roll back {rel['target']} to {good_text.split(' (')[0]}: {summary}"[:300], priority=0,
+                 doer="human", actor="maxpm", blocks=fault_id, goals=[],
+                 short=f"Roll back {rel['target']}"[:60],
+                 context=f"The check {c['scope']}/{c['name']} fails since release #{release_id} to {rel['target']}: "
+                         f"{summary}. The last good release: {good_text}. The rollback command: "
+                         + (cmd if cmd else "none set (set it: maxpm ops system edit " + project
+                            + " --set infra.rollback=\"<command>\")") + f". Run it, check that {c['scope']}/{c['name']} "
+                         f"passes (maxpm ops run {c['scope']} {c['name']}), then mark this item done: the fault "
+                         f"#{fault_id} then goes to an agent, which fixes the code through normal review. If a rollback "
+                         f"is not wanted, drop this item with the reason.")
+    return r["id"]
 
 
 def _ops_fault_items(conn, c):
@@ -6634,6 +6673,7 @@ def ops_system_edit(conn, project, sets=None, body=None, why=None, actor=None, i
         if new == base:
             raise RiverError(f"the system description of {pr['name']} is like this already: nothing changed")
         decider = not actor or _is_person(conn, actor) or _is_manager(conn, actor)
+        _ops_rollback_guard(conn, pr, base, new, actor, proposed=not decider)
         if not decider and not why:
             raise RiverError('say why: --why "<the fact that was missing, and the fault or the item that showed it>"')
         if item_id is None and actor:
@@ -6661,6 +6701,18 @@ def ops_system_edit(conn, project, sets=None, body=None, why=None, actor=None, i
     return dict(ops_system_show(conn, pr["name"]), changed=changed, state=state)
 
 
+def _ops_rollback_guard(conn, pr, old, new, actor, proposed=False):
+    """On a project with a deploy target (production), only a person sets the rollback command (#5515): the manager
+    may not write infra.rollback or accept a proposal that changes it; an agent may propose it for a person."""
+    if (old.get("infra") or {}).get("rollback") == (new.get("infra") or {}).get("rollback") or proposed:
+        return
+    target = conn.execute("SELECT target FROM projects WHERE id=?", (pr["id"],)).fetchone()["target"]
+    if target and actor and not _is_person(conn, actor):
+        raise RiverError(f"refused: {pr['name']} releases to {target}, and on production only a person sets the "
+                         f"rollback command (infra.rollback). Ask the person: maxpm --as {actor} ask <person> "
+                         f"\"<the rollback command of {pr['name']}, and why>\"")
+
+
 def _ops_system_decide(conn, project, actor, note, accept):
     if actor and not _is_person(conn, actor) and not _is_manager(conn, actor):
         raise RiverError(f"{actor} is an agent; only a person or the manager {'accepts' if accept else 'rejects'} a "
@@ -6685,6 +6737,7 @@ def _ops_system_decide(conn, project, actor, note, accept):
                 json.loads(r["body"])
             sets = {f"{p}.{f}": (mine.get(p) or {}).get(f, "") for p in OPS_SYSTEM_FIELDS for f in OPS_SYSTEM_FIELDS[p]
                     if (mine.get(p) or {}).get(f) != (base.get(p) or {}).get(f)}
+            _ops_rollback_guard(conn, pr, cur, _ops_system_set(cur, sets), actor)
             conn.execute("UPDATE ops_systems SET body=?, seq=? WHERE id=?",
                          (json.dumps(_ops_system_set(cur, sets), sort_keys=True), (top or 0) + 1, r["id"]))
         conn.execute("UPDATE ops_systems SET state=?, decided_by=?, decided_at=?, note=? WHERE id=?",
