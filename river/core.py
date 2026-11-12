@@ -600,6 +600,7 @@ CREATE TABLE IF NOT EXISTS items (
   max_model         TEXT,
   agent             TEXT,                     -- the agent type that takes it: a launch platform (codex, claude-code)
   tier              TEXT,                     -- 'expert': a task that a person talks through with an expert session (#4959)
+  changed           TEXT,                     -- what changed, one plain line for a person (maxpm done --changed, #5570)
   ran_model         TEXT,                     -- the model (ladder name) of the last session that claimed it (#4961)
   backlog_at        TEXT,                     -- in the backlog since then: kept, never offered (maxpm activate ends it)
   backlog_note      TEXT,                     -- why not now
@@ -1671,6 +1672,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN tier TEXT")
     if "short" not in icols:  # the short title the pages show (#5086)
         conn.execute("ALTER TABLE items ADD COLUMN short TEXT")
+    if "changed" not in icols:  # what changed, one plain line for a person (#5570)
+        conn.execute("ALTER TABLE items ADD COLUMN changed TEXT")
     if "ran_model" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN ran_model TEXT")
     if "native_status" not in {r["name"] for r in conn.execute("PRAGMA table_info(queue_entries)")}:
@@ -7917,6 +7920,20 @@ def _check_words(text, words, chars, what, example, rule=SHORT_RULE):
     return t
 
 
+CHANGED_WORDS, CHANGED_CHARS = 30, 220
+CHANGED_RULE = ("one plain sentence for a person about what is different now: no item ids, no file names, no links, no "
+                "commands or flags")
+
+
+def check_changed(text):
+    """What changed, one plain line for a person (#5570); "" clears it. The output stays the note for agents."""
+    t = _check_words(text, CHANGED_WORDS, CHANGED_CHARS, "what changed", "'Each check can now say which kind of "
+                     "error it counts'", CHANGED_RULE)
+    if re.search(r"(?<!\w)--?\w", t):
+        raise RiverError(f"what changed {t!r} has a flag: {CHANGED_RULE}")
+    return t
+
+
 def check_short(text):
     """An item's short title, cleaned; "" clears it. The pages show it; the title stays the full text (#5086)."""
     return _check_words(text, SHORT_WORDS, SHORT_CHARS, "the short title", "'Fix the Windows test failures'")
@@ -8246,12 +8263,16 @@ def _changed(col, old):
 
 def item_edit(conn, item_id, title=None, notes=None, doer=None, project=None, actor=None,
               context=None, touches=None, check=None, due=None, goals=None, untag=None, refs=None, unref=None,
-              models=None, tier=None, kind=None, short=None):
+              models=None, tier=None, kind=None, short=None, changed=None):
     tier = _check_tier(tier)
     kind = _check_kind(kind)
     short = check_short(short) if short is not None else None
+    changed = check_changed(changed) if changed is not None else None
     with tx(conn):
         it = _item(conn, item_id)
+        if changed is not None and (it["changed"] or "") != changed:
+            conn.execute("UPDATE items SET changed=? WHERE id=?", (changed or None, it["id"]))
+            _event(conn, it["id"], actor, f"what changed: {changed}" if changed else "what changed removed")
         if short is not None and (it["short"] or "") != short:
             conn.execute("UPDATE items SET short=? WHERE id=?", (short or None, it["id"]))
             _event(conn, it["id"], actor, f"short title: {short}" if short else "short title removed")
@@ -12311,10 +12332,17 @@ def _approved_fixes(conn, it, actor):
     return [{"id": a["id"], "title": a["title"]} for a in added]
 
 
-def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synced_=False, force=None):
+def done(conn, item_id, output=None, actor=None, ship_it=False, note=None, synced_=False, force=None, changed=None):
     """Close an item as done. Refused while an item it waits on is open; force (a reason) closes a
-    non-deploy item anyway and records the reason."""
+    non-deploy item anyway and records the reason. changed: what changed, one plain line for a person (#5570),
+    checked before the close."""
+    changed = check_changed(changed) if changed else None
     res = _close(conn, item_id, "done", actor, output, note, force)
+    if changed:
+        with tx(conn):
+            conn.execute("UPDATE items SET changed=? WHERE id=?", (changed, res["id"]))
+            _event(conn, res["id"], actor, f"what changed: {changed}")
+        res["changed"] = changed
     try:  # the cost of the item, from its sessions' transcripts on this computer; never stops a done
         measure_usage(conn, res["id"])
         res["usage"] = item_usage(conn, res["id"])

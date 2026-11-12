@@ -11580,3 +11580,33 @@ class Causes(Base):
         r = self.run_at("site", "app", self.t + timedelta(minutes=20), self.proc(0, "OK"))
         self.assertEqual([v["verdict"] for v in r["verdicts"]], ["pass"])
         self.assertEqual(core._item(self.c, self.fault)["status"], "done")
+
+
+class Changed(Base):
+    """What changed, one plain line for a person (#5570): maxpm done --changed and maxpm edit --changed store it on the
+    item; maxpm show and the item's API return it; --output stays the note for agents."""
+
+    def test_done_and_edit_store_one_plain_line_and_refuse_ids_files_and_flags(self):
+        from river import cli
+        core.project_add(self.c, "p")
+        core.register(self.c, "w")
+        i = self.add("p", "Add a field outside to the checks")
+        core.claim(self.c, i, "w")
+        for bad, why in (("closes #12", "an id"), ("edits river/core.py", "a path"), ("adds --outside on", "a flag")):
+            with self.assertRaisesRegex(RiverError, why):
+                core.done(self.c, i, "8610692", "w", changed=bad)
+        self.assertEqual(core._item(self.c, i)["status"], "in_progress")  # a refused line closes nothing
+        r = core.done(self.c, i, "8610692 on local main", "w", changed="A check can now run outside the page server")
+        self.assertEqual(r["changed"], "A check can now run outside the page server")
+        self.assertEqual(core.item_show(self.c, i)["changed"], "A check can now run outside the page server")
+        core.item_edit(self.c, i, changed="Checks can run while the page server is down", actor="w")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["-q", "show", str(i)])
+        self.assertIn("  changed: Checks can run while the page server is down", out.getvalue())
+        j = self.add("p", "Another")
+        core.claim(self.c, j, "w")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            cli.run(["--as", "w", "done", str(j), "--output", "x"])
+        self.assertIn(f"what changed, for a person: maxpm --as w edit {j} --changed", err.getvalue())

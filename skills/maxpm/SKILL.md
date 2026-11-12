@@ -112,7 +112,7 @@ your type from your CLI's environment.
    `busy_max`: `maxpm serve` keeps your lease and your item while it runs,
    also when a message comes for you, and you read the message when the
    harness wakes you. A loop that only renews the lease is not work.
-4. Finish: `maxpm done <id> --output "<one line: what changed, commit id>"`.
+4. Finish: `maxpm done <id> --output "<one line: what changed, commit id>" --changed "<the same for a person: plain words>"`.
    The reply lists items that became ready, and MAY BE UNNECESSARY NOW: open items the close may have
    made unnecessary. Decide each one at once: close it (`done|drop <id> --note "<why>"`, a person's item
    too), merge it, or `maxpm keep <id> --close <your-id> --note "<why it is still needed>"`.

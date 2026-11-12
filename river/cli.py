@@ -420,6 +420,8 @@ def _print_show(a):
     if a.get("mine"):
         print(f"  reserved for you: no other session takes it while your session lives. When it is done: "
               f"maxpm done {a['id']} --output \"...\"   (to work on it alone first: maxpm claim {a['id']})")
+    if a.get("changed"):
+        print("  changed:", a["changed"])
     if a.get("output"):
         print("  output:", a["output"])
     if a.get("found_during"):
@@ -1394,6 +1396,8 @@ def build_parser(only=None):
     x.add_argument("id", type=int); x.add_argument("--title"); x.add_argument("--notes")
     x.add_argument("--short", help="the short title every page shows: about 6 plain words, no ids, no file names, no "
                    "quotes; \"\" removes it")
+    x.add_argument("--changed", help="what changed, one plain line for a person (no ids, no file names, no flags); "
+                   "\"\" removes it")
     x.add_argument("--no-goal-context", dest="goal_context", action="store_false", default=None,
                    help="its session starts fresh, not as a fork of its goal's base")
     x.add_argument("--goal-context", dest="goal_context", action="store_true", help="undo --no-goal-context")
@@ -1615,6 +1619,8 @@ def build_parser(only=None):
     x.add_argument("--before", type=int); x.add_argument("--after", type=int)
     x = sub.add_parser("claim", help="take one ready item by id"); x.add_argument("id", type=int)
     x = sub.add_parser("done", help="finish an item"); x.add_argument("id", type=int); x.add_argument("--output")
+    x.add_argument("--changed", help="what changed, one plain line for a person: no ids, no file names, no flags "
+                   "(the pages show it; --output stays the note for agents)")
     x.add_argument("--ship", action="store_true", help="also ask for it to be deployed (maxpm ship)")
     x.add_argument("--note", help="why an agent may close a person's item (required then; the user is told)")
     x.add_argument("--synced", action="store_true", help="you already posted the result to its tracker issues")
@@ -2406,7 +2412,9 @@ def _hint(a, res, actor):
     if c in ("go", "plan"):
         return None
     if actor and c == "done":
-        return (f"next: maxpm --as {actor} go   (now: keep going while go gives you items, unless auto_continue is off; "
+        return ((f"what changed, for a person: maxpm --as {actor} edit {res['id']} --changed \"<one plain line>\"\n"
+                 if isinstance(res, dict) and not res.get("changed") and res.get("id") else "")
+                + f"next: maxpm --as {actor} go   (now: keep going while go gives you items, unless auto_continue is off; "
                 f"with tree, go gives only the tasks of your own tree)")
     if c == "report" or (c == "release" and a.id is None):
         return None  # a hook runs it: no hint
@@ -3277,7 +3285,7 @@ def dispatch(conn, a, actor):
             core.item_goal_context(conn, a.id, a.goal_context, actor)
         return core.item_edit(conn, a.id, a.title, a.notes, a.doer, a.project, actor, a.context, a.touches, a.check,
                               a.due, a.goal, a.untag, core.parse_refs(a.ref, a.ref_url), a.unref, _models(a),
-                              tier=a.tier, kind=a.kind, short=a.short)
+                              tier=a.tier, kind=a.kind, short=a.short, changed=a.changed)
     if c == "list":
         return core.item_list(conn, a.project, a.status, a.all, a.goal, a.ref)
     if c == "show":
@@ -3380,7 +3388,7 @@ def dispatch(conn, a, actor):
             core.set_agent_type(conn, actor, core.agent_type_from_env(os.environ))
         return core.claim(conn, a.id, actor)
     if c == "done":
-        return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.synced, a.force)
+        return core.done(conn, a.id, a.output, actor, a.ship, a.note, a.synced, a.force, a.changed)
     if c == "synced":
         return core.synced(conn, a.id, a.ref, actor)
     if c == "cleanup":
