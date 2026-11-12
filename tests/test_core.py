@@ -8724,6 +8724,30 @@ class Policies(Base):
         self.assertIn("reviewer", st["policy_roles"])
 
 
+class AnnotateOnce(Base):
+    """Inside one build of the page's state, annotate reads the item graph once while nothing writes (#5465)."""
+
+    def test_one_read_until_a_write(self):
+        core.project_add(self.c, "web")
+        self.add("web", "First")
+        runs = []
+        real = core._annotate
+        with mock.patch.object(core, "_annotate", side_effect=lambda c: runs.append(1) or real(c)):
+            tok = core.ANN_SHARE.set({})
+            try:
+                a = core.annotate(self.c)
+                self.assertIs(core.annotate(self.c), a)
+                self.assertEqual(len(runs), 1)
+                self.add("web", "Second")  # a write: the next read sees it
+                self.assertEqual(len(core.annotate(self.c)), 2)
+                self.assertEqual(len(runs), 2)
+            finally:
+                core.ANN_SHARE.reset(tok)
+            core.annotate(self.c)
+            core.annotate(self.c)  # outside a build: each call reads anew
+            self.assertEqual(len(runs), 4)
+
+
 class EditKeepsOldText(Base):
     """maxpm edit --notes or --context replaces the text; the history keeps the old one (#5384)."""
 

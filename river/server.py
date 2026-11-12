@@ -4034,6 +4034,7 @@ def page_state(closed):
             return hit
         gen = _state_gen[0]  # an action during the build makes this build old at once
         conn = core.connect()
+        share = core.ANN_SHARE.set({})  # the build reads the item graph once (#5465)
         try:
             core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
             st = core.state(conn, closed=key)
@@ -4060,6 +4061,7 @@ def page_state(closed):
             _state_cache[key] = (time.time(), gen, st)
             return st
         finally:
+            core.ANN_SHARE.reset(share)
             conn.close()
 
 

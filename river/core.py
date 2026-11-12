@@ -5720,8 +5720,25 @@ def _load_graph(conn):
     return projects, items, waits_on, waited_by, conflicts, feeds
 
 
+# One build of the page's state (server.page_state) reads the item graph once (#5465): inside it, annotate keeps its
+# result for a connection while no write changed the database (the connection's own writes, or another
+# connection's: PRAGMA data_version). Its callers there only read the result. Outside a build each call computes anew.
+ANN_SHARE = contextvars.ContextVar("ann_share", default=None)
+
+
 def annotate(conn):
     """Compute readiness, effective priority, unblock counts, and sort keys for every item."""
+    share = ANN_SHARE.get()
+    if share is None:
+        return _annotate(conn)
+    key = (id(conn), conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+    if key not in share:
+        share.clear()
+        share[key] = _annotate(conn)
+    return share[key]
+
+
+def _annotate(conn):
     projects, items, waits_on, waited_by, conflicts, feeds = _load_graph(conn)
     is_open = {i: items[i]["status"] in OPEN_STATES for i in items}
     zone = setting(conn, "timezone")
