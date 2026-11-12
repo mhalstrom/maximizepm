@@ -10320,7 +10320,8 @@ def _queue_ready(conn, agent, ann=None):
 
 def _drop_queue(conn, agent, why, items_only=False):
     """The agent is gone or stopped: its queued items go back to the main queue; an active manager hears it.
-    items_only keeps the instructions (a stop entry stays, so a person can withdraw the stop)."""
+    items_only keeps the instructions (a stop entry stays while the stopped session may still run, so a person can
+    withdraw the stop)."""
     rows = conn.execute("SELECT item_id FROM queue_entries WHERE agent=? AND item_id IS NOT NULL", (agent,)).fetchall()
     conn.execute("DELETE FROM queue_entries WHERE agent=?" + (" AND item_id IS NOT NULL" if items_only else ""), (agent,))
     for r in rows:
@@ -11051,8 +11052,11 @@ def _sweep(conn):
             _send(conn, "notice", "maxpm", f"the wait on #{r['id']} {r['title']} ended "
                   f"({r['blocked_reason']}); it can start now", to=r["blocked_set_by"], item_id=r["id"])
     _due_warnings(conn, t)
+    # A stopped agent keeps its stop entry while its session may still run, so a person can withdraw the stop; once
+    # the session is gone, its queue goes like any gone agent's (#5557: _agent_state says stopped before gone, so 695
+    # of 706 queue entries were stop entries of ended agents, read on each command).
     for r in conn.execute("SELECT DISTINCT a.* FROM agents a JOIN queue_entries q ON q.agent=a.name").fetchall():
-        if _agent_state(conn, r) == "gone":
+        if _live_state(conn, r) == "gone":
             _drop_queue(conn, r["name"], "is gone")
     for r in conn.execute("SELECT name, owner FROM goals WHERE owner IS NOT NULL AND owner_expires_at < ?",
                           (t,)).fetchall():
@@ -11615,6 +11619,12 @@ def _agent(conn, name):
 def _agent_state(conn, a):
     if "stop_at" in a.keys() and a["stop_at"]:
         return "stopped"
+    return _live_state(conn, a)
+
+
+def _live_state(conn, a):
+    """active, away or gone, from the agent's process, its report and the time since its last command; a stop
+    request does not count here (_agent_state says stopped first)."""
     # Its process on this host has ended: gone at once, not after gone_after.
     if "pid" in a.keys() and a["pid"] and a["host"] == this_host() and not pid_alive(a["pid"]):
         return "gone"

@@ -5598,6 +5598,24 @@ class Stop(Base):
         core.queue_remove(self.c, "s1", "e%d" % core.queue_list(self.c, "s1")["entries"][0]["entry"], actor="mark")
         self.assertIsNone(core.stop_request(self.c, "s1"))
 
+    def test_the_stop_entry_goes_when_the_stopped_session_is_gone(self):
+        # #5557: _agent_state says stopped before gone, so the sweep never dropped the queue of a stopped agent: 695 of
+        # 706 queue entries on the live queue were stop entries of ended agents. The entry stays while the session may
+        # run (a person can withdraw the stop), and goes with the queue once the session is gone.
+        x = self.add("a", "x")
+        core.queue_add(self.c, "s1", x, actor="mark")
+        core.stop_agent(self.c, "s1", "project paused", actor="mark")
+        core.stop_agent(self.c, "s2", "wrong model", actor="mark")
+        core.go(self.c, self.dir.name, "s1")  # its stop finishes: the item goes back, the stop entry stays
+        core.activity(self.c, "mark")
+        self.assertEqual([e["kind"] for e in core.queue_list(self.c, "s1")["entries"]], ["stop"])
+        old = core.iso(core.now() - timedelta(hours=25))
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name='s1'", (old,))
+        core.activity(self.c, "mark")
+        self.assertEqual(core.queue_list(self.c, "s1")["entries"], [])
+        self.assertEqual(core.agent_status(self.c, "s1")["state"], "stopped")  # agents.stop_at keeps the stop
+        self.assertEqual([e["kind"] for e in core.queue_list(self.c, "s2")["entries"]], ["stop"])
+
 
 class NativeDelivery(Base):
     """Queue instructions, stops, and messages also go through the agent platform's own messaging (#426)."""
