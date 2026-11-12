@@ -68,9 +68,6 @@ button.srow-it { cursor: pointer; }
 }
 .sess-st { display: inline-flex; align-items: center; gap: var(--sp-2); flex: none; font-size: var(--fs-s); color: var(--muted); white-space: nowrap; }
 /* Stop beside the state (#5547): ends the running turn now, as Esc in its terminal. */
-.sess-stop { flex: none; display: inline-flex; }
-.sess-stop:empty { display: none; }
-.sess-stopbtn { font-size: var(--fs-s); padding: var(--sp-0) var(--sp-3); }
 .sess-stw { white-space: nowrap; }
 .sess-stw .dot { margin-right: var(--sp-1); vertical-align: var(--hair); }
 .sess-item { display: inline-flex; align-items: center; gap: var(--sp-2); flex: 0 1 auto; min-width: 0; font-size: var(--fs-m); }

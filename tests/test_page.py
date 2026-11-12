@@ -811,24 +811,30 @@ try {
         self.assertTrue(any(x.startswith(" Attached files:") and "notes.txt\n\nfirst line for ag" in x for x in sent), sent)
 
     def _stop_and_send_now(self, size):
-        """#5547: ag waits at a permission prompt in its pane, so it can be stopped: Stop stands in the head, beside
-        its state, and the bolt beside the send arrow is Send now. Both fit the head and the box at this width."""
+        """#5547, #5587 (mark 2026-11-12: 'the stop button should not be up at the top'): ag waits at a permission
+        prompt in its pane, so it can be stopped. With the box empty, a Stop square stands in the send arrow's place in
+        the message bar, and the head has no Stop; with text, the arrow and the bolt (Send now) show instead. Both fit
+        the box at this width, and the square reads in light and in dark."""
         driver = r'''try {
   await until(() => window.__appReady && q("#sessTitle").textContent === "ag" && !q("#sessText").disabled
-                    && q("#sessStop [data-stop]"), "the chat of ag with Stop");
+                    && q("#sessBar").classList.contains("can-now"), "the chat of ag that can stop");
   const box = (s) => q(s).getBoundingClientRect(), head = q(".sess-head");
-  const out = { headFits: head.scrollWidth <= head.clientWidth + 1, stopIn: box("#sessStop button").right <= innerWidth,
-                nowHidden: box("#sessNow").width === 0 };
+  const reads = () => { const cs = getComputedStyle(q("#sessStop")); return cs.color !== cs.backgroundColor; };
+  const out = { headFits: head.scrollWidth <= head.clientWidth + 1, headStop: !!head.querySelector(":scope > [data-stop], :scope > * > [data-stop]:not(.sess-mi)"),
+                stopIn: box("#sessStop").width > 0 && box("#sessStop").right <= q("#sessText").parentElement.getBoundingClientRect().right,
+                arrowHidden: box("#sessSend").width === 0 && box("#sessNow").width === 0, light: reads() };
+  document.documentElement.dataset.theme = "dark"; out.dark = reads(); delete document.documentElement.dataset.theme;
   const x = q("#sessText"); x.focus(); x.setRangeText("use the other file", 0, 0, "end");
   x.dispatchEvent(new Event("input", { bubbles: true }));
   await until(() => box("#sessNow").width > 0, "Send now shows with text");
   out.nowIn = box("#sessNow").right <= box("#sessSend").left + 1 && box("#sessSend").right <= innerWidth;
+  out.stopHidden = box("#sessStop").width === 0;
   q("#sessNow").click();
-  await until(() => x.value === "", "Send now empties the box");
+  await until(() => x.value === "" && box("#sessStop").width > 0, "Send now empties the box; Stop is back");
   await fetch("/__step/after_now");
   await until(() => q("#sessOpen [data-stop]"), "Stop its turn in the menu");
   out.menu = [...q("#sessOpen").querySelectorAll("button, a")].map(b => b.childNodes[0].textContent.trim());
-  q("#sessStop [data-stop]").click();
+  q("#sessStop").click();
   await sleep(400);
   post(out);
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
@@ -836,7 +842,8 @@ try {
         self.c.execute("UPDATE agents SET agent_type='claude-code' WHERE name='ag'")
         self.pane["keys"].clear()
         got = self.drive(driver, "/sessions/ag", size=size, steps={"after_now": lambda: keys.update(now=list(self.pane["keys"]))})
-        self.assertEqual(got, {"headFits": True, "stopIn": True, "nowHidden": True, "nowIn": True,
+        self.assertEqual(got, {"headFits": True, "headStop": False, "stopIn": True, "arrowHidden": True, "light": True,
+                               "dark": True, "nowIn": True, "stopHidden": True,
                                "menu": ["Open on claude.ai", "Stop its turn", "Pin to the top", "Settings", "End"]})
         self.assertEqual(keys["now"], ["Escape", "use the other file", "Enter"])
         self.assertEqual(self.pane["keys"][3:], ["Escape"])  # Stop

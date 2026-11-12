@@ -351,9 +351,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const row = list.find(x => x.name === agent), st = headState(row, lastRead, listRead);
     putHtml($("#sessState"), provTag(lastRead.provider) + stateDot(st));
     const s = { ...(row || {}), provider: lastRead.provider, running: !!row, terminal: lastRead.terminal };
-    const stop = canStop(s, st.state) && stopKeys(s).length > 0;
-    putHtml($("#sessStop"), stop ? button("Stop", { cls: "sess-stopbtn", data: { stop: agent }, title: "End its turn now" }) : "");
-    $("#sessBar").classList.toggle("can-now", stop);
+    // Stop and Send now are in the message bar (#5587): the square while the box is empty, the bolt with text.
+    $("#sessBar").classList.toggle("can-now", canStop(s, st.state) && stopKeys(s).length > 0);
   }
 
   // The rows from the list as it is now: refresh after each read, and a pin at once (#5400).
@@ -496,7 +495,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     main.classList.toggle("hidden", !name);
     $("#sessTitle").textContent = name || "";
     $("#sessName").textContent = (list.find(x => x.name === name) || {}).title || "";  // what it works on (#4695)
-    for (const id of ["#sessState", "#sessStop", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
+    for (const id of ["#sessState", "#sessItem", "#sessMenuItem", "#sessOpen", "#sessPlan"]) putHtml($(id), "");
+    $("#sessBar").classList.remove("can-now");  // the next read of the session says whether it can stop
     renderGive(name);
     loadPrompts(name);
     loadDraft(name);
@@ -585,7 +585,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // The composer (components/composer.js, #5078) grows with the text; Enter sends, Shift+Enter starts a new line.
   $("#sessBar").innerHTML = composerHtml("sess", { placeholder: "Message", label: "Message for the session's terminal",
     attachTitle: "Attach files (up to 5, 10 MB each)", sendTitle: "Send the message and files to the session. Shift+Enter starts a new line.",
-    nowTitle: "Stop and send now" });
+    nowTitle: "Stop and send now", stopTitle: "Stop its turn" });
   const text = $("#sessText");
   // The box grows with its text, up to a third of the window, upward over the chat (#5111): the chat keeps its frame
   // and its scroll, so nothing in it moves while the person types. A hidden copy of the box measures the text, so the
@@ -904,17 +904,21 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     await refresh();
     if (name === agent) poll();
   }
-  // Stop (#5547): the agent's interrupt keys go to its pane; the head then says it is at its prompt.
+  // Stop (#5547): the agent's interrupt keys go to its pane; the head then says it is at its prompt. The square of the
+  // message bar waits for the answer, so a second press is a second Stop (Codex: /stop, #5563), not a double click.
   async function stopIt(name) {
     headMore(false);
     let r;
+    const sq = $("#sessStop");
+    sq.disabled = true;
     try { r = await typeAction("session_interrupt", { agent: name }); } catch (err) { return toast(err.message, true); }
+    finally { sq.disabled = false; }
     toast(r && r.command ? `${name}: ${r.command} sent, to ${r.did}`
       : `${name}: its turn stopped${r && r.again ? `. ${r.again}` : ""}`);
     await refresh();
     if (name === agent) poll();
   }
-  $("#sessStop").addEventListener("click", (e) => { const b = e.target.closest("[data-stop]"); if (b) stopIt(b.dataset.stop); });
+  $("#sessStop").addEventListener("click", () => { if (agent) stopIt(agent); });
   $("#sessOpen").addEventListener("click", (e) => {
     const stp = e.target.closest("[data-stop]"); if (stp) return stopIt(stp.dataset.stop);
     const end = e.target.closest("[data-end]"); if (end) return endIt(end.dataset.end);
