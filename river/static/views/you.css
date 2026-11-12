@@ -6,11 +6,19 @@
 .sess-you.hidden, .you-part.hidden { display: none; }
 .you-part h2 { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; row-gap: var(--sp-1); margin: 0 0 var(--sp-3); font-size: calc(var(--fs-base) + var(--hair)); font-weight: 600; color: var(--ink); }
 .you-part h2 .spacer { flex: 1; }
-#needsYouPanel, #takeoverPanel { border-top: var(--hair-2) solid var(--human); padding-top: var(--sp-3); }  /* a colored rule, no outline (#5043) */
+/* One thin rule between two parts that show, as in the other areas (#5043); none above the first one (#5324). */
+.you-body > .you-part:not(.hidden) ~ .you-part { border-top: var(--hair) solid var(--line); padding-top: var(--sp-3); }
 .you-none { padding: var(--sp-3) 0; }
 .msg .body { white-space: pre-wrap; margin: var(--sp-1) 0; }
 .msg.read { opacity: .65; }
 .msg .actions input { flex: 1; min-width: var(--w-s); }
+/* An inbox row (#5324): each field with its button on a line of its own, the field as wide as the cell, so its
+   placeholder shows whole; a button with no field (Mark read, Accept) at the left under them. The time and 'thread'
+   stay together on one line. */
+#inbox .actions { flex-direction: column; align-items: flex-start; }
+#inbox .ib-pair { display: flex; gap: var(--sp-2); align-items: center; align-self: stretch; }
+#inbox .ib-pair input { flex: 1; min-width: 0; }
+#inbox .ny-meta { white-space: nowrap; display: inline-flex; gap: var(--sp-3); align-items: baseline; }
 .thread { margin: var(--sp-2) 0 0 var(--sp-5); padding-left: var(--sp-3); border-left: var(--hair-2) solid var(--line); font-size: var(--fs-m); }
 .nyl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-3); align-items: center; padding: var(--sp-2) var(--sp-1); border-top: var(--hair) solid var(--line); cursor: pointer; }
 .nyl:first-child { border-top: none; }

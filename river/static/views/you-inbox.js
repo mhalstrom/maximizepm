@@ -34,24 +34,24 @@ function inboxCell(m) {
   const open = m.state === "open", it = m.item_id ? S.items.find(i => i.id === m.item_id) : null;
   let acts = "";
   if (m.kind === "question" && open)
-    acts = `<input id="ans-${m.id}" placeholder="your answer">` + button("Answer", { kind: "primary", data: { ib: "answer", msg: m.id } });
+    acts = `<span class="ib-pair"><input id="ans-${m.id}" placeholder="your answer">` + button("Answer", { kind: "primary", data: { ib: "answer", msg: m.id } }) + `</span>`;
   else if (m.kind === "offer" && open) {
     const mine = it && it.assignee === me;
     acts = (mine ? button(`Give #${m.item_id} to ${esc(m.from_agent)}`, { kind: "primary", data: { ib: "give", msg: m.id, id: m.item_id, to: m.from_agent } })
-        + `\n        <input id="split-${m.id}" placeholder="smaller pieces, separated by ;">` + button("Split", { data: { ib: "split", msg: m.id, id: m.item_id } }) : "")
-      + `<input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } });
+        + `\n        <span class="ib-pair"><input id="split-${m.id}" placeholder="smaller pieces, separated by ;">` + button("Split", { data: { ib: "split", msg: m.id, id: m.item_id } }) + `</span>` : "")
+      + `<span class="ib-pair"><input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } }) + `</span>`;
   } else {
     const pushed = m.kind === "alert" && it && it.status === "open" && it.reserved_for === me && it.reserved_until;
     if (pushed) acts += button(`Accept #${it.id}`, { kind: "primary", data: { ib: "accept", id: it.id } })
       + button(`Decline #${it.id}`, { data: { ib: "decline-push", id: it.id } });
-    else if (m.kind === "alert" && open) acts += `<input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } });
-    acts += `<input id="rep-${m.id}" placeholder="reply">` + button("Reply", { data: { ib: "reply", msg: m.id } });
+    else if (m.kind === "alert" && open) acts += `<span class="ib-pair"><input id="dec-${m.id}" placeholder="why not (optional)">` + button("Decline", { data: { ib: "decline", msg: m.id } }) + `</span>`;
+    acts += `<span class="ib-pair"><input id="rep-${m.id}" placeholder="reply">` + button("Reply", { data: { ib: "reply", msg: m.id } }) + `</span>`;
     if (m.unread) acts += button("Mark read", { data: { ib: "read", msg: m.id } });
   }
   return `<div class="ny-h">${chip(m.kind === "alert" ? "c-p0" : "c-p", esc(m.kind))}<b>${esc(m.from_agent)}</b>
       ${m.item_id ? `<span class="link" data-open="${m.item_id}">#${m.item_id} ${esc(clip(m.item_title || "", 60))}</span>` : ""}
-      <span class="muted t-s">${ago(m.created_at)} · #${m.id}${m.state !== "open" && m.state !== "read" ? " · " + esc(m.state) : ""}</span>
-      <span class="link" data-thread="${m.id}">thread</span></div>
+      <span class="ny-meta"><span class="muted t-s">${ago(m.created_at)} · #${m.id}${m.state !== "open" && m.state !== "read" ? " · " + esc(m.state) : ""}</span>
+      <span class="link" data-thread="${m.id}">thread</span></span></div>
     <div class="body">${esc(m.body)}</div>
     <div class="actions">${acts}</div>
     <div class="thread hidden" id="thr-${m.id}"></div>`;
