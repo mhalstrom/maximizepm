@@ -416,7 +416,7 @@ maxpm project target <name> <target>                   # each project has at mos
 maxpm target show <target>                             # its projects and owner
 maxpm target rename <target> <new>                     # with its deploy project deploy-<target>
 maxpm target own <target>                              # one owner per target runs its deploys
-maxpm target monitor <target> "<what to watch, for how long>"   # the deploy session watches the release
+maxpm ops add <target> <check> <form> ...              # its checks, and its projects', run at once after each release
 maxpm target cadence <target> 2h|1d|1w|1mo|off         # shortest time between releases; ship requests collect
 maxpm target cut <target> --rev <commit>               # fix the release's items now; later ships join the next one
 maxpm target hook <target> <event> "<command>"         # MaximizePM runs it on release-cut, review-passed, review-failed, or deployed (a person or the manager sets it)

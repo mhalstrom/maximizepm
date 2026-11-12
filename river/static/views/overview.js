@@ -53,7 +53,7 @@ export function renderWork() {
 // the advice; Start an agent when an agent can take something.
 export function renderCapacity() {
   const c = S.capacity; if (!c) return;
-  const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review", "monitor"].includes(i.kind)).length;
+  const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)).length;
   put($("#capStart"), ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
     title: "Start an agent on the top ready item" }) : "");
   const idle = (S.agents || []).filter(a => a.kind !== "human" && a.role === "waiting");

@@ -134,10 +134,10 @@ your type from your CLI's environment.
    `maxpm target release-now <target> --reason "<why>"`. The owner's `maxpm go`
    gives it the ready deploy item first (role DEPLOYER), with what it ships;
    `maxpm go --role deployer` also takes a free target of the folder's projects.
-   When the target has a monitor text (`maxpm target monitor`), watching the
-   release is part of the deploy task: after the deploy, the deployer watches
-   as the text says, then finishes, or alerts the manager and adds a person's
-   item with a proposed rollback. It never rolls back by itself.
+   After the deploy, `maxpm serve` runs the checks of the target and of its
+   projects (`maxpm ops list`) at once, as the watch of the release: a fault
+   opens its own item, found during the deploy item. The deploy task ends
+   with the deploy.
    A target can have hooks (`maxpm target hook <target>` lists them): commands
    that MaximizePM runs by itself when a release is cut, when its review passes
    or fails, and when its deploy item is done. The reply of your command shows

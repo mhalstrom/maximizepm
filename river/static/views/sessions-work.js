@@ -13,7 +13,7 @@ const put = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.
 // Start an agent, with the open slots (max_sessions less the sessions that run) and the ready items for agents.
 export function renderStart() {
   if (!S) return;
-  const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review", "monitor"].includes(i.kind)).length;
+  const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)).length;
   const slots = S.capacity ? S.capacity.spare_slots : 0;
   const line = `<span class="muted t-s" title="Open slots and ready items">${slots} open slot${slots === 1 ? "" : "s"} · ${ready} ready</span>`;
   put($("#sessStart"), line + (ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',

@@ -34,7 +34,7 @@ export function modelAllowed(ladder, m, lo, hi) {
 
 // The ready items an agent can start on, most important first (S.items is in queue order).
 export function startable(S) {
-  return (S.items || []).filter(i => i.ready && i.doer !== "human" && !["deploy", "review", "monitor"].includes(i.kind)
+  return (S.items || []).filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)
     && !i.reserved_for && !i.project_archived);
 }
 

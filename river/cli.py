@@ -945,7 +945,8 @@ def build_parser():
     op = sub.add_parser("ops", help="operations checks of a project or a deploy target: what MaximizePM watches "
                         "(a url, a beat, a command, a log, or a Monitoring Plugins executable), when it is a fault, "
                         "and who is told. Any session adds a url or beat check; a cmd, log, or plugin check and a "
-                        "repair need a person or the manager; a repair on a deploy target needs a person")
+                        "repair need a person or the manager; a repair on a deploy target needs a person. After each release "
+                        "of a target, its checks and its projects' checks run at once (the release watch)")
     ops = op.add_subparsers(dest="ocmd", required=True)
 
     def ops_fields(x, add):
@@ -1057,9 +1058,6 @@ def build_parser():
     x = tgs.add_parser("add"); x.add_argument("name")
     x.add_argument("--description", default="", help="how and where it deploys")
     x = tgs.add_parser("describe", help="set how a target deploys"); x.add_argument("name"); x.add_argument("text")
-    x = tgs.add_parser("monitor", help="what the deploy session watches after each deploy (health links, logs, for "
-                       "how long); it is part of the deploy task")
-    x.add_argument("name"); x.add_argument("text", nargs="?", help="the monitor text; \"\" removes it; none shows it")
     x = tgs.add_parser("deployer", help="what maxpm serve starts for the target's deploys: launch (the default) "
                        "alerts the owner when a deploy is ready, and starts a deployer session when there is no owner "
                        "or the owner cannot take it (gone, or idle at its prompt); standing starts that session as "
@@ -2823,8 +2821,6 @@ def dispatch(conn, a, actor):
             return core.target_show(conn, a.name)
         if a.tcmd == "rename":
             return core.target_rename(conn, a.name, a.new, actor)
-        if a.tcmd == "monitor":
-            return core.target_show(conn, a.name) if a.text is None else core.target_monitor(conn, a.name, a.text, actor)
         if a.tcmd == "deployer":
             return core.target_show(conn, a.name) if a.mode is None else core.target_deployer(conn, a.name, a.mode, actor)
         if a.tcmd == "cadence":
@@ -3860,8 +3856,11 @@ def render_go(b):
             out.append("  ships:")
             for d in b["ships"]:
                 out.append(f"    #{d['id']} {d['title']} ({d['status']})")
-            if t.get("monitor"):
-                out.append(f"  after the deploy, watch the release (part of this task): {t['monitor']}")
+            if t["checks"]:
+                out.append(f"  after the deploy, maxpm serve runs its checks at once as the watch of the release: "
+                           f"{', '.join(t['checks'])}; a fault opens its own item, found during this deploy")
+            else:
+                out.append("  no check watches the release: the target and its projects have none (maxpm ops list)")
             if b.get("hooks"):
                 out.append("  " + _hooks_brief(t["name"], b["hooks"]))
             for n in b.get("next_deploy", []):
@@ -3874,15 +3873,8 @@ def render_go(b):
                            + f". You decide a release sooner, with a reason: {r} target release-now {t['name']} "
                              f"--reason \"<why>\"")
             out += ["",
-                    "Deploy as the target description says, run its checks"
-                    + (", and watch the release as the line 'after the deploy' says" if t.get("monitor") else "")
-                    + ", then put the release id or",
-                    f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\""]
-            if t.get("monitor"):
-                out += ["Something fails while you watch: alert the manager with the evidence, and add a person's item",
-                        f"with the rollback you propose ({r} add \"Roll back {t['name']}?\" --doer human --found-during "
-                        f"{it['id']} --context \"<evidence; the exact commands>\"). Do not roll back yourself."]
-            out += [
+                    "Deploy as the target description says, run the checks it names, then put the release id or",
+                    f"deployed commit in the output: {r} done {it['id']} --output \"<release id, checks passed>\"",
                     "A step needs a person's go (an approval, a command the auto mode classifier refuses): ask in the",
                     f"queue before you stop at your prompt: {r} ask <person> \"<what to approve>\" --item {it['id']}",
                     "While that question is open, maxpm serve keeps your lease and the target and starts no other",
@@ -4926,9 +4918,9 @@ def render(a, res):
             print("  set its release gate and cadence from the needs of its projects (a service with users: a short "
                   "cadence, so a fix is live soon; a public tool repository: each push); the commands are below")
         print("  " + (res["description"] or f"(no description: maxpm target describe {res['name']} \"how it deploys\")"))
-        print("  monitor: " + (res.get("monitor") or f"none (the deploy session watches the release as it says, when "
-                                                      f"you set one: maxpm target monitor {res['name']} \"<what to watch, for "
-                                                      f"how long>\")"))
+        checks = res.get("checks") or []
+        print("  release watch: " + (", ".join(checks) + " run at once after each deploy" if checks else
+                                     f"none (no check of the target or its projects: maxpm ops add {res['name']} <check> <form> ...)"))
         modes = {"launch": "launch (maxpm serve alerts the owner when a deploy is ready, and starts a deployer session "
                            "when the owner cannot take it)",
                  "standing": "standing (maxpm serve keeps a deployer session that owns the target while a release "

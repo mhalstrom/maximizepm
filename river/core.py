@@ -234,6 +234,11 @@ DEFAULT_SETTINGS = {
     # after that only a person starts it.
     "ops_repair_max": "2",
     "ops_repair_window": "6h",
+    # The release watch (#5459): after each release of a deploy target (its deploy item is done), each check of the
+    # target and of its projects runs at once, then every ops_watch_every (when its own every is longer) until
+    # fail_after runs have ended since the release; then on its own schedule. A fault in the watch is linked to the
+    # deploy item.
+    "ops_watch_every": "1m",
     "ops_reopen_within": "24h",
     "ops_storm_count": "3",
     "ops_storm_window": "5m",
@@ -443,7 +448,6 @@ CREATE TABLE IF NOT EXISTS targets (
   id                INTEGER PRIMARY KEY,
   name              TEXT NOT NULL UNIQUE,
   description       TEXT NOT NULL DEFAULT '',
-  monitor           TEXT NOT NULL DEFAULT '',  -- what the deploy session watches after each deploy (maxpm target monitor)
   deployer          TEXT NOT NULL DEFAULT 'launch',  -- what maxpm serve starts for its deploys (maxpm target deployer)
   cadence           TEXT NOT NULL DEFAULT '',  -- how often it releases: 2h, 1d, 1w, 1mo; '' is off (maxpm target cadence)
   cadence_reason    TEXT NOT NULL DEFAULT '',  -- why that cadence fits the project's needs (#5003)
@@ -1437,8 +1441,6 @@ def _migrate(conn):
         conn.execute("ALTER TABLE items ADD COLUMN reserved_for TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN hold_expires_at TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN replan INTEGER NOT NULL DEFAULT 0")
-    if "monitor" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
-        conn.execute("ALTER TABLE targets ADD COLUMN monitor TEXT NOT NULL DEFAULT ''")
     if "deployer" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
         conn.execute("ALTER TABLE targets ADD COLUMN deployer TEXT NOT NULL DEFAULT 'launch'")
     if "cadence" not in {r["name"] for r in conn.execute("PRAGMA table_info(targets)")}:
@@ -1648,7 +1650,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_watch_every", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -3043,18 +3045,6 @@ def target_describe(conn, name, text, actor=None):
     return target_show(conn, name)
 
 
-def target_monitor(conn, name, text, actor=None):
-    """What to watch after each deploy of the target: health links, logs, error rates, and for how long.
-    The deploy session reads it in its deploy task: after the deploy it watches the release as the text says
-    (#4972: no separate monitor task or session). A target with a deploy hook has no session: its release command
-    does the checks, and a failure (exit not 0) starts the release again."""
-    with tx(conn):
-        name = _target(conn, name)["name"]
-        conn.execute("UPDATE targets SET monitor=? WHERE name=?", (text.strip(), name))
-        _event(conn, None, actor, f"target {name} monitor " + ("changed" if text.strip() else "removed"))
-    return target_show(conn, name)
-
-
 # The events that run a hook (maxpm target hook), each with when it occurs. A later event (an item is claimed,
 # an item is done, a goal is done) is one entry here and one _hook call in the transaction where it occurs.
 HOOK_EVENTS = {
@@ -3723,9 +3713,87 @@ def _ops_folder(conn, c):
     return os.path.expanduser(folder) if folder else None
 
 
+def _ops_target(conn, c):
+    """The deploy target whose releases a check watches: the check's own target, or the target of its project."""
+    if c["scope_kind"] == "target":
+        return c["scope"]
+    r = conn.execute("SELECT target FROM projects WHERE name=?", (c["scope"],)).fetchone()
+    return r["target"] if r and r["target"] else None
+
+
+def ops_target_checks(conn, target):
+    """The checks that watch each release of a target: its own and those of its projects."""
+    return [_ops_row(r) for r in conn.execute(
+        "SELECT * FROM checks WHERE (scope_kind='target' AND scope=?) OR (scope_kind='project' AND scope IN "
+        "(SELECT name FROM projects WHERE target=?)) ORDER BY scope_kind DESC, scope, name", (target, target))]
+
+
+def _ops_watch(conn, c, at):
+    """The release watch of a check at `at` (#5459): the newest release of its target before `at` (a deploy item
+    done), with the runs of the check that started since. It is computed from the deploy items and ops_runs, so no
+    state is kept for it. None when the target never released, or the check was added after its last release (its
+    first run comes at once anyway)."""
+    target = _ops_target(conn, c)
+    if not target:
+        return None
+    d = conn.execute("SELECT id, closed_at FROM items WHERE kind='deploy' AND target=? AND status='done' AND closed_at "
+                     "IS NOT NULL AND closed_at<=? ORDER BY closed_at DESC, id DESC LIMIT 1", (target, iso(at))).fetchone()
+    if d is None or c["created_at"] > d["closed_at"]:
+        return None
+    runs = conn.execute("SELECT id, started_at FROM ops_runs WHERE check_id=? AND started_at>=? AND started_at<=? "
+                        "ORDER BY id", (c["id"], d["closed_at"], iso(at))).fetchall()
+    fault = conn.execute("SELECT MIN(at) t FROM ops_events WHERE check_id=? AND state='fault' AND at>=?",
+                         (c["id"], d["closed_at"])).fetchone()["t"]
+    return {"deploy": d["id"], "target": target, "released_at": d["closed_at"], "runs": [r["id"] for r in runs],
+            "last_start": runs[-1]["started_at"] if runs else None, "fault_at": fault}
+
+
+def _ops_watch_due(conn, c, at):
+    """True when the release watch of a check makes it due now: its first run after the release, or the next one
+    ops_watch_every (or its own every, when shorter) after the last. The watch is open while fewer than fail_after
+    runs started since the release and no fault came since."""
+    w = _ops_watch(conn, c, at)
+    if w is None or len(w["runs"]) >= c["fail_after"] or w["fault_at"]:
+        return False
+    if not w["runs"]:
+        return True
+    step = min(parse_duration(c["every"]), parse_duration(setting(conn, "ops_watch_every")))
+    return at - parse_iso(w["last_start"]) >= step
+
+
+def _ops_watch_of_run(conn, run):
+    """The release watch that a run belongs to, with its place in it ("n"), or None: the run is one of the first
+    fail_after runs since the release, and no fault came before it in the watch."""
+    c = run["check"]
+    r = conn.execute("SELECT started_at FROM ops_runs WHERE id=?", (run["id"],)).fetchone()
+    w = _ops_watch(conn, c, parse_iso(r["started_at"])) if r else None
+    if w is None or run["id"] not in w["runs"]:
+        return None
+    n = w["runs"].index(run["id"]) + 1
+    if n > c["fail_after"] or (w["fault_at"] and w["fault_at"] < r["started_at"]):
+        return None
+    return dict(w, n=n)
+
+
+def _ops_watch_end(conn, run, rec, watch, items):
+    """A line on the deploy item when the watch of one check ends: its last watch run, or a fault in the watch."""
+    c = run["check"]
+    row = conn.execute("SELECT state FROM checks WHERE id=?", (c["id"],)).fetchone()
+    faults = [x["item"] for x in items if x.get("item")]
+    if row is None or (watch["n"] < c["fail_after"] and not faults):
+        return None
+    line = f"release watch: {c['scope']}/{c['name']} " + (
+        f"in fault after {watch['n']} run(s) since the release: " + ", ".join(f"#{x}" for x in faults) if faults
+        else f"{row['state']} after {watch['n']} run(s) since the release (last run {rec['status']})")
+    with tx(conn):
+        _event(conn, watch["deploy"], "maxpm", line)
+    return line
+
+
 def ops_due(conn, at=None):
-    """The checks whose next run is due: not paused, no run open, and the last run started at least `every` ago.
-    A pause whose time passed ends here (an ops_events row 'resumed')."""
+    """The checks whose next run is due: not paused, no run open, and the last run started at least `every` ago,
+    or sooner in the watch of a release of its target (_ops_watch_due). A pause whose time passed ends here (an
+    ops_events row 'resumed')."""
     at = at or now()
     out = []
     for r in conn.execute("SELECT * FROM checks ORDER BY id").fetchall():
@@ -3743,7 +3811,7 @@ def ops_due(conn, at=None):
             continue
         last = conn.execute("SELECT started_at FROM ops_runs WHERE check_id=? ORDER BY id DESC LIMIT 1",
                             (c["id"],)).fetchone()
-        if last is None or at - parse_iso(last["started_at"]) >= parse_duration(c["every"]):
+        if last is None or at - parse_iso(last["started_at"]) >= parse_duration(c["every"]) or _ops_watch_due(conn, c, at):
             out.append(c)
     return out
 
@@ -4006,7 +4074,10 @@ def ops_finish(conn, run, at=None):
     Never an error: a failure to record leaves the run open, and ops_close_lost closes it later as unknown."""
     res = ops_execute(run, at)
     rec = ops_record(conn, run, res, at)
-    rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at)
+    watch = _ops_watch_of_run(conn, run)
+    rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at, watch)
+    if watch:
+        rec["watch"] = _ops_watch_end(conn, run, rec, watch, rec["items"])
     return rec
 
 
@@ -4064,10 +4135,14 @@ def _ops_tell_manager(conn, kind, body, item_id=None):
             _send(conn, kind, "maxpm", body, to=m, item_id=item_id)
 
 
-def _ops_fault_item(conn, c, key, res, at, new):
+def _ops_fault_item(conn, c, key, res, at, new, watch=None):
     """The item of one fault key: the open one (a note), one closed within ops_reopen_within (open again), the
-    storm item of the scope, or a new one. Returns {"key", "item", "action"}."""
+    storm item of the scope, or a new one. Returns {"key", "item", "action"}. In the watch of a release, a new item
+    is found during the deploy item, and every note names the release."""
     summary = res.get("summary") or res.get("status")
+    if watch:
+        summary += (f" (in the watch of release #{watch['deploy']} to {watch['target']}, "
+                    f"done {show_time(watch['released_at'])})")
     it = _ops_item(conn, key)
     if it:
         noted = _ops_note(conn, it["id"], f"ops {'fault again' if new else 'still failing'} at {show_time(iso(at))}: "
@@ -4102,13 +4177,18 @@ def _ops_fault_item(conn, c, key, res, at, new):
                f"check's runs: maxpm ops history {c['scope']} <check>. Find the shared cause, then close this item "
                f"with it; a check that stays in fault after that gets its own item at its next fault.")
         r = item_add(conn, project, f"{storm} {len(keys)} checks failing", priority=1, doer="ai", actor="maxpm",
-                     context=ctx, goals=[], kind="operational", short=f"{c['scope']}: {len(keys)} checks failing")
+                     context=ctx, goals=[], kind="operational", short=f"{c['scope']}: {len(keys)} checks failing",
+                     found_during=watch["deploy"] if watch else None)
         _ops_tell_manager(conn, "alert", f"{len(keys)} checks of {c['scope']} fail at once: #{r['id']}", r["id"])
         return {"key": key, "item": r["id"], "action": "storm"}
     since = conn.execute("SELECT MAX(at) t FROM ops_events WHERE key=? AND state='fault'", (key,)).fetchone()["t"]
-    r = item_add(conn, _ops_project(conn, c), f"{key} {summary}"[:300], priority=1, doer="ai", actor="maxpm",
-                 context=_ops_evidence(c, key, res, at, parse_iso(since) if since else at), goals=[],
-                 kind="operational", short=f"Fault: {c['name']}"[:60])
+    ctx = _ops_evidence(c, key, res, at, parse_iso(since) if since else at)
+    if watch:
+        ctx = (f"The fault came in the watch of release #{watch['deploy']} to {watch['target']} (done "
+               f"{show_time(watch['released_at'])}, run {watch['n']} since): that release is the first suspect.\n" + ctx)
+    r = item_add(conn, _ops_project(conn, c), f"{key} {res.get('summary') or res.get('status')}"[:300], priority=1,
+                 doer="ai", actor="maxpm", context=ctx, goals=[], kind="operational", short=f"Fault: {c['name']}"[:60],
+                 found_during=watch["deploy"] if watch else None)
     _ops_tell_manager(conn, "alert", f"new fault: {key} ({summary}): #{r['id']}", r["id"])
     return {"key": key, "item": r["id"], "action": "opened"}
 
@@ -4228,12 +4308,13 @@ def ops_fault_brief(conn, item):
     return {"key": key, "storm": not name, "checks": checks}
 
 
-def ops_faults(conn, check_id, rec, res, at=None):
+def ops_faults(conn, check_id, rec, res, at=None, watch=None):
     """After a run (ops_record): each key of the check in fault has its one operational item (_ops_fault_item); a
     key that recovered adds 'recovered at' to its open item and leaves it open, for the investigator to close with
     the cause. A check of severity note opens no item: the manager gets a note. A check with subjects opens items
-    for its subjects, and for the check itself only when no subject is in fault. Returns what it did, one dict
-    for each key."""
+    for its subjects, and for the check itself only when no subject is in fault. A fault that a
+    run of a release watch (_ops_watch_of_run) finds is linked to the deploy item. Returns what it did, one dict for
+    each key."""
     at = at or now()
     row = conn.execute("SELECT * FROM checks WHERE id=?", (check_id,)).fetchone()
     if row is None:
@@ -4257,7 +4338,7 @@ def ops_faults(conn, check_id, rec, res, at=None):
                                   f"is of severity note, so no item")
                 out.append({"key": key, "item": None, "action": "manager-note"})
             continue
-        out.append(_ops_fault_item(conn, c, key, res, at, new))
+        out.append(_ops_fault_item(conn, c, key, res, at, new, watch))
     for key, state in to.items():
         if state == "recovered":
             it = _ops_item(conn, key)
@@ -5472,6 +5553,7 @@ def target_show(conn, name):
         "FROM projects p WHERE p.target=? AND p.archived=0 ORDER BY p.rank, p.id", (name,))]
     t["release"] = release_plan(conn, name)
     t["hooks"] = target_hooks(conn, name)
+    t["checks"] = [f"{c['scope']}/{c['name']}" for c in ops_target_checks(conn, name)]
     return t
 
 
@@ -6756,7 +6838,7 @@ def backlog(conn, item_id, note=None, actor=None, force=None):
         if it["status"] != "open":
             raise RiverError(f"refused: {it['assignee'] or 'an agent'} holds #{item_id} ({it['status'].replace('_', ' ')}). "
                              f"Release it first (maxpm release {item_id} --note \"<why>\"), then move it to the backlog")
-        if it["kind"] in ("deploy", "review", "monitor"):
+        if it["kind"] in ("deploy", "review"):
             raise RiverError(f"refused: #{item_id} is a {it['kind']} item, which MaximizePM makes for a release; "
                              f"only work items go to the backlog")
         waiting = _waiting_on(conn, item_id)
@@ -6950,7 +7032,7 @@ def _since(conn, text):
 
 def search(conn, text, project=None, status=None, since=None, limit=20, kinds=False):
     """Items whose title, context, notes, or output hold every word of the text, newest first: open, done,
-    and dropped. Only work items, unless kinds (deploy, review, monitor and fixes items too). No item with every
+    and dropped. Only work items, unless kinds (deploy, review and fixes items too). No item with every
     word: the closest items by the score, so a search never comes back empty-handed when something is near."""
     want = _words(text)
     if not want:
@@ -9307,7 +9389,7 @@ FOLDER_WHY = "needs a folder: it names files or a check command (a coding agent 
 def needs_folder(a):
     touches = a.get("touches") or []
     touches = touches.split(",") if isinstance(touches, str) else touches
-    return any(str(t).strip() for t in touches) or bool((a.get("check") or "").strip()) or a.get("kind") in ("deploy", "monitor")
+    return any(str(t).strip() for t in touches) or bool((a.get("check") or "").strip()) or a.get("kind") == "deploy"
 
 
 def _backlog_claim_refusal(it):
@@ -11166,7 +11248,7 @@ def context_wanted(conn):
         if setting(conn, "goal_context", project_id=g["project_id"]) != "on" or not g["path"]:
             continue
         ready = [a for a in ann.values() if g["name"] in a["goals"] and a["ready"] and a["doer"] != "human"
-                 and not a["no_goal_context"] and a["kind"] not in ("deploy", "review", "monitor")]
+                 and not a["no_goal_context"] and a["kind"] not in ("deploy", "review")]
         b = _base_view(conn, g)
         if len(ready) < 2 or (b and b["warm"]):
             continue
@@ -13956,7 +14038,7 @@ def launch_target(conn, project=None, agent=None, item=None, model=None, effort=
     own = conn.execute("SELECT 1 FROM items WHERE id=? AND reserved_for=? AND status='open'",
                        (int(item), actor)).fetchone() if item is not None and actor else None
     # A ready release review is work for any agent (role REVIEWER); a deploy item is the target owner's.
-    pool = sorted((a for a in ann.values() if a["ready"] and a["doer"] != "human" and a["kind"] not in ("deploy", "monitor")
+    pool = sorted((a for a in ann.values() if a["ready"] and a["doer"] != "human" and a["kind"] != "deploy"
                    and (not a["reserved_for"] or (own and a["id"] == int(item))) and not a["project_archived"]
                    and (project is None or a["project"] == project)), key=lambda a: a["sort_key"])
     if item is not None:
@@ -15302,7 +15384,8 @@ def _deploy_brief(conn, item):
     t = dict(_target(conn, item["target"]))
     nxt = conn.execute("SELECT id FROM items WHERE kind='deploy' AND target=? AND status='open' AND id<>? ORDER BY id",
                        (t["name"], item["id"])).fetchall()
-    return {"target": {"name": t["name"], "description": t["description"], "owner": t["owner"], "monitor": t["monitor"]},
+    return {"target": {"name": t["name"], "description": t["description"], "owner": t["owner"],
+                       "checks": [f"{c['scope']}/{c['name']}" for c in ops_target_checks(conn, t["name"])]},
             "hooks": target_hooks(conn, t["name"]),
             "ships": item["waits_on_detail"], "release": release_plan(conn, t["name"]),
             "next_deploy": [item_show(conn, r["id"]) for r in nxt]}
@@ -16220,7 +16303,7 @@ def manager_findings(conn):
     sessions = project_sessions(conn, ann)
     types = {n: session_type(conn, n) for ns in sessions.values() for n in ns}
     pool = sorted((x for x in ann.values() if x["ready"] and x["doer"] != "human" and not x["reserved_for"]
-                   and x["kind"] not in ("deploy", "review", "monitor") and not x["project_archived"]),
+                   and x["kind"] not in ("deploy", "review") and not x["project_archived"]),
                   key=lambda x: x["sort_key"])
     # Ready work by project and agent type: work for Codex needs a Codex session, whatever else runs there.
     # A session of no known type covers any work.

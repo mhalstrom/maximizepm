@@ -472,7 +472,7 @@ const readyDialog = makeDialog($("#readyDlg"));
 function openReady() { readyDialog.open(); renderReady(); $("#readyClose").focus(); }
 function renderReady() {
   if (!S || !readyDialog.isOpen()) return;
-  const rows = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review", "monitor"].includes(i.kind)).sort(itemOrder);
+  const rows = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)).sort(itemOrder);
   $("#readyList").innerHTML = rows.map(i => `<div class="rrow"><div>
       <div class="t"><span class="link" data-open="${i.id}">#${i.id} ${esc(i.title)}</span></div>
       <div class="sub">${projectChip(i.project)}${prioNumChip(i.effective_priority ?? i.priority, "priority")}${doerChip(i)}
@@ -635,7 +635,7 @@ function renderSetup(st) {
     }).join("")}</div>`).join("")
 , "");
   // A first item, then an agent that takes it. The page says "item" everywhere, not "task" (#4705).
-  const tasks = (S && S.items || []).filter(i => !["deploy", "review", "monitor"].includes(i.kind));
+  const tasks = (S && S.items || []).filter(i => !["deploy", "review"].includes(i.kind));
   const closedN = closedTotal();
   const folderProjects = (S && S.projects || []).filter(p => p.path);
   out.push(step(tasks.length + closedN > 0, "Add a first item",

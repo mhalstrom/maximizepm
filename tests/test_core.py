@@ -4947,9 +4947,10 @@ class Models(Base):
         self.assertIn("--model opus ", core.build_command("claude-code", {"prompt": "go"}, model="opus"))
 
 
-class Monitor(Base):
-    """A target's monitor text is part of the deploy task (#4972): the deploy session watches the release as it says;
-    no separate monitor item, role, or session."""
+class ReleaseWatch(Base):
+    """After each release of a target, its checks run at once as the watch of the release (#5459): then every
+    ops_watch_every until fail_after runs ended since the release, then on their own schedule. A fault in the watch
+    opens its item found during the deploy item. The target's free monitor text is gone."""
 
     def setUp(self):
         super().setUp()
@@ -4962,24 +4963,88 @@ class Monitor(Base):
         core.claim(self.c, w, "dev")
         core.done(self.c, w, "abc", "dev", ship_it=True)
         self.deploy = core.item_show(self.c, w)["unblocks"][0]
-
-    def test_the_deploy_task_carries_the_monitor_text(self):
-        from river import cli
-        core.target_monitor(self.c, "web", "check https://example.test/health for 15 minutes")
-        self.assertEqual(core.target_show(self.c, "web")["monitor"], "check https://example.test/health for 15 minutes")
         core.target_own(self.c, "web", "ops")
+
+    def release(self):
+        core.claim(self.c, self.deploy, "ops")
+        core.done(self.c, self.deploy, "v1 out", "ops")
+        return core.parse_iso(core._item(self.c, self.deploy)["closed_at"])
+
+    def run_at(self, name, at, status=200):
+        c = core.ops_find(self.c, "site", name)
+        with mock.patch.object(core, "OPS_HTTP", lambda url, limit: (status, "")):
+            return core.ops_finish(self.c, core.ops_start(self.c, c, at=at), at=at)
+
+    def due(self, at):
+        return [c["name"] for c in core.ops_due(self.c, at)]
+
+    def deploy_lines(self):
+        return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=? AND change LIKE 'release watch%' "
+                                             "ORDER BY id", (self.deploy,))]
+
+    def test_the_checks_run_at_once_after_the_release_then_every_minute_then_on_their_schedule(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
+        self.run_at("home", core.now() - timedelta(minutes=1))
+        t = self.release() + timedelta(seconds=1)
+        self.assertEqual(self.due(t), ["home"])  # its own every (5m) is not over: the release makes it due
+        self.assertIsNone(self.run_at("home", t)["watch"])  # run 1 of 3: no line yet
+        self.assertEqual(self.due(t + timedelta(seconds=30)), [])
+        self.assertEqual(self.due(t + timedelta(seconds=61)), ["home"])  # ops_watch_every
+        self.run_at("home", t + timedelta(seconds=61))
+        self.assertEqual(self.deploy_lines(), [])
+        r = self.run_at("home", t + timedelta(seconds=122))  # run 3 of fail_after 3: the watch ends
+        self.assertEqual(r["watch"], "release watch: site/home healthy after 3 run(s) since the release (last run ok)")
+        self.assertEqual(self.deploy_lines(), [r["watch"]])
+        self.assertEqual(self.due(t + timedelta(seconds=200)), [])  # its own schedule again
+        self.assertEqual(self.due(t + timedelta(seconds=122 + 300)), ["home"])
+        core.config_set(self.c, "ops_watch_every", "2m")
+        self.assertEqual(core.setting(self.c, "ops_watch_every"), "2m")
+
+    def test_a_fault_in_the_watch_opens_its_item_found_during_the_deploy(self):
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
+        t = self.release() + timedelta(seconds=1)
+        r = [self.run_at("home", t + timedelta(seconds=61 * k), 503) for k in range(3)]
+        self.assertEqual(core.ops_show(self.c, "site", "home")["state"], "fault")  # in 2 minutes, not 10
+        self.assertEqual(r[2]["items"][0]["action"], "opened")
+        it = core.item_show(self.c, r[2]["items"][0]["item"])
+        self.assertEqual((it["kind"], it["found_during"]), ("operational", self.deploy))
+        self.assertIn(f"The fault came in the watch of release #{self.deploy} to web", it["context"])
+        self.assertEqual(self.deploy_lines(), [f"release watch: site/home in fault after 3 run(s) since the release: "
+                                               f"#{it['id']}"])
+        self.assertEqual(self.due(t + timedelta(seconds=122 + 61)), [])  # the fault ends the watch
+        # A later run of the same fault is outside the watch: its note does not name the release.
+        x = self.run_at("home", t + timedelta(minutes=40), 503)
+        self.assertNotIn("watch", x)
+        self.assertEqual(x["items"][0]["item"], it["id"])
+
+    def test_a_check_added_after_the_release_runs_on_its_own_schedule(self):
+        t = self.release() + timedelta(seconds=5)
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
+        self.c.execute("UPDATE checks SET created_at=?", (core.iso(t),))  # a second may hold both
+        self.c.commit()
+        self.assertEqual(self.due(t), ["home"])  # its first run
+        self.run_at("home", t)
+        self.assertEqual(self.due(t + timedelta(seconds=61)), [])
+
+    def test_the_deployer_brief_and_target_show_name_the_checks_and_the_monitor_text_is_gone(self):
+        from river import cli
+        core.ops_add(self.c, "site", "home", "url", {"url": "https://example.test/"}, actor="dev")
+        core.ops_add(self.c, "web", "health", "url", {"url": "https://example.test/health"}, actor="dev")
+        self.assertEqual(core.target_show(self.c, "web")["checks"], ["web/health", "site/home"])
+        self.assertNotIn("monitor", core.target_show(self.c, "web"))
+        self.assertFalse(hasattr(core, "target_monitor"))
         b = core.go(self.c, self.dir.name, "ops")
         self.assertEqual((b["role"], b["item"]["id"]), ("deployer", self.deploy))
-        self.assertNotIn("monitor_item", b)
-        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM items WHERE kind='monitor'").fetchone()[0], 0)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli.render_go(b)
         text = out.getvalue()
-        self.assertIn("after the deploy, watch the release (part of this task): check https://example.test/health", text)
-        self.assertIn("Do not roll back yourself.", text)
-        self.assertNotIn("monitor #", text)
-        self.assertNotIn("monitors", core.targets_view(self.c)[0]["pending"][0])
+        self.assertIn("after the deploy, maxpm serve runs its checks at once as the watch of the release: "
+                      "web/health, site/home", text)
+        self.assertNotIn("Do not roll back yourself.", text)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["target", "monitor", "web", "watch it"])
 
 
 class SharedGoalHandoff(Base):
@@ -6785,7 +6850,6 @@ class DeployHook(Base):
 
     def test_a_failure_keeps_the_deploy_open_and_starts_the_release_again(self):
         open(self.flag, "w").close()
-        core.target_monitor(self.c, "web", "watch the error rate", "mark")
         self.pass_review("rev")
         r = self.run_deploy()
         self.assertEqual([(h["ok"], h["deploy_end"], h["alerted"]) for h in r], [(False, "failed", "ops")])
@@ -6801,7 +6865,6 @@ class DeployHook(Base):
         self.assertIn("migration 7 failed", f["context"])
         self.assertIn("Do not run the release command again", f["context"])
         self.assertEqual(core.item_show(self.c, rv2)["waits_on"], [fix])  # the new review covers the fix
-        self.assertFalse([i for i in core.item_list(self.c) if i.get("kind") == "monitor"])
         alert = [m for m in core.inbox(self.c, "ops") if "deploy hook of target web failed" in m["body"]]
         self.assertTrue(alert and "Do not run the command by hand" in alert[0]["body"])
         # The fix, a new review by a new session (it cuts the release again), then the hook runs again.
@@ -6815,7 +6878,6 @@ class DeployHook(Base):
         r = self.run_deploy()
         self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
         self.assertEqual(core._item(self.c, self.deploy)["status"], "done")
-        self.assertFalse([i for i in core.item_list(self.c) if i.get("kind") == "monitor"])  # no monitor task (#4972)
 
     def test_with_no_review_the_hook_cuts_the_release_and_its_cut_hook_runs_first(self):
         core.drop(self.c, self.review, note="no review for this one", actor="mark")
