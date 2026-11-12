@@ -375,6 +375,26 @@ class LaunchAgent(unittest.TestCase):
         server.PS_RUNNER = bad
         self.assertIsNone(server._pid_ttys(["123"]))
 
+    def test_pid_ttys_asks_ps_only_for_live_pids_it_has_not_seen(self):
+        # #5524: ps took 50-70 ms of each page state build; a process keeps its terminal for its whole life.
+        server.PS_RUNNER = None
+        server._tty_cache.clear()
+        self.addCleanup(server._tty_cache.clear)
+        asked, alive = [], {"10", "11", "12"}
+        out = lambda pids: "".join(f"{p} {'ttys001' if p == '10' else '??'}\n" for p in pids)
+        run = lambda argv, **k: asked.append(argv[-1]) or subprocess.CompletedProcess(argv, 0, out(argv[-1].split(",")))
+        with mock.patch("subprocess.run", run), mock.patch.object(core, "pid_alive", lambda p: str(p) in alive):
+            self.assertEqual(server._pid_ttys(["10", "11", "12", "99"]), {"10": "/dev/ttys001"})
+            self.assertEqual(asked, ["10,11,12"])  # 99 is gone: it has no terminal, and ps is not asked for it
+            self.assertEqual(server._pid_ttys(["10", "11"]), {"10": "/dev/ttys001"})
+            self.assertEqual(len(asked), 1)  # all seen: no ps
+            alive.discard("10")
+            self.assertEqual(server._pid_ttys(["10", "11"]), {})  # the process ended: it leaves the cache
+            self.assertEqual(len(asked), 1)
+            with mock.patch.object(server, "TTY_SECS", -1):  # an old answer is asked again
+                server._pid_ttys(["11"])
+            self.assertEqual(asked[-1], "11")
+
     def test_one_failing_step_of_the_serve_loop_does_not_stop_the_others(self):
         # #5075: an error in adopt_sessions skipped auto_release, auto_tidy and every later step of each pass.
         import threading

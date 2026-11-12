@@ -7764,6 +7764,7 @@ class Backlog(Base):
         self.assertEqual([s["id"] for s in core.cleanup(self.c)], [])
 
     def test_the_columns_come_by_migration(self):
+        self.c.execute("DROP INDEX items_light")  # an old queue has no index on backlog_at either (#5524)
         self.c.execute("ALTER TABLE items DROP COLUMN backlog_at")
         self.c.execute("ALTER TABLE items DROP COLUMN backlog_note")
         self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)
@@ -11223,3 +11224,40 @@ class Schedules(Base):
         self.assertEqual((core.schedule_list(self.c)["schedules"], len(self.items())), ([], 1))
         with self.assertRaisesRegex(RiverError, "no schedule"):
             core.schedule_rm(self.c, s["id"])
+
+
+class BuildMemo(Base):
+    """#5524: inside a page state build (BUILD_MEMO) each agent's status is read once for all agents; the answer is
+    the one agent_status gives outside a build, and a caller's change to it stays its own."""
+
+    def setUp(self):
+        super().setUp()
+        core.project_add(self.c, "a")
+
+    def test_an_agent_status_in_a_build_is_the_same_as_outside(self):
+        x = self.add("a", "x")
+        core.register(self.c, "ag")
+        core.register(self.c, "mark", human=True)
+        core.claim(self.c, x, "ag")
+        core.session_pin(self.c, "ag", actor="mark")
+        outside = {n: core.agent_status(self.c, n) for n in ("ag", "mark")}
+        tok = core.BUILD_MEMO.set({})
+        try:
+            inside = {n: core.agent_status(self.c, n) for n in ("ag", "mark")}
+            self.assertEqual(inside, outside)
+            self.assertEqual([h["id"] for h in inside["ag"]["holds"]], [x])
+            self.assertEqual(inside["ag"]["pinned_by"], ["mark"])
+            inside["ag"]["state"] = "changed"
+            self.assertNotEqual(core.agent_status(self.c, "ag")["state"], "changed")
+            with self.assertRaisesRegex(RiverError, "is not registered"):
+                core.agent_status(self.c, "nobody")
+        finally:
+            core.BUILD_MEMO.reset(tok)
+
+    def test_the_state_queues_are_the_queue_lists(self):
+        x = self.add("a", "x")
+        core.register(self.c, "ag")
+        core.register(self.c, "mark", human=True)
+        core.queue_add(self.c, "ag", x, actor="mark")
+        core.queue_add(self.c, "ag", message="do this", actor="mark")
+        self.assertEqual(core.state(self.c)["queues"], {"ag": core.queue_list(self.c, "ag")["entries"]})

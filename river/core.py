@@ -1153,6 +1153,8 @@ CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
 CREATE INDEX IF NOT EXISTS items_kind_target ON items(kind, target);
+CREATE INDEX IF NOT EXISTS items_project ON items(project_id);
+CREATE INDEX IF NOT EXISTS item_goals_goal ON item_goals(goal_id, item_id);
 
 -- One number that grows with each change of the item graph by any connection (triggers of _graph_triggers): the
 -- cache of annotate holds while it is the same. A lease renewal is no change of the graph (#5521).
@@ -1535,6 +1537,10 @@ def _migrate(conn):
     if "backlog_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
         conn.execute("ALTER TABLE items ADD COLUMN backlog_at TEXT")
         conn.execute("ALTER TABLE items ADD COLUMN backlog_note TEXT")
+    # The read of the done and dropped items for annotate (LIGHT_COLUMNS) comes from this index, not from the
+    # whole rows: 3 ms instead of 7 on a queue of 5,500 items (#5524). Here, after backlog_at exists.
+    conn.execute("CREATE INDEX IF NOT EXISTS items_light ON items(status, id, project_id, priority, due, backlog_at, "
+                 "assignee)")
     # Items held before the holds table existed: their hold starts at the claim.
     conn.execute("INSERT INTO holds (item_id, agent, started_at) SELECT i.id, i.assignee, COALESCE(i.claimed_at, ?) "
                  "FROM items i WHERE i.status IN ('in_progress','held') AND i.assignee IS NOT NULL AND NOT EXISTS "
@@ -2616,9 +2622,13 @@ def project_restore(conn, name, actor=None):
 def project_archived(conn):
     """The archived projects, last archived first, with their item counts (the Plan tab's Archived list)."""
     out = []
-    for r in conn.execute("SELECT id, name, notes, path FROM projects WHERE archived=1").fetchall():
-        at = conn.execute("SELECT MAX(at) m FROM events WHERE item_id IS NULL AND (change=? OR change LIKE ?)",
-                          (f"project {r['name']} archived", f"project {r['name']} archived (%")).fetchone()["m"]
+    projects = conn.execute("SELECT id, name, notes, path FROM projects WHERE archived=1").fetchall()
+    # One read of the archive events for all of them (#5524: one read for each project took 5 ms).
+    events = conn.execute("SELECT change, at FROM events WHERE item_id IS NULL AND change LIKE 'project % archived%'"
+                          ).fetchall() if projects else []
+    for r in projects:
+        word, more = f"project {r['name']} archived", f"project {r['name']} archived ("
+        at = max((e["at"] for e in events if e["change"] == word or e["change"].startswith(more)), default=None)
         out.append({"name": r["name"], "notes": r["notes"], "path": r["path"], "archived_at": at,
                     **_project_counts(conn, r["id"])})
     return sorted(out, key=lambda r: (r["archived_at"] or "", r["name"]), reverse=True)
@@ -2956,14 +2966,15 @@ def _handoff_due(conn, g):
     if not g["owner"] or not conn.execute("SELECT 1 FROM agents WHERE name=? AND kind='ai'", (g["owner"],)).fetchone():
         return None
     h = _handoff(conn, g["id"])
-    for r in conn.execute("SELECT i.id, i.title, i.closed_at FROM items i JOIN item_goals ig ON ig.item_id=i.id "
-                          "WHERE ig.goal_id=? AND i.status='done' AND i.closed_at IS NOT NULL "
-                          "ORDER BY i.closed_at DESC, i.id DESC", (g["id"],)):
-        if h and r["closed_at"] <= h["created_at"]:
-            return None
-        if _done_by(conn, r["id"]) == g["owner"]:
-            return dict(r)
-    return None
+    # The newest done item of the goal, after the handoff, whose last done event (as _done_by reads it) is the
+    # owner's: one query, not one _done_by read for each done item (#5524).
+    r = conn.execute("SELECT i.id, i.title, i.closed_at FROM items i JOIN item_goals ig ON ig.item_id=i.id "
+                     "WHERE ig.goal_id=? AND i.status='done' AND i.closed_at IS NOT NULL"
+                     + (" AND i.closed_at > ?" if h else "") +
+                     " AND (SELECT e.actor FROM events e WHERE e.item_id=i.id AND e.change LIKE 'done%' "
+                     "ORDER BY e.id DESC LIMIT 1) = ? ORDER BY i.closed_at DESC, i.id DESC LIMIT 1",
+                     (g["id"], h["created_at"], g["owner"]) if h else (g["id"], g["owner"])).fetchone()
+    return dict(r) if r else None
 
 
 def goal_handoff(conn, name, text=None, actor=None, version=None):
@@ -9199,6 +9210,22 @@ def _load_graph(conn, closed=True):
 ANN_SHARE = contextvars.ContextVar("ann_share", default=None)
 ANN_SHARE_SECS = 10
 
+# One build of the page's state (server.page_state, #5524) asks for the same agent's status and the same launch
+# platforms many times: state, capacity and sessions.running each read all agents (834 on the live queue), and each
+# launch profile reads every platform. Inside a build, BUILD_MEMO holds each answer once; outside it, each call
+# computes anew. The build writes nothing after its first step (poll_activity), so an answer cannot get old in it.
+BUILD_MEMO = contextvars.ContextVar("build_memo", default=None)
+
+
+def _memo(key, fn):
+    """fn() once per page state build (BUILD_MEMO); every call outside a build runs fn()."""
+    memo = BUILD_MEMO.get()
+    if memo is None:
+        return fn()
+    if key not in memo:
+        memo[key] = fn()
+    return memo[key]
+
 
 class OpenAnn(dict):
     """annotate(conn, closed=False): the open items, computed; a done or dropped item is computed when a caller
@@ -9610,6 +9637,14 @@ def _queue_rows(conn, agent):
     return conn.execute("SELECT * FROM queue_entries WHERE agent=? ORDER BY kind='item', pos, id", (agent,)).fetchall()
 
 
+def _all_queues(conn):
+    """{agent: its queue_entries rows in _queue_rows order}, by agent name, in one query (state, #5524)."""
+    out = {}
+    for r in conn.execute("SELECT * FROM queue_entries ORDER BY agent, kind='item', pos, id"):
+        out.setdefault(r["agent"], []).append(r)
+    return out
+
+
 def _queue_pos(conn, agent, first=False, before=None, after=None):
     rows = conn.execute("SELECT item_id, pos FROM queue_entries WHERE agent=? ORDER BY pos", (agent,)).fetchall()
     if not rows:
@@ -9692,10 +9727,11 @@ def queue_add(conn, agent, item=None, message=None, first=False, before=None, ac
     return queue_list(conn, agent)
 
 
-def queue_list(conn, agent, ann=None):
+def queue_list(conn, agent, ann=None, rows=None):
+    """rows: the agent's queue_entries rows, in _queue_rows order, when the caller read them already (state, #5524)."""
     ann = ann or annotate(conn)
     out = []
-    for r in _queue_rows(conn, agent):
+    for r in _queue_rows(conn, agent) if rows is None else rows:
         e = {"entry": r["id"], "kind": r["kind"], "added_by": r["added_by"], "created_at": r["created_at"],
              "delivered_at": r["delivered_at"], "native_status": r["native_status"]}
         if r["item_id"] is not None and r["item_id"] in ann:
@@ -11122,18 +11158,51 @@ def not_connected(conn, a):
             and not a["stop_at"] and now() - parse_iso(a["registered_at"]) > parse_duration(setting(conn, "connect_within")))
 
 
+_HOLDS_SQL = ("SELECT assignee, id, title, short, status, claimed_at, lease_expires_at, hold_expires_at FROM items "
+              "WHERE status IN ('in_progress','held') {} ORDER BY id")
+_OWNS_SQL = "SELECT owner, name, owner_expires_at FROM targets WHERE owner {} ORDER BY name"
+_PINS_SQL = "SELECT agent, person FROM session_pins WHERE agent {} ORDER BY pinned_at, person"
+
+
 def agent_status(conn, name):
-    a = dict(_agent(conn, name))
+    if BUILD_MEMO.get() is None:
+        return _agent_status(conn, dict(_agent(conn, name)),
+                             conn.execute(_HOLDS_SQL.format("AND assignee=?"), (name,)),
+                             conn.execute(_OWNS_SQL.format("=?"), (name,)),
+                             conn.execute(_PINS_SQL.format("=?"), (name,)))
+    # Inside a page state build: every agent at once, in four queries instead of four for each agent (#5524).
+    a = _memo("agent_statuses", lambda: _agent_statuses(conn)).get(name)
+    if a is None:
+        _agent(conn, name)  # its RiverError
+    return dict(a)  # a field a caller sets stays its own; the lists are only read (state, capacity, sessions.running)
+
+
+def _agent_statuses(conn):
+    """{name: agent_status} of every agent."""
+    holds, owns, pins = {}, {}, {}
+    for r in conn.execute(_HOLDS_SQL.format("AND assignee IS NOT NULL")):
+        holds.setdefault(r["assignee"], []).append(r)
+    for r in conn.execute(_OWNS_SQL.format("IS NOT NULL")):
+        owns.setdefault(r["owner"], []).append(r)
+    for r in conn.execute(_PINS_SQL.format("IS NOT NULL")):
+        pins.setdefault(r["agent"], []).append(r)
+    rows = list(conn.execute("SELECT * FROM agents"))
+    cols = rows[0].keys() if rows else []  # dict(zip()): dict() of a sqlite3.Row is slow (#5491)
+    out = {}
+    for r in rows:
+        a = dict(zip(cols, r))
+        out[a["name"]] = _agent_status(conn, a, holds.get(a["name"], ()), owns.get(a["name"], ()),
+                                       pins.get(a["name"], ()))
+    return out
+
+
+def _agent_status(conn, a, holds, owns, pins):
+    """An agent row (a dict) with its state and what it holds, owns, and who pinned it."""
     a["state"] = _agent_state(conn, a)
     a["can_kill"] = bool(a.get("pid")) and a.get("host") == this_host() and a["state"] != "gone"
-    a["holds"] = [dict(r) for r in conn.execute(
-        "SELECT id, title, short, status, claimed_at, lease_expires_at, hold_expires_at FROM items WHERE assignee=? "
-        "AND status IN ('in_progress','held') ORDER BY id",
-        (name,))]
-    a["owns"] = [dict(r) for r in conn.execute(
-        "SELECT name, owner_expires_at FROM targets WHERE owner=? ORDER BY name", (name,))]
-    a["pinned_by"] = [r["person"] for r in conn.execute(
-        "SELECT person FROM session_pins WHERE agent=? ORDER BY pinned_at, person", (name,))]
+    a["holds"] = [{k: r[k] for k in r.keys() if k != "assignee"} for r in holds]
+    a["owns"] = [{k: r[k] for k in r.keys() if k != "owner"} for r in owns]
+    a["pinned_by"] = [r["person"] for r in pins]
     return a
 
 
@@ -16534,7 +16603,8 @@ def launch_platforms():
     """{platform: entry} of every registered agent that MaximizePM can start (it has its launch part): the built-in
     ones under their platform names (claude-code, codex), the others under their id, each with the options of its
     setting specs (platform_spec, #5169)."""
-    return {_platform_of(a): platform_spec(_platform_of(a)) for a in _adapters().load().values() if not a.missing()}
+    return dict(_memo("launch_platforms", lambda: {_platform_of(a): platform_spec(_platform_of(a))
+                                                   for a in _adapters().load().values() if not a.missing()}))
 
 
 def _agent_option(key):
@@ -16679,8 +16749,7 @@ def state(conn, closed=True):
         "tmux": can_start_agents(),  # every agent starts in tmux (Windows: a console window): the page says when it is missing
         "tmux_install": tmux_install(),
         "start_next": _start_next(conn),
-        "queues": {r["agent"]: queue_list(conn, r["agent"], ann)["entries"]
-                   for r in conn.execute("SELECT DISTINCT agent FROM queue_entries ORDER BY agent")},
+        "queues": {agent: queue_list(conn, agent, ann, rows)["entries"] for agent, rows in _all_queues(conn).items()},
         "manager": manager_view(conn),
         "effort_levels": _levels(setting(conn, "effort_levels")),
         "settings": config_list(conn),

@@ -774,6 +774,34 @@ def _tmux_env():
 def _tmux_panes(everywhere=False):
     """The panes of the maxpm tmux session (everywhere: of every session); [] when there is none. "ended": only
     a shell runs there, and the pane is older than START_GRACE ("starting": it is not)."""
+    early = (core.BUILD_MEMO.get() or {}).get(("tmux_panes", bool(everywhere)))
+    if early is not None:  # a page state build asked tmux at its start (_ask_tmux_early)
+        early[0].join()
+        if early[2] is not None:
+            raise early[2]
+        return [dict(p) for p in early[1]]
+    return _tmux_panes_now(everywhere)
+
+
+def _ask_tmux_early(memo):
+    """A page state build asks tmux for both pane lists in threads at its start, while it reads the database: the
+    two tmux processes took 15 ms of each build (#5524). Real tmux only: a test's TMUX_RUNNER answers in its thread."""
+    if TMUX_RUNNER is not None or not _tmux_cmd():
+        return
+    for everywhere in (False, True):
+        box = [None, None, None]
+
+        def run(box=box, everywhere=everywhere):
+            try:
+                box[1] = _tmux_panes_now(everywhere)
+            except Exception as e:  # noqa: BLE001 - the caller gets it, as without the thread
+                box[2] = e
+        box[0] = threading.Thread(target=run, daemon=True)
+        box[0].start()
+        memo[("tmux_panes", everywhere)] = box
+
+
+def _tmux_panes_now(everywhere=False):
     out = _tmux("list-panes", *(["-a"] if everywhere else ["-s", "-t", "=" + TMUX_SESSION]), "-F", _TMUX_PANE,
                 check=False)
     rows, t = [], core.now().timestamp()
@@ -1706,18 +1734,31 @@ def _pid_ttys(pids):
     pids = list(pids)
     if not pids:
         return {}
-    try:
-        ps = (PS_RUNNER or (lambda p: subprocess.run(["ps", "-o", "pid=,tty=", "-p", ",".join(p)], capture_output=True,
-                                                     text=True, errors="replace", timeout=5).stdout))(pids)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    out = {}
-    for line in ps.splitlines():
-        pid, _, tty = line.strip().partition(" ")
-        tty = tty.strip()
-        if tty and tty not in ("?", "??"):
-            out[pid] = tty if tty.startswith("/dev/") else "/dev/" + tty
-    return out
+    # A process keeps its terminal for its whole life: ps runs only for pids it has not seen in TTY_SECS (#5524: ps
+    # took 50-70 ms of each page state build). A pid that is gone leaves the cache, so a reused pid is asked again.
+    cache = _tty_cache if PS_RUNNER is None else {}
+    t = time.time()
+    for pid in [p for p in cache if p in pids and (t - cache[p][0] > TTY_SECS or not core.pid_alive(p))]:
+        del cache[pid]
+    # A pid that is gone has no terminal: ps gives no line for it, so it would be asked again at each build.
+    ask = [p for p in pids if p not in cache and (PS_RUNNER is not None or core.pid_alive(p))]
+    if ask:
+        try:
+            ps = (PS_RUNNER or (lambda p: subprocess.run(["ps", "-o", "pid=,tty=", "-p", ",".join(p)],
+                                                         capture_output=True, text=True, errors="replace",
+                                                         timeout=5).stdout))(ask)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        for line in ps.splitlines():
+            pid, _, tty = line.strip().partition(" ")
+            tty = tty.strip()
+            cache[pid] = (t, (tty if tty.startswith("/dev/") else "/dev/" + tty)
+                          if tty and tty not in ("?", "??") else None)
+    return {p: cache[p][1] for p in pids if p in cache and cache[p][1]}
+
+
+_tty_cache = {}  # {pid: (when ps read it, its terminal device or None)}, for _pid_ttys
+TTY_SECS = 300
 
 
 def terminal_screen(conn, agent):
@@ -4246,6 +4287,8 @@ def page_state(closed):
         gen = _state_gen[0]  # an action during the build makes this build old at once
         conn = core.connect()
         share = core.ANN_SHARE.set({})  # the build reads the item graph once (#5465)
+        memo = core.BUILD_MEMO.set({})  # and each agent's status and the launch platforms once (#5524)
+        _ask_tmux_early(core.BUILD_MEMO.get())
         try:
             core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
             st = core.state(conn, closed=key)
@@ -4273,6 +4316,7 @@ def page_state(closed):
             _state_cache[key] = (time.time(), gen, st)
             return st
         finally:
+            core.BUILD_MEMO.reset(memo)
             core.ANN_SHARE.reset(share)
             conn.close()
 
