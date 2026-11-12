@@ -3,7 +3,8 @@
 .ov-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: var(--sp-6); align-items: start; }
 @media (max-width: 1000px) { .ov-grid { grid-template-columns: minmax(0, 1fr); } }
 .ov-idle { margin-top: var(--sp-3); }
-.sw-a { background: var(--accent); } .sw-h { background: var(--human); }
+/* Agents are neutral and people keep the people color, so the two read apart in both themes (#5330). */
+.sw-a { background: var(--muted); } .sw-h { background: var(--human); }
 .graph-steps { margin: 0 0 var(--sp-6); }
 .graph-steps .layers { margin-top: 0; }
 .recent > summary { cursor: pointer; font-weight: 600; }
@@ -36,8 +37,8 @@
 .advice .human { background: var(--human-bg); color: var(--human); }
 .layers { display: flex; align-items: flex-end; gap: var(--sp-2); height: var(--h-bars); margin-top: var(--sp-5); }
 .layer { flex: 1; max-width: var(--w-bar); display: flex; flex-direction: column-reverse; align-items: stretch; position: relative; }
-.layer .a { background: var(--accent); border-radius: calc(var(--sp-1) - var(--hair)) calc(var(--sp-1) - var(--hair)) 0 0; }
-.layer .h { background: var(--human); opacity: .75; }
+.layer .a { background: var(--muted); border-radius: calc(var(--sp-1) - var(--hair)) calc(var(--sp-1) - var(--hair)) 0 0; }
+.layer .h { background: var(--human); }
 .layer .cap { position: absolute; bottom: calc(-1 * var(--sp-6)); width: 100%; text-align: center; font-size: var(--fs-xs); color: var(--muted); }
 .legend { font-size: var(--fs-xs); color: var(--muted); margin-top: calc(var(--sp-6) + var(--sp-1)); display: flex; gap: var(--sp-5); }
 .sw { display: inline-block; width: calc(var(--sp-3) + var(--hair)); height: calc(var(--sp-3) + var(--hair)); border-radius: var(--sp-0); margin-right: var(--sp-1); vertical-align: calc(-1 * var(--hair)); }

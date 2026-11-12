@@ -7,3 +7,18 @@
 .pz-tools { position: absolute; right: var(--sp-3); top: var(--sp-3); display: flex; gap: var(--sp-1); }
 .pz-tools .btn { min-width: var(--w-tool); padding: var(--sp-1) var(--sp-3); background: var(--panel); }
 #graphNote { margin-bottom: var(--sp-3); }
+/* The graph's colors come from the page's tokens, not from Mermaid's theme, so they follow light and dark (#5330).
+   .pz-stage raises the weight of each rule above the rules in Mermaid's own style sheet (#<id> .node rect). */
+#graph .pz-stage .cluster :is(rect, path, polygon) { fill: var(--panel); stroke: var(--line); }
+#graph .pz-stage .cluster-label :is(span, p, div) { color: var(--muted); }
+#graph .pz-stage .cluster-label text { fill: var(--muted); }
+#graph .pz-stage .node :is(rect, path, polygon, circle) { fill: var(--wait-bg); stroke: var(--wait); }
+#graph .pz-stage .node.ready :is(rect, path, polygon, circle) { fill: var(--ready-bg); stroke: var(--ready); }
+#graph .pz-stage .node.prog :is(rect, path, polygon, circle) { fill: var(--prog-bg); stroke: var(--prog); }
+#graph .pz-stage .node.done :is(rect, path, polygon, circle) { fill: var(--done-bg); stroke: var(--line); }
+#graph .pz-stage .node.human :is(rect, path, polygon, circle) { stroke: var(--human); }
+#graph .pz-stage .node :is(.nodeLabel, .label, span, p) { color: var(--ink); }
+#graph .pz-stage .node text { fill: var(--ink); }
+#graph .pz-stage .node.done :is(.nodeLabel, .label, span, p) { color: var(--muted); }
+#graph .pz-stage :is(.flowchart-link, .edgePath .path) { stroke: var(--muted); }
+#graph .pz-stage :is(.marker, .arrowheadPath) { fill: var(--muted); stroke: var(--muted); }

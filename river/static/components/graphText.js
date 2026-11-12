@@ -37,7 +37,8 @@ export function graphText(projects, items, show) {
     g += "end\n";
   }
   for (const i of shown) for (const b of i.waits_on) if (show.has(b)) { g += `N${b} --> N${i.id}\n`; edges++; }
-  g += "classDef ready fill:#dcf5e3,stroke:#1a7f37,color:#0b3d1b\nclassDef prog fill:#fff3c4,stroke:#9a6700,color:#3d2a00\nclassDef wait fill:#eceff2,stroke:#8c959f,color:#24292f\nclassDef done fill:#f0f1f3,stroke:#c4c9cf,color:#8c959f\nclassDef human stroke:#8250df,stroke-width:3px\n";
+  // The classes carry no colors: graph.css colors them from the page's tokens, so both themes read (#5330).
+  g += "classDef ready stroke-width:1px\nclassDef prog stroke-width:1px\nclassDef wait stroke-width:1px\nclassDef done stroke-width:1px\nclassDef human stroke-width:3px\n";
   for (const i of shown) {
     const cls = finished(i) ? "done" : ["in_progress", "held"].includes(i.status) ? "prog" : i.ready ? "ready" : "wait";
     g += `class N${i.id} ${cls}\n`;
