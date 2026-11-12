@@ -3342,6 +3342,27 @@ def render_expert(res):
                   f"line, then leave the topic to {t['session_name']}.")
 
 
+def _fault_lines(f, r):
+    """The FAULT block of the go briefing of a fault item (#5432): each check, its state and last runs, and the
+    commands of an investigation."""
+    if not f:
+        return []
+    out = [f"  FAULT {f['key']}" + (": several checks of one scope fail at once; find their shared cause" if f["storm"]
+                                     else "") + ". You investigate: read and diagnose (POLICIES), then close it with the cause."]
+    for c in f["checks"]:
+        out.append(f"    check {c['scope']}/{c['name']} ({c['form']}), now {c['state']}"
+                   + (f", subject {c['subject']}" if c.get("subject") else ""))
+        for x in c["runs"]:
+            out.append(f"      {x['ended_at']} {x['status']}: {(x['summary'] or '')[:140]}")
+        if c.get("runbook"):
+            out.append(f"      runbook: {c['runbook'][:300]}")
+        out.append(f"      run it now: {r} ops run {c['scope']} {c['name']}   its runs and changes: "
+                   f"{r} ops history {c['scope']} {c['name']}" + ("   (it has a repair command)" if c["repair"] else ""))
+    if not f["checks"]:
+        out.append("    no check of this key now (removed, or healthy again): read the item's context")
+    return out
+
+
 def render_go(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
@@ -3524,6 +3545,7 @@ def render_go(b):
         if it["notes"]:
             out.append(f"  notes: {it['notes']}")
         out += _context_lines(it)
+        out += _fault_lines(b.get("fault"), r)
         for h in b.get("handoffs") or []:  # the context of the item's goals, from their owners
             first, *rest = _handoff_lines(h["goal"], h, h.get("due"))
             out += [f"  goal {h['goal']}: {first.strip()}"] + rest

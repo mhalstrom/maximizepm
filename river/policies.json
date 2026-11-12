@@ -44,6 +44,13 @@
       "text": "Never look in environment variables or home-folder files for API keys, not even to see if one is there. Use the model the item names; when it names none, add a person item (--doer human --blocks <id>).",
       "reason": "A missing key is the person's step. A search for keys reads secrets the task was not given, and it ends at a permission prompt for the person.",
       "source": "mark 2026-11-11"
+    },
+    {
+      "id": "g7",
+      "text": "On a fault item (an operational item whose title starts with ops:) you investigate: read logs, state and the check's runs, find the cause, write it on the item, add fix items for the code (they go through the normal review and release), and close the item with the cause. Change nothing in production yourself; a repair runs only through maxpm ops repair.",
+      "reason": "A fault investigation starts at once, before a person looks; a guess that changes production can make the fault worse, while a found cause and fix items go through review. The monitor is deterministic, and the investigation is ordinary queue work (#5431, #5432).",
+      "source": "mark 2026-11-12",
+      "role": "worker"
     }
   ]
 }

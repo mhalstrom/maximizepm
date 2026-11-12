@@ -2534,10 +2534,13 @@ def auto_operational(conn, runner=None):
     operational task for a person whose list holds old items. Then each ready operational task that nobody holds
     or has reserved goes to a session that waits for work in its project and held no task before, else to a new
     session (start_fresh): an operational task starts in a new session. No session starts while max_sessions agent
-    sessions are live. Returns {"added": [ids], "pushed": {item: agent}, "started": {item: session}, "failed": {}}."""
+    sessions are live. A fault item of an operations check (#5432) comes first and starts at once, also when
+    max_sessions are live, but at most ops_max_investigations at the same time. Returns {"added": [ids], "pushed":
+    {item: agent}, "started": {item: session}, "failed": {}}."""
     out = {"added": core.cleanup_trigger(conn), "pushed": {}, "started": {}, "failed": {}}
-    rows = conn.execute("SELECT id FROM items WHERE kind='operational' AND status='open' AND assignee IS NULL "
-                        "AND (reserved_for IS NULL OR reserved_until < ?) ORDER BY id", (core.iso(core.now()),)).fetchall()
+    rows = conn.execute("SELECT id, title, kind FROM items WHERE kind='operational' AND status='open' AND assignee IS NULL "
+                        "AND (reserved_for IS NULL OR reserved_until < ?) ORDER BY title NOT LIKE 'ops:%', id",
+                        (core.iso(core.now()),)).fetchall()
     if not rows:
         return out
     cap = int(core.setting(conn, "max_sessions") or 0)
@@ -2547,6 +2550,12 @@ def auto_operational(conn, runner=None):
         if (a is None or not a["ready"] or a["reserved_for"] or a["project_archived"] or a["backlog"]
                 or a["doer"] == "human" or _release_recent(conn, a["id"])):
             continue
+        fault = core.fault_key(dict(r)) is not None
+        if fault:
+            most = int(core.setting(conn, "ops_max_investigations") or 0)
+            if core.investigations_live(conn) >= most:
+                out["failed"][a["id"]] = f"ops_max_investigations {most}"
+                continue
         waiting = core.waiting_agent_for(conn, a["project"], a["id"])
         if waiting:
             try:
@@ -2558,11 +2567,12 @@ def auto_operational(conn, runner=None):
             _release_event(conn, a["id"], f"pushed to {waiting}, who waits for work")
             out["pushed"][a["id"]] = waiting
             continue
-        if cap and core.live_sessions(conn) >= cap:
+        if cap and core.live_sessions(conn) >= cap and not fault:
             out["failed"][a["id"]] = f"max_sessions {cap}"
             continue
         try:
-            name = start_fresh(conn, a["id"], "operational task ready", runner)["session_name"]
+            name = start_fresh(conn, a["id"], "a fault to investigate" if fault else "operational task ready",
+                               runner)["session_name"]
         except (RiverError, StopIteration) as e:
             _release_event(conn, a["id"], f"no session for the operational task: {e}")
             out["failed"][a["id"]] = str(e)

@@ -225,6 +225,10 @@ DEFAULT_SETTINGS = {
     # same item again; more than ops_storm_count keys of one project or target that fail within ops_storm_window share
     # one item ('<scope>: N checks failing'), so a storm does not flood the queue.
     "ops_note_every": "30m",
+    # A fault item starts a new investigation session at once, ahead of normal work and also when max_sessions are
+    # live (#5432), but at most this many investigations at the same time (fault items that a live session holds or
+    # that wait for the session started for them).
+    "ops_max_investigations": "2",
     "ops_reopen_within": "24h",
     "ops_storm_count": "3",
     "ops_storm_window": "5m",
@@ -1643,7 +1647,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "ops_storm_count", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_storm_count", "ops_max_investigations", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -3916,6 +3920,50 @@ def _ops_fault_item(conn, c, key, res, at, new):
                  kind="operational", short=f"Fault: {c['name']}"[:60])
     _ops_tell_manager(conn, "alert", f"new fault: {key} ({summary}): #{r['id']}", r["id"])
     return {"key": key, "item": r["id"], "action": "opened"}
+
+
+def fault_key(item):
+    """The fault key of a fault item (an operational item whose title starts with ops:), else None. A storm item
+    has the key of its scope: 'ops:<scope>:'."""
+    t = (item.get("title") or "") if isinstance(item, dict) else (item["title"] or "")
+    kind = item.get("kind") if isinstance(item, dict) else item["kind"]
+    if kind != "operational" or not t.startswith("ops:"):
+        return None
+    return t.split(" ", 1)[0]
+
+
+def investigations_live(conn):
+    """The fault items that an investigation works on now: held by a live session, or reserved for one."""
+    t = iso(now())
+    n = 0
+    for r in conn.execute("SELECT i.status, i.assignee, i.reserved_for, i.reserved_until FROM items i WHERE "
+                          "i.kind='operational' AND i.title LIKE 'ops:%' AND i.status IN ('open','in_progress','held')"):
+        who = r["assignee"] if r["status"] != "open" else (r["reserved_for"] if (r["reserved_until"] or "") > t else None)
+        a = conn.execute("SELECT * FROM agents WHERE name=?", (who,)).fetchone() if who else None
+        if a is not None and _agent_state(conn, a) not in ("gone", "stopped"):
+            n += 1
+    return n
+
+
+def ops_fault_brief(conn, item):
+    """What the go briefing of a fault item shows (#5432): its key, each check of it with its state and last runs,
+    and the commands that read them. A storm item: the checks of its scope that are not healthy."""
+    key = fault_key(item)
+    if not key:
+        return None
+    parts = key.split(":")
+    scope, name = parts[1], (parts[2] if len(parts) > 2 else "")
+    rows = conn.execute("SELECT * FROM checks WHERE scope=? AND name=?", (scope, name)).fetchall() if name else \
+        conn.execute("SELECT * FROM checks WHERE scope=? AND state IN ('failing','fault') ORDER BY name", (scope,)).fetchall()
+    checks = []
+    for r in rows:
+        c = _ops_row(r)
+        runs = [dict(x) for x in conn.execute("SELECT status, summary, ended_at FROM ops_runs WHERE check_id=? AND "
+                                              "ended_at IS NOT NULL ORDER BY id DESC LIMIT 3", (c["id"],))]
+        checks.append({"scope": c["scope"], "name": c["name"], "form": c["form"], "state": c["state"],
+                       "subject": parts[3] if len(parts) > 3 else None, "runbook": c.get("runbook"),
+                       "repair": bool(c.get("repair")), "runs": runs})
+    return {"key": key, "storm": not name, "checks": checks}
 
 
 def ops_faults(conn, check_id, rec, res, at=None):
@@ -14320,6 +14368,8 @@ def go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None,
         if it and it.get("project") and it["project"] not in names:
             names.append(it["project"])
         brief["policies"] = policies_for(conn, names, brief["role"], cwd)
+        if it and fault_key(it):
+            brief["fault"] = ops_fault_brief(conn, it)  # an investigation (#5432)
     return brief
 
 

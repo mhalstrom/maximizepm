@@ -9385,6 +9385,28 @@ class Ops(Base):
         self.assertEqual(r["items"][0]["action"], "opened")
         self.assertEqual(len(self.ops_items()), 2)
 
+    def test_the_briefing_of_a_fault_item_shows_the_check_and_its_commands(self):
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 1,
+                                                       "runbook": "read the job log"}, actor="boss")
+        r = self.run_at("site", "job", core.now(), self.proc(2, "JOB CRITICAL - no run for 2h"))
+        it = r["items"][0]["item"]
+        core.register(self.c, "inv")
+        b = core.go(self.c, self.dir.name, "inv", project="site", focus=f"item:{it}")
+        self.assertEqual(b["item"]["id"], it)
+        f = b["fault"]
+        self.assertEqual((f["key"], f["storm"], [c["state"] for c in f["checks"]]), ("ops:site:job", False, ["fault"]))
+        self.assertIn("g7", [p["pid"] for p in b["policies"]])
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        text = out.getvalue()
+        for want in ("FAULT ops:site:job", "check site/job (plugin), now fault", "critical: JOB CRITICAL - no run for 2h",
+                     "runbook: read the job log", "ops run site job", "ops history site job"):
+            self.assertIn(want, text)
+        self.assertIsNone(core.fault_key({"kind": "work", "title": "ops:site:job looks like a key"}))
+        self.assertEqual(core.fault_key({"kind": "operational", "title": "ops:site: 4 checks failing"}), "ops:site:")
+
     def test_subjects_have_items_of_their_own_and_a_note_check_none(self):
         core.ops_add(self.c, "site", "jobs", "plugin", {"command": "check_jobs", "fail_after": 1, "subject": True},
                      actor="boss")

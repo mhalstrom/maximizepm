@@ -416,6 +416,23 @@ class LaunchAgent(unittest.TestCase):
         b = core.go(self.c, self.dir.name, r["started"][op], focus=f"item:{op}")
         self.assertEqual(b["item"]["id"], op)
 
+    def test_a_fault_item_starts_an_investigation_at_once_and_at_most_two_run(self):
+        # #5432: fault items come first and start also when max_sessions are live, at most ops_max_investigations.
+        core.project_add(self.c, "site", path=self.dir.name)
+        core.config_set(self.c, "max_sessions", "1")
+        core.register(self.c, "busy")
+        x = core.item_add(self.c, "site", "page")["id"]
+        core.claim(self.c, x, "busy")  # the one slot is taken
+        plain = core.item_add(self.c, "site", "Read the logs of the failed login", kind="operational")["id"]
+        faults = [core.item_add(self.c, "site", f"ops:site:c{i} C{i} CRITICAL - down", kind="operational", priority=1,
+                                doer="ai")["id"] for i in range(3)]
+        sent = []
+        r = server.auto_operational(self.c, runner=sent.append)
+        self.assertEqual(sorted(r["started"]), faults[:2])
+        self.assertEqual(r["failed"], {faults[2]: "ops_max_investigations 2", plain: "max_sessions 1"})
+        self.assertEqual(core.investigations_live(self.c), 2)
+        self.assertEqual(server.auto_operational(self.c, runner=sent.append)["started"], {})  # still two at a time
+
     def _release(self, owner="ops", review="on"):
         """A target web with one project, a release of one item by dev, and its review; returns (review, deploy)."""
         core.target_add(self.c, "web", "push, then smoke test")
