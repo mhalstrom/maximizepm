@@ -1,7 +1,7 @@
 {
   "name": "maximizepm",
   "productName": "MaximizePM",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MaximizePM dashboard in its own window: runs maxpm serve and shows the page.",
   "main": "main.js",
   "license": "MIT",
