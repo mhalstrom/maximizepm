@@ -1565,6 +1565,31 @@ try {
         self.assertEqual(got["head"], got["row"])
         self.assertEqual(got["gone"], {"state": "gone", "state_label": "ended"})
 
+class BrowserPressed(Base):
+    """#5476: the Browser button of the session head shows as pressed while the side panel shows a project's
+    browser, as Items and Artifacts do for their lists."""
+
+    def test_the_browser_button_follows_the_panel(self):
+        driver = DRIVE_HEAD + r'''
+try {
+  await until(() => q("#sessTitle").textContent === "ag" && q('.sess-lists [data-sp-browser]'), "the head of ag");
+  const sp = await import("/components/sidePanel.js");
+  const st = () => ["items", "browser"].map(k => { const b = q(k === "items" ? '.sess-lists [data-sp-open="items"]' : ".sess-lists [data-sp-browser]");
+    return [b.getAttribute("aria-pressed"), b.classList.contains("on")]; });
+  const before = st();
+  sp.openTool("browser:site", "Browser · site", (box) => { box.textContent = "the browser"; });
+  await until(() => q(".sp-tab.on") && /Browser/.test(q(".sp-tab.on").textContent), "the browser tab");
+  const browser = st();
+  q('.sess-lists [data-sp-open="items"]').click();
+  await until(() => q('.sess-lists [data-sp-open="items"]').getAttribute("aria-pressed") === "true", "Items");
+  post({ before, browser, items: st() });
+} catch (e) { post({ error: String(e.stack || e) }); }
+'''
+        got = drive_page(self, driver)
+        self.assertEqual(got["before"], [["false", False], ["false", False]])
+        self.assertEqual(got["browser"], [["false", False], ["true", True]])
+        self.assertEqual(got["items"], [["true", True], ["false", False]])
+
 class ExpertCache(Base):
     """#5023: an expert's prompt cache from its transcript: warm with the minutes left, or cold, and what the next
     message costs at the read or the write price of the lifetime in force."""

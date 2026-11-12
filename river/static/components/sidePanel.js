@@ -104,11 +104,13 @@ function renderTabs() {
   markPair();
   save();
 }
-// Items and Artifacts in the session head (#5115): a tab pair; the one whose list the open panel shows is on.
+// Items, Artifacts and Browser in the session head (#5115): the one whose list or browser the open panel shows is on
+// (Browser: a tab of a project's browser, #5476).
 function markPair() {
   const open = !panel().classList.contains("hidden");
-  for (const b of document.querySelectorAll(".sess-lists [data-sp-open]")) {
-    const yes = open && on === b.dataset.spOpen;
+  const cur = (tabs.find(t => t.id === on) || {}).target || "";
+  for (const b of document.querySelectorAll(".sess-lists [data-sp-open], .sess-lists [data-sp-browser]")) {
+    const yes = open && ("spBrowser" in b.dataset ? cur.startsWith("tool:browser:") : on === b.dataset.spOpen);
     b.classList.toggle("on", yes); b.setAttribute("aria-pressed", String(yes));
   }
 }
