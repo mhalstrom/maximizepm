@@ -280,6 +280,10 @@ DEFAULT_SETTINGS = {
     # same for one pass, git shows no change in the code folder that is not committed (an agent in the middle of an
     # edit), and the new code loads. maxpm serve --restart does it at once. off: only a person restarts it.
     "serve_reload": "on",
+    # The least time between two such starts (#5469): each start makes every open page load the whole state again,
+    # and a busy day had a commit to the code every 7 minutes. New code waits until serve has run this long. 0s: at
+    # once.
+    "serve_reload_min": "15m",
     # While this computer is connected to the relay (maxpm connect), maxpm serve keeps it from idle sleep
     # (macOS caffeinate -i), so the tunnel answers while the person is away. The display still sleeps; the cost
     # is the power of a computer that stays on (a few watts for a Mac mini or a MacBook on its charger). off:
@@ -1530,7 +1534,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)

@@ -3525,7 +3525,8 @@ RELOAD = {"seen": None, "bad": None}
 def reload_ready(conn):
     """One look of the loop of maxpm serve (every notify_interval): the code id to start again for, or None.
     The code on disk must be newer than the code this server runs (code_stale), the same as on the pass
-    before (nobody writes it now), committed (in a git clone), and it must load. Setting serve_reload."""
+    before (nobody writes it now), committed (in a git clone), and it must load, and the server has run for
+    serve_reload_min. Settings serve_reload and serve_reload_min."""
     if DESKTOP or DEV["on"] or core.setting(conn, "serve_reload") != "on":
         return None  # the app's code changes with the app; dev mode restarts on every change by itself
     cur = _code_id()
@@ -3537,6 +3538,8 @@ def reload_ready(conn):
         return None
     if cur == RELOAD["bad"] or _code_dirty():
         return None
+    if time.time() - float(BOOT) < core.parse_duration(core.setting(conn, "serve_reload_min")).total_seconds():
+        return None  # it started a short time ago: the new code waits (#5469); maxpm serve --restart does not
     why = _code_loads()
     if why:
         RELOAD["bad"] = cur

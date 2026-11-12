@@ -658,7 +658,8 @@ blocker trees, the agent registry, capacity, settings, and the web page.
   An agent that holds an item and reports nothing for `activity_silence`
   (10m) alerts the manager once.
 - `maxpm serve` runs new code by itself: after a commit or a pull that
-  changes the code, it starts again within a minute or two, on the same port.
+  changes the code, it starts again on the same port, at most once in
+  `serve_reload_min` (15m; each start makes every open page load again).
   It waits while git shows a change in the code that is not committed, and it
   keeps the old code when the new code does not load. `maxpm serve --restart`
   does it at once and waits until the page answers.

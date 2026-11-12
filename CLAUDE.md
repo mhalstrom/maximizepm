@@ -15,7 +15,7 @@ When the user says "go" (or asks you to take work from the queue), run
   part for which element, and the tokens. `tests/test_ui_parts.py` refuses a raw button, a dialog
   of its own, or a literal color or px size in a view.
 - After a commit that changes `river/*.py`, `maxpm serve` starts again by itself
-  within a minute or two and runs the new code. To have it at once, run
+  and runs the new code, at most once in `serve_reload_min` (15m). To have it at once, run
   `maxpm serve --restart`: it waits until the page answers. Never add an item
   for a person to restart `maxpm serve`.
 

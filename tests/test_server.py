@@ -3710,6 +3710,7 @@ class ServeReload(unittest.TestCase):
         self.dir.cleanup()
 
     def test_serve_starts_again_for_code_that_stayed_is_committed_and_loads(self):
+        core.config_set(self.c, "serve_reload_min", "0s")  # the wait between two starts: its own test
         code, dirty, loads, asked = [server.BOOT_CODE], [False], [None], []
         with mock.patch.object(server, "_code_id", lambda: code[0]), \
                 mock.patch.object(server, "_code_dirty", lambda: dirty[0]), \
@@ -3744,6 +3745,17 @@ class ServeReload(unittest.TestCase):
             self.assertIsNone(ready())
             with self.assertRaisesRegex(RiverError, "serve_reload is on or off"):
                 core.config_set(self.c, "serve_reload", "maybe")
+
+    def test_new_code_waits_until_serve_has_run_serve_reload_min(self):
+        # Each start makes every open page load the whole state again: at most one in serve_reload_min (#5469).
+        with mock.patch.object(server, "_code_id", lambda: "2"), mock.patch.object(server, "_code_dirty", lambda: False), \
+                mock.patch.object(server, "_code_loads", lambda: None), \
+                mock.patch.object(server, "BOOT", str(time.time() - 300)):
+            self.assertEqual((server.reload_ready(self.c), server.reload_ready(self.c)), (None, None))  # 5 min < 15m
+            core.config_set(self.c, "serve_reload_min", "4m")
+            self.assertEqual(server.reload_ready(self.c), "2")
+        with self.assertRaisesRegex(RiverError, "bad duration"):
+            core.config_set(self.c, "serve_reload_min", "soon")
 
     def test_the_new_server_keeps_the_arguments_but_does_not_open_the_page_again(self):
         with mock.patch.object(sys, "argv", ["/x/bin/maxpm", "serve", "--port", "8765", "--open"]):
