@@ -367,7 +367,7 @@ button.srow-it { cursor: pointer; }
 .set-head { margin: var(--sp-3) 0; }
 /* The third column has one width in every row (Change now, restart, now, fixed), so each field ends at the same x (#5322). */
 .set-row { display: grid; grid-template-columns: var(--w-label) minmax(0, 1fr) var(--w-s); gap: var(--sp-1) var(--sp-4); align-items: center; padding: var(--sp-3) 0; border-top: var(--hair) solid var(--line); }
-.set-row select, .set-row input { font: inherit; background: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); min-width: 0; width: 100%; box-sizing: border-box; }
+.set-row select, .set-row input { font: inherit; background-color: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-1) var(--sp-2); min-width: 0; width: 100%; box-sizing: border-box; }
 .set-row > .btn, .set-row > span.muted { justify-self: start; white-space: nowrap; }
 .set-row [data-other] { grid-column: 2; }
 .set-sub { grid-column: 2 / 4; font-size: var(--fs-s); }

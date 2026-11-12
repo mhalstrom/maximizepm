@@ -161,3 +161,25 @@ class Dialogs(unittest.TestCase):
         text = (STATIC / "components" / "dialog.js").read_text()
         self.assertIn('if (!el.hasAttribute("role")) el.setAttribute("role", "dialog");', text)
         self.assertIn('el.setAttribute("aria-modal", "true");', text)
+
+
+class Selects(unittest.TestCase):
+    def test_no_rule_takes_the_phone_arrow_off_a_select(self):
+        # phone.css draws a select's arrow as a background image; a later or stronger rule with the background
+        # shorthand on a select removes it (the session Settings rows, #5421). Only the base rule of app.css, which
+        # phone.css follows, may use it; any other rule sets background-color.
+        found = []
+        for path in sorted(STATIC.rglob("*.css")):
+            if "vendor" in path.parts:
+                continue
+            text = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+            for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", text):
+                sel = " ".join(sel.split())
+                names = [s.strip() for s in sel.split(",")]
+                if not any(re.search(r"(^|[\s>])select\b(?![-\w])", s) for s in names):
+                    continue
+                if sel == "select, input, textarea":
+                    continue
+                if re.search(r"(^|;)\s*background\s*:", body):
+                    found.append(f"{path.name}: {sel}")
+        self.assertEqual(found, [])

@@ -281,7 +281,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .tabulator .tabulator-header .tabulator-col { background: transparent; border-right: 0; }
 .tabulator .tabulator-header .tabulator-col .tabulator-col-content { padding: 6px 8px; }
 .tabulator .tabulator-header .tabulator-col .tabulator-header-filter input,
-.tabulator .tabulator-header .tabulator-col .tabulator-header-filter select { background: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; font-weight: normal; }
+.tabulator .tabulator-header .tabulator-col .tabulator-header-filter select { background-color: var(--panel); border: 1px solid var(--line); border-radius: 5px; padding: 3px 6px; font-weight: normal; }
 .tabulator .tabulator-header .tabulator-col.tabulator-sortable[aria-sort=none] .tabulator-col-content .tabulator-col-sorter .tabulator-arrow { border-bottom-color: var(--muted); opacity: .5; }
 .tabulator .tabulator-header .tabulator-col.tabulator-sortable[aria-sort=ascending] .tabulator-col-content .tabulator-col-sorter .tabulator-arrow { border-bottom-color: var(--accent); }
 .tabulator .tabulator-header .tabulator-col.tabulator-sortable[aria-sort=descending] .tabulator-col-content .tabulator-col-sorter .tabulator-arrow { border-top-color: var(--accent); }
