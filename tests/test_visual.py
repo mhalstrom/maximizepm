@@ -154,7 +154,10 @@ class RealChrome(Base):
 
     def test_run_approve_match_and_differ(self):
         kw = {"widths": "600", "themes": "light,dark", "masks": [".clock"], "wait": 0.2}
-        self.assertEqual(visual.run("t", self.page("Some text.", "12:00"), **kw)["status"], 1)
+        first = visual.run("t", self.page("Some text.", "12:00"), **kw)
+        if first["status"] == 3 and "could not be shot" in first["summary"]:
+            self.skipTest(f"Chrome does not start here (an agent sandbox): {first['summary']}")  # #5497
+        self.assertEqual(first["status"], 1, first["summary"])
         visual.approve(self.c, "t", actor="mark")
         res = visual.run("t", self.page("Some text.", "13:59"), **kw)
         self.assertEqual(res["status"], 0, visual.lines(res)[0])
