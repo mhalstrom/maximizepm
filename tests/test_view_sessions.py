@@ -1567,7 +1567,7 @@ try {
 
 class BrowserPressed(Base):
     """#5476: the Browser button of the session head shows as pressed while the side panel shows a project's
-    browser, as Items and Artifacts do for their lists."""
+    browser, as Items and Artifacts do for their lists. #5477: no address bar over the browser."""
 
     def test_the_browser_button_follows_the_panel(self):
         driver = DRIVE_HEAD + r'''
@@ -1579,13 +1579,18 @@ try {
   const before = st();
   sp.openTool("browser:site", "Browser · site", (box) => { box.textContent = "the browser"; });
   await until(() => q(".sp-tab.on") && /Browser/.test(q(".sp-tab.on").textContent), "the browser tab");
-  const browser = st();
+  const browser = st(), bar = () => q("#spForm").getClientRects().length > 0;
+  const barOnBrowser = bar();  // #5477: no address bar over the browser, which has its own
   q('.sess-lists [data-sp-open="items"]').click();
   await until(() => q('.sess-lists [data-sp-open="items"]').getAttribute("aria-pressed") === "true", "Items");
-  post({ before, browser, items: st() });
+  const barOnItems = bar(), items = st();
+  window.riverOpenInPanel("ag", "#ITEM");
+  await until(() => q(".sp-tab.on") && /#ITEM/.test(q(".sp-tab.on").textContent), "the item tab");
+  post({ before, browser, items, bars: [barOnBrowser, barOnItems, bar(), q("#spAddr").value] });
 } catch (e) { post({ error: String(e.stack || e) }); }
 '''
-        got = drive_page(self, driver)
+        got = drive_page(self, driver.replace("ITEM", str(self.it)))
+        self.assertEqual(got["bars"], [False, True, True, f"#{self.it}"])
         self.assertEqual(got["before"], [["false", False], ["false", False]])
         self.assertEqual(got["browser"], [["false", False], ["true", True]])
         self.assertEqual(got["items"], [["true", True], ["false", False]])

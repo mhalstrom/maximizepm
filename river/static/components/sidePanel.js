@@ -115,11 +115,19 @@ function markPair() {
   }
 }
 
+// The bar of a tab's address, Find, Reload, New tab and Full screen: not over a tool (a project's browser has its own
+// bar, and tool:browser:<project> is no address to show, #5477).
+function frameBar(yes) {
+  $("#spForm").classList.toggle("hidden", !yes);
+  if (!yes && findOpen()) closeFind();
+}
+
 async function show(t) {
   on = t.id;
   renderTabs();
   tell();
   $("#spAddr").value = itemOf(t.target) ? "#" + itemOf(t.target) : t.target;
+  frameBar(kindOf(t.target) !== "tool");
   const box = $("#spBody");
   box.replaceChildren();
   const note = (html) => { const d = document.createElement("div"); d.className = "sp-note"; d.innerHTML = html; box.append(d); };
@@ -737,7 +745,7 @@ export async function openFullScreen(target, session = "", item = "") {
 // the rows of the Artifacts tab). A click on an item or an artifact opens it in a tab here. After the last tab
 // closes, the Artifacts list shows (#4646). quiet: read again in place, with no "Reading" line (every 10 seconds).
 async function showList(kind = "artifacts", quiet = false) {
-  if (!quiet || on !== kind) { on = kind; renderTabs(); tell(); $("#spAddr").value = ""; }
+  if (!quiet || on !== kind) { on = kind; renderTabs(); tell(); $("#spAddr").value = ""; frameBar(true); }
   const box = $("#spBody"), name = session;
   let list = box.querySelector(`.sp-list[data-list="${kind}"] .sp-rows`);
   if (!quiet || !list) {
