@@ -7869,6 +7869,7 @@ class Backlog(Base):
 
     def test_the_columns_come_by_migration(self):
         self.c.execute("DROP INDEX items_light")  # an old queue has no index on backlog_at either (#5524)
+        self.c.execute("DROP INDEX items_project_status")  # nor this one (#5580)
         self.c.execute("ALTER TABLE items DROP COLUMN backlog_at")
         self.c.execute("ALTER TABLE items DROP COLUMN backlog_note")
         self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # an old queue has no schema id of this code (#5396)

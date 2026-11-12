@@ -1600,6 +1600,15 @@ def _migrate(conn):
                       ("items_held_for", "items(held_for) WHERE held_for<>''"),
                       ("items_fresh_start", "items(fresh_start) WHERE fresh_start IS NOT NULL"),
                       ("messages_held_for", "messages(held_for) WHERE held_for IS NOT NULL"),
+                      # The nudges of each sweep (#5580): open questions and unread messages not yet nudged.
+                      ("messages_nudge_question", "messages(to_agent) WHERE kind='question' AND state='open' "
+                       "AND nudged_at IS NULL"),
+                      ("messages_nudge_unread", "messages(to_agent) WHERE kind IN ('alert','note','offer') "
+                       "AND read_at IS NULL AND nudged_at IS NULL"),
+                      # The open questions that an agent asked (asked_open, on each go and Stop hook), and the counts
+                      # of each project (project_list): both read every row before (#5580).
+                      ("messages_open_question", "messages(from_agent) WHERE kind='question' AND state='open'"),
+                      ("items_project_status", "items(project_id, status, backlog_at)"),
                       ("events_actor", "events(actor, id)")):
         conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {sql}")
     # Items held before the holds table existed: their hold starts at the claim.
@@ -9232,6 +9241,7 @@ def _idf(conn):
 
 
 _DF = {}  # queue file -> (key, df, n): the word table of _df, which a runner of serve keeps between commands (#5522)
+_DF_STAMP = {}  # queue file -> (connection, data_version, total_changes) when _DF was last checked (#5580)
 
 
 def _df(conn):
@@ -9240,9 +9250,16 @@ def _df(conn):
     of every work item took 0.2 s of each maxpm show, add and search (#5491). A runner keeps the table in memory, and
     when only new work items came since its key (the count and the length grew by theirs), it adds their words: each
     add made the next command count every item again, 58 ms on a queue of 5,500 items (#5522)."""
+    f = conn.execute("PRAGMA database_list").fetchone()[2]
+    # Nothing written since the last call, by this connection (total_changes) or another (data_version): the same table
+    # without the key's read of every work item's text (#5580: go called it twice, 3 ms each).
+    stamp = (id(conn), conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes)
+    if f in _DF and _DF_STAMP.get(f) == stamp:
+        key, df, n = _DF[f]
+        return df, n, key
     key = list(conn.execute("SELECT count(*), max(id), total(length(title) + coalesce(length(context), 0)) "
                             "FROM items WHERE kind='work'").fetchone())
-    f = conn.execute("PRAGMA database_list").fetchone()[2]
+    _DF_STAMP[f] = stamp
     path = Path(f + "-words.json") if f else None
     got = None
     if f in _DF:
@@ -11468,11 +11485,15 @@ def _question_nudges(conn):
               f"and has not answered your question #{r['id']}. Ask someone else"
               + (f": maxpm ask --holder-of {r['item_id']} \"...\", or maxpm who" if r["item_id"] else ": maxpm who"),
               to=r["from_agent"], item_id=r["item_id"], reply_to=r["id"])
-    # Other messages (alerts, notes, offers) that a gone agent never read: tell the sender once.
+    # Other messages (alerts, notes, offers) that a gone agent never read: tell the sender once. The state of each
+    # receiver once, not once for each of its messages (#5580: 103 messages to a few agents, on every command).
+    states = {}
     for r in conn.execute("SELECT m.id, m.kind, m.from_agent, m.to_agent, m.item_id, a.last_seen FROM messages m "
                           "JOIN agents a ON a.name=m.to_agent WHERE m.kind IN ('alert','note','offer') "
                           "AND m.read_at IS NULL AND m.nudged_at IS NULL AND m.from_agent<>'maxpm'").fetchall():
-        if _agent_state(conn, {"name": r["to_agent"], "last_seen": r["last_seen"]}) != "gone":
+        if r["to_agent"] not in states:
+            states[r["to_agent"]] = _agent_state(conn, {"name": r["to_agent"], "last_seen": r["last_seen"]})
+        if states[r["to_agent"]] != "gone":
             continue
         conn.execute("UPDATE messages SET nudged_at=? WHERE id=?", (iso(now()), r["id"]))
         _send(conn, "notice", "maxpm", f"{r['to_agent']} is gone (last seen {r['last_seen'][:16].replace('T', ' ')} UTC) "
@@ -12668,7 +12689,8 @@ def synced(conn, item_id, ref=None, actor=None):
 def unsynced(conn, actor=None):
     """Closed items with tracker links not yet updated; with actor, only the items that agent closed."""
     rows = conn.execute(
-        "SELECT DISTINCT i.id FROM items i JOIN item_refs r ON r.item_id=i.id WHERE r.synced_at IS NULL "
+        # From the few tracker links, not from every closed item (#5580: 3 ms of each go).
+        "SELECT DISTINCT i.id FROM item_refs r CROSS JOIN items i ON i.id=r.item_id WHERE r.synced_at IS NULL "
         f"AND i.status IN {CLOSED_STATES}" + (" AND i.assignee=?" if actor else "") + " ORDER BY i.closed_at",
         (actor,) if actor else ()).fetchall()
     ann = annotate(conn, closed=False) if rows else {}
