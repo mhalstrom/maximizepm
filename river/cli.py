@@ -1022,6 +1022,22 @@ def build_parser():
                        "a line for each subject, exit 0 OK or 2 CRITICAL), for a cmd check with --subject on: "
                        + "; ".join(f"{k}: {v}" for k, v in core.OPS_PROBES.items()))
     x.add_argument("name", choices=list(core.OPS_PROBES))
+    x = ops.add_parser("logs", help="a plugin: the new lines of a log since its last run against a pattern and limits "
+                       "(maxpm ops add <scope> <name> plugin --command \"maxpm ops logs --file <path>\")")
+    x.add_argument("--file", help="a log file; the next run reads from where this one stopped (a rotated file from "
+                   "its start)")
+    x.add_argument("--ssh", help="the host of --file: read it through ssh in batch mode")
+    x.add_argument("--command", help="a command that prints the log, such as docker logs app --since {since} or "
+                   "journalctl -u app --since @{since_epoch}; the lines after the last run's last lines count")
+    x.add_argument("--pattern", help="the lines that count, a regular expression (default: ERROR, CRITICAL, FATAL, "
+                   "Traceback, panic)")
+    x.add_argument("--ignore", help="the lines that never count, a regular expression")
+    x.add_argument("--warning", type=float, help="WARNING from this many matching lines")
+    x.add_argument("--critical", type=float, help="CRITICAL from this many matching lines (with neither: 1)")
+    x.add_argument("--per-minute", action="store_true", help="the limits are lines a minute since the last run")
+    x.add_argument("--from-start", action="store_true", help="the first run reads the old lines too")
+    x.add_argument("--name", help="the name of its read position (default: the check that runs it)")
+    x.add_argument("--timeout", type=float, default=60, help="seconds for the command or ssh (default 60)")
     x = ops.add_parser("visual", help="a page looks as it was approved: screenshots at set widths and themes against "
                        "approved ones, as a plugin check (maxpm ops add <scope> <name> plugin --command \"maxpm ops "
                        "visual run <name> --url <address>\" --timeout 2m)")
@@ -1841,6 +1857,12 @@ def run(argv=None):
         return 0
     if args.cmd == "connect":
         return connect_command(args)
+    if args.cmd == "ops" and args.ocmd == "logs":  # a plugin: its own lines only, no briefing, no footer
+        from .plugins import logs
+        res = logs.run(args.name, args.file, args.ssh, args.command, args.pattern, args.ignore, args.warning,
+                       args.critical, args.per_minute, args.from_start, args.timeout)
+        print(json.dumps(res) if args.json else "\n".join(logs.lines(res)))
+        return res["status"]
     if args.cmd == "ops" and args.ocmd == "visual" and args.vcmd in ("run", "show"):  # a plugin: its own lines only
         from .plugins import visual
         if args.vcmd == "show":
