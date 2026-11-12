@@ -8763,25 +8763,39 @@ def _idf(conn):
     return idf
 
 
+_DF = {}  # queue file -> (key, df, n): the word table of _df, which a runner of serve keeps between commands (#5522)
+
+
 def _df(conn):
     """(document frequency of each word, number of work items), from the cache file beside the database while its
     key matches: the count, the last id and the length of the work items' titles and contexts. Counting the words
-    of every work item took 0.2 s of each maxpm show, add and search (#5491)."""
+    of every work item took 0.2 s of each maxpm show, add and search (#5491). A runner keeps the table in memory, and
+    when only new work items came since its key (the count and the length grew by theirs), it adds their words: each
+    add made the next command count every item again, 58 ms on a queue of 5,500 items (#5522)."""
     key = list(conn.execute("SELECT count(*), max(id), total(length(title) + coalesce(length(context), 0)) "
                             "FROM items WHERE kind='work'").fetchone())
     f = conn.execute("PRAGMA database_list").fetchone()[2]
     path = Path(f + "-words.json") if f else None
-    if path:
+    got = None
+    if f in _DF:
+        got = dict(zip(("key", "df", "n"), _DF[f]))
+    elif path:
         try:
             got = json.loads(path.read_text())
-            if got["key"] == key:
-                return got["df"], got["n"], key
         except (OSError, ValueError, KeyError, TypeError):
-            pass
-    df, n = collections.Counter(), 0
-    for title, context in conn.execute("SELECT title, context FROM items WHERE kind='work'").fetchall():
-        n += 1
-        df.update(set(_words_of(title or "")).union(_words_of(context or "")))
+            got = None
+    if isinstance(got, dict) and got.get("key") == key:
+        _DF[f] = (key, got["df"], got["n"])
+        return got["df"], got["n"], key
+    grown = _df_grow(conn, got, key) if isinstance(got, dict) else None
+    if grown:
+        df, n = grown
+    else:
+        df, n = collections.Counter(), 0
+        for title, context in conn.execute("SELECT title, context FROM items WHERE kind='work'").fetchall():
+            n += 1
+            df.update(set(_words_of(title or "")).union(_words_of(context or "")))
+    _DF[f] = (key, df, n)
     if path:
         tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         try:
@@ -8790,6 +8804,24 @@ def _df(conn):
         except OSError:
             tmp.unlink(missing_ok=True)
     return df, n, key
+
+
+def _df_grow(conn, got, key):
+    """(df, n) of a word table `got` with the work items added after its key, or None when the change was more than
+    new items (an edit, a removal, a kind that changed): the caller counts every item then."""
+    try:
+        (n0, last, total), df0, n = got["key"], got["df"], got["n"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(df0, dict) or key[0] <= n0 or n != n0:
+        return None
+    rows = conn.execute("SELECT title, context FROM items WHERE kind='work' AND id>?", (last or 0,)).fetchall()
+    if n0 + len(rows) != key[0] or total + sum(len(t or "") + len(c or "") for t, c in rows) != key[2]:
+        return None
+    df = collections.Counter(df0)  # a copy: an idf made before keeps its own table
+    for title, context in rows:
+        df.update(set(_words_of(title or "")).union(_words_of(context or "")))
+    return df, n0 + len(rows)
 
 
 _VECTORS = {}  # item id -> (word table key, title, context, vector): a runner of serve keeps them (#5501)
@@ -8863,15 +8895,29 @@ def _idents(text):
     return out
 
 
+_IDENTS = {}  # item id -> ((title, context, notes), identifiers): a runner of serve keeps them (#5522)
+
+
 def _item_idents(d):
-    return _idents(" ".join(x or "" for x in (d["title"], d["context"], d["notes"])))
+    """The identifiers of an item's title, context and notes, kept while those are the same: each close read those
+    of every open item again, 26 ms of maxpm done with 164 open items (#5522)."""
+    text = (d["title"], d["context"], d["notes"])
+    got = _IDENTS.get(d.get("id"))
+    if got and got[0] == text:
+        return got[1]
+    out = frozenset(_idents(" ".join(x or "" for x in text)))
+    if d.get("id") is not None:
+        _IDENTS[d["id"]] = (text, out)
+    return out
 
 
 def _ident_counts(rows):
     """How many of the rows (open items) name each identifier."""
     n = {}
     for d in rows:
-        for x in d.setdefault("idents", _item_idents(d)):
+        if "idents" not in d:
+            d["idents"] = _item_idents(d)
+        for x in d["idents"]:
             n[x] = n.get(x, 0) + 1
     return n
 

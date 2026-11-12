@@ -7831,6 +7831,47 @@ class TextQueue(Base):
 class SimilarWork(TextQueue):
     """Find related items before work repeats (#2257): search, the check of add, related, duplicates, merge."""
 
+    def test_the_word_table_adds_new_items_and_counts_all_again_after_an_edit(self):
+        """#5522: a runner keeps the word table; new work items add their words to it, and any other change (an edit
+        of a title) counts every item again. Each way gives the table that a count of every item gives."""
+        def fresh():
+            core._DF.clear()
+            for f in __import__("pathlib").Path(self.dir.name).glob("*-words.json"):
+                f.unlink()
+            return core._df(self.c)[:2]
+        grew = []
+        real = core._df_grow
+        core._df_grow = lambda *a: grew.append(real(*a)) or grew[-1]
+        self.addCleanup(setattr, core, "_df_grow", real)
+        core._df(self.c)
+        a = self.add("Worktree hooks refuse the release", context="the gate script")
+        grew.clear()
+        df, n, _ = core._df(self.c)  # grown from the table in memory
+        self.assertTrue(grew and grew[0])
+        self.assertEqual((dict(df), n), tuple((dict(x) if i == 0 else x) for i, x in enumerate(fresh())))
+        self.assertEqual(df[core._word("worktree")], 1)
+        core._DF.clear()  # another process: the file beside the queue, then the new item
+        self.add("Worktree page")
+        grew.clear()
+        df, n, _ = core._df(self.c)
+        self.assertTrue(grew and grew[0])
+        self.assertEqual((dict(df), n), tuple((dict(x) if i == 0 else x) for i, x in enumerate(fresh())))
+        self.assertEqual(df[core._word("worktree")], 2)
+        core.item_edit(self.c, a, title="Gate hooks refuse the release", actor="t")
+        grew.clear()
+        df, n, _ = core._df(self.c)
+        self.assertEqual(grew, [None])  # an edit: every item is counted again
+        self.assertEqual(df[core._word("worktree")], 1)
+        self.assertEqual((dict(df), n), tuple((dict(x) if i == 0 else x) for i, x in enumerate(fresh())))
+
+    def test_identifiers_of_an_item_are_kept_while_its_text_is_the_same(self):
+        """#5522: a close reads the identifiers of every open item; they are read again only when its text changed."""
+        d = {"id": 9001, "title": "Fix river/core.py", "context": "see 'the gate hook script'", "notes": None}
+        first = core._item_idents(d)
+        self.assertIs(core._item_idents(dict(d)), first)
+        self.assertEqual(first, frozenset({"river/core.py", "'the gate hook script'"}))
+        self.assertEqual(core._item_idents({**d, "notes": "and docs/guide.md"}), first | {"docs/guide.md"})
+
     def test_search_finds_every_word_in_any_state_newest_first(self):
         a = self.add("Worktree script fails during a release", context="the hook refuses HEAD")
         b = self.add("Release notes page")
