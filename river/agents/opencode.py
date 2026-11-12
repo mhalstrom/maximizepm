@@ -37,6 +37,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -220,13 +221,21 @@ def _own_dir():
 
 MODELS_RUNNER = None  # a test hook: a function () -> the text of `opencode models`
 _models = {"at": 0.0, "list": None}
+_models_lock = threading.Lock()
 
 
 def read_models():
     """The "provider/model" ids that `opencode models --standalone` lists (the providers a person connected, and
-    OpenCode's free ones), read at most once in ten minutes; None when the CLI does not answer."""
+    OpenCode's free ones), read at most once in ten minutes; None when the CLI does not answer. A CLI that gave no list
+    is asked again only after the ten minutes too, and one read at a time (#5428: the page's state reads it, and
+    each read starts the CLI for seconds)."""
+    with _models_lock:
+        return _read_models()
+
+
+def _read_models():
     if _models["list"] is not None and time.time() - _models["at"] < 600:
-        return list(_models["list"])
+        return list(_models["list"]) or None
     try:
         if MODELS_RUNNER:
             out = MODELS_RUNNER()
@@ -234,12 +243,10 @@ def read_models():
             out = subprocess.run(["opencode", "models", "--standalone"], capture_output=True, text=True,
                                  timeout=60).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
+        out = ""
     got = [ln.strip() for ln in (out or "").splitlines() if re.fullmatch(r"[\w.-]+/\S+", ln.strip())]
-    if not got:
-        return None
     _models.update(at=time.time(), list=got)
-    return list(got)
+    return list(got) or None
 
 
 # ---------------------------------------------------------------------------------------------------------------

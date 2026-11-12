@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -3838,6 +3840,62 @@ class ServeReload(unittest.TestCase):
             with self.assertRaisesRegex(RiverError, "no maxpm serve answers"):
                 cli.ask_server(self.c, "serve_status", {}, retries=1)
             self.assertEqual(len(tries), 2)
+
+
+class StateCache(unittest.TestCase):
+    """/api/state builds at most once in STATE_TTL and every page shares it; an action of the page builds anew
+    (#5428: each open page polled a full build every 3 s, 200-300% CPU on 5000 items and 20 sessions)."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        os.environ["MAXPM_DB"] = os.path.join(self.dir.name, "t.db")
+        self.c = core.connect()
+        core.project_add(self.c, "web")
+        mock.patch.object(server, "STATE_TTL", 60).start()
+        mock.patch.dict(server._state_cache, clear=True).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        self.c.close()
+        os.environ.pop("MAXPM_DB", None)
+        self.dir.cleanup()
+
+    def test_pages_share_one_build_until_an_action(self):
+        built = []
+        real = core.state
+        with mock.patch.object(core, "state", side_effect=lambda conn, closed=True: built.append(closed) or real(conn, closed)):
+            a = server.page_state(False)
+            b = server.page_state(False)
+            self.assertIs(a, b)
+            self.assertEqual(built, [False])
+            server.page_state(True)  # with the closed items: a build of its own
+            self.assertEqual(built, [False, True])
+            core.item_add(self.c, "web", "New work")
+            self.assertIs(server.page_state(False), a)  # a change outside the server shows at the next build
+            server.state_changed()  # an action through the server
+            c = server.page_state(False)
+            self.assertIsNot(c, a)
+            self.assertIn("New work", [i["title"] for i in c["items"]])
+
+    def test_a_poll_during_a_build_waits_for_it(self):
+        gate, built = threading.Event(), []
+        real = core.state
+
+        def slow(conn, closed=True):
+            built.append(1)
+            gate.wait(5)
+            return real(conn, closed)
+        got = []
+        with mock.patch.object(core, "state", side_effect=slow):
+            ts = [threading.Thread(target=lambda: got.append(server.page_state(False))) for _ in range(3)]
+            for t in ts:
+                t.start()
+            time.sleep(0.2)
+            gate.set()
+            for t in ts:
+                t.join(10)
+        self.assertEqual((len(built), len(got)), (1, 3))
+        self.assertTrue(got[0] is got[1] is got[2])
 
 
 class ServeLoop(unittest.TestCase):

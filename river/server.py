@@ -3999,6 +3999,70 @@ def needs_you_view(conn, human=None, sync=True):
     return rows
 
 
+# The page's state, built at most once in STATE_TTL seconds and shared by every page that polls (#5428): each open
+# page (a browser tab, the desktop app, a phone through the relay) asks every three seconds, and one build reads the
+# whole queue (about 2 s of CPU on a queue of 5000 items and 20 sessions). A request that comes while a build runs
+# waits for it instead of starting its own. An action of the page (POST /api/action) makes the next poll build anew,
+# so the page shows its own change at once.
+STATE_TTL = 2.0
+_state_cache = {}
+_state_build = threading.Lock()
+_state_gen = [0]
+
+
+def state_changed():
+    """The next /api/state builds anew (after an action through this server)."""
+    _state_gen[0] += 1
+
+
+def _state_hit(key):
+    hit = _state_cache.get(key)
+    if hit and hit[1] == _state_gen[0] and time.time() - hit[0] < STATE_TTL:
+        return hit[2]
+    return None
+
+
+def page_state(closed):
+    """The state for /api/state: closed says whether done and dropped items are in it. The callers only read it."""
+    key = bool(closed)
+    hit = _state_hit(key)
+    if hit is not None:
+        return hit
+    with _state_build:
+        hit = _state_hit(key)
+        if hit is not None:
+            return hit
+        gen = _state_gen[0]  # an action during the build makes this build old at once
+        conn = core.connect()
+        try:
+            core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
+            st = core.state(conn, closed=key)
+            st["goals"] = core.goal_list(conn, include_complete=True)
+            if DEV["on"]:
+                st["dev_build"] = _build_id()
+            st["page_build"] = page_build()
+            st["state_shape"] = STATE_SHAPE
+            st["desktop"] = DESKTOP
+            st["dictation"] = dictation.engine()  # "mac": speech to text on this Mac (#5107); else the browser's
+            st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
+            st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
+            from . import sessions
+            # The agents whose session the Sessions tab shows: the Board's Open session goes there (#4687).
+            run = sessions.running(conn, st["terminals"])
+            st["sessions"] = [a["name"] for a in run]
+            # What each running session works on, the name the page shows for it (#4695).
+            st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
+            st["relay"] = relay.status()
+            st["canvas_opens"] = canvas_opens()  # maxpm canvas open: the page opens the canvas (#4783)
+            from .routes import browser as browser_routes
+            st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
+            st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
+            _state_cache[key] = (time.time(), gen, st)
+            return st
+        finally:
+            conn.close()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet
         pass
@@ -4032,36 +4096,11 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs, urlsplit
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query, keep_blank_values=True).items()}
             delta = "since" in q
-            conn = core.connect()
-            try:
-                core.poll_activity(conn, None)  # a busy queue skips the sweep; the page still gets its state
-                st = core.state(conn, closed=not delta or q.get("closed") == "1")
-                st["goals"] = core.goal_list(conn, include_complete=True)
-                if DEV["on"]:
-                    st["dev_build"] = _build_id()
-                st["page_build"] = page_build()
-                st["state_shape"] = STATE_SHAPE
-                st["desktop"] = DESKTOP
-                st["dictation"] = dictation.engine()  # "mac": speech to text on this Mac (#5107); else the browser's
-                st["terminals"] = agent_terminals(conn)  # the agents whose tmux pane the page can show
-                st["tmux_done"] = tmux_done(conn, st["terminals"])  # the panes its Close button closes
-                from . import sessions
-                # The agents whose session the Sessions tab shows: the Board's Open session goes there (#4687).
-                run = sessions.running(conn, st["terminals"])
-                st["sessions"] = [a["name"] for a in run]
-                # What each running session works on, the name the page shows for it (#4695).
-                st["session_names"] = {a["name"]: sessions.work_name(conn, a) for a in run}
-                st["relay"] = relay.status()
-                st["canvas_opens"] = canvas_opens()  # maxpm canvas open: the page opens the canvas (#4783)
-                from .routes import browser as browser_routes
-                st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
-                st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
-                if delta:
-                    from . import statedelta
-                    return self._send(200, statedelta.answer(statedelta.slim(st), q["since"] or None))
-                return self._send(200, st)
-            finally:
-                conn.close()
+            st = page_state(not delta or q.get("closed") == "1")
+            if delta:
+                from . import statedelta
+                return self._send(200, statedelta.answer(statedelta.slim(st), q["since"] or None))
+            return self._send(200, st)
         if path == "/api/terminal":
             from urllib.parse import parse_qs, urlsplit
             conn = core.connect()
@@ -4230,6 +4269,7 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 core.EVENT_VIA.reset(via)
                 conn.close()
+                state_changed()
         except RiverError as e:
             return self._send(409, {"error": str(e)})
         except (KeyError, ValueError, TypeError) as e:

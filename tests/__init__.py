@@ -20,6 +20,7 @@ dictation.BUILD = False  # a test never builds the dictation helper into ~/.maxi
 from river.agents import codex as codex_adapter  # noqa: E402
 codex_adapter.CODEX_FLAGS = set()  # not the installed Codex: a test of its flags sets them
 server.ENTER_PAUSE = server.COMMAND_LOOK = 0  # no waits for a CLI's paste window or a command's screen (#5220)
+server.STATE_TTL = 0  # each /api/state of a test builds anew; StateCache tests the shared build (#5428)
 from river.agents import opencode as opencode_adapter  # noqa: E402
 opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
 
