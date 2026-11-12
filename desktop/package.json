@@ -12,8 +12,6 @@
     "dist": "electron-builder --mac dmg --arm64 --x64 --publish never",
     "python": "node scripts/fetch-python.js",
     "predist": "node scripts/fetch-python.js mac-arm64 mac-x64",
-    "dist:win": "electron-builder --win nsis --x64 --publish never",
-    "predist:win": "node scripts/fetch-python.js win-x64",
     "icon": "electron scripts/make-icon.js"
   },
   "devDependencies": {
@@ -61,13 +59,6 @@
     },
     "dmg": {
       "artifactName": "MaximizePM-${version}-${arch}.${ext}"
-    },
-    "win": {
-      "target": "nsis",
-      "icon": "icon.png"
-    },
-    "nsis": {
-      "artifactName": "MaximizePM-${version}-${arch}-setup.${ext}"
     }
   }
 }

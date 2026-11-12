@@ -16,7 +16,7 @@ async function open() {
     return;
   }
   console.log(`MaximizePM app: ${river.url}`);
-  // The app icon on the window (Windows, Linux) and, run from source, in the Dock; a build has it in its bundle.
+  // The app icon in the Dock when the app runs from source; a build has it in its bundle.
   const icon = path.join(__dirname, "icon.png");
   if (!app.isPackaged && app.dock) app.dock.setIcon(icon);
   const win = new BrowserWindow({ width: 1400, height: 900, title: "MaximizePM", icon,

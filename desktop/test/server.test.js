@@ -38,7 +38,7 @@ test("says clearly when Python is missing", async () => {
   await assert.rejects(startRiver({ riverRoot: repo, find: () => null }), /needs Python 3\.10 or newer/);
 });
 
-test("a packaged app starts MaximizePM with the Python it carries, without looking for one", { skip: process.platform === "win32" }, async () => {
+test("a packaged app starts MaximizePM with the Python it carries, without looking for one", async () => {
   // A copy of the app's river-app folder: river and bin from the repo, python/bin/python3 = this machine's Python.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "river-app-"));
   fs.symlinkSync(path.join(repo, "river"), path.join(root, "river"));

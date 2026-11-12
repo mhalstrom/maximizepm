@@ -33,7 +33,7 @@ About 50 changes since v0.2.0. The main ones:
 
 - **Mac with Apple silicon (M1 and later):** `MaximizePM-{VERSION}-arm64.dmg`
 - **Mac with an Intel chip:** `MaximizePM-{VERSION}-x64.dmg`
-- **Windows (x64, and Windows on Arm):** `MaximizePM-{VERSION}-x64-setup.exe`
+- **Windows:** there's no Windows app. Install WSL 2 and run MaximizePM there: see [Windows](https://github.com/mhalstrom/maximizepm#windows) in the README.
 
 To find your Mac's chip, open the Apple menu and choose **About This Mac**.
 
@@ -58,10 +58,3 @@ xattr -dr com.apple.quarantine "/Applications/MaximizePM.app"
 This command removes the macOS download check for this app only. Do it only for an app that you downloaded from this page.
 
 If macOS says that the app "is damaged", you have an older copy. Move that app to the Trash and download this release.
-
-## Open the app on Windows
-
-The installer is not signed yet, so Windows SmartScreen shows "Windows protected your PC". To continue:
-
-1. Click **More info**.
-2. Click **Run anyway**.

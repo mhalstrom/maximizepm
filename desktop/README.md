@@ -30,18 +30,17 @@ Inside the app the page's git Update button is hidden: the server runs with
 ## Release
 
 `npm run dist` builds `out/MaximizePM-<version>-arm64.dmg` and `-x64.dmg`
-with electron-builder, and `npm run dist:win` builds the Windows installer
-`out/MaximizePM-<version>-x64-setup.exe`. The app carries a copy of the command
-and its Python package, and `scripts/fetch-python.js` (run first by both; pinned release
-and sha256) puts the Python for each system and chip type in
-`build/python/<os>-<arch>/` (`mac-arm64`, `mac-x64`, `win-x64`). Pushing a
-version tag (`git tag v0.1.0 && git push origin v0.1.0`) runs
-`.github/workflows/desktop-release.yml`, which builds the `.dmg` files on macOS
-and the installer on Windows, checks that each app starts MaximizePM from its own
-copy, and attaches all three to the GitHub Release for that tag, with
-`release-notes.md` as its notes. The app is not signed with a Developer ID or
-notarized yet, so macOS says it "could not verify" the app, and Windows
-SmartScreen warns. `release-notes.md` tells people how to open it: Open Anyway
-in System Settings > Privacy & Security on a Mac (or the `xattr` command, which
-also stops the slow check before each start), More info and Run anyway on
-Windows. Windows on Arm runs the x64 app.
+with electron-builder. The app carries a copy of the command and its Python
+package, and `scripts/fetch-python.js` (run first; pinned release and sha256)
+puts the Python for each chip type in `build/python/<os>-<arch>/` (`mac-arm64`,
+`mac-x64`). Pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`)
+runs `.github/workflows/desktop-release.yml`, which builds the `.dmg` files on
+macOS, checks that each app starts MaximizePM from its own copy, and attaches
+both to the GitHub Release for that tag, with `release-notes.md` as its notes.
+The app is not signed with a Developer ID or notarized yet, so macOS says it
+"could not verify" the app. `release-notes.md` tells people how to open it:
+Open Anyway in System Settings > Privacy & Security (or the `xattr` command,
+which also stops the slow check before each start).
+
+The desktop app is for macOS. On Windows, install WSL 2 and run MaximizePM
+there: see [Windows](../README.md#windows) in the main README.

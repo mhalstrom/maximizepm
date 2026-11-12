@@ -1,7 +1,6 @@
-# The desktop app: on a version tag (v0.1.0), build the macOS .dmg files (Apple silicon and Intel) and the
-# Windows installer (x64), and attach them to a GitHub Release for that tag. Not signed or notarized yet
-# (item #249 adds that): on a Mac the first open needs Open Anyway in System Settings (macOS 15+) or
-# right-click, Open (older macOS); on Windows, SmartScreen warns: More info, Run anyway.
+# The desktop app: on a version tag (v0.1.0), build the macOS .dmg files (Apple silicon and Intel) and attach
+# them to a GitHub Release for that tag. Not signed or notarized yet (item #249 adds that): the first open
+# needs Open Anyway in System Settings (macOS 15+) or right-click, Open (older macOS).
 name: desktop-release
 on:
   push:
@@ -18,7 +17,7 @@ env:
   CSC_IDENTITY_AUTO_DISCOVERY: "false"
 jobs:
   # Before the release builds (#4636): the unit tests, and the wheel builds, installs and runs. The desktop smoke
-  # test (maxpm serve starts and stops) runs in the mac and windows jobs before their build step.
+  # test (maxpm serve starts and stops) runs in the mac jobs before their build step.
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -127,50 +126,8 @@ jobs:
             startRiver({ riverRoot: process.argv[1], find: () => null }).then(async (r) => { console.log("MaximizePM answers on", r.url, "with", r.child.spawnargs[0]); await r.stop(); })
               .catch((e) => { console.error(e.message); process.exit(1); });' "$app/Contents/Resources/river-app"
           hdiutil detach "$RUNNER_TEMP/app"
-  windows:
-    needs: checks
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-      - name: Install
-        working-directory: desktop
-        run: npm ci
-      - name: Smoke test (maxpm serve starts and stops)
-        working-directory: desktop
-        run: npm test
-      - name: Version from the tag
-        working-directory: desktop
-        run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3, not $TAG"; exit 1; }
-          npm version --no-git-tag-version --allow-same-version "${TAG#v}"
-      - name: Build the installer (unsigned)
-        working-directory: desktop
-        run: npm run dist:win
-      - name: The app starts MaximizePM from its own bundle, with its own Python
-        working-directory: desktop
-        run: |
-          MAXPM_DB="$RUNNER_TEMP/q.db" node -e '
-            const { startRiver } = require("./server");
-            startRiver({ riverRoot: process.argv[1], find: () => null }).then(async (r) => { console.log("MaximizePM answers on", r.url, "with", r.child.spawnargs[0]); await r.stop(); })
-              .catch((e) => { console.error(e.message); process.exit(1); });' "$PWD/out/win-unpacked/resources/river-app"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: desktop/out/*-setup.exe
-          if-no-files-found: error
   publish:
-    needs: [mac, mac-intel, windows]
+    needs: [mac, mac-intel]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
