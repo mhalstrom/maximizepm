@@ -94,6 +94,8 @@ function render(box, project) {
   // Who controls it: the line, the buttons, and whether the person's input goes through.
   function show(j) {
     v.running = !!j.running; v.window = !!j.window;
+    // No Chrome on this computer (#5624): the answer of start says so; it holds until a start runs Chrome.
+    if ("no_chrome" in j || j.running) v.noChrome = j.running ? "" : j.no_chrome || "";
     const c = j.controller, me = actor();
     v.mine = !c || c.kind === "person";
     $$(".br-who").textContent = !j.running ? "The browser is not running."
@@ -109,7 +111,7 @@ function render(box, project) {
     const win = $$(".br-win");
     win.textContent = j.window ? "Back to the panel" : "Open as a window";
     win.dataset.br = j.window ? "headless" : "window";
-    win.classList.toggle("hidden", !j.modes);  // a Chrome that runs already (browser_source) needs browser_mode (#5619)
+    win.classList.toggle("hidden", !j.modes || !!v.noChrome);  // a Chrome that runs already (browser_source) needs browser_mode (#5619)
     win.classList.toggle("primary", !!j.refused && !j.window);
     $$(".br-refused").classList.toggle("hidden", !(j.refused && !j.window));
     stage.classList.toggle("br-locked", !v.mine);
@@ -118,7 +120,11 @@ function render(box, project) {
     sel.classList.toggle("hidden", tabs.length < 2);
     sel.innerHTML = tabs.map(t => `<option value="${esc(t.id)}"${t.on ? " selected" : ""}>${esc((t.title || t.url || "").slice(0, 60))}</option>`).join("");
     msg.classList.toggle("hidden", j.running && !!v.w);
-    if (!j.running) msg.innerHTML = `The browser of ${esc(project)} is not running. ${button("Start", { kind: "primary", data: { br: "start" } })}`;
+    if (!j.running) msg.innerHTML = v.noChrome
+      ? `The Browser needs Google Chrome, and this computer does not have it. Download it, install it, then press Check again.
+         <div class="br-dl"><a class="btn primary" href="${esc(j.download || "https://www.google.com/chrome/")}" target="_blank" rel="noopener">Download Google Chrome</a>
+         ${button("Check again", { data: { br: "start" } })}</div>`
+      : `The browser of ${esc(project)} is not running. ${button("Start", { kind: "primary", data: { br: "start" } })}`;
     if (j.frame) {
       img.src = "data:image/jpeg;base64," + j.frame.data;
       v.w = j.frame.w || img.naturalWidth; v.h = j.frame.h || img.naturalHeight;

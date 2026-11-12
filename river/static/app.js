@@ -624,6 +624,13 @@ function renderSetup(st) {
           <a href="https://github.com/openai/codex" target="_blank" rel="noopener">Codex</a>.`
       : "Found on this Mac: " + addable.map(a => esc(a.label)).join(", ") + ". Add one to the Start button.",
     (none ? `<button class="btn" data-su="recheck">Check again</button>` : "") + addBtns));
+  // The Browser pane needs Google Chrome (#5624): a missing Chrome shows here, not only in More.
+  const chromeStep = extra(st.chrome !== false, "Google Chrome for the Browser",
+    st.chrome === false ? "The Browser shows web pages to you and your agents, and it needs Google Chrome. Download it, install it, then check again."
+      : "The Browser uses the Google Chrome on this computer.",
+    `<a class="btn primary" href="https://www.google.com/chrome/" target="_blank" rel="noopener">Download Google Chrome</a>
+     <button class="btn" data-su="recheck">Check again</button>`);
+  if (st.chrome === false) out.push(chromeStep);
   // How river starts each profile agent (Claude Code, Codex): its options, as global settings.
   const profs = st.launch_profiles || [];
   const howStart = profs.length && extra(true, `<span title="Applies to every project">How agents start</span>`,
@@ -655,6 +662,7 @@ function renderSetup(st) {
       : `<span class="muted">Needs an agent and an item first.</span>`));
   // Extras: nice to have, not needed for a first result.
   const more = howStart ? [howStart] : [];
+  if (st.chrome !== false) more.push(chromeStep);
   const missing = Object.entries(st.skills).filter(([, v]) => v !== "installed").map(([k]) => k);
   if (st.claude_home) more.push(extra(missing.length === 0, "Claude Code skills",
     missing.length ? "Teach Claude Code MaximizePM's full workflow (missing: " + missing.join(", ") + ")." : "maxpm and maxpm-manager are installed.",

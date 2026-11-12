@@ -588,6 +588,47 @@ class FakeHandler:
         self.sent = (code, body)
 
 
+class NoChrome(Base):
+    """#5624: with no Google Chrome, the panel, the setup guide and maxpm browser ask the person to download it."""
+
+    def setUp(self):
+        super().setUp()
+        missing = os.path.join(self.tmp.name, "no-chrome")
+        patch =mock.patch.dict(os.environ, {"MAXPM_CHROME": missing})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.missing = missing
+
+    def test_a_command_says_where_to_download_it(self):
+        why = browser.no_chrome()
+        self.assertIn(browser.CHROME_DOWNLOAD, why)
+        self.assertIn(f"MAXPM_CHROME names {self.missing}", why)
+        self.assertIn("tells the person and does not try again", why)
+        with self.assertRaisesRegex(RiverError, "https://www.google.com/chrome/"):
+            browser.get("web").start()
+        self.assertFalse(browser.get("web").running())
+
+    def test_the_panel_offers_the_download_and_works_after_the_install(self):
+        got = routes.act(self.c, {"action": "start", "project": "web"}, "mark")
+        self.assertEqual((got["running"], got["download"]), (False, browser.CHROME_DOWNLOAD))
+        self.assertIn("not on this computer", got["no_chrome"])
+        Path(self.missing).write_text("")  # installed: the next start finds it, with no restart of serve
+        self.assertIsNone(browser.no_chrome())
+        with mock.patch.object(browser.Browser, "start") as start:
+            got = routes.act(self.c, {"action": "start", "project": "web"}, "mark")
+        start.assert_called_once()
+        self.assertNotIn("no_chrome", got)
+
+    def test_an_attached_browser_needs_no_chrome_here(self):
+        core.config_set(self.c, "browser_source", "cdp:9339", project="web")
+        with mock.patch.object(browser.Browser, "start"):
+            got = routes.act(self.c, {"action": "start", "project": "web"}, "mark")
+        self.assertNotIn("no_chrome", got)
+
+    def test_the_setup_guide_shows_the_step(self):
+        self.assertFalse(server.setup_status(self.c)["chrome"])
+
+
 class Routes(Base):
     def test_the_frames_need_the_page_token(self):
         h = FakeHandler("/api/browser/frame?project=web&after=0")

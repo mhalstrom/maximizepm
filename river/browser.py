@@ -81,6 +81,22 @@ def chrome_path():
     return None
 
 
+CHROME_DOWNLOAD = "https://www.google.com/chrome/"
+
+
+def no_chrome():
+    """Why the project browser cannot start on this computer, or None when Chrome is here (#5624, mark 2026-11-12: 'if
+    the user does not have chrome we need to prompt them to download it'). Read at each start, so a Chrome that the
+    person installs works at the next open, with no restart of serve."""
+    if chrome_path():
+        return None
+    env = os.environ.get("MAXPM_CHROME")
+    where = f" (MAXPM_CHROME names {env}, which is not there)" if env else ""
+    return (f"Google Chrome is not on this computer{where}, and the project browser needs it: download it at "
+            f"{CHROME_DOWNLOAD}, install it, then open the browser again. A session tells the person and does not "
+            f"try again")
+
+
 def user_agent(chrome):
     """The user agent of this Chrome with a window, for a headless one: Google's sign-in refuses HeadlessChrome. With
     the flag, navigator.userAgentData says Google Chrome too (Chrome 157, 2026-11-12). None when the version is not
@@ -571,8 +587,7 @@ class Browser:
     def _launch(self):
         chrome = chrome_path()
         if not chrome:
-            raise RiverError("no Google Chrome on this computer: install it, or set MAXPM_CHROME to the path of Chrome or "
-                             "Chromium, then run the command again")
+            raise RiverError(no_chrome())
         profile = self.dir / "profile"
         (self.dir / "downloads").mkdir(parents=True, exist_ok=True)
         profile.mkdir(parents=True, exist_ok=True)

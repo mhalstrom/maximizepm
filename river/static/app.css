@@ -105,8 +105,10 @@ nav button.on { color: var(--ink); border-bottom-color: var(--ink); }
 select, input, textarea, button { font: inherit; color: var(--ink); }
 select, input, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
 /* Buttons are text in the accent color; one filled button (primary) does the main thing of an area (#5043). */
-button.btn { background: none; border: 1px solid transparent; border-radius: var(--r-xs); padding: 4px 6px; cursor: pointer; color: var(--accent); font-weight: 500; }
-button.btn:hover { background: var(--bubble); }
+button.btn, a.btn { background: none; border: 1px solid transparent; border-radius: var(--r-xs); padding: 4px 6px; cursor: pointer; color: var(--accent); font-weight: 500; }
+button.btn:hover, a.btn:hover { background: var(--bubble); }
+/* A link that opens another site looks like a button (#5624: Download Google Chrome): no underline. */
+a.btn { display: inline-block; text-decoration: none; }
 /* A text button that starts a line under text sits on the text's left edge: its padding and border go into a
    negative margin, so its label lines up with the text above (#5314). Use it where a .btn begins a left line. */
 :root { --btn-inset: calc(-1 * (var(--sp-2) + var(--hair))); }
@@ -114,8 +116,8 @@ button.btn:hover { background: var(--bubble); }
 #setup .fix:not(:has(> :not(button.btn:not(.primary)))) { margin-left: var(--btn-inset); }
 /* A card that is one button (button.js kind "card", #5046): no button look; the card's class draws it. */
 button.cardbtn { display: block; width: 100%; text-align: left; font: inherit; color: var(--ink); cursor: pointer; }
-button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); padding: 4px 12px; }
-button.primary:hover { background: var(--accent); filter: brightness(1.08); }
+button.primary, a.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); padding: 4px 12px; }
+button.primary:hover, a.btn.primary:hover { background: var(--accent); filter: brightness(1.08); }
 button.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }  /* a lapsed relay plan (#4759) */
 main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 /* Until the first state comes (#4888): through the relay on a phone it takes seconds. */

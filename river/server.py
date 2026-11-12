@@ -4065,6 +4065,7 @@ def _block_state(path):
 def setup_status(conn):
     """What the setup guide shows: each check, and whether it is done."""
     import shutil
+    from .browser import chrome_path
     from . import notify
     from . import agents as adapters
     from .cli import instructions_layout
@@ -4107,6 +4108,7 @@ def setup_status(conn):
             "SELECT scope, value FROM settings WHERE key='notify_open' AND scope LIKE 'agent:%'")},
         "notify_phone": notify.phone_note(conn),
         "maxpm_cmd": command_status(),
+        "chrome": chrome_path() is not None,  # the Browser pane needs it (#5624)
     }
 
 

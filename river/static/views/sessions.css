@@ -294,6 +294,8 @@ button.srow-it { cursor: pointer; }
 .br-keys { position: absolute; left: 0; top: 0; width: var(--hair); height: var(--hair); opacity: 0; border: 0; padding: 0; resize: none; }
 .br-msg { position: absolute; inset: 0; display: flex; gap: var(--sp-3); align-items: center; justify-content: center; padding: var(--sp-6); text-align: center; background: var(--bg); }
 .br-msg.hidden { display: none; }
+.br-msg:has(.br-dl) { flex-direction: column; }  /* no Chrome (#5624): the sentence, then its buttons */
+.br-dl { display: flex; flex-wrap: wrap; gap: var(--sp-3); justify-content: center; }
 /* #5616: the pointer of the session that drives, a ring at each press, its name, and the keys it types. They lie over
    the page and take no click; the pointer moves by transform only, so it glides (browserTool.js sets the time). */
 .br-over { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }

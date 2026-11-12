@@ -91,6 +91,9 @@ def act(conn, a, who):
         return browser.walk(b, [browser.norm_url(u) for u in pages], float(a.get("settle") or 3),
                             float(a.get("timeout") or 60))
     if action == "start":  # the panel shows the browser: start it, and say so
+        why = None if b._attached_now() else browser.no_chrome()
+        if why:  # the panel asks the person to download Chrome (#5624)
+            return {**b.info(), "no_chrome": why, "download": browser.CHROME_DOWNLOAD}
         b.start()
         return b.info()
     if action == "open":
