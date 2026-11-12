@@ -9334,6 +9334,87 @@ class Ops(Base):
         self.assertEqual(code, 2)
         self.assertIn("name yourself", out)
 
+    # ---- fault items (#5431)
+
+    def ops_items(self):
+        return self.c.execute("SELECT id, title, status, priority, doer, kind, context FROM items WHERE kind='operational' "
+                              "ORDER BY id").fetchall()
+
+    def notes(self, item_id):
+        return [r[0] for r in self.c.execute("SELECT change FROM events WHERE item_id=? AND change LIKE 'ops %' "
+                                             "ORDER BY id", (item_id,))]
+
+    def test_a_fault_opens_one_item_notes_it_recovers_and_comes_back_within_a_day(self):
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "check_job", "fail_after": 2, "recover_after": 1,
+                                                       "runbook": "read the job log"}, actor="boss")
+        t = core.now()
+        at = lambda m: t + timedelta(minutes=m)
+        bad, good = self.proc(2, "JOB CRITICAL - no run for 2h|age=7200s\nlast run failed\n"), self.proc(0, "JOB OK")
+        self.run_at("site", "job", at(0), bad)
+        self.assertEqual(self.ops_items(), [])  # failing, not a fault yet
+        r = self.run_at("site", "job", at(5), bad)
+        (it,) = self.ops_items()
+        self.assertEqual(r["items"], [{"key": "ops:site:job", "item": it["id"], "action": "opened"}])
+        self.assertTrue(it["title"].startswith("ops:site:job JOB CRITICAL - no run for 2h"))
+        self.assertEqual((it["priority"], it["doer"], it["status"]), (1, "ai", "open"))
+        for want in ("Key: ops:site:job", "last run failed", "Runbook: read the job log", "maxpm ops history site job"):
+            self.assertIn(want, it["context"])
+        alerts = [m["body"] for m in core.inbox(self.c, "boss")]
+        self.assertTrue(any(f"new fault: ops:site:job" in b and f"#{it['id']}" in b for b in alerts), alerts)
+        # Later runs: one note at most every ops_note_every (30m), no second item.
+        for m in (10, 15, 40):
+            self.run_at("site", "job", at(m), bad)
+        self.assertEqual(len(self.ops_items()), 1)
+        self.assertEqual(len([n for n in self.notes(it["id"]) if "still failing" in n]), 1)  # at 40m, not at 10 or 15
+        # Recovery: a note, and the item stays open for the investigator.
+        r = self.run_at("site", "job", at(45), good)
+        self.assertEqual(r["items"][0]["action"], "recovered")
+        self.assertIn("ops recovered at", self.notes(it["id"])[-1])
+        self.assertEqual(self.ops_items()[0]["status"], "open")
+        # Closed with the cause, then a fault within 24h: the same item again.
+        core.done(self.c, it["id"], actor="boss", output="the job's disk was full")
+        self.run_at("site", "job", at(60), bad); r = self.run_at("site", "job", at(65), bad)
+        self.assertEqual(r["items"][0], {"key": "ops:site:job", "item": it["id"], "action": "reopened"})
+        self.assertEqual([x["status"] for x in self.ops_items()], ["open"])
+        # After ops_reopen_within, a new item.
+        core.done(self.c, it["id"], actor="boss", output="again the disk")
+        self.run_at("site", "job", at(70), good)
+        later = core.now() + timedelta(hours=25)
+        with mock.patch.object(core, "now", lambda: later):
+            self.run_at("site", "job", later, bad); r = self.run_at("site", "job", later + timedelta(minutes=5), bad)
+        self.assertEqual(r["items"][0]["action"], "opened")
+        self.assertEqual(len(self.ops_items()), 2)
+
+    def test_subjects_have_items_of_their_own_and_a_note_check_none(self):
+        core.ops_add(self.c, "site", "jobs", "plugin", {"command": "check_jobs", "fail_after": 1, "subject": True},
+                     actor="boss")
+        core.ops_add(self.c, "site", "soft", "plugin", {"command": "check_soft", "fail_after": 1, "severity": "note"},
+                     actor="boss")
+        t = core.now()
+        r = self.run_at("site", "jobs", t, self.proc(2, "JOBS CRITICAL - 2 failed\nbackup: failed at 03:00\n"
+                                                         "mail_sync: failed twice\n"))
+        self.assertEqual(sorted(x["key"] for x in r["items"]), ["ops:site:jobs:backup", "ops:site:jobs:mail_sync"])
+        self.assertEqual(len(self.ops_items()), 2)  # none for ops:site:jobs itself
+        r = self.run_at("site", "soft", t, self.proc(2, "SOFT CRITICAL - slow"))
+        self.assertEqual(r["items"], [{"key": "ops:site:soft", "item": None, "action": "manager-note"}])
+        self.assertEqual(len(self.ops_items()), 2)
+
+    def test_a_storm_of_one_scope_shares_one_item(self):
+        t = core.now()
+        for i in range(6):
+            core.ops_add(self.c, "site", f"c{i}", "plugin", {"command": "x", "fail_after": 1}, actor="boss")
+        acts = [self.run_at("site", f"c{i}", t + timedelta(seconds=10 * i), self.proc(2, f"C{i} CRITICAL - down"))
+                ["items"][0]["action"] for i in range(6)]
+        self.assertEqual(acts, ["opened", "opened", "opened", "storm", "storm-note", "storm-note"])
+        titles = [x["title"] for x in self.ops_items()]
+        self.assertEqual(len(titles), 4)
+        self.assertEqual(titles[3], "ops:site: 4 checks failing")
+        # Another scope is not part of the storm.
+        core.project_add(self.c, "api")
+        core.ops_add(self.c, "api", "home", "plugin", {"command": "x", "fail_after": 1}, actor="boss")
+        r = self.run_at("api", "home", t + timedelta(seconds=70), self.proc(2, "HOME CRITICAL - down"))
+        self.assertEqual(r["items"][0]["action"], "opened")
+
     # ---- running the checks (#5430)
 
     def run_at(self, scope, name, at, runner=None, http=None):

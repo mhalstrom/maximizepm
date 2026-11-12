@@ -220,6 +220,14 @@ DEFAULT_SETTINGS = {
     # / window); release-loop: an item released or reopened ops_release_loop times. stuck-session reads
     # activity_silence.
     "ops_idle_work": "10m",
+    # A fault of an operations check opens one operational item for its key (#5431). A run that keeps failing adds its
+    # evidence to that item at most every ops_note_every; a fault that comes back within ops_reopen_within opens the
+    # same item again; more than ops_storm_count keys of one project or target that fail within ops_storm_window share
+    # one item ('<scope>: N checks failing'), so a storm does not flood the queue.
+    "ops_note_every": "30m",
+    "ops_reopen_within": "24h",
+    "ops_storm_count": "3",
+    "ops_storm_window": "5m",
     "ops_lease_loop": "3/6h",
     "ops_release_loop": "4/24h",
     # The outside switch (#5435, decision 3 A of #5380): maxpm serve sends an HTTP GET to ops_deadman_url every
@@ -1612,7 +1620,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -1635,7 +1643,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         except re.error as e:
             raise RiverError(f"{key} is a regular expression, and this one has an error: {e}")
     elif key in ("keep_prereq_limit", "replan_threshold", "max_leases", "goal_max_leases", "serve_port", "list_cleanup_min",
-                 "max_sessions", "canvas_max", "canvas_versions", "health_person_minutes"):
+                 "max_sessions", "ops_storm_count", "canvas_max", "canvas_versions", "health_person_minutes"):
         if not value.isdigit():
             raise RiverError(f"{key} takes a whole number")
     elif key == "canvas_network":
@@ -3799,10 +3807,155 @@ def ops_record(conn, run, res, at=None):
 
 
 def ops_finish(conn, run, at=None):
-    """Run an open run and record it (a thread of maxpm serve calls it). Never an error: a failure to record
-    leaves the run open, and ops_close_lost closes it later as unknown."""
+    """Run an open run and record it (a thread of maxpm serve calls it), then keep its fault items (ops_faults).
+    Never an error: a failure to record leaves the run open, and ops_close_lost closes it later as unknown."""
     res = ops_execute(run, at)
-    return ops_record(conn, run, res, at)
+    rec = ops_record(conn, run, res, at)
+    rec["items"] = ops_faults(conn, run["check"]["id"], rec, res, at)
+    return rec
+
+
+# ---- fault items (#5431): a fault opens one operational item for its key, the queue's ordinary work. No model call.
+
+def _ops_item(conn, prefix, statuses=OPEN_STATES):
+    """The newest item of kind operational whose title starts with prefix and a space, in these statuses."""
+    q, head = ",".join("?" * len(statuses)), prefix + " "
+    return conn.execute(f"SELECT * FROM items WHERE kind='operational' AND substr(title, 1, ?)=? AND status IN ({q}) "
+                        f"ORDER BY id DESC LIMIT 1", (len(head), head, *statuses)).fetchone()
+
+
+def _ops_project(conn, c):
+    """The project that a fault item of this check goes to: the check's project; for a deploy target, the first
+    project of the target, else its deploy project."""
+    if c["scope_kind"] == "project":
+        return c["scope"]
+    r = conn.execute("SELECT name FROM projects WHERE target=? AND archived=0 AND name NOT LIKE 'deploy-%' "
+                     "ORDER BY rank, id LIMIT 1", (c["scope"],)).fetchone()
+    return r["name"] if r else f"deploy-{c['scope']}"
+
+
+def _ops_evidence(c, key, res, at, since=None):
+    lines = (res.get("output") or "").splitlines()[-15:]
+    return (f"The operations check {c['scope']}/{c['name']} ({c['form']}) is in fault"
+            + (f" since {show_time(iso(since))}" if since else "") + f": {res.get('summary') or res.get('status')}.\n"
+            f"Key: {key}. Last run: {show_time(iso(at))}, status {res.get('status')}"
+            + (f", perfdata {res['perfdata']}" if res.get("perfdata") else "") + ".\n"
+            f"The check: {json.dumps(c['config'])}; every {c['every']}, a fault after {c['fail_after']} failed runs, "
+            f"healed after {c['recover_after']} passed runs.\n"
+            + ("Last output:\n" + "\n".join(lines) + "\n" if lines else "")
+            + (f"Evidence: {json.dumps(res['evidence'])[:1500]}\n" if res.get("evidence") else "")
+            + f"Runbook: {c.get('runbook') or 'none'}\n"
+            f"Find the cause, fix it or add the items it needs, then close this item with the cause (maxpm done <id> "
+            f"--output \"<cause>\"). The check's runs and changes: maxpm ops history {c['scope']} {c['name']}. "
+            f"A recovery adds a note here and leaves the item open: you close it.")
+
+
+def _ops_note(conn, item_id, text, at, force=False):
+    """Add evidence to a fault item as a line of its history, at most every ops_note_every unless force."""
+    every = parse_duration(setting(conn, "ops_note_every"))
+    last = conn.execute("SELECT MAX(at) t FROM events WHERE item_id=? AND (change LIKE 'ops %' OR change LIKE 'added%' "
+                        "OR change='reopened')", (item_id,)).fetchone()["t"]  # the item's start counts as its first note
+    if not force and last and at - parse_iso(last) < every:
+        return False
+    with tx(conn):
+        _event(conn, item_id, "maxpm", text[:2000])
+    return True
+
+
+def _ops_tell_manager(conn, kind, body, item_id=None):
+    m = active_manager(conn)
+    if m:
+        with tx(conn):
+            _send(conn, kind, "maxpm", body, to=m, item_id=item_id)
+
+
+def _ops_fault_item(conn, c, key, res, at, new):
+    """The item of one fault key: the open one (a note), one closed within ops_reopen_within (open again), the
+    storm item of the scope, or a new one. Returns {"key", "item", "action"}."""
+    summary = res.get("summary") or res.get("status")
+    it = _ops_item(conn, key)
+    if it:
+        noted = _ops_note(conn, it["id"], f"ops {'fault again' if new else 'still failing'} at {show_time(iso(at))}: "
+                                          f"{summary}", at, force=new)
+        return {"key": key, "item": it["id"], "action": "note" if noted else "none"}
+    if not new:  # in fault with no open item: one was closed while the fault lasted; a new run reports it again
+        new = True
+    old = _ops_item(conn, key, ("done", "dropped"))
+    within = parse_duration(setting(conn, "ops_reopen_within"))
+    if old and old["closed_at"] and at - parse_iso(old["closed_at"]) < within:
+        reopen(conn, old["id"], actor="maxpm")
+        _ops_note(conn, old["id"], f"ops fault again at {show_time(iso(at))}: {summary}", at, force=True)
+        _ops_tell_manager(conn, "alert", f"fault again: {key} ({summary}); #{old['id']} is open again", old["id"])
+        return {"key": key, "item": old["id"], "action": "reopened"}
+    # Storm: more than ops_storm_count keys of the scope went to fault within ops_storm_window: one item holds them.
+    window = parse_duration(setting(conn, "ops_storm_window"))
+    keys = [r["key"] for r in conn.execute(
+        "SELECT DISTINCT e.key FROM ops_events e JOIN checks k ON k.id=e.check_id WHERE e.state='fault' AND e.at>=? "
+        "AND k.scope_kind=? AND k.scope=?", (iso(at - window), c["scope_kind"], c["scope"]))]
+    storm = f"ops:{c['scope']}:"
+    if len(keys) > int(setting(conn, "ops_storm_count")):
+        st = conn.execute("SELECT * FROM items WHERE kind='operational' AND substr(title, 1, ?)=? AND title LIKE "
+                          "'% checks failing' AND status IN ('open','in_progress','held') ORDER BY id DESC LIMIT 1",
+                          (len(storm) + 1, storm + " ")).fetchone()
+        if st:
+            _ops_note(conn, st["id"], f"ops storm: {key} failed too at {show_time(iso(at))}: {summary}", at, force=True)
+            return {"key": key, "item": st["id"], "action": "storm-note"}
+        project = _ops_project(conn, c)
+        ctx = (f"{len(keys)} checks of {c['scope']} went to fault within {setting(conn, 'ops_storm_window')}, so one "
+               f"item holds them (ops_storm_count {setting(conn, 'ops_storm_count')}): {', '.join(sorted(keys))}. "
+               f"They likely share one cause (a host, a network, a deploy). The last one: {key}: {summary}. Each "
+               f"check's runs: maxpm ops history {c['scope']} <check>. Find the shared cause, then close this item "
+               f"with it; a check that stays in fault after that gets its own item at its next fault.")
+        r = item_add(conn, project, f"{storm} {len(keys)} checks failing", priority=1, doer="ai", actor="maxpm",
+                     context=ctx, goals=[], kind="operational", short=f"{c['scope']}: {len(keys)} checks failing")
+        _ops_tell_manager(conn, "alert", f"{len(keys)} checks of {c['scope']} fail at once: #{r['id']}", r["id"])
+        return {"key": key, "item": r["id"], "action": "storm"}
+    since = conn.execute("SELECT MAX(at) t FROM ops_events WHERE key=? AND state='fault'", (key,)).fetchone()["t"]
+    r = item_add(conn, _ops_project(conn, c), f"{key} {summary}"[:300], priority=1, doer="ai", actor="maxpm",
+                 context=_ops_evidence(c, key, res, at, parse_iso(since) if since else at), goals=[],
+                 kind="operational", short=f"Fault: {c['name']}"[:60])
+    _ops_tell_manager(conn, "alert", f"new fault: {key} ({summary}): #{r['id']}", r["id"])
+    return {"key": key, "item": r["id"], "action": "opened"}
+
+
+def ops_faults(conn, check_id, rec, res, at=None):
+    """After a run (ops_record): each key of the check in fault has its one operational item (_ops_fault_item); a
+    key that recovered adds 'recovered at' to its open item and leaves it open, for the investigator to close with
+    the cause. A check of severity note opens no item: the manager gets a note. A check with subjects opens items
+    for its subjects, and for the check itself only when no subject is in fault. Returns what it did, one dict
+    for each key."""
+    at = at or now()
+    row = conn.execute("SELECT * FROM checks WHERE id=?", (check_id,)).fetchone()
+    if row is None:
+        return []
+    c = _ops_row(row)
+    to = {ch["key"]: ch["to"] for ch in rec.get("changes") or []}
+    faulted = []
+    if c["subject"]:
+        for r in conn.execute("SELECT DISTINCT key FROM ops_events WHERE check_id=? AND key LIKE ?",
+                              (c["id"], c["key"] + ":%")).fetchall():
+            if _ops_subject_state(conn, c["id"], r["key"]) == "fault":
+                faulted.append(r["key"])
+    if c["state"] == "fault" and not faulted:
+        faulted.append(c["key"])
+    out = []
+    for key in faulted:
+        new = to.get(key) == "fault"
+        if c["severity"] == "note":
+            if new:
+                _ops_tell_manager(conn, "note", f"fault: {key} ({res.get('summary') or res.get('status')}); the check "
+                                  f"is of severity note, so no item")
+                out.append({"key": key, "item": None, "action": "manager-note"})
+            continue
+        out.append(_ops_fault_item(conn, c, key, res, at, new))
+    for key, state in to.items():
+        if state == "recovered":
+            it = _ops_item(conn, key)
+            if it:
+                _ops_note(conn, it["id"], f"ops recovered at {show_time(iso(at))}: {key} passed {c['recover_after']} runs "
+                                          f"in a row; close this item with the cause", at, force=True)
+                out.append({"key": key, "item": it["id"], "action": "recovered"})
+    return out
 
 
 def ops_close_lost(conn, running=(), at=None):
@@ -3821,7 +3974,9 @@ def ops_close_lost(conn, running=(), at=None):
         res = {"status": "unknown", "exit_code": None, "timed_out": False, "summary": "the run never ended: maxpm "
                "serve stopped while it ran", "perfdata": None, "evidence": None, "output": None, "subjects": None,
                "matches": None}
-        out.append(ops_record(conn, {"id": r["id"], "check": _ops_row(row)}, res, at))
+        rec = ops_record(conn, {"id": r["id"], "check": _ops_row(row)}, res, at)
+        rec["items"] = ops_faults(conn, row["id"], rec, res, at)
+        out.append(rec)
     return out
 
 
