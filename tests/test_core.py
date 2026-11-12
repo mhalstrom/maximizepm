@@ -11754,6 +11754,7 @@ class WorkLine(Base):
                           (z, "it added it; nobody holds it"), (u, f"waits on its task #{w}")])
         self.assertEqual(line["people"]["s2"]["doing"], "a prerequisite")  # by what it does, not its name alone
         self.assertIsNone(line["goal"])
+        self.assertEqual(line["item"]["ships"], [])
         # The task it holds gives the same line; a task it added that nobody holds says so.
         self.assertEqual(core.work_line(self.c, w)["owner_is"], "holds")
         self.assertEqual([d["id"] for d in core.work_line(self.c, w)["done"]], [x])
@@ -11778,6 +11779,7 @@ class WorkLine(Base):
         self.assertEqual((g["name"], g["outcome"], g["done_when"], g["done"], g["open"]),
                          ("cart", "people buy things", "an order goes through", 1, 1))
         self.assertEqual([t["id"] for t in g["open_tasks"]], [rest])
+        self.assertEqual(g["sessions"], 1)  # s3 took a task of it
         m = core.item_add(self.c, "a", "sign the contract", doer="human", actor="mark")["id"]
         core.claim(self.c, m, "mark")
         person = core.work_line(self.c, m)

@@ -444,6 +444,70 @@ try {
                     self.assertLessEqual(abs(e["agent"][1] - e["bar"][1]), 1, got)
                     self.assertLessEqual(abs(e["user"] - e["bar"][1]), 1, got)
 
+    def test_a_task_link_opens_the_task_in_the_work_of_its_session(self):
+        """#5572 (mark 2026-11-12: 'understand the task in the context of what the session has done and will do', 'there
+        should be a button to Go to Session'): a #id in the chat and the head's task open a large view over the chat:
+        the session's line (Done, Now, Next) with the task marked, the task beside it, Go to Session and Open the full
+        task. On a phone the task is a sheet at the bottom with Go to Session, and nothing scrolls sideways."""
+        first = core.item_add(self.c, "site", "the logo", short="The logo")["id"]
+        core.release(self.c, self.it, "later", "ag")
+        core.claim(self.c, first, "ag")
+        found = core.item_add(self.c, "site", "a broken link in the footer", actor="ag", found_during=first)["id"]
+        core.done(self.c, first, output="x", actor="ag", changed="The logo is new")
+        core.claim(self.c, self.it, "ag")
+        self.write(claude_line("assistant", [{"type": "text", "text": f"I finished #{first} and now work on #{self.it}."}],
+                               "end_turn"))
+        driver = r'''try {
+  await until(() => window.__appReady && q(`#sessCol [data-open="FIRST"]`) && q(`#sessMenuItem [data-open="IT"]`), "the #id in the chat and the head's task");
+  const shown = () => q("#taskDlg") && !q("#taskDlg").classList.contains("hidden") && q("#taskDlg .tc-ev.on");
+  const vis = (s) => { const e = q(s); return !!(e && e.offsetParent); };
+  const t0 = performance.now();
+  q(`#sessCol [data-open="FIRST"]`).click();
+  await until(shown, "the task view from the chat");
+  const ms = Math.round(performance.now() - t0);
+  const box = q("#taskDlg .tc-box");
+  const out = { ms, head: q("#taskDlg .tc-head h2").textContent, on: q("#taskDlg .tc-ev.on").dataset.tcTask,
+    groups: [...document.querySelectorAll("#taskDlg .tc-grp")].map(g => g.textContent),
+    kid: (q("#taskDlg .tc-kid") || {}).textContent || "", changed: q("#taskDlg .tc-det").textContent.includes("The logo is new"),
+    headGo: vis("#taskDlg .tc-head .tc-gobtn"), sheetGo: vis("#taskDlg .tc-det .tc-gobtn"),
+    side: box.scrollWidth - box.clientWidth, wide: box.getBoundingClientRect().width };
+  // A row of the line moves the view to that task; the head's task opens it too.
+  q(`#taskDlg [data-tc-task="FOUND"]`).click();
+  await until(() => shown() && q("#taskDlg .tc-ev.on, #taskDlg .tc-det") && q("#taskDlg .tc-det").textContent.includes("broken link"), "the found task");
+  q("#taskDlg [data-tc-close]").click();
+  await until(() => q("#taskDlg").classList.contains("hidden"), "closed");
+  const head = q(`#sessItem [data-open="IT"]`) || q(`#sessMenuItem [data-open="IT"]`);
+  head.click();
+  await until(() => shown() && q("#taskDlg .tc-ev.on").dataset.tcTask === "IT", "the task view from the head");
+  out.headOn = q("#taskDlg .tc-ev.on").dataset.tcTask;
+  out.nowGroup = q("#taskDlg .tc-ev.on").closest(".tc-line") && [...q("#taskDlg .tc-line").children].indexOf(q("#taskDlg .tc-ev.on"))
+    > [...q("#taskDlg .tc-line").children].findIndex(c => c.textContent === "Now");
+  [...document.querySelectorAll("#taskDlg [data-tc-full]")].find(b => b.offsetParent).click();
+  await until(() => q("#taskDlg").classList.contains("hidden") && !q("#sessPanel").classList.contains("hidden"), "the full task in the side panel");
+  head.click();
+  await until(shown, "the task view again");
+  [...document.querySelectorAll("#taskDlg [data-tc-go]")].find(b => b.offsetParent).click();
+  await until(() => q("#taskDlg").classList.contains("hidden"), "Go to Session closes the view");
+  out.path = location.pathname;
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''.replace("FIRST", str(first)).replace("FOUND", str(found)).replace("IT", str(self.it))
+        for size in ("1280,900", "390,844"):
+            got = self.drive(driver, "/sessions/ag", size=size)
+            with self.subTest(size=size):
+                self.assertTrue(got["head"].startswith("Session:"), got)
+                self.assertEqual((got["on"], got["headOn"]), (str(first), str(self.it)), got)
+                self.assertEqual(got["groups"][1:], ["Now", "Next"], got)
+                self.assertIn("It found one more task", got["kid"])
+                self.assertTrue(got["changed"], got)
+                self.assertTrue(got["nowGroup"], got)
+                self.assertEqual(got["side"], 0, got)
+                self.assertTrue(got["path"].startswith("/sessions/ag"), got)  # the side panel keeps the full task
+                self.assertLess(got["ms"], 500, got)  # p147: the route answers in a few ms; the rest is the page
+                phone = size.startswith("390")
+                self.assertEqual((got["headGo"], got["sheetGo"]), (not phone, phone), got)
+                if not phone:
+                    self.assertGreater(got["wide"], 900, got)
+
     def test_typing_in_the_message_box_moves_nothing_at_desktop_width(self):
         """#5111: typing in the message box moves nothing in the chat above it, replaces nothing, scrolls nothing."""
         self.type_in_the_box("1240,900")

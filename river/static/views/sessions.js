@@ -15,6 +15,7 @@ import { openSettings } from "../components/settingsDialog.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
 import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
+import { openTask } from "../components/taskContext.js";
 import { openBrowser } from "../components/browserTool.js";
 import { checkPaths } from "../components/artLinks.js";
 import { cacheBadge, askCold } from "../components/cacheBadge.js";
@@ -224,9 +225,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   const body = $("#sessBody"), col = $("#sessCol"), main = $("#sessMain");
   wireCopy(col);
   wirePanel();
-  // The chat stays in sight (#4685): in this tab an item opens in the side panel, not in the drawer (a #<id> in the
-  // chat, the item of a session row or of the header, an item of the panel's lists), and Items and Artifacts open
-  // there as lists.
+  // The chat stays in sight (#4685): in this tab an item opens over the chat or in the side panel, not in the drawer:
+  // a #<id> in the chat and the item of the header open the task view (#5572), the item of a session row and an item
+  // of the panel's lists open in the side panel; Items and Artifacts open there as lists.
   $("#tab-sessions").addEventListener("click", (e) => {
     // Also from the ⋯ menu, where a phone has them (#5402): the menu closes.
     const l = e.target.closest("[data-sp-open]"); if (l) { if (l.closest("#sessMenu")) headMore(false); return openList(l.dataset.spOpen); }
@@ -236,6 +237,12 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const o = e.target.closest("[data-open]");
     if (!o || !/^\d+$/.test(o.dataset.open) || e.metaKey || e.ctrlKey) return;
     e.preventDefault(); e.stopPropagation();
+    // A #id in the chat and the task of the head: the task in the work of its session (#5572); the rest (a row's
+    // task, the panel's lists) opens in the side panel.
+    if (o.closest("#sessCol, #sessItem, #sessMenuItem")) {
+      if (o.closest("#sessMenu")) headMore(false);  // the head's task in the ⋯ menu, where a phone has it
+      return openTask(+o.dataset.open, { onGo: (name) => pick(name), onFull: (id) => openInPanel("item:" + id) });
+    }
     openInPanel("item:" + o.dataset.open);
   });
   // A link or a file path in the chat opens in the side panel; Cmd or Ctrl+click keeps a new browser tab (#4619).

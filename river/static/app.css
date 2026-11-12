@@ -61,6 +61,7 @@
   --scrim: rgba(0,0,0,.45); --shadow-dlg: 0 12px 40px rgba(0,0,0,.25);
   --shadow-pop: 0 4px 16px rgba(0,0,0,.18);  /* a bar that floats over the page (a canvas a session opened) */
   --w-dlg-s: 520px; --w-dlg-m: 620px;  /* a small and a middle dialog (--dlg-w) */
+  --w-dlg-l: 1000px;   /* a large view over the chat: a task in the work of its session (#5572) */
   /* The Sessions tab (#5044) */
   --w-sess-min: 280px; --w-sess-max: 360px;  /* the column of the session list */
   --w-panel: 480px;    /* the side panel at its first width, and a bar over it */
@@ -361,6 +362,51 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; padding
 .end-now .actions { justify-content: flex-end; margin-top: var(--sp-2); }
 /* Archive a project (archiveProject.js, #5197): the same look as End. */
 #archDlg { --dlg-w: var(--w-dlg-s); }
+/* A task in the work of its session (components/taskContext.js, #5572): the head, the goal head, then the line of the
+   session (left) and the task (right). Each part scrolls by itself; the head stays. */
+#taskDlg { --dlg-w: var(--w-dlg-l); }
+#taskDlg > .tc-box { padding: 0; overflow: hidden; display: flex; flex-direction: column; max-height: 88vh; }
+.tc-head { flex: none; align-items: center; flex-wrap: wrap; margin: 0; padding: var(--sp-5) var(--sp-6);
+  border-bottom: var(--hair) solid var(--line); }
+.tc-head h2 { font-size: var(--fs-l); overflow-wrap: anywhere; }
+.tc-sp { flex: 1; }
+.tc-goal { flex: none; padding: var(--sp-5) var(--sp-6); border-bottom: var(--hair) solid var(--line); background: var(--bg); }
+.tc-go { font-size: var(--fs-base); font-weight: 600; margin: var(--sp-0) 0; }
+.tc-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 4fr); }
+.tc-body.tc-only { grid-template-columns: minmax(0, 1fr); }
+.tc-line { min-height: 0; overflow-y: auto; padding: var(--sp-3) var(--sp-5) var(--sp-6); border-right: var(--hair) solid var(--line); }
+.tc-det { min-height: 0; overflow-y: auto; padding: var(--sp-6); overflow-wrap: anywhere; }
+.tc-grp { font-size: var(--fs-xs); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: var(--sp-5) 0 var(--sp-2); }
+button.tc-ev, button.tc-k, button.tc-unfold { border: 0; background: none; }
+button.tc-ev { display: grid; grid-template-columns: calc(var(--sp-7) * 3) var(--sp-5) minmax(0, 1fr); gap: var(--sp-3);
+  align-items: start; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-m); }
+button.tc-ev:hover { background: var(--bg); }
+button.tc-ev.on { background: var(--human-bg); outline: var(--hair-2) solid var(--accent); outline-offset: calc(-1 * var(--hair-2)); }
+.tc-t { font-size: var(--fs-s); color: var(--muted); text-align: right; padding-top: var(--hair); white-space: nowrap; }
+.tc-dot { width: var(--sp-5); height: var(--sp-5); margin-top: var(--sp-1); border-radius: 50%; box-sizing: border-box;
+  border: var(--hair-2) solid var(--done); background: var(--done-bg); }
+.tc-dot.done { background: var(--done); }
+.tc-dot.now { border-color: var(--prog); background: var(--prog); }
+.tc-dot.next { border-color: var(--ready); background: var(--panel); }
+.tc-dot.wait { border-color: var(--wait); background: var(--wait-bg); }
+.tc-txt { display: flex; flex-direction: column; min-width: 0; }
+.tc-ti { font-weight: 500; }
+.tc-tl { display: block; }
+.tc-sub, .tc-none { font-size: var(--fs-s); color: var(--muted); }
+.tc-none { padding: var(--sp-1) var(--sp-3); }
+.tc-kid { margin-left: calc(var(--sp-7) * 3 + var(--sp-5) + var(--sp-3) * 3); padding: 0 var(--sp-3) var(--sp-2);
+  font-size: var(--fs-s); color: var(--muted); }
+button.tc-k { display: inline; width: auto; padding: 0; color: var(--ink); text-decoration: underline dotted; }
+.tc-pill { display: inline-block; margin-left: var(--sp-2); padding: var(--hair) var(--sp-3); border-radius: var(--r-pill);
+  font-size: var(--fs-xs); font-weight: 400; background: var(--done-bg); color: var(--done); }
+.tc-pill.tc-prog { background: var(--prog-bg); color: var(--prog); }
+.tc-pill.tc-you { background: var(--human-bg); color: var(--human); }
+button.tc-unfold { display: none; }
+.tc-h { margin: var(--sp-1) 0 0; font-size: var(--fs-l); }
+.tc-sec { margin-top: var(--sp-5); }
+.tc-sec h4 { margin: 0 0 var(--sp-1); font-size: var(--fs-s); font-weight: 500; color: var(--muted); }
+.tc-acts { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-6); }
+.tc-det .tc-gobtn { display: none; }
 .arch-box h2 { margin: 0; font-size: var(--fs-l); overflow-wrap: anywhere; }  /* in .dlg-head, which gives the space under it */
 .arch-box p { margin: var(--sp-2) 0; font-size: var(--fs-m); }
 .arch-box > .actions { justify-content: flex-end; margin-top: var(--sp-5); }

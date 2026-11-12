@@ -1480,6 +1480,8 @@ try {
   await until(() => q('.sp-list[data-list="artifacts"]'), "the Artifacts list");
   const ref = [...document.querySelectorAll("#sessCol [data-open]")].pop();
   check(ref, "a #<id> link in the chat"); ref.click();
+  await until(() => q("#taskDlg") && !q("#taskDlg").classList.contains("hidden") && [...document.querySelectorAll("#taskDlg [data-tc-full]")].some(b => b.offsetParent), "the task view (#5572)");
+  [...document.querySelectorAll("#taskDlg [data-tc-full]")].find(b => b.offsetParent).click();  // Open the full task
   await until(() => q(".sp-item h3"), "the chat's #<id> opens in the panel");
   check(!q("#drawer").classList.contains("open") && chat(), "not in the drawer");
   check(document.querySelectorAll(".sp-tab:not(.sp-tab-list)").length === 1, "one tab for the item, opened twice");
@@ -2046,6 +2048,8 @@ try {
   await until(() => q(".sp-tab.on") && q(".sp-tab.on").title === "http://localhost:5173/app", "the local page in the panel");
   await until(() => q("#sessItem [data-open]"), "the session's item");  // drawn after the session's data comes (#4766)
   q("#sessItem [data-open]").click();
+  await until(() => q("#taskDlg") && !q("#taskDlg").classList.contains("hidden") && [...document.querySelectorAll("#taskDlg [data-tc-full]")].some(b => b.offsetParent), "the task view (#5572)");
+  [...document.querySelectorAll("#taskDlg [data-tc-full]")].find(b => b.offsetParent).click();  // Open the full task
   await until(() => q(".sp-item [data-file][data-checked]"), "the item's path checked");
   q(".sp-item [data-file]").click();
   await until(() => q(".sp-tab.on") && q(".sp-tab.on").title.endsWith("shot.png"), "the item's path in the panel");

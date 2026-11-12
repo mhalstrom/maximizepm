@@ -216,4 +216,21 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
   /* Dialogs: the whole width, from the top (the dialog part, .dlg: every dialog, #5028). */
   .dlg { padding: var(--sp-5) var(--sp-3); }
   .dlg > .box { padding: 14px var(--sp-5); }
+  /* A task in the work of its session (#5572): the line first, the earlier tasks folded; the task is a sheet at the
+     bottom with Go to Session, where the thumb reaches it. */
+  #taskDlg > .tc-box { padding: 0; height: calc(100dvh - 2 * var(--sp-5)); max-height: none; }
+  .tc-head { padding: var(--sp-3) var(--sp-5); }
+  .tc-head .tc-gobtn, .tc-hm { display: none; }
+  .tc-goal { padding: var(--sp-3) var(--sp-5); }
+  .tc-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .tc-line { border-right: 0; padding: var(--sp-1) var(--sp-3) var(--sp-5); }
+  .tc-det { max-height: 45dvh; padding: var(--sp-5); border-top: var(--hair) solid var(--line); background: var(--bg); }
+  .tc-body.tc-only .tc-det { max-height: none; border-top: 0; background: none; }
+  .tc-det .tc-gobtn { display: inline-flex; }
+  .tc-acts .btn { min-height: var(--tap); }
+  button.tc-ev { grid-template-columns: calc(var(--sp-7) * 2 + var(--sp-3)) var(--sp-5) minmax(0, 1fr); }
+  .tc-kid { margin-left: calc(var(--sp-7) * 2 + var(--sp-5) + var(--sp-3) * 4); }
+  button.tc-unfold { display: block; padding: var(--sp-2) var(--sp-3); font-size: var(--fs-s); color: var(--muted); }
+  .tc-line:not(.unfold) .tc-early { display: none; }
+  .tc-line.unfold button.tc-unfold { display: none; }
 }

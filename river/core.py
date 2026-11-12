@@ -10213,7 +10213,11 @@ def work_line(conn, item_id):
             "changed": it["changed"], "output": it["output"], "notes": it["notes"], "context": it["context"],
             "found_during": it["found_during"], "assignee": it["assignee"], "claimed_at": it["claimed_at"],
             "closed_at": it["closed_at"], "created_at": it["created_at"], "nobody_holds": why == "added"
-            and it["status"] in OPEN_STATES}
+            and it["status"] in OPEN_STATES,
+            # Where it goes (#5572): the deploy items that carry it (maxpm ship), with their target and state.
+            "ships": [dict(r) for r in conn.execute(
+                "SELECT d.id, d.target, d.status, d.closed_at FROM deps x JOIN items d ON d.id=x.item_id "
+                "WHERE x.blocked_by=? AND d.kind='deploy' ORDER BY d.id", (it["id"],))]}
     out = {"item": task, "owner": None, "owner_is": why, "since": None, "done": None, "added": None, "now": None,
            "next": None, "goal": None, "people": {}}
     names = {owner}
@@ -10361,6 +10365,9 @@ def _line_goal(conn, gid, names):
     sessions |= {r["actor"] for r in conn.execute(
         "SELECT DISTINCT actor FROM events WHERE item_id IS NULL AND change LIKE ? AND actor IS NOT NULL",
         (f"owns goal {g['name']} %",))}
+    sessions |= {r["actor"] for r in conn.execute(
+        "SELECT DISTINCT e.actor FROM item_goals ig JOIN events e ON e.item_id=ig.item_id WHERE ig.goal_id=? "
+        "AND e.change LIKE 'claimed%' AND e.actor IS NOT NULL", (gid,))}  # the sessions that took a task of it
     if g["owner"]:
         sessions.add(g["owner"])
     last = conn.execute("SELECT MAX(created_at) FROM goal_handoffs WHERE goal_id=?", (gid,)).fetchone()[0]
