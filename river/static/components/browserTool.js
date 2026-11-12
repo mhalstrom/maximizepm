@@ -55,7 +55,8 @@ function render(box, project) {
       <input class="br-addr" placeholder="Address" aria-label="The address of the browser's page">
       <select class="br-tabs hidden" aria-label="The tabs of the browser"></select>
     </form>
-    <div class="br-ctl"><span class="br-who muted t-s"></span><span class="br-sp"></span>
+    <div class="br-ctl"><span class="br-who muted t-s"></span>
+      <span class="br-refused hidden t-s">This site refuses a browser with no window: open it as a window.</span><span class="br-sp"></span>
       ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
       ${button("Give back", { cls: "br-back hidden", title: "Hand the browser on", data: { br: "give_back" } })}
       ${button("Open as a window", { cls: "br-win", title: "Show it as a normal window", data: { br: "window" } })}
@@ -108,7 +109,9 @@ function render(box, project) {
     const win = $$(".br-win");
     win.textContent = j.window ? "Back to the panel" : "Open as a window";
     win.dataset.br = j.window ? "headless" : "window";
-    win.classList.toggle("hidden", !!j.source);  // a Chrome that runs already (browser_source) has its own window
+    win.classList.toggle("hidden", !j.modes);  // a Chrome that runs already (browser_source) needs browser_mode (#5619)
+    win.classList.toggle("primary", !!j.refused && !j.window);
+    $$(".br-refused").classList.toggle("hidden", !(j.refused && !j.window));
     stage.classList.toggle("br-locked", !v.mine);
     if (document.activeElement !== addr) addr.value = j.url && j.url !== "about:blank" ? j.url : "";
     const sel = $$(".br-tabs"), tabs = j.tabs || [];

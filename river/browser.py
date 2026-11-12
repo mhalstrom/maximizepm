@@ -22,6 +22,12 @@ the person sees and uses in the side panel of the Sessions tab, and which a sess
   browser) instead: the panel and the sessions use only the tabs that serve opened in it, serve never closes that
   Chrome, and the network rule above does not hold for it. browser_lock and browser_unlock name the commands that
   take and give back that browser's lock when the controller changes.
+- Such a browser runs headless too, so no window shows (#5619). The setting browser_mode names the command that starts
+  it again as a window or headless ({mode}); with it, the panel offers Open as a window and Back to the panel for it
+  as for its own browser, and serve runs the command under the lock (attached_mode).
+- A headless Chrome says HeadlessChrome in its user agent, and Google's sign-in refuses it: serve's own Chrome gets
+  the user agent of the same Chrome with a window (--user-agent). A page that refuses the browser anyway (REFUSED)
+  makes the panel say so and offer Open as a window.
 
 Python's standard library has no WebSocket client, so the CDP connection uses the small one below (RFC 6455)."""
 
@@ -41,6 +47,7 @@ import socket
 import socketserver
 import struct
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -69,6 +76,44 @@ def chrome_path():
         if p:
             return p
     return None
+
+
+def user_agent(chrome):
+    """The user agent of this Chrome with a window, for a headless one: Google's sign-in refuses HeadlessChrome. With
+    the flag, navigator.userAgentData says Google Chrome too (Chrome 157, 2026-11-12). None when the version is not
+    known."""
+    try:
+        out = subprocess.run([chrome, "--version"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"(\d+)\.\d+", out)
+    if not m:
+        return None
+    plat = {"darwin": "Macintosh; Intel Mac OS X 10_15_7", "win32": "Windows NT 10.0; Win64; x64"}.get(
+        sys.platform, "X11; Linux x86_64")
+    return f"Mozilla/5.0 ({plat}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{m.group(1)}.0.0.0 Safari/537.36"
+
+
+# The pages of a site that refuses a browser with no window (#5619): the panel says so and offers Open as a window.
+REFUSED = [re.compile(r"^https://accounts\.google\.com/(?:v3/)?signin/rejected")]
+
+MODE_RUNNER = None   # tests: port -> True (the Chrome on it has a window), False (headless), None (not known)
+
+
+def has_window(port):
+    """Whether the Chrome that listens on 127.0.0.1:<port> has a window, from its arguments (its user agent can hide
+    HeadlessChrome, also in /json/version). None when it is not known."""
+    if MODE_RUNNER:
+        return MODE_RUNNER(port)
+    try:
+        pids = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True, text=True,
+                              timeout=5).stdout.split()
+        if not pids:
+            return None
+        args = subprocess.run(["ps", "-o", "args=", "-p", pids[0]], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return "--headless" not in args if args.strip() else None
 
 
 def browser_dir(project):
@@ -411,6 +456,8 @@ class Browser:
         self.size = None     # (w, h) of the panel, CSS px
         self.attached = None # the debugging port of a Chrome that serve did not start (browser_source cdp:<port>)
         self.mine = set()    # attached: the tabs serve opened in it, and the tabs that they opened
+        self.attached_window = None  # attached: whether that Chrome has a window (None: not known)
+        self.modes = False   # attached: the project has browser_mode, so the panel offers a window and back
         self.listeners = {}  # CDP session -> fn(method, params): the events of a tab that a page walk opened
         self.pointer = None  # the driving session's mouse (#5616): {x, y, who, target, n, press, px, py}
         self.typed = None    # what it types now: {who, target, text, secret, n, at, done}
@@ -460,21 +507,27 @@ class Browser:
             self._connect()
 
     def _start_attached(self, port, window):
-        if window:
-            raise RiverError(f"the browser of {self.project} is a Chrome that runs already (browser_source cdp:{port}): "
-                             f"it has its own window, so it does not open as one")
+        """Attach to that Chrome. A change of its mode (window) goes through attached_mode, which holds the lock."""
         with self.lock:
-            if self.ws is not None and self.attached == port:
-                return
-            if self.ws is not None:
-                self._stop_chrome()
-            try:
-                self._version(port)
-            except (OSError, ValueError):
-                raise RiverError(f"no Chrome answers on 127.0.0.1:{port} (browser_source cdp:{port} of {self.project}): "
-                                 f"start that browser first, as the project's own steps say")
-            self.attached = self.port = port
-            self._connect()
+            on = self.ws is not None and self.attached == port
+            if window is not None and window != bool(self.attached_window if on else has_window(port)):
+                raise RiverError(f"the browser of {self.project} is a Chrome that runs already (browser_source "
+                                 f"cdp:{port}); it opens as a window only through the setting browser_mode")
+            if not on:
+                if self.ws is not None:
+                    self._stop_chrome()
+                try:
+                    self._version(port)
+                except (OSError, ValueError):
+                    raise RiverError(f"no Chrome answers on 127.0.0.1:{port} (browser_source cdp:{port} of "
+                                     f"{self.project}): start that browser first, as the project's own steps say")
+                self.attached = self.port = port
+                self.attached_window = has_window(port)
+                self.modes = bool((setting_of(self.project, "browser_mode") or "").strip())
+                self._connect()
+
+    def _windowed(self):
+        return bool(self.attached_window) if self.attached else bool(self.state.get("window"))
 
     def _new_target(self, url="about:blank"):
         """A new tab; attached, it is one of serve's own tabs."""
@@ -531,6 +584,9 @@ class Browser:
                 f"--window-size={w},{h}", "about:blank"]
         if not self.state.get("window"):
             args[1:1] = ["--headless=new", "--hide-scrollbars", "--mute-audio"]
+            ua = user_agent(chrome)
+            if ua:
+                args.insert(1, f"--user-agent={ua}")
         self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
         end = time.time() + START_WAIT
@@ -599,7 +655,7 @@ class Browser:
 
     def _fit(self):
         """The page takes the size of the panel (headless only; a window has its own size)."""
-        if not self.size or self.state.get("window") or not self.session:
+        if not self.size or self._windowed() or not self.session:
             return
         w, h = self.size
         self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False},
@@ -629,7 +685,7 @@ class Browser:
         if self.attached:  # a Chrome that serve did not start: only leave it
             if ws:
                 ws.close()
-            self.attached = None
+            self.attached = self.attached_window = None
             self.session = self.target = None
             self.targets, self.mine = {}, set()
             return
@@ -716,11 +772,13 @@ class Browser:
                 self.seq += 1
                 self.cond.notify_all()
         elif method == "Target.targetDestroyed":
-            self.targets.pop(p["targetId"], None)
+            gone = self.targets.pop(p["targetId"], None) or {}
             self.mine.discard(p["targetId"])
             if p["targetId"] == self.target:
                 self.session = self.target = None
-                threading.Thread(target=self._switch_quiet, args=(None,), daemon=True).start()
+                # A popup that closes (an OAuth sign-in) shows the page that opened it again (#5619).
+                back = gone.get("opener") if gone.get("opener") in self.targets else None
+                threading.Thread(target=self._switch_quiet, args=(back,), daemon=True).start()
             with self.cond:
                 self.seq += 1
                 self.cond.notify_all()
@@ -793,8 +851,11 @@ class Browser:
         cur = self.targets.get(self.target) or {}
         c = self.state.get("controller") or {}
         before = self.state.get("before") or {}
-        return {"project": self.project, "running": self.running(), "window": bool(self.state.get("window")),
+        url = cur.get("url", "")
+        return {"project": self.project, "running": self.running(), "window": self._windowed(),
                 "source": f"cdp:{self.attached}" if self.attached else None,
+                "modes": not self.attached or self.modes,  # the panel offers Open as a window and Back to the panel
+                "refused": any(r.match(url) for r in REFUSED),  # the site refuses a browser with no window
                 "url": cur.get("url", ""), "title": cur.get("title", ""), "controller": c or None,
                 "before": before.get("who"),
                 "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target}
@@ -1229,13 +1290,16 @@ LOCK_WAIT = 60       # seconds that one lock command may take
 LOCK_RUNNER = None   # tests: (command, folder) -> (exit code, output)
 
 
-def _lock_run(conn, b, key, who):
-    """Run the project's browser_lock or browser_unlock for who: (ok, output). No command set: (True, None)."""
+def _lock_run(conn, b, key, who, mode=None):
+    """Run the project's browser_lock, browser_unlock or browser_mode for who: (ok, output). No command set: (True,
+    None)."""
     r = conn.execute("SELECT id, path FROM projects WHERE name=?", (b.project,)).fetchone()
     cmd = (core.setting(conn, key, project_id=r["id"] if r else None) or "").strip()
     if not cmd:
         return True, None
     cmd = cmd.replace("{who}", shlex.quote(who))
+    if mode:
+        cmd = cmd.replace("{mode}", mode)
     cwd = os.path.expanduser(r["path"]) if r and r["path"] else None
     if LOCK_RUNNER:
         code, out = LOCK_RUNNER(cmd, cwd)
@@ -1390,6 +1454,39 @@ def hand(conn, b, who, to):
         raise
     b.state["controller"] = {"who": to, "kind": "session", "sub": None, "since": core.iso(core.now())}
     b._save()
+    _notify(b)
+    return b.info()
+
+
+def attached_mode(conn, b, who, window):
+    """Open as a window, or Back to the panel, for an attached Chrome (browser_source cdp, #5619): browser_mode starts
+    that Chrome again in the mode, with the same profile, while who holds its lock, because the restart closes every
+    tab in it (the walks of other sessions too). A lock that another holder keeps refuses it."""
+    who = who or "person"
+    if window == bool(b.attached_window) and b.running():
+        return b.info()
+    lk = b.state.get("locked")
+    if lk and lk.get("who") != who:
+        raise RiverError(f"{lk['who']} holds the lock of the browser of {b.project}, and a new mode starts that Chrome "
+                         f"again: press Take control first")
+    mine = not lk
+    if mine:
+        _take_lock(conn, b, who)
+    try:
+        with b.lock:
+            b._stop_chrome()
+            ok, out = _lock_run(conn, b, "browser_mode", who, "window" if window else "headless")
+            if out is None:
+                raise RiverError(f"the browser of {b.project} is a Chrome that runs already (browser_source): set the "
+                                 f"command that starts it again as a window or headless, maxpm config set browser_mode "
+                                 f"'bash scripts/test-browser.sh {{mode}}' --project {b.project}")
+            if not ok:
+                raise RiverError(f"browser_mode of {b.project} failed: {out}")
+            b.start()
+    finally:
+        if mine:
+            _give_lock(conn, b, who)
+            b._save()
     _notify(b)
     return b.info()
 

@@ -166,6 +166,11 @@ DEFAULT_SETTINGS = {
     # lock. Example: bash scripts/test-browser.sh lock {who}   and   bash scripts/test-browser.sh unlock {who}
     "browser_lock": "",
     "browser_unlock": "",
+    # The command that starts a project's attached browser (browser_source cdp:<port>) again as a normal window or
+    # headless, with the same profile (#5619): {mode} is window or headless. serve runs it in the project folder while
+    # the person holds the browser's lock (browser_lock), when the person presses Open as a window or Back to the
+    # panel. Empty: the panel offers neither for that browser. Example: bash scripts/test-browser.sh {mode}
+    "browser_mode": "",
     # The Playwright MCP tools on the project's browser (#5405): on, a Claude Code session that maxpm starts for the
     # project gets a Playwright MCP server named maxpm-browser in its launch command (--mcp-config), with a CDP address
     # of its own through maxpm serve (ws://127.0.0.1:<serve_port>/cdp/<agent>?project=..&token=..), which keeps the
@@ -2095,6 +2100,10 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("browser_pace is watch (a person's pace while the panel shows the browser), person or fast")
     elif key == "browser_shot_cursor" and value not in ("on", "off"):
         raise RiverError("browser_shot_cursor is on or off")
+    elif key == "browser_mode":
+        if value.strip() and "{mode}" not in value:
+            raise RiverError("browser_mode names the mode as {mode} (window or headless): "
+                             "bash scripts/test-browser.sh {mode}")
     elif key in ("browser_lock", "browser_unlock"):
         if value.strip() and "{who}" not in value:
             raise RiverError(f"{key} names the holder as {{who}}: bash scripts/test-browser.sh "

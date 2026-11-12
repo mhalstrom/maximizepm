@@ -127,6 +127,30 @@ class Controller(Base):
         browser.control(self.c, b, "ag2")
         self.assertEqual(b.info()["controller"]["who"], "ag2")
 
+    def test_headless_chrome_gets_the_user_agent_of_a_window(self):
+        """#5619: HeadlessChrome in the user agent makes Google's sign-in refuse; the flag gives Chrome's own."""
+        out = mock.Mock(stdout="Google Chrome 157.0.8103.52 \n")
+        with mock.patch.object(browser.subprocess, "run", return_value=out):
+            ua = browser.user_agent("chrome")
+        self.assertIn("Chrome/157.0.0.0 Safari/537.36", ua)
+        self.assertNotIn("Headless", ua)
+        with mock.patch.object(browser.subprocess, "run", side_effect=OSError):
+            self.assertIsNone(browser.user_agent("chrome"))
+
+    def test_a_refused_page_and_a_popup_that_closes(self):
+        """#5619: the panel says when a site refuses a browser with no window; a closed popup shows its opener."""
+        b = browser.get("web")
+        b.targets = {"a": {"url": "https://example.com/", "title": "", "opener": None},
+                     "p": {"url": "https://accounts.google.com/v3/signin/rejected?x=1", "title": "", "opener": "a"}}
+        b.target = "p"
+        self.assertTrue(b.info()["refused"])
+        b.target = "a"
+        self.assertFalse(b.info()["refused"])
+        b.target = "p"
+        with mock.patch.object(browser.threading, "Thread") as th:
+            b._event("Target.targetDestroyed", {"targetId": "p"}, None)
+        self.assertEqual(th.call_args.kwargs["args"], ("a",))
+
     def test_the_profile_lives_beside_the_queue(self):
         self.assertEqual(browser.browser_dir("my web/app").parent, core.db_path().parent / "browsers")
         self.assertEqual(browser.browser_dir("my web/app").name, "my_web_app")
@@ -194,9 +218,83 @@ class SharedBrowserLock(Base):
                 core.config_set(self.c, "browser_source", bad, project="web")
         with self.assertRaisesRegex(RiverError, "names the holder"):
             core.config_set(self.c, "browser_lock", "bash lock.sh", project="web")
+        with self.assertRaisesRegex(RiverError, "names the mode"):
+            core.config_set(self.c, "browser_mode", "bash scripts/test-browser.sh window", project="web")
         core.config_set(self.c, "browser_source", "cdp:9339", project="web")
-        with self.assertRaisesRegex(RiverError, "has its own window"):
-            browser.get("web").start(window=True)
+        self._modes(lambda port: False)
+        # A start with a mode refuses before it connects (no test reaches the person's browser on 9339).
+        with mock.patch.object(browser.Browser, "_version", side_effect=AssertionError("connected")):
+            with self.assertRaisesRegex(RiverError, "only through the setting browser_mode"):
+                browser.get("web").start(window=True)
+
+    def _modes(self, fn):
+        old = browser.MODE_RUNNER
+        browser.MODE_RUNNER = fn
+        self.addCleanup(lambda: setattr(browser, "MODE_RUNNER", old))
+
+    def _attached(self, window=False):
+        """An attached browser (browser_source cdp:9339) with no Chrome: start and stop are fakes."""
+        core.config_set(self.c, "browser_source", "cdp:9339", project="web")
+        b = browser.get("web")
+        b.attached, b.attached_window = 9339, window
+        b.ws = object()
+        starts = []
+
+        def start(window=None):
+            b.attached, b.ws = 9339, object()
+            b.attached_window = "window" in self.calls[-1] if self.calls else window
+            starts.append(window)
+
+        def stop():
+            b.ws, b.attached = None, None
+        b.start, b._stop_chrome = start, stop
+        return b, starts
+
+    def test_open_as_a_window_runs_browser_mode_under_the_lock(self):
+        """#5619: an attached Chrome opens as a window and goes back headless through browser_mode, under its lock."""
+        b, starts = self._attached()
+        with self.assertRaisesRegex(RiverError, "maxpm config set browser_mode"):
+            browser.attached_mode(self.c, b, "mark", True)
+        self.assertEqual(self.calls, ["lock mark", "unlock mark"])  # the lock goes back after the refusal too
+        core.config_set(self.c, "browser_mode", "mode {mode}", project="web")
+        self.calls.clear()
+        info = browser.attached_mode(self.c, b, "mark", True)
+        self.assertEqual(self.calls, ["lock mark", "mode window", "unlock mark"])
+        self.assertTrue(info["window"])
+        self.calls.clear()
+        browser.attached_mode(self.c, b, "mark", True)  # the mode it has already: nothing runs
+        self.assertEqual(self.calls, [])
+        browser.attached_mode(self.c, b, "mark", False)
+        self.assertEqual(self.calls, ["lock mark", "mode headless", "unlock mark"])
+        self.assertFalse(b.info()["window"])
+
+    def test_a_mode_change_waits_for_another_holder_of_the_lock(self):
+        b, _ = self._attached()
+        core.config_set(self.c, "browser_mode", "mode {mode}", project="web")
+        browser.control(self.c, b, "ag1")
+        self.calls.clear()
+        with self.assertRaisesRegex(RiverError, "ag1 holds the lock .* press Take control first"):
+            browser.attached_mode(self.c, b, "mark", True)
+        self.assertEqual(self.calls, [])
+        browser.take(self.c, b, "mark")  # the person holds it: the mode changes and the lock stays the person's
+        self.calls.clear()
+        browser.attached_mode(self.c, b, "mark", True)
+        self.assertEqual(self.calls, ["mode window"])
+        self.assertEqual(b.state["locked"]["who"], "mark")
+
+    def test_the_panel_offers_a_window_only_with_browser_mode(self):
+        b, _ = self._attached()
+        self.assertFalse(b.info()["modes"])
+        b.modes = True
+        self.assertTrue(b.info()["modes"])
+        self.assertTrue(browser.Browser("other").info()["modes"])  # serve's own Chrome always can
+
+    def test_the_window_route_uses_browser_mode_for_an_attached_chrome(self):
+        b, _ = self._attached()
+        with mock.patch.object(browser, "attached_mode", return_value={}) as m:
+            routes.act(self.c, {"action": "window", "project": "web", "window": True}, "mark")
+        m.assert_called_once()
+        self.assertEqual(m.call_args.args[2:], ("mark", True))
 
 
 class ProjectOf(Base):
@@ -652,6 +750,8 @@ class AttachedChrome(Base):
         b.start()
         info = b.info()
         self.assertEqual(info["source"], f"cdp:{port}")
+        self.assertFalse(info["window"])  # headless, from the arguments of the Chrome on that port (#5619)
+        self.assertFalse(info["modes"])  # no browser_mode: the panel offers no window
         self.assertEqual(len(info["tabs"]), 1)  # its own tab; the other tab stays out of it
         self.assertNotIn("Theirs", [t["title"] for t in info["tabs"]])
         own = info["tabs"][0]["id"]

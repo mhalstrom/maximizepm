@@ -143,7 +143,11 @@ def act(conn, a, who):
         return b.info()
     if action == "window":  # decision 3: a normal window for a site that refuses a headless browser, and back
         url = b.info()["url"] if b.running() else ""
-        b.start(window=bool(a.get("window", True)))
+        window = bool(a.get("window", True))
+        if b._attached_now():  # a Chrome that serve did not start: its browser_mode, under the lock (#5619)
+            browser.attached_mode(conn, b, who, window)
+        else:
+            b.start(window=window)
         if url and url != "about:blank":
             b.open(url)
         return b.info()
