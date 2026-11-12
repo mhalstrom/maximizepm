@@ -65,6 +65,75 @@ class Client(unittest.TestCase):
         self.assertIn("took the command", err.getvalue())
 
 
+class LeanStart(unittest.TestCase):
+    """The command's own start (#5525): the client uses the C parts of json and socket, and bin/maxpm runs Python
+    with -S."""
+
+    def test_the_json_of_the_c_parts_is_the_json_of_the_module(self):
+        self.assertEqual(client._socket.__name__, "_socket")
+        obj = {"argv": ["--as", "ag", "say", "caf\u00e9 \u2713"], "env": {"A": "1"}, "ppid": 7, "tty": False,
+               "none": None, "n": [1.5, -2]}
+        self.assertEqual(client._dumps(obj), json.dumps(obj))
+        self.assertEqual(client._loads(json.dumps(obj)), obj)
+        self.assertEqual(client._loads(b' {"out": "a\\nb", "code": 0} \n'), {"out": "a\nb", "code": 0})
+        for bad in ("", "{} x", "NaN", "{"):
+            with self.assertRaises(ValueError, msg=bad):
+                client._loads(bad)
+        with self.assertRaises(TypeError):
+            client._dumps({"x": object()})
+
+    def test_post_talks_http_over_a_local_socket(self):
+        import socket
+        import threading
+        srv = socket.socket()
+        try:
+            srv.bind(("127.0.0.1", 0))
+        except OSError:
+            self.skipTest("this sandbox binds no port")
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        got = {}
+
+        def answer():
+            c, _ = srv.accept()
+            with c:
+                data = b""
+                while b"\r\n\r\n" not in data or not data.endswith(b"}"):
+                    data += c.recv(65536)
+                got["req"] = data
+                body = b'{"code": 3, "out": "x"}'
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        t = threading.Thread(target=answer)
+        t.start()
+        status, rest = client._post(srv.getsockname()[1], b'{"argv": []}', "tok", 5)
+        t.join(5)
+        self.assertEqual((status, client._loads(rest)), (200, {"code": 3, "out": "x"}))
+        self.assertIn(b"X-Maxpm-Token: tok", got["req"])
+        self.assertEqual(client._post(1, b"{}", "t", 1), (None, None))  # nothing listens on port 1
+
+    def test_main_runs_the_command_here_when_serve_does_not(self):
+        ran = []
+        with mock.patch.object(client, "run_remote", return_value=None), \
+                mock.patch("river.cli.main", lambda: ran.append("local")):
+            client.main()
+        self.assertEqual(ran, ["local"])
+        with mock.patch.object(client, "run_remote", return_value=4), self.assertRaises(SystemExit) as e:
+            client.main()
+        self.assertEqual(e.exception.code, 4)
+
+    def test_bin_maxpm_starts_python_without_site(self):
+        path = os.path.join(ROOT, "bin", "maxpm")
+        with open(path) as f:
+            self.assertEqual(f.readline().strip(), "#!/usr/bin/env -S python3 -S")
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        env = {**os.environ, "MAXPM_LOCAL": "1", "MAXPM_DB": os.path.join(d.name, "q.db")}
+        r = subprocess.run([sys.executable, "-S", path, "--version"], capture_output=True, text=True, env=env,
+                           timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("maxpm "), r.stdout)
+
+
 class Runner(unittest.TestCase):
     """A runner process over its pipes, as serve uses it."""
 

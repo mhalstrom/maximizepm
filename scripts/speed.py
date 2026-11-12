@@ -24,7 +24,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if "--repo" in sys.argv[:-1]:  # the code to measure: another checkout (to compare with the code before a change)
     ROOT = os.path.abspath(os.path.expanduser(sys.argv[sys.argv.index("--repo") + 1]))
 sys.path.insert(0, ROOT)
-MAXPM = [sys.executable, os.path.join(ROOT, "bin", "maxpm"), "-q"]
+# As a person runs it: through its shebang (python3 -S, #5525); Windows has no shebang.
+MAXPM = ([sys.executable] if os.name == "nt" else []) + [os.path.join(ROOT, "bin", "maxpm"), "-q"]
 
 # (name, words, writes). {open} is an open agent item, {held} the item the test agent holds, {agent} its name.
 COMMANDS = [

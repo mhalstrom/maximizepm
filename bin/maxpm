@@ -1,17 +1,15 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -S
 """MaximizePM command. Put this directory on PATH or link it:
-ln -s <repo>/bin/maxpm ~/.local/bin/maxpm"""
+ln -s <repo>/bin/maxpm ~/.local/bin/maxpm
+
+Python starts with -S (no site): maxpm uses only the standard library, and site with its .pth files and
+sitecustomize takes about 5 ms of each command (#5525)."""
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 # First the running maxpm serve, which runs the command with the code and the queue in memory (#5501); when it
 # does not take the command, it runs here.
-from river.client import run_remote  # noqa: E402
-
-code = run_remote(sys.argv[1:])
-if code is not None:
-    sys.exit(code)
-from river.cli import main  # noqa: E402
+from river.client import main  # noqa: E402
 
 main()

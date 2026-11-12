@@ -7,11 +7,48 @@ command must run in its own process: serve does not run (no serve file, no answe
 (every runner busy, older code than this checkout), the command is one that runs here (LOCAL), or MAXPM_LOCAL is
 set. None never means the command ran: a command that serve took is never run a second time here.
 
-This module imports nothing of the rest of maxpm, and only os, sys, json and socket: its own start is the cost."""
-import json
+This module imports nothing of the rest of maxpm, and of the standard library only os and the C modules _socket
+and _json: its own start is the cost. json and socket import re, enum and collections, about 6 ms of a 47 ms
+command (#5525); bin/maxpm also starts Python with -S (no site), which then saves its 5 ms."""
 import os
-import socket
 import sys
+
+try:  # the C parts of json and socket, without the Python modules around them (#5525)
+    import _json
+    import _socket
+
+    class _Scan:
+        strict, object_hook, object_pairs_hook, parse_float, parse_int = True, None, None, float, int
+
+        @staticmethod
+        def parse_constant(name):
+            raise ValueError(f"no JSON constant {name}")
+
+    def _no_type(o):
+        raise TypeError(f"{type(o).__name__} is not JSON")
+
+    _SCAN = _json.make_scanner(_Scan())
+    _ENCODE = _json.make_encoder({}, _no_type, _json.encode_basestring_ascii, None, ": ", ", ", False, False, True)
+
+    def _dumps(obj):
+        return "".join(_ENCODE(obj, 0))
+
+    def _loads(text):
+        text = text.decode() if isinstance(text, bytes) else text
+        text = text.strip()
+        try:
+            obj, end = _SCAN(text, 0)
+        except StopIteration:
+            raise ValueError("no JSON value")
+        if end != len(text):
+            raise ValueError("more text after the JSON value")
+        return obj
+
+    _dumps({"a": [1, None, True]})  # another Python whose C parts differ falls back to json below
+except Exception:  # noqa: BLE001 - no C parts here: the Python modules do the same, a little slower
+    import json as _json_mod
+    import socket as _socket
+    _dumps, _loads = _json_mod.dumps, _json_mod.loads
 
 # The commands that serve's runners may run. serve runs outside an agent's sandbox, so none of them reads or
 # writes a file that the caller names (those options are in FILE_WORDS), runs the caller's commands (review, ops),
@@ -68,22 +105,32 @@ def _post(port, body, token, timeout):
     (an agent sandbox permits no direct connection; its proxy passes a host that the sandbox allows)."""
     req = (f"POST /api/run HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
            f"X-Maxpm-Token: {token}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n")
+    s = None
     try:
-        s = socket.create_connection(("127.0.0.1", port), timeout=2)
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(("127.0.0.1", port))
         head = req
     except PermissionError:
+        s.close()
         proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
         if not proxy:
             return None, None
+        import socket  # the proxy may have a name to resolve: the whole module, only on this path
         from urllib.parse import unquote, urlsplit
         p = urlsplit(proxy)
-        s = socket.create_connection((p.hostname, p.port or 80), timeout=2)
+        try:
+            s = socket.create_connection((p.hostname, p.port or 80), timeout=2)
+        except OSError:
+            return None, None
         head = req.replace("POST /api/run", f"POST http://127.0.0.1:{port}/api/run", 1)
         if p.username:
             import binascii
             cred = binascii.b2a_base64(f"{unquote(p.username)}:{unquote(p.password or '')}".encode(), newline=False)
             head += f"Proxy-Authorization: Basic {cred.decode()}\r\n"
     except OSError:
+        if s is not None:
+            s.close()
         return None, None
     try:
         try:
@@ -124,7 +171,7 @@ def run_remote(words, env=None, cwd=None):
         return None
     try:
         with open(serve_file(env)) as f:
-            info = json.load(f)
+            info = _loads(f.read())
         port, token = int(info["port"]), str(info["token"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -132,7 +179,7 @@ def run_remote(words, env=None, cwd=None):
         cwd = cwd or os.getcwd()
     except OSError:
         return None
-    body = json.dumps({"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(),
+    body = _dumps({"argv": list(words), "cwd": cwd, "env": env, "ppid": os.getppid(),
                        "stamp": code_stamp(), "stdin_tty": sys.stdin.isatty() if sys.stdin else False}).encode()
     status, answer = _post(port, body, token, timeout=None)
     if status is None or 400 <= status < 500 or status == 503:
@@ -140,7 +187,7 @@ def run_remote(words, env=None, cwd=None):
         # (409), every runner busy (503): serve did not run it, so it runs here.
         return None
     try:
-        res = json.loads(answer)
+        res = _loads(answer)
     except ValueError:
         res = None
     if status != 200 or not isinstance(res, dict):
@@ -156,3 +203,12 @@ def run_remote(words, env=None, cwd=None):
         sys.stderr.write(res["err"])
         sys.stderr.flush()
     return int(res.get("code") or 0)
+
+
+def main():
+    """The installed maxpm command (the pyproject entry point): serve runs it when it can, else maxpm here."""
+    code = run_remote(sys.argv[1:])
+    if code is not None:
+        sys.exit(code)
+    from .cli import main as local
+    local()

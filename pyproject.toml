@@ -21,7 +21,7 @@ Homepage = "https://maximizepm.com"
 Source = "https://github.com/mhalstrom/maximizepm"
 
 [project.scripts]
-maxpm = "river.cli:main"
+maxpm = "river.client:main"  # serve runs the command when it can (#5501, #5525)
 
 [tool.hatch.build.targets.wheel]
 packages = ["river"]

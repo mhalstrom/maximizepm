@@ -3444,7 +3444,7 @@ class CommandNames(unittest.TestCase):
                                 text=True, env=env)
             self.assertIn("shop", ls.stdout)
         text = (root / "pyproject.toml").read_text()
-        self.assertIn('maxpm = "river.cli:main"', text)
+        self.assertIn('maxpm = "river.client:main"', text)  # serve runs it when it can, else river.cli (#5525)
         self.assertNotIn('river = "river.cli:main"', text)
         self.assertIn('name = "maximizepm"', text)
 
