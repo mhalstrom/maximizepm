@@ -142,7 +142,10 @@ def person_input(conn, a, who):
     if b is None or not b.running():
         raise RiverError("the browser is not running: open a page first")
     browser.may_change(conn, b, who, True)
-    return browser.person_input(b, a.get("ev") or {})
+    out = None
+    for ev in a.get("evs") or [a.get("ev") or {}]:  # the page sends what came during its last request at once (#5479)
+        out = browser.person_input(b, ev or {})
+    return out
 
 
 def cdp(h, path):

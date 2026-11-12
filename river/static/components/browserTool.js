@@ -67,9 +67,19 @@ function render(box, project) {
   const $$ = (s) => box.querySelector(s);
   const stage = $$(".br-stage"), img = $$(".br-img"), keys = $$(".br-keys"), msg = $$(".br-msg"), addr = $$(".br-addr");
   const v = { seq: 0, w: 0, h: 0, mine: true, running: false, window: false };
-  let sending = Promise.resolve(), token = null;
+  // One request at a time; what the person types or clicks while it runs goes in the next one, in order (#5479: one
+  // request for each key took about 0.7 s a key when serve was busy).
+  let pending = [], busy = false, token = null;
   const send = (ev) => { if (!v.mine) return toast("A session controls the browser: press Take control first", true);
-    sending = sending.then(() => typeAction("browser_input", { project, ev })).catch((e) => toast(e.message, true)); };
+    pending.push(ev); if (!busy) flush(); };
+  async function flush() {
+    busy = true;
+    while (pending.length) {
+      const evs = pending; pending = [];
+      try { await typeAction("browser_input", { project, evs }); } catch (e) { toast(e.message, true); }
+    }
+    busy = false;
+  }
 
   // Who controls it: the line, the buttons, and whether the person's input goes through.
   function show(j) {

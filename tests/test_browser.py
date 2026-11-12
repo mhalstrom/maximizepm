@@ -299,6 +299,18 @@ class Routes(Base):
         with self.assertRaisesRegex(RiverError, "not running"):
             server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "text", "text": "x"}}, None)
 
+    def test_the_input_of_one_request_goes_in_order(self):
+        # #5479: the keys typed while a request runs come in the next one, as a list.
+        b = browser.get("web")
+        got = []
+        with mock.patch.object(b, "running", lambda: True), \
+                mock.patch.object(browser, "person_input", lambda b, ev: got.append(ev) or {"ok": len(got)}):
+            out = server.OPS["browser_input"](self.c, {"project": "web", "evs": [
+                {"type": "key", "key": "h"}, {"type": "key", "key": "i"}, {"type": "key", "key": "Enter"}]}, None)
+            server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "text", "text": "x"}}, None)
+        self.assertEqual([e.get("key") or e.get("text") for e in got], ["h", "i", "Enter", "x"])
+        self.assertEqual(out, {"ok": 3})
+
     def test_a_session_open_asks_the_page_to_show_it(self):
         routes._ask_open("web", "ag1", "ag1")
         self.assertEqual(routes.browser_opens()[-1], {"seq": routes._open_seq[0], "project": "web", "session": "ag1",
