@@ -64,14 +64,15 @@
     <!-- view: artifacts -->
     <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
       <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>
-      <div class="sp-tabs" id="spTabs"></div>
+      <!-- The tabs and the panel's ✕ share one line: the ✕ never stands alone under the address bar (#5323). -->
+      <div class="sp-top"><div class="sp-tabs" id="spTabs"></div>
+        <button class="iconbtn" type="button" id="spClose" title="Close the side panel" aria-label="Close the side panel">✕</button></div>
       <form class="sp-bar" id="spForm" autocomplete="off">
         <input id="spAddr" placeholder="Address or path" aria-label="A web address or a full file path">
         <button class="btn" type="button" id="spFindBtn" title="Find words in this tab (Cmd+F or Ctrl+F in the panel)" aria-controls="spFind" aria-expanded="false">Find</button>
         <button class="btn" type="button" id="spReload" title="Load it again">Reload</button>
-        <button class="btn" type="button" id="spNew" title="Open it in a new browser tab">Open in a new tab</button>
-        <button class="btn" type="button" id="spFull" title="Show it alone in a browser tab of its own, with a link to keep">Open full screen</button>
-        <button class="iconbtn" type="button" id="spClose" title="Close the side panel">✕</button>
+        <button class="btn" type="button" id="spNew" title="Open it in a new browser tab">New tab</button>
+        <button class="btn" type="button" id="spFull" title="Show it alone in a browser tab of its own, with a link to keep">Full screen</button>
       </form>
       <div class="sp-find hidden" id="spFind" role="search">
         <input id="spFindQ" type="search" placeholder="Find" aria-label="Find in this tab" autocomplete="off" enterkeyhint="search">

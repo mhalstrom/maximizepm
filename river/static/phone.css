@@ -207,7 +207,9 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
 
   /* The side panel takes the whole screen; its X closes it. */
   .sess-layout > .sess-panel { left: 0; width: 100vw; height: auto; border-left: 0; padding: calc(8px + env(safe-area-inset-top)) 10px calc(8px + env(safe-area-inset-bottom)); }
-  .sp-bar #spClose { order: -1; min-width: 44px; min-height: 44px; font-size: 16px; }
+  .sp-top #spClose { order: -1; margin-left: 0; min-width: 44px; min-height: 44px; font-size: 16px; }
+  /* One line of tools: on a phone a new tab is the full screen already (#5323). */
+  .sp-bar #spFull { display: none; }
   .sp-bar .btn { min-height: 40px; }
 
   /* Dialogs: the whole width, from the top (the dialog part, .dlg: every dialog, #5028). */

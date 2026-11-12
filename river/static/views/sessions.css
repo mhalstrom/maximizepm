@@ -244,6 +244,9 @@ button.srow-it { cursor: pointer; }
 .sess-panel.hidden { display: none; }
 .sp-grip { position: absolute; left: calc(-1 * var(--sp-1)); top: 0; bottom: 0; width: var(--sp-3); cursor: col-resize; z-index: 2; }
 .sp-grip:hover { background: var(--accent); opacity: .3; }
+.sp-top { display: flex; align-items: center; gap: var(--sp-2); flex: none; min-width: 0; }
+.sp-top .sp-tabs { flex: 1; min-width: 0; }
+.sp-top #spClose { flex: none; margin-left: auto; }
 .sp-tabs { display: flex; gap: var(--sp-1); overflow-x: auto; flex: none; }
 .sp-tab { display: inline-flex; align-items: center; gap: var(--sp-1); max-width: var(--w-tab); border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-0) var(--sp-1) var(--sp-0) var(--sp-3); font-size: var(--fs-s); cursor: pointer; background: var(--bg); }
 .sp-tab.on { border-color: var(--accent); background: var(--panel); }
