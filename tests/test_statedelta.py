@@ -73,11 +73,14 @@ class PageState(Base):
         # An unknown version (a restarted server, a page away for long) also gets the whole state.
         self.assertIn("state", self.get("/api/state?since=gone-1"))
 
-    def test_without_since_the_old_whole_state(self):
+    def test_without_since_the_state_of_the_first_answer(self):
+        # A bare /api/state was every item with every field: 21.5 MB for a queue of 5,600 items (#5590).
         st = self.get("/api/state")
         self.assertNotIn("v", st)
-        self.assertEqual({i["id"] for i in st["items"]}, {self.one, self.two, self.old})
-        self.assertIn("context", st["items"][0])
+        self.assertEqual([i["id"] for i in st["items"]], [self.one, self.two])
+        self.assertNotIn("context", st["items"][0], "the drawer loads the item itself")
+        done = self.get("/api/state?closed=1")
+        self.assertEqual({i["id"] for i in done["items"]}, {self.one, self.two, self.old})
 
     def test_the_changes_rebuild_the_state(self):
         first = self.get("/api/state?since=")
@@ -122,7 +125,7 @@ class PageState(Base):
             if n % 3:
                 core.claim(self.c, i, "ag")
                 core.done(self.c, i, actor="ag", output="what changed " * 40)
-        whole = len(json.dumps(self.get("/api/state")))
+        whole = len(json.dumps(server.page_state(True), default=str))  # every item with every field
         first = self.get("/api/state?since=")
         start = len(json.dumps(first))
         core.item_add(self.c, "a", "one more")
@@ -143,6 +146,84 @@ class PageState(Base):
 
 
 @unittest.skipUnless(shutil.which("node"), "node is not on this machine")
+def wire(path, headers):
+    """What the real Handler._send writes for a GET of path: (status line and headers as a dict, body bytes)."""
+    import io
+    h = server.Handler.__new__(server.Handler)
+    h.path, h.client_address, h.headers = path, ("127.0.0.1", 5555), {"Host": "127.0.0.1:8765", **headers}
+    h.wfile, h.request_version, h.requestline, h.command = io.BytesIO(), "HTTP/1.1", f"GET {path} HTTP/1.1", "GET"
+    h.do_GET()
+    head, _, body = h.wfile.getvalue().partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    return lines[0], {k.lower(): v.strip() for k, _, v in (ln.partition(":") for ln in lines[1:])}, body
+
+
+class Gzip(Base):
+    """The page's answers go gzipped to a browser that accepts gzip (#5590)."""
+
+    def test_gzip_only_when_the_browser_takes_it(self):
+        import gzip
+        first, heads, body = wire("/api/state?since=", {"Accept-Encoding": "gzip, deflate, br"})
+        self.assertIn(" 200 ", first)
+        self.assertEqual(heads["content-encoding"], "gzip")
+        self.assertEqual(heads["vary"], "Accept-Encoding")
+        self.assertEqual(int(heads["content-length"]), len(body))
+        st = json.loads(gzip.decompress(body))["state"]
+        self.assertEqual([i["id"] for i in st["items"]], [self.one, self.two])
+        _, heads, body = wire("/api/state?since=", {})
+        self.assertNotIn("content-encoding", heads)
+        self.assertIn("state", json.loads(body))
+        _, heads, _ = wire("/api/state?since=", {"Accept-Encoding": "gzip;q=0"})
+        self.assertNotIn("content-encoding", heads)
+
+    def test_the_relay_gzips_for_itself(self):
+        from river import relay
+        _, heads, body = wire("/api/state?since=", {"Accept-Encoding": "gzip", "X-Maxpm-Relay": relay.PAGE_SECRET})
+        self.assertNotIn("content-encoding", heads)
+        self.assertIn("state", json.loads(body))
+
+    def test_a_small_answer_goes_plain(self):
+        _, heads, body = wire("/api/token", {"Accept-Encoding": "gzip"})
+        self.assertNotIn("content-encoding", heads)
+        self.assertIn("token", json.loads(body))
+
+
+class Limits(Base):
+    """The speed test of the page's data (#5590, p147): on a queue of the size of mark's (300 open items, 5,000 done,
+    long notes and output), the first answer is under 1 MB gzipped, a poll after one change under 50 KB, and the
+    done view under 3 MB gzipped. The numbers of 2026-11-12: 147 KB, 4 to 35 KB, 1.8 MB."""
+
+    def setUp(self):
+        super().setUp()
+        pid = self.c.execute("SELECT id FROM projects WHERE name='a'").fetchone()[0]
+        now = core.iso(core.now())
+        text = "why it matters, where the code is, and what to check " * 20
+        with core.tx(self.c):
+            self.c.executemany(
+                "INSERT INTO items (project_id, title, notes, context, status, created_at, rank) VALUES (?,?,?,?,?,?,?)",
+                [(pid, f"open item {n} with a title of some length", text, text, "open", now, n) for n in range(300)])
+            self.c.executemany(
+                "INSERT INTO items (project_id, title, notes, context, output, status, assignee, created_at,"
+                " closed_at, rank) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [(pid, f"done item {n} with a title of some length", text, text, text, "done", "ag", now, now, n)
+                 for n in range(5000)])
+
+    def test_the_page_data_stays_under_the_limits(self):
+        gz = {"Accept-Encoding": "gzip"}
+        _, heads, first = wire("/api/state?since=", gz)
+        self.assertEqual(heads["content-encoding"], "gzip")
+        self.assertLess(len(first), 1024 * 1024, "the first answer, gzipped")
+        import gzip
+        v = json.loads(gzip.decompress(first))["v"]
+        core.item_add(self.c, "a", "one more")
+        _, _, poll = wire(f"/api/state?since={v}", gz)
+        self.assertLess(len(poll), 50 * 1024, "a poll after one change")
+        _, _, done = wire(f"/api/state?since={v}&closed=1", gz)
+        self.assertLess(len(done), 3 * 1024 * 1024, "the done view, gzipped")
+        _, _, bare = wire("/api/state", gz)
+        self.assertLess(len(bare), 1024 * 1024, "a bare /api/state is the first answer's state")
+
+
 class PageApplies(Base):
     """The page's own code (static/state.js) applies the answers."""
 

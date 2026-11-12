@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import hmac
 import json
 import os
@@ -4332,6 +4333,10 @@ def _state_hit(key):
     return None
 
 
+# gzip of the page's answers (#5590): level 5 makes the 1 MB first state about 147 KB in 7 ms; above GZIP_BIG
+# (the done view, about 10 MB) level 1 keeps the time near 30 ms for a fifth of the bytes.
+GZIP_LEVEL, GZIP_FAST, GZIP_BIG = 5, 1, 2 * 1024 * 1024
+
 ENDED_SHOWN = 30  # the Sessions tab lists the newest 30 ended sessions (static/views/sessions-work.js)
 
 
@@ -4401,12 +4406,32 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet
         pass
 
+    def _gzip_level(self, ctype, data, headers):
+        """The gzip level for this answer, or None to send it plain (#5590). The page's first state is about
+        1 MB of JSON and its done view about 10 MB: gzip makes them a seventh and a fifth. Only text of 1 KB or
+        more, for a request that accepts gzip, and not for the relay: it gzips for the browser itself
+        (relay.serve_page)."""
+        req = getattr(self, "headers", None)
+        if len(data) < relay.GZIP_MIN or not ctype.startswith(relay.GZIP_TYPES) or not req:
+            return None
+        if any(k.lower() == "content-encoding" for k in headers or {}) or relay.page_request(req):
+            return None
+        if not relay.accepts_gzip([[k, v] for k, v in req.items()]):
+            return None
+        return GZIP_FAST if len(data) > GZIP_BIG else GZIP_LEVEL
+
     def _send(self, code, body, ctype="application/json", headers=None):
         data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
+        level = self._gzip_level(ctype, data, headers)
+        if level is not None:
+            data = gzip.compress(data, level, mtime=0)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if level is not None:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -4426,14 +4451,15 @@ class Handler(BaseHTTPRequestHandler):
                 return route[1](self, path)
         if path == "/api/state":
             # The page asks with ?since=<version>[&closed=1]: then the answer holds only what changed since that
-            # version, without done items unless closed=1 (statedelta, #4709). Without since: the whole state.
+            # version (statedelta, #4709). Without since: the state as the page's first answer holds it. Done and
+            # dropped items come only with closed=1, and an item comes without the fields that its drawer loads
+            # (statedelta.slim): with them, a queue of 5,600 items was 21.5 MB (#5590).
             from urllib.parse import parse_qs, urlsplit
+            from . import statedelta
             q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query, keep_blank_values=True).items()}
-            delta = "since" in q
-            st = page_state(not delta or q.get("closed") == "1")
-            if delta:
-                from . import statedelta
-                return self._send(200, statedelta.answer(statedelta.slim(st), q["since"] or None))
+            st = statedelta.slim(page_state(q.get("closed") == "1"))
+            if "since" in q:
+                return self._send(200, statedelta.answer(st, q["since"] or None))
             return self._send(200, st)
         if path == "/api/terminal":
             from urllib.parse import parse_qs, urlsplit
