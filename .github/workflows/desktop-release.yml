@@ -168,13 +168,22 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # A re-run of failed jobs (run attempt 2 and later) gets HTTP 403 'Resource not accessible by integration' when it
+      # creates the release, with the same contents: write token (v0.1.4 and v1.0.0); every first attempt published
+      # (#5606). After a failed build, start a new run for the tag instead of a re-run:
+      #   gh workflow run desktop-release.yml -R mhalstrom/maximizepm -f tag=<tag>
       - name: Publish the GitHub Release
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
         run: |
           ls -l dist
           # The notes: desktop/release-notes.md, with {TAG} and {VERSION} filled in.
           sed -e "s/{TAG}/${TAG}/g" -e "s/{VERSION}/${TAG#v}/g" desktop/release-notes.md > "$RUNNER_TEMP/notes.md"
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
-          else
-            gh release create "$TAG" dist/* --title "MaximizePM ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA" -R "$GITHUB_REPOSITORY"
+          elif ! gh release create "$TAG" dist/* --title "MaximizePM ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" --target "$GITHUB_SHA" -R "$GITHUB_REPOSITORY"; then
+            if [ "$ATTEMPT" -gt 1 ]; then
+              echo "::error::A re-run (attempt $ATTEMPT) cannot create the release. Start a new run for the tag: gh workflow run desktop-release.yml -R $GITHUB_REPOSITORY -f tag=$TAG"
+            fi
+            exit 1
           fi
