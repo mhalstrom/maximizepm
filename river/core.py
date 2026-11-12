@@ -10213,7 +10213,13 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
         with tx(conn):
             _touch_agent(conn, actor or it["assignee"])
 
-    run = runner or (lambda c, d: _run_command(c, d, limit, renew))
+    # The commands get the commit the release ships (#5500): a gate must test that one, not whatever origin/main is
+    # when it runs (toolscaled's gate ran twice in one pass and took a newer origin/main the second time).
+    dep_id = _review_deploy(conn, it["id"])
+    rev_env = ((pin["named"] or pin["pin"]) if pin else None) or (rev or "").strip() or (
+        _item(conn, dep_id)["cut_rev"] if dep_id else None) or ""
+    env = {**os.environ, "MAXPM_REV": rev_env, "MAXPM_TARGET": it["target"] or "", "MAXPM_REVIEW": str(it["id"])}
+    run = runner or (lambda c, d: _run_command(c, d, limit, renew, env))
 
     def must_pass(cmd, where, what):
         r = run(cmd, where)
@@ -11504,6 +11510,8 @@ def item_show(conn, item_id, ann=None):
     if a["kind"] == "review":
         a["reviews"] = [d for d in a["waits_on_detail"]]
         a["review_steps"] = release_review_steps(conn, iid)
+        dep = _review_deploy(conn, iid)
+        a["release_rev"] = _item(conn, dep)["cut_rev"] if dep else None  # MAXPM_REV of its commands (#5500)
     if a["kind"] == "deploy":
         r = conn.execute("SELECT owner FROM targets WHERE name=?", (a["target"],)).fetchone()
         a["target_owner"] = r["owner"] if r else None
@@ -14020,8 +14028,10 @@ def _release_commits(conn, review):
     folder = _review_folder(conn, review)
     last = conn.execute("SELECT output FROM items WHERE kind='deploy' AND target IS ? AND status='done' "
                         "ORDER BY closed_at DESC, id DESC LIMIT 1", (review["target"],)).fetchone()
+    dep = _review_deploy(conn, review["id"])
     env = {**os.environ, "MAXPM_LAST_RELEASE": (last["output"] or "") if last else "",
-           "MAXPM_TARGET": review["target"] or "", "MAXPM_REVIEW": str(review["id"])}
+           "MAXPM_TARGET": review["target"] or "", "MAXPM_REVIEW": str(review["id"]),
+           "MAXPM_REV": (_item(conn, dep)["cut_rev"] or "") if dep else ""}
     try:
         r = subprocess.run(cmd, shell=True, cwd=os.path.expanduser(folder["path"]) if folder else None, env=env,
                            capture_output=True, text=True, timeout=60)

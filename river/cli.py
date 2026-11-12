@@ -3944,6 +3944,10 @@ def render_go(b):
                     "deployer. The person answers in your terminal or with maxpm answer."]
         if b["role"] == "reviewer":
             out.append(f"  release {it.get('target')}: the deploy waits on this review. It covers:")
+            if it.get("release_rev"):
+                out.append(f"  pinned at {it['release_rev']}: review that commit; your review commands get it as MAXPM_REV")
+            else:
+                out.append("  no pin yet: review pass pins the commit the folder holds after your steps (or --rev)")
             for d in it["waits_on_detail"]:
                 out.append(f"    #{d['id']} {d['title']} ({d['status']})   {r} show {d['id']}")
             groups = it.get("review_steps") or []

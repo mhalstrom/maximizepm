@@ -6873,6 +6873,23 @@ class ReviewPin(Base):
         self.review = [i for i in ids if core.item_show(self.c, i)["kind"] == "review"][0]
         self.deploy = [i for i in ids if i != self.review][0]
 
+    def test_the_review_commands_get_the_pin_as_maxpm_rev_and_the_brief_names_it(self):
+        from river import cli
+        core.target_cut(self.c, "web", rev=self.a, actor="ops")
+        core.register(self.c, "rev2")
+        b = core.go(self.c, self.repo, "rev2", role="reviewer")
+        self.assertEqual((b["role"], b["item"]["id"]), ("reviewer", self.review))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn(f"pinned at {self.a}: review that commit; your review commands get it as MAXPM_REV", out.getvalue())
+        seen = os.path.join(self.dir.name, "env.txt")
+        core.item_edit(self.c, self.review, actor="rev2", check=f'"{sys.executable}" -c "import os; open({seen!r}, \'w\')'
+                       f'.write(os.environ[\'MAXPM_REV\'] + \' \' + os.environ[\'MAXPM_REVIEW\'])"')
+        core.review_pass(self.c, self.review, None, "rev2", cwd=self.repo)
+        with open(seen) as f:
+            self.assertEqual(f.read(), f"{self.a} {self.review}")
+
     def deploy_rev(self):
         self.assertIsNotNone(core.deploy_hook_start(self.c, self.deploy, "tok"))
         return self.c.execute("SELECT rev FROM hook_runs WHERE event='deploy' ORDER BY id DESC LIMIT 1").fetchone()[0]
@@ -6902,6 +6919,7 @@ class ReviewPin(Base):
         core.item_edit(self.c, self.review, check=f"git checkout -q {self.a}", actor="rev")
         res = core.review_pass(self.c, self.review, None, "rev", cwd=self.repo)
         self.assertEqual(res["reviewed"], self.a)
+        self.assertEqual(core.item_show(self.c, self.review)["release_rev"], self.a)
         self.assertEqual(core._item(self.c, self.deploy)["cut_rev"], self.a)
         self.assertEqual(self.deploy_rev(), self.a)
 
