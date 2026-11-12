@@ -70,6 +70,12 @@ def act(conn, a, who):
         browser.may_change(conn, b, who, person)
     if action == "status":
         return b.info()
+    if action == "walk":  # a page walk check (#5516): its own background tab, so it changes nothing the person sees
+        pages = a.get("pages") or []
+        if not isinstance(pages, list) or not pages:
+            raise RiverError("a page walk needs pages: a list of addresses")
+        return browser.walk(b, [browser.norm_url(u) for u in pages], float(a.get("settle") or 3),
+                            float(a.get("timeout") or 60))
     if action == "start":  # the panel shows the browser: start it, and say so
         b.start()
         return b.info()

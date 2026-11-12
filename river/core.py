@@ -273,6 +273,9 @@ DEFAULT_SETTINGS = {
     "ops_confirm": "on",
     # The time limit of a command that proves the cause of a fault (maxpm ops cause --proof "<command>", #5513).
     "ops_proof_timeout": "60s",
+    # The time limit of the command that builds the source maps of a released commit for a page walk check
+    # (maxpm ops pages, #5516): the project's system description names it in code.source_maps.
+    "ops_maps_timeout": "15m",
     # After this many released fixes of one fault did not clear it, MaximizePM starts no more agents for the fault:
     # its items wait for the manager (#5514). 0: no limit.
     "ops_fix_max": "2",
@@ -1965,7 +1968,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
@@ -6596,7 +6599,9 @@ OPS_SYSTEM_FIELDS = {
         "logs": "where errors are logged",
         "log_format": "the log format: JSON or text, and which field names the module, the user, the workspace, "
                       "the request and the integration",
-        "source_maps": "how a minified bundle maps back to the source (the command that builds the source maps)",
+        "source_maps": "how a minified bundle maps back to the source: a line 'command: <shell command>' that builds "
+                       "the bundle with each .map file beside its script, in a copy of the released commit (maxpm ops "
+                       "pages runs it once for each commit)",
         "integrations": "the integrations, and how an error names one (a field, an address, a text)",
     },
     "infra": {

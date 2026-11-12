@@ -415,6 +415,7 @@ class Browser:
         self.size = None     # (w, h) of the panel, CSS px
         self.attached = None # the debugging port of a Chrome that serve did not start (browser_source cdp:<port>)
         self.mine = set()    # attached: the tabs serve opened in it, and the tabs that they opened
+        self.listeners = {}  # CDP session -> fn(method, params): the events of a tab that a page walk opened
         self.state = self._load()
 
     # state.json: the controller, the window mode, Chrome's pid and the proxy port (to attach after a restart)
@@ -687,6 +688,10 @@ class Browser:
             w[0].set()
 
     def _event(self, method, p, session):
+        fn = self.listeners.get(session) if session else None
+        if fn:
+            fn(method, p)
+            return
         if method == "Page.screencastFrame":
             if session == self.session:
                 m = p.get("metadata") or {}
@@ -1437,3 +1442,118 @@ def close_tab(b, target=None):
     b.call("Target.closeTarget", {"targetId": target})
     time.sleep(0.3)
     return b.info()
+
+
+# ---- the page walk (#5516): a check opens each page of a list in a tab of its own and records what went wrong
+
+WALK_FRAMES = 12  # the stack frames kept of one error
+
+
+def _frames(trace):
+    """The frames of a CDP stack trace: [{function, url, line, column}], 0-based as CDP gives them."""
+    return [{"function": f.get("functionName") or "", "url": f.get("url") or "", "line": f.get("lineNumber", 0),
+             "column": f.get("columnNumber", 0)} for f in ((trace or {}).get("callFrames") or [])[:WALK_FRAMES]]
+
+
+def _arg_text(a):
+    if "value" in a:
+        return a["value"] if isinstance(a["value"], str) else json.dumps(a["value"])
+    return a.get("description") or a.get("type") or ""
+
+
+def walk(b, pages, settle=3.0, timeout=60.0):
+    """Open each address of pages in a background tab of the project's browser b (not the tab the person sees) and
+    record, for each page: the uncaught exceptions, console.error calls and error log entries with their stack
+    frames (minified as the browser ran them), the requests that failed (an HTTP status of 400 or more, or no
+    answer), and the SHA-256 of each script that a frame names, so the caller can check that a source map is the
+    build of that script. settle: seconds after the load event, for the errors that come late. Pages that do not fit
+    in timeout seconds are marked skipped. The tab closes at the end."""
+    b.start()
+    end = time.monotonic() + timeout
+    target = b.call("Target.createTarget", {"url": "about:blank", "background": True})["targetId"]
+    if b.attached:
+        b.mine.add(target)
+    session = b.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
+    loaded, now = threading.Event(), {"page": None, "requests": {}, "scripts": {}}
+
+    def on(method, p):
+        page = now["page"]
+        if method == "Page.loadEventFired":
+            loaded.set()
+        elif method == "Debugger.scriptParsed" and p.get("url"):
+            now["scripts"][p["url"]] = p["scriptId"]
+        elif page is None:
+            return
+        elif method == "Runtime.exceptionThrown":
+            d = p.get("exceptionDetails") or {}
+            text = ((d.get("exception") or {}).get("description") or d.get("text") or "an exception").strip()
+            frames = _frames(d.get("stackTrace")) or ([{"function": "", "url": d["url"], "line": d.get("lineNumber", 0),
+                                                        "column": d.get("columnNumber", 0)}] if d.get("url") else [])
+            page["errors"].append({"kind": "exception", "message": text.splitlines()[0][:500], "frames": frames})
+        elif method == "Runtime.consoleAPICalled" and p.get("type") in ("error", "assert"):
+            text = " ".join(_arg_text(a) for a in p.get("args") or []).strip() or p["type"]
+            page["errors"].append({"kind": "console", "message": text.splitlines()[0][:500],
+                                   "frames": _frames(p.get("stackTrace"))})
+        elif method == "Log.entryAdded":
+            e = p.get("entry") or {}
+            if e.get("level") == "error" and e.get("source") not in ("network", "console-api"):
+                page["errors"].append({"kind": "log", "message": (e.get("text") or "").splitlines()[0][:500],
+                                       "frames": _frames(e.get("stackTrace")) or (
+                                           [{"function": "", "url": e["url"], "line": e.get("lineNumber", 0), "column": 0}]
+                                           if e.get("url") else [])})
+        elif method == "Network.requestWillBeSent":
+            r = p.get("request") or {}
+            now["requests"][p["requestId"]] = {"url": r.get("url", ""), "method": r.get("method", "GET"),
+                                               "type": p.get("type") or ""}
+        elif method == "Network.responseReceived":
+            r = p.get("response") or {}
+            if (r.get("status") or 0) >= 400:
+                q = now["requests"].get(p["requestId"]) or {"url": r.get("url", ""), "method": "GET"}
+                page["requests"].append({**q, "type": p.get("type") or q.get("type", ""), "status": r["status"]})
+        elif method == "Network.loadingFailed" and not p.get("canceled"):
+            q = now["requests"].get(p["requestId"]) or {"url": "", "method": "GET"}
+            page["requests"].append({**q, "type": p.get("type") or q.get("type", ""),
+                                     "error": p.get("blockedReason") or p.get("errorText") or "failed"})
+
+    b.listeners[session] = on
+    out = []
+    try:
+        for m in ("Page.enable", "Runtime.enable", "Log.enable", "Network.enable", "Debugger.enable"):
+            b.call(m, session=session)
+        b.call("Debugger.setSkipAllPauses", {"skip": True}, session=session)  # a debugger statement must not stop it
+        for url in pages:
+            left = end - time.monotonic()
+            if left <= 1:
+                out.append({"url": url, "skipped": True})
+                continue
+            page = {"url": url, "errors": [], "requests": [], "scripts": {}, "load": None}
+            now.update(page=page, requests={}, scripts={})
+            loaded.clear()
+            try:
+                r = b.call("Page.navigate", {"url": url}, session=session, timeout=min(CALL_WAIT, left))
+                if r.get("errorText"):
+                    page["load"] = r["errorText"]
+                elif not loaded.wait(min(LOAD_WAIT, max(0.0, end - time.monotonic()))):
+                    page["load"] = f"no load event within {min(LOAD_WAIT, int(left))}s"
+                time.sleep(max(0.0, min(settle, end - time.monotonic())))
+            except RiverError as e:
+                page["load"] = str(e)
+            now["page"] = None
+            for u in dict.fromkeys(f["url"] for e in page["errors"] for f in e["frames"] if f["url"]):
+                sid = now["scripts"].get(u)
+                if not sid:
+                    continue
+                try:
+                    src = b.call("Debugger.getScriptSource", {"scriptId": sid}, session=session)["scriptSource"]
+                    page["scripts"][u] = hashlib.sha256(src.encode()).hexdigest()
+                except (RiverError, KeyError):
+                    pass
+            out.append(page)
+    finally:
+        b.listeners.pop(session, None)
+        try:
+            b.call("Target.closeTarget", {"targetId": target}, timeout=5)
+        except RiverError:
+            pass
+    return {"project": b.project, "pages": out}
+

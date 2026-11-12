@@ -1140,6 +1140,26 @@ def build_parser(only=None):
     x.add_argument("--from-start", action="store_true", help="the first run reads the old lines too")
     x.add_argument("--name", help="the name of its read position (default: the check that runs it)")
     x.add_argument("--timeout", type=float, default=60, help="seconds for the command or ssh (default 60)")
+    x = ops.add_parser("pages", help="a page walk: each page of a list opens in a background tab of the project's "
+                       "browser, and its browser errors and failed requests, with their stack frames mapped to the "
+                       "source, are one subject each, as a plugin check (maxpm ops add <project> <name> plugin "
+                       "--command \"maxpm ops pages run <name> --project <project> --pages <address>,...\" --subject on "
+                       "--timeout 15m: the first run after a release builds the source maps)")
+    pgs = x.add_subparsers(dest="pgcmd", required=True)
+    v = pgs.add_parser("run", help="the plugin: walk the pages and print one subject for each error group (exit 0 "
+                       "no error, 2 an error group, 3 the walk did not run)")
+    v.add_argument("name", help="the check's name")
+    v.add_argument("--project", required=True, help="the project whose browser walks, and whose release gives the "
+                   "source maps")
+    v.add_argument("--pages", required=True, help="the addresses, separated by commas")
+    v.add_argument("--settle", type=float, default=3.0, help="seconds after each load for errors that come late "
+                   "(default 3)")
+    v.add_argument("--timeout", type=float, default=60.0, help="seconds for the whole walk (default 60)")
+    v.add_argument("--rev", help="map with the build of this commit, not the one in production")
+    v = pgs.add_parser("maps", help="build the source maps of the commit in production now, with the command of the "
+                       "system description (code.source_maps 'command: ...'); a run builds them otherwise")
+    v.add_argument("project")
+    v.add_argument("--rev", help="this commit, not the one in production")
     x = ops.add_parser("visual", help="a page looks as it was approved: screenshots at set widths and themes against "
                        "approved ones, as a plugin check (maxpm ops add <scope> <name> plugin --command \"maxpm ops "
                        "visual run <name> --url <address>\" --timeout 2m)")
@@ -2098,6 +2118,26 @@ def run(argv=None):
         res = logs.run(args.name, args.file, args.ssh, args.command, args.pattern, args.ignore, args.warning,
                        args.critical, args.per_minute, args.from_start, args.timeout)
         print(json.dumps(res) if args.json else "\n".join(logs.lines(res)))
+        return res["status"]
+    if args.cmd == "ops" and args.ocmd == "pages":  # a plugin (#5516): its own lines only
+        from .plugins import pages
+        if args.pgcmd == "maps":
+            conn = core.connect()
+            try:
+                res = pages.build_maps(conn, args.project, args.rev)
+            finally:
+                conn.close()
+            if args.json:
+                print(json.dumps(res))
+            elif res.get("error"):
+                raise RiverError(res["error"])
+            else:
+                print(f"source maps of {res['rev'][:12]}: {sum(len(v) for v in res['files'].values())} map(s) for "
+                      f"{len(res['files'])} script name(s), in {pages.map_dir(args.project, res['rev'])}"
+                      + (f" ({res['note']})" if res.get("note") else ""))
+            return 0
+        res = pages.run(args.name, args.project, args.pages, args.settle, args.timeout, args.rev)
+        print(json.dumps(res) if args.json else "\n".join(pages.lines(res)))
         return res["status"]
     if args.cmd == "ops" and args.ocmd == "visual" and args.vcmd in ("run", "show"):  # a plugin: its own lines only
         from .plugins import visual
