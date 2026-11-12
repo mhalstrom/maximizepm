@@ -3847,6 +3847,13 @@ def _findings_lines(f, r):
                    + (f"; the last one closed was #{last['id']} {_cut(last['title'], 40)}" if last else "")
                    + ". " + x["question"].replace("maxpm ", f"{r} ")
                    + ". Ask the user when only they can tell")
+    for x in f.get("unpushed", []):  # #5600: finished work that waits to go out
+        out.append(f"  UNPUSHED {x['target']}: main in {x['folder']} is {x['commits']} commit"
+                   f"{'s' if x['commits'] != 1 else ''} ahead of origin, the oldest {x['oldest']} old.  Run the tests "
+                   f"there and push main (git -C {x['folder']} push origin main), or ask the user for the yes it waits on")
+    for x in f.get("untagged", []):
+        out.append(f"  NOT TAGGED #{x['id']} {_cut(x['title'], 50)}: it is done, and origin has no tag {x['tag']} "
+                   f"or later.  Push main and the tag {x['tag']}: the release waits on them")
     for x in f["human_ready"]:
         if x.get("held_for"):  # held for the manager (#5311): the person does not see it yet
             out.append(f"  PERSON ITEM #{x['id']} {_cut(x['title'], 60)}: waits for you, not the person.  "
@@ -3929,8 +3936,10 @@ def render_manage(b):
     out += ["", "Projects: " + ", ".join(f"{p['project']} {p['ready']} ready/{p['open']} open"
                                           + (f" ({p['backlog']} in backlog)" if p.get("backlog") else "")
                                           for p in st["projects"][:12] if p.get("open")),
-            ""] + policy_lines(b.get("policies") or [], b.get("other_policies") or 0) + [
-            "NEEDS ATTENTION:"] + _findings_lines(b["findings"], r)
+            ""] + policy_lines(b.get("policies") or [], b.get("other_policies") or 0)
+    if b.get("handed"):  # #5600: what the last manager did not read comes to this one
+        out += ["FROM THE LAST MANAGER (it did not read these; act on them):"] + [_fmt_msg(m, "  ") for m in b["handed"]]
+    out += ["NEEDS ATTENTION:"] + _findings_lines(b["findings"], r)
     out += ["",
             "Your job: plan with the user, and keep the other agents working together. You take no items.",
             f"  launch:  {r} launch [--project P | --item N] [--model M] [--effort E] [--dry-run]",

@@ -6220,6 +6220,83 @@ class Manager(Base):
         self.assertIsNone(core._agent(self.c, "boss")["role"])
         self.assertIn("took over as manager", core.inbox(self.c, "boss")[0]["body"])
 
+    def test_a_managers_unread_mail_goes_to_the_next_manager(self):
+        """#5600: a release waited on an alert to a manager that a person had stopped; the next manager never saw
+        it, and its sender got 'send it to another agent'."""
+        x = self.add("a", "release v0.3.0")
+        core.manage(self.c, self.dir.name, "boss")
+        alert = core.send(self.c, "alert", "push main and the tag", to="boss", item=x, actor="w1")["id"]
+        ask = core.send(self.c, "question", "which tag?", to="boss", actor="w2")["id"]
+        core.stop_agent(self.c, "boss", "from the page", actor="mark")
+        self.assertTrue(core.end_stopped(self.c, "boss")["ended"])
+        # No manager runs: the mail waits for the next one, and each sender hears that.
+        self.assertEqual({r["to_agent"] for r in self.c.execute("SELECT to_agent FROM messages WHERE id IN (?,?)",
+                                                                 (alert, ask))}, {core.NEXT_MANAGER})
+        told = [m["body"] for m in core.inbox(self.c, "w1") if m["kind"] == "notice"]
+        self.assertTrue(any("waits for the next manager" in b for b in told), told)
+        m = core.manage(self.c, self.dir.name, "boss2")
+        self.assertEqual([h["id"] for h in m["handed"]], [alert, ask])
+        self.assertEqual({r["id"] for r in core.inbox(self.c, "boss2") if r["unread"]} >= {alert, ask}, True)
+        # A takeover hands on what the old manager did not read; a manager that is stopped while another runs too.
+        late = core.send(self.c, "alert", "the gate is red", to="boss2", actor="w1")["id"]
+        m3 = core.manage(self.c, self.dir.name, "boss3", takeover="boss2 went quiet")
+        self.assertIn(late, [h["id"] for h in m3["handed"]])
+        self.assertIn("It went to boss3", [m for m in core.inbox(self.c, "w1") if m["kind"] == "notice"][-1]["body"])
+        core.register(self.c, "boss4")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='boss4'")
+        q = core.send(self.c, "question", "deploy now?", to="boss4", actor="w2")["id"]
+        core.stop_agent(self.c, "boss4", "two managers", actor="mark")
+        core.end_stopped(self.c, "boss4")
+        self.assertEqual(self.c.execute("SELECT to_agent FROM messages WHERE id=?", (q,)).fetchone()[0], "boss3")
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='boss3' AND body LIKE 'STOP%'"
+                                        ).fetchone()[0], 0)  # a stop request stays with the stopped manager
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render(argparse.Namespace(cmd="manage", watch=False, json=False, actor="boss2"), m)
+        self.assertIn("FROM THE LAST MANAGER", out.getvalue())
+
+    def test_unpushed_and_untagged_finished_work_is_a_finding(self):
+        """#5600: a target with no deploy hook releases by a push to main; its folder's main ahead of origin for
+        over unpushed_after, and a done release item whose tag origin lacks, are findings of the manager."""
+        os.makedirs(os.path.join(self.dir.name, ".git"))
+        core.target_add(self.c, "site")
+        core.project_target(self.c, "a", "site")
+        old, new = int((core.now() - core.timedelta(hours=3)).timestamp()), int(core.now().timestamp())
+        remote = ["abc\trefs/tags/v0.2.0", "def\trefs/tags/v0.2.0^{}"]
+        calls = []
+
+        def git(folder, args):
+            calls.append(args[0])
+            return f"{new}\n{old}\n" if args[0] == "log" else "\n".join(remote) + "\n"
+        core.GIT_RUNNER = git
+        self.addCleanup(setattr, core, "GIT_RUNNER", None)
+        core._GIT_SEEN.clear()
+        self.addCleanup(core._GIT_SEEN.clear)
+        x = self.add("a", "Release v0.3.0: the notes, then the manager pushes main and the tag v0.3.0")
+        core.done(self.c, x, output="on local main, not pushed", actor="w1")
+        f = core.manager_findings(self.c)
+        self.assertEqual([(u["target"], u["commits"]) for u in f["unpushed"]], [("site", 2)])
+        self.assertEqual([(u["id"], u["tag"]) for u in f["untagged"]], [(x, "v0.3.0")])
+        self.assertTrue({"unpushed:site", f"untagged:{x}"} <= set(core._finding_keys(f)))
+        from river import cli
+        lines = "\n".join(cli._findings_lines(f, "maxpm --as boss"))
+        self.assertIn("UNPUSHED site", lines)
+        self.assertIn(f"NOT TAGGED #{x}", lines)
+        n = len(calls)
+        core.manager_findings(self.c)
+        self.assertEqual(len(calls), n)  # git once a minute (the watch looks every 3 s)
+        core._GIT_SEEN.clear()
+        remote.append("ghi\trefs/tags/v1.0.0")  # a later version went out: the old release is done with
+        old = new - 600  # and the oldest unpushed commit is younger than unpushed_after
+        f = core.manager_findings(self.c)
+        self.assertEqual((f["unpushed"], f["untagged"]), ([], []))
+        core._GIT_SEEN.clear()
+        old = new - 4 * 3600
+        core.target_hook(self.c, "site", "deploy", "make release", actor="mark")  # a deploy hook releases it instead
+        self.assertEqual(core.manager_findings(self.c)["unpushed"], [])
+
     def test_findings_and_actions(self):
         x, y = self.add("a", "x"), self.add("b", "y")
         z = self.add("a", "z")

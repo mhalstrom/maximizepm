@@ -73,8 +73,9 @@ BLOCKED_SIGNS = ("sender", "waits", "item")
 BLOCKED_WINDOW = timedelta(minutes=3)
 # New findings of these kinds wait manage_wait_low: an agent that waits ends by itself after wait_max, and a
 # person gets a notification for an item that is ready for them, and the closer decides the items its close
-# check listed (unneeded, #3286). A goal with nothing open waits for nobody (goal, #4970).
-LOW_FINDINGS = ("waiting", "human", "unneeded", "goal")
+# check listed (unneeded, #3286). A goal with nothing open waits for nobody (goal, #4970). Finished work that waits
+# to go out is hours old already (unpushed, untagged, #5600).
+LOW_FINDINGS = ("waiting", "human", "unneeded", "goal", "unpushed", "untagged")
 
 DEFAULT_SETTINGS = {
     "lease_ttl": "30m",
@@ -215,6 +216,9 @@ DEFAULT_SETTINGS = {
     # maxpm manage --watch returns on a new finding, or after manage_every with nothing new (it runs as a
     # background command, so the manager's session wakes only then).
     "wait_too_long": "20m",
+    # A target that releases by a push to main (it has no deploy hook) whose folder's main is ahead of origin/main
+    # with a commit older than unpushed_after is a finding of the manager (#5600): finished work that waits to go out.
+    "unpushed_after": "2h",
     # A session the page (or maxpm launch) started that runs no river command within connect_within is a
     # finding (not connected): its agent did not start, or waits on a prompt in its terminal.
     "connect_within": "5m",
@@ -11329,6 +11333,8 @@ def _killed(conn, agent, reason, actor, pid, killed):
             conn.execute("UPDATE targets SET owner=NULL, owner_expires_at=NULL WHERE name=?", (t["name"],))
             _event(conn, None, "maxpm", f"target {t['name']} released: {agent} killed")
         queued = _drop_queue(conn, agent, "was killed")
+        if _is_manager(conn, agent):  # #5600: before its role says stopped
+            _move_manager_mail(conn, agent, active_manager(conn, but=agent), f"{agent} was killed")
         conn.execute("UPDATE agents SET stop_at=?, stop_by=?, stop_reason=?, role='stopped', note='killed' WHERE name=?",
                      (iso(now()), actor, "killed: " + reason.strip(), agent))
         _event(conn, None, actor, f"killed {agent} (by {actor}: {reason.strip()})")
@@ -11492,6 +11498,8 @@ def _finish_stop(conn, agent):
             conn.execute("UPDATE targets SET owner=NULL, owner_expires_at=NULL WHERE name=?", (t["name"],))
             _event(conn, None, "maxpm", f"target {t['name']} released: {agent} stopped")
         _drop_queue(conn, agent, "stopped", items_only=True)
+        if _is_manager(conn, agent):  # #5600: before its role says stopped
+            _move_manager_mail(conn, agent, active_manager(conn, but=agent), f"{agent} stopped")
         conn.execute("UPDATE agents SET role='stopped', note='stopped', waiting_since=NULL, waiting_in=NULL "
                      "WHERE name=?", (agent,))
         if not conn.execute("SELECT 1 FROM events WHERE actor='maxpm' AND change=?", (f"{agent} ended (stopped)",)).fetchone():
@@ -19214,6 +19222,9 @@ def end_idle(conn, agent, why, force=False):
             return None
         unread = conn.execute("SELECT id, kind, from_agent, item_id FROM messages WHERE to_agent=? AND from_agent<>'maxpm' "
                               "AND (read_at IS NULL OR (kind='question' AND state='open'))", (agent,)).fetchall()
+        if _is_manager(conn, agent):  # its mail goes to the next manager (#5600), not back to each sender
+            _move_manager_mail(conn, agent, active_manager(conn, but=agent), f"{agent} ended ({why})")
+            unread = []
         for m in unread:
             _send(conn, "notice", "maxpm", f"{agent} ended ({why}) before it read your {m['kind']} #{m['id']}. Send it "
                   f"to another agent (maxpm who), or add an item for it", to=m["from_agent"], item_id=m["item_id"],
@@ -19834,14 +19845,111 @@ def manager_findings(conn):
         goal_checks.append({"goal": g["name"], "project": g["project"], "shared": bool(g["shared"]),
                             "done_when": g["done_when"], "outcome": g["outcome"], "backlog": backlog,
                             "last": dict(last) if last else None, "question": _done_when_question(g, backlog)})
+    waits = release_waits(conn)
     return {"stuck": stuck, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
-            "unneeded": unneeded, "goal_checks": goal_checks,
+            "unneeded": unneeded, "goal_checks": goal_checks, "unpushed": waits["unpushed"],
+            "untagged": waits["untagged"],
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
             "targets": targets, "questions": questions, "broken_rules": broken_rules(conn),
             "human_ready": [{"id": x["id"], "title": x["title"], "found_during": x["found_during"],
                              "held_for": x["held_for"] or None, "held_until": x["held_until"]} for x in sorted(
                                (x for x in ann.values() if x["ready"] and x["doer"] == "human" and not x["project_archived"]),
                                key=lambda x: x["sort_key"])]}
+
+
+GIT_RUNNER = None  # tests: gets (folder, args), returns the output text or raises RiverError
+_GIT_SEEN = {}  # (folder, what) -> (monotonic time, answer): release_waits reads git at most once in GIT_FRESH
+GIT_FRESH = {"ahead": 60.0, "tags": 600.0}
+
+
+def _git_read(folder, *args, timeout=10):
+    if GIT_RUNNER is not None:
+        return GIT_RUNNER(folder, args)
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RiverError(f"git {args[0]}: {e}")
+    if r.returncode:
+        raise RiverError(f"git {args[0]}: {(r.stderr or r.stdout).strip()}")
+    return r.stdout
+
+
+def _git_kept(folder, what, read):
+    """The last answer of read() for the folder (None before the first one, or when git failed): a thread reads it
+    again when it is older than GIT_FRESH[what], so no command waits for git (git ls-remote asks the network: 365 ms).
+    The manager's watch looks every 3 s and has the answer at its next look. Tests (GIT_RUNNER) read at once."""
+    import threading
+    key, t = (folder, what), _monotonic()
+    got = _GIT_SEEN.get(key)
+    if got is not None and t - got[0] <= GIT_FRESH[what]:
+        return got[1]
+
+    def run():
+        try:
+            _GIT_SEEN[key] = (_monotonic(), read())
+        except RiverError:
+            _GIT_SEEN[key] = (_monotonic(), None)
+    if GIT_RUNNER is not None:
+        run()
+        return _GIT_SEEN[key][1]
+    _GIT_SEEN[key] = (t, got[1] if got else None)  # one reader at a time: the next look keeps this answer meanwhile
+    threading.Thread(target=run, daemon=True, name=f"maxpm-git-{what}").start()
+    return got[1] if got else None
+
+
+_TAG = re.compile(r"\btag (v\d+(?:\.\d+){1,2})\b")
+
+
+def _version(tag):
+    return tuple(int(x) for x in tag.lstrip("v").split("."))
+
+
+def release_waits(conn):
+    """Finished work that waits to go out (#5600), for the manager's findings. A target with no deploy hook releases
+    by a push to main (maximizepm-github, a site): unpushed, when main in a folder of its projects is ahead of
+    origin/main with a commit older than unpushed_after; untagged, when an item of those projects that was done in
+    the last 14 days names a tag in its title ('... pushes main and the tag v0.3.0') and origin has neither that
+    tag nor a later version. On 2026-11-12 local main was 88 commits ahead for a day and the v0.3.0 release waited
+    on a manager that had ended."""
+    rows = conn.execute("SELECT t.name target, p.id project_id, p.path FROM targets t JOIN projects p ON p.target=t.name "
+                        "WHERE p.archived=0 AND p.path IS NOT NULL AND p.path<>'' AND NOT EXISTS (SELECT 1 FROM hooks h "
+                        "WHERE h.target_id=t.id AND h.event='deploy') ORDER BY t.name, p.id").fetchall()
+    if not rows:
+        return {"unpushed": [], "untagged": []}
+    after = parse_duration(setting(conn, "unpushed_after"))
+    t = now()
+    unpushed, folders = [], {}
+    for r in rows:
+        folder = os.path.expanduser(r["path"])
+        if not os.path.isdir(os.path.join(folder, ".git")):
+            continue
+        folders.setdefault(folder, (r["target"], []))[1].append(r["project_id"])
+    for folder, (target, _) in folders.items():
+        out = _git_kept(folder, "ahead", lambda: _git_read(folder, "log", "--format=%ct", "origin/main..main"))
+        times = [int(x) for x in (out or "").split() if x.isdigit()]
+        if times and t - datetime.fromtimestamp(min(times), timezone.utc) > after:
+            unpushed.append({"target": target, "folder": folder, "commits": len(times),
+                             "oldest": _short(t - datetime.fromtimestamp(min(times), timezone.utc))})
+    untagged = []
+    since = iso(t - timedelta(days=14))
+    for folder, (target, projects) in folders.items():
+        named = []
+        for r in conn.execute(f"SELECT id, title FROM items WHERE status='done' AND closed_at>=? AND project_id IN "
+                              f"({','.join('?' * len(projects))}) ORDER BY id", (since, *projects)):
+            m = _TAG.search(r["title"])
+            if m:
+                named.append((r["id"], r["title"], m.group(1)))
+        if not named:
+            continue
+        out = _git_kept(folder, "tags", lambda: _git_read(folder, "ls-remote", "--tags", "origin", timeout=15))
+        if out is None:
+            continue  # origin does not answer: nothing to say
+        have = [_version(x.rsplit("/", 1)[1]) for x in out.split() if re.fullmatch(r"refs/tags/v\d+(\.\d+){1,2}", x)]
+        for i, title, tag in named:
+            if not any(v >= _version(tag) for v in have):
+                untagged.append({"id": i, "title": title, "tag": tag, "target": target})
+    return {"unpushed": unpushed, "untagged": untagged}
 
 
 def _finding_keys(f):
@@ -19853,6 +19961,8 @@ def _finding_keys(f):
                   | {f"unneeded:{x['id']}" for x in f.get("unneeded", [])}
                   | {f"goal:{x['goal']}" for x in f.get("goal_checks", [])}
                   | {f"rule:{x['key']}" for x in f.get("broken_rules", [])}
+                  | {f"unpushed:{x['target']}" for x in f.get("unpushed", [])}
+                  | {f"untagged:{x['id']}" for x in f.get("untagged", [])}
                   | {f"human:{x['id']}" for x in f["human_ready"]})
 
 
@@ -19875,6 +19985,28 @@ def manager_view(conn):
                 f"AND to_agent IN ({','.join('?' * len(humans))}) ORDER BY id", (name, *humans))] if humans else []}
 
 
+NEXT_MANAGER = "manager"  # the to_agent of a manager's mail while no manager runs: the next one takes it (#5600)
+
+
+def _move_manager_mail(conn, old, new, why):
+    """Inside a tx: the messages to the manager `old` that it did not read, and its open questions, go to the manager
+    `new` (None: to NEXT_MANAGER, until a manager starts), unread. On 2026-11-12 a release waited on an alert to a
+    manager that a person had stopped, and the next manager never saw it. Returns the ids of the messages."""
+    rows = conn.execute("SELECT id, kind, item_id, from_agent FROM messages WHERE to_agent=? AND from_agent<>'maxpm' "
+                        "AND (read_at IS NULL OR (kind IN ('question','alert') AND state='open')) "
+                        "AND NOT (kind='alert' AND body LIKE 'STOP requested:%')", (old,)).fetchall()  # its own stop stays
+    to = new or NEXT_MANAGER
+    for m in rows:
+        conn.execute("UPDATE messages SET to_agent=?, read_at=NULL, native_status=NULL WHERE id=?", (to, m["id"]))
+        _event(conn, m["item_id"], "maxpm", f"{m['kind']} #{m['id']} to {old} went to "
+               f"{new or 'the next manager'}: {why}")
+        if old != NEXT_MANAGER and m["from_agent"] != new:  # the sender hears where it went
+            _send(conn, "notice", "maxpm", f"{why} before it read your {m['kind']} #{m['id']}. "
+                  + (f"It went to {new}, the manager now." if new else "It waits for the next manager."),
+                  to=m["from_agent"], item_id=m["item_id"], reply_to=m["id"])
+    return [m["id"] for m in rows]
+
+
 def manage(conn, cwd, actor=None, takeover=None):
     """Start or continue the manager session: one at a time. It changes the plan and runs the other agents
     (launch, queues, messages, stop, launch settings, target give) and takes no work itself."""
@@ -19894,13 +20026,20 @@ def manage(conn, cwd, actor=None, takeover=None):
     if held:
         raise RiverError(f"{actor} holds {', '.join('#' + str(r['id']) for r in held)}; a manager holds no work. "
                          f"Finish or release it first, or manage from a new session: maxpm manage (without --as)")
+    handed = []
     if other:
         with tx(conn):
+            handed += _move_manager_mail(conn, other, actor, f"{other} is no longer the manager ({actor} took over)")
             conn.execute("UPDATE agents SET role=NULL, note='manager until taken over' WHERE name=?", (other,))
             _send(conn, "alert", actor, f"{actor} took over as manager: {takeover}. You are no longer the manager.",
                   to=other)
             _event(conn, None, actor, f"took over as manager from {other}: {takeover}")
     _set_role_note(conn, actor, "manager", None)
+    if NEXT_MANAGER != actor and conn.execute("SELECT 1 FROM messages WHERE to_agent=? LIMIT 1", (NEXT_MANAGER,)).fetchone() \
+            and not conn.execute("SELECT 1 FROM agents WHERE name=?", (NEXT_MANAGER,)).fetchone():
+        with tx(conn):  # what came for the managers while none ran (#5600)
+            handed += _move_manager_mail(conn, NEXT_MANAGER, actor, f"{actor} is the manager now")
+    handed = [_msg_dict(conn.execute("SELECT * FROM messages WHERE id=?", (i,)).fetchone()) for i in sorted(handed)]
     f = manager_findings(conn)
     import json
     with tx(conn):  # what the manager has seen: manage --watch reports what is new after this
@@ -19909,6 +20048,7 @@ def manage(conn, cwd, actor=None, takeover=None):
     from . import release
     return {"agent": actor, "new_name": new_name, "role": "manager", "status": status(conn), "findings": f,
             "release": release.notice(conn),  # a newer MaximizePM is out: tell the person (#5601)
+            "handed": handed,
             "policies": pol, "other_policies": len(policy_list(conn)) - len(pol),
             "took_over": other, "every": setting(conn, "manage_every"), "settle": setting(conn, "manage_settle", agent=actor),
             "wait_high": setting(conn, "manage_wait_high", agent=actor),
