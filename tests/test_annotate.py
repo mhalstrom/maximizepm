@@ -208,6 +208,14 @@ class PageOp(Base):
         with self.assertRaisesRegex(RiverError, "maxpm browser annotation"):
             server.OPS["browser"](self.c, {"action": "annotation_mark", "project": "web", "id": s["id"], "n": 1}, "ag1")
 
+    def test_freeze_gives_the_picture_and_the_size_of_the_view_now(self):
+        # #5660: the frame that the pane shows can be older than its last resize; the drawing takes this size.
+        b = browser.get("web", "ag1")
+        with mock.patch.object(b, "evaluate", lambda js, timeout=None: [454, 524]), \
+                mock.patch.object(browser, "screenshot", lambda b: {"png": png(), "url": "u"}):
+            r = server.OPS["browser"](self.c, {"action": "freeze", "project": "web", "session": "ag1"}, "mark")
+        self.assertEqual((r["view"], r["png"]), ([454, 524], png()))
+
     def test_the_marks_of_this_page_follow_its_scroll(self):
         s = self.save()
         b = browser.get("web", "ag1")

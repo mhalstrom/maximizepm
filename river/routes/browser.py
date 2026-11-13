@@ -183,6 +183,10 @@ def act(conn, a, who):
             raise RiverError("only a person saves a browser's sign-ins for the project: the Browser pane has the "
                              "button Save sign-ins for the project")
         return browser.save_signins(b)
+    if action == "freeze":  # Annotate's background (#5660): a PNG of the tab and the size of its view in CSS pixels,
+        # read together: a frame that the pane shows can be older than the pane's last resize
+        view = b.evaluate("[innerWidth, innerHeight]", 5)
+        return {**browser.screenshot(b), "view": view}
     if action in ("pick", "area"):  # Annotate (#5655): the element at a point, or what a dragged box holds
         if not b.running():
             raise RiverError("the browser is not running: open a page first")

@@ -239,13 +239,23 @@ export function makeAnnotate(ctx) {
     if (a.on) return;
     a.on = true; a.shapes = []; a.saved = null; a.editing = -1; a.bg = null;
     a.w = ctx.view.w || img.naturalWidth; a.h = ctx.view.h || img.naturalHeight;
-    stage.classList.add("br-annon"); bar.classList.remove("hidden"); layer.classList.remove("hidden");
+    stage.classList.add("br-annon"); bar.classList.remove("hidden");
     box.querySelector(".br-annbtn").setAttribute("aria-pressed", "true");
     $(".br-send").classList.toggle("hidden", !ctx.session);
-    place(); draw();
     setTool(a.tool); setColor(a.color);
-    // The background: a PNG of the tab now, one pixel for each CSS pixel; the frozen frame shows until it comes.
-    ctx.call("screenshot", {}).then(r => { if (a.on && r.png) { a.bg = "data:image/png;base64," + r.png; img.src = a.bg; } }).catch(() => {});
+    // The background: a PNG of the tab now and the size of its view (#5660: the frame shown can be older than the
+    // pane's last resize). The layer takes the pointer when it is there; with no answer, the frame shown stays.
+    try {
+      const r = await ctx.call("freeze", {});
+      if (!a.on) return;
+      if (r.png && r.view) {
+        a.bg = "data:image/png;base64," + r.png; [a.w, a.h] = r.view;
+        img.src = a.bg; await img.decode().catch(() => {});
+      }
+    } catch (e) { /* call showed it */ }
+    if (!a.on) return;
+    layer.classList.remove("hidden");
+    place(); draw();
     loadSets();
   }
   function stop() {
