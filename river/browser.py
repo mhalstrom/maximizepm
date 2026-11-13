@@ -3118,6 +3118,78 @@ def outline(b, heads=OUTLINE_HEADS):
     return r
 
 
+TEXT_MAX = 3800  # bytes of text that maxpm browser text prints by default: with its last line, under 4 KB
+# #5672: the text of the main content (main, role=main, article; else the body) as a person reads it, without the
+# menus, side bars and footers inside it; or one section by its heading (to the next heading of its level or
+# higher); or the lines that hold a word, with one line around each; from a character on, up to max bytes.
+TEXT_JS = r"""(function (o) {
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const OUT = 'nav,footer,aside,[role=navigation],[role=contentinfo],[role=complementary],[role=search]';
+  const main = o.all ? document.body : document.querySelector('main,[role=main]') || document.querySelector('article')
+    || document.body;
+  if (!main) return {text: '', total: 0, rest: 0, next: null, heads: []};
+  let text = main.innerText || '';
+  if (!o.all) for (const x of main.querySelectorAll(OUT)) {
+    const up = x.parentElement && x.parentElement.closest(OUT);
+    if (up && main.contains(up)) continue;  // its text went with the part around it
+    const t = x.innerText; if (t && t.trim()) text = text.replace(t, '');
+  }
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+  const heads = Array.from(main.querySelectorAll('h1,h2,h3,h4,h5,h6')).filter(h => h.innerText.trim())
+    .map(h => [+h.tagName[1], h.innerText.trim().split('\n')[0]]);
+  const out = {heads: heads.slice(0, 40).map(h => h[1])};
+  if (o.section) {
+    const want = norm(o.section), lines = text.split('\n');
+    let i = heads.findIndex(h => norm(h[1]) === want);
+    if (i < 0) i = heads.findIndex(h => norm(h[1]).startsWith(want));
+    if (i < 0) return {error: 'no heading ' + JSON.stringify(o.section) + '; the page has ' +
+      heads.slice(0, 15).map(h => JSON.stringify(h[1])).join(', ')};
+    const lvl = heads[i][0], stop = heads.slice(i + 1).filter(h => h[0] <= lvl).map(h => norm(h[1]));
+    const at = lines.findIndex(l => norm(l) === norm(heads[i][1]));
+    if (at < 0) return {error: 'the heading ' + JSON.stringify(heads[i][1]) + ' is not in the text of the page'};
+    let end = lines.length;
+    for (let k = at + 1; k < lines.length; k++) if (stop.includes(norm(lines[k]))) { end = k; break; }
+    text = lines.slice(at, end).join('\n').trim();
+    out.section = heads[i][1];
+  }
+  if (o.grep) {
+    const w = norm(o.grep), lines = text.split('\n').filter(l => l.trim()), keep = new Set();
+    lines.forEach((l, k) => { if (norm(l).includes(w)) [k - 1, k, k + 1].forEach(j => j >= 0 && j < lines.length && keep.add(j)); });
+    const ks = [...keep].sort((a, b) => a - b), parts = [];
+    ks.forEach((k, n) => { if (n && k !== ks[n - 1] + 1) parts.push('--'); parts.push(lines[k]); });
+    text = parts.join('\n');
+    out.matches = lines.filter(l => norm(l).includes(w)).length;
+  }
+  const enc = new TextEncoder(), from = Math.max(0, o.from || 0);
+  const shown = text.slice(from);
+  let cutAt = shown.length;
+  if (enc.encode(shown).length > o.max) {  // cut at the end of a line within max bytes
+    let lo = 0, hi = shown.length;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (enc.encode(shown.slice(0, mid)).length <= o.max) lo = mid; else hi = mid - 1; }
+    const nl = shown.lastIndexOf('\n', lo);
+    cutAt = nl > lo / 2 ? nl : lo;
+  }
+  out.text = shown.slice(0, cutAt).trimEnd();
+  out.total = text.length;
+  out.next = from + cutAt < text.length ? from + cutAt : null;
+  out.rest = out.next === null ? 0 : enc.encode(text.slice(out.next)).length;
+  return out;
+})"""
+
+
+def page_text(b, section=None, grep=None, start=0, limit=TEXT_MAX, everything=False):
+    """#5672: the page's text with limits (TEXT_JS); rest: the bytes after what it gives, next: where --from goes on."""
+    loading(b)
+    r = in_world(b, "(%s)(%s)" % (TEXT_JS, json.dumps({"section": section or None, "grep": grep or None,
+                                                       "from": int(start or 0), "max": int(limit or TEXT_MAX),
+                                                       "all": bool(everything)})))
+    if r is NO_WORLD or not isinstance(r, dict):
+        raise RiverError("the page did not answer: run maxpm browser text again")
+    if r.get("error"):
+        raise RiverError(r["error"])
+    return r
+
+
 def resolve_target(b, target, within=None, verb="click"):
     """#5667: the element that an action names, as a ref (@e3) or a CSS selector (css:<selector>). target: a ref, a
     name as a snapshot prints it ("Comments"), a role and a name (link "Comments"), or css:<selector>; within: the

@@ -156,6 +156,12 @@ def _act(conn, a, who):
         raise RiverError(f"--wait is {', '.join(browser.WAITS)}, not {wait}")
     sess = None if person else who
 
+    def page_text(a):  # #5672: the text with its limits, and where the rest is
+        every = bool(a.get("all"))
+        t = browser.page_text(b, a.get("section"), a.get("grep"), a.get("from") or 0,
+                              10 ** 9 if every else int(a.get("max") or browser.TEXT_MAX), every)
+        return {k: t.get(k) for k in ("text", "rest", "next", "section", "matches")}
+
     def then(out):  # --snapshot: the snapshot of the page that the action left (#5663)
         if a.get("snapshot"):
             out["snapshot"] = browser.snapshot(b, interactive=True)["snapshot"]
@@ -172,6 +178,8 @@ def _act(conn, a, who):
             _ask_open(project, who, who)
         if a.get("outline", not person) and not out.get("dialog"):  # #5670: the map of the page; the pane needs none
             out["outline"] = browser.outline(b)["lines"]
+        if a.get("read") and not out.get("dialog"):  # #5672: open --text, the text in the same command
+            out.update(page_text(a))
         return then(out)
     if action == "outline":
         return {**b.info(), "outline": browser.outline(b, int(a.get("heads") or browser.OUTLINE_HEADS))["lines"]}
@@ -207,7 +215,7 @@ def _act(conn, a, who):
         html = browser.on_element(b, sc, "(el) => el.outerHTML") if sc else b.evaluate("document.documentElement.outerHTML")
         return {**b.info(), "html": html, "bytes": len((html or "").encode())}
     if action == "text":
-        return {**b.info(), "text": b.evaluate("document.body ? document.body.innerText : ''")}
+        return {**b.info(), **page_text(a)}
     if action == "screenshot":
         return browser.screenshot(b, bool(a.get("full")), bool(a.get("cursor")))
     if action == "tab":

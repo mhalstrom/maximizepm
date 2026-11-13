@@ -612,6 +612,22 @@ class Command(Base):
         a, out = self.asked("outline", res={"title": "X", "url": "u", "outline": ["[page] 1 link"]})
         self.assertEqual((a["action"], out.splitlines()), ("outline", ["X  u", "[page] 1 link"]))
 
+    def test_text_takes_a_section_grep_from_and_says_what_is_left(self):
+        """#5672: maxpm browser text --section/--grep/--from/--max/--all, and open --text."""
+        a, out = self.asked("text", "--section", "Production", "--from", "120", res={
+            "title": "X", "url": "u", "text": "Production\nmore", "rest": 2500, "next": 3800, "section": "Production"})
+        self.assertEqual((a["section"], a["from"]), ("Production", 120))
+        self.assertEqual(out.splitlines(), ["Production", "more", '... 2.5 KB more: --section "Production" --from 3800'])
+        a, out = self.asked("text", "--grep", "battery", res={"text": "a battery", "rest": 0, "matches": 1})
+        self.assertEqual((a["grep"], out.splitlines()), ("battery", ["(1 line with the word)", "a battery"]))
+        a, out = self.asked("text", res={"text": "Intro", "rest": 101200, "next": 3775})
+        self.assertNotIn("section", a)
+        self.assertEqual(out.splitlines()[-1], '... 101.2 KB more: --from 3775, --section "<heading>" (maxpm browser '
+                                               'outline lists them), --grep <word>, or --all')
+        a, out = self.asked("open", "x.test", "--text", "--no-outline", res={"title": "X", "url": "u", "text": "Hi",
+                                                                             "rest": 0})
+        self.assertEqual((a["read"], out.splitlines()), (True, ["X  u", "Hi"]))
+
     def test_batch_sends_the_lines_as_one_request(self):
         f = os.path.join(self.tmp.name, "steps")
         Path(f).write_text("# a note\nclick @e3\n\nmaxpm browser fill @e5 'two words'\nkey Enter --wait load\n"
@@ -1695,6 +1711,66 @@ class SnapshotLimits(Base):
         self.assertNotIn("outline", act(action="open", url=f"http://127.0.0.1:{port}/"))
         self.assertEqual(act(action="outline", heads=1)["outline"], want[:3] + ["(1 more headings: maxpm browser "
                                                                                  "snapshot --all)"])
+
+
+DOC = (b"<title>Doc</title><nav>Menu one</nav><main><h1>Doc</h1><p>Intro line</p><nav>Inner menu</nav>"
+       b"<h2>Alpha</h2><p>alpha text</p><h3>Alpha sub</h3><p>sub text</p><h2>Beta</h2>"
+       + b"".join(b"<p>beta line %d</p>" % n for n in range(40)) + b"<aside>Side box</aside></main><footer>Foot</footer>")
+
+
+class PageText(Base):
+    """#5672 in a real Chrome: the main text without its menus, side boxes and footer; a section to the next heading of
+    its level; the lines with a word; the limit, the rest and --from; --all; open --text."""
+
+    def test_main_text_a_section_grep_the_limit_and_open_text(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(DOC)))
+                self.end_headers()
+                self.wfile.write(DOC)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        out = act(action="open", url=f"http://127.0.0.1:{port}/", read=True, outline=False)
+        t = out["text"]
+        self.assertTrue(t.startswith("Doc\n\nIntro line"), t)
+        self.assertIn("beta line 39", t)
+        for gone in ("Menu one", "Inner menu", "Side box", "Foot"):
+            self.assertNotIn(gone, t)
+        self.assertEqual((out["rest"], out["next"]), (0, None))
+        self.assertEqual(act(action="text", section="alpha")["text"].split("\n"),
+                         ["Alpha", "", "alpha text", "", "Alpha sub", "", "sub text"])
+        with self.assertRaisesRegex(RiverError, 'no heading "Gamma"; the page has "Doc", "Alpha", "Alpha sub", "Beta"'):
+            act(action="text", section="Gamma")
+        g = act(action="text", grep="sub")
+        self.assertEqual((g["matches"], g["text"].split("\n")), (2, ["alpha text", "Alpha sub", "sub text", "Beta"]))
+        part = act(action="text", max=40)
+        self.assertLessEqual(len(part["text"].encode()), 40)
+        self.assertGreater(part["rest"], 0)
+        self.assertIn(f"--from {part['next']}", cli._text_lines(part)[-1])
+        nxt = act(action="text", **{"from": part["next"], "max": 40})
+        self.assertFalse(t.startswith(nxt["text"]))
+        self.assertIn(nxt["text"].strip()[:10], t)
+        self.assertIn("Foot", act(action="text", all=True)["text"])
+        sec = act(action="text", section="Beta", max=30)
+        self.assertTrue(cli._text_lines(sec)[-1].startswith(f'... ') and f'--section "Beta" --from {sec["next"]}'
+                        in cli._text_lines(sec)[-1])
 
 
 BOXES = (b"<title>Boxes</title>"

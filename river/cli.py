@@ -911,6 +911,7 @@ def build_parser(only=None):
                        "browser in your side panel); the reply is the page's outline")
     x.add_argument("url"); x.add_argument("--no-show", action="store_true", help="do not open it in your side panel")
     x.add_argument("--no-outline", action="store_true", help="reply with the title and address only")
+    x.add_argument("--text", action="store_true", help="also the main text, as maxpm browser text gives it")
     x = brs.add_parser("outline", parents=[bp], help="the page's regions with their counts of links, buttons, fields "
                        "and rows, and its headings (about 0.5 KB)")
     x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab; prints the file's path")
@@ -920,7 +921,13 @@ def build_parser(only=None):
     x = brs.add_parser("html", parents=[bp], help="the HTML of the page (the DOM as it is now)")
     x.add_argument("--out", help="write it to this file")
     x.add_argument("--scope", help="only one element: a ref (@e3) or a CSS selector")
-    x = brs.add_parser("text", parents=[bp], help="the text of the page as a person reads it")
+    x = brs.add_parser("text", parents=[bp], help="the main text of the page as a person reads it, without its menus "
+                       "and footers, up to 4 KB, and how much more there is")
+    x.add_argument("--section", help="only the section under this heading (maxpm browser outline lists them)")
+    x.add_argument("--grep", help="only the lines with this word, and one line around each")
+    x.add_argument("--from", dest="start", type=int, help="from this character on (the more line names it)")
+    x.add_argument("--max", type=int, help="the bytes it prints at most (default 3800)")
+    x.add_argument("--all", action="store_true", help="all the text of the page, menus too, with no limit")
     # #5667: an element by its name as a snapshot prints it, or by role and name, in its row with --in
     ep = argparse.ArgumentParser(add_help=False)
     ep.add_argument("--in", dest="within", metavar="TEXT", help="only in the row, card or region whose text holds this")
@@ -2543,7 +2550,10 @@ def _browser_args(a):
     if getattr(a, "within", None):
         args["within"] = a.within
     if b == "open":
-        args.update(url=a.url, show=not a.no_show, outline=not a.no_outline)
+        args.update(url=a.url, show=not a.no_show, outline=not a.no_outline, read=a.text)
+    elif b == "text":  # #5672
+        args.update({k: v for k, v in (("section", a.section), ("grep", a.grep), ("from", a.start), ("max", a.max),
+                                       ("all", a.all)) if v})
     elif b == "snapshot":
         args.update(interactive=a.interactive, scope=a.scope, delta=a.delta, max=a.max, all=a.all, region=a.region)
     elif b == "find":  # #5671: a snapshot of the matching elements
@@ -5108,7 +5118,7 @@ def _browser_result(action, res):
     if action == "snapshot":
         return _snapshot_lines(res["snapshot"])
     if action == "text":
-        return [res.get("text", "")]
+        return _text_lines(res)
     if action == "eval":
         return [json.dumps(res.get("value"), ensure_ascii=False)]
     what = []
@@ -5128,8 +5138,23 @@ def _browser_result(action, res):
                    + ", or dismiss")
     if res.get("outline"):  # #5670: the reply of open, and maxpm browser outline
         out += res["outline"]
+    if "text" in res:  # #5672: open --text
+        out += _text_lines(res)
     if res.get("snapshot"):
         out += _snapshot_lines(res["snapshot"], title=False)
+    return out
+
+
+def _text_lines(res):
+    """The text of maxpm browser text (#5672), and a last line that says how much more there is and how to get it."""
+    out = [f"({res['matches']} line{'' if res['matches'] == 1 else 's'} with the word)"] if "matches" in res and \
+        res["matches"] is not None else []
+    out.append(res.get("text") or "(no text)")
+    if res.get("rest"):
+        kb, sec = res["rest"] / 1000, res.get("section")
+        go = (f"--section {json.dumps(sec, ensure_ascii=False)} " if sec else "") + f"--from {res['next']}"
+        out.append(f"... {kb:.1f} KB more: {go}" + ("" if sec else ", --section \"<heading>\" (maxpm browser outline "
+                                                                    "lists them), --grep <word>, or --all"))
     return out
 
 
@@ -5158,7 +5183,7 @@ def render_browser(a, res):
         print(res["html"])
         return
     if b == "text":
-        print(res.get("text", ""))
+        print("\n".join(_text_lines(res)))
         return
     if b == "eval":
         print(json.dumps(res.get("value"), indent=2, ensure_ascii=False))
