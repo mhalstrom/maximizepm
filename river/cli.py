@@ -1140,6 +1140,16 @@ def build_parser(only=None):
     x = cvs.add_parser("save", help="write a version of a canvas as a file (for a page that goes into git)")
     x.add_argument("name"); x.add_argument("path"); x.add_argument("--version", type=int); x.add_argument("--project")
     x.add_argument("--force", action="store_true", help="write over the file")
+    x = cvs.add_parser("publish", help="show a canvas off this computer, as the button Share artifact does: publish a "
+                       "version as a private realquicksite page and print its link (the person shares it there)")
+    x.add_argument("name"); x.add_argument("--version", type=int, help="default: the newest")
+    x.add_argument("--project")
+    x.add_argument("--yes", action="store_true", help="a person's yes to a new version of a page that is shared")
+    rq = sub.add_parser("realquicksite", help="the connection that publishes canvases on realquicksite")
+    rqs = rq.add_subparsers(dest="rqcmd", required=True)
+    rqs.add_parser("status", help="connected or not, and the account (never the key)")
+    rqs.add_parser("connect", help="print the address that connects MaximizePM to realquicksite (maxpm serve must run)")
+    rqs.add_parser("disconnect", help="delete the key file (then click Remove on the realquicksite setup screen)")
 
     gl = sub.add_parser("goal", help="goals: outcomes in a project that one agent owns and works toward")
     gls = gl.add_subparsers(dest="gcmd", required=True)
@@ -3727,6 +3737,12 @@ def dispatch(conn, a, actor):
         return _browser_cmd(conn, a, actor)
     if c == "canvas":
         return _canvas_dispatch(conn, a, actor)
+    if c == "realquicksite":
+        if a.rqcmd == "status":
+            return core.rqs_status(conn)
+        if a.rqcmd == "disconnect":
+            return core.rqs_disconnect(conn)
+        return ask_server(conn, "rqs_connect", {}, actor=actor)
     if c == "goal":
         g = a.gcmd
         if g == "add":
@@ -5312,7 +5328,29 @@ def _canvas_dispatch(conn, a, actor):
         return core.canvas_answer(conn, a.name, a.decision, a.text, actor, a.project)
     if v == "save":
         return core.canvas_save(conn, a.name, a.path, a.version, a.project, a.force)
+    if v == "publish":
+        return core.canvas_publish(conn, a.name, actor, a.version, a.project, a.yes)
     raise RiverError(f"unknown canvas command {v}")
+
+
+def page_lines(p):
+    """The realquicksite page of a canvas in a few lines (#5789): link, private or shared, end date, problems."""
+    if not p:
+        return []
+    out = []
+    if p.get("url"):
+        ends = core.show_time(p["expires_at"]) if p.get("expires_at") else "?"
+        how = "shared: anyone with the link opens it" if p.get("access") == "link" else "private"
+        out.append(f"  realquicksite: {p['url']}  {how}  v{p.get('version')}  "
+                   f"{'ended' if p.get('ended') else 'ends'} {ends}")
+    if p.get("state") == "publishing":
+        out.append("  realquicksite: publishing now")
+    if p.get("error"):
+        out.append(f"  realquicksite: {'the last publish failed: ' if p.get('state') == 'failed' else ''}{p['error']}")
+    for x in (p.get("problems") or [])[:10]:
+        out.append(f"  problem at the {x.get('viewport')} width ({x.get('kind')}): {x.get('message')}"
+                   + (f" [{x['selector']}]" if x.get("selector") else ""))
+    return out
 
 
 def _canvas_line(d):
@@ -5612,6 +5650,8 @@ def render_canvas(a, res):
             print("(no canvases: maxpm canvas put <file> --name <name>)")
         for d in res:
             print(_canvas_line(d))
+            if d.get("page") and d["page"].get("url"):
+                print(page_lines(d["page"])[0])
         return
     if v == "show":
         if a.text:
@@ -5622,6 +5662,8 @@ def render_canvas(a, res):
         print(f"  shown: version {sh['version']} by {sh['author']} {core.show_time(sh['created_at'])}"
               + (f": {sh['note']}" if sh["note"] else ""))
         print("  versions: " + ", ".join(f"v{x['version']} {x['author']}" for x in res["versions"]))
+        for line in page_lines(res.get("page")):
+            print(line)
         for r in res["comments"]:
             print("\n".join(_comment_lines(r)))
         print("---- text of version %d (only the text: maxpm canvas show %s --text) ----" % (sh["version"], res["name"]))
@@ -5660,6 +5702,35 @@ def render_canvas(a, res):
         return
     if v == "save":
         print(f"canvas {res['canvas']} version {res['version']} written to {res['path']}")
+    if v == "publish":
+        print(f"canvas {res['canvas']} version {res['version']} "
+              + ("is on this page already" if res.get("already") else "published") + ":")
+        print("\n".join(page_lines(res)))
+        if res.get("access") != "link":
+            print("  Only the person opens it (Google sign-in). They click Share on the page to send it; tell them "
+                  "the link and the end date.")
+        if res.get("problems"):
+            print(f"  Fix the problems in the canvas, put a new version, and publish again: "
+                  f"maxpm canvas publish {res['canvas']}")
+
+
+def render_realquicksite(a, res):
+    if a.rqcmd == "status":
+        if res["connected"]:
+            print(f"connected to realquicksite" + (f" as {res['email']}" if res.get("email") else "")
+                  + (f" since {core.show_time(res['connected_at'])}" if res.get("connected_at") else "")
+                  + f"; {res['pages']} canvas page(s). The key is in {res['file']} (mode 600).")
+            if res.get("mode_fixed"):
+                print(f"  the key file had mode {res['mode_fixed']}; it has 600 now")
+        else:
+            print("not connected to realquicksite. Connect: the button Share artifact in a canvas's bar, or "
+                  "maxpm realquicksite connect")
+        return
+    if a.rqcmd == "disconnect":
+        print(("disconnected: the key file is deleted. " if res["disconnected"] else "") + res["next"])
+        return
+    print(f"Open this address in your browser and click Allow: {res['url']}\n"
+          f"realquicksite then comes back to maxpm serve, which keeps the key (it works for 30 minutes).")
 
 
 # maxpm artifacts (#4838): the rows of the Artifacts tab in the terminal, so a manager can check what a worker made
@@ -5671,7 +5742,7 @@ ART_TEXT_MAX = 1_000_000
 def _art_label(r):
     if r["kind"] == "file":
         return "image" if r["target"].lower().endswith(ART_IMAGES[:-1]) else "pdf" if r["target"].lower().endswith(".pdf") else "file"
-    return {"artifact": "claude.ai", "page": "page"}.get(r["kind"], r["kind"])
+    return {"artifact": "claude.ai", "page": "page", "rqs": "rqs page"}.get(r["kind"], r["kind"])
 
 
 def artifact_rows(conn, a):
@@ -5732,6 +5803,10 @@ def artifacts_cmd(conn, a):
                        + "); maxpm cannot fetch it")
     elif row["kind"] == "page":
         out["read"] = "a local page: open it with a browser tool, or curl it while its server runs"
+    elif row["kind"] == "rqs":
+        out["read"] = (f"the realquicksite page of canvas {row['name']} ({row.get('access') or 'private'}): read the "
+                       f"canvas with maxpm canvas show {row['name']}; a private page opens only after the person's "
+                       "Google sign-in")
     else:
         f = Path(row["target"]).expanduser()
         if not f.is_file():
@@ -6190,6 +6265,8 @@ def render(a, res):
         return render_go(res)
     if c == "artifacts":
         return render_artifacts(res, a)
+    if c == "realquicksite":
+        return render_realquicksite(a, res)
     if c == "search":
         return render_search(res, a.limit)
     if c == "duplicates":

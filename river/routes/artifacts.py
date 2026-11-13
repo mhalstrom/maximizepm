@@ -15,11 +15,20 @@ def canvas_rows(conn, agent=None, item=None, since=None):
     wrote = None
     if agent:
         wrote = {r[0] for r in conn.execute("SELECT DISTINCT canvas_id FROM canvas_versions WHERE author=?", (agent,))}
-    return [{"kind": "canvas", "target": f"canvas:{c['id']}", "session": c["agent"], "how": "wrote",
+    heads = [c for c in core.canvas_heads(conn) if (wrote is None or c["id"] in wrote)
+             and (item is None or c["item_id"] == item)]
+    rows = [{"kind": "canvas", "target": f"canvas:{c['id']}", "session": c["agent"], "how": "wrote",
              "item": c["item_id"], "at": c["updated_at"], "title": c["title"] or c["name"], "name": c["name"],
              "version": c["version"], "open_comments": c["open_comments"], "project": c["project"]}
-            for c in core.canvas_heads(conn) if (wrote is None or c["id"] in wrote)
-            and (item is None or c["item_id"] == item) and (not since or (c["updated_at"] or "") >= since)]
+            for c in heads if not since or (c["updated_at"] or "") >= since]
+    # The realquicksite page of a canvas (#5789), as an artifact of the canvas's item.
+    pages = {r["canvas_id"]: r for r in conn.execute(
+        "SELECT canvas_id, url, access, version, published_at FROM canvas_pages WHERE url IS NOT NULL")}
+    rows += [{"kind": "rqs", "target": p["url"], "session": c["agent"], "how": "published", "item": c["item_id"],
+              "at": p["published_at"], "title": c["title"] or c["name"], "name": c["name"], "version": p["version"],
+              "access": p["access"], "project": c["project"]}
+             for c in heads for p in [pages.get(c["id"])] if p and (not since or (p["published_at"] or "") >= since)]
+    return rows
 
 
 def shows_file(conn):

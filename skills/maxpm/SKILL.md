@@ -481,6 +481,8 @@ this computer, with each version, and that the user opens in the MaximizePM page
   as a card, the user answers it in place, and the answer comes to you as a message, like a comment.
 - `maxpm canvas list` shows the canvases; `maxpm canvas show <name> [--version N] [--text]` reads one;
   `maxpm canvas save <name> <path>` writes a version as a file when it must go into git.
+- To show a page off this computer: `maxpm canvas publish <name>`, as the button Share artifact does (a
+  private realquicksite page; only the user opens it and shares it). Fix the problems it prints, and put again.
 
 ## The project's browser
 

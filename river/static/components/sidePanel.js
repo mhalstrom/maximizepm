@@ -27,6 +27,7 @@ import { decorateDoc, updateAnswers } from "./canvasDoc.js";
 import { findMark, findClear, findGo } from "./findText.js";
 import { queueHtml } from "./agentActions.js";
 import { button, iconButton } from "./button.js";
+import { publishButton, pageLine, openOnRqs } from "./rqsPublish.js";
 import { S } from "../page.js";
 
 const WIDTH = "river.sidepanel.width", TABS = "river.sidepanel.tabs";
@@ -240,7 +241,8 @@ async function showCanvas(t, box, note) {
   box.replaceChildren();
   const bar = document.createElement("div"); bar.className = "sp-cbar";
   t.bar = bar; t.barSig = null;
-  box.append(bar);
+  t.rqs = document.createElement("div"); t.rqs.className = "sp-crqs"; t.rqs.setAttribute("role", "status");
+  box.append(bar, t.rqs);
   drawBar(t, meta);
   const side = document.createElement("div"); side.className = "sp-cside";
   t.side = side;
@@ -282,6 +284,10 @@ function drawBar(t, meta) {
   const bar = t.bar, v = t.pin || meta.version;
   const title = meta.title || meta.name;
   if (t.title !== title) { t.title = title; renderTabs(); }
+  // The realquicksite page of the canvas (#5789): its own line under the bar, drawn when it changed.
+  t.meta = meta;
+  const line = pageLine(meta.page, v);
+  if (t.rqs && t.rqs._html !== line) { t.rqs.innerHTML = line; t.rqs._html = line; }
   const sigNow = JSON.stringify([meta.versions, v, t.pin, meta.item_id, meta.item_title, meta.kind, Math.floor(Date.now() / 60000)]);
   if (sigNow === t.barSig || bar.contains(document.activeElement)) return;
   t.barSig = sigNow;
@@ -291,8 +297,9 @@ function drawBar(t, meta) {
     ${meta.item_id ? `<span class="link cv-item" data-open="${meta.item_id}" title="${esc(meta.item_title || "")}">#${meta.item_id}</span>` : ""}
     <span class="cv-sp"></span>${meta.kind === "svg" ? "" : `<button class="btn" type="button" data-cv-mode aria-pressed="${!!t.commenting}" title="Click a part or select text to comment">Comment</button>`}
     <span class="cv-menu"><button class="btn" type="button" data-cv-page>Comment on the page</button>
-    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Edit the text as a new version">Edit</button>` : ""}</span>
-    ${iconButton("⋯", "More: comment on the page, edit", { cls: "cv-more", data: { "cv-more": "" } })}`;
+    ${meta.kind === "md" && !t.pin ? `<button class="btn" type="button" data-cv-edit title="Edit the text as a new version">Edit</button>` : ""}
+    ${publishButton()}</span>
+    ${iconButton("⋯", "More: comment, edit, publish", { cls: "cv-more", data: { "cv-more": "" } })}`;
   bar.querySelector("select").onchange = (e) => { const n = +e.target.value; t.pin = n === meta.version ? null : n; t.scroll = null; show(t); };
   const newest = bar.querySelector("[data-cv-newest]");
   if (newest) newest.onclick = () => { t.pin = null; show(t); };
@@ -301,6 +308,8 @@ function drawBar(t, meta) {
   bar.querySelector("[data-cv-page]").onclick = () => { setCommenting(t, false); t.comments.compose(null); t.side.scrollIntoView({ block: "nearest" }); };
   const edit = bar.querySelector("[data-cv-edit]");
   if (edit) edit.onclick = () => editCanvas(t, $("#spBody"), `canvas/${canvasOf(t.target)}/latest?${t.sig}`, t.side);
+  // The newest meta at the click: the page row changes while the bar stays drawn.
+  bar.querySelector("[data-cv-rqs]").onclick = () => openOnRqs(canvasOf(t.target), t.meta, t.pin || t.meta.version);
   // #5361: on a phone the bar is one row; Comment on the page and Edit sit under its ⋯. A choice closes the menu, and
   // so do Esc and a click outside the bar (barMenu, once for the page: the bar is drawn again often).
   const more = bar.querySelector("[data-cv-more]");
@@ -471,6 +480,7 @@ async function loadComments(t) {
     const r = await fetch(`canvas/${canvasOf(t.target)}/meta?${t.sig}`);
     if (!r.ok || on !== t.id) return;
     const meta = await r.json();
+    if (t.bar && t.bar.isConnected) drawBar(t, meta);  // the realquicksite line follows its publish (#5789)
     t.comments.render(meta);
     if (t.md && t.md.isConnected && !t.pin) updateAnswers(t.md, meta);
     if (t.frame && t.frame.contentWindow) postAnswers(t.frame.contentWindow, meta);

@@ -15,6 +15,8 @@ GET: (test, handler) pairs that Handler.do_GET tries in order; a handler answers
 merged into server.OPS."""
 
 import re
+import threading
+import time
 from pathlib import Path
 
 from .. import core, server  # noqa: F401  (server: read at call time, so tests that replace its globals still work)
@@ -170,8 +172,150 @@ def canvas(h, path):
         conn.close()
 
 
+# ---- Share artifact (#5789): the canvas off this computer as a private realquicksite page.
+# The action only starts the publish (a page action answers in 100 ms, p147); a thread of maxpm serve talks to
+# realquicksite, and the row in canvas_pages says publishing, done or failed. The first click with no key starts the
+# connect step: realquicksite comes back to /api/rqs/callback with a code, which this server trades for the key with the
+# verifier it kept in memory, and then the publish runs. The tab that the click opened waits on /api/rqs/wait/<id> and
+# goes to the page when it is there.
+
+RQS_CONNECT_SECONDS = 30 * 60  # as long as realquicksite's own Allow form lives
+_rqs_lock = threading.Lock()
+_rqs_connects = {}  # state -> {verifier, at, actor, publish: (canvas id, version, confirm) or None}
+RQS_CALLBACK = "/api/rqs/callback"
+RQS_WAIT = re.compile(r"^/api/rqs/(wait|page)/c?(\d+)$")
+
+
+def _serve_port(conn):
+    from .. import notify
+    return notify.SERVE_PORT["port"] or core.serve_port_now(conn)
+
+
+def publish_in_thread(cid, version, actor, confirm=False):
+    """canvas_publish_send in a thread with its own connection; the row records the result or the error."""
+    def work():
+        conn = core.connect()
+        try:
+            core.canvas_publish_send(conn, cid, version, actor, confirm)
+        except RiverError:
+            pass  # canvas_publish_send wrote it on the row
+        except Exception as e:  # a fault of maxpm: the row must not stay 'publishing'
+            try:
+                core._rqs_failed(conn, cid, f"maxpm failed: {e}")
+            except Exception:
+                pass
+        finally:
+            conn.close()
+    threading.Thread(target=work, daemon=True).start()
+
+
+def rqs_connect(conn, args, who, publish=None):
+    """Start the connect step: the address to open. publish: the canvas to publish once the key is there."""
+    got = core.rqs_connect_start(_serve_port(conn))
+    t = time.time()
+    with _rqs_lock:
+        for k in [k for k, v in _rqs_connects.items() if t - v["at"] > RQS_CONNECT_SECONDS]:
+            del _rqs_connects[k]
+        _rqs_connects[got["state"]] = {"verifier": got["verifier"], "at": t, "actor": who, "publish": publish}
+    return {"connect": True, "url": got["url"]}
+
+
+def canvas_publish(conn, args, who):
+    """The button Share artifact. {open: url} when the page shows this version already; {connect, url} when
+    MaximizePM has no key yet; else {publishing, wait}: the tab that the click opened goes to wait."""
+    ref, version, confirm = args["name"], args.get("version"), bool(args.get("confirm"))
+    if not core._rqs_file(conn):
+        c = core._canvas_row(conn, ref, args.get("project"))
+        return dict(rqs_connect(conn, args, who, (c["id"], version, confirm)), canvas=c["name"], id=c["id"])
+    got = core.canvas_publish_begin(conn, ref, who, version, args.get("project"))
+    if got.get("open"):
+        return {"open": got["open"], "canvas": got["canvas"], "id": got["id"]}
+    publish_in_thread(got["id"], got["version"], who, confirm)
+    return {"publishing": True, "canvas": got["canvas"], "id": got["id"], "version": got["version"],
+            "wait": f"api/rqs/wait/{got['id']}"}
+
+
+def _rqs_page(title, text, status=200):
+    import html
+    return (f"<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport "
+            f"content='width=device-width,initial-scale=1'><title>{html.escape(title)}</title><style>body{{font:16px/1.5 "
+            f"system-ui,sans-serif;max-width:36em;margin:15vh auto;padding:0 16px}}@media(prefers-color-scheme:dark)"
+            f"{{body{{background:#111;color:#eee}}}}</style></head><body><h1>{html.escape(title)}</h1>"
+            f"<p id=t>{html.escape(text)}</p>").encode()
+
+
+def rqs_callback(h, path):
+    """realquicksite comes back here after Allow (code, state) or Cancel (error, state)."""
+    from urllib.parse import parse_qs, urlsplit
+    q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
+    with _rqs_lock:
+        entry = _rqs_connects.pop(q.get("state") or "", None)
+    html_type = "text/html; charset=utf-8"
+    if not entry or time.time() - entry["at"] > RQS_CONNECT_SECONDS:
+        return h._send(400, _rqs_page("Can't connect", "This connect step is unknown or too old. Click Share "
+                                      "artifact in MaximizePM again."), html_type)
+    if q.get("error") or not q.get("code"):
+        return h._send(200, _rqs_page("Not connected", "You did not allow it, so nothing changed. You can close this "
+                                      "tab."), html_type)
+    conn = core.connect()
+    try:
+        core.rqs_connect_finish(conn, q["code"], entry["verifier"])
+        if not entry["publish"]:
+            return h._send(200, _rqs_page("Connected", "MaximizePM is connected to realquicksite. You can close this "
+                                          "tab."), html_type)
+        cid, version, confirm = entry["publish"]
+        got = core.canvas_publish_begin(conn, cid, entry["actor"], version)
+        if got.get("open"):
+            return h._send(302, b"", html_type, {"Location": got["open"]})
+        publish_in_thread(got["id"], got["version"], entry["actor"], confirm)
+        return h._send(302, b"", html_type, {"Location": f"/api/rqs/wait/{got['id']}"})
+    except RiverError as e:
+        return h._send(400, _rqs_page("Can't connect", str(e)), html_type)
+    finally:
+        conn.close()
+
+
+_RQS_WAIT_JS = """<script>
+const t = document.getElementById("t");
+async function look() {
+  try {
+    const r = await fetch(location.pathname.replace("/wait/", "/page/"), {cache: "no-store"});
+    const p = await r.json();
+    if (p.state === "done" && p.url) { location.replace(p.url); return; }
+    if (p.state === "failed") { t.textContent = "The publish failed: " + (p.error || "no reason came") + " Close this tab and see the canvas bar in MaximizePM."; return; }
+  } catch (e) { /* maxpm serve restarts: ask again */ }
+  setTimeout(look, 1000);
+}
+look();
+</script>"""
+
+
+def rqs_wait(h, path):
+    """/api/rqs/wait/<id>: a tab that waits for the publish and then goes to the page; /api/rqs/page/<id>: the row."""
+    m = RQS_WAIT.match(path)
+    conn = core.connect()
+    try:
+        cid = int(m.group(2))
+        if m.group(1) == "page":
+            return h._send(200, core.canvas_page(conn, cid) or {"state": "none"})
+        c = core._canvas_row(conn, cid)
+        return h._send(200, _rqs_page("Publishing on realquicksite",
+                                      f"MaximizePM publishes the canvas \"{c['title'] or c['name']}\" as a private page. "
+                                      "It opens here in a few seconds.") + _RQS_WAIT_JS.encode(),
+                       "text/html; charset=utf-8")
+    except RiverError as e:
+        return h._send(404, {"error": str(e)})
+    finally:
+        conn.close()
+
+
 GET = [
     (lambda path: bool(PATH.match(path)), canvas),
+    (lambda path: path == RQS_CALLBACK, rqs_callback),
+    (lambda path: bool(RQS_WAIT.match(path)), rqs_wait),
 ]
 
-OPS = {}
+OPS = {
+    "canvas_publish": canvas_publish,
+    "rqs_connect": lambda c, a, who: rqs_connect(c, a, who),
+}

@@ -379,6 +379,14 @@ button.srow-it { cursor: pointer; }
 /* #5361: Comment on the page and Edit stand in the bar on a wide screen; on a phone they sit under the bar's ⋯. */
 .cv-menu { display: contents; }
 .sp-cbar .cv-more { display: none; }
+/* The realquicksite page of the canvas (#5789, components/rqsPublish.js), under the bar: link, private or shared,
+   end date, the problems of its check. It wraps on a phone; a long link breaks anywhere. */
+.sp-crqs { flex: none; padding: var(--sp-1) var(--sp-3); border-bottom: var(--hair) solid var(--line); background: var(--panel); font-size: var(--fs-xs); color: var(--muted); }
+.sp-crqs:empty { display: none; }
+.cv-rqs-line { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; }
+.cv-rqs-line a { overflow-wrap: anywhere; }
+.cv-rqs-err { color: var(--warn); overflow-wrap: anywhere; }
+.cv-rqs-probs { margin: var(--sp-1) 0 0; padding-left: var(--sp-6); color: var(--warn); overflow-wrap: anywhere; }
 /* The comments of a canvas (#4769), under the page. */
 .sp-cside { flex: none; border-top: var(--hair) solid var(--line); background: var(--panel); padding: var(--sp-3) var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-3); font-size: calc(var(--fs-s) + var(--hair) / 2); }
 .cv-head { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }

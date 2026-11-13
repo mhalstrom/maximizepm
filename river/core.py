@@ -1089,6 +1089,25 @@ CREATE TABLE IF NOT EXISTS canvas_comments (
 );
 CREATE INDEX IF NOT EXISTS canvas_versions_canvas ON canvas_versions(canvas_id, version);
 CREATE INDEX IF NOT EXISTS canvas_comments_canvas ON canvas_comments(canvas_id, state);
+-- The realquicksite page of a canvas (#5789): the canvas off this computer, private until the person clicks Share
+-- there. Read by the canvas bar (link, private or shared, end date, publishing state, problems), maxpm canvas show
+-- and list, maxpm artifacts (the page link as an artifact of the canvas's item), and the responses pass (#5790).
+-- The key that publishes is never here: it is in the file realquicksite.key beside the queue.
+CREATE TABLE IF NOT EXISTS canvas_pages (
+  canvas_id      INTEGER PRIMARY KEY REFERENCES canvases(id),
+  subdomain      TEXT,
+  url            TEXT,
+  access         TEXT,                        -- private | link, as realquicksite last said
+  expires_at     TEXT,
+  version        INTEGER,                     -- the canvas version on the page
+  state          TEXT NOT NULL,               -- publishing | done | failed
+  problems       TEXT,                        -- JSON: the check's problems of the last publish
+  error          TEXT,
+  started_at     TEXT,                        -- the start of the last publish
+  published_at   TEXT,                        -- the end of the last good publish
+  responses_at   TEXT,                        -- the newest comment or vote already brought back (#5790)
+  checked_at     TEXT                         -- the last read of the responses (#5790)
+);
 
 -- The prompts that people sent to a session from the Sessions tab's message box (#4855): Up and Down in the box
 -- bring them back, newest first, on every device and through the relay. At most sessions.PROMPTS_KEEP a session.
@@ -16310,6 +16329,7 @@ def _canvas_info(conn, c):
     d["open_comments"] = counts.get("sent", 0) + counts.get("read", 0)
     d["item_title"] = (conn.execute("SELECT title FROM items WHERE id=?", (c["item_id"],)).fetchone() or [None])[0] \
         if c["item_id"] else None
+    d["page"] = canvas_page(conn, c["id"])  # its realquicksite page (#5789), or None
     return d
 
 
@@ -16821,6 +16841,329 @@ def canvas_save(conn, ref, path, version=None, project=None, force=False):
     except OSError as e:
         raise RiverError(f"cannot write {p}: {e.strerror}")
     return {"canvas": d["name"], "version": d["shown"]["version"], "path": str(p), "bytes": d["bytes"]}
+
+
+# ---------------------------------------------------------------- realquicksite (#5789)
+
+# A canvas goes off this computer as a private realquicksite page (design: maxpm canvas show rqs-design, section
+# MaximizePM). One connect step makes an app key of realquicksite: maxpm serve opens my.realquicksite.com/connect with
+# a loopback callback, checks the state, and trades the code and its verifier for the key. The key is a file beside
+# the queue (RQS_KEY_FILE, mode 600). It never goes into the database, the settings, a log, a command's output or the
+# page state. Each publish sends one version of the canvas with access private: nothing is public until the person
+# clicks Share on realquicksite, so a session may publish too, but never a new version of a page that is shared.
+RQS_HOST = "https://my.realquicksite.com"
+RQS_APP = "MaximizePM"
+RQS_KEY_FILE = "realquicksite.key"
+RQS_SETUP = RQS_HOST + "/#apps"  # the setup screen: Connected apps, with Remove
+RQS_CHECKER = "realquicksite check"  # the author of the comment with the check's problems
+# Test hook: fn(method, url, body or None, headers) -> (status, reply dict). The tests use a fake realquicksite.
+RQS_HTTP = None
+RQS_TIMEOUT = 120  # seconds: a publish waits for the render check at two widths
+# A publish that started this long ago and never ended (serve stopped in the middle) does not stop the next one.
+RQS_STALE = timedelta(minutes=5)
+RQS_NOT_CONNECTED = ("MaximizePM is not connected to realquicksite: a person connects it once with the button Share "
+                     "artifact in the bar of a canvas (or maxpm realquicksite connect)")
+_RQS_WRITING = re.compile(r"^[ \t]*writing:[ \t].*$", re.M | re.I)
+
+
+class RqsError(RiverError):
+    """A refusal of realquicksite: code is its error code (not_found, invalid_key, live_site_limit, ...)."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def rqs_key_path(conn):
+    """The key file: beside the queue's database."""
+    return Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent / RQS_KEY_FILE
+
+
+def _rqs_file(conn):
+    """The key file's content ({key, email, connected_at}), or None when MaximizePM is not connected."""
+    try:
+        text = rqs_key_path(conn).read_text().strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    try:
+        d = json.loads(text)
+    except ValueError:
+        d = {"key": text}  # a file with only the key
+    return d if isinstance(d, dict) and str(d.get("key") or "").startswith("rqs_") else None
+
+
+def _rqs_save(conn, data):
+    """Write the key file, mode 600 from its first byte; a new file replaces the old one in one step."""
+    p = rqs_key_path(conn)
+    tmp = p.with_name(p.name + ".new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (json.dumps(data) + "\n").encode())
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+
+def _rqs_http(method, url, body=None, key=None):
+    """(status, reply dict) of one request to realquicksite. RiverError when it cannot be reached."""
+    headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": RQS_APP}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    if RQS_HTTP is not None:
+        return RQS_HTTP(method, url, body, headers)
+    import urllib.error
+    import urllib.request
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=RQS_TIMEOUT) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {}
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise RiverError(f"cannot reach realquicksite: {getattr(e, 'reason', None) or e}")
+
+
+def rqs_tool(conn, name, body):
+    """Call one realquicksite tool with the key (POST /api/v1/tools/<name>): its reply, or RqsError."""
+    f = _rqs_file(conn)
+    if not f:
+        raise RiverError(RQS_NOT_CONNECTED)
+    status, reply = _rqs_http("POST", f"{RQS_HOST}/api/v1/tools/{name}", body, f["key"])
+    reply = reply if isinstance(reply, dict) else {}
+    if status >= 400 or reply.get("error"):
+        code = str(reply.get("error") or "http")
+        msg = str(reply.get("message") or f"realquicksite answered {status}")
+        if code == "invalid_key":
+            msg += " Then: maxpm realquicksite disconnect, and connect again with the button Share artifact."
+        raise RqsError(code, f"realquicksite: {msg}")
+    return reply
+
+
+def rqs_connect_start(port):
+    """The first step of the connect: {state, verifier, url}. The caller keeps state and verifier (maxpm serve, in
+    memory) and opens url; realquicksite comes back to http://127.0.0.1:<port>/api/rqs/callback."""
+    import base64
+    import hashlib
+    import secrets
+    from urllib.parse import urlencode
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(24)
+    q = urlencode({"app": RQS_APP, "callback": f"http://127.0.0.1:{int(port)}/api/rqs/callback",
+                   "challenge": challenge, "state": state})
+    return {"state": state, "verifier": verifier, "url": f"{RQS_HOST}/connect?{q}"}
+
+
+def rqs_connect_finish(conn, code, verifier):
+    """The last step of the connect: trade the code and the verifier for the key, and keep the key in its file."""
+    status, reply = _rqs_http("POST", f"{RQS_HOST}/api/v1/keys", {"code": code, "verifier": verifier})
+    reply = reply if isinstance(reply, dict) else {}
+    key = str(reply.get("key") or "")
+    if status >= 400 or not key.startswith("rqs_"):
+        raise RiverError("realquicksite: " + str(reply.get("message") or f"no key came (answer {status})")
+                         + " Connect again.")
+    _rqs_save(conn, {"key": key, "email": reply.get("email"), "connected_at": iso(now())})
+    return {"connected": True, "email": reply.get("email")}
+
+
+def rqs_status(conn):
+    """Connected or not, the account, and the canvases that have a page. Never the key."""
+    f = _rqs_file(conn)
+    p = rqs_key_path(conn)
+    out = {"connected": bool(f), "file": str(p), "setup": RQS_SETUP,
+           "pages": conn.execute("SELECT COUNT(*) FROM canvas_pages WHERE url IS NOT NULL").fetchone()[0]}
+    if f:
+        out.update(email=f.get("email"), connected_at=f.get("connected_at"))
+        mode = p.stat().st_mode & 0o777
+        if mode != 0o600:
+            os.chmod(p, 0o600)  # someone changed it: the key is for this user only
+            out["mode_fixed"] = oct(mode)
+    return out
+
+
+def rqs_disconnect(conn):
+    """Delete the key file. realquicksite has no call that removes a key with the key itself, so the person removes
+    it on the setup screen too (the reply says where)."""
+    p = rqs_key_path(conn)
+    had = p.exists()
+    p.unlink(missing_ok=True)
+    return {"disconnected": had, "setup": RQS_SETUP,
+            "next": f"realquicksite lists MaximizePM under Connected apps until you click Remove there: {RQS_SETUP}"
+            if had else "MaximizePM was not connected"}
+
+
+def _rqs_time(s):
+    """A time from realquicksite (2026-11-20T12:00:00.000Z) in the form of iso(), or None."""
+    try:
+        return iso(parse_iso(re.sub(r"\.\d+", "", str(s)).replace("+00:00", "Z")))
+    except (TypeError, ValueError):
+        return None
+
+
+def canvas_page(conn, cid):
+    """The realquicksite page of a canvas for the bar, show and list: the row with its problems as a list, and ended
+    when its end date passed; None when it has none."""
+    r = conn.execute("SELECT * FROM canvas_pages WHERE canvas_id=?", (int(cid),)).fetchone()
+    if r is None:
+        return None
+    d = {k: r[k] for k in ("subdomain", "url", "access", "expires_at", "version", "state", "error", "started_at",
+                           "published_at")}
+    try:
+        d["problems"] = json.loads(r["problems"]) if r["problems"] else []
+    except ValueError:
+        d["problems"] = []
+    d["ended"] = bool(r["expires_at"] and r["expires_at"] <= iso(now()))
+    return d
+
+
+def _rqs_files(conn, c, v):
+    """The files of one canvas version as realquicksite takes them: Markdown as /index.md (realquicksite draws it with
+    its design), HTML as /index.html (with the kit when it asks for it), SVG inside a plain page."""
+    body = v["body"]
+    if c["kind"] == "md":
+        body = _RQS_WRITING.sub("*This part is not written yet.*", body)
+        return [{"path": "/index.md", "encoding": "utf8", "content": body}]
+    if c["kind"] == "html":
+        if uses_kit(body):
+            from .routes import canvas as canvas_routes
+            body = canvas_routes.with_kit(conn, body)
+        return [{"path": "/index.html", "encoding": "utf8", "content": body}]
+    import html
+    svg = re.sub(r"^\s*(<\?xml[^>]*\?>\s*)?(<!DOCTYPE[^>]*>\s*)?", "", body, flags=re.I)
+    page = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            f"<title>{html.escape(c['title'] or c['name'])}</title>"
+            "<style>body{margin:0;padding:16px;background:#fff}svg{display:block;max-width:100%;height:auto;"
+            "margin:0 auto}</style></head><body>" + svg + "</body></html>")
+    return [{"path": "/index.html", "encoding": "utf8", "content": page}]
+
+
+def _rqs_prefix(name):
+    """Words for the page's address from the canvas name: a-z, 0-9 and '-', at most 30."""
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())).strip("-")[:30].strip("-") or "canvas"
+
+
+def canvas_publish_begin(conn, ref, actor=None, version=None, project=None):
+    """The local part of a publish, fast (a page action answers in 100 ms, p147): the checks and the row marked
+    publishing. {"open": url} when the page shows this version already; else {"canvas", "version", "page"}, and
+    canvas_publish_send does the rest."""
+    if not actor:
+        raise RiverError("publishing needs a name: set MAXPM_AGENT or pass --as <name>")
+    if not _rqs_file(conn):
+        raise RiverError(RQS_NOT_CONNECTED)
+    c = _canvas_row(conn, ref, project)
+    if version in (None, "", "latest"):
+        v = _canvas_latest(conn, c["id"])
+    else:
+        v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?",
+                         (c["id"], int(version))).fetchone()
+    if v is None:
+        raise RiverError(f"canvas {c['name']} has no version {version}")
+    with tx(conn):
+        page = canvas_page(conn, c["id"])
+        t = now()
+        if page and page["state"] == "publishing" and page["started_at"] and \
+                parse_iso(page["started_at"]) > t - RQS_STALE:
+            raise RiverError(f"canvas {c['name']} is being published now; wait for it (maxpm canvas show {c['name']})")
+        if page and page["state"] == "done" and page["version"] == v["version"] and page["url"] and not page["ended"]:
+            return {"canvas": c["name"], "id": c["id"], "version": v["version"], "open": page["url"], "page": page}
+        if page:
+            conn.execute("UPDATE canvas_pages SET state='publishing', error=NULL, started_at=? WHERE canvas_id=?",
+                         (iso(t), c["id"]))
+        else:
+            conn.execute("INSERT INTO canvas_pages (canvas_id, state, started_at) VALUES (?, 'publishing', ?)",
+                         (c["id"], iso(t)))
+    return {"canvas": c["name"], "id": c["id"], "version": v["version"], "page": page}
+
+
+def _rqs_failed(conn, cid, error):
+    with tx(conn):
+        conn.execute("UPDATE canvas_pages SET state='failed', error=? WHERE canvas_id=?", (str(error)[:500], cid))
+
+
+def canvas_publish_send(conn, cid, version, actor, confirm=False):
+    """The part of a publish that talks to realquicksite (seconds: it waits for the render check). A session never
+    sends a new version of a shared page; a person does after a yes (confirm). Records the page or the failure."""
+    c = conn.execute("SELECT * FROM canvases WHERE id=?", (int(cid),)).fetchone()
+    v = conn.execute("SELECT * FROM canvas_versions WHERE canvas_id=? AND version=?", (c["id"], int(version))).fetchone()
+    page = canvas_page(conn, c["id"]) or {}
+    person = _is_person(conn, actor)
+    try:
+        sub = page.get("subdomain") if not page.get("ended") else None
+        if sub:
+            # The person may have clicked Share or Make private on realquicksite since: ask it, not the row.
+            got = next((p for p in rqs_tool(conn, "list_pages", {}).get("pages") or [] if p.get("subdomain") == sub),
+                       None)
+            if got is None:
+                sub = None  # it ended or was deleted: a new page
+            elif got.get("access") == "link" and not (person and confirm):
+                with tx(conn):
+                    conn.execute("UPDATE canvas_pages SET access='link', expires_at=? WHERE canvas_id=?",
+                                 (_rqs_time(got.get("expires_at")), c["id"]))
+                raise RqsError("shared", "the page is shared; " + (
+                    "anyone with the link sees a new version: publish it again and say yes" if person else
+                    "the person publishes new versions of it with the button Share artifact"))
+        body = {"files": _rqs_files(conn, c, v), "title": (c["title"] or c["name"])[:200]}
+        if sub:
+            body["subdomain"] = sub
+        else:
+            body.update(access="private", prefix_hint=_rqs_prefix(c["name"]))
+        try:
+            out = rqs_tool(conn, "publish", body)
+        except RqsError as e:
+            if e.code != "not_found" or not sub:
+                raise
+            body.pop("subdomain")
+            body.update(access="private", prefix_hint=_rqs_prefix(c["name"]))
+            out = rqs_tool(conn, "publish", body)
+    except RiverError as e:
+        _rqs_failed(conn, c["id"], e)
+        raise
+    problems = [{"viewport": p.get("viewport"), "kind": p.get("kind"), "message": p.get("message"),
+                 **({"selector": p["selector"]} if p.get("selector") else {})}
+                for p in out.get("problems") or [] if isinstance(p, dict)]
+    with tx(conn):
+        conn.execute("UPDATE canvas_pages SET subdomain=?, url=?, access=?, expires_at=?, version=?, state='done', "
+                     "problems=?, error=?, published_at=? WHERE canvas_id=?",
+                     (out.get("subdomain"), out.get("url"), out.get("access") or "private",
+                      _rqs_time(out.get("expires_at")), v["version"], json.dumps(problems) if problems else None,
+                      (f"the render check did not run: {out['render_check_error']}"
+                       if out.get("render_check_error") else None), iso(now()), c["id"]))
+        _event(conn, c["item_id"], actor, f"canvas {c['name']} v{v['version']} on realquicksite: {out.get('url')}")
+    if problems and c["kind"] != "md" and problems != (page.get("problems") or []):
+        _rqs_problems_comment(conn, c, v["version"], problems)
+    return dict(canvas_page(conn, c["id"]), canvas=c["name"], id=c["id"],
+                screenshots=out.get("screenshots") or {}, settings_url=out.get("settings_url"))
+
+
+def _rqs_problems_comment(conn, c, version, problems):
+    """The check's problems as one canvas comment to the session that wrote the canvas: it fixes the page through
+    the normal comment path. A canvas whose session ended and that has no item keeps it as a draft."""
+    lines = [f"realquicksite found {len(problems)} problem(s) on the page of version {version}:"]
+    for p in problems[:20]:
+        lines.append(f"- {p.get('viewport') or ''} {p.get('kind') or ''}: {p.get('message') or ''}"
+                     + (f" ({p['selector']})" if p.get("selector") else ""))
+    lines.append("Fix them in the canvas and put a new version; the page then publishes again.")
+    try:
+        canvas_comment(conn, c["id"], "\n".join(lines), RQS_CHECKER, version=version, send_now=True)
+    except RiverError:
+        pass
+
+
+def canvas_publish(conn, ref, actor=None, version=None, project=None, confirm=False):
+    """Publish one version of a canvas (the newest by default) as a private realquicksite page, and wait for it:
+    maxpm canvas publish and the MCP tool. The page that shows this version already is not sent again."""
+    got = canvas_publish_begin(conn, ref, actor, version, project)
+    if got.get("open"):
+        return dict(got["page"], canvas=got["canvas"], id=got["id"], already=True)
+    return canvas_publish_send(conn, got["id"], got["version"], actor, confirm)
 
 
 # ---------------------------------------------------------------- session samples (#5352)

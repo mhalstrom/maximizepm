@@ -8,11 +8,13 @@ import { openFullScreen } from "../components/sidePanel.js";
 import { button } from "../components/button.js";
 import { empty as emptyState } from "../components/empty.js";
 
-const KIND = { canvas: "canvas", file: "file", page: "local page", artifact: "claude.ai artifact" };
+const KIND = { canvas: "canvas", file: "file", page: "local page", artifact: "claude.ai artifact", rqs: "realquicksite page" };
+// A page on another site that refuses a frame or needs its own sign-in (#5789): a link that opens a new tab.
+const OUTSIDE = { artifact: ["Open on claude.ai", "Opens claude.ai"], rqs: ["Open on realquicksite", "Opens realquicksite"] };
 let list = [];
 
 function name(a) {
-  if (a.kind === "canvas") return a.title || a.name;
+  if (a.kind === "canvas" || a.kind === "rqs") return a.title || a.name;
   if (a.kind === "file") return a.target.split(/[\\/]/).pop();
   return a.target.replace(/^https?:\/\//, "");
 }
@@ -23,13 +25,13 @@ export function showRows(el, rows, empty) {
   el._rows = rows;
   const html = rows.map((a, i) => `<div class="art-row">
       <div class="art-main"><b title="${esc(a.target)}">${esc(clip(name(a), 80))}</b>
-        <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} <span class="art-meta">${a.how === "wrote" ? "written by" : "named by"} ${esc(a.session)}${(a.sessions || []).length > 1 ? `, also ${esc(a.sessions.slice(1).join(", "))}` : ""}
+        <div class="sub">${chip("c-p", esc(KIND[a.kind] || a.kind))} <span class="art-meta">${a.how === "wrote" ? "written by" : a.how === "published" ? "a canvas of" : "named by"} ${esc(a.session)}${(a.sessions || []).length > 1 ? `, also ${esc(a.sessions.slice(1).join(", "))}` : ""}
           ${a.item ? ` · <span class="link" data-open="${a.item}">#${a.item}</span>` : ""}${a.at ? ` · ${ago(a.at)}` : ""}${a.kind === "canvas" ? ` · v${a.version}${a.open_comments ? ` · ${a.open_comments} open comment${a.open_comments === 1 ? "" : "s"}` : ""}` : ""}</span>
           <span class="muted art-path">${esc(clip(a.kind === "canvas" ? `${a.project}/${a.name}` : a.target, 120))}</span></div></div>
-      <div class="art-btns">${a.kind === "artifact"
-        ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="claude.ai blocks showing it in a frame">Open on claude.ai</a>`
+      <div class="art-btns">${OUTSIDE[a.kind]
+        ? `<a class="btn" href="${esc(a.target)}" target="_blank" rel="noopener noreferrer" title="${OUTSIDE[a.kind][1]}">${OUTSIDE[a.kind][0]}</a>`
         : button("Open", { data: { "art-open": i } })}
-        ${button("Open full screen", { data: { "art-full": i } })}</div>
+        ${a.kind === "rqs" ? "" : button("Open full screen", { data: { "art-full": i } })}</div>
     </div>`).join("") || emptyState(esc(empty));
   // #4844: the lists read again every 10 seconds; the same rows are not drawn again (a hover, a focus, and a
   // selection stay, and nothing flashes).
