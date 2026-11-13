@@ -837,6 +837,34 @@ def parse_args(argv=None):
 
 
 BROWSER_WAITS = ("auto", "load", "idle", "none")  # browser.WAITS, without the import of browser at each command
+# #5683: the rules of the browser that the skill names only in short; maxpm browser -h prints them above the commands.
+BROWSER_GUIDE = """\
+Each project has one browser (headless Google Chrome, its own profile) that maxpm serve runs. The person sees and
+uses it in the side panel of your session; while it shows, it draws your pointer and the keys you type.
+
+Read small views, not HTML:
+  open <address>        replies with the page's outline (regions, counts, headings)
+  snapshot              the elements in the window, one line each with a ref (@e3); repeated rows fold
+  find <words>          elements anywhere on the page by name, row or column
+  text                  the main text, about 4 KB; --section, --grep, --from for more
+  When the names do not work: html --scope <ref>, then html, then screenshot <target> --grid and --at.
+
+Act by name: click "Comments", click link "Comments", fill "Month" 2026-10,
+click "Delete" --in "Invoice 1042". Two matches: nothing is done and the reply lists them. A ref (@e3) and a CSS
+selector work too. The reply says what changed (a new page's outline, a menu that opened, the page's errors).
+
+Control: one controller at a time. control takes it for your session, give <label> says that your subagent drives
+it, release gives it up. The person can hand it to you (Hand to in the panel): your chat then gets its address.
+While the person holds it (Take control), commands that change the page are refused; reads work. control --take
+takes it from the person only when they asked you in your chat, or after browser_take_after (2m) with no input
+from them; a Playwright click takes it the same way. With the Playwright tools, a refused click, typing or
+browser_evaluate fails as a timeout or "Execution context was destroyed".
+
+The browser opens no loopback or private address (your dev server): the person allows one for the project with
+maxpm config set browser_allow "localhost:5173" --project <name>.
+Only the person signs in: never type a password. Never solve a CAPTCHA: ask the person. A site that refuses a
+headless browser: the person presses Open as a window (run window only when they asked in your chat).
+The person's marked-up pages come to your chat as [maxpm annotations a<id> ...] with the commands to answer them."""
 BROWSER_ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
                  "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file",
                  "image",
@@ -885,7 +913,8 @@ def build_parser(only=None):
     x = prs.add_parser("list"); x.add_argument("--archived", action="store_true", help="the archived projects")
 
     br = sub.add_parser("browser", help="the browser of a project (#4631): the person sees and uses it in the side panel of "
-                        "the Sessions tab; a session drives it with these commands (one controller at a time)")
+                        "the Sessions tab; a session drives it with these commands (one controller at a time)",
+                        description=BROWSER_GUIDE, formatter_class=argparse.RawDescriptionHelpFormatter)
     brs = br.add_subparsers(dest="bcmd", required=True)
     bp = argparse.ArgumentParser(add_help=False)
     bp.add_argument("--project", help="default: the project of the item you hold, or of this folder")

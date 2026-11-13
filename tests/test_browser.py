@@ -434,6 +434,30 @@ class ProjectOf(Base):
         core.claim(self.c, core.item_add(self.c, "deploy-prod", "Only this")["id"], "ag2")
         self.assertEqual(browser.project_of(self.c, agent="ag2"), "deploy-prod")  # no project with a folder: as before
 
+
+class Guide(unittest.TestCase):
+    """#5683: every session reads the skill, so its browser section is short; maxpm browser -h has the rest."""
+
+    def test_the_skill_names_the_browser_in_few_words_and_the_help_has_the_rest(self):
+        text = (cli.GUIDES / "maxpm" / "SKILL.md").read_text(encoding="utf-8")
+        section = text.split("## The project's browser\n", 1)[1].split("\n## ", 1)[0]
+        self.assertLess(len(section.split()), 100)
+        for words in ("maxpm browser open", "snapshot", "find", "text", 'click "Comments"', "--in",
+                      "never type a password", "maxpm browser -h"):
+            self.assertIn(words, section)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["browser", "-h"])
+        h = out.getvalue()
+        for op in ("outline", "snapshot", "find", "text", "html", "extract", "screenshot", "hover", "scroll", "drag",
+                   "upload", "image", "dialog", "batch", "size", "errors", "record", "steps", "run", "control", "give",
+                   "annotation"):
+            self.assertRegex(h, rf"\n    {op} ")
+        for rule in ("Act by name", "--in", "control --take", "browser_take_after", "Execution context was destroyed",
+                     "browser_allow", "never type a password", "Never solve a CAPTCHA", "screenshot <target> --grid"):
+            self.assertIn(rule, h)
+
+
 class Command(Base):
     def run_cli(self, *words):
         out = io.StringIO()

@@ -486,33 +486,14 @@ this computer, with each version, and that the user opens in the MaximizePM page
 
 ## The project's browser
 
-Each project has one browser that `maxpm serve` runs (headless Google Chrome, its own profile). The user sees
-and uses it in the side panel of your session (Browser), and you drive the same browser:
+Each project has one browser; the user watches and uses it in your side panel.
 
-- `maxpm browser snapshot -i` reads the page: a line for each link, button and field, with a ref
-  (`@e3 button "Send"`); `--scope '<css>'`: a part; `--delta`: what changed. Act by ref (a CSS selector works
-  too): `click @e3`, `fill @e5 "<text>"` (at once), `type @e5 "<text>"` (key by key), `select @e7 "<option>"`,
-  `check @e8`, `key Enter`. Each prints the title and address, after the page it opened loaded; `--snapshot`
-  adds the next snapshot. `maxpm browser batch` runs one action from each line of its input.
-- Also `open <address>`, `text`, `screenshot [--full] [--cursor]` (prints the PNG's path: read it),
-  `eval "<js>"`, `back`, `reload`, `status`.
-- The user watches you: your first click or key opens the browser in your side panel, which draws your pointer
-  and the keys you type. While it shows, a click glides to its point and `type` goes key by key.
-- The user can hand you the browser (Hand to in the panel): you control it then, and your chat gets its address.
-- One controller at a time. `maxpm browser control` takes it for your session; `maxpm browser give <label>` says
-  that your subagent (for example `browser`) drives it now; `maxpm browser release` gives it up. While the user
-  holds it (Take control in the panel), commands that change the page are refused. When the user asked you in
-  your chat to do something there, `maxpm browser control --take` takes it (also after 2 minutes with no input
-  from them; your Playwright clicks take it the same way); else wait. Reads (text, html, screenshot) always work.
-  With the Playwright tools, `browser_snapshot` works then too, and a refused click, typing or `browser_evaluate`
-  fails as a timeout or "Execution context was destroyed".
-- The browser opens no loopback or private address (your dev server, a test database): the user allows one for
-  the project with `maxpm config set browser_allow "localhost:5173" --project <name>`. Only the user signs in;
-  never type a password. A site that refuses a headless browser: the user presses Open as a window
-  (`maxpm browser window` only when the user asked in your chat); it comes back into the panel by itself.
-- The user marks up the page (Annotate in the panel) and sends it: your chat gets `[maxpm annotations a<id> ...]`
-  with the picture and numbered notes. `maxpm browser annotation <id>` reads it again; after each fix, run
-  `maxpm browser annotation <id> fix <n> --note "<what you changed>"` (or `not-fixed <n> --note "<why>"`).
+- Read small views, not HTML: `maxpm browser open <address>` replies with the page's outline; then
+  `snapshot`, `find <words>`, `text`.
+- Act by name: `click "Comments"`, `fill "Month" 2026-10`, `click "Delete" --in "Invoice 1042"`.
+- One controller at a time, and the user's input wins: while the user holds it, wait.
+- Only the user signs in: never type a password.
+- The rest (pointer actions, extract, run, control): `maxpm browser -h`.
 
 ## Expert sessions
 
