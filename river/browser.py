@@ -3946,8 +3946,8 @@ def track_download(b, method, p):
         if not d:
             return
         d["bytes"] = p.get("receivedBytes", d["bytes"])
-        d["state"] = p.get("state", d["state"])
-        if d["state"] == "completed" and not d["path"]:
+        state = p.get("state", d["state"])
+        if state == "completed" and not d["path"]:
             folder = b.dir / "downloads"
             stem, dot, ext = d["name"].rpartition(".")
             stem, ext = (stem, dot + ext) if stem else (d["name"], "")
@@ -3960,6 +3960,7 @@ def track_download(b, method, p):
                 d["path"] = str(target)
             except OSError:  # saved under its own name (a session's Playwright set the behavior allow)
                 d["path"] = str(folder / d["name"])
+        d["state"] = state  # last: an action that waits for the end reads the path once the state says so
     with b.cond:
         b.cond.notify_all()
 
