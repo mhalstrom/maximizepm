@@ -574,7 +574,9 @@ CREATE TABLE IF NOT EXISTS hook_runs (
   timed_out   INTEGER NOT NULL DEFAULT 0,
   seconds     REAL,
   output      TEXT,                      -- the last lines
-  result      TEXT                       -- the result as JSON (run_hooks): a command whose hook maxpm serve ran reads it
+  result      TEXT,                      -- the result as JSON (run_hooks): a command whose hook maxpm serve ran reads it
+  runner      TEXT,                      -- <pid>:<token> of the process whose thread runs it (OPS_PROCESS, #5654)
+  pid         INTEGER                    -- the hook's own shell, the leader of its process group (#5654)
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -1665,6 +1667,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE close_checks ADD COLUMN ready INTEGER NOT NULL DEFAULT 0")
     if "result" not in {r["name"] for r in conn.execute("PRAGMA table_info(hook_runs)")}:
         conn.execute("ALTER TABLE hook_runs ADD COLUMN result TEXT")
+    if "runner" not in {r["name"] for r in conn.execute("PRAGMA table_info(hook_runs)")}:
+        conn.execute("ALTER TABLE hook_runs ADD COLUMN runner TEXT")
+        conn.execute("ALTER TABLE hook_runs ADD COLUMN pid INTEGER")
     if "parent_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(goals)")}:
         conn.execute("ALTER TABLE goals ADD COLUMN parent_id INTEGER REFERENCES goals(id)")
     if "no_goal_context" not in {r["name"] for r in conn.execute("PRAGMA table_info(items)")}:
@@ -7249,7 +7254,7 @@ def run_hooks(conn, cwd=None, token=None, orphans=False, sandbox=False):
             run = conn.execute(q, args).fetchone()
             if run is None:
                 break
-            conn.execute("UPDATE hook_runs SET started_at=? WHERE id=?", (iso(now()), run["id"]))
+            conn.execute("UPDATE hook_runs SET started_at=?, runner=? WHERE id=?", (iso(now()), OPS_PROCESS, run["id"]))
         out.append(_run_hook(conn, dict(run), cwd, sandbox))
     return out
 
@@ -7280,12 +7285,20 @@ def _run_hook(conn, run, cwd=None, sandbox=False):
             with tx(conn):
                 _touch_agent(conn, actor)
 
+    def started(pid):  # the hook's own process: a pass of maxpm serve ends it when the thread that runs it is gone
+        try:
+            with tx(conn):
+                conn.execute("UPDATE hook_runs SET pid=? WHERE id=?", (pid, run["id"]))
+        except sqlite3.Error:
+            pass  # a busy queue: hook_runs_cut then finds the run by its runner alone
+
     t0 = time.monotonic()
     code, timed_out, text = None, False, ""
     try:
         if where and not os.path.isdir(where):
             raise OSError(f"the folder {where} does not exist")
-        r = (HOOK_RUNNER or _run_command)(cmd, where, limit, renew, env)
+        r = (HOOK_RUNNER(cmd, where, limit, renew, env) if HOOK_RUNNER
+             else _run_command(cmd, where, limit, renew, env, started=started))
         code, timed_out = r.returncode, bool(getattr(r, "timed_out", False))
         text = ((r.stdout or "") + (r.stderr or "")).strip()
     except OSError as e:
@@ -7497,6 +7510,157 @@ def deploy_hook_lost(conn):
                 continue
         _deploy_hook_end(conn, dict(r), False, "the run did not end (maxpm serve stopped while it ran)", "", None)
         out.append(r["deploy_id"])
+    return out
+
+
+# A run of a hook is cut when the process whose thread ran it is gone (#5654): on 2026-11-13 a restart of maxpm serve
+# ended the loop's process while the deploy hook of a release ran in its thread, and the release waited 2 hours
+# (deploy_timeout) before anything saw it. Each run records that process (runner) and the hook's own shell (pid).
+HOOK_CUT = "cut: the maxpm serve process that ran it ended (a restart or a stop)"
+HOOK_CUTS_MAX = 2  # cuts in a row of one release's deploy hook that run it again; the next one counts as a failure
+
+
+def _hook_limit(conn, r):
+    key = "deploy_timeout" if r["event"] == "deploy" else "hook_timeout"
+    return parse_duration(setting(conn, key, item_id=r["deploy_id"])).total_seconds()
+
+
+def _hook_run_cut(r, serve=None, boot=None):
+    """Whether no thread runs this open run any more. serve: <pid>:<token> of the maxpm serve process, so the loop's
+    own process (river/loop.py) sees that serve started again with exec (the same pid, a new token). boot: when this
+    serve started (iso); a run of before #5654 records no runner, and one that started before boot was cut."""
+    if not r["runner"]:
+        return bool(boot) and r["started_at"] < boot
+    if serve and r["runner"].partition(":")[0] == serve.partition(":")[0]:
+        return r["runner"] != serve
+    return bool(_ops_cut(r["runner"]))
+
+
+def hooks_running(conn, serve=None, boot=None):
+    """The hook runs that a process still runs: a restart of maxpm serve (its loop's process, a code reload, maxpm
+    serve --restart) waits until none is left. A run older than its timeout and DEPLOY_HOOK_LOST counts no more."""
+    out = []
+    for r in conn.execute("SELECT id, target, event, deploy_id, started_at, runner FROM hook_runs "
+                          "WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY id").fetchall():
+        if _hook_run_cut(r, serve, boot):
+            continue
+        if (now() - parse_iso(r["started_at"])).total_seconds() > _hook_limit(conn, r) + DEPLOY_HOOK_LOST:
+            continue
+        out.append({"id": r["id"], "target": r["target"], "event": r["event"], "deploy": r["deploy_id"],
+                    "started_at": r["started_at"]})
+    return out
+
+
+def hooks_running_text(runs):
+    return "; ".join(f"the {r['event']} hook of target {r['target']} (since {show_time(r['started_at'])})" for r in runs)
+
+
+PS_LEADER_RUNNER = None  # a test hook: (pid) -> the output of ps -o lstart= -p <pid>
+
+
+def _hook_group_lives(pid, started_at):
+    """Whether the process group of a hook still has a process (_run_command starts the shell as its leader). A pid
+    is not used again while its group lives, so the members are the hook's. A leader that started after the run is
+    another process that got the same pid: not the hook's (ps tells its start; without ps the group counts)."""
+    import subprocess
+    import time
+    try:
+        os.killpg(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False  # another user's group: the pid is not the hook's any more
+    try:
+        out = PS_LEADER_RUNNER(pid) if PS_LEADER_RUNNER else subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10).stdout
+        if time.mktime(time.strptime(out.strip(), "%a %b %d %H:%M:%S %Y")) > parse_iso(started_at).timestamp() + 60:
+            return False
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass  # no ps (a sandbox), or the leader ended and its group lives on: the group is the hook's
+    return True
+
+
+def _hook_group_stop(pid, started_at):
+    """End what is left of a cut hook: SIGTERM to its group, then SIGKILL. True when nothing of it runs any more."""
+    import signal
+    import time
+    if not pid:
+        return True
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not _hook_group_lives(pid, started_at):
+            return True
+        try:
+            os.killpg(int(pid), sig)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        for _ in range(10):
+            time.sleep(0.5)
+            if not _hook_group_lives(pid, started_at):
+                return True
+    return not _hook_group_lives(pid, started_at)
+
+
+def hook_runs_cut(conn, serve=None, boot=None):
+    """One pass of maxpm serve, and its first at the start: each open hook run whose process is gone ends at once,
+    with HOOK_CUT. What is left of its process group stops first. A deploy hook then runs again from its beginning
+    (no fix item and no new review: the release did not fail), up to HOOK_CUTS_MAX cuts in a row; the next counts as
+    a failed deploy (_deploy_hook_end). Another hook is queued again once, and maxpm serve runs it in this pass
+    (hooks_soon). Returns [{"run", "target", "event", "deploy", "again"}]."""
+    out = []
+    for r in conn.execute("SELECT * FROM hook_runs WHERE started_at IS NOT NULL AND ended_at IS NULL ORDER BY id").fetchall():
+        if not _hook_run_cut(r, serve, boot) or not _hook_group_stop(r["pid"], r["started_at"]):
+            continue
+        r = dict(r)
+        res = {"id": r["id"], "target": r["target"], "event": r["event"], "command": r["command"], "item": r["item_id"],
+               "deploy": r["deploy_id"], "rev": r["rev"], "exit_code": None, "timed_out": False, "ok": False,
+               "result": HOOK_CUT, "output": "", "alerted": None}
+        fail = None
+        with tx(conn):
+            if conn.execute("UPDATE hook_runs SET ended_at=?, output=?, result=? WHERE id=? AND ended_at IS NULL",
+                            (iso(now()), HOOK_CUT, json.dumps(res), r["id"])).rowcount == 0:
+                continue
+            dep = conn.execute("SELECT * FROM items WHERE id=?", (r["deploy_id"],)).fetchone() if r["deploy_id"] else None
+            again = None
+            if r["event"] == "deploy":
+                cuts = 0
+                for x in conn.execute("SELECT output FROM hook_runs WHERE event='deploy' AND deploy_id=? AND ended_at "
+                                      "IS NOT NULL ORDER BY id DESC", (r["deploy_id"],)):
+                    if x["output"] != HOOK_CUT:
+                        break
+                    cuts += 1
+                if cuts > HOOK_CUTS_MAX:
+                    fail = f"{HOOK_CUT}, {cuts} times in a row"
+                elif dep is not None and dep["status"] == "open":
+                    conn.execute("UPDATE items SET blocked_reason=NULL, blocked_at=NULL, blocked_until=NULL, "
+                                 "blocked_set_by=NULL WHERE id=? AND blocked_set_by=?", (dep["id"], DEPLOY_HOOK_BY))
+                    _event(conn, dep["id"], "maxpm", f"hook deploy: {HOOK_CUT}; it runs again from its beginning "
+                                                     f"(no fix item: the release did not fail): {r['command']}")
+                    _wake_manager(conn, "maxpm", f"the deploy hook of target {r['target']} for deploy #{dep['id']} was "
+                                  f"cut ({HOOK_CUT}); maxpm serve runs it again now", dep["id"], level="low")
+                    again = "deploy"
+            elif not (r["queued_by"] or "").startswith("cut:"):
+                again = conn.execute(
+                    "INSERT INTO hook_runs(target,event,command,item_id,deploy_id,rev,actor,queued_at,queued_by) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (r["target"], r["event"], r["command"], r["item_id"], r["deploy_id"], r["rev"], r["actor"],
+                     iso(now() - timedelta(seconds=HOOK_ORPHAN_AFTER + 1)), f"cut:{r['id']}")).lastrowid
+                if dep is not None:
+                    _event(conn, dep["id"], "maxpm", f"hook {r['event']}: {HOOK_CUT}; it runs again now: {r['command']}")
+            else:
+                if dep is not None:
+                    _event(conn, dep["id"], "maxpm", f"hook {r['event']}: {HOOK_CUT}, the second time: {r['command']}")
+                tg = conn.execute("SELECT owner FROM targets WHERE name=?", (r["target"],)).fetchone()
+                to = (tg["owner"] if tg and tg["owner"] else None) or active_manager(conn)
+                if to:
+                    _send(conn, "alert", "maxpm", f"hook {r['event']} of target {r['target']} was cut twice "
+                          f"({HOOK_CUT}) for #{r['item_id']}: {r['command']}. The event stands; when the release needs "
+                          f"the command, run it by hand.", to=to, item_id=r["deploy_id"])
+        if fail:
+            _deploy_hook_end(conn, r, False, fail, "", None)
+        out.append({"run": r["id"], "target": r["target"], "event": r["event"], "deploy": r["deploy_id"],
+                    "again": again if not fail else None})
     return out
 
 
@@ -13581,17 +13745,19 @@ def review_pass(conn, item_id, output=None, actor=None, cwd=None, runner=None, c
 REVIEW_RENEW_EVERY = 60  # seconds between lease renewals while a review command runs; the tests make it short
 
 
-def _run_command(cmd, cwd, limit, renew=None, env=None):
+def _run_command(cmd, cwd, limit, renew=None, env=None, started=None):
     """Run a shell command in its own process group and capture its output.
 
     renew runs every REVIEW_RENEW_EVERY seconds while the command runs, so a long gate keeps the
     reviewer's leases. After limit seconds (0: none) the whole group stops: SIGTERM, then SIGKILL, so no build
-    is left running without an owner. The result has
+    is left running without an owner. started(pid) runs once the command's process exists. The result has
     returncode, stdout, stderr, and timed_out."""
     import subprocess
     import time
     p = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          start_new_session=True)
+    if started:
+        started(p.pid)
     end = time.monotonic() + limit if limit > 0 else None
     out = err = ""
     while True:

@@ -25,6 +25,8 @@ def main(argv):
     server.BOOT = os.environ.get("MAXPM_LOOP_BOOT") or server.BOOT
     server.BOOT_CODE = os.environ.get("MAXPM_LOOP_CODE") or server.BOOT_CODE
     server.DEV["on"] = os.environ.get("MAXPM_LOOP_DEV") == "1"
+    # serve's process: a hook run of a serve that started again since (exec, the same pid) was cut (#5654).
+    server.SERVE_PROCESS["id"] = os.environ.get("MAXPM_LOOP_SERVE") or server.SERVE_PROCESS["id"]
     stop = threading.Event()
 
     def parent_gone():

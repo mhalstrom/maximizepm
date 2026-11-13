@@ -245,6 +245,81 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn("deploy hook: exit 0", it["output"])
         self.assertEqual(server.auto_release(self.c, runner=sent.append)["deploying"], {})
 
+    def test_no_restart_of_serve_while_a_deploy_hook_runs(self):
+        """#5654: a restart of serve on 2026-11-13 ended the loop's process while the deploy hook of a release ran in
+        its thread. A long deploy hook runs; the code changes: the loop's pass, keep_loop, serve --restart and the
+        page's restart all wait, also when the run belongs to another process of serve (the queue says it runs);
+        when the hook ends, the restart goes."""
+        from river import notify
+        rv, dep = self._release(owner="ops")
+        core.register(self.c, "mark", human=True)
+        core.target_hook(self.c, "web", "deploy", "bash release.sh", actor="mark")
+        core.register(self.c, "rev")
+        core.claim(self.c, rv, "rev")
+        core.review_pass(self.c, rv, "ok", "rev")
+        go, began = threading.Event(), threading.Event()
+
+        def runner(cmd, folder, limit, renew, env):  # a long deploy: it ends when the test says so
+            began.set()
+            go.wait(30)
+            return mock.Mock(returncode=0, timed_out=False, stdout="released", stderr="")
+        self.addCleanup(go.set)
+        restarts = []
+        self.addCleanup(server.LOOP_THREAD.update, {"thread": None, "stop": None, "at": 0.0, "proc": None,
+                                                    "child": False, "restart": None, "gate_at": 0.0})
+
+        def one_pass():  # one pass of the loop's process (river/loop.py), with new code on disk
+            stop = threading.Event()
+            with mock.patch.dict(notify.SERVE_PORT, {"port": 8765}), mock.patch.dict(notify.CHILD, {"on": True}), \
+                    mock.patch.object(server, "watch_prompts", lambda c: stop.set()), \
+                    mock.patch.object(server, "reload_ready", lambda c: "2"), \
+                    mock.patch.object(server, "restart_now", restarts.append), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                notify.CHILD["restart"] = False
+                notify.loop(stop, interval_s=1)
+                return notify.CHILD["restart"]
+        with mock.patch.object(core, "HOOK_RUNNER", runner):
+            self.assertIn(dep, server.auto_release(self.c, runner=[].append)["deploying"])
+            self.assertTrue(began.wait(10))
+            self.assertIn("hook(s) of this process run", server.restart_blocked(self.c))
+            self.assertFalse(one_pass())  # the loop's process does not ask for the restart
+            with mock.patch.dict(server.HOOKS, {"running": 0}):  # the hook of another process: the queue says so
+                self.assertIn("the deploy hook of target web", server.restart_blocked(self.c))
+                self.assertFalse(one_pass())
+                stop = threading.Event()
+                server.LOOP_THREAD.update(thread=None, proc=None, stop=stop, child=True, restart="code changed",
+                                          gate_at=0)
+                with mock.patch.object(server, "restart_now", restarts.append):
+                    self.assertFalse(server.keep_loop())  # serve's own restart waits too
+                with mock.patch.object(server, "_code_loads", lambda: None), \
+                        mock.patch.object(server, "_restart_soon", lambda why: restarts.append(why)):
+                    ans = server.serve_restart(self.c)  # maxpm serve --restart: it says what it waits for
+                self.assertIn("the deploy hook of target web", ans["waits"])
+                self.assertEqual(restarts, ["restart asked"])  # _restart_soon itself waits (_restart_wait)
+            go.set()
+            for _ in range(600):
+                if core._item(self.c, dep)["status"] == "done" and not server.HOOKS["running"]:
+                    break
+                time.sleep(0.05)
+        self.assertEqual(core._item(self.c, dep)["status"], "done")
+        self.assertIsNone(server.restart_blocked(self.c))
+        self.assertTrue(one_pass())  # the hook ended: the new code runs
+        server.LOOP_THREAD["gate_at"] = 0
+        with mock.patch.object(server, "restart_now", restarts.append):
+            server.keep_loop()
+        self.assertEqual(restarts, ["restart asked", "code changed"])
+
+    def test_restart_wait_waits_for_the_hook(self):
+        """#5654: an explicit restart (maxpm serve --restart, the page, an update) waits in its thread until no hook
+        runs, then starts again."""
+        said, naps = io.StringIO(), []
+        busy = ["the deploy hook of target web (since 01:00)", None]
+        with mock.patch.object(server, "restart_blocked", lambda c: busy.pop(0)), \
+                mock.patch.object(server.time, "sleep", naps.append), contextlib.redirect_stdout(said):
+            server._restart_wait("restart asked")
+        self.assertEqual(naps, [5])
+        self.assertIn("restart asked: the restart waits until this ends: the deploy hook of target web", said.getvalue())
+
     def test_a_failed_deploy_takes_in_the_later_release_and_runs_again_with_no_manager_step(self):
         """#5074: the deploy hook of release #4912 failed; a later deploy item #5017 had collected the ship requests,
         its reviewer cut it seconds later, and the new review of #4912 waited on the release order of #5017 and on

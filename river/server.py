@@ -1215,7 +1215,6 @@ def hooks_soon(conn, token=None, cwd=None):
         return False
 
     def work():
-        HOOKS["running"] += 1
         try:
             c = core.connect()
             try:
@@ -1226,9 +1225,63 @@ def hooks_soon(conn, token=None, cwd=None):
         except Exception as e:  # a busy queue: the next pass of the loop takes the hook
             print(f"hook: {e}", flush=True)
         finally:
+            with HOOKS_LOCK:
+                HOOKS["running"] -= 1
+    # Counted before the thread starts: the reload check later in the same pass sees it (#5654).
+    with HOOKS_LOCK:
+        HOOKS["running"] += 1
+    try:
+        threading.Thread(target=work, daemon=True).start()
+    except Exception:
+        with HOOKS_LOCK:
             HOOKS["running"] -= 1
-    threading.Thread(target=work, daemon=True).start()
+        raise
     return True
+
+
+HOOKS_LOCK = threading.Lock()
+# <pid>:<token> of the maxpm serve process (core.OPS_PROCESS). The loop's own process reads serve's from
+# MAXPM_LOOP_SERVE, so it sees the hook runs of a serve that started again with exec as cut (core.hook_runs_cut).
+SERVE_PROCESS = {"id": core.OPS_PROCESS}
+
+
+def _boot_iso():
+    try:
+        return core.iso(core.datetime.fromtimestamp(float(BOOT), core.timezone.utc))
+    except (TypeError, ValueError):
+        return None
+
+
+def restart_blocked(conn):
+    """Why maxpm serve may not start again now, or None (#5654): a hook or a check that a thread of this process runs,
+    or a hook run that another process of this serve runs (the loop's process, a page action). A restart of serve
+    ends its loop's process, and that ended the thread of a deploy hook on 2026-11-13. Every restart waits for it."""
+    if HOOKS["running"]:
+        return f"{HOOKS['running']} hook(s) of this process run"
+    if OPS_RUNNING:
+        return f"{len(OPS_RUNNING)} operations check(s) run"
+    runs = core.hooks_running(conn, serve=SERVE_PROCESS["id"], boot=_boot_iso())
+    return core.hooks_running_text(runs) if runs else None
+
+
+def _restart_wait(why):
+    """Wait until restart_blocked says nothing (an explicit restart, an update): a deploy that runs ends first."""
+    said = False
+    while True:
+        try:
+            c = core.connect()
+            try:
+                busy = restart_blocked(c)
+            finally:
+                c.close()
+        except Exception as e:  # a busy queue: look again
+            busy = f"the queue did not answer ({e})"
+        if not busy:
+            return
+        if not said:
+            print(f"{why}: the restart waits until this ends: {busy}", flush=True)
+            said = True
+        time.sleep(5)
 
 
 # Operations checks (#5430): the run ids that a thread of this maxpm serve runs now. The loop does not start the
@@ -2719,10 +2772,17 @@ def auto_release(conn, runner=None):
       release command, in a thread (core.deploy_hook_start); no session takes the item (#4971).
     No session starts while max_sessions agent sessions are live. Returns {"pushed": {item: agent},
     "started": {item: session}, "alerted": {item: owner}, "failed": {item: why}, "deploying": {item: hook run},
-    "lost": [deploy items whose hook run never ended]}."""
+    "lost": [deploy items whose hook run never ended], "cut" (only when there are): [hook runs whose process ended (core.hook_runs_cut)]}."""
     out = {"pushed": {}, "started": {}, "alerted": {}, "failed": {}, "deploying": {}, "lost": []}
     ann = None
     cap = int(core.setting(conn, "max_sessions") or 0)
+    # A hook run whose process ended (a stop or a crash of serve) ends at once; a cut deploy runs again below (#5654).
+    cut = core.hook_runs_cut(conn, serve=SERVE_PROCESS["id"], boot=_boot_iso())
+    if cut:
+        out["cut"] = cut
+    for r in cut:
+        print(f"hook {r['event']} of target {r['target']}: {core.HOOK_CUT}"
+              + ("; it runs again now" if r["again"] else ""), flush=True)
     out["lost"] = core.deploy_hook_lost(conn)  # a deploy hook that never ended: its release starts again
     out["asked"] = core.release_yes_pass(conn)  # release_approval person: one yes for each ready release (#5003)
 
@@ -3918,9 +3978,11 @@ def restart_now(why="code changed"):
 
 
 def _restart_soon(why="updated"):
-    """Start the server process again after the reply goes out, so it runs the new code."""
+    """Start the server process again after the reply goes out, so it runs the new code. A hook that runs ends
+    first (restart_blocked)."""
     def go():
         time.sleep(0.8)
+        _restart_wait(why)
         restart_now(why)
     threading.Thread(target=go, daemon=True).start()
 
@@ -3931,6 +3993,7 @@ def _restart_into(root):
     app still stops it when it quits."""
     def go():
         time.sleep(0.8)
+        _restart_wait("updated")
         print(f"updated; restarting from {root}", flush=True)
         stop_loop_process()
         os.chdir(root)
@@ -4013,14 +4076,16 @@ def reload_ready(conn):
 
 
 def serve_restart(conn):
-    """maxpm serve --restart: start again now, when the code on disk loads. The reply goes out first."""
+    """maxpm serve --restart: start again now, when the code on disk loads. The reply goes out first. While a hook
+    runs, the restart waits for its end (#5654): waits says what runs."""
     if DESKTOP:
         raise RiverError("the desktop app runs its own copy of the code; start the app again to restart it")
     why = _code_loads()
     if why:
         raise RiverError(f"the code on disk does not load, so maxpm serve keeps the code it runs: {why}")
+    waits = restart_blocked(conn)
     _restart_soon("restart asked")
-    return {"restarting": True, "boot": BOOT, "stale": code_stale()}
+    return {"restarting": True, "boot": BOOT, "stale": code_stale(), "waits": waits}
 
 
 def update_apply(repo=REPO, restart=_restart_soon):
@@ -5148,7 +5213,7 @@ class _Server(ThreadingHTTPServer):
 # The loop of maxpm serve (notify.loop), its stop event, and when it started (time.monotonic). It runs in a process
 # of its own (proc, river/loop.py, #5569) when serve_loop_process is on (child), else in a thread of serve. restart:
 # the reason when the loop's process asked for a restart onto the new code (its exit code RESTART_EXIT).
-LOOP_THREAD = {"thread": None, "stop": None, "at": 0.0, "proc": None, "child": False, "restart": None}
+LOOP_THREAD = {"thread": None, "stop": None, "at": 0.0, "proc": None, "child": False, "restart": None, "gate_at": 0.0}
 LOOP_RESTART_S = 30  # a loop that ended starts again, but not more often than this
 
 
@@ -5156,13 +5221,21 @@ def keep_loop():
     """Start the loop of maxpm serve when it does not run: at the start of serve, and again when it ended. No error
     of a pass ends it (notify.loop), but when it ended on 2026-10-08 the page still answered and serve did none of its
     automatic work for 3 hours (#1663). A loop process that asked for a restart (#5569) gets it once no hook or check
-    of serve's own threads runs. True when it started one."""
+    of serve's own threads runs, and the queue shows no hook run that a live process runs (restart_blocked, #5654).
+    True when it started one."""
     t, stop, p = LOOP_THREAD["thread"], LOOP_THREAD["stop"], LOOP_THREAD["proc"]
     if stop is None or stop.is_set():
         return False
     if LOOP_THREAD["restart"]:
-        if not HOOKS["running"] and not OPS_RUNNING:
-            restart_now(LOOP_THREAD["restart"])
+        if not HOOKS["running"] and not OPS_RUNNING and time.monotonic() - LOOP_THREAD["gate_at"] >= 5:
+            LOOP_THREAD["gate_at"] = time.monotonic()  # the queue is read at most every 5 s, not twice a second
+            c = core.connect()
+            try:
+                busy = restart_blocked(c)  # a hook that a page action started, in a thread of serve (#5654)
+            finally:
+                c.close()
+            if not busy:
+                restart_now(LOOP_THREAD["restart"])
         return False
     if (t is not None and t.is_alive()) or (p is not None and p.poll() is None):
         return False
@@ -5194,7 +5267,7 @@ def _loop_process():
     from . import notify
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env = {**os.environ, "MAXPM_LOOP_BOOT": BOOT, "MAXPM_LOOP_CODE": BOOT_CODE or "",
-           "MAXPM_LOOP_DEV": "1" if DEV["on"] else ""}
+           "MAXPM_LOOP_DEV": "1" if DEV["on"] else "", "MAXPM_LOOP_SERVE": SERVE_PROCESS["id"]}
     return subprocess.Popen([sys.executable, "-m", "river.loop", "serve", str(notify.SERVE_PORT["port"] or 0)],
                             cwd=root, env=env, stdin=subprocess.PIPE)
 

@@ -560,9 +560,9 @@ def loop(stop, interval_s=None):
                         pass
             if failed:
                 error = "; ".join(failed)
-            # maxpm serve only: run the new code, but not while one of its threads runs a hook or a check
-            if SERVE_PORT.get("port") and not server.HOOKS["running"] and not server.OPS_RUNNING \
-                    and server.reload_ready(conn):
+            # maxpm serve only: run the new code, but not while a hook or a check runs, in this process or in another
+            # process of serve (restart_blocked, #5654)
+            if SERVE_PORT.get("port") and not server.restart_blocked(conn) and server.reload_ready(conn):
                 if CHILD["on"]:  # a process of its own (river/loop.py, #5569): it ends, and serve restarts
                     CHILD["restart"] = True
                     stop.set()

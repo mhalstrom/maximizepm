@@ -7410,6 +7410,126 @@ class DeployHook(Base):
         self.assertTrue(any("did not end" in e["change"] for e in dep["events"]))
         self.assertEqual(core.deploy_hook_lost(self.c), [])
 
+    def _dead_runner(self):
+        import subprocess
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return f"{p.pid}:gone"
+
+    def _took(self, run, runner, pid=None, ago=0):
+        """The run as a process of maxpm serve took it: started ago seconds back, by runner."""
+        with core.tx(self.c):
+            self.c.execute("UPDATE hook_runs SET started_at=?, runner=?, pid=? WHERE id=?",
+                           (core.iso(core.now() - timedelta(seconds=ago)), runner, pid, run))
+
+    def test_a_deploy_hook_whose_process_ended_is_cut_at_once_and_runs_again(self):
+        """#5654: a restart of maxpm serve ended the process that ran the deploy hook. The next pass sees it at once
+        (not after deploy_timeout), and the release runs its deploy again by the normal path: no fix item."""
+        self.pass_review("rev")
+        run = core.deploy_hook_start(self.c, self.deploy, "gone")
+        self._took(run, self._dead_runner())
+        self.assertEqual(core.hooks_running(self.c), [])
+        self.assertEqual([(c["run"], c["event"], c["again"]) for c in core.hook_runs_cut(self.c)],
+                         [(run, "deploy", "deploy")])
+        row = self.c.execute("SELECT * FROM hook_runs WHERE id=?", (run,)).fetchone()
+        self.assertEqual((bool(row["ended_at"]), row["output"]), (True, core.HOOK_CUT))
+        dep = core.item_show(self.c, self.deploy)
+        self.assertEqual((dep["status"], dep["blocked_reason"]), ("open", None))
+        self.assertTrue(any("it runs again from its beginning" in e["change"] for e in dep["events"]))
+        self.assertFalse([i for i in dep["waits_on"] if core._item(self.c, i)["title"].startswith("Fix the failed")])
+        self.assertTrue(core.annotate(self.c)[self.deploy]["ready"])
+        self.assertEqual(core.hook_runs_cut(self.c), [])  # once
+        run2 = core.deploy_hook_start(self.c, self.deploy, "again")
+        self.assertNotEqual(run2, run)
+        r = core.run_hooks(self.c, token="again")
+        self.assertEqual([(h["ok"], h["deploy_end"]) for h in r], [(True, "done")])
+        self.assertTrue(self.c.execute("SELECT runner FROM hook_runs WHERE id=?", (run2,)).fetchone()[0]
+                        .startswith(f"{os.getpid()}:"))  # each run records the process that runs it
+        self.assertTrue(self.c.execute("SELECT pid FROM hook_runs WHERE id=?", (run2,)).fetchone()[0])
+
+    def test_a_run_counts_as_running_while_its_process_lives(self):
+        self.pass_review("rev")
+        run = core.deploy_hook_start(self.c, self.deploy, "x")
+        self._took(run, core.OPS_PROCESS)
+        self.assertEqual([r["id"] for r in core.hooks_running(self.c)], [run])
+        self.assertEqual(core.hook_runs_cut(self.c), [])
+        # serve started again with exec: the same pid, a new token. The loop's process knows serve's new one.
+        other = os.getppid()
+        self._took(run, f"{other}:old")
+        self.assertEqual(len(core.hooks_running(self.c)), 1)  # its pid lives
+        self.assertEqual(core.hooks_running(self.c, serve=f"{other}:new"), [])
+        self.assertEqual(len(core.hooks_running(self.c, serve=f"{other}:old")), 1)
+        self._took(run, f"{os.getpid()}:old")  # this process's own pid with another token: cut
+        self.assertEqual(core.hooks_running(self.c), [])
+        # A run of before #5654 has no runner: cut when it started before this serve did.
+        self._took(run, None, ago=60)
+        self.assertEqual(len(core.hooks_running(self.c)), 1)
+        self.assertEqual(len(core.hooks_running(self.c, boot=core.iso(core.now() - timedelta(minutes=2)))), 1)
+        self.assertEqual(core.hooks_running(self.c, boot=core.iso(core.now())), [])
+        # Past its timeout and DEPLOY_HOOK_LOST it holds no restart: deploy_hook_lost ends it.
+        self._took(run, core.OPS_PROCESS, ago=3 * 3600)
+        self.assertEqual(core.hooks_running(self.c), [])
+
+    def test_three_cuts_in_a_row_count_as_a_failed_deploy(self):
+        self.pass_review("rev")
+        for n in range(3):
+            run = core.deploy_hook_start(self.c, self.deploy, f"t{n}")
+            self.assertIsNotNone(run)
+            self._took(run, self._dead_runner())
+            cut = core.hook_runs_cut(self.c)
+            self.assertEqual(cut[0]["again"], "deploy" if n < core.HOOK_CUTS_MAX else None)
+        dep = core.item_show(self.c, self.deploy)
+        fix = [i for i in dep["waits_on"] if core._item(self.c, i)["title"].startswith("Fix the failed deploy")]
+        self.assertEqual(len(fix), 1)
+        self.assertIn("3 times in a row", core._item(self.c, fix[0])["title"])
+
+    def test_the_process_group_of_a_cut_hook_stops(self):
+        """The hook's shell outlived the process that ran it (its parent ended, as at a restart of serve): the cut
+        ends its process group before the deploy runs again, so two deploys never run at the same time."""
+        import subprocess
+        import time as _time
+
+        def orphan():  # a process group whose parent ended: nothing of this test keeps it as a zombie
+            out = subprocess.run([sys.executable, "-c", "import subprocess as s; p = s.Popen(['sleep', '60'], "
+                                  "start_new_session=True, stdout=s.DEVNULL, stderr=s.DEVNULL); print(p.pid)"],
+                                 capture_output=True, text=True, timeout=30)
+            pid = int(out.stdout.strip())
+            self.addCleanup(lambda: core.pid_alive(pid) and os.kill(pid, 9))
+            return pid
+        self.pass_review("rev")
+        run = core.deploy_hook_start(self.c, self.deploy, "x")
+        pid = orphan()
+        self._took(run, self._dead_runner(), pid=pid)
+        self.assertEqual(len(core.hook_runs_cut(self.c)), 1)
+        for _ in range(100):
+            if not core.pid_alive(pid):
+                break
+            _time.sleep(0.05)
+        self.assertFalse(core.pid_alive(pid))
+        # A pid that leads another process now (it started after the run) is not the hook's: it is left alone.
+        pid = orphan()
+        run = core.deploy_hook_start(self.c, self.deploy, "y")
+        self._took(run, self._dead_runner(), pid=pid, ago=600)
+        with mock.patch.object(core, "PS_LEADER_RUNNER", lambda p: _time.strftime("%a %b %d %H:%M:%S %Y")):
+            self.assertEqual(len(core.hook_runs_cut(self.c)), 1)
+        self.assertTrue(core.pid_alive(pid))
+
+    def test_another_hook_that_was_cut_runs_again_once(self):
+        self.pass_review("rev")
+        cmd = f'"{sys.executable}" -c "print(1)"'
+        with core.tx(self.c):
+            run = self.c.execute("INSERT INTO hook_runs(target,event,command,item_id,deploy_id,actor,queued_at,"
+                                 "queued_by) VALUES ('web','release-cut',?,?,?,'rev',?,'x')",
+                                 (cmd, self.deploy, self.deploy, core.iso(core.now()))).lastrowid
+        self._took(run, self._dead_runner())
+        again = core.hook_runs_cut(self.c)[0]["again"]
+        row = self.c.execute("SELECT * FROM hook_runs WHERE id=?", (again,)).fetchone()
+        self.assertEqual((row["queued_by"], row["started_at"]), (f"cut:{run}", None))
+        self.assertLess(row["queued_at"], core.iso(core.now() - timedelta(seconds=core.HOOK_ORPHAN_AFTER)))
+        self._took(again, self._dead_runner())  # cut again: it stays ended, and the owner hears of it
+        self.assertIsNone(core.hook_runs_cut(self.c)[0]["again"])
+        self.assertTrue([m for m in core.inbox(self.c, "ops") if "was cut twice" in m["body"]])
+
     def test_a_deploy_hook_is_stopped_at_deploy_timeout(self):
         core.config_set(self.c, "deploy_timeout", "90m")
         seen = []

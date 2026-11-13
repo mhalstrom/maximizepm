@@ -2234,6 +2234,9 @@ READS_NEEDS_YOU = ("cleanup", "health")
 def _run(args, conn):
     if args.cmd == "serve" and args.restart:
         res = serve_restart(conn)
+        if res.get("waits"):
+            print(f"maxpm serve starts again when this ends (a restart now would cut it): {res['waits']}")
+            return 0
         print(f"maxpm serve started again and answers on port {core.setting(conn, 'serve_port')}"
               + ("" if not res["stale"] else "; the code changed again since: run it once more")
               if res["restarted"] else
@@ -2487,7 +2490,10 @@ def serve_restart(conn, wait=60, sleep=None):
     refuses code that does not load), then wait until the new one answers. An agent runs this after a
     commit that changes river's code; with no command, maxpm serve does it by itself within a pass or two."""
     sleep = sleep or time.sleep
-    old = ask_server(conn, "serve_restart", {}, timeout=90)["boot"]
+    ans = ask_server(conn, "serve_restart", {}, timeout=90)
+    if ans.get("waits"):  # a hook runs: serve starts again when it ends (#5654); nothing to wait for here
+        return {"restarted": False, "stale": True, "waits": ans["waits"]}
+    old = ans["boot"]
     for _ in range(int(wait)):
         sleep(1)
         try:
