@@ -1153,6 +1153,48 @@ try {
         self.assertEqual(self._box("1280,900"), {"text": True, "value": "Ann", "cancel": True,
                                                  "inside": True, "wide": False})
 
+    def _rec(self, size):
+        """#5707: Record steps in the pane starts a recording of the person's steps (op browser_steps); the button
+        then says Stop recording with the count, inside the pane (p57: also at 390 px); Stop ends it."""
+        import base64
+        from river import browser
+        project = browser.project_of(self.c, agent="ag")
+        b = browser.get(project, "ag")
+        self.addCleanup(browser.BROWSERS.clear)
+        self.addCleanup(browser.STEPS_ON.clear)
+        b.ws = object()  # running, with no Chrome: the test gives the frame
+        with b.cond:
+            b.seq += 1
+            b.frame = {"seq": b.seq, "data": base64.b64encode(gray_jpeg(8)).decode(), "w": 400, "h": 400}
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag", "session ag shown");
+  const { openBrowser } = await import("./components/browserTool.js");
+  await openBrowser("ag");
+  const rec = () => q(".br-rec");
+  await until(() => rec() && !rec().classList.contains("hidden"), "the Record button");
+  const before = rec().textContent;
+  rec().click();
+  await until(() => rec().getAttribute("aria-pressed") === "true", "recording");
+  const r = rec().getBoundingClientRect(), pane = q(".br").getBoundingClientRect();
+  const out = { before, during: rec().textContent, inside: r.left >= pane.left && r.right <= pane.right + 0.5,
+    wide: document.documentElement.scrollWidth > innerWidth };
+  rec().click();
+  await until(() => rec().getAttribute("aria-pressed") === "false", "stopped");
+  out.after = rec().textContent;
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        out = self.drive(driver, "/sessions/ag", size=size)
+        self.assertIsNone(b.psteps)
+        return out
+
+    def test_the_pane_records_steps_at_desktop_width(self):
+        self.assertEqual(self._rec("1280,900"), {"before": "Record steps", "during": "Stop recording (0)",
+                                                 "inside": True, "wide": False, "after": "Record steps"})
+
+    def test_the_pane_records_steps_at_phone_width(self):
+        self.assertEqual(self._rec("390,844"), {"before": "Record steps", "during": "Stop recording (0)",
+                                                "inside": True, "wide": False, "after": "Record steps"})
+
     def test_the_pane_shows_a_box_of_the_page_at_phone_width(self):
         self.assertEqual(self._box("390,844"), {"text": True, "value": "Ann", "cancel": True,
                                                 "inside": True, "wide": False})

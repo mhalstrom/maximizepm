@@ -76,6 +76,7 @@ function render(box, project, session) {
       <span class="br-refused hidden t-s">This site refuses a browser with no window: open it as a window.</span>
       <span class="br-wby hidden muted t-s"></span><span class="br-sp"></span>
       ${button("Annotate", { cls: "br-annbtn hidden", title: "Mark up the page", pressed: false, data: { br: "annotate" } })}
+      ${button("Record steps", { cls: "br-rec hidden", title: "Record my steps", pressed: false, data: { br: "rec" } })}
       ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
       ${button("Give back", { cls: "br-back hidden", title: "Hand the browser on", data: { br: "give_back" } })}
       ${button("Open as a window", { cls: "br-win", title: "Show it as a normal window", data: { br: "window" } })}
@@ -145,6 +146,11 @@ function render(box, project, session) {
     shownKey = key;
     v.running = !!j.running; v.window = !!j.window; v.url = j.url || ""; v.title = j.title || "";
     $$(".br-annbtn").classList.toggle("hidden", !j.running || !!j.window);  // Annotate draws on the panel's frames
+    // #5707: Record turns the person's own clicks, keys and addresses into steps; Stop sends them to the session
+    const rec = $$(".br-rec"), sr = j.steps_rec;
+    rec.classList.toggle("hidden", !j.running || !!j.window);
+    rec.setAttribute("aria-pressed", sr ? "true" : "false");
+    rec.textContent = sr ? `Stop recording (${sr.steps})` : "Record steps";
     if (ann.on && (!j.running || j.window)) ann.stop();
     // No Chrome on this computer (#5624): the answer of start says so; it holds until a start runs Chrome.
     if ("no_chrome" in j || j.running) v.noChrome = j.running ? "" : j.no_chrome || "";
@@ -394,6 +400,13 @@ function render(box, project, session) {
         const r = await typeAction("browser_hand", { project, session, to: b.dataset.to });
         toast(`${r.told} has the browser`); return show(r);
       }
+      if (what === "rec") {  // #5707: start, or stop and send the steps to this panel's session
+        const stop = b.getAttribute("aria-pressed") === "true";
+        const r = await typeAction("browser_steps", { project, session, do: stop ? "stop" : "start" });
+        if (stop) toast(r.sent ? `Sent ${r.lines.length} steps to ${r.told}` : r.lines.length
+          ? "No session to send the steps to: maxpm browser record-steps status shows them" : "No steps were recorded");
+        return show(r);
+      }
       if (what === "window" || what === "headless") { msg.classList.remove("hidden"); msg.textContent = what === "window" ? "Opening a window…" : "Back to the panel…"; }
       const args = { project, pane };
       if (what === "window" || what === "headless") args.window = what === "window";
@@ -403,7 +416,7 @@ function render(box, project, session) {
       if (what === "start") { sized = ""; fit(); }
       if (what === "new_tab") addr.focus();  // a new tab: type its address
       if (what === "save_signins") toast(`Saved ${r.saved} sign-in cookie${r.saved === 1 ? "" : "s"} for ${project}: new sessions start signed in`);
-    } catch (err) { if (what === "hand") toast(err.message, true); }
+    } catch (err) { if (what === "hand" || what === "rec") toast(err.message, true); }
   });
   const go = async (url) => {
     addr.blur();

@@ -185,7 +185,101 @@ def act(conn, a, who):
         _record(b, mark, error=e)
         raise
     _record(b, mark, out=out)
+    if browser.STEPS_ON and (a.get("action") or "status") in BAR_STEPS:
+        _bar_step(conn, a, who, out)
     return out
+
+
+# #5707: the person's actions of the pane's bar that a recording of their steps keeps
+BAR_STEPS = {"open", "back", "forward", "reload", "dialog"}
+
+
+def _bar_step(conn, a, who, out):
+    if not _person(conn, who) or a.get("_run"):
+        return
+    try:
+        b = _browser_of(conn, a, who)
+    except RiverError:
+        return
+    if b.psteps is None:
+        return
+    action = a["action"]
+    step = {"action": action}
+    if action == "open":
+        step["url"] = (out or {}).get("url") or browser.norm_url(a.get("url") or "")
+    elif action == "dialog":
+        step.update(accept=a.get("accept", True), text=a.get("text"))
+    b.psteps.bar(step)
+
+
+STEPS_TEXT = """{who} recorded {n} steps in the browser of {project}{site}, as lines of maxpm browser run:
+
+{lines}
+{notes}Put {{name}} where a value changes, save the lines in a file, and run them with other values: maxpm browser run \
+--file <file> name=value ..."""
+
+
+def record_steps(conn, a, who, b, person, send=False):
+    """#5707: maxpm browser record-steps start | stop | status, and Record in the pane: the person's own actions in
+    this browser become steps (browser.PersonSteps). stop returns the lines; with send (the pane's Stop, a typing op)
+    the chat of the pane's session gets them."""
+    do = a.get("do") or "status"
+    if do == "start":
+        if b.psteps is not None:
+            raise RiverError(f"Record is on in this browser already (since {b.psteps.at}): "
+                             "maxpm browser record-steps stop ends it")
+        if not b.running():
+            raise RiverError("the browser is not running: open a page first")
+        by = (who or "the person") if person else "the person"
+        b.psteps = browser.PersonSteps(b, by, a.get("session") or (None if person else who))
+        browser.STEPS_ON.add(b)
+        return {**b.info(), "on": True}
+    if do == "status":
+        r = b.psteps
+        return {**b.info(), "on": r is not None, "lines": r.lines() if r else [
+            shlex.join(browser.step_words(s)) for s in (b.last_psteps or {}).get("steps", [])]}
+    if do != "stop":
+        raise RiverError(f"maxpm browser record-steps start | stop | status; not {do}")
+    r = b.psteps
+    if r is None:
+        raise RiverError("Record is not on in this browser: maxpm browser record-steps start (or Record in the pane)")
+    got = r.stop()
+    b.psteps, b.last_psteps = None, got
+    browser.STEPS_ON.discard(b)
+    for sel, desc in got["fallbacks"]:
+        _log(conn, b, r.by, "selector", action="record", tried=desc, used=sel)
+    lines = [shlex.join(browser.step_words(s)) for s in got["steps"]]
+    notes = ""
+    if any("{" in ln for ln in lines):
+        notes += "A {name} in a fill is a secret field (a password): its text is not kept; pass it as an input.\n"
+    if got["fallbacks"]:
+        notes += f"{len(got['fallbacks'])} steps name an element by a CSS selector (it has no name): check them.\n"
+    if got["over"]:
+        notes += f"{got['over']} later actions are not in it (at most {browser.PSTEPS_MAX} steps).\n"
+    url = b.info().get("url") or ""
+    text = STEPS_TEXT.format(who=r.by, n=len(lines), project=b.project, site=f" (now at {url})" if url else "",
+                             lines="\n".join(lines) or "(no steps)", notes=notes + ("\n" if notes else ""))
+    out = {**b.info(), "on": False, "lines": lines, "text": text, "fallbacks": len(got["fallbacks"]), "sent": False}
+    to = a.get("session") or r.session
+    if send and to and lines:
+        try:
+            server.session_send(conn, to, text, who=who, hold=True)
+        except RiverError as e:
+            raise RiverError(f"the steps are kept (maxpm browser record-steps status), but the chat of {to} did not get "
+                             f"them: {e}")
+        out.update(sent=True, told=to)
+    return out
+
+
+def steps_op(conn, a, who):
+    """Op browser_steps (a typing op, server.TYPING_OPS): Record and Stop of the pane; Stop sends the steps to the
+    pane's session."""
+    if not _person(conn, who):
+        raise RiverError("only the pane records the person's steps; a session uses maxpm browser record-steps")
+    b = browser.find(a.get("project") or "", a.get("session"))
+    if b is None:
+        raise RiverError("the browser is not running: open a page first")
+    return record_steps(conn, a, who, b, True, send=a.get("do") == "stop")
 
 
 STEP_ACTIONS = CHANGES | {"extract"}  # #5682: the actions that add a step to a record that is on
@@ -345,6 +439,8 @@ def _act(conn, a, who):
         return {**b.info(), "steps": steps, "lines": [shlex.join(browser.step_words(s)) for s in steps]}
     if action == "record":  # #5682: a step record of the actions in this browser
         return record_action(conn, a, who, b, project, person)
+    if action == "record_steps":  # #5707: the person's actions as steps (sending to a chat: op browser_steps)
+        return record_steps(conn, a, who, b, person)
     if action == "size":  # #5676: the page's size by command (the controller rule holds above)
         return browser.set_size(b, a.get("size") or "", (who or "the person") if person else who, a.get("dpr"))
     if action == "errors":  # #5675: the shown tab's script errors and failed requests
@@ -490,7 +586,7 @@ def _act(conn, a, who):
     if action in ("check", "uncheck"):
         return then(browser.check(b, a.get("selector") or "", action == "check", who=sess, wait=wait))
     if action == "key":
-        return then(browser.press(b, a.get("key") or "", who=sess, wait=wait))
+        return then(browser.press(b, a.get("key") or "", who=sess, wait=wait, mods=a.get("mods") or ()))
     if action in ("back", "forward"):
         return then(browser.history(b, -1 if action == "back" else 1, wait=wait))
     if action == "reload":
@@ -655,7 +751,10 @@ def person_input(conn, a, who):
     evs = [ev or {} for ev in a.get("evs") or [a.get("ev") or {}]]  # what came while the batches before were on their way (#5479)
     calls = []
     for ev in evs:
-        calls += browser.input_calls(ev)
+        got = browser.input_calls(ev)
+        if b.psteps is not None and got:  # #5707: Record is on; the input thread gives the input to the recorder
+            got[0] = (got[0][0], {**got[0][1], "_ev": ev})
+        calls += got
     # #5651: nobody controls the browser, and the person clicks, scrolls or types in it: they control it from now on
     # (a session's maxpm browser waits then), with no Take control first. A hover alone takes nothing.
     if not b.state.get("controller") and any(ev.get("action") != "move" for ev in evs):
@@ -750,4 +849,5 @@ OPS = {
     "browser_input": person_input,
     "browser_hand": hand,
     "browser_annotate": annotate_send,
+    "browser_steps": steps_op,
 }

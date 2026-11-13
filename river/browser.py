@@ -628,6 +628,8 @@ class Browser:
         self.dialog = None   # the alert, confirm or prompt box of the shown tab that waits for an answer (#5674)
         self.rec = None      # #5682: the step record that is on (record_start), and the last one that stopped
         self.last_rec = None
+        self.psteps = None   # #5707: the person's actions as steps while Record is on (PersonSteps), and the last ones
+        self.last_psteps = None
         self.state = self._load()
         if owner:  # the sweep of a later serve finds a Chrome of this session that still runs (#5636)
             self.state.update(project=project, owner=owner)
@@ -1194,6 +1196,8 @@ class Browser:
                 # #5676: the size a session set by command, which holds until the person uses the pane
                 "forced": {k: self.forced[k] for k in ("w", "h", "name", "by")} if self.forced else None,
                 "dialog": dialog_info(self.dialog),  # a box of the page that waits for an answer (#5674)
+                # #5707: Record is on: the person's actions become steps
+                "steps_rec": {"by": self.psteps.by, "steps": len(self.psteps.steps)} if self.psteps else None,
                 # The tab strip (#5632): each tab with its icon (from Chrome's Favicons, a data address) and the
                 # session whose pointer is on it.
                 "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target,
@@ -2429,7 +2433,11 @@ class Inputs:
                     self.cond.wait(INPUT_GAP / 3 if self.held else 1.0)
                 method, params = self._take()
                 self.busy = True
+            ev = params.pop("_ev", None)  # #5707: the person's input that this call starts, while Record is on
             try:
+                rec = self.b.psteps
+                if ev is not None and rec is not None and self.b.running():
+                    rec.event(ev, params)  # before the call: a press names the element while the page still shows it
                 if self.b.running():  # a browser that closed meanwhile: page() would start it again
                     self.b.page(method, params)
             except DialogOpen:  # the pane shows the box and its buttons (#5674): no error under it
@@ -3101,6 +3109,42 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       buttons = Array.from(box.querySelectorAll('button,[role=button],a[href]')).filter(shown).slice(0, 3).map(lineOf);
     } else line = own ? lineOf(own) : lineOf(h);
     return {line, buttons, next: start};
+  }
+  // #5707: the number of shown elements a step can name: a hover that adds some (a menu) becomes a step.
+  if (o.shown) return {next: start, shown: Array.from(document.querySelectorAll(SEL)).filter(shown).length};
+  // #5707: the element under a press of the person (o.at: [x, y]) or the focused one (o.at: 'focus'), as a recorded
+  // step names it: its role and name; the text of its row when other shown elements have the same role and name; a
+  // CSS selector for one with no name; whether it is a secret field or a field; a select's choice.
+  if (o.at) {
+    let h;
+    if (o.at === 'focus') {
+      h = document.activeElement;
+      for (let i = 0; i < 20 && h && h.shadowRoot && h.shadowRoot.activeElement; i++) h = h.shadowRoot.activeElement;
+      if (h === document.body || h === document.documentElement) h = null;
+    } else {
+      const [x, y] = o.at;
+      h = document.elementFromPoint(x, y);
+      while (h && h.shadowRoot) { const i = h.shadowRoot.elementFromPoint(x, y); if (!i || i === h) break; h = i; }
+    }
+    if (!h || h.nodeType !== 1) return {next: start};
+    const e = h.closest(SEL) || (isPic(h) ? h : null), el = e || h;
+    const css = c0 => { const p = [];
+      for (let c = c0; c && c.nodeType === 1 && p.length < 6; c = c.parentElement) {
+        if (c.id && document.querySelectorAll('#' + CSS.escape(c.id)).length === 1) { p.unshift('#' + CSS.escape(c.id)); break; }
+        const sib = c.parentElement ? Array.from(c.parentElement.children).filter(x => x.localName === c.localName) : [];
+        p.unshift(c.localName + (sib.length > 1 ? ':nth-of-type(' + (sib.indexOf(c) + 1) + ')' : ''));
+      }
+      return p.join(' > '); };
+    const r = role(el), nm = e ? cut(name(e), 60) : '';
+    let same = 0;
+    if (nm) for (const f of document.querySelectorAll(SEL)) {
+      if (role(f) === r && cut(name(f), 60) === nm && (f === e || shown(f)) && ++same > 1) break;
+    }
+    const ty = (el.getAttribute('type') || '').toLowerCase(), ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+    return {next: start, role: r, name: nm, same, css: css(el), within: same > 1 ? (rowText(el) || context(el, nm)) : '',
+      secret: ty === 'password' || /password|one-time-code/.test(ac),
+      field: ['INPUT', 'TEXTAREA'].includes(el.tagName) || el.isContentEditable,
+      choice: el.tagName === 'SELECT' ? Array.from(el.selectedOptions).map(x => x.label) : null, ref: keepRef(el)};
   }
   // #5668: a ref whose element left the page (the page drew it again): the elements with the role, name and region
   // that the snapshot kept for it.
@@ -4432,11 +4476,12 @@ def check(b, target, on=True, who=None, wait=None):
     return {**out, "checked": on}
 
 
-def press(b, key, who=None, wait=None):
+def press(b, key, who=None, wait=None, mods=()):
     mark = nav_mark(b)
-    for p in key_events(key):
+    held(mods)  # refuses a name it does not know
+    for p in key_events(key, {m: True for m in mods}):
         b.page("Input.dispatchKeyEvent", p)
-    if len(key) == 1 or key in KEY_SIGNS:
+    if (len(key) == 1 and not mods) or key in KEY_SIGNS:
         note_keys(b, driver(b, who), key if len(key) == 1 else "", key=key, secret=secret(b) if len(key) == 1 else None,
                   hidden=lambda: secret(b))
     return done(b, wait, mark)
@@ -5011,6 +5056,249 @@ def record_page(r, limit=5_000_000):
         out.append("</li>")
     out.append("</ol></main></body></html>")
     return "".join(out)
+
+
+# ---- #5707: the person's own actions in the pane, as the steps that maxpm browser run takes
+
+DRAG_MIN = 8        # CSS pixels that a held button moves before its press is a drag
+HOVER_REST = 0.6    # seconds that the pointer rests before a hover that showed new elements becomes a step
+PSTEPS_MAX = 300    # the steps of one recording
+STEPS_ON = set()    # the browsers with Record on: a pane action looks for the recorder only then
+
+
+class PersonSteps:
+    """The person's input while Record is on, as walk steps (routes/browser.STEP_KEYS: step_words prints each as a
+    line of maxpm browser run). event() runs on the input thread (Inputs) before the input goes to Chrome, so a press
+    names its element while the page still shows it; bar() adds an action of the pane's bar (an address, Back).
+    A press and its release become a click (two: --double; the right button: --right), or a drag when the button
+    moved more than DRAG_MIN; keys into one field become one fill with the field's name, and a secret field's text
+    is never kept: fill "Password" {password}; Enter, Tab, Escape and the keys with ctrl, alt or meta are key steps;
+    wheel steps between two other actions are one scroll; a select whose choice changed is a select; a rest of the
+    pointer that showed new elements (a menu) is a hover. An element with no name is named by a CSS selector, and
+    stop() lists those steps for the fallback log (#5692). Recording never stops the input: a step that the page
+    cannot name keeps the point."""
+
+    def __init__(self, b, by, session=None):
+        self.b, self.by, self.session = b, by, session
+        self.at = core.iso(core.now())
+        self.lock = threading.Lock()
+        self.steps, self.over, self.misses = [], 0, 0
+        self.fallbacks = []   # (step, element description): the steps that a CSS selector names
+        self.press = None     # a press that waits for its release
+        self.keys = None      # the run of keys into one element
+        self.scroll = None    # the wheel steps since the last action
+        self.hover = None     # the pointer with no button: where it is, since when, and the shown elements before
+        self.choice = None    # a select that was pressed: its choice then
+
+    # -- what the page says
+    def _snap(self, o):
+        r = in_world(self.b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, self.b.refs, json.dumps(o)))
+        if r is NO_WORLD or not isinstance(r, dict):
+            return None
+        self.b.refs = max(self.b.refs, r.get("next") or 0)
+        return r
+
+    def _at(self, at):
+        r = self._snap({"at": at})
+        return r if r and "role" in r else None
+
+    def _target(self, info):
+        """The selector and --in text of a step on the element that info names; (None, None): none."""
+        if not info:
+            return None, None
+        if not info.get("name"):
+            sel = "css:" + info["css"]
+            self.fallbacks.append((sel, f"{info['role']} {info['css']}"))
+            return sel, None
+        nm = info["name"]
+        sel = f'{info["role"]} "{nm}"' if info["role"] in ROLES else nm
+        within = (info.get("within") or "").rstrip("…").strip()
+        return sel, (within[:60] or None)
+
+    # -- steps
+    def _add(self, step):
+        step = {k: v for k, v in step.items() if not (v is None or v is False or v == "" or v == [])}
+        if len(self.steps) >= PSTEPS_MAX:
+            self.over += 1
+        else:
+            self.steps.append(step)
+
+    def _on(self, step, sel, within, x, y):
+        if sel:
+            step.update(selector=sel, within=within)
+        else:
+            step.update(x=int(x), y=int(y))
+        return step
+
+    def _end_keys(self):
+        k, self.keys = self.keys, None
+        if not k or (not k["text"] and not k["secret"]):
+            return
+        text = "{%s}" % k["var"] if k["secret"] else k["text"]
+        if not k["sel"] or not k["field"]:
+            return self._add({"action": "type", "text": text})
+        last = self.steps[-1] if self.steps else {}
+        if last.get("action") == "click" and last.get("selector") == k["sel"] and last.get("within") == k["within"]:
+            self.steps.pop()  # the click that put the cursor in the field: the fill does that
+        self._add({"action": "fill", "selector": k["sel"], "within": k["within"], "text": text})
+
+    def _end_scroll(self):
+        s, self.scroll = self.scroll, None
+        if s and (abs(s["dy"]) >= 1 or abs(s["dx"]) >= 1):
+            self._add({"action": "scroll", "amount": str(int(round(s["dy"])))} if abs(s["dy"]) >= abs(s["dx"]) else
+                      {"action": "scroll", "amount": "right" if s["dx"] > 0 else "left"})
+
+    def _end_choice(self):
+        c, self.choice = self.choice, None
+        if not c:
+            return
+        try:
+            now = on_element(self.b, "@" + c["ref"], "(el) => Array.from(el.selectedOptions).map(x => x.label)")
+        except RiverError:
+            return
+        if isinstance(now, list) and now != c["before"]:
+            self._add({"action": "select", "selector": c["sel"], "within": c["within"], "values": now})
+
+    def _end_press(self):
+        p, self.press = self.press, None
+        if p:
+            self._release(p, p.get("to") or (p["x"], p["y"]))
+
+    def _rested(self, now):
+        """The pointer rested HOVER_REST on one point: a hover step when more elements show than before it came."""
+        h = self.hover
+        if not h or h["checked"] or now - h["t"] < HOVER_REST:
+            return
+        h["checked"] = True
+        r = self._snap({"shown": True})
+        if r and h["base"] is not None and (r.get("shown") or 0) > h["base"]:
+            self._end_keys()
+            self._end_scroll()
+            sel, within = self._target(self._at([h["x"], h["y"]]))
+            self._add(self._on({"action": "hover"}, sel, within, h["x"], h["y"]))
+        self.hover = None
+
+    def _before_action(self, now):
+        self._rested(now)
+        self.hover = None
+        self._end_choice()
+
+    def _release(self, p, to):
+        sel, within = self._target(p["info"])
+        x, y = p["x"], p["y"]
+        if p["drag"]:
+            info = self._at(list(to))
+            tsel = self._target(info)[0] if info and info.get("ref") != (p["info"] or {}).get("ref") else None
+            src = sel or f"{int(x)},{int(y)}"
+            return self._add({"action": "drag", "selector": src, "within": within,
+                              "to": tsel or [int(to[0]), int(to[1])]})
+        info = p["info"] or {}
+        if info.get("choice") is not None:  # a select opens; its new choice is the step (_end_choice)
+            self.choice = {"ref": info["ref"], "sel": sel, "within": within, "before": info["choice"]}
+            return
+        last = self.steps[-1] if self.steps else {}
+        if p["clicks"] >= 2 and last.get("action") == "click" and last.get("selector") == sel \
+                and last.get("within") == within and last.get("x") == (None if sel else int(x)):
+            last["count"] = 2
+            return
+        self._add(self._on({"action": "click", "button": "right" if p["button"] == "right" else None},
+                           sel, within, x, y))
+
+    def event(self, ev, params=None):
+        try:
+            with self.lock:
+                self._event(ev, params or {})
+        except DialogOpen:
+            self.misses += 1
+        except Exception:  # noqa: BLE001  the recording never stops the person's input
+            self.misses += 1
+
+    def _event(self, ev, params):
+        kind, act, now = ev.get("type"), ev.get("action"), time.monotonic()
+        x, y = float(ev.get("x") or 0), float(ev.get("y") or 0)
+        if kind == "mouse" and act == "move":
+            p = self.press
+            if p and ev.get("button") in BUTTONS:
+                if abs(x - p["x"]) + abs(y - p["y"]) > DRAG_MIN:
+                    p["drag"] = True
+                p["to"] = (x, y)
+                return
+            self._rested(now)
+            if self.hover is None:
+                r = self._snap({"shown": True})
+                self.hover = {"base": r.get("shown") if r else None}
+            self.hover.update(x=x, y=y, t=now, checked=False)
+            return
+        if kind == "mouse" and act == "wheel":
+            self._before_action(now)
+            self._end_keys()
+            s = self.scroll or {"dx": 0.0, "dy": 0.0, "x": x, "y": y}
+            s["dx"] += float(params.get("deltaX", ev.get("dx") or 0))
+            s["dy"] += float(params.get("deltaY", ev.get("dy") or 0))
+            self.scroll = s
+            return
+        self._before_action(now)
+        if kind == "mouse" and act == "down":
+            self._end_keys()
+            self._end_scroll()
+            self._end_press()
+            self.press = {"x": x, "y": y, "button": ev.get("button") or "left", "clicks": int(ev.get("clicks") or 1),
+                          "drag": False, "info": self._at([x, y])}
+            return
+        if kind == "mouse" and act == "up":
+            p, self.press = self.press, None
+            if p:
+                self._release(p, (x, y))
+            return
+        self._end_scroll()
+        m = ev.get("mods") or {}
+        if kind == "text" or (kind == "key" and len(ev.get("key") or "") == 1
+                              and not (m.get("ctrl") or m.get("meta") or m.get("alt"))):
+            return self._type(str(ev.get("text") if kind == "text" else ev.get("key")) or "")
+        if kind == "key":
+            key = ev.get("key") or ""
+            if key == "Backspace" and self.keys and not self.keys["secret"] and self.keys["text"]:
+                self.keys["text"] = self.keys["text"][:-1]
+                return
+            if key == "Backspace" and self.keys and self.keys["secret"]:
+                return
+            self._end_keys()
+            self._add({"action": "key", "key": key, "mods": [n for n in MOD_NAMES if m.get(n)]})
+
+    def _type(self, text):
+        if self.keys is None:
+            info = self._at("focus") or {}
+            sel, within = self._target(info) if info else (None, None)
+            var = re.sub(r"[^a-z0-9]+", "_", (info.get("name") or "").lower()).strip("_")[:30] or "password"
+            self.keys = {"sel": sel, "within": within, "text": "", "secret": bool(info.get("secret")),
+                         "field": bool(info.get("field")), "var": var}
+        if not self.keys["secret"]:
+            self.keys["text"] += text
+
+    def bar(self, step):
+        """An action of the pane's bar: open (the address), back, forward, reload, a tab, a box's answer."""
+        with self.lock:
+            self._before_action(time.monotonic())
+            self._end_keys()
+            self._end_scroll()
+            self._end_press()
+            self._add(step)
+
+    def stop(self):
+        with self.lock:
+            try:
+                self._end_choice()
+            except Exception:  # noqa: BLE001  the page went away: the steps so far
+                pass
+            self._end_keys()
+            self._end_scroll()
+            self._end_press()
+            return {"by": self.by, "at": self.at, "steps": list(self.steps), "over": self.over, "misses": self.misses,
+                    "fallbacks": list(self.fallbacks)}
+
+    def lines(self):
+        with self.lock:
+            return [shlex.join(step_words(s)) for s in self.steps]
 
 
 def walk(b, pages, settle=3.0, timeout=60.0):

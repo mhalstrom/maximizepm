@@ -1011,8 +1011,8 @@ def build_parser(only=None):
     for name, h in (("check", "make a checkbox, a radio button or a switch checked"),
                     ("uncheck", "make a checkbox or a switch not checked")):
         brs.add_parser(name, parents=[bp, ap, ep], help=h).add_argument("target")
-    x = brs.add_parser("key", parents=[bp, ap], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., or "
-                       "one character")
+    x = brs.add_parser("key", parents=[bp, ap, wp], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., "
+                       "or one character; --with meta for a shortcut (meta a)")
     x.add_argument("key")
     x = brs.add_parser("upload", parents=[bp, ap, ep], help="give files to a file field (also a hidden one): each "
                        "file in the project's folder or the browser's downloads")
@@ -1047,6 +1047,9 @@ def build_parser(only=None):
     x.add_argument("do", nargs="?", default="status", choices=("start", "stop", "status", "step"))
     x.add_argument("n", nargs="?", type=int, help="the step's number (record step <n>)")
     x.add_argument("--name", help="the record's name, also its canvas's name (default walk-<date>-<time>)")
+    x = brs.add_parser("record-steps", parents=[bp], help="the person's own clicks, keys and addresses in this browser "
+                       "as lines that run takes: start, the person works in the pane, stop prints the lines")
+    x.add_argument("do", nargs="?", default="status", choices=("start", "stop", "status"))
     x = brs.add_parser("steps", parents=[bp], help="the actions of your walk in this browser, as lines that run takes "
                        "(names, not refs); put {name} where an input goes")
     x.add_argument("--clear", action="store_true", help="forget the walk so far (start a new one)")
@@ -2723,7 +2726,8 @@ def _is_number(s):
 def _browser_args(a):
     """The arguments of one maxpm browser action for serve (routes/browser.act), from its parsed words."""
     b = a.bcmd
-    args = {"action": {"new-tab": "new_tab", "close-tab": "close_tab", "headless": "window"}.get(b, b)}
+    args = {"action": {"new-tab": "new_tab", "close-tab": "close_tab", "headless": "window",
+                       "record-steps": "record_steps"}.get(b, b)}
     if getattr(a, "wait", None):
         args["wait"] = a.wait
     if getattr(a, "snapshot", False):
@@ -2824,6 +2828,8 @@ def _browser_args(a):
         if a.do == "step" and a.n is None:
             raise RiverError("name the step: maxpm browser record step <n> (maxpm browser record lists them)")
         args.update(record=a.do, name=a.name, n=a.n)
+    elif b == "record-steps":  # #5707
+        args["do"] = a.do
     elif b == "upload":  # #5679: full paths, as serve runs in another folder
         args.update(selector=a.target, files=[str(Path(f).expanduser().resolve()) for f in a.files])
     elif b == "image":  # #5688: serve writes the file, so a full path
@@ -5702,6 +5708,16 @@ def render_browser(a, res):
         return
     if b == "record":  # #5682
         _record_lines(res)
+        return
+    if b == "record-steps":  # #5707
+        if a.do == "start":
+            print("Record is on: the person's clicks, keys and addresses in this browser become steps. "
+                  "maxpm browser record-steps stop gives them as lines of maxpm browser run.")
+        elif a.do == "stop":
+            print(res.get("text") or "(no steps)")
+        else:
+            print(("Record is on. " if res.get("on") else "Record is off. Last recording: ")
+                  + ("\n" + "\n".join(res["lines"]) if res.get("lines") else "no steps"))
         return
     if b == "run":  # #5680: the result (the last extract's rows), or the step that failed and the page
         if res.get("ok"):

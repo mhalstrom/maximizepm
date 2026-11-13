@@ -3458,3 +3458,183 @@ class CdpAddress(Base):
         self.assertEqual(got.get("result", {}).get("result", {}).get("value"), 1, f"an objectId of the world: {handle} {got}")
         got = call("Runtime.evaluate", {"expression": "1"}, sid=sid)
         self.assertIn("the person (mark) controls", got["error"]["message"])
+
+
+class FakeSteps(browser.PersonSteps):
+    """PersonSteps with the page's answers given by the test: AT maps a point (or 'focus') to what the page says."""
+
+    def __init__(self, at, shown=10):
+        super().__init__(mock.Mock(), "mark", "ag1")
+        self.AT, self.n_shown = at, shown
+
+    def _snap(self, o):
+        if o.get("shown"):
+            return {"shown": self.n_shown}
+        return self.AT.get(tuple(o["at"]) if isinstance(o["at"], list) else o["at"])
+
+
+def _el(role, name, **kw):
+    return {"role": role, "name": name, "same": 1, "css": kw.pop("css", "div > " + role), "within": "", "secret": False,
+            "field": False, "choice": None, "ref": kw.pop("ref", "e" + name), **kw}
+
+
+class PersonStepRules(unittest.TestCase):
+    """#5707: the rules that turn the person's input into steps, with the page's answers given."""
+
+    def lines(self, rec):
+        return [" ".join(browser.step_words(s)) for s in rec.stop()["steps"]]
+
+    def test_clicks_keys_fill_drag_scroll_hover_select_and_a_secret(self):
+        email = _el("textbox", "Email", field=True)
+        pw = _el("textbox", "Password", field=True, secret=True)
+        at = {(10, 10): _el("button", "Save"), (20, 20): email, "focus": email, (30, 30): _el("link", "Edit",
+              same=3, within="Invoice 1042 …"), (40, 40): _el("clickable", "", css="#app > div:nth-of-type(2)"),
+              (50, 50): _el("listitem", "Card A"), (90, 90): _el("region", "Done"), (60, 60): _el("button", "Menu"),
+              (70, 70): _el("combobox", "Month", choice=["January"], ref="e9")}
+        rec = FakeSteps(at)
+        ev = lambda **k: rec.event(k)  # noqa: E731
+        m = {"alt": False, "ctrl": False, "meta": False, "shift": False}
+        ev(type="mouse", action="down", x=10, y=10, button="left", clicks=1)
+        ev(type="mouse", action="up", x=10, y=10, button="left", clicks=1)
+        ev(type="mouse", action="down", x=10, y=10, button="left", clicks=2)  # a double click
+        ev(type="mouse", action="up", x=10, y=10, button="left", clicks=2)
+        ev(type="mouse", action="down", x=20, y=20, button="left", clicks=1)  # the click into the field goes
+        ev(type="mouse", action="up", x=20, y=20, button="left", clicks=1)
+        for k in "ann@x.coo":
+            ev(type="key", key=k, mods=m)
+        ev(type="key", key="Backspace", mods=m)
+        ev(type="text", text="m")
+        ev(type="key", key="Enter", mods=m)
+        ev(type="key", key="a", mods={**m, "meta": True})
+        rec.AT["focus"] = pw
+        for k in "s3cret":
+            ev(type="key", key=k, mods=m)
+        ev(type="mouse", action="down", x=30, y=30, button="right", clicks=1)
+        ev(type="mouse", action="up", x=30, y=30, button="right", clicks=1)
+        ev(type="mouse", action="down", x=40, y=40, button="left", clicks=1)
+        ev(type="mouse", action="up", x=40, y=40, button="left", clicks=1)
+        ev(type="mouse", action="down", x=50, y=50, button="left", clicks=1)  # a drag onto another element
+        ev(type="mouse", action="move", x=70, y=70, button="left")
+        ev(type="mouse", action="up", x=90, y=90, button="left", clicks=1)
+        rec.event({"type": "mouse", "action": "wheel", "x": 5, "y": 5, "dx": 0, "dy": 100}, {"deltaX": 0, "deltaY": 100})
+        rec.event({"type": "mouse", "action": "wheel", "x": 5, "y": 5, "dx": 0, "dy": 150}, {"deltaX": 0, "deltaY": 150})
+        ev(type="mouse", action="move", x=60, y=60)  # rests on Menu, and a menu shows
+        rec.hover["t"] -= browser.HOVER_REST + 0.1
+        rec.n_shown = 14
+        ev(type="mouse", action="move", x=61, y=61)
+        ev(type="mouse", action="move", x=200, y=200)  # passes with nothing new: no step
+        rec.AT[(200, 200)] = _el("text", "x")
+        ev(type="mouse", action="down", x=70, y=70, button="left", clicks=1)
+        ev(type="mouse", action="up", x=70, y=70, button="left", clicks=1)
+        with mock.patch.object(browser, "on_element", lambda b, t, js: ["March"]):
+            rec.bar({"action": "open", "url": "https://example.com/"})
+        rec.bar({"action": "back"})
+        got = rec.stop()
+        lines = [" ".join(browser.step_words(s)) for s in got["steps"]]
+        self.assertEqual(lines, [
+            'click button "Save" --double',
+            'fill textbox "Email" ann@x.com',
+            "key Enter",
+            "key a --with meta",
+            'fill textbox "Password" {password}',
+            'click link "Edit" --right --in Invoice 1042',
+            "click css:#app > div:nth-of-type(2)",
+            'drag Card A Done',
+            "scroll 250",
+            'hover button "Menu"',
+            'select combobox "Month" March',
+            "open https://example.com/",
+            "back"])
+        self.assertNotIn("s3cret", json.dumps(got))
+        self.assertEqual(got["fallbacks"], [("css:#app > div:nth-of-type(2)", "clickable #app > div:nth-of-type(2)")])
+
+    def test_a_point_the_page_cannot_name_keeps_the_point_and_an_error_never_stops_input(self):
+        rec = FakeSteps({})
+        rec.event({"type": "mouse", "action": "down", "x": 3, "y": 4, "button": "left", "clicks": 1})
+        rec.event({"type": "mouse", "action": "up", "x": 3, "y": 4, "button": "left", "clicks": 1})
+        rec.event({"type": "key"})  # no key: nothing, and no exception
+        rec._snap = mock.Mock(side_effect=ValueError("page gone"))
+        rec.event({"type": "mouse", "action": "down", "x": 1, "y": 1, "button": "left", "clicks": 1})
+        self.assertGreaterEqual(rec.misses, 1)
+        self.assertEqual(self.lines(rec)[0], "click 3 4")
+
+
+class PersonRecord(Base):
+    """#5707 in a real Chrome: Record on, the person's clicks and keys through the pane's input op become steps by
+    name; stop gives the lines, and maxpm browser run plays them again with another input."""
+
+    def test_the_person_s_steps_run_again_with_another_value(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = ROWS_FORM
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        core.register(self.c, "mark", human=True)
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda who, **a: routes.act(self.c, {"project": "web", "session": "ag1", **a}, who)  # noqa: E731
+        act("ag1", action="open", url=f"http://127.0.0.1:{port}/")
+        act("ag1", action="release")
+        out = act("ag1", action="record_steps", do="start")
+        self.assertEqual(out["steps_rec"], {"by": "the person", "steps": 0})
+
+        def box(css):
+            r = b.evaluate("(() => { const r = document.querySelector(%s).getBoundingClientRect(); "
+                           "return [r.x + r.width / 2, r.y + r.height / 2]; })()" % json.dumps(css))
+            return {"x": r[0], "y": r[1]}
+        n = [0]
+
+        def put(*evs):
+            n[0] += 1
+            routes.person_input(self.c, {"project": "web", "session": "ag1", "pane": "p", "n": n[0], "evs": list(evs)},
+                                "mark")
+            self.assertTrue(b.inputs.settle())
+        m = {"alt": False, "ctrl": False, "meta": False, "shift": False}
+        name = box("#name")
+        put({"type": "mouse", "action": "down", **name, "button": "left", "clicks": 1},
+            {"type": "mouse", "action": "up", **name, "button": "left", "clicks": 1})
+        put(*[{"type": "key", "key": k, "mods": m} for k in "Ann"])
+        save = box("tr:nth-of-type(2) button")
+        put({"type": "mouse", "action": "down", **save, "button": "left", "clicks": 1},
+            {"type": "mouse", "action": "up", **save, "button": "left", "clicks": 1})
+        self.assertEqual(b.evaluate("document.querySelector('#out').textContent"), "saved Ann in row 2")
+        sent = []
+        with mock.patch.object(server, "session_send", lambda conn, to, text, **k: sent.append((to, text))):
+            out = routes.steps_op(self.c, {"project": "web", "session": "ag1", "do": "stop"}, "mark")
+        self.assertEqual(out["lines"], ["fill 'textbox \"Name\"' Ann", "click 'button \"Save\"' --in 'Row 2'"])
+        self.assertEqual(sent[0][0], "ag1")
+        self.assertIn(out["lines"][1], sent[0][1])
+        # The lines, with {who} in place of the name, run again as one call with another value.
+        lines = [ln.replace("Ann", "{who}") for ln in out["lines"]]
+        act("mark", action="release")  # the person's clicks took control; they give it back
+        act("ag1", action="open", url=f"http://127.0.0.1:{port}/")
+        steps = [cli._browser_args(cli.build_parser(only="browser").parse_args(
+            ["browser"] + __import__("shlex").split(ln.replace("{who}", "Bea")))) for ln in lines]
+        res = routes.run(self.c, {"project": "web", "session": "ag1", "steps": steps}, "ag1")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(b.evaluate("document.querySelector('#out').textContent"), "saved Bea in row 2")
+
+
+ROWS_FORM = (b"<title>Form</title><label>Name <input id=name></label><table>"
+        b"<tr><td>Row 1</td><td><button onclick=\"save(1)\">Save</button></td></tr>"
+        b"<tr><td>Row 2</td><td><button onclick=\"save(2)\">Save</button></td></tr></table><p id=out></p><script>"
+        b"function save(n) { document.getElementById('out').textContent = 'saved ' + "
+        b"document.getElementById('name').value + ' in row ' + n; }</script>")
