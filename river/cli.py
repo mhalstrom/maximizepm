@@ -5141,7 +5141,7 @@ def _browser_result(action, res):
     if res.get("answered"):
         what.append(("accepted" if res["answered"]["accept"] else "dismissed") + f" the {res['answered']['type']} box")
     head = ("new page: " if res.get("navigated") else "") + f"{res.get('title') or '(no title)'}  {res.get('url') or ''}"
-    out = [head + (f"  ({'; '.join(what)})" if what else "")]
+    out = [head + (f"  ({'; '.join(what)})" if what else "")] + list(res.get("notes") or [])  # notes: #5668
     d = res.get("dialog")
     if d:  # #5674: the page waits for this box; every other command is refused until it is answered
         out.append(f"dialog {d['type']} {json.dumps(d['message'], ensure_ascii=False)}"

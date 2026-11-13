@@ -1809,6 +1809,74 @@ class SnapshotLimits(Base):
             act(action="extract", rows="Help")
 
 
+COVER = (b"<title>Cover</title><style>.f{position:fixed;left:0}</style>"
+         b"<button class=f style='bottom:10px;width:200px;height:40px' onclick=\"document.title='bottom'\">Bottom</button>"
+         b"<div role=dialog aria-label=Cookies class=f style='bottom:0;right:0;height:120px;background:#eee'>"
+         b"<p>We use cookies</p><button onclick='this.parentNode.remove()'>Accept</button></div>"
+         b"<button class=f style='top:100px;width:300px;height:40px' onclick=\"document.title='half'\">Half</button>"
+         b"<div class=f style='top:90px;left:100px;width:100px;height:60px;background:red'></div>"
+         b"<div style='margin-top:200px'><button id=t onclick=\"document.title='target'\">Target</button>"
+         b"<button onclick='t.replaceWith(t.cloneNode(true))'>Redraw</button>"
+         b"<button onclick=\"const x = document.createElement('button'); x.textContent = 'Target'; "
+         b"t.after(x)\">Twin</button></div>")
+
+
+class Aim(Base):
+    """#5668 in a real Chrome: a button under a cookie banner is not clicked and the reply names the banner and its
+    buttons; a button half covered is clicked where it shows; a ref of a button that the page drew again is found
+    again by its role and name, and two such buttons are named instead."""
+
+    def test_a_covered_element_is_not_clicked_and_a_redrawn_one_is_found_again(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(COVER)))
+                self.end_headers()
+                self.wfile.write(COVER)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/")
+        with self.assertRaisesRegex(RiverError, r'^@e\d+ is covered by @e\d+ dialog "Cookies"; in it: @e\d+ button '
+                                                r'"Accept"; nothing was clicked'):
+            act(action="click", selector="Bottom")
+        self.assertEqual(b.evaluate("document.title"), "Cover")
+        act(action="click", selector="Half")  # its middle is under the red box; its left part shows
+        self.assertEqual(b.evaluate("document.title"), "half")
+        act(action="click", selector="Accept")
+        act(action="click", selector="Bottom")
+        self.assertEqual(b.evaluate("document.title"), "bottom")
+        # The page draws Target again: its old ref finds the new one, and the reply says so.
+        lines = act(action="snapshot", interactive=True)["snapshot"]["lines"]
+        ref = next(x for x in lines if '"Target"' in x).split()[0]
+        act(action="click", selector="Redraw")
+        out = act(action="click", selector=ref)
+        self.assertEqual(b.evaluate("document.title"), "target")
+        self.assertRegex(out["notes"][0], rf'^{ref} was drawn again; it is @e\d+ button "Target" now$')
+        self.assertIn(out["notes"][0], cli._browser_result("click", out))
+        lines = act(action="snapshot", interactive=True)["snapshot"]["lines"]
+        ref = next(x for x in lines if '"Target"' in x).split()[0]
+        act(action="click", selector="Redraw")
+        act(action="click", selector="Twin")
+        with self.assertRaisesRegex(RiverError, f"{ref} is no longer on the page, and 2 elements have its role and name"):
+            act(action="click", selector=ref)
+
+
 MENU = (b"<title>Menu</title><nav aria-label=Top><button onclick=\"menu.hidden = !menu.hidden\">Account</button>"
         b"<div id=menu role=menu aria-label=Account hidden><a role=menuitem href=/p>Profile</a>"
         b"<a role=menuitem href=/s>Settings</a><button role=menuitem>Sign out</button></div></nav>"

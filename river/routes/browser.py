@@ -165,8 +165,11 @@ def _act(conn, a, who):
         return {k: t.get(k) for k in ("text", "rest", "next", "section", "matches")}
 
     pre = None  # #5673: the page's elements before a session's action, for the reply that says what changed
+    b.said = []  # #5668: what the action did on its own (a ref found again), for its reply
 
     def then(out):  # --snapshot: the snapshot of the page that the action left (#5663)
+        if b.said:
+            out["notes"] = b.said
         if pre is not None and not out.get("dialog"):  # a new page: its outline; else what changed on this one
             if out.get("navigated"):
                 out["outline"] = browser.outline(b)["lines"]

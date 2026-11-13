@@ -2927,6 +2927,45 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const r = e.getBoundingClientRect();
     return r.width + r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
   };
+  // #5668: what is on top at a point: the dialog (or region, or interactive element) it belongs to, with a ref, and
+  // up to three buttons in that dialog, so the agent can close it.
+  const keepRef = e => { let ref = R.ref.get(e); if (!ref || !R.els.has(ref)) { ref = 'e' + (++start); R.ref.set(e, ref); }
+    R.els.set(ref, new WeakRef(e)); return ref; };
+  const lineOf = e => { const r = role(e); return '@' + keepRef(e) + ' ' + r + ' ' + JSON.stringify(cut(name(e), 60)); };
+  if (o.cover) {
+    const [x, y] = o.cover;
+    let h = document.elementFromPoint(x, y);
+    while (h && h.shadowRoot) { const i = h.shadowRoot.elementFromPoint(x, y); if (!i || i === h) break; h = i; }
+    if (!h) return {next: start};
+    const box = h.closest('dialog,[role=dialog],[role=alertdialog],[aria-modal=true]') || h.closest(REGION);
+    const own = h.closest(SEL);
+    let line, buttons = [];
+    if (box) {
+      const l = box.getAttribute('aria-label') || (box.querySelector('h1,h2,h3,h4,h5,h6') || {}).innerText || '';
+      line = '@' + keepRef(box) + ' ' + kindOf(box) + ' ' + JSON.stringify(cut(l || text(box), 40));
+      buttons = Array.from(box.querySelectorAll('button,[role=button],a[href]')).filter(shown).slice(0, 3).map(lineOf);
+    } else line = own ? lineOf(own) : lineOf(h);
+    return {line, buttons, next: start};
+  }
+  // #5668: a ref whose element left the page (the page drew it again): the elements with the role, name and region
+  // that the snapshot kept for it.
+  if (o.again) {
+    const info = R.info && R.info.get(o.again);
+    if (!info) return {count: 0, next: start};
+    const hits = [], norm = s => cut(s, 60).toLowerCase();
+    const look = node => {
+      const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+      for (let e = w.currentNode; e; e = w.nextNode()) {
+        if (e.nodeType === 1 && e.matches(SEL) && role(e) === info[0] && norm(name(e)) === info[1] && shown(e)) {
+          const g = e.closest(REGION);
+          if ((g ? regionName(g) : '') === info[2]) hits.push(e);
+        }
+        if (e.nodeType === 1 && e.shadowRoot) look(e.shadowRoot);
+      }
+    };
+    look(document.documentElement);
+    return {count: hits.length, lines: hits.slice(0, 5).map(lineOf), next: start};
+  }
   // #5673: the interactive elements of the whole page that a person can see (not only the window: an action scrolls
   // its element into view), each with its ref, line and region, for the reply that says what an action changed.
   // 'before' keeps a short signature of each element in the page's world (no layout work); 'after' compares and
@@ -3093,7 +3132,8 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       let ref = R.ref.get(e);
       if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
       R.els.set(ref, new WeakRef(e));
-      const nm = cut(name(e), 60), c = rowText(e) || context(e, nm) || column(e);
+      const nm = cut(name(e), 60), c = rowText(e) || context(e, nm) || column(e), g = e.closest(REGION);
+      (R.info || (R.info = new Map())).set(ref, [role(e), nm.toLowerCase(), g ? regionName(g) : '']);  // #5668
       return {ref, line: '@' + ref + ' ' + role(e) + ' ' + JSON.stringify(nm) + extra(e, role(e)) +
         (c ? ' (in ' + JSON.stringify(c) + ')' : '') + (inView(e) ? '' : ' (out of the window)')};
     }), count: hits.length};
@@ -3135,7 +3175,8 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     let ref = R.ref.get(e);
     if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
     R.els.set(ref, new WeakRef(e));
-    const x = extra(e, r);
+    const x = extra(e, r), g = e.closest(REGION);
+    (R.info || (R.info = new Map())).set(ref, [r, nm.toLowerCase(), g ? regionName(g) : '']);  // #5668: to find it again
     now[ref] = '@' + ref + ' ' + r + ' ' + JSON.stringify(nm) + x;
     items.push({e, ref, r, nm, x});
   };
@@ -3558,7 +3599,17 @@ def on_element(b, target, fn, *args):
     if r is NO_WORLD:
         raise RiverError(f"@{ref} is from an earlier page: run maxpm browser snapshot")
     if not r or r.get("gone"):
-        if ref:
+        if ref:  # #5668: the page drew it again; the role, name and region that the snapshot kept find it
+            again = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps({"again": ref})),
+                             create=False)
+            if isinstance(again, dict):
+                b.refs = max(b.refs, again.get("next") or 0)
+                if again.get("count") == 1:
+                    b.said = getattr(b, "said", []) + [f"@{ref} was drawn again; it is {again['lines'][0]} now"]
+                    return on_element(b, again["lines"][0].split(" ", 1)[0], fn, *args)
+                if again.get("count"):
+                    raise RiverError(f"@{ref} is no longer on the page, and {again['count']} elements have its role "
+                                     f"and name; name one:\n  " + "\n  ".join(again["lines"]))
             raise RiverError(f"@{ref} is no longer on the page: run maxpm browser snapshot")
         raise RiverError(f"no element matches {target!r} in {b.info()['url']}")
     return r.get("v")
@@ -3566,12 +3617,27 @@ def on_element(b, target, fn, *args):
 
 # The point to click, and (#5717) the address of the element's link when it is another address of the same site in the
 # same tab: the page's script may follow it as a client route, and the click then waits for that.
-POINT_JS = ("(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); const r = el.getBoundingClientRect(); "
-            "const a = el.closest('a[href]'); let link = null; "
-            "if (a && (!a.target || a.target === '_self')) { const u = new URL(a.href, location.href), "
-            "h = new URL(location.href); u.hash = h.hash = ''; "
-            "if (u.origin === h.origin && u.href !== h.href) link = u.href; } "
-            "return [r.left + r.width / 2, r.top + r.height / 2, link]; }")
+# #5668: the aim. After the scroll, up to five points of each visible part of the element (the middle first) are hit
+# tested, through open shadow roots; the first point where the element itself (or its label) is on top is the point.
+# None: {covered: the middle}, and nothing is clicked (point_of names the cover).
+POINT_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'});
+  const a = el.closest('a[href]'); let link = null;
+  if (a && (!a.target || a.target === '_self')) { const u = new URL(a.href, location.href), h = new URL(location.href);
+    u.hash = h.hash = ''; if (u.origin === h.origin && u.href !== h.href) link = u.href; }
+  const deep = (x, y) => { let h = document.elementFromPoint(x, y);
+    while (h && h.shadowRoot) { const i = h.shadowRoot.elementFromPoint(x, y); if (!i || i === h) break; h = i; } return h; };
+  const mine = h => { for (let n = h; n; n = n.parentNode || n.host) if (n === el) return true;
+    return !!(el.labels && Array.from(el.labels).some(l => l.contains(h))); };
+  const pts = [];
+  for (const r of el.getClientRects()) {
+    const l = Math.max(r.left, 0), t = Math.max(r.top, 0), rt = Math.min(r.right, innerWidth), bt = Math.min(r.bottom, innerHeight);
+    if (rt <= l || bt <= t) continue;
+    const cx = (l + rt) / 2, cy = (t + bt) / 2;
+    pts.push([cx, cy], [l + (rt - l) / 4, cy], [l + 3 * (rt - l) / 4, cy], [cx, t + (bt - t) / 4], [cx, t + 3 * (bt - t) / 4]);
+  }
+  if (!pts.length) return null;
+  for (const [x, y] of pts) { const h = deep(x, y); if (h && mine(h)) return [x, y, link]; }
+  return {covered: pts[0]}; }"""
 # Focus a field and select what it holds, so the text that comes next replaces it. What kind of field it is: text
 # (Input.insertText types it), value (a date, a color: the value is set), select, or no:<what> (fill refuses).
 FOCUS_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); el.focus();
@@ -3610,7 +3676,20 @@ def point_of(b, target):
     pos = on_element(b, target, POINT_JS)
     if not pos:
         raise RiverError(f"{target} has no place on the page to click")
+    if isinstance(pos, dict) and pos.get("covered"):  # #5668: another element is on top: no click
+        x, y = pos["covered"]
+        raise RiverError(f"{target} is covered by {cover_of(b, x, y)}; nothing was clicked. Close that first, or "
+                         f"click the point if you mean it: maxpm browser click {round(x)} {round(y)}")
     return pos
+
+
+def cover_of(b, x, y):
+    """#5668: the element on top at a point, as a line with its ref, and the buttons in its dialog (to close it)."""
+    r = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps({"cover": [x, y]})))
+    if r is NO_WORLD or not isinstance(r, dict) or not r.get("line"):
+        return "another element"
+    b.refs = max(b.refs, r.get("next") or 0)
+    return r["line"] + ("; in it: " + ", ".join(r["buttons"]) if r.get("buttons") else "")
 
 
 # ---- what a session does (maxpm browser ...)
