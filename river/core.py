@@ -217,12 +217,17 @@ DEFAULT_SETTINGS = {
     # session (maxpm report --wake, a Claude Code hook with asyncRewake) waits for the message and ends with exit
     # code 2, and Claude Code then shows it to the session at once, also at an idle prompt
     # (code.claude.com/docs/en/hooks). A session that runs without MaximizePM's hooks has no listener, and the
-    # delivery fails. "uds {address} {message}" writes the message as one line to that Unix socket.
+    # delivery fails. Pi (#5691): MaximizePM's state extension listens the same way and gives the message to
+    # Pi with pi.sendUserMessage, which starts a turn at an idle prompt; the address is PI_SESSION_ID, which
+    # Pi sets for the commands of its bash tool (Pi 0.82 and later).
+    # "uds {address} {message}" writes the message as one line to that Unix socket.
     # (Claude Code's own session inbox, CLAUDE_CODE_MESSAGING_SOCKET, has no documented message format.)
     # A platform without an entry, or a failed delivery, keeps the other path: the message waits in the queue
     # and the inbox for the agent's next maxpm command, and the manager's watch brings it. The first entry whose
-    # ENV_VAR is set wins: Codex first, since a Codex started from a Claude Code shell keeps its variables.
+    # ENV_VAR is set wins: Codex and Pi before Claude Code, since a CLI started from a Claude Code shell keeps
+    # its variables.
     "native_message": "Codex=CODEX_THREAD_ID: codex queue --thread {address} --message {message}; "
+                      "Pi=PI_SESSION_ID: wake {address} {message}; "
                       "Claude Code=CLAUDE_CODE_SESSION_ID: wake {address} {message}",
     "setup_done": "off",
     # Review before release: with review on, each deploy item waits on a review item that waits on

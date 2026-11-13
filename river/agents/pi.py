@@ -101,7 +101,8 @@ CHAT = {"compressed": False, "file_tools": ["write", "edit"], "ref": "session", 
 STATE = {"state": "hook", "session_id": "hook"}
 
 # Stop on the Sessions tab (#5547): Esc aborts the running turn.
-INPUT = {"native": None, "interrupt": ["Escape"]}
+# Messages reach it through the state extension's listener (core.native_message 'wake', #5691).
+INPUT = {"native": ["wake", "{address}", "{text}"], "interrupt": ["Escape"]}
 
 # Pi's built-in slash commands (BUILTIN_SLASH_COMMANDS of dist/core/slash-commands.js, Pi 1.5.2), in its order, with
 # the argument hints of docs/slash-commands.md; /mcp from the same page (built-in MCP support is on unless --no-mcp).
@@ -239,19 +240,65 @@ def parse_command(words):
 EXTENSION_NAME = "maxpm-state.ts"
 
 # The extension that reports Pi's state to MaximizePM (docs/agent-adapters.md, step 7). __REPORT__ is the maxpm report
-# command as a JSON list, __SELF__ the path of this file (the resume command loads it again). No import: Pi loads a
-# .ts file as it is, and the types are only a help for the reader.
+# command as a JSON list, __SELF__ the path of this file (the resume command loads it again), __WAKE__ the folder of
+# the listeners beside the queue (core.wake_dir). No import: Pi loads a .ts file as it is, and the types are only a
+# help for the reader; Node's own modules come by import() at the session start.
+#
+# It is also the session's listener for messages (#5691; core.native_message 'Pi=PI_SESSION_ID: wake ...'), as
+# MaximizePM's hook is for Claude Code: it owns the folder of its session id (the same hash as core.wake_dir), touches
+# 'alive' every second, and gives each '.msg' file that a sender writes there to Pi with pi.sendUserMessage, which Pi's
+# docs/extensions.md documents: 'When not streaming, the message is sent immediately and triggers a new turn'; while
+# a turn runs, deliverAs 'steer' delivers it before the next model call. Pi's own example file-trigger.ts does the same.
 EXTENSION = """\
-// MaximizePM: reports this Pi session's state with maxpm report (written by river/agents/pi.py; do not edit).
+// MaximizePM: reports this Pi session's state with maxpm report, and brings MaximizePM's messages into it
+// (written by river/agents/pi.py; do not edit).
 const REPORT: string[] = __REPORT__;
 const SELF: string = __SELF__;
+const WAKE: string = __WAKE__;
 const RELEASE: string[] = REPORT.map((w) => (w === "report" ? "release" : w));
+
+async function listen(pi: any, id: string) {
+  // A failure here never stops Pi: the messages then wait in MaximizePM's inbox.
+  const fs: any = await import("node:fs");
+  const path: any = await import("node:path");
+  const crypto: any = await import("node:crypto");
+  const dir = path.join(WAKE, crypto.createHash("sha1").update(id).digest("hex").slice(0, 16));
+  fs.mkdirSync(dir, { recursive: true });
+  const me = `${process.pid}-${Date.now()}`;
+  fs.writeFileSync(path.join(dir, "owner"), me);
+  const alive = path.join(dir, "alive");
+  let beat = 0;
+  const timer = setInterval(() => {
+    try {
+      if (fs.readFileSync(path.join(dir, "owner"), "utf8") !== me) return clearInterval(timer);
+      if (Date.now() - beat >= 1000) {
+        const t = new Date();
+        try { fs.utimesSync(alive, t, t); } catch { fs.writeFileSync(alive, ""); }
+        beat = Date.now();
+      }
+      const texts: string[] = [];
+      for (const f of fs.readdirSync(dir).filter((n: string) => n.endsWith(".msg")).sort()) {
+        try {
+          texts.push(fs.readFileSync(path.join(dir, f), "utf8"));
+          fs.unlinkSync(path.join(dir, f));
+        } catch {}
+      }
+      if (texts.length) pi.sendUserMessage(texts.join("\\n"), { deliverAs: "steer" });
+    } catch {}
+  }, 200);
+  timer.unref?.(); // the listener never keeps Pi's process alive by itself
+  return () => {
+    clearInterval(timer);
+    try { if (fs.readFileSync(path.join(dir, "owner"), "utf8") === me) fs.unlinkSync(alive); } catch {}
+  };
+}
 
 export default function (pi: any) {
   const agent = process.env.MAXPM_AGENT;
   if (!agent) return; // a session that MaximizePM did not start: no report
   let seq = 0;
   let sessionId: string | undefined;
+  let unlisten: (() => void) | undefined;
   const run = (argv: string[]) => {
     // A report never waits for maxpm, and its failure never stops Pi.
     pi.exec(argv[0], argv.slice(1), { timeout: 15000 }).catch(() => {});
@@ -267,10 +314,17 @@ export default function (pi: any) {
     sessionId = ctx.sessionManager.getSessionId();
     if (!pi.getSessionName()) pi.setSessionName(agent);
     report("idle");
+    if (unlisten) unlisten();
+    unlisten = undefined;
+    if (sessionId) {
+      try { unlisten = await listen(pi, sessionId); } catch {}
+    }
   });
   pi.on("agent_start", async () => report("working"));
   pi.on("agent_end", async () => report("idle"));
   pi.on("session_shutdown", async (event: any) => {
+    if (unlisten) unlisten();
+    unlisten = undefined;
     if (event.reason === "quit") run(RELEASE);
   });
 }
@@ -279,7 +333,9 @@ export default function (pi: any) {
 
 def extension_text(report, path):
     """The extension's text for the maxpm report command `report` (argv words), written at `path`."""
-    return EXTENSION.replace("__REPORT__", json.dumps(list(report))).replace("__SELF__", json.dumps(str(path)))
+    from ..core import river_dir
+    return (EXTENSION.replace("__REPORT__", json.dumps(list(report))).replace("__SELF__", json.dumps(str(path)))
+            .replace("__WAKE__", json.dumps(str(Path(river_dir()) / "wake"))))
 
 
 def install_hooks(folder, report):

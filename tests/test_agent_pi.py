@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -336,6 +337,45 @@ class State(Env):
         out = subprocess.run(["node", str(harness), f.as_uri()], capture_output=True, text=True, timeout=60,
                              env={k: v for k, v in os.environ.items() if k != "MAXPM_AGENT"})
         self.assertEqual(json.loads(out.stdout.strip().splitlines()[-1])["calls"], [])  # not started by MaximizePM
+
+    @unittest.skipUnless(shutil.which("node"), "no node")
+    def test_the_extension_brings_a_message_into_the_session(self):
+        """#5691: the extension listens in the folder of its session id (the hash of core.wake_dir): a message that a
+        sender writes there goes to Pi with sendUserMessage, which starts a turn at an idle prompt."""
+        f = Path(self.a.install_hooks("/work/demo", ["maxpm", "report"])[1])
+        harness = self.root / "listen.mjs"
+        harness.write_text("""
+            const ext = (await import(process.argv[2])).default;
+            const handlers = {}, sent = [];
+            const pi = {
+              on: (e, h) => { handlers[e] = h; },
+              exec: () => Promise.resolve({ code: 0 }),
+              getSessionName: () => "w1", setSessionName: () => {},
+              sendUserMessage: (text, opts) => { sent.push([text, opts]); },
+            };
+            ext(pi);
+            await handlers.session_start({ reason: "startup" }, { sessionManager: { getSessionId: () => "7f3c" } });
+            const t0 = Date.now();
+            while (!sent.length && Date.now() - t0 < 20000) await new Promise((r) => setTimeout(r, 50));
+            await handlers.session_shutdown({ reason: "reload" }, {});
+            console.log(JSON.stringify(sent));
+        """, encoding="utf-8")
+        p = subprocess.Popen(["node", str(harness), f.as_uri()], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, env={**os.environ, "MAXPM_AGENT": "w1"})
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        alive = core.wake_dir("7f3c") / "alive"
+        for _ in range(200):
+            if alive.exists() or p.poll() is not None:
+                break
+            time.sleep(0.05)
+        if p.poll() is not None and "Unknown file extension" in p.stderr.read():
+            self.skipTest("this node does not strip TypeScript types")
+        self.assertTrue(alive.exists())
+        self.assertEqual(core._wake_send("7f3c", "[maxpm alert from mark] the build is red"), (0, ""))
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]),
+                         [["[maxpm alert from mark] the build is red", {"deliverAs": "steer"}]], err)
+        self.assertFalse(alive.exists())  # the session ended its listener: a sender gets a failure now
 
 
 if __name__ == "__main__":
