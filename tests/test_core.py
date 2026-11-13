@@ -11486,6 +11486,22 @@ class OpsOutside(Base):
         self.assertEqual([x["name"] for x in core.ops_due(self.c)], ["serve"])
         self.assertEqual(core.ops_due(self.c, outside=True), [])
 
+    def test_a_serve_stopped_on_purpose_runs_none_of_the_checks_that_need_serve(self):
+        # #5649: the person quit the desktop app and no login agent runs serve: maxpm's own probes do not run, so
+        # no repair and no notice; a check of the person's own still runs.
+        self.check_code = 0
+        self.add(command="maxpm ops probe serve")
+        core.ops_add(self.c, "maxpm", "site", "plugin", {"command": "check_site", "every": "1m", "timeout": "10s",
+                                                         "outside": True}, actor="mark")
+        t = core.now()
+        for i in range(4):
+            res = core.ops_outside(self.c, self.notice, t + timedelta(minutes=i), serve_wanted=False)
+            self.assertEqual([r["check"] for r in res], ["maxpm/site"])
+        self.assertEqual(self.calls, ["check_site"] * 4)
+        # The app opens again: the serve check is due at once.
+        res = core.ops_outside(self.c, self.notice, t + timedelta(minutes=4))
+        self.assertIn("maxpm/serve", [r["check"] for r in res])
+
     def test_a_run_one_second_early_is_due_in_the_watchdog(self):
         self.add()
         t = core.now()

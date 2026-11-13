@@ -913,6 +913,110 @@ class LoginAgent(Base):
         self.assertFalse(res["started_now"])
         self.assertNotIn("bootstrap", self.calls)
 
+    # #5649: the desktop app installs and keeps its own watchdog.
+
+    def app(self):
+        """The variables of the desktop app: its bundle and its folder, in the test's folder."""
+        bundle, appdir = os.path.join(self.tmp.name, "bundle"), os.path.join(self.tmp.name, "appdir")
+        patch = mock.patch.dict(os.environ, {"MAXPM_DESKTOP": "1", "MAXPM_APP_BUNDLE": bundle, "MAXPM_APP_DIR": appdir,
+                                             "MAXPM_APP_SHELL": "abc"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return bundle, appdir
+
+    def marker(self, appdir, **kw):
+        os.makedirs(appdir, exist_ok=True)
+        with open(os.path.join(appdir, "open"), "w") as f:
+            json.dump({"app": os.getpid(), "serve": None, "db": os.environ["MAXPM_DB"], **kw}, f)
+
+    def test_the_app_installs_the_watchdog_with_its_launcher_which_follows_each_update(self):
+        import plistlib
+        import subprocess
+        import sys
+        bundle, appdir = self.app()
+        res = self.login.app_start(self.conn)
+        self.assertEqual((res["watchdog"], res["background"]), ("installed", "off"))
+        self.assertEqual(self.calls, ["print", "bootstrap"])
+        spec = plistlib.loads(self.login.plist_path(self.login.WATCHDOG_LABEL).read_bytes())
+        launcher = os.path.join(appdir, "bin", "maxpm")
+        self.assertEqual(spec["ProgramArguments"], [launcher, "ops", "check", "--outside"])
+        env = spec["EnvironmentVariables"]
+        self.assertEqual((env["MAXPM_DESKTOP"], env["MAXPM_APP_BUNDLE"], env["MAXPM_APP_DIR"], env["MAXPM_APP_SHELL"],
+                          env["PYTHONDONTWRITEBYTECODE"]), ("1", bundle, appdir, "abc", "1"))
+        self.assertTrue(env["PATH"].startswith(os.path.join(appdir, "bin") + os.pathsep))  # the checks' maxpm
+        # The launcher runs the code version that current names (an update moves it), else the app's own copy.
+        new = os.path.join(appdir, "versions", "9.9.9")
+        for root in (bundle, new):
+            os.makedirs(os.path.join(root, "bin"), exist_ok=True)
+            with open(os.path.join(root, "bin", "maxpm"), "w") as f:
+                f.write("import sys; print(__file__, sys.argv[1:])\n")
+        run = lambda: subprocess.run([launcher, "ops"], capture_output=True, text=True, timeout=20).stdout  # noqa: E731
+        self.assertEqual(run().strip(), f"{bundle}/bin/maxpm ['ops']")
+        with open(os.path.join(appdir, "current"), "w") as f:
+            f.write(new + "\n")
+        self.assertEqual(run().strip(), f"{new}/bin/maxpm ['ops']")
+        # The next start with the same job loaded changes nothing.
+        self.calls.clear()
+        self.loaded = True
+        self.assertEqual(self.login.app_start(self.conn)["watchdog"], "current")
+        self.assertEqual(self.calls, ["print"])
+        with open(launcher, encoding="utf-8") as f:
+            self.assertIn(sys.executable, f.read())  # the app's Python
+
+    def test_the_app_leaves_a_login_serve_of_another_install_and_its_watchdog_alone(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["serve", "--install-login"])  # a git clone's login serve, from a terminal
+        self.app()
+        self.calls.clear()
+        res = self.login.app_start(self.conn)
+        self.assertEqual((res["watchdog"], res["background"]), ("left", "other"))
+        self.assertIn("serve --port", res["by"])
+        self.assertFalse(self.login.plist_path(self.login.WATCHDOG_LABEL).exists())
+        self.assertEqual(self.calls, [])
+
+    def test_keep_running_in_the_background_is_a_login_agent_that_runs_the_apps_launcher(self):
+        import plistlib
+        _, appdir = self.app()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["serve", "--install-login"])
+        spec = plistlib.loads(self.login.plist_path().read_bytes())
+        self.assertEqual(spec["ProgramArguments"], [os.path.join(appdir, "bin", "maxpm"), "serve", "--port", str(self.free)])
+        res = self.login.app_start(self.conn)
+        self.assertEqual((res["watchdog"], res["background"]), ("installed", "on"))
+        self.assertTrue(self.login.serve_wanted())
+
+    def test_serve_is_wanted_while_a_login_agent_runs_it_or_the_app_is_open(self):
+        import subprocess
+        import sys
+        _, appdir = self.app()
+        self.assertFalse(self.login.serve_wanted())  # the app was quit: serve stopped on purpose
+        self.marker(appdir)
+        self.assertTrue(self.login.serve_wanted())
+        self.marker(appdir, db=os.path.join(self.tmp.name, "other.db"))
+        self.assertFalse(self.login.serve_wanted())  # the app is open for another queue
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        self.marker(appdir, app=gone.pid)
+        self.assertFalse(self.login.serve_wanted())  # the app crashed
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run(["serve", "--install-login"])
+        self.assertTrue(self.login.serve_wanted())
+
+    def test_kick_with_the_app_open_stops_the_serve_that_the_app_started(self):
+        import subprocess
+        import sys
+        _, appdir = self.app()
+        self.marker(appdir)
+        with self.assertRaisesRegex(core.RiverError, "install one first"):
+            self.login.kick()  # the app runs no serve of its own (a terminal's serve is never stopped)
+        serve = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(serve.kill)
+        self.marker(appdir, serve=serve.pid)
+        with mock.patch.object(self.login, "KILL_WAIT", 0.5), contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.run(["serve", "--kick"])
+        self.assertIn("the desktop app starts it again", out.getvalue())
+        self.assertIsNotNone(serve.wait(timeout=5))
+
 
 class LoginSystemd(Base):
     """#5520: the same on Linux, as systemd user units."""

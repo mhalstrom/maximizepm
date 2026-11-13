@@ -9,7 +9,7 @@
       "every": "1m", "fail_after": 2, "recover_after": 2, "timeout": "30s", "severity": "page",
       "outside": true,
       "repair": "maxpm serve --kick",
-      "runbook": "maxpm serve runs the page, the relay, every pass of the loop (sessions, reviews, deploys, notices) and the other checks; when it is down, no session starts. The watchdog runs this check with no serve, and its repair (maxpm serve --kick) restarts serve through its login agent, launchd or systemd (maxpm serve --install-login must be installed). Read $MAXPM_QUEUE_DIR/serve.log (launchd's output of serve) and serve-loop.json (the last pass and its error). A loop that is late with a port that answers: a pass hangs; read locked.log for a lock held long."
+      "runbook": "maxpm serve runs the page, the relay, every pass of the loop (sessions, reviews, deploys, notices) and the other checks; when it is down, no session starts. The watchdog runs this check with no serve, and its repair (maxpm serve --kick) restarts serve through its login agent, launchd or systemd (maxpm serve --install-login, or the desktop app's Keep MaximizePM running in the background), or stops the serve of the open desktop app, which starts it again. With no login agent and the app closed, the person stopped serve on purpose: the watchdog runs this check not at all. Read $MAXPM_QUEUE_DIR/serve.log (launchd's output of serve) and serve-loop.json (the last pass and its error). A loop that is late with a port that answers: a pass hangs; read locked.log for a lock held long."
     },
     {
       "name": "relay",

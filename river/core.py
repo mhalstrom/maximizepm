@@ -6551,13 +6551,17 @@ def _ops_notice(conn, c, state, title, body, notice, at):
     return {"title": title, "body": body, "sent": sent}
 
 
-def ops_outside(conn, notice=None, at=None):
+def ops_outside(conn, notice=None, at=None, serve_wanted=True):
     """One pass of the watchdog (maxpm ops check --outside): close the lost runs of the outside checks, then run
     each one that is due. notice(title, body) sends a notice on every channel of notify_channels (notify.direct);
-    None sends none. Returns one result for each check that ran."""
+    None sends none. serve_wanted False (login.serve_wanted, #5649): the person stopped maxpm serve on purpose (quit
+    the desktop app), so the checks of maxpm's own probes, which need serve, do not run: no repair, no notice.
+    Returns one result for each check that ran."""
     ops_close_lost(conn, at=at, outside=True)
     out = []
     for c in ops_due(conn, at, outside=True, slack=OPS_OUTSIDE_SLACK):
+        if not serve_wanted and str(c["config"].get("command") or "").startswith("maxpm ops probe "):
+            continue
         try:
             out.append(_ops_outside_one(conn, c, notice, at))
         except Exception as e:  # one check that fails does not stop the others; the run stays open, then lost

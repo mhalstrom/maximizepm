@@ -1901,7 +1901,7 @@ def build_parser(only=None):
                         "user unit), for a computer you reach through the relay")
     x.add_argument("--remove-login", action="store_true", help="remove that login agent")
     x.add_argument("--kick", action="store_true", help="stop maxpm serve and start it again through its login agent, "
-                   "also when it hangs (the repair of the serve check)")
+                   "or through the open desktop app, also when it hangs (the repair of the serve check)")
     x.add_argument("--install-watchdog", action="store_true",
                    help="a job that runs maxpm ops check --outside every minute, also when maxpm serve is down (the "
                         "checks marked outside, their repairs, a notice); macOS: launchd, Linux: a systemd timer")
@@ -2168,11 +2168,12 @@ def run(argv=None):
         print(json.dumps(res) if args.json else "\n".join(visual.lines(res)))
         return res["status"]
     if args.cmd == "ops" and args.ocmd == "check":  # the watchdog (#5441): no activity, no footer; its log is the output
-        from . import notify
+        from . import login, notify
         conn = core.connect()
         try:
             core.adopt_login_path(conn, max_age=24 * 3600)  # launchd's short PATH: the checks need a terminal's (#5611)
-            res = core.ops_outside(conn, lambda title, body: notify.direct(conn, title, body))
+            res = core.ops_outside(conn, lambda title, body: notify.direct(conn, title, body),
+                                   serve_wanted=login.serve_wanted())
         finally:
             conn.close()
         print(json.dumps(res) if args.json else "\n".join(ops_outside_lines(res)), flush=True)
@@ -2256,6 +2257,7 @@ def _run(args, conn):
         from . import login
         res = login.kick()
         print("maxpm serve " + ("started through its login agent" if res["how"] == "loaded" else
+                                "stopped; the desktop app starts it again" if res["how"] == "app" else
                                 "stopped and started again through its login agent"))
         return 0
     if args.cmd == "serve" and (args.install_login or args.remove_login):

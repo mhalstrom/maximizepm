@@ -73,15 +73,49 @@ function portFree(port) {
 const real = (p) => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };
 
 // The queue of this app and its serve (#5618): {db, port (the setting serve_port), running: {port, pid} or null},
-// read by the Python that the app runs, from the code it runs.
-function queueInfo({ riverRoot, python, env = process.env }) {
+// read by the Python that the app runs, from the code it runs. appStart (#5649): in the same Python start, install
+// or update the watchdog (river/login.py app_start); app is then {watchdog, background: on|off|other, by}.
+function queueInfo({ riverRoot, python, env = process.env, appStart = false }) {
   const [cmd, ...args] = python;
   const code = "import json, sys; sys.path.insert(0, sys.argv[1]); from river import core; c = core.connect(); "
-    + "print(json.dumps({'db': str(core.db_path()), 'port': int(core.setting(c, 'serve_port')), "
-    + "'running': core.running_serve(c)}))";
-  const out = execFileSync(cmd, [...args, "-c", code, riverRoot], { encoding: "utf8", timeout: 20000, env,
-    stdio: ["ignore", "pipe", "pipe"] });
+    + "info = {'db': str(core.db_path()), 'port': int(core.setting(c, 'serve_port')), 'running': core.running_serve(c)}\n"
+    + "if sys.argv[2] == '1':\n"
+    + "    try:\n"
+    + "        from river import login; info['app'] = login.app_start(c)\n"
+    + "    except Exception as e:\n"
+    + "        info['app'] = {'error': f'{type(e).__name__}: {e}'}\n"
+    + "print(json.dumps(info))";
+  const out = execFileSync(cmd, [...args, "-c", code, riverRoot, appStart ? "1" : "0"], { encoding: "utf8",
+    timeout: 20000, env, stdio: ["ignore", "pipe", "pipe"] });
   return JSON.parse(out.trim().split("\n").pop());
+}
+
+// Run one maxpm command with the app's Python and code (#5649: serve --install-login and --remove-login, for Keep
+// MaximizePM running in the background). Returns its output; throws with its error text.
+function runMaxpm({ riverRoot, python, env = process.env }, args) {
+  const [cmd, ...pre] = python;
+  try {
+    return execFileSync(cmd, [...pre, path.join(riverRoot, "bin", "maxpm"), ...args], { encoding: "utf8",
+      timeout: 60000, env, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (e) {
+    throw new Error(((e.stderr || "") + (e.stdout || "")).trim() || e.message);
+  }
+}
+
+// Wait until a serve that answers for this queue shows up (the login agent starts it), at most ms. Its {url, port}, or null.
+async function waitServe(info, ms) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const r = await runningServe(info);
+    if (r || Date.now() >= until) return r;
+    await new Promise((res) => setTimeout(res, 300));
+  }
+}
+
+// Wait until url answers no more (a serve that stops), at most ms.
+async function waitDown(url, ms) {
+  const until = Date.now() + ms;
+  while (Date.now() < until && await get(url + "api/state") !== 0) await new Promise((res) => setTimeout(res, 200));
 }
 
 // A maxpm serve that answers for this queue already (the login serve, or one a person started from a terminal):
@@ -191,19 +225,32 @@ async function startRiver({ riverRoot, pythonRoot, python, env = process.env, ti
 // The app's server (#5618): a serve that answers for the queue already is opened as it is (the app is then only a
 // window, and quitting it leaves that serve running: stop does nothing); else the app starts its own, on the queue's
 // serve_port when it is free. Resolves to { url, port, child (null for a serve the app did not start), stop, external }.
+// appStart (#5649): install or update the watchdog first (queueInfo). When the app's login agent runs serve (Keep
+// MaximizePM running in the background) and no serve answers, start it through the agent and wait for it.
+// The result also has db (the queue) and app (app_start's answer, or null).
 async function openRiver(opts = {}) {
   const own = opts.python ? null : bundledPython(opts.pythonRoot || opts.riverRoot);
   const py = opts.python || own || (opts.find || findPython)();
+  const python = py && (Array.isArray(py) ? py : [py]);
+  const env = opts.env || process.env;
   let info = null;
   if (py) {
-    try { info = queueInfo({ riverRoot: opts.riverRoot, python: Array.isArray(py) ? py : [py], env: opts.env || process.env }); }
+    try { info = queueInfo({ riverRoot: opts.riverRoot, python, env, appStart: !!opts.appStart }); }
     catch (e) { /* the code does not load: startRiver says why */ }
   }
-  const running = info && await runningServe(info);
-  if (running) return { ...running, child: null, external: true, stop: () => Promise.resolve() };
+  const more = { db: info ? info.db : null, app: info ? info.app || null : null };
+  let running = info && await runningServe(info);
+  if (!running && more.app && more.app.background === "on") {
+    running = await waitServe(info, 5000);  // the agent may start it now (at login, or just installed)
+  }
+  if (!running && more.app && more.app.background === "on") {
+    try { runMaxpm({ riverRoot: opts.riverRoot, python, env }, ["serve", "--kick"]); } catch (e) { /* then the app starts its own */ }
+    running = await waitServe(info, opts.agentWaitMs || 20000);
+  }
+  if (running) return { ...running, ...more, child: null, external: true, stop: () => Promise.resolve() };
   const r = await startRiver({ ...opts, port: info ? info.port : undefined });
-  return { ...r, external: false };
+  return { ...r, ...more, external: false };
 }
 
 module.exports = { findPython, bundledPython, freePort, portFree, startRiver, openRiver, runningServe, queueInfo,
-  appDir, codeVersion, markBad, pickRoot };
+  appDir, codeVersion, markBad, pickRoot, runMaxpm, waitServe, waitDown };

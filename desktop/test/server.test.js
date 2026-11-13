@@ -168,3 +168,21 @@ test("alone, the app starts its serve on serve_port, or on a free port that its 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// #5649: the packaged app asks for the watchdog in the same Python start that reads the queue; outside the app (no
+// MAXPM_APP_BUNDLE, as here) it installs nothing. runMaxpm runs one command and throws with its error text.
+test("the app's start asks for the watchdog; outside the app nothing is installed", () => {
+  const { queueInfo, runMaxpm } = require("../server");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "river-dog-"));
+  const env = { ...process.env, MAXPM_DB: path.join(dir, "q.db"), MAXPM_DESKTOP: "", MAXPM_APP_BUNDLE: "" };
+  try {
+    const info = queueInfo({ riverRoot: repo, python: findPython(), env, appStart: true });
+    assert.deepStrictEqual(info.app, { watchdog: "none", background: "off", by: null });
+    assert.strictEqual(queueInfo({ riverRoot: repo, python: findPython(), env }).app, undefined);
+    const ctx = { riverRoot: repo, python: findPython(), env: { ...env, MAXPM_LOCAL: "1", MAXPM_AGENT: "" } };
+    assert.match(runMaxpm(ctx, ["config", "get", "serve_port"]), /\d+/);
+    assert.throws(() => runMaxpm(ctx, ["config", "set", "no_such_key", "1"]), /no_such_key/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
