@@ -1136,6 +1136,25 @@ class Fit(Base):
         self.assertFalse(b.pane_seen("phone"))
         self.assertEqual(b.size, (1200, 900))
 
+    def test_the_moving_frames_go_smaller_when_a_sharp_frame_follows(self):
+        """#5658: at a density above 1 the screencast frames show only while the page moves, so their JPEG quality
+        is lower; the screencast starts again when the density crosses 1."""
+        b = browser.Browser("web")
+        calls = []
+        b.call = lambda method, params=None, session=None, timeout=None: calls.append((method, params)) or {}
+        b._want_sharp = lambda now=False: None
+        b.session, b.cast_quality = "S", browser.STILL_QUALITY
+        b.resize(800, 600, 1)
+        b._fit()
+        self.assertEqual([m for m, _ in calls], ["Emulation.setDeviceMetricsOverride"])  # the same quality: no restart
+        b.resize(800, 600, 2)
+        calls.clear()
+        b._fit()
+        self.assertEqual([(m, (p or {}).get("quality")) for m, p in calls],
+                         [("Emulation.setDeviceMetricsOverride", None), ("Page.stopScreencast", None),
+                          ("Page.startScreencast", browser.MOVING_QUALITY)])
+        self.assertLess(browser.MOVING_QUALITY, browser.STILL_QUALITY)
+
 
 class SharpWhenStill(Base):
     """#5637 (mark 2026-11-12: 'the layout in the browser keeps flashing'): while the page moves, the panel gets the

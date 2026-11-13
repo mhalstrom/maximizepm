@@ -80,6 +80,12 @@ SHARP_SEEN = 8       # frames whose bytes a sharp frame skips: a screenshot pain
 # the panel gets the screencast frames only. A screenshot after each frame sent each change twice, the second about
 # four times larger, and it took the place of the frames that came after it.
 SHARP_QUIET = 0.3
+# The JPEG quality of the screencast frames (#5658). At a density above 1 they show only while the page moves (the
+# sharp frame takes their place when it holds still), so they go smaller: over a phone link (120 ms, 20 Mbit/s) a
+# scrolling text page sent 86 kB frames at quality 70, 16 a second; 70 kB and 19 at 50; 62 kB and 21 at 40
+# (seed/browser_speed.py --rtt 120 --mbps 20). At density 1 they are the picture that stays.
+STILL_QUALITY = 70
+MOVING_QUALITY = 40
 
 
 def chrome_path():
@@ -545,6 +551,7 @@ class Browser:
         self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
         self.inputs = Inputs(self)  # the person's input, to Chrome in order without a wait in the request (#5651)
         self.refit_ws = None  # the CDP connection of the Chrome whose density was set again after a load (#5651)
+        self.cast_quality = None  # the JPEG quality of the running screencast (#5658)
         self.active_at = time.time()  # the last change of the page: a new frame, a tab, an address (#5650: a window
                                       # with none for browser_window_idle goes back into the panel)
         self.visits = {}     # url -> {url, title, n, at}: the pages its tabs showed, for the address bar (#5635)
@@ -749,7 +756,8 @@ class Browser:
         self.call("Network.enable", session=s)
         self.call("Network.setBlockedURLs", {"urls": ["file://*", "chrome://*", "chrome-extension://*"]}, session=s)
         self._fit()
-        self.call("Page.startScreencast", {"format": "jpeg", "quality": 70, "everyNthFrame": 1}, session=s)
+        self.cast_quality = self._cast_quality()
+        self.call("Page.startScreencast", {"format": "jpeg", "quality": self.cast_quality, "everyNthFrame": 1}, session=s)
         try:
             self.call("Target.activateTarget", {"targetId": target})
         except RiverError:
@@ -768,7 +776,16 @@ class Browser:
             sw, sh = SCREEN
         self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": self.dsf,
                   "mobile": False, "screenWidth": sw, "screenHeight": sh}, session=self.session)
+        q = self._cast_quality()
+        if self.cast_quality not in (None, q):  # the density crossed 1: the frames' quality follows
+            self.cast_quality = q
+            self.call("Page.stopScreencast", session=self.session)
+            self.call("Page.startScreencast", {"format": "jpeg", "quality": q, "everyNthFrame": 1}, session=self.session)
         self._want_sharp(now=True)  # a page that does not paint again after the change sends no frame of its new size
+
+    def _cast_quality(self):
+        """Smaller screencast frames when a sharp frame follows them (#5658)."""
+        return MOVING_QUALITY if self.dsf > 1 and self.size and not self._windowed() else STILL_QUALITY
 
     def _refit(self):
         try:
