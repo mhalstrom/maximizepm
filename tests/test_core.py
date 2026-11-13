@@ -6750,7 +6750,7 @@ class Manager(Base):
         with at(30):
             core.send(self.c, "question", "which one?", to="boss", actor="w1", blocked=True)
             self.assertIsNone(core.watch_gap(self.c, "boss"))
-            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": []})
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "woke": {}, "told": [], "closed": []})
             w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("a blocked message does not wait"))
             self.assertEqual(len(w["messages"]), 1)
             self.assertIsNone(core.watch_gap(self.c, "boss"))  # the watch ran until now
@@ -6770,23 +6770,28 @@ class Manager(Base):
         with at(36):
             core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
             self.assertEqual(core.manager_view(self.c)["no_watch"], "6m")
-            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": []})
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "woke": {}, "told": [], "closed": []})
         with at(47):  # the note is due (manage_wait_high, 10m)
             r = core.tell_watch_late(self.c)
-            self.assertEqual((r["late"], r["told"], r["closed"]), ({"boss": 1}, ["boss"], []))
+            # This manager has no channel into its session (#5747): the wake cannot reach it, so the person hears at once.
+            self.assertEqual((r["late"], r["woke"], r["told"], r["closed"]),
+                             ({"boss": 1}, {"boss": "no native channel"}, ["boss"], []))
             (a,) = alerts()
-            self.assertTrue(a["body"].startswith("runs no watch (maxpm manage --watch) for 17m: 1 message waits for it. "), a["body"])
+            self.assertTrue(a["body"].startswith("runs no watch (maxpm manage --watch) for 17m: 1 message waits for it. "
+                                                 "MaximizePM could not wake it (no native channel). "), a["body"])
+            (wake,) = [m for m in core.inbox(self.c, "boss", mark_read=False) if m["from_agent"] == "maxpm"]
+            self.assertTrue(wake["body"].startswith("Your watch stopped 17m ago and 1 message waits for you. "), wake["body"])
             self.assertIn("maxpm --as boss manage --watch", a["body"])
             self.assertEqual(core.prompt_alert_agent(self.c, a["id"]), "boss")  # the link opens its Terminal
             self.assertTrue(any(e.get("message_id") == a["id"] for e in core.needs_you(self.c)))
             # One alert for each time with no watch, also when more comes.
             core.send(self.c, "question", "may I run the probe?", to="boss", actor="w2", blocked=True)
-            self.assertEqual(core.tell_watch_late(self.c), {"late": {"boss": 2}, "told": [], "closed": []})
-        # The watch runs again: the alert closes.
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {"boss": 2}, "woke": {}, "told": [], "closed": []})
+        # The watch runs again: both alerts close.
         with at(48):
             # The blocked question comes alone (#5666); the note comes with the next watch.
             self.assertEqual(len(core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)["messages"]), 1)
-            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": [a["id"]]})
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "woke": {}, "told": [], "closed": [a["id"], wake["id"]]})
             self.assertIsNotNone(alerts()[0]["read_at"])
             self.assertFalse(any(e.get("message_id") == a["id"] for e in core.needs_you(self.c)))
         # The next time, a blocked message is in the alert; a manager that is stopped gets none.
@@ -6796,7 +6801,61 @@ class Manager(Base):
             # 2: the note that waited behind the blocked question at minute 48 waits too.
             self.assertIn("for 12m: 2 messages wait for it, 1 blocked (the sender stands still). ", alerts()[1]["body"])
             core.stop_agent(self.c, "boss", "done for the day", actor="mark")
-            self.assertEqual(core.tell_watch_late(self.c), {"late": {}, "told": [], "closed": [alerts()[1]["id"]]})
+            r = core.tell_watch_late(self.c)
+            self.assertEqual((r["late"], r["told"], r["closed"][0], len(r["closed"])), ({}, [], alerts()[1]["id"], 2))
+
+    def test_a_manager_with_no_watch_is_woken_first_and_the_person_hears_only_when_that_does_not_help(self):
+        # #5747: on 2026-11-13 a manager ran no watch from 07:50Z to 08:22Z. Only the person heard of it, at 07:55Z,
+        # and read it at 08:23Z; a sign-in that blocked workers waited for the manager all that time.
+        from river import cli
+        sent = []
+        core.NATIVE_RUNNER = lambda args: (sent.append(args[-1]), (0, ""))[1]
+        self.addCleanup(setattr, core, "NATIVE_RUNNER", None)
+        core.manage(self.c, self.dir.name, "boss")
+        # The watch records the session's channel: a manager that started before its platform had one gets it.
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "t-9"}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.run(["--as", "boss", "manage", "--watch", "--step", "0s"])
+        self.assertEqual(tuple(self.c.execute("SELECT platform, native_address FROM agents WHERE name='boss'").fetchone()),
+                         ("Codex", "t-9"))
+        to_mark = lambda: [r["body"] for r in self.c.execute(
+            "SELECT body FROM messages WHERE to_agent='mark' AND kind='alert' ORDER BY id")]
+        t0 = core.now()
+        at = lambda minutes: mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=minutes))
+        with at(1):
+            core.send(self.c, "note", "#12 is on main", to="boss", actor="w1")
+        with at(12):  # the note is due: the manager's session gets the wake, the person nothing yet
+            r = core.tell_watch_late(self.c)
+            self.assertEqual((r["late"], r["woke"], r["told"]), ({"boss": 1}, {"boss": "sent"}, []))
+            self.assertEqual(len(sent), 1)
+            self.assertIn("[maxpm alert from maxpm] Your watch stopped 12m ago and 1 message waits for you. "
+                          "Read them now (maxpm --as boss inbox), then start the watch again in the background: "
+                          "maxpm --as boss manage --watch", sent[0])
+            self.assertEqual(to_mark(), [])
+        with at(16):  # one wake for each time with no watch, also when the manager read it
+            ids = [m["id"] for m in core.inbox(self.c, "boss", mark_read=False) if m["from_agent"] == "maxpm"]
+            with core.tx(self.c):
+                core._mark_read(self.c, ids)
+            self.assertEqual(core.tell_watch_late(self.c), {"late": {"boss": 1}, "woke": {}, "told": [], "closed": []})
+            self.assertEqual(len(sent), 1)
+        with at(17):  # WATCH_LATE after the wake the watch still does not run: now the person hears
+            self.assertEqual(core.tell_watch_late(self.c)["told"], ["boss"])
+            (body,) = to_mark()
+            self.assertIn("MaximizePM woke it 5m ago, and it did not start the watch. ", body)
+        with at(18):  # the watch runs again: the person's alert closes
+            core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+            self.assertEqual(len(core.tell_watch_late(self.c)["closed"]), 1)
+        # The next time without a watch, a manager that starts it again after the wake never reaches the person.
+        with at(20):
+            core.send(self.c, "alert", "the build is red", to="boss", actor="w1", blocked=True)
+        with at(24):
+            core.send(self.c, "note", "one more", to="boss", actor="w1")
+        with at(35):
+            self.assertEqual(core.tell_watch_late(self.c)["woke"], {"boss": "sent"})
+            core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+            r = core.tell_watch_late(self.c)
+            self.assertEqual((r["late"], r["told"], len(r["closed"])), ({}, [], 1))
+            self.assertEqual(len(to_mark()), 1)
 
     def watch_minutes(self, **kw):
         """Run the watch with a clock that moves one minute for each poll; returns (result, minutes waited)."""

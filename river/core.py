@@ -12881,10 +12881,13 @@ PROMPT_NOTE = "waits on a prompt in its terminal"
 # so for 16 minutes it heard of nothing, and a blocked question waited 11.9 minutes while its sender stood still.
 # A watch runs when its last poll is younger than WATCH_BEAT (a poll comes each 3s; a locked queue skips some).
 # After that, each command of the manager says that no watch runs. After WATCH_LATE with no watch and a message
-# that is due, maxpm serve tells each person (tell_watch_late): the first words of that alert are WATCH_NOTE.
+# that is due, maxpm serve first wakes the manager's session (tell_watch_late, #5747): an alert from maxpm whose
+# first words are WATCH_WAKE, through the platform's own messaging. Each person gets an alert (first words
+# WATCH_NOTE) when that alert could not reach the session, or when the watch still does not run WATCH_LATE after it.
 WATCH_BEAT = timedelta(minutes=1)
 WATCH_LATE = timedelta(minutes=5)
 WATCH_NOTE = "runs no watch"
+WATCH_WAKE = "Your watch stopped"
 
 
 def prompt_alert_agent(conn, message_id):
@@ -20950,7 +20953,7 @@ def _watch_mail(conn, actor, native, waits):
     message do not wait (MaximizePM may mark one blocked after the send); another one waits the time of its
     level (waits: {"high": ..., "low": ...})."""
     waiting = [m for m in conn.execute(
-        f"SELECT m.level, m.blocked, m.created_at, m.native_status, a.kind sender FROM messages m "
+        f"SELECT m.id, m.level, m.blocked, m.created_at, m.native_status, a.kind sender FROM messages m "
         f"LEFT JOIN agents a ON a.name=m.from_agent WHERE {_TO_ME} "
         f"AND m.from_agent<>? AND m.read_at IS NULL AND m.delivered_at IS NULL", (actor, actor, actor)).fetchall()
         if not _brought(native, m)]
@@ -20972,11 +20975,17 @@ def watch_gap(conn, name):
 def tell_watch_late(conn):
     """One pass of maxpm serve (#1898). A manager that runs no watch for WATCH_LATE, while a message for it is
     due (a watch would return for it now), does not hear of the message: nothing wakes a session at its prompt.
-    Each person gets one alert in the manager's name (WATCH_NOTE), which opens a needs-you event; the page and
-    the notification link open the manager's Terminal for it. When the watch runs again, nothing is due any
-    more, or the manager is stopped or gone, MaximizePM marks the alert read, which closes the event. Returns
-    {"late": {manager: messages due}, "told": [managers], "closed": [message ids]}."""
-    late = {}
+    First MaximizePM wakes the manager (#5747): one alert from maxpm to it (WATCH_WAKE), sent into its session by
+    the platform's own messaging (native_message), that says to read the messages and start the watch. On
+    2026-11-13 only the person heard of a manager with no watch, read it 28 minutes later, and workers stood
+    still. Each person gets one alert in the manager's name (WATCH_NOTE) when the wake could not reach the
+    session, or when the watch still does not run WATCH_LATE after the wake; it opens a needs-you event, and the
+    page and the notification link open the manager's Terminal for it. When the watch runs again, nothing is due
+    any more, or the manager is stopped or gone, MaximizePM marks both alerts read, which closes the event.
+    Returns {"late": {manager: messages due}, "woke": {manager: delivery status}, "told": [managers],
+    "closed": [message ids]}."""
+    wake_q = "SELECT * FROM messages WHERE kind='alert' AND from_agent='maxpm' AND body LIKE ?"
+    late, wakes = {}, {}
     for a in conn.execute("SELECT * FROM agents WHERE role='manager' AND kind='ai' AND watch_seen IS NOT NULL").fetchall():
         gap = watch_gap(conn, a["name"])
         if gap is None or gap < WATCH_LATE or _agent_state(conn, a) not in ("active", "away"):
@@ -20984,31 +20993,61 @@ def tell_watch_late(conn):
         waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=a["name"])),
                  "low": parse_duration(setting(conn, "manage_wait_low", agent=a["name"]))}
         due = _watch_mail(conn, a["name"], has_native(conn, a["name"]), waits)[1]
+        # One wake for each time with no watch, also when the manager read it (#5747).
+        wake = conn.execute(wake_q + " AND to_agent=? AND created_at>=? ORDER BY id DESC LIMIT 1",
+                            (WATCH_WAKE + "%", a["name"], a["watch_seen"])).fetchone()
+        due = [m for m in due if not wake or m["id"] != wake["id"]]  # the wake itself is no message that waits
         if due:
             late[a["name"]] = (gap, due)
+            if wake:
+                wakes[a["name"]] = dict(wake)
     alerts = conn.execute("SELECT id, from_agent FROM messages WHERE kind='alert' AND read_at IS NULL AND body LIKE ?",
                           (WATCH_NOTE + "%",)).fetchall()
-    closed = [m["id"] for m in alerts if m["from_agent"] not in late]
-    told = [name for name in late if not any(m["from_agent"] == name for m in alerts)]
+    closed = [m["id"] for m in alerts if m["from_agent"] not in late] + [
+        m["id"] for m in conn.execute(wake_q + " AND read_at IS NULL", (WATCH_WAKE + "%",)) if m["to_agent"] not in late]
+    wake_now = [name for name in late if name not in wakes]
+    woke = {}
+    if wake_now or closed:
+        with tx(conn):
+            _mark_read(conn, closed)
+            for name in wake_now:
+                gap, due = late[name]
+                blocked = sum(1 for m in due if m["blocked"])
+                body = (f"{WATCH_WAKE} {_short(gap)} ago and {len(due)} message{'s' if len(due) != 1 else ''} "
+                        f"wait{'' if len(due) != 1 else 's'} for you"
+                        + (f", {blocked} blocked (the sender stands still)" if blocked else "")
+                        + f". Read them now (maxpm --as {name} inbox), then start the watch again in the background: "
+                          f"maxpm --as {name} manage --watch")
+                wakes[name] = {"id": _send(conn, "alert", "maxpm", body, to=name), "created_at": iso(now()), "body": body}
+        for name in wake_now:  # outside the tx: a platform's command may take seconds
+            w = wakes[name]
+            w["native_status"] = woke[name] = deliver_native(conn, name, _native_text("alert", "maxpm", w["body"]))
+            with tx(conn):
+                conn.execute("UPDATE messages SET native_status=? WHERE id=?", (w["native_status"], w["id"]))
+                if w["native_status"] == "sent":
+                    _mark_delivered(conn, [w["id"]], "native")
+    told = [name for name in late if not any(m["from_agent"] == name for m in alerts)
+            and (wakes[name]["native_status"] != "sent" or now() - parse_iso(wakes[name]["created_at"]) >= WATCH_LATE)]
     if not told and not closed:
-        return {"late": {n: len(d) for n, (_, d) in late.items()}, "told": [], "closed": []}  # the usual pass: no write
+        return {"late": {n: len(d) for n, (_, d) in late.items()}, "woke": woke, "told": [], "closed": []}
     with tx(conn):
-        _mark_read(conn, closed)
         people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name")]
         for name in told:
             gap, due = late[name]
             blocked = sum(1 for m in due if m["blocked"])
+            w = wakes[name]
             body = (f"{WATCH_NOTE} (maxpm manage --watch) for {_short(gap)}: {len(due)} message{'s' if len(due) != 1 else ''} "
                     f"wait{'' if len(due) != 1 else 's'} for it"
                     + (f", {blocked} blocked (the sender stands still)" if blocked else "")
-                    + f". Nothing wakes a session at its prompt. Tell it in its terminal to start the watch again: "
-                      f"maxpm --as {name} manage --watch")
+                    + (f". MaximizePM woke it {_short(now() - parse_iso(w['created_at']))} ago, and it did not start the watch"
+                       if w["native_status"] == "sent" else
+                       f". MaximizePM could not wake it ({w['native_status'] or 'no native channel'})")
+                    + f". Tell it in its terminal to start the watch again: maxpm --as {name} manage --watch")
             for person in people:
                 _send(conn, "alert", name, body, to=person)
         told = told if people else []  # with no person in the queue yet, the first one who registers gets it
-        if told or closed:
-            sync_needs_you(conn)
-    return {"late": {n: len(d) for n, (_, d) in late.items()}, "told": told, "closed": closed}
+        sync_needs_you(conn)
+    return {"late": {n: len(d) for n, (_, d) in late.items()}, "woke": woke, "told": told, "closed": closed}
 
 
 UNANSWERED_NOTE = "The manager has not answered"

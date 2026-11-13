@@ -3971,6 +3971,13 @@ def dispatch(conn, a, actor):
         if a.watch:
             if not actor:
                 raise RiverError("--watch needs the manager's name: maxpm --as <name> manage --watch")
+            platform, address = core.native_from_env(conn, os.environ)
+            me = conn.execute("SELECT role, platform, native_address FROM agents WHERE name=?", (actor,)).fetchone()
+            if platform and not core.HTTP_CHAT.get() and me and me["role"] == "manager" \
+                    and (me["platform"], me["native_address"]) != (platform, address):
+                # A manager that started before its platform had a channel gets it with its next watch: then
+                # MaximizePM can wake it when its watch stops (#5747).
+                core.set_native(conn, actor, platform, address)
             return core.manage_watch(conn, actor, a.step)
         res = core.manage(conn, os.getcwd(), actor, a.takeover)
         if not core.HTTP_CHAT.get():
