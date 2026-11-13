@@ -950,6 +950,8 @@ def build_parser(only=None):
     x.add_argument("fields", nargs="*", metavar="name=<css>[@attr]", help="the fields of each row (default: its text)")
     x.add_argument("--rows", help="the rows: a ref or name of an element in a repeated row (its rows, as the snapshot "
                    "folds them), or a CSS selector; none: the page as one row")
+    x.add_argument("--in", dest="within", metavar="TEXT", help="with a --rows name that repeats: the one in the row "
+                   "or card whose text holds this")
     x.add_argument("--limit", type=int, help="the rows it gives at most (default 100)")
     x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab, or of one element (about 1000 pixels on its "
                        "long side at most); prints the file's path")

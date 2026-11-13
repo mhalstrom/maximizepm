@@ -3638,3 +3638,76 @@ ROWS_FORM = (b"<title>Form</title><label>Name <input id=name></label><table>"
         b"<tr><td>Row 2</td><td><button onclick=\"save(2)\">Save</button></td></tr></table><p id=out></p><script>"
         b"function save(n) { document.getElementById('out').textContent = 'saved ' + "
         b"document.getElementById('name').value + ' in row ' + n; }</script>")
+
+
+STARS = "data:image/svg+xml;base64," + "PHN2Zz48L3N2Zz4" * 220  # 3.3 KB of an inline picture
+PLACES = ("<title>Places</title><main><p>Results</p></main><aside><h1>Places</h1><div class=list>" + "".join(
+    f"<article tabindex=0><h2>Place {n}</h2><img src='{STARS}' alt='rating: 4.{n % 10}'><p>{n} Main St</p>"
+    f"<p>Open until 9</p></article>" for n in range(1, 21)) + "</div></aside>").encode()
+CARD = ("<div class=card><h2><a href=/r/{k}>{name}</a></h2><a href=/map/{k}>{n} El Camino Real, Menlo Park, CA 94025</a>"
+        "<span class=price>$$</span><ul class=tags><li><a href=/t/a>Date night</a></li><li><a href=/t/b>Patio</a></li>"
+        "</ul><a href=/review/{k}>READ THE REVIEW</a></div>")
+GUIDE = ("<title>Guide</title><main><h1>The best restaurants</h1><section><h2>The spots</h2>"
+         + "".join((CARD.format(k=n, n=100 + n, name="Eylan" if n == 1 else f"Spot {n}")
+                    + ("<div class=ad><a href=/near>Find the best spots nearby</a></div>" if n == 1 else "")
+                    + ("<div class=slot><iframe title=ad></iframe></div>" if n == 3 else ""))
+                   for n in range(1, 17)) + "</section></main>").encode()
+
+
+class ExtractShapes(Base):
+    """#5721 in a real Chrome: extract by a name finds the rows of a list whose rows are each one clickable element
+    (a places list of <article tabindex=0>) and of a guide whose cards an ad and a link box cut into runs; html --scope
+    shows an inline data: address as its type and size."""
+
+    def test_places_list_and_guide_cards_by_name_and_html_without_data(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = PLACES if self.path == "/places" else GUIDE
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/places")
+        f = [browser.parse_field(x) for x in ("name=h2", "rating=img@alt", "address=p")]
+        res = act(action="extract", rows="Place 3", fields=f, limit=50)
+        self.assertEqual(res["count"], 20)
+        self.assertEqual(res["data"][2], {"name": "Place 3", "rating": "rating: 4.3", "address": "3 Main St"})
+        html = act(action="html", scope="css:article")
+        self.assertLess(html["bytes"], 600, html["html"])
+        self.assertIn("data:image/svg+xml;base64,…(3300 bytes)", html["html"])
+
+        act(action="open", url=f"http://127.0.0.1:{port}/guide")
+        f = [browser.parse_field(x) for x in ("name=h2", "address=a[href^='/map']", "review=a[href^='/review']@href")]
+        res = act(action="extract", rows='link "Eylan"', fields=f, limit=50)
+        self.assertEqual(res["count"], 16)
+        self.assertEqual(res["data"][0], {"name": "Eylan", "address": "101 El Camino Real, Menlo Park, CA 94025",
+                                          "review": f"http://127.0.0.1:{port}/review/1"})
+        self.assertEqual(res["data"][15]["name"], "Spot 16")
+        by_review = act(action="extract", rows="READ THE REVIEW", within="Spot 5", fields=f[:1], limit=50)
+        self.assertEqual(by_review["count"], 16)
+
+
+class CutData(unittest.TestCase):
+    def test_a_long_data_address_shows_its_type_and_size_and_a_short_one_stays(self):
+        short = "data:image/gif;base64,R0lGODlhAQABAAAAACw="
+        html = f'<img src="{STARS}"><i style="background:url(data:image/png;base64,{"A" * 500})"></i><img src="{short}">'
+        self.assertEqual(browser.cut_data(html), '<img src="data:image/svg+xml;base64,…(3300 bytes)"><i style="background:'
+                                                 'url(data:image/png;base64,…(500 bytes))"></i>' f'<img src="{short}">')

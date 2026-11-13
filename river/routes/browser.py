@@ -548,7 +548,8 @@ def _act(conn, a, who):
     if action == "outline":
         return {**b.info(), "outline": browser.outline(b, int(a.get("heads") or browser.OUTLINE_HEADS))["lines"]}
     if action == "extract":  # #5677: rows with named fields, as JSON
-        r = browser.extract(b, a.get("rows") or None, a.get("fields") or [], int(a.get("limit") or browser.EXTRACT_MAX))
+        r = browser.extract(b, a.get("rows") or None, a.get("fields") or [], int(a.get("limit") or browser.EXTRACT_MAX),
+                            a.get("within") or None)
         record()
         return {**b.info(), "data": r["rows"], "count": r["count"]}
     if action in ON_ELEMENT and a.get("selector"):
@@ -603,6 +604,7 @@ def _act(conn, a, who):
             fb = _fallback_before(conn, b, who, "html", kind="html_part" if sc else "html_whole",
                                   target=a.get("scope") or None)
         html = browser.on_element(b, sc, "(el) => el.outerHTML") if sc else b.evaluate("document.documentElement.outerHTML")
+        html = browser.cut_data(html)  # #5721: inline data: addresses as their type and size
         if fb:
             _fallback_after(conn, b, who, fb)
         return {**b.info(), "html": html, "bytes": len((html or "").encode())}

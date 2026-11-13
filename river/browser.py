@@ -3067,7 +3067,15 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       best.id = ++gid;
       best.parent = p;
       best.idx = new Map();
-      for (let i = best.at; i < best.at + best.n * best.per; i++) best.idx.set(ch[i], Math.floor((i - best.at) / best.per));
+      if (best.per === 1) {
+        // #5721: rows of one element each are all the children with that structure, also the ones that an ad or a
+        // link box between them cut from the run (a guide's 16 cards: a run of 12 and 4 more before it)
+        const k = sig(ch[best.at]);
+        let r = 0;
+        for (let i = 0; i < ch.length; i++) if (sig(ch[i]) === k) best.idx.set(ch[i], r++);
+        best.n = r;
+      } else
+        for (let i = best.at; i < best.at + best.n * best.per; i++) best.idx.set(ch[i], Math.floor((i - best.at) / best.per));
     }
     groups.set(p, best);
     return best;
@@ -3221,12 +3229,16 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     if (x.ref) {
       const w = R.els.get(x.ref), e = w && w.deref();
       if (!e || !e.isConnected) return {error: '@' + x.ref + ' is no longer on the page: run maxpm browser snapshot'};
-      const c = chain(e).find(({g}) => {  // a row of two or more elements on average, as the snapshot folds
+      const counts = g => {  // the listed elements of each row that has some
         const per = new Map();
         g.idx.forEach((r, k) => per.set(r, (per.get(r) || 0) + k.querySelectorAll(SEL).length + (k.matches(SEL) ? 1 : 0)));
-        const v = [...per.values()].filter(q => q > 0);
-        return v.length >= 2 && v.reduce((a, q) => a + q, 0) / v.length >= 2;
-      });
+        return [...per.values()].filter(q => q > 0);
+      };
+      const ch = chain(e);
+      // A row of two or more elements on average, as the snapshot folds; else (#5721) rows that are each one
+      // clickable element with its text inside (a list of places: <article tabindex=0> with a heading and lines).
+      const c = ch.find(({g}) => { const v = counts(g); return v.length >= 2 && v.reduce((a, q) => a + q, 0) / v.length >= 2; })
+        || ch.find(({g}) => { const v = counts(g); return v.length >= 3 && v.length >= 0.8 * g.n; });
       if (!c) return {error: '@' + x.ref + ' is in no repeated row: name the rows with --rows \'<css>\''};
       const m = new Map();
       c.g.idx.forEach((r, k) => { if (!m.has(r)) m.set(r, []); m.get(r).push(k); });
@@ -3604,12 +3616,13 @@ def parse_field(spec):
     return [name.strip(), css, attr]
 
 
-def extract(b, rows=None, fields=(), limit=EXTRACT_MAX):
-    """#5677: one object for each row (rows: @eN, a name, or a CSS selector, as resolve_target takes them; None: the
-    page as one row), with the fields of parse_field; a field that a row lacks is null."""
+def extract(b, rows=None, fields=(), limit=EXTRACT_MAX, within=None):
+    """#5677: one object for each row (rows: @eN, a name, or a CSS selector, as resolve_target takes them, with
+    within for a name that repeats; None: the page as one row), with the fields of parse_field; a field that a row
+    lacks is null."""
     x = {"fields": [parse_field(f) if isinstance(f, str) else list(f) for f in fields], "limit": int(limit or EXTRACT_MAX)}
     if rows:
-        t = resolve_target(b, rows, verb="extract --rows")
+        t = resolve_target(b, rows, within, verb="extract --rows")
         if t.startswith("css:"):
             x["css"] = t[4:]
         else:
@@ -3746,6 +3759,16 @@ TEXT_JS = r"""(function (o) {
     return undo;
   }
 })"""
+
+
+DATA_KEEP = 100  # characters of an inline data: address that maxpm browser html keeps; a longer one shows its size
+DATA_URI = re.compile(r"data:([\w.+-]+/[\w.+-]+)?((?:;[\w=.+-]+)*),((?:(?!&quot;)[^\"')]){%d,})" % DATA_KEEP)
+
+
+def cut_data(html):
+    """#5721: each long inline data: address of HTML as its type and size. One SVG of rating stars was 3.3 KB of the
+    4 KB that html --scope gave for one row; its bytes tell an agent nothing."""
+    return DATA_URI.sub(lambda m: f"data:{m.group(1) or ''}{m.group(2)},…({len(m.group(3))} bytes)", html or "")
 
 
 def page_text(b, section=None, grep=None, start=0, limit=TEXT_MAX, everything=False):
