@@ -163,6 +163,43 @@ def browser_dir(project):
     return core.db_path().parent / "browsers" / safe
 
 
+# Every Chrome this process started, until it has ended and is reaped (#5715). The loop of maxpm serve runs in a
+# process of its own (river/loop.py) and stops a session's Chrome there by its pid (sweep, browser_idle_end), but the
+# Chrome is a child of serve's own process, which then never waited for it: 126 zombies after a day on mark's Mac
+# (2026-11-13), each with its SingletonLock left in the profile. A thread of the process that started them polls
+# them, so each one that ended is reaped, whoever stopped it.
+CHILDREN = []
+_CHILDREN_LOCK = threading.Lock()
+_REAPER = {"thread": None}
+REAP_EVERY = 30.0
+
+
+def track_child(proc):
+    with _CHILDREN_LOCK:
+        CHILDREN.append(proc)
+        if _REAPER["thread"] is None or not _REAPER["thread"].is_alive():
+            _REAPER["thread"] = threading.Thread(target=_reap_loop, daemon=True, name="browser-reaper")
+            _REAPER["thread"].start()
+
+
+def reap():
+    """Wait for each Chrome child that ended (poll), so none stays a zombie. Returns how many still run."""
+    with _CHILDREN_LOCK:
+        CHILDREN[:] = [p for p in CHILDREN if p.poll() is None]
+        return len(CHILDREN)
+
+
+def _reap_loop():
+    stop = threading.Event()
+    while True:
+        stop.wait(REAP_EVERY)
+        if not reap():
+            with _CHILDREN_LOCK:
+                if not CHILDREN:  # nothing to watch: the next start starts it again
+                    _REAPER["thread"] = None
+                    return
+
+
 def session_dir(project, owner):
     """The folder of one session's browser of a project (#5636): its own profile, downloads and state.json."""
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", owner).strip("._") or "session"
@@ -706,6 +743,7 @@ class Browser:
                 args.insert(1, f"--user-agent={ua}")
         self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                      start_new_session=True)
+        track_child(self.proc)
         end = time.time() + START_WAIT
         while time.time() < end:
             port = self._active_port()

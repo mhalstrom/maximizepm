@@ -5501,7 +5501,27 @@ def remove_serve_file(path):
         pass
 
 
+def reap_orphans():
+    """Wait for the children of this process that ended before it started (#5715). A restart of serve is an exec of
+    the same process: the Chromes it stopped before stay its children, as zombies that no Popen of the new code
+    knows. Only ended ones (WNOHANG): a child that still runs is left alone. Returns how many it reaped."""
+    n = 0
+    if not hasattr(os, "WNOHANG"):
+        return 0
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return n
+        if not pid:
+            return n
+        n += 1
+
+
 def serve(port: int, open_browser=False, dev=False):
+    reaped = reap_orphans()  # before the first child of this start (#5715)
+    if reaped:
+        print(f"reaped {reaped} ended child processes of the last start", flush=True)
     httpd = _Server(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     DEV["on"] = dev

@@ -2061,6 +2061,36 @@ class AttachedChrome(Base):
         b.close()
 
 
+class Reaper(unittest.TestCase):
+    """A Chrome that another process stopped by its pid is reaped by the process that started it (#5715)."""
+
+    @unittest.skipIf(os.name == "nt", "POSIX zombies")
+    def test_an_ended_child_is_reaped_and_dropped(self):
+        import subprocess
+        p = subprocess.Popen(["sh", "-c", "exit 3"])
+        ref = p  # the Browser object keeps its Popen: Python's own cleanup of dropped ones does not reach it
+        browser.track_child(p)
+        self.addCleanup(lambda: browser.CHILDREN.remove(p) if p in browser.CHILDREN else None)
+        end = time.time() + 5
+        while time.time() < end and p in browser.CHILDREN:
+            browser.reap()
+            time.sleep(0.05)
+        self.assertNotIn(p, browser.CHILDREN)
+        self.assertEqual(ref.returncode, 3)
+        with self.assertRaises(ChildProcessError):  # nothing is left to wait for: no zombie
+            os.waitpid(p.pid, os.WNOHANG)
+        self.assertTrue(browser._REAPER["thread"] is None or browser._REAPER["thread"].daemon)
+
+    @unittest.skipIf(not hasattr(os, "posix_spawn"), "POSIX zombies")
+    def test_serve_reaps_the_children_that_ended_before_its_start(self):
+        pid = os.posix_spawn("/bin/sh", ["sh", "-c", "exit 0"], os.environ)  # no Popen knows it, as after an exec
+        end = time.time() + 5
+        while time.time() < end and server.reap_orphans() == 0:
+            time.sleep(0.05)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
+
+
 if __name__ == "__main__":
     unittest.main()
 
