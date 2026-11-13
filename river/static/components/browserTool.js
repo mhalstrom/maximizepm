@@ -71,7 +71,8 @@ function render(box, project, session) {
         autocapitalize="off" spellcheck="false" enterkeyhint="go">
     </form>
     <div class="br-ctl"><span class="br-who muted t-s"></span>
-      <span class="br-refused hidden t-s">This site refuses a browser with no window: open it as a window.</span><span class="br-sp"></span>
+      <span class="br-refused hidden t-s">This site refuses a browser with no window: open it as a window.</span>
+      <span class="br-wby hidden muted t-s"></span><span class="br-sp"></span>
       ${button("Annotate", { cls: "br-annbtn hidden", title: "Mark up the page", pressed: false, data: { br: "annotate" } })}
       ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
       ${button("Give back", { cls: "br-back hidden", title: "Hand the browser on", data: { br: "give_back" } })}
@@ -158,6 +159,13 @@ function render(box, project, session) {
     $$(".br-save").classList.toggle("hidden", !(j.running && j.owner));  // a session's browser (#5633, #5634)
     win.classList.toggle("primary", !!j.refused && !j.window);
     $$(".br-refused").classList.toggle("hidden", !(j.refused && !j.window));
+    // #5650: who opened the window and when; it goes back into the panel by itself, and the pane says why.
+    const hm = (at) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const wb = j.window && j.window_by, we = !j.window && j.window_end;
+    const wby = $$(".br-wby");
+    wby.textContent = wb ? `${wb.who} opened it as a window at ${hm(wb.at)}. It comes back here after ${j.window_idle} with no input in it, or when the window closes.`
+      : we && Date.now() - Date.parse(we.at) < 600000 ? `Back in the panel at ${hm(we.at)}: ${we.why}.` : "";
+    wby.classList.toggle("hidden", !wby.textContent);
     stage.classList.toggle("br-locked", !v.mine);
     if (document.activeElement !== addr) addr.value = j.url && j.url !== "about:blank" ? j.url : "";
     strip(j.tabs || []);

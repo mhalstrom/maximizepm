@@ -349,6 +349,58 @@ class SharedBrowserLock(Base):
         m.assert_called_once()
         self.assertEqual(m.call_args.args[2:], ("mark", True))
 
+    def test_a_window_goes_back_into_the_panel_by_itself(self):
+        """#5650: a browser shown as a window goes back headless when the person closes the window, and after
+        browser_window_idle with no input in it and no change of its page; the panel says who opened it and why it
+        came back."""
+        import datetime
+        # serve's own Chrome: the person closes the window; the next start is headless, not a new window.
+        b = browser.get("web", "ag1")
+        b.state["window"] = True
+        browser.mark_window(b, "mark", True, True)
+
+        class Closed:
+            def recv(self):
+                raise EOFError
+        b.ws = ws = Closed()
+        b._reader(ws)
+        self.assertEqual((b.state["window"], b.state["window_end"]["why"]), (False, "the window was closed"))
+        self.assertNotIn("window_by", b.state)
+        # No input for browser_window_idle (10m): it starts again with no window.
+        b2 = browser.get("web", "ag2")
+        b2.ws, b2.state["window"], starts = object(), True, []
+        b2.start = lambda window=None: starts.append(window)
+        browser.mark_window(b2, "ag2", False, True)
+        info = b2.info()
+        self.assertEqual((info["window_by"]["who"], info["window_idle"]), ("ag2", "10m"))
+        b2.state["window_by"]["at"] = core.iso(core.now() - datetime.timedelta(minutes=11))
+        b2.active_at = b2.person_at = time.time() - 300
+        self.assertEqual(browser.window_sweep(self.c), [])  # a change of its page 5 minutes ago
+        b2.active_at = b2.person_at = time.time() - 700
+        self.assertEqual(browser.window_sweep(self.c), [("web", "ag2", "no input in the window for 11m")])
+        self.assertEqual((starts, b2.state["window_end"]["why"]), ([False], "no input in the window for 11m"))
+        # An attached Chrome whose window was closed: browser_mode starts it again headless.
+        a, _ = self._attached(window=True)
+        core.config_set(self.c, "browser_mode", "mode {mode}", project="web")
+        a.ws = None
+        self.calls.clear()
+        self.assertIn(("web", None, "the window was closed"), browser.window_sweep(self.c))
+        self.assertIn("mode headless", self.calls)
+
+    def test_a_session_opens_a_window_only_when_the_person_asked_in_its_chat(self):
+        b = browser.get("web", "ag1")
+        starts = []
+        b.start = lambda window=None: starts.append(window)
+        with self.assertRaisesRegex(RiverError, "only when the person asked for it in its chat"):
+            routes.act(self.c, {"action": "window", "project": "web", "window": True}, "ag1")
+        core.activity_event(self.c, {"hook_event_name": "UserPromptSubmit", "prompt": "open it as a window"},
+                            {"MAXPM_AGENT": "ag1"})
+        info = routes.act(self.c, {"action": "window", "project": "web", "window": True}, "ag1")
+        self.assertEqual((starts, b.state["window_by"]["who"], b.state["window_by"]["person"]), ([True], "ag1", False))
+        routes.act(self.c, {"action": "window", "project": "web", "window": False}, "ag1")  # back: always
+        self.assertNotIn("window_by", b.state)
+        self.assertIsNone(info["window_by"])  # the fake start opened no window
+
 
 class ProjectOf(Base):
     def test_the_project_of_the_held_item_then_the_only_project(self):

@@ -189,6 +189,11 @@ DEFAULT_SETTINGS = {
     # when they click or type, #5629) when the person's newest message in its chat is newer than their last input in
     # the browser, or when the person has not used the browser for this long. Until then their input wins.
     "browser_take_after": "2m",
+    # A browser opened as a window (Open as a window, maxpm browser window) goes back into the panel, headless, after
+    # this long with no input in the window and no change of its page, and at once when the person closes the window
+    # (#5650, mark 2026-11-12: 'I thought the browser worked without opening a separate chrome window?'). A session
+    # opens it as a window only when the person asked in its chat within this time.
+    "browser_window_idle": "10m",
     # on: a screenshot that a session takes with the Playwright tools has the session's pointer and its last click
     # ring drawn in (#5616), as maxpm browser screenshot --cursor; off: a clean picture of the page.
     "browser_shot_cursor": "off",
@@ -2102,7 +2107,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
-            "prompt_wait", "idle_end", "browser_idle_end", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)

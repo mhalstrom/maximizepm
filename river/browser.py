@@ -545,6 +545,8 @@ class Browser:
         self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
         self.inputs = Inputs(self)  # the person's input, to Chrome in order without a wait in the request (#5651)
         self.refit_ws = None  # the CDP connection of the Chrome whose density was set again after a load (#5651)
+        self.active_at = time.time()  # the last change of the page: a new frame, a tab, an address (#5650: a window
+                                      # with none for browser_window_idle goes back into the panel)
         self.visits = {}     # url -> {url, title, n, at}: the pages its tabs showed, for the address bar (#5635)
         self.history = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's History in memory
         self.icons = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's Favicons (#5632)
@@ -891,6 +893,14 @@ class Browser:
         if self.ws is ws:  # Chrome ended (a person closed the window): the next action starts it again
             self.ws = None
             self.session = self.target = None
+            if self.state.get("window") and not self.attached:  # #5650: headless again, not a new window
+                self.state["window"] = False
+                self.state.pop("window_by", None)
+                self.state["window_end"] = {"why": "the window was closed", "at": core.iso(core.now())}
+                try:
+                    self._save()
+                except OSError:
+                    pass
             with self.cond:
                 self.seq += 1
                 self.cond.notify_all()
@@ -921,6 +931,7 @@ class Browser:
                     if h not in self.seen:
                         self.seen = (self.seen + [h])[-SHARP_SEEN:]
                     self._want_sharp()
+                self.active_at = time.time()
                 with self.cond:
                     self.seq += 1
                     self.frame = {"seq": self.seq, "data": p["data"], "w": m.get("deviceWidth"), "h": m.get("deviceHeight")}
@@ -941,6 +952,7 @@ class Browser:
                     return
                 self.mine.add(t["targetId"])
             new = t["targetId"] not in self.targets
+            self.active_at = time.time()
             self.targets[t["targetId"]] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
             note_visit(self, t["url"], t["title"])
             if new and t.get("openerId") and t["openerId"] == self.target:  # a page opened a new tab: show it
@@ -1035,6 +1047,10 @@ class Browser:
                 "refused": any(r.match(url) for r in REFUSED),  # the site refuses a browser with no window
                 "url": cur.get("url", ""), "title": cur.get("title", ""), "controller": c or None,
                 "before": before.get("who"),
+                # #5650: who opened it as a window and when; why it went back into the panel by itself
+                "window_by": self.state.get("window_by") if self._windowed() else None,
+                "window_idle": setting_of(self.project, "browser_window_idle") if self._windowed() else None,
+                "window_end": self.state.get("window_end"),
                 "size": list(self.size) if self.size else None,  # the panel's size that serve has (#5625)
                 # The tab strip (#5632): each tab with its icon (from Chrome's Favicons, a data address) and the
                 # session whose pointer is on it.
@@ -1663,6 +1679,8 @@ def sweep(conn, at=None):
     that it stopped."""
     at = at or time.time()
     out = []
+    for project, owner, why in window_sweep(conn, at):
+        print(f"browser {project}/{owner or '-'}: back in the panel ({why})", flush=True)
     for (project, owner), b in list(BROWSERS.items()):
         if not owner:
             continue
@@ -1995,6 +2013,69 @@ def _notify(b):
     with b.cond:
         b.seq += 1
         b.cond.notify_all()
+
+
+# ---- a window ends by itself (#5650): a browser shown as a window goes back into the panel, headless
+
+def mark_window(b, who, person, window):
+    """Record who opened the browser as a window and when (the panel shows it), or that it went back."""
+    if window:
+        b.state["window_by"] = {"who": who or "the person", "person": bool(person), "at": core.iso(core.now())}
+        b.state.pop("window_end", None)
+    else:
+        b.state.pop("window_by", None)
+    b._save()
+
+
+def may_open_window(conn, b, who):
+    """A session opens the browser as a window only when the person asked for it in its chat within
+    browser_window_idle; RiverError says why not."""
+    idle = core.parse_duration(setting_of(b.project, "browser_window_idle")).total_seconds()
+    r = conn.execute("SELECT person_said_at FROM agents WHERE name=?", (who,)).fetchone()
+    said = core.parse_iso(r["person_said_at"]).timestamp() if r and r["person_said_at"] else 0
+    if time.time() - said > idle:
+        raise RiverError(f"a session opens the browser of {b.project} as a window only when the person asked for it in "
+                         f"its chat (in the last {_ago(idle)}): ask them there; the person presses Open as a window "
+                         f"in the panel")
+
+
+def end_window(conn, b, why):
+    """Back into the panel, headless: serve's own Chrome starts again with no window, an attached one through
+    browser_mode (under its lock)."""
+    if b.attached:
+        attached_mode(conn, b, "maxpm", False)
+    else:
+        b.start(window=False)
+    b.state.pop("window_by", None)
+    b.state["window_end"] = {"why": why, "at": core.iso(core.now())}
+    b._save()
+    _notify(b)
+
+
+def window_sweep(conn, at=None):
+    """A pass of maxpm serve: each browser shown as a window with no input and no change of its page for
+    browser_window_idle, and each attached Chrome whose window was closed, goes back into the panel. Returns the
+    (project, owner, why) of each."""
+    at = at or time.time()
+    out = []
+    for (project, owner), b in list(BROWSERS.items()):
+        why = None
+        if b.attached and b.attached_window and not b.running():
+            why = "the window was closed"
+        elif b.running() and b._windowed():
+            by = (b.state.get("window_by") or {}).get("at")
+            last = max(b.active_at, b.person_at, core.parse_iso(by).timestamp() if by else 0)
+            idle = core.parse_duration(setting_of(project, "browser_window_idle")).total_seconds()
+            if at - last >= idle:
+                why = f"no input in the window for {_ago(at - last)}"
+        if not why:
+            continue
+        try:
+            end_window(conn, b, why)
+            out.append((project, owner, why))
+        except RiverError:
+            pass  # another holder keeps the lock of a shared Chrome: the next pass tries again
+    return out
 
 
 # ---- the panel's frames and input
