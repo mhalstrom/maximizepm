@@ -988,6 +988,9 @@ def build_parser(only=None):
     x.add_argument("--file", help="read the lines from this file, not the standard input")
     x.add_argument("--lines", help="the lines themselves, in one argument (the MCP tool)")
     # #5680: a session's walk as lines, and the lines as one call with inputs
+    x = brs.add_parser("errors", parents=[bp], help="the page's script errors, console.error calls and failed requests "
+                       "(status 400 or more, or no answer), the newest last")
+    x.add_argument("--clear", action="store_true", help="empty the list after it prints")
     x = brs.add_parser("steps", parents=[bp], help="the actions of your walk in this browser, as lines that run takes "
                        "(names, not refs); put {name} where an input goes")
     x.add_argument("--clear", action="store_true", help="forget the walk so far (start a new one)")
@@ -2702,7 +2705,7 @@ def _browser_args(a):
         args["selector"] = a.target
     elif b == "key":
         args["key"] = a.key
-    elif b == "steps":  # #5680
+    elif b in ("steps", "errors"):  # #5680, #5675
         args["clear"] = a.clear
     elif b == "upload":  # #5679: full paths, as serve runs in another folder
         args.update(selector=a.target, files=[str(Path(f).expanduser().resolve()) for f in a.files])
@@ -5329,6 +5332,12 @@ def _browser_result(action, res):
         out.append(f"downloaded {d['path']} ({size})" if d["state"] == "completed" else
                    f"download {d['state']}: {d['name']} ({size} so far)" if d["state"] == "inProgress" else
                    f"download {d['state']}: {d['name']}")
+    pe = res.get("page_errors")
+    if pe:  # #5675: the page's errors since the action began
+        n, r = pe.get("errors", 0), pe.get("requests", 0)
+        out.append(", ".join(x for x in (f"{n} error{'' if n == 1 else 's'}" if n else "",
+                                         f"{r} failed request{'' if r == 1 else 's'}" if r else "") if x)
+                   + " (maxpm browser errors)")
     if "text" in res:  # #5672: open --text
         out += _text_lines(res)
     if res.get("snapshot"):
@@ -5374,6 +5383,17 @@ def render_browser(a, res):
         print("\n".join(_browser_result("extract", res)))
         if res.get("count", 0) > len(res.get("data") or []):
             print(f"maxpm: {len(res['data'])} of {res['count']} rows: --limit <n> for more", file=sys.stderr)
+        return
+    if b == "errors":  # #5675: one line each, with its first stack frame or its request
+        for e in res.get("errors") or []:
+            if e["kind"] == "request":
+                print(f"request {e.get('method', 'GET')} {e.get('url', '')} {e.get('status') or e.get('error')}")
+            else:
+                f = (e.get("frames") or [{}])[0]
+                at = f" (at {f['url']}:{f.get('line', 0) + 1})" if f.get("url") else ""
+                print(f"{e.get('source', 'error')}: {e['message']}{at}")
+        if not res.get("errors"):
+            print("(no errors on this page)")
         return
     if b == "steps":  # #5680: the walk as lines for run
         import shlex

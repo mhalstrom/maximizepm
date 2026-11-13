@@ -194,6 +194,11 @@ def _act(conn, a, who):
         if a.get("clear"):
             b.walk = []
         return {**b.info(), "steps": list(getattr(b, "walk", []))}
+    if action == "errors":  # #5675: the shown tab's script errors and failed requests
+        out = {**b.info(), "errors": list(b.errors)}
+        if a.get("clear"):
+            b.errors = []
+        return out
     # #5680: a step of a batch or a run checks the controller before it runs, reads too: the person's Take control
     # stops the sequence before its next step
     guard = a.get("_guard") and not person and action not in CHANGES

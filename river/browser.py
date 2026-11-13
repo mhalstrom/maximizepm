@@ -619,6 +619,9 @@ class Browser:
         self.refs = 0        # the last ref number given: refs never repeat in one browser, so an old ref fails
         self.opened = 0      # tabs that a page of the shown tab opened
         self.downloads = []  # #5679: the last downloads: {guid, url, name, state, bytes, path}
+        self.errors = []     # #5675: the shown tab's script errors and failed requests (ERRORS_KEEP), and their count
+        self.err_n = 0
+        self.req_info = {}   # requestId -> {url, method, type}: what a failed request names
         self.dl_n = 0        # downloads begun: an action's mark counts the ones it started
         self.dialog = None   # the alert, confirm or prompt box of the shown tab that waits for an answer (#5674)
         self.state = self._load()
@@ -825,6 +828,12 @@ class Browser:
         s = self.session
         self.call("Page.enable", session=s)
         self.call("Network.enable", session=s)
+        self.req_info = {}
+        for m in ("Runtime.enable", "Log.enable"):  # #5675: the page's errors, for the replies of actions
+            try:
+                self.call(m, session=s)
+            except RiverError:
+                pass
         self.call("Network.setBlockedURLs", {"urls": ["file://*", "chrome://*", "chrome-extension://*"]}, session=s)
         self._fit()
         self.cast_quality = self._cast_quality()
@@ -1032,8 +1041,11 @@ class Browser:
                     self.seq += 1
                     self.frame = {"seq": self.seq, "data": p["data"], "w": m.get("deviceWidth"), "h": m.get("deviceHeight")}
                     self.cond.notify_all()
-        elif session == self.session and method in NAV_EVENTS:
-            track_nav(self, method, p)
+        elif session == self.session and (method in NAV_EVENTS or method in ERROR_EVENTS):
+            if method in ERROR_EVENTS:  # #5675
+                track_errors(self, method, p)
+            if method in NAV_EVENTS:
+                track_nav(self, method, p)
         elif method in ("Browser.downloadWillBegin", "Browser.downloadProgress"):
             track_download(self, method, p)
         elif session == self.session and method in ("Page.javascriptDialogOpening", "Page.javascriptDialogClosed"):
@@ -2549,6 +2561,8 @@ def char_events(ch):
 
 # ---- what an action waits for (#5663): the next page that it led to, or nothing
 
+ERROR_EVENTS = {"Runtime.exceptionThrown", "Runtime.consoleAPICalled", "Log.entryAdded", "Network.requestWillBeSent",
+                "Network.responseReceived", "Network.loadingFailed"}  # #5675: the shown tab's errors
 NAV_EVENTS = {"Page.frameStartedLoading", "Page.frameStoppedLoading", "Page.frameNavigated",
               "Page.frameRequestedNavigation", "Page.frameClearedScheduledNavigation", "Page.navigatedWithinDocument",
               "Network.requestWillBeSent", "Network.loadingFinished", "Network.loadingFailed"}
@@ -2635,7 +2649,8 @@ class BrowserError(RiverError):
 ERROR_CODES = ("not_found", "ambiguous", "covered", "dialog_open", "not_controller", "timeout", "refused_address",
                "refused_file", "error")
 # What each action does: a read changes nothing on the page (a recorder may run it with no yes); a change does.
-READS = {"status", "snapshot", "outline", "text", "extract", "html", "screenshot", "suggest", "annotations", "steps"}
+READS = {"status", "snapshot", "outline", "text", "extract", "html", "screenshot", "suggest", "annotations", "steps",
+         "errors"}
 _PAGE = {"project", "owner", "running", "window", "source", "modes", "refused", "url", "title", "controller", "before",
          "window_by", "window_idle", "window_end", "size", "dialog", "tabs", "navigated", "changes", "outline", "notes"}
 
@@ -2734,7 +2749,8 @@ def nav_mark(b):
     """Before an action: what after() compares with."""
     b.nav.clear()
     return {"navs": b.navs, "opened": b.opened, "target": b.target, "asks": b.asks, "within": b.within, "dl": b.dl_n,
-            "title": (b.targets.get(b.target) or {}).get("title"), "url": (b.targets.get(b.target) or {}).get("url")}
+            "title": (b.targets.get(b.target) or {}).get("title"), "url": (b.targets.get(b.target) or {}).get("url"),
+            "err": b.err_n, "at": time.time()}
 
 
 def route_title(b, mark):
@@ -3924,6 +3940,16 @@ def done(b, wait, mark, **out):
         out["downloads"] = got
         if (b.targets.get(b.target) or {}).get("url") == mark.get("url"):
             moved = False  # Chrome started a load for the link, which became the download: the page stays
+    # #5675: the requests that the action started end first (REQUESTS_WAIT at most), so their errors are in the reply
+    started = [r for r, t in list(b.requests.items()) if t >= mark.get("at", time.time())]
+    end = time.time() + REQUESTS_WAIT
+    while started and (wait or "auto") != "none" and not b.dialog and time.time() < end:
+        started = [r for r in started if r in b.requests]
+        if started:
+            _pause(0.02)
+    errs = errors_since(b, mark)
+    if errs:
+        out["page_errors"] = errs
     return {**b.info(), **out, "navigated": moved}
 
 
@@ -4260,6 +4286,68 @@ def _arg_text(a):
     return a.get("description") or a.get("type") or ""
 
 
+def error_of(method, p, requests):
+    """One error of a page from a CDP event, or None (the page walk of #5516 and the shown tab of #5675): a script
+    error {kind error, source exception|console|log, message, frames}, or a request that failed {kind request, url,
+    method, type, status or error}. requests: requestId -> the request, which requestWillBeSent fills."""
+    if method == "Runtime.exceptionThrown":
+        d = p.get("exceptionDetails") or {}
+        text = ((d.get("exception") or {}).get("description") or d.get("text") or "an exception").strip()
+        frames = _frames(d.get("stackTrace")) or ([{"function": "", "url": d["url"], "line": d.get("lineNumber", 0),
+                                                    "column": d.get("columnNumber", 0)}] if d.get("url") else [])
+        return {"kind": "error", "source": "exception", "message": text.splitlines()[0][:500], "frames": frames}
+    if method == "Runtime.consoleAPICalled" and p.get("type") in ("error", "assert"):
+        text = " ".join(_arg_text(a) for a in p.get("args") or []).strip() or p["type"]
+        return {"kind": "error", "source": "console", "message": text.splitlines()[0][:500],
+                "frames": _frames(p.get("stackTrace"))}
+    if method == "Log.entryAdded":
+        e = p.get("entry") or {}
+        if e.get("level") == "error" and e.get("source") not in ("network", "console-api"):
+            return {"kind": "error", "source": "log", "message": (e.get("text") or "").splitlines()[0][:500],
+                    "frames": _frames(e.get("stackTrace")) or (
+                        [{"function": "", "url": e["url"], "line": e.get("lineNumber", 0), "column": 0}]
+                        if e.get("url") else [])}
+        return None
+    if method == "Network.requestWillBeSent":
+        r = p.get("request") or {}
+        requests[p["requestId"]] = {"url": r.get("url", ""), "method": r.get("method", "GET"), "type": p.get("type") or ""}
+        if len(requests) > 2000:  # a page that never stops asking
+            for k in list(requests)[:1000]:
+                requests.pop(k, None)
+        return None
+    if method == "Network.responseReceived":
+        r = p.get("response") or {}
+        if (r.get("status") or 0) >= 400:
+            q = requests.get(p["requestId"]) or {"url": r.get("url", ""), "method": "GET"}
+            return {"kind": "request", **q, "type": p.get("type") or q.get("type", ""), "status": r["status"]}
+        return None
+    if method == "Network.loadingFailed" and not p.get("canceled"):
+        q = requests.get(p["requestId"]) or {"url": "", "method": "GET"}
+        return {"kind": "request", **q, "type": p.get("type") or q.get("type", ""),
+                "error": p.get("blockedReason") or p.get("errorText") or "failed"}
+    return None
+
+
+ERRORS_KEEP = 100  # the errors of the shown tab that a browser keeps (maxpm browser errors)
+REQUESTS_WAIT = 1.0  # seconds that an action waits for the requests it started (their errors go in its reply)
+
+
+def track_errors(b, method, p):
+    """#5675: the errors of the shown tab, for the replies of actions and maxpm browser errors."""
+    e = error_of(method, p, b.req_info)
+    if e:
+        b.err_n += 1
+        b.errors.append({**e, "n": b.err_n, "at": core.iso(core.now()), "page": (b.targets.get(b.target) or {}).get("url")})
+        del b.errors[:-ERRORS_KEEP]
+
+
+def errors_since(b, mark):
+    """The counts of the errors since mark: {errors, requests}; empty when none."""
+    new = [e for e in b.errors if e["n"] > mark.get("err", b.err_n)]
+    out = {"errors": sum(1 for e in new if e["kind"] == "error"), "requests": sum(1 for e in new if e["kind"] == "request")}
+    return out if new else {}
+
+
 def walk(b, pages, settle=3.0, timeout=60.0):
     """Open each address of pages in a background tab of the project's browser b (not the tab the person sees) and
     record, for each page: the uncaught exceptions, console.error calls and error log entries with their stack
@@ -4285,36 +4373,12 @@ def walk(b, pages, settle=3.0, timeout=60.0):
             now["scripts"][p["url"]] = p["scriptId"]
         elif page is None:
             return
-        elif method == "Runtime.exceptionThrown":
-            d = p.get("exceptionDetails") or {}
-            text = ((d.get("exception") or {}).get("description") or d.get("text") or "an exception").strip()
-            frames = _frames(d.get("stackTrace")) or ([{"function": "", "url": d["url"], "line": d.get("lineNumber", 0),
-                                                        "column": d.get("columnNumber", 0)}] if d.get("url") else [])
-            page["errors"].append({"kind": "exception", "message": text.splitlines()[0][:500], "frames": frames})
-        elif method == "Runtime.consoleAPICalled" and p.get("type") in ("error", "assert"):
-            text = " ".join(_arg_text(a) for a in p.get("args") or []).strip() or p["type"]
-            page["errors"].append({"kind": "console", "message": text.splitlines()[0][:500],
-                                   "frames": _frames(p.get("stackTrace"))})
-        elif method == "Log.entryAdded":
-            e = p.get("entry") or {}
-            if e.get("level") == "error" and e.get("source") not in ("network", "console-api"):
-                page["errors"].append({"kind": "log", "message": (e.get("text") or "").splitlines()[0][:500],
-                                       "frames": _frames(e.get("stackTrace")) or (
-                                           [{"function": "", "url": e["url"], "line": e.get("lineNumber", 0), "column": 0}]
-                                           if e.get("url") else [])})
-        elif method == "Network.requestWillBeSent":
-            r = p.get("request") or {}
-            now["requests"][p["requestId"]] = {"url": r.get("url", ""), "method": r.get("method", "GET"),
-                                               "type": p.get("type") or ""}
-        elif method == "Network.responseReceived":
-            r = p.get("response") or {}
-            if (r.get("status") or 0) >= 400:
-                q = now["requests"].get(p["requestId"]) or {"url": r.get("url", ""), "method": "GET"}
-                page["requests"].append({**q, "type": p.get("type") or q.get("type", ""), "status": r["status"]})
-        elif method == "Network.loadingFailed" and not p.get("canceled"):
-            q = now["requests"].get(p["requestId"]) or {"url": "", "method": "GET"}
-            page["requests"].append({**q, "type": p.get("type") or q.get("type", ""),
-                                     "error": p.get("blockedReason") or p.get("errorText") or "failed"})
+        else:
+            e = error_of(method, p, now["requests"])
+            if e and e.pop("kind") == "request":
+                page["requests"].append(e)
+            elif e:
+                page["errors"].append({"kind": e.pop("source"), **e})
 
     b.listeners[session] = on
     out = []

@@ -27,7 +27,7 @@ PROTOCOL = "2025-06-18"
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
 BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
                    "check", "uncheck", "key", "dialog", "upload", "back", "forward", "reload", "screenshot", "status",
-                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag")
+                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag", "errors")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "

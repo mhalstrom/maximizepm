@@ -1897,6 +1897,60 @@ FILES = (b"<title>Files</title><a href=/report.csv>Report</a> <label for=f>Choos
          b"<input id=f type=file style='display:none' onchange=\"document.title = 'got ' + this.files[0].name\">")
 
 
+ERRS = (b"<title>Err</title><button onclick=\"fetch('/api/fail')\">Load</button>"
+        b"<button onclick=\"console.error('bad thing'); throw new Error('boom')\">Break</button>"
+        b"<button onclick=\"document.title = 'fine'\">Fine</button>")
+
+
+class PageErrors(Base):
+    """#5675 in a real Chrome: the reply of an action counts the page's errors and failed requests since it began
+    (a request with status 500, console.error, an uncaught error), says nothing when there are none, and maxpm
+    browser errors lists them."""
+
+    def test_an_action_counts_its_errors_and_errors_lists_them(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                fail = self.path == "/api/fail"
+                body = b"no" if fail else ERRS
+                self.send_response(500 if fail else 200)
+                self.send_header("Content-Type", "text/plain" if fail else "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+        out = act(action="click", selector="Load")
+        self.assertEqual(out["page_errors"], {"errors": 0, "requests": 1})
+        self.assertIn("1 failed request (maxpm browser errors)", cli._browser_result("click", out))
+        out = act(action="click", selector="Break")
+        self.assertEqual(out["page_errors"], {"errors": 2, "requests": 0})
+        self.assertIn("2 errors (maxpm browser errors)", cli._browser_result("click", out))
+        self.assertNotIn("page_errors", act(action="click", selector="Fine"))
+        errs = act(action="errors", clear=True)["errors"]
+        self.assertEqual([(e["kind"], e.get("status") or e.get("source")) for e in errs],
+                         [("request", 500), ("error", "console"), ("error", "exception")])
+        self.assertEqual(errs[0]["url"], f"http://127.0.0.1:{port}/api/fail")
+        self.assertIn("boom", errs[2]["message"])
+        self.assertEqual(act(action="errors")["errors"], [])
+
+
 POINTER = (b"<title>Pointer</title><style>#mm{display:none;position:absolute;background:#fff} #m:hover #mm{display:block}"
            b"</style><nav aria-label=Main>"
            b"<div id=m style='display:inline-block;padding:8px'>Products<div role=menu aria-label=Products id=mm>"
