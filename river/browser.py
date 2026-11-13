@@ -524,6 +524,7 @@ class Browser:
         self.screen = None   # (w, h) of the panel's screen, CSS px
         self.sharp = threading.Event()  # a sharp frame is due: _sharpen takes a screenshot of the page
         self.sharp_due = 0.0  # when: SHARP_QUIET after the last new frame
+        self.sent = {}       # pane id -> the seq that its last answered poll had (#5637: several polls at once)
         self.sharp_thread = None
         self.seen = []       # the bytes (a hash) of the last screencast frames, for the sharp frames
         self.panes = {}      # the open panels: pane id -> {size, dsf, screen, at}
@@ -1969,9 +1970,13 @@ def _notify(b):
 
 # ---- the panel's frames and input
 
-def frame(b, after, timeout=8, pane=None):
+def frame(b, after, timeout=8, pane=None, many=False):
     """The newest frame after seq `after` (a long poll); with no new frame within timeout, the status only. pane: the
-    panel that asks; pane_known says whether serve has its size (after a restart of serve it has none)."""
+    panel that asks; pane_known says whether serve has its size (after a restart of serve it has none).
+    many (#5637): the panel keeps several polls open at once (a phone over the relay, where each poll costs a round
+    trip). Each answer then moves the pane's cursor, so the next poll that waits gets the next change, never one that
+    another poll took; at most as many frames as polls are on the way, each the newest when it left. A poll that
+    waits the whole timeout gets the frame after `after` itself, in case an answer was lost."""
     known = b.pane_seen(pane) if pane else None
     start = time.time()
     end = start + timeout
@@ -1979,24 +1984,48 @@ def frame(b, after, timeout=8, pane=None):
     b.watched = start
     if again and b.dsf > 1 and b.frame and not b.frame.get("sharp"):
         b._want_sharp()  # the panel watches again: the frame that came while nobody watched is not sharp
+    key = str(pane)[:40] if many and pane else None
     with b.cond:
         b.watching += 1
         try:
-            while b.seq <= after and time.time() < end:
+            while True:  # the cursor again at each wake: another poll of the pane may have taken the change
+                mark = max(after, b.sent.get(key, 0)) if key else after
+                if b.seq > mark or time.time() >= end:
+                    break
                 b.cond.wait(max(0.05, end - time.time()))
         finally:
             b.watching -= 1
         f = b.frame
         seq = b.seq
+        if key:
+            if seq <= mark:
+                mark = after  # nothing new for the whole poll: the panel's own seq says what it has
+            if len(b.sent) > 50:
+                b.sent.clear()
+            b.sent[key] = max(b.sent.get(key, 0), seq)
     b.watched = time.time()
     out = b.info()
     out["seq"] = seq
+    out["waited"] = round((time.time() - start) * 1000)  # ms in serve: the panel tells the link's time from it
     if pane:
         out["pane_known"] = known
-    if f and (not after or f["seq"] > after):
-        out["frame"] = {"data": f["data"], "w": f["w"], "h": f["h"]}
+    if f and (not mark or f["seq"] > mark):
+        out["frame"] = {"data": f["data"], "w": f["w"], "h": f["h"], "sharp": bool(f.get("sharp")), "seq": f["seq"]}
     out.update(drawn(b))
     return out
+
+
+def frame_bytes(out):
+    """frame() as one binary answer (#5637): 4 bytes of the length of the JSON head (big-endian), the head, then the
+    JPEG as it is. As base64 in JSON the frame had a third more bytes, serve gzipped it again for each answer, and the
+    page decoded it again."""
+    f = out.pop("frame", None)
+    jpeg = b""
+    if f:
+        jpeg = base64.b64decode(f.pop("data"))
+        out["frame"] = f
+    head = json.dumps(out, default=str).encode()
+    return struct.pack(">I", len(head)) + head + jpeg
 
 
 def person_input(b, ev):

@@ -45,20 +45,25 @@ def first_input(project, session):
 
 def frame(h, path):
     """GET /api/browser/frame?project=<name>&after=<seq>&token=<page token>: the newest frame after that seq, or the
-    status alone after a few seconds with nothing new."""
+    status alone after a few seconds with nothing new. With bin=1 (#5637) the answer is binary (browser.frame_bytes),
+    and the pane may keep several such polls open at once (browser.frame, many)."""
     from urllib.parse import parse_qs, urlsplit
     q = {k: v[0] for k, v in parse_qs(urlsplit(h.path).query).items()}
     if not hmac.compare_digest(q.get("token", ""), server.PAGE_TOKEN):
         return h._send(403, {"error": "this needs the page's token: reload the page"})
-    project = q.get("project", "")
+    project, binary = q.get("project", ""), q.get("bin") == "1"
     b = browser.find(project, q.get("session"))  # the browser of the panel's session (#5636)
     if b is None:
-        return h._send(200, {"project": project, "running": False, "seq": 0, "tabs": [], "controller": None})
-    try:
-        return h._send(200, browser.frame(b, int(q.get("after") or 0), min(float(q.get("wait") or 8), 20),
-                                          q.get("pane") or None))
-    except (RiverError, ValueError) as e:
-        return h._send(409, {"error": str(e)})
+        out = {"project": project, "running": False, "seq": 0, "tabs": [], "controller": None}
+    else:
+        try:
+            out = browser.frame(b, int(q.get("after") or 0), min(float(q.get("wait") or 8), 20), q.get("pane") or None,
+                                many=binary)
+        except (RiverError, ValueError) as e:
+            return h._send(409, {"error": str(e)})
+    if binary:
+        return h._send(200, browser.frame_bytes(out), "application/octet-stream")
+    return h._send(200, out)
 
 
 def _person(conn, who):

@@ -5,8 +5,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import struct
+
 from river import core, server
 from tests.test_view_sessions import TmuxBase, claude_line
+
+
+def gray_jpeg(w):
+    """A baseline gray JPEG of w x 8 px (w a multiple of 8): each block has DC 0 and an end of block, with one-code
+    Huffman tables. The tests need a JPEG that Chrome decodes, and the standard library makes none."""
+    seg = lambda m, body: b"\xff" + bytes([m]) + struct.pack(">H", len(body) + 2) + body  # noqa: E731
+    one = bytes([1] + [0] * 15) + b"\x00"
+    bits = "00" * (w // 8)
+    bits += "1" * (-len(bits) % 8)
+    return (b"\xff\xd8" + seg(0xDB, b"\x00" + b"\x01" * 64)
+            + seg(0xC0, b"\x08" + struct.pack(">HH", 8, w) + b"\x01\x01\x11\x00")
+            + seg(0xC4, b"\x00" + one) + seg(0xC4, b"\x10" + one) + seg(0xDA, b"\x01\x01\x00\x00\x3f\x00")
+            + bytes(int(bits[i:i + 8], 2) for i in range(0, len(bits), 8)) + b"\xff\xd9")
 
 
 class PageBrowser(TmuxBase):
@@ -1018,6 +1033,48 @@ try {
          wide: document.documentElement.scrollWidth > innerWidth, visible: on.getBoundingClientRect().right <= innerWidth });
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         return self.drive(driver, "/sessions/ag", size=size)
+
+    def _frames(self, size):
+        """#5637: the pane reads binary frames (bin=1) and shows each JPEG from a blob address; the next frame takes its
+        place, the text over the stage goes, and the page does not get wider (p57)."""
+        import base64
+        from unittest import mock
+        from river import browser
+        project = browser.project_of(self.c, agent="ag")
+        b = browser.get(project, "ag")
+        self.addCleanup(browser.BROWSERS.clear)
+        b.ws = object()  # running, with no Chrome: the test gives the frames
+
+        def put(w):
+            with b.cond:
+                b.seq += 1
+                b.frame = {"seq": b.seq, "data": base64.b64encode(gray_jpeg(w)).decode(), "w": w * 50, "h": 400}
+                b.cond.notify_all()
+        put(8)
+        no = mock.patch.object(browser, "no_chrome", lambda: "no Chrome in this test")
+        no.start()
+        self.addCleanup(no.stop)
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag", "session ag shown");
+  const { openBrowser } = await import("./components/browserTool.js");
+  await openBrowser("ag");
+  const img = () => q(".br-img");
+  await until(() => img() && img().naturalWidth === 8, "the first frame");
+  const out = { blob: img().src.startsWith("blob:"), msg: q(".br-msg").classList.contains("hidden") };
+  await fetch("/__step/second");
+  await until(() => img().naturalWidth === 16, "the second frame");
+  const r = img().getBoundingClientRect();
+  out.drawn = r.width > 0 && r.height > 0 && r.right <= innerWidth;
+  out.wide = document.documentElement.scrollWidth > innerWidth;
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        return self.drive(driver, "/sessions/ag", steps={"second": lambda: put(16)}, size=size)
+
+    def test_the_pane_shows_binary_frames_at_desktop_width(self):
+        self.assertEqual(self._frames("1280,900"), {"blob": True, "msg": True, "drawn": True, "wide": False})
+
+    def test_the_pane_shows_binary_frames_at_phone_width(self):
+        self.assertEqual(self._frames("390,844"), {"blob": True, "msg": True, "drawn": True, "wide": False})
 
     def test_the_tab_strip_at_desktop_width(self):
         got = self._tab_strip("1280,900")

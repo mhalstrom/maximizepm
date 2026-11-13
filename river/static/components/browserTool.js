@@ -1,8 +1,7 @@
 // The browser of a project in the side panel (#4631, design #4641): a tool tab of the panel (openTool). maxpm serve
 // runs a headless Google Chrome for each session of a project (river/browser.py, #5636); this tab shows the page of
-// the Chrome of the panel's session as frames (a long poll
-// of GET api/browser/frame), and sends the person's clicks, wheel, keys and pasted text (op browser_input, with the
-// page's token). Back, Forward, Reload, an address field, the tabs of the browser, and who controls it: nobody, the
+// the Chrome of the panel's session as frames (long polls of GET api/browser/frame, binary: #5637), and sends the
+// person's clicks, wheel, keys and pasted text (op browser_input, with the page's token). Back, Forward, Reload, an address field, the tabs of the browser, and who controls it: nobody, the
 // person (Take control, Give back), or a session (maxpm browser control) and the subagent it names. While a session
 // controls it, the person's input waits until Take control. "Open as a window" shows the same browser as a normal
 // window, for a site that refuses a headless browser (a sign-in); "Back to the panel" ends that.
@@ -106,8 +105,14 @@ function render(box, project, session) {
     busy = false;
   }
 
-  // Who controls it: the line, the buttons, and whether the person's input goes through.
+  // Who controls it: the line, the buttons, and whether the person's input goes through. Drawn again only when the
+  // status changed (#5637): most poll answers bring a frame and the same status.
+  let shownKey = "";
   function show(j) {
+    const { seq, waited, frame, pointer, typed: t, pane_known, ...status } = j;
+    const key = JSON.stringify(status);
+    if (key === shownKey) return draw(j);
+    shownKey = key;
     v.running = !!j.running; v.window = !!j.window;
     // No Chrome on this computer (#5624): the answer of start says so; it holds until a start runs Chrome.
     if ("no_chrome" in j || j.running) v.noChrome = j.running ? "" : j.no_chrome || "";
@@ -139,13 +144,22 @@ function render(box, project, session) {
          <div class="br-dl"><a class="btn primary" href="${esc(j.download || "https://www.google.com/chrome/")}" target="_blank" rel="noopener">Download Google Chrome</a>
          ${button("Check again", { data: { br: "start" } })}</div>`
       : `The browser of ${esc(project)} is not running. ${button("Start", { kind: "primary", data: { br: "start" } })}`;
-    if (j.frame) {
-      img.src = "data:image/jpeg;base64," + j.frame.data;
-      v.w = j.frame.w || img.naturalWidth; v.h = j.frame.h || img.naturalHeight;
-      msg.classList.add("hidden");
-    }
     draw(j);
   }
+
+  // A frame (#5637): the JPEG bytes of the binary answer, shown from a blob address. A poll that was slower than
+  // another brings an older frame: it is dropped. The addresses that no longer show are freed once the new one loads.
+  let shown = 0, urls = [];
+  function paint(f, jpeg) {
+    if (f.seq && f.seq <= shown) return;
+    shown = f.seq || shown;
+    const u = URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" }));
+    urls.push(u);
+    img.src = u;
+    v.w = f.w || v.w; v.h = f.h || v.h;
+    msg.classList.add("hidden");
+  }
+  img.addEventListener("load", () => { const keep = img.src; urls = urls.filter(u => u === keep || URL.revokeObjectURL(u)); });
 
   // The tab strip (#5632), like Chrome's: each tab with its icon and title (a click shows it), x closes it, + opens a
   // new one; the session whose pointer is on a tab is named on it. Drawn again only when a tab changed.
@@ -215,33 +229,49 @@ function render(box, project, session) {
   const fit = (again) => { if (fitting && !again) return; clearTimeout(fitting); fitting = setTimeout(fitNow, 150); };
   const ro = new ResizeObserver(() => fit(true)); ro.observe(stage);
 
-  async function loop() {
-    try { show(await call("start", { project })); } catch (e) { show({ running: false }); }
-    fit();
+  // The frames (#5637): binary answers (bin=1: the length of a JSON head, the head, the JPEG). Over a long link (a
+  // phone through the relay) each poll costs a round trip, so the pane keeps one poll open for each 30 ms of it, at
+  // most four; serve gives each one the next change, so at most that many frames are on the way, never a backlog.
+  let slots = 1, trips = [];
+  async function poll(i) {
     while (box.isConnected) {
-      if (document.hidden) { await sleep(1000); continue; }
+      if (document.hidden || i >= slots) { await sleep(i ? 250 : 1000); continue; }
       try {
         token = token || await pageToken();
-        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&session=${encodeURIComponent(session)}&after=${v.seq}&pane=${pane}&token=${encodeURIComponent(token)}`);
+        const t = performance.now();
+        const r = await fetch(`api/browser/frame?project=${encodeURIComponent(project)}&session=${encodeURIComponent(session)}&after=${v.seq}&pane=${pane}&bin=1&token=${encodeURIComponent(token)}`);
         if (r.status === 403) { token = await pageToken(true); continue; }
-        const j = await r.json();
+        if (!r.ok) { await sleep(2000); continue; }
+        const buf = await r.arrayBuffer();
         if (!box.isConnected) break;
-        if (j.error) { await sleep(2000); continue; }
+        const n = new DataView(buf).getUint32(0), j = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
+        trips = trips.concat(performance.now() - t - (j.waited || 0)).slice(-20);
+        slots = Math.max(1, Math.min(4, Math.ceil(Math.min(...trips) / 30)));
         const was = v.running;
-        v.seq = j.seq || 0; show(j);
+        v.seq = Math.max(v.seq, j.seq || 0);
+        if (j.frame && buf.byteLength > 4 + n) paint(j.frame, new Uint8Array(buf, 4 + n));
+        show(j);
         // serve started again (it does not know this panel), or the window went to a screen of another density.
         if ((!was && v.running) || (v.running && !j.window && j.pane_known === false)) sized = "";
         fit();
         if (!j.running) await sleep(2000);
       } catch (e) { await sleep(2000); }
     }
+  }
+
+  async function loop() {
+    try { show(await call("start", { project })); } catch (e) { show({ running: false }); }
+    fit();
+    await Promise.all([0, 1, 2, 3].map(poll));
     ro.disconnect();
   }
 
   // The point in the page's CSS pixels.
   const at = (e) => { const r = img.getBoundingClientRect();
     return { x: (e.clientX - r.left) * (v.w || r.width) / r.width, y: (e.clientY - r.top) * (v.h || r.height) / r.height }; };
-  let down = false, lastMove = 0, wheel = null;
+  // A drag's moves and the wheel go once for each frame of the screen (#5637); a move that waits goes before the up.
+  let down = false, move = null, moving = 0, wheel = null;
+  const sendMove = () => { cancelAnimationFrame(moving); moving = 0; if (move) { const m = move; move = null; send(m); } };
   img.addEventListener("pointerdown", (e) => {
     e.preventDefault(); keys.focus({ preventScroll: true });
     if (!v.mine) return toast("A session controls the browser: press Take control first", true);
@@ -250,18 +280,20 @@ function render(box, project, session) {
   });
   img.addEventListener("pointerup", (e) => {
     if (!down) return; down = false;
+    sendMove();
     send({ type: "mouse", action: "up", ...at(e), button: ["left", "middle", "right"][e.button] || "left", clicks: e.detail || 1, mods: mods(e) });
   });
   img.addEventListener("pointermove", (e) => {
-    if (!down || !v.mine || Date.now() - lastMove < 50) return;
-    lastMove = Date.now(); send({ type: "mouse", action: "move", ...at(e), mods: mods(e) });
+    if (!down || !v.mine) return;
+    move = { type: "mouse", action: "move", ...at(e), mods: mods(e) };
+    if (!moving) moving = requestAnimationFrame(sendMove);
   });
   img.addEventListener("contextmenu", (e) => e.preventDefault());
   stage.addEventListener("wheel", (e) => {
     e.preventDefault(); if (!v.mine) return;
     if (wheel) { wheel.dx += e.deltaX; wheel.dy += e.deltaY; return; }
     wheel = { type: "mouse", action: "wheel", ...at(e), dx: e.deltaX, dy: e.deltaY };
-    setTimeout(() => { const w = wheel; wheel = null; send(w); }, 60);
+    requestAnimationFrame(() => { const w = wheel; wheel = null; send(w); });
   }, { passive: false });
   keys.addEventListener("keydown", (e) => {
     if (MODS.has(e.key)) return;

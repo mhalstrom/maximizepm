@@ -995,6 +995,46 @@ class SharpWhenStill(Base):
         self.assertEqual(len(self.shots), 2)
 
 
+class ManyPolls(Base):
+    """#5637: a pane over a long link keeps several polls open; each gets the next change, never one that another poll
+    of the pane took; a poll that waits its whole time gets the frame after its own seq; the answer is binary."""
+
+    def put(self, b, data):
+        with b.cond:
+            b.seq += 1
+            b.frame = {"seq": b.seq, "data": base64.b64encode(data).decode(), "w": 500, "h": 400}
+            b.cond.notify_all()
+
+    def test_each_poll_gets_the_next_change(self):
+        b = browser.Browser("web")
+        self.put(b, b"one")
+        got, polls = [], []
+        for _ in range(2):
+            t = threading.Thread(target=lambda: got.append(browser.frame(b, b.seq, 3, "p", many=True)))
+            t.start()
+            polls.append(t)
+        time.sleep(0.2)
+        self.put(b, b"two")
+        time.sleep(0.1)
+        self.put(b, b"three")
+        for t in polls:
+            t.join(5)
+        self.assertEqual(sorted(base64.b64decode(g["frame"]["data"]) for g in got), [b"three", b"two"])
+        # Nothing new for the whole poll: the frame after the panel's own seq, in case an answer was lost.
+        again = browser.frame(b, 1, 0.1, "p", many=True)
+        self.assertEqual((again["frame"]["seq"], again["waited"] >= 100), (3, True))
+        self.assertNotIn("frame", browser.frame(b, 3, 0.1, "p", many=True))
+
+    def test_the_binary_answer(self):
+        b = browser.Browser("web")
+        self.put(b, b"\xff\xd8jpeg")
+        raw = browser.frame_bytes(browser.frame(b, 0, 0.1, "p", many=True))
+        n = struct.unpack(">I", raw[:4])[0]
+        head = json.loads(raw[4:4 + n])
+        self.assertEqual((head["frame"], raw[4 + n:]), ({"w": 500, "h": 400, "sharp": False, "seq": 1}, b"\xff\xd8jpeg"))
+        self.assertEqual(browser.frame_bytes({"seq": 0})[4:], b'{"seq": 0}')
+
+
 class RealChrome(Base):
     """One real headless Chrome: a page through the proxy, the text, a click, typing, and a blocked address."""
 
