@@ -4323,6 +4323,15 @@ def _findings_lines(f, r):
         out.append(f"  STUCK {x['agent']} ({x['state']}, {x['why']}): holds "
                    + (", ".join(f"#{i}" for i in x["holds"]) or "nothing") + (f", {x['queued']} queued" if x["queued"] else "")
                    + f".  Ask it to stop: {r} stop {x['agent']} --reason \"...\"")
+    for x in f.get("ends", []):
+        # #5776: a session that waits at its prompt for a person's answer should end; the answer starts a fresh one.
+        out.append(f"  END IT {x['agent']}: waits at its prompt {x['waited']} for {x['person']}'s answer to question "
+                   f"#{x['question']}" + (f" (#{x['item']})" if x["item"] else "") + ". "
+                   + (f"maxpm serve ends it {x['ends_after']} after the question, and the answer starts a fresh "
+                      f"session. Sooner: answer it ({r} answer {x['question']} \"...\"), or {r} stop {x['agent']} "
+                      f"--reason \"waits on an answer\"" if x["ends_after"] else
+                      f"It keeps its item or target. Answer it ({r} answer {x['question']} \"...\"), or send it on "
+                      f"({r} forward {x['question']})"))
     for x in f["lost_leases"]:
         out.append(f"  LEASE RAN OUT #{x['id']} [{x['project']}] {_cut(x['title'], 50)}: check it, then queue or launch it")
     for x in f["waiting_too_long"]:
@@ -4590,16 +4599,17 @@ def _look_rule(b, it, r, short=False):
     if short:
         if ask:
             return [f"  the user should look at the result: this project asks first: commit, no push, {r} ask <person> "
-                    f"\"Look at ...\" --item {it['id']}, wait for the yes, then push and done"]
+                    f"\"Look at ...\" --item {it['id']}, then {r} release {it['id']} --note \"<what is left>\" and go: "
+                    f"the yes starts a fresh session that pushes"]
         return [f"  the result needs a look: push, done, then check it yourself or {r} add \"Check <result> ...\" "
                 f"--found-during {it['id']}; a person item only for a taste or product decision"]
     if ask:
         return [f"  - The user should look at the finished result: this project asks first (setting result_look). "
                 f"Commit, do not push, and",
-                f"    {r} ask <person> \"Look at <result>: <where>. Push?\" --item {it['id']}   then wait at your "
-                f"prompt for the yes.",
-                f"    MaximizePM keeps your lease while the question is open. After the yes: push, then "
-                f"{r} done {it['id']}."]
+                f"    {r} ask <person> \"Look at <result>: <where>. Push?\" --item {it['id']}   then, not waiting at "
+                f"your prompt:",
+                f"    {r} release {it['id']} --note \"<what is done, what is left>\" and {r} go. The yes starts a fresh "
+                f"session that pushes and closes #{it['id']}."]
     return [f"  - The finished result needs a look: push, {r} done {it['id']}, then check it yourself (open it, take "
             f"screenshots, compare with the item), or",
             f"    {r} add \"Check <result>: <where>, with screenshots\" --found-during {it['id']}   (an agent does "
@@ -5046,8 +5056,10 @@ def render_go(b):
                 f"it is a step for the user",
                 # Not the permission rule: the classifier refused the item that named it and a later session (#1669).
                 f"    (below), with the exact command and the reason of the refusal; the user runs it or allows it. "
-                f"Stand at your prompt only for a release to",
-                f"    production or a deletion of data: {r} ask <person> \"<what to approve>\" --item {it['id']}   first.",
+                f"A release to",
+                f"    production or a deletion of data: {r} ask <person> \"<what to approve>\" --item {it['id']}, then "
+                f"commit, {r} release {it['id']} --note \"<what is left>\" and go:",
+                f"    no session waits at its prompt for a yes; the answer starts a fresh session (question_wait_end).",
                 *_look_rule(b, it, r),
                 f"  - You need the user (a decision, an approval, an account or payment step): put it in the queue, not only in chat:",
                 f"    {r} add \"<what to decide or do>\" --doer human --context \"<exactly what, where the material is>\" --blocks {it['id']} --release",
@@ -6662,6 +6674,8 @@ def render(a, res):
             print(f"sent #{m['id']} {m['kind']} to {to}" + (", blocked" if m.get("blocked") else "") + more)
             if m.get("held_note"):
                 print(f"  {m['held_note']}")
+            if m.get("then"):
+                print(f"  Now: {m['then']}")
         return
     if c == "accept" and a.message:
         print(f"accepted alert #{res['id']}" + (f"; see: maxpm show {res['item_id']}" if res["item_id"] else "")

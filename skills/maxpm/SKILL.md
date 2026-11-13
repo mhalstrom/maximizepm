@@ -382,20 +382,18 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
   settings into the item, and do not plan there that a later session runs the
   refused command: the classifier refuses such an item too. When the person
   marks the item done, a fresh session finishes what is left.
-- Wait at your prompt only for a step that must not run without the person's
-  yes each time: a release to production, or a deletion of data. Ask in the
-  queue first, as your last step before you stop:
-  `maxpm ask <person> "<what to approve>" --item <the item you hold>`. While the
-  question is open, `maxpm serve` keeps your lease (and your deploy target),
-  takes nothing back, starts no other session for your work, and alerts the
-  manager. The person answers in your terminal or with `maxpm answer`; an
-  answer with `maxpm answer` (the person, the manager, or the page) comes into
-  your terminal as a prompt that starts `[maxpm answer from ...]`. A wait
-  that you only say in chat looks idle: `maxpm serve` gives your work to others.
+- A step that must not run without the person's yes each time (a release to
+  production, a deletion of data): ask in the queue,
+  `maxpm ask <person> "<what to approve>" --item <the item you hold>`, and do
+  not wait at your prompt for the answer. Commit what is finished (or name the
+  uncommitted files in the note), then `maxpm release <id> --note "<what is
+  done, what is left, where the work is>"` and run `maxpm go`. The item waits
+  on the answer, and the answer starts a fresh session with the question, the
+  answer and your note. A session still at its prompt `question_wait_end` (1h)
+  after its question is ended by `maxpm serve` the same way.
   While a manager is active, a question to a person goes to the manager first:
-  it answers you itself (`[maxpm answer from <manager> for <person> ...]`), or
-  sends the question on to the person (`maxpm forward`). The person gets it by
-  itself after `question_hold` (10m). Your wait does not change.
+  it answers it, or sends it on to the person (`maxpm forward`). The person
+  gets it by itself after `question_hold` (10m).
   The same holds for an alert to a person and for a person item (`--doer
   human`: a decision, an approval): while a manager is active it sees them
   first, does or closes them, or forwards them; the person gets what is left
@@ -423,8 +421,8 @@ maxpm add "Approve the refund policy draft" --doer human --blocks <your-id> --re
     the item says "ask before the push".
   - `ask_first`: commit, do not push, and ask in the queue:
     `maxpm ask <person> "Look at <result>: <where>. Push?" --item <id>`. Then
-    wait at your prompt for the yes; `maxpm serve` keeps your lease while the
-    question is open. After the yes, push and close the item.
+    release the item and run `maxpm go`, as above: the yes starts a fresh
+    session that pushes and closes the item.
   A person sets it: `maxpm config set result_look ask_first --project <name>`;
   `maxpm project show <name>` shows it.
 

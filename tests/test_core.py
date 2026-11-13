@@ -463,8 +463,10 @@ class Go(Base):
                       f"#{x}, and wait for the manager's word that it ended: maxpm --as {me} inbox --wait", first)
         self.assertIn("A command is refused (the auto mode classifier, a permission prompt): do the parts you can. "
                       "Then it is a step for the user (below), with the exact command and the reason of the refusal; "
-                      "the user runs it or allows it. Stand at your prompt only for a release to production or a "
-                      "deletion of data", first)
+                      "the user runs it or allows it. A release to production or a deletion of data: "
+                      f"maxpm --as {me} ask <person> \"<what to approve>\" --item {x}, then commit, maxpm --as {me} "
+                      f"release {x} --note \"<what is left>\" and go: no session waits at its prompt for a yes; the "
+                      f"answer starts a fresh session (question_wait_end).", first)
         self.assertIn(f"The finished result needs a look: push, maxpm --as {me} done {x}, then check it yourself "
                       f"(open it, take screenshots, compare with the item), or maxpm --as {me} add \"Check <result>: "
                       f"<where>, with screenshots\" --found-during {x} (an agent does it). Add a person item (--doer "
@@ -515,13 +517,15 @@ class Go(Base):
         self.assertEqual((b["item"]["id"], b["result_look"]), (x, "ask_first"))
         self.assertIn(f"The user should look at the finished result: this project asks first (setting result_look). "
                       f"Commit, do not push, and maxpm --as {me} ask <person> \"Look at <result>: <where>. Push?\" "
-                      f"--item {x} then wait at your prompt for the yes. MaximizePM keeps your lease while the question "
-                      f"is open. After the yes: push, then maxpm --as {me} done {x}.", first)
+                      f"--item {x} then, not waiting at your prompt: maxpm --as {me} release {x} --note \"<what is "
+                      f"done, what is left>\" and maxpm --as {me} go. The yes starts a fresh session that pushes and "
+                      f"closes #{x}.", first)
         self.assertNotIn("--doer human --found-during", first)
         core.done(self.c, x, "done", me)
         later = text(core.go(self.c, self.web, me))
         self.assertIn(f"the user should look at the result: this project asks first: commit, no push, maxpm --as {me} "
-                      f"ask <person> \"Look at ...\" --item {y}, wait for the yes, then push and done", later)
+                      f"ask <person> \"Look at ...\" --item {y}, then maxpm --as {me} release {y} --note \"<what is "
+                      f"left>\" and go: the yes starts a fresh session that pushes", later)
         self.assertEqual(core.project_show(self.c, "web")["result_look"], "ask_first")
         self.assertIn("  look at a finished result: project web has result_look ask_first (nobody chose for this "
                       "project yet).\n", shown("web"))

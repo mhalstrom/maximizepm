@@ -3169,6 +3169,100 @@ class LaunchInTmux(unittest.TestCase):
             notify.loop(stop, interval_s=1)
         self.assertEqual(looks, [1])
 
+    def test_a_session_that_waits_at_its_prompt_for_an_answer_ends_and_the_answer_starts_a_fresh_one(self):
+        """#5776 (mark 2026-11-13, policy p154): four sessions waited 6h to 7.5h at their prompts for mark's 'deploy'
+        or 'push', and each answer read the whole context again at the cache write price. The ask tells the worker to
+        release and end; maxpm serve ends one still at its prompt after question_wait_end (1h); the answer starts a
+        fresh session with the question and the answer in its notes; the manager sees END IT, not STUCK."""
+        from unittest import mock
+        from river import cli
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "boss")
+        with core.tx(self.c):
+            self.c.execute("UPDATE agents SET role='manager' WHERE name='boss'")
+        x = core.item_add(self.c, "shop", "publish the page")["id"]
+        name = server.launch_agent(self.c)["session_name"]
+        pane, clock = self.tmux.panes[0], [core.now()]
+        self.addCleanup(server.IDLE.clear)
+        fake_now = mock.patch.object(core, "now", lambda: clock[0])
+        fake_now.start()
+        self.addCleanup(fake_now.stop)
+        agents = lambda: {r["name"] for r in self.c.execute("SELECT name FROM agents WHERE kind='ai'")}
+
+        def tick(after=300):
+            clock[0] += core.timedelta(seconds=after)
+            core.activity(self.c, "boss")
+            server.watch_busy(self.c)
+            return server.fresh_sessions(self.c)
+        clock[0] += core.timedelta(seconds=1)
+        core.activity(self.c, name)
+        core.claim(self.c, x, name)
+        sent = core.send(self.c, "question", "Push the page?", to="mark", item=x, actor=name)
+        q = sent["id"]
+        self.assertIn(f"do not wait at your prompt for the answer. Save your work: commit, or name the uncommitted "
+                      f"files in the note. Then: maxpm release {x} --note", sent["then"])
+        self.assertIn("A session still at its prompt after 1h is ended by maxpm serve", sent["then"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render(cli.build_parser().parse_args(["ask", "mark", "Push?", "--item", str(x)]), [sent])
+        self.assertIn("  Now: do not wait at your prompt", out.getvalue())
+        # A question to another agent, or about an item it does not hold, gets no such line.
+        self.assertNotIn("then", core.send(self.c, "question", "which header?", to="boss", item=x, actor=name))
+        pane["screen"] = "⏺ I asked mark and wait for the yes.\n\n╭────╮\n│ >  │\n╰────╯"
+        nothing = {"started": {}, "ended": {}, "failed": {}}
+        # Within the hour it waits, keeps its item, and the manager sees END IT with the time left, not STUCK.
+        self.assertEqual([tick() for _ in range(11)], [nothing] * 11)
+        self.assertEqual(core.item_show(self.c, x)["assignee"], name)
+        f = core.manager_findings(self.c)
+        self.assertEqual([s["agent"] for s in f["stuck"]], [])
+        self.assertEqual([(e["agent"], e["question"], e["person"], e["item"], e["ends_after"]) for e in f["ends"]],
+                         [(name, q, "mark", x, "1h")])
+        self.assertIn(f"ends:{name}", core._finding_keys(f))
+        lines = " ".join(cli._findings_lines(f, "maxpm"))
+        self.assertIn(f"END IT {name}: waits at its prompt 55m for mark's answer to question #{q} (#{x}). maxpm serve "
+                      f"ends it 1h after the question", lines)
+        self.assertNotIn("STUCK", lines)
+        # After the hour, with the same screen for idle_after: the item goes back with CHECK FIRST and waits on the
+        # answer, and the session ends; its pane closes.
+        r = [tick(60) for _ in range(8)]
+        ended = [e["ended"] for e in r if e["ended"]]
+        self.assertEqual(len(ended), 1)
+        self.assertIn(f"at its prompt for mark's answer to question #{q} (question_wait_end)", ended[0][name])
+        self.assertEqual((name in agents(), pane in self.tmux.panes), (False, False))
+        it = core.item_show(self.c, x)
+        self.assertEqual((it["status"], it["assignee"], it["needs_check"], it["ready"]), ("open", None, 1, False))
+        self.assertEqual(it["blocked_reason"], f"waits on mark's answer to question #{q}")
+        self.assertIn("CHECK FIRST", it["notes"])
+        self.assertEqual(core.waits_on_person(self.c), {})
+        # The question stays open for mark; the answer starts a fresh session with the question and the answer.
+        self.assertEqual(core.message_show(self.c, q)["state"], "open")
+        clock[0] += core.timedelta(seconds=1)
+        core.answer(self.c, q, "yes, push it", actor="boss")
+        it = core.item_show(self.c, x)
+        self.assertIsNone(it["blocked_reason"])
+        self.assertIn("[answer from boss] yes, push it", it["notes"])
+        started = server.fresh_sessions(self.c)["started"]
+        self.assertEqual(list(started), [x])
+        self.assertEqual(core.item_show(self.c, x)["reserved_for"], started[x])
+        # A worker that releases the item itself after it asked: the item waits on the answer; a withdrawn
+        # question makes it ready again.
+        core.register(self.c, "w2")
+        y = core.item_add(self.c, "shop", "delete the old rows")["id"]
+        core.claim(self.c, y, "w2")
+        q2 = core.send(self.c, "question", "Delete them?", to="mark", item=y, actor="w2")["id"]
+        core.release(self.c, y, "committed abc123; the delete is left", actor="w2")
+        self.assertFalse(core.item_show(self.c, y)["ready"])
+        core.withdraw(self.c, q2, "not needed", actor="w2")
+        self.assertTrue(core.item_show(self.c, y)["ready"])
+        # question_wait_end 0s: the session waits at its prompt as before.
+        core.config_set(self.c, "question_wait_end", "0s")
+        z = core.item_add(self.c, "shop", "third")["id"]
+        core.claim(self.c, z, "w2")
+        q3 = core.send(self.c, "question", "Ship?", to="mark", item=z, actor="w2")["id"]
+        self.assertEqual(core.waits_ended(self.c, {"w2": q3}, clock[0] + core.timedelta(hours=9)), {})
+        with self.assertRaisesRegex(RiverError, "bad duration"):
+            core.config_set(self.c, "question_wait_end", "soon")
+
     def test_an_answer_for_an_agent_that_ended_starts_a_fresh_session(self):
         from unittest import mock
         core.register(self.c, "mark", human=True)

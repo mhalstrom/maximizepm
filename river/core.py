@@ -414,6 +414,12 @@ DEFAULT_SETTINGS = {
     # answers the question (maxpm answer) or sends it on to the person (maxpm forward). With no manager action within
     # question_hold, or no active manager, the person gets it (Waits for you, needs-you, phone). 0s: the person at once.
     "question_hold": "10m",
+    # A worker that asked a person a question about its item and sits at its prompt for the answer (waits_on_person)
+    # ends after question_wait_end (#5776, mark 2026-11-13: sessions waited 7h at their prompts for a 'deploy', and
+    # each answer read the whole context again at the cache write price): maxpm serve releases the item, which then
+    # waits on the answer (QUESTION_BY), and ends the session; the answer starts a fresh session for the item with the
+    # question and the answer in its notes. The prompt cache lasts 1h. 0s: the session waits at its prompt.
+    "question_wait_end": "1h",
     # maxpm serve closes the tmux panes of sessions that are done every tidy_every, as maxpm view --tidy does; a pane
     # it closes by the queue's word (the CLI is still open) must show the same screen for idle_after first. It also
     # ends the tmux servers the tests left behind with their socket gone (maxpm view --orphans). 0s: never.
@@ -2205,7 +2211,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
@@ -8259,8 +8265,9 @@ def waits_on_person(conn, names=None):
     person's answer: an open question (maxpm ask) from the agent to a person, about an item it holds or the open
     deploy item of a target it owns. The person may answer in the agent's terminal (an approval the auto mode
     classifier refused to the agent), so such an agent is not idle: maxpm serve keeps its leases and its target,
-    takes nothing back, starts no other session for its work, and alerts the manager (tell_manager_waits). Not an
-    agent that is stopped, or whose process on this computer ended."""
+    takes nothing back, starts no other session for its work, and alerts the manager (tell_manager_waits), until
+    question_wait_end: then it ends, and the answer starts a fresh session (waits_ended, end_for_answer, #5776). Not
+    an agent that is stopped, or whose process on this computer ended."""
     out = {}
     for r in conn.execute(
             "SELECT m.id, m.from_agent, a.pid, a.host, a.stop_at FROM messages m "
@@ -8291,12 +8298,68 @@ def tell_manager_waits(conn, waiting):
                     "SELECT 1 FROM messages WHERE reply_to=? AND from_agent='maxpm' AND kind='alert'", (qid,)).fetchone():
                 continue
             q = _message(conn, qid)
+            end = _wait_end(conn, agent, q)
             _send(conn, "alert", "maxpm", f"{agent} waits at its prompt for {q['to_agent']}'s answer to question #{qid} "
-                  f"(#{q['item_id']}): {q['body'][:200]}. maxpm keeps its lease and its target and starts no other "
-                  f"session for its work. {q['to_agent']} answers in its terminal, or: maxpm answer {qid} \"...\"",
+                  f"(#{q['item_id']}): {q['body'][:200]}. {q['to_agent']} answers in its terminal, or: maxpm answer "
+                  f"{qid} \"...\". " + (f"maxpm serve ends it {end} after the question (question_wait_end); the "
+                                        f"answer then starts a fresh session for #{q['item_id']}"
+                                        if end else "maxpm keeps its lease and its target and starts no other "
+                                        "session for its work"),
                   to=boss, item_id=q["item_id"], reply_to=qid)
             told.append(agent)
     return told
+
+
+def _wait_end(conn, agent, q):
+    """question_wait_end for a waiting agent's question q, as text, or None when maxpm serve does not end it: the
+    setting is 0s, the question is about a deploy item (the target owner keeps it), or the agent does not hold
+    the question's item."""
+    it = conn.execute("SELECT * FROM items WHERE id=?", (q["item_id"],)).fetchone() if q["item_id"] else None
+    if it is None or it["kind"] not in ANSWER_KINDS or it["assignee"] != agent:
+        return None
+    end = setting(conn, "question_wait_end", item_id=it["id"], agent=agent)
+    return end if parse_duration(end).total_seconds() > 0 else None
+
+
+def waits_ended(conn, waiting, t=None):
+    """{agent: question id} among waiting (waits_on_person) whose wait at the prompt is over (#5776): the question
+    and the agent's last river command are older than question_wait_end. maxpm serve ends those that sit idle at
+    their prompt (end_for_answer)."""
+    t, out = t or now(), {}
+    for agent, qid in waiting.items():
+        q = _message(conn, qid)
+        end = _wait_end(conn, agent, q)
+        a = conn.execute("SELECT last_seen FROM agents WHERE name=?", (agent,)).fetchone()
+        if end and a and t - max(parse_iso(q["created_at"]), parse_iso(a["last_seen"])) >= parse_duration(end):
+            out[agent] = qid
+    return out
+
+
+def end_for_answer(conn, agent, qid):
+    """maxpm serve ends an agent that waited at its prompt for a person's answer for question_wait_end (#5776). Each
+    item it holds goes back to the queue with CHECK FIRST (its changes may be in the folder, not committed); the item
+    of the question waits on the answer (_wait_on_question), and the answer starts a fresh session for it with the
+    question and the answer in its notes. Returns {"ended", "why", "released"}, or None when it owns a target or
+    no longer waits (it stays)."""
+    with tx(conn):
+        q = _message(conn, qid)
+        if q["state"] != "open" or conn.execute("SELECT 1 FROM targets WHERE owner=?", (agent,)).fetchone():
+            return None
+        waited = _short(now() - parse_iso(q["created_at"]))
+        why = f"waited {waited} at its prompt for {q['to_agent']}'s answer to question #{qid} (question_wait_end)"
+        released = []
+        for r in conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                              (agent,)).fetchall():
+            _add_note(conn, r["id"], f"[maxpm] {agent} {why} and maxpm ended it. CHECK FIRST: its changes may be in the "
+                      f"folder, not committed (git status, git log --grep '#{r['id']}'), and its own notes above say "
+                      f"what is left.")
+            conn.execute("UPDATE items SET needs_check=1 WHERE id=?", (r["id"],))
+            _unhold(conn, r["id"], "maxpm", f"released: {agent} {why}")
+            released.append(r["id"])
+    out = end_idle(conn, agent, why)
+    if out is None:
+        return None
+    return {**out, "released": released}
 
 
 def target_handoff(conn, name, to, why):
@@ -9290,8 +9353,54 @@ def _hold(conn, parent, actor, reserve):
            else f"held by {actor} until its prerequisites are done")
 
 
+# The blocked_set_by of an item that waits on a person's answer to its last holder's question (#5776): the holder asked
+# (maxpm ask --item), released the item and ended, and the answer clears the blocker and starts a fresh session.
+QUESTION_BY = "maxpm question"
+# The kinds of item that a fresh session takes when an answer comes (_want_fresh). A deploy item stays with its
+# target owner, and a review starts in a session that MaximizePM picks for it.
+ANSWER_KINDS = ("work", "fixes")
+
+
+def _person_question(conn, item_id, agent):
+    """The newest open question (a messages row) that agent asked a person about item_id, or None."""
+    return conn.execute("SELECT m.* FROM messages m JOIN agents p ON p.name=m.to_agent AND p.kind='human' "
+                        "WHERE m.kind='question' AND m.state='open' AND m.item_id=? AND m.from_agent=? "
+                        "ORDER BY m.id DESC LIMIT 1", (item_id, agent)).fetchone()
+
+
+def _wait_on_question(conn, it, holder):
+    """Inside a tx, when holder gives item it back (release, stop, hand-over, maxpm serve's end of a waiting
+    session): an open question of the holder to a person about it blocks it until the answer (#5776). Without
+    this the next session takes the item, finds the same open question, and stops again. Not when another
+    blocker is set."""
+    if it["kind"] not in ANSWER_KINDS or it["blocked_reason"]:
+        return None
+    q = _person_question(conn, it["id"], holder)
+    if q is None:
+        return None
+    conn.execute("UPDATE items SET blocked_reason=?, blocked_until=NULL, blocked_set_by=?, blocked_at=? WHERE id=?",
+                 (f"waits on {q['to_agent']}'s answer to question #{q['id']}", QUESTION_BY, iso(now()), it["id"]))
+    _event(conn, it["id"], "maxpm", f"waits on {q['to_agent']}'s answer to question #{q['id']} of {holder}; "
+           f"the answer starts a fresh session (fresh_sessions)")
+    return q["id"]
+
+
+def _answer_unblocks(conn, q):
+    """Inside a tx: question q closed (answered, answered in the chat, withdrawn). The item that waited on it
+    (_wait_on_question) is ready again. Returns whether an item waited on it."""
+    if q["item_id"] is None:
+        return False
+    n = conn.execute("UPDATE items SET blocked_reason=NULL, blocked_until=NULL, blocked_at=NULL, blocked_set_by=NULL "
+                     "WHERE id=? AND blocked_set_by=? AND blocked_reason LIKE ?",
+                     (q["item_id"], QUESTION_BY, f"%question #{q['id']}")).rowcount
+    if n:
+        _event(conn, q["item_id"], "maxpm", f"question #{q['id']} closed: ready again")
+    return bool(n)
+
+
 def _unhold(conn, parent, actor, why):
-    """Turn a hold into a release: the parent is open to everyone and its reservations end."""
+    """Turn a hold into a release: the parent is open to everyone and its reservations end. When the holder
+    asked a person about it and the question is open, the item waits on the answer (_wait_on_question)."""
     it = _item(conn, parent)
     conn.execute("UPDATE items SET status='open', assignee=NULL, claimed_at=NULL, lease_expires_at=NULL, "
                  "hold_expires_at=NULL WHERE id=?", (parent,))
@@ -9302,6 +9411,8 @@ def _unhold(conn, parent, actor, why):
         for r in _open_prereqs(conn, parent):
             conn.execute("UPDATE items SET reserved_for=NULL WHERE id=? AND reserved_for=?", (r, it["assignee"]))
     _event(conn, parent, actor, why)
+    if it["assignee"]:
+        _wait_on_question(conn, it, it["assignee"])
     if actor and actor == it["assignee"]:  # what it just told the manager about this item cannot wait (#1608)
         _raise_blocked(conn, actor, "item", parent)
 
@@ -15486,7 +15597,19 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
     res = message_show(conn, mid)
     if held:
         res["held_note"] = (f"held for the manager {held['manager']}: it answers you, or sends the question on to {to}; "
-                            f"{to} gets it by itself after {held['hold']} (question_hold). Your wait does not change")
+                            f"{to} gets it by itself after {held['hold']} (question_hold)")
+    if kind == "question" and item is not None and _is_person(conn, to) and not _is_person(conn, actor):
+        it = _item(conn, item)
+        if it["assignee"] == actor and it["status"] in ("in_progress", "held") and it["kind"] in ANSWER_KINDS:
+            # #5776 (policy p154): a session that waits at its prompt for hours reads its whole context again at the
+            # cache write price when the answer comes. It ends, and the answer starts a fresh session.
+            end = setting(conn, "question_wait_end", item_id=item, agent=actor)
+            res["then"] = (f"do not wait at your prompt for the answer. Save your work: commit, or name the uncommitted "
+                           f"files in the note. Then: maxpm release {item} --note \"<what is done, what is left, where "
+                           f"the work is>\", and run maxpm go. #{item} waits on the answer, and the answer starts a "
+                           f"fresh session with the question, the answer and your note"
+                           + (f". A session still at its prompt after {end} is ended by maxpm serve"
+                              if parse_duration(end).total_seconds() > 0 else ""))
     if manager and not res["blocked"] and not _is_person(conn, actor):
         # For the sender: how long the manager's watch lets it wait (the command says how to shorten that).
         res["manager_wait"] = setting(conn, "manage_wait_" + res["level"], agent=to)
@@ -15705,10 +15828,13 @@ def answer(conn, msg_id, body, actor=None, in_chat=False, self_answer=False):
             _event(conn, q["item_id"], actor, f"answered question #{q['id']}"
                    + (f" for {for_person} (the manager)" if for_person and _is_manager(conn, actor)
                       else f" for {for_person}" if for_person else ""))
-            # The asker ended (it filed its question and stopped): a fresh session takes the item, with the answer.
-            if not conn.execute("SELECT 1 FROM agents WHERE name=?", (q["from_agent"],)).fetchone():
-                _want_fresh(conn, q["item_id"], f"[question #{q['id']} from {q['from_agent']}] {q['body']}\n"
-                            f"[answer from {actor}] {body.strip()}")
+            # The asker released the item (it filed its question and ended, or maxpm serve ended it at its prompt
+            # after question_wait_end, #5776): the item is ready again, and a fresh session takes it with the answer.
+            # An asker that still holds the item gets the answer in its session (_deliver_answer); _want_fresh
+            # leaves a held item alone.
+            _answer_unblocks(conn, q)
+            _want_fresh(conn, q["item_id"], f"[question #{q['id']} from {q['from_agent']}] {q['body']}\n"
+                        f"[answer from {actor}] {body.strip()}")
     if waits:
         _deliver_answer(conn, q, mid, actor, body.strip(), for_person)
     return message_show(conn, mid)
@@ -15766,6 +15892,7 @@ def _close_in_chat(conn, q, body, t, how="in the chat"):
     conn.execute("UPDATE messages SET state='read', read_at=?, native_status=? WHERE id=?", (t, how, mid))
     conn.execute("UPDATE messages SET state='answered', closed_at=?, read_at=COALESCE(read_at, ?) WHERE id=?",
                  (t, t, q["id"]))
+    _answer_unblocks(conn, q)
     if q["item_id"] is not None:
         _event(conn, q["item_id"], who if how == "in the chat" else q["from_agent"],
                f"answered question #{q['id']} in the chat of {q['from_agent']}" if how == "in the chat"
@@ -15795,6 +15922,7 @@ def withdraw(conn, msg_id, note, actor=None):
                      (t, t, q["id"]))
         if q["item_id"] is not None:
             _event(conn, q["item_id"], actor, f"withdrew question #{q['id']}: {note.strip()}")
+        _answer_unblocks(conn, q)
     sync_needs_you(conn)
     return {"withdrawn": q["id"], "note": note.strip(), "to": q["to_agent"]}
 
@@ -19909,7 +20037,7 @@ def _want_fresh(conn, item_id, note):
     person's item and ended, or asked a question and ended): put the answer in the item's notes, and mark it
     for maxpm serve, which starts a fresh session for it (fresh_sessions). Inside a tx."""
     it = _item(conn, item_id)
-    if (it["status"] != "open" or it["doer"] == "human" or it["kind"] != "work" or it["reserved_for"]
+    if (it["status"] != "open" or it["doer"] == "human" or it["kind"] not in ANSWER_KINDS or it["reserved_for"]
             or not conn.execute("SELECT 1 FROM events WHERE item_id=? AND change LIKE 'claimed%'", (item_id,)).fetchone()):
         return False
     _add_note(conn, item_id, note)
@@ -20566,9 +20694,17 @@ def manager_findings(conn):
     agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents WHERE kind='ai' ORDER BY name")]
     queued = {r["agent"]: r["n"] for r in conn.execute(
         "SELECT agent, COUNT(*) n FROM queue_entries WHERE item_id IS NOT NULL GROUP BY agent")}
-    stuck = []
+    stuck, ends = [], []
+    # A session that waits at its prompt for a person's answer is not stuck: it should end, and the answer starts a
+    # fresh session (#5776). maxpm serve ends it after question_wait_end; the manager can end it sooner.
+    asking = waits_on_person(conn, [a["name"] for a in agents])
     for a in agents:
-        if a["state"] in ("away", "gone") and (a["holds"] or queued.get(a["name"])):
+        if a["name"] in asking:
+            q = _message(conn, asking[a["name"]])
+            ends.append({"agent": a["name"], "question": q["id"], "person": q["to_agent"], "item": q["item_id"],
+                         "waited": _short(t - parse_iso(q["created_at"])),
+                         "ends_after": _wait_end(conn, a["name"], q)})
+        elif a["state"] in ("away", "gone") and (a["holds"] or queued.get(a["name"])):
             dead = bool(a.get("pid")) and a.get("host") == this_host() and not pid_alive(a["pid"])
             stuck.append({"agent": a["name"], "state": a["state"], "why": "its process ended" if dead else
                           f"not seen for {_short(t - parse_iso(a['last_seen']))}",
@@ -20632,7 +20768,7 @@ def manager_findings(conn):
                             "done_when": g["done_when"], "outcome": g["outcome"], "backlog": backlog,
                             "last": dict(last) if last else None, "question": _done_when_question(g, backlog)})
     waits = release_waits(conn)
-    return {"stuck": stuck, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
+    return {"stuck": stuck, "ends": ends, "lost_leases": lost, "waiting_too_long": waiting, "uncovered": uncovered,
             "unneeded": unneeded, "goal_checks": goal_checks, "unpushed": waits["unpushed"],
             "untagged": waits["untagged"],
             "not_connected": unconnected, "serve_loop": [loop] if loop and loop["late"] else [],
@@ -20739,7 +20875,8 @@ def release_waits(conn):
 
 
 def _finding_keys(f):
-    return sorted({f"stuck:{x['agent']}" for x in f["stuck"]} | {f"lost:{x['id']}" for x in f["lost_leases"]}
+    return sorted({f"stuck:{x['agent']}" for x in f["stuck"]} | {f"ends:{x['agent']}" for x in f.get("ends", [])}
+                  | {f"lost:{x['id']}" for x in f["lost_leases"]}
                   | {f"waiting:{x['agent']}" for x in f["waiting_too_long"]}
                   | {f"unconnected:{x['agent']}" for x in f.get("not_connected", [])} | {f"uncovered:{x['project']}" + (f":{x['agent_type']}" if x.get("agent_type") else "") for x in f["uncovered"]}
                   | {f"target:{x['target']}" for x in f["targets"]} | {f"question:{x['id']}" for x in f["questions"]}
