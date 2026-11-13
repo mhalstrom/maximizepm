@@ -1047,12 +1047,14 @@ class Browser:
                     # input it is a caret that blinks.
                     h = hashlib.sha1(p["data"].encode()).digest()
                     sharp = self.frame and self.frame.get("sharp")
-                    if sharp and (h == self.look or (h in self.seen and time.time() - self.person_at > INPUT_SHOWS)):
+                    echo = h == self.look or (h in self.seen and time.time() - self.person_at > INPUT_SHOWS)
+                    if sharp and echo:
                         return
                     self.look = h
                     if h not in self.seen:
                         self.seen = (self.seen + [h])[-SHARP_SEEN:]
-                    self._want_sharp()
+                    if not echo:  # #5706: an echo that comes before the screenshot's reply is no change either
+                        self._want_sharp()
                 self.active_at = time.time()
                 with self.cond:
                     self.seq += 1

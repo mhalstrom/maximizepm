@@ -1455,6 +1455,20 @@ class SharpWhenStill(Base):
         timing.wait_for(lambda: b.frame.get("sharp"), 10, "the next sharp frame")
         self.assertEqual(len(self.shots), 2)
 
+    def test_the_echo_of_the_screenshot_before_its_reply_keeps_the_sharp_frame(self):
+        """#5706: the screenshot's repaint can send its echo frame before the screenshot's reply comes (a loaded
+        computer). The echo is no change: the screenshot stays the sharp frame. Before, each echo threw the screenshot
+        away and asked for another, whose echo did the same ('no sharp frame came', one run in three)."""
+        b = self.b
+        b.call = lambda method, params=None, session=None, timeout=None: (
+            self.shots.append(method), self.paint(b"frame 1"), {"data": base64.b64encode(b"sharp").decode()})[-1]
+        self.paint(b"frame 1")
+        timing.wait_for(lambda: b.frame.get("sharp"), 3, "the sharp frame")
+        self.assertEqual(self.shots, ["Page.captureScreenshot"])
+        self.paint(b"frame 2")  # a real change during no screenshot: shown at once, and the next sharp frame follows
+        self.assertIsNone(b.frame.get("sharp"))
+        timing.wait_for(lambda: b.frame.get("sharp"), 3, "the next sharp frame")
+
 
 class ManyPolls(Base):
     """#5637: a pane over a long link keeps several polls open; each gets the next change, never one that another poll
@@ -1572,7 +1586,7 @@ class RealChrome(Base):
             if sharp:
                 break
             f = browser.frame(b, f["seq"], 1)
-        self.assertIsNotNone(sharp, "no sharp frame came")
+        self.assertIsNotNone(sharp, "no sharp frame came")  # #5706: SharpWhenStill has the race that it lost
         self.assertEqual((sharp["w"], sharp["h"], jpeg_size(sharp["data"])), (500, 400, (1000, 800)))
         self.assertEqual(b.evaluate("[innerWidth, innerHeight, devicePixelRatio, screen.width >= outerWidth]"),
                          [500, 400, 2, True])
