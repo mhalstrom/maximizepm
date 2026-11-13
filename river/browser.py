@@ -562,12 +562,14 @@ class Browser:
         # shown tab's requests in flight (requestId -> when it started), for --wait idle.
         self.navs = 0
         self.stops = 0
+        self.asks = self.asks_end = 0  # #5674: next pages that the page asked for, and those that started or stayed
         self.nav = threading.Event()
         self.requests = {}
         self.net_at = 0.0
         self.snap = None     # the snapshot's world in the shown tab: {target, session, ctx}; refs live in it (#5663)
         self.refs = 0        # the last ref number given: refs never repeat in one browser, so an old ref fails
         self.opened = 0      # tabs that a page of the shown tab opened
+        self.dialog = None   # the alert, confirm or prompt box of the shown tab that waits for an answer (#5674)
         self.state = self._load()
         if owner:  # the sweep of a later serve finds a Chrome of this session that still runs (#5636)
             self.state.update(project=project, owner=owner)
@@ -757,6 +759,8 @@ class Browser:
         old = self.session
         self.session = self.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
         self.target = target
+        self.dialog = None  # a box of the tab shown before waits in that tab
+        self.asks_end = self.asks
         self.requests = {}  # the requests of the tab shown before never finish for this one (--wait idle)
         self.stops = self.navs  # nor does a load of that tab (loading)
         if old:
@@ -922,7 +926,7 @@ class Browser:
                 pass
         if self.ws is ws:  # Chrome ended (a person closed the window): the next action starts it again
             self.ws = None
-            self.session = self.target = None
+            self.session = self.target = self.dialog = None
             if self.state.get("window") and not self.attached:  # #5650: headless again, not a new window
                 self.state["window"] = False
                 self.state.pop("window_by", None)
@@ -968,6 +972,8 @@ class Browser:
                     self.cond.notify_all()
         elif session == self.session and method in NAV_EVENTS:
             track_nav(self, method, p)
+        elif session == self.session and method in ("Page.javascriptDialogOpening", "Page.javascriptDialogClosed"):
+            track_dialog(self, method, p, session)
         elif method == "Page.loadEventFired" and session == self.session and self.refit_ws is not self.ws:
             # #5651: a Chrome that took the panel's density before its first page load put each hover (a move with
             # no button held) at x / density: at density 2 a move to (300, 300) reached the page at (150, 150), so
@@ -998,7 +1004,7 @@ class Browser:
             gone = self.targets.pop(p["targetId"], None) or {}
             self.mine.discard(p["targetId"])
             if p["targetId"] == self.target:
-                self.session = self.target = None
+                self.session = self.target = self.dialog = None
                 # A popup that closes (an OAuth sign-in) shows the page that opened it again (#5619).
                 back = gone.get("opener") if gone.get("opener") in self.targets else None
                 threading.Thread(target=self._switch_quiet, args=(back,), daemon=True).start()
@@ -1037,7 +1043,7 @@ class Browser:
         msg = {"id": i, "method": method, "params": params or {}}
         if session:
             msg["sessionId"] = session
-        w = self.wait[i] = [threading.Event(), None]
+        w = self.wait[i] = [threading.Event(), None, session]  # a box that opens in session ends the wait (#5674)
         try:
             ws.send(json.dumps(msg))
             if not w[0].wait(timeout):
@@ -1048,6 +1054,8 @@ class Browser:
             self.wait.pop(i, None)
         if w[1] is None:
             raise RiverError("the browser closed")
+        if "dialog" in w[1]:
+            raise DialogOpen(self, w[1]["dialog"])
         if "error" in w[1]:
             raise RiverError(f"the browser refused {method}: {w[1]['error'].get('message')}")
         return w[1].get("result") or {}
@@ -1057,6 +1065,8 @@ class Browser:
         self.start()
         if not self.session:
             self._switch_quiet(None)
+        if self.dialog and method != "Page.handleJavaScriptDialog":  # the page waits for the box: the call would too
+            raise DialogOpen(self, self.dialog)
         return self.call(method, params, session=self.session, timeout=timeout)
 
     def evaluate(self, expr, timeout=CALL_WAIT):
@@ -1086,6 +1096,7 @@ class Browser:
                 "window_idle": setting_of(self.project, "browser_window_idle") if self._windowed() else None,
                 "window_end": self.state.get("window_end"),
                 "size": list(self.size) if self.size else None,  # the panel's size that serve has (#5625)
+                "dialog": dialog_info(self.dialog),  # a box of the page that waits for an answer (#5674)
                 # The tab strip (#5632): each tab with its icon (from Chrome's Favicons, a data address) and the
                 # session whose pointer is on it.
                 "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target,
@@ -1119,6 +1130,8 @@ class Browser:
             try:
                 if self.evaluate("document.readyState", 5) == "complete":
                     break
+            except DialogOpen:  # the page waits for a box (#5674): it loads no further until someone answers it
+                break
             except RiverError:
                 pass
             time.sleep(0.2)
@@ -2305,6 +2318,8 @@ class Inputs:
             try:
                 if self.b.running():  # a browser that closed meanwhile: page() would start it again
                     self.b.page(method, params)
+            except DialogOpen:  # the pane shows the box and its buttons (#5674): no error under it
+                pass
             except RiverError as e:
                 self.error = str(e)
             except Exception as e:  # the thread must not end with calls in the queue
@@ -2459,6 +2474,7 @@ def char_events(ch):
 # ---- what an action waits for (#5663): the next page that it led to, or nothing
 
 NAV_EVENTS = {"Page.frameStartedLoading", "Page.frameStoppedLoading", "Page.frameNavigated",
+              "Page.frameRequestedNavigation", "Page.frameClearedScheduledNavigation", "Page.navigatedWithinDocument",
               "Network.requestWillBeSent", "Network.loadingFinished", "Network.loadingFailed"}
 NAV_GRACE = 0.02    # seconds in which a navigation that an action caused has started (a link, a form, Enter):
                     # Chrome said so within 2 ms on a local page; a later start is caught by loading() below
@@ -2487,7 +2503,14 @@ def track_nav(b, method, p):
         return
     if p.get("frameId") != b.target and not (method == "Page.frameNavigated" and not p["frame"].get("parentId")):
         return  # an inner frame
-    if method == "Page.frameStartedLoading":
+    if method == "Page.frameRequestedNavigation":  # #5674: the page asked for the next page; it starts to load later
+        if p.get("disposition", "currentTab") == "currentTab":  # (400 ms later after a box that asks to leave)
+            b.asks += 1
+            b.nav.set()
+        return
+    if method in ("Page.frameClearedScheduledNavigation", "Page.navigatedWithinDocument"):
+        b.asks_end = b.asks  # it started, or it stays in this document (a link to #part)
+    elif method == "Page.frameStartedLoading":
         b.navs += 1
         b.nav.set()
     elif method == "Page.frameStoppedLoading":
@@ -2504,13 +2527,89 @@ def loading(b):
     also when the action before returned before the load started."""
     if b.navs != b.stops:
         with b.cond:
-            b.cond.wait_for(lambda: b.stops == b.navs, LOADING_WAIT)
+            b.cond.wait_for(lambda: b.stops == b.navs or b.dialog, LOADING_WAIT)
+
+
+# ---- a box of the page (#5674): alert, confirm, prompt. While one shows, the page's script stops at it, and so does
+# every CDP call that needs the page (a script, a click, a screenshot): each would wait CALL_WAIT and fail with no
+# cause. So a call that waits ends when a box opens, a later call fails at once and names the box, and the session
+# answers it with maxpm browser dialog accept|dismiss (the person with the buttons of the pane). A box that asks
+# whether to leave the page (beforeunload) is accepted at once: the action that leaves the page asked for it.
+
+DIALOG_CLOSE = 1.0  # seconds that an answer waits for Chrome's word that the box closed
+
+
+class DialogOpen(RiverError):
+    """A box of the page waits for an answer."""
+
+    def __init__(self, b, dialog):
+        self.browser, self.dialog = b, dialog
+        super().__init__(dialog_text(dialog))
+
+
+def dialog_info(d):
+    """A box as the replies and the pane show it."""
+    return {"type": d["type"], "message": d["message"], "default": d.get("default", ""), "url": d.get("url", "")} \
+        if d else None
+
+
+def dialog_text(d):
+    """The refusal of a command while the box shows: the box, its text, and how to answer it."""
+    accept = 'maxpm browser dialog accept "<text>"' if d["type"] == "prompt" else "maxpm browser dialog accept"
+    return f'the page shows a {d["type"]} box {json.dumps(d["message"], ensure_ascii=False)}: {accept}, or ' \
+           f"maxpm browser dialog dismiss"
+
+
+def track_dialog(b, method, p, session):
+    """Page.javascriptDialogOpening and Closed of the shown tab (Browser._event)."""
+    if method == "Page.javascriptDialogOpening":
+        if p.get("type") == "beforeunload":
+            b.send("Page.handleJavaScriptDialog", {"accept": True}, session=session)
+            return
+        d = b.dialog = {"type": p.get("type") or "alert", "message": p.get("message") or "",
+                        "default": p.get("defaultPrompt") or "", "url": p.get("url") or "", "session": session,
+                        "at": time.time()}
+        for w in list(b.wait.values()):  # the calls that wait for this page: they end now and say why
+            if w[2] == session and w[1] is None:
+                w[1] = {"dialog": d}
+                w[0].set()
+        b.nav.set()
+    else:
+        b.dialog = None
+    with b.cond:
+        b.seq += 1  # the panel's poll answers at once with the box, or without it
+        b.cond.notify_all()
+
+
+def answer_dialog(b, accept=True, text=None, who=None, wait=None):
+    """Accept or dismiss the box of the page; text: the answer of a prompt box. Then the page goes on, and the reply
+    is the page as the action that follows the answer left it (a new page, or a next box)."""
+    d = b.dialog
+    if not d:
+        raise RiverError("the page shows no alert, confirm or prompt box")
+    if text is not None and d["type"] != "prompt":
+        raise RiverError(f"a {d['type']} box takes no text: maxpm browser dialog accept")
+    mark = nav_mark(b)
+    p = {"accept": bool(accept)}
+    if text is not None:
+        p["promptText"] = text
+    try:
+        b.call("Page.handleJavaScriptDialog", p, session=d["session"])
+    except RiverError as e:
+        if "no dialog" not in str(e).lower():
+            raise  # else someone else answered it a moment before (the person in the pane)
+    with b.cond:  # Chrome answers before the page goes on (18 ms on a local page); the page goes on at the close
+        b.cond.wait_for(lambda: b.dialog is not d, DIALOG_CLOSE)
+    if b.dialog is d:
+        b.dialog = None
+    driver(b, who)
+    return done(b, wait, mark, answered={"type": d["type"], "message": d["message"], "accept": bool(accept)})
 
 
 def nav_mark(b):
     """Before an action: what after() compares with."""
     b.nav.clear()
-    return {"navs": b.navs, "opened": b.opened, "target": b.target}
+    return {"navs": b.navs, "opened": b.opened, "target": b.target, "asks": b.asks}
 
 
 def net_idle(b):
@@ -2531,19 +2630,23 @@ def after(b, wait, mark):
     if wait == "none":
         return False
     moved = lambda: b.navs != mark["navs"] or b.opened != mark["opened"]  # noqa: E731
-    if not moved():
+    if not moved() and not b.dialog:
         b.nav.wait(NAV_START if wait == "load" else NAV_GRACE)
+    if not moved() and b.asks != mark["asks"] and b.asks_end != b.asks and not b.dialog:
+        with b.cond:  # the page asked for the next page, which has not started to load yet
+            b.cond.wait_for(lambda: moved() or b.asks_end == b.asks or b.dialog, NAV_START)
     if not moved():
-        if wait == "idle":
+        if wait == "idle" and not b.dialog:
             net_idle(b)
         return False
     end = time.time() + LOAD_WAIT
     if b.opened != mark["opened"]:  # a new tab: serve shows it once it is attached (_switch_quiet)
         while time.time() < end and b.target == mark["target"]:
             _pause(0.05)
-    else:
+    else:  # a box of the next page stops its load (#5674): the reply names the box
         with b.cond:
-            b.cond.wait_for(lambda: b.stops == b.navs or b.target != mark["target"], max(0.0, end - time.time()))
+            b.cond.wait_for(lambda: b.stops == b.navs or b.target != mark["target"] or b.dialog,
+                            max(0.0, end - time.time()))
     b.settle(max(0.5, end - time.time()))
     if wait == "idle":
         net_idle(b)
@@ -3065,6 +3168,8 @@ def walk(b, pages, settle=3.0, timeout=60.0):
         page = now["page"]
         if method == "Page.loadEventFired":
             loaded.set()
+        elif method == "Page.javascriptDialogOpening":  # a box would stop the page and the walk (#5674)
+            b.send("Page.handleJavaScriptDialog", {"accept": p.get("type") == "beforeunload"}, session=session)
         elif method == "Debugger.scriptParsed" and p.get("url"):
             now["scripts"][p["url"]] = p["scriptId"]
         elif page is None:

@@ -509,6 +509,60 @@ class Command(Base):
         _, out = self.asked("check", "@e3", res={"title": "X", "url": "u", "checked": True})
         self.assertEqual(out.strip(), "X  u  (checked)")
 
+    def test_dialog_answers_the_box_and_an_action_prints_the_box(self):
+        """#5674: maxpm browser dialog accept [text] | dismiss, and the line of a box that waits."""
+        a, _ = self.asked("dialog", "accept", "Bob")
+        self.assertEqual((a["action"], a["accept"], a["text"]), ("dialog", True, "Bob"))
+        a, _ = self.asked("dialog", "dismiss")
+        self.assertEqual((a["accept"], a["text"]), (False, None))
+        with self.assertRaisesRegex(RiverError, "dismiss takes no text"):
+            self.asked("dialog", "dismiss", "x")
+        box = {"type": "prompt", "message": "Your name?", "default": "Ann", "url": "u"}
+        _, out = self.asked("click", "@e3", res={"title": "X", "url": "u", "navigated": False, "dialog": box})
+        self.assertEqual(out.splitlines(), ["X  u", 'dialog prompt "Your name?" (default "Ann"): maxpm browser '
+                                                    'dialog accept "<text>", or dismiss'])
+        _, out = self.asked("status", res={"project": "web", "running": True, "title": "X", "url": "u", "dialog": box})
+        self.assertIn('  dialog prompt "Your name?"', out)
+        _, out = self.asked("dialog", "accept", "Bob", res={"title": "X", "url": "u", "answered": {
+            "type": "prompt", "message": "Your name?", "accept": True}})
+        self.assertEqual(out.strip(), "X  u  (accepted the prompt box)")
+
+    def test_a_box_ends_the_wait_of_a_call_and_refuses_the_next_one(self):
+        """#5674, with no Chrome: a box that opens ends the call that waits for the page; a later call fails at once
+        and names it; a box that asks to leave the page is accepted; the close lets calls through again."""
+        b = browser.get("web")
+        sent = []
+
+        class WS:
+            def send(self, text):
+                sent.append(json.loads(text))
+        b.ws, b.session, b.target = WS(), "S1", "T1"
+        b.start = lambda window=None: None
+        got = {}
+
+        def click():
+            try:
+                b.page("Input.dispatchMouseEvent", {"type": "mouseReleased"})
+            except RiverError as e:
+                got["e"] = e
+        t = threading.Thread(target=click)
+        t.start()
+        while not b.wait:
+            time.sleep(0.01)
+        b._event("Page.javascriptDialogOpening", {"type": "beforeunload", "message": ""}, "S1")
+        self.assertEqual((sent[-1]["method"], sent[-1]["params"], b.dialog), ("Page.handleJavaScriptDialog",
+                                                                               {"accept": True}, None))
+        b._event("Page.javascriptDialogOpening", {"type": "confirm", "message": "Delete this?"}, "S1")
+        t.join(2)
+        self.assertIsInstance(got["e"], browser.DialogOpen)
+        self.assertEqual(b.info()["dialog"], {"type": "confirm", "message": "Delete this?", "default": "", "url": ""})
+        n = len(sent)
+        with self.assertRaisesRegex(RiverError, 'confirm box "Delete this\\?": maxpm browser dialog accept, or'):
+            b.evaluate("1")
+        self.assertEqual(len(sent), n)  # nothing went to Chrome
+        b._event("Page.javascriptDialogClosed", {"result": True}, "S1")
+        self.assertIsNone(b.dialog)
+
     def test_snapshot_prints_refs_a_delta_and_what_it_left_out(self):
         snap = {"lines": ["# Sign up", '@e1 textbox "Name" value="Bob"'], "more": 3, "frames": 1,
                 "url": "https://x.test/", "title": "Form"}
@@ -1499,6 +1553,112 @@ class AgentActions(Base):
                          [(False, "back"), (False, "snapshot"), (True, "click")])
         self.assertEqual((res["ok"], res["left"], res["steps"][0]["result"]["url"]), (False, 1, f"http://127.0.0.1:{port}/one"))
         self.assertIn("is no longer on the page", res["steps"][2]["error"])
+
+
+BOXES = (b"<title>Boxes</title>"
+         b"<button id=del onclick=\"document.title = confirm('Delete this?') ? 'deleted' : 'kept'\">Delete</button>"
+         b"<button id=ask onclick=\"document.title = 'hi ' + prompt('Your name?', 'Ann')\">Ask</button>"
+         b"<button id=al onclick=\"setTimeout(() => { alert('Saved'); document.title = 'after alert' }, 300)\">Later</button>"
+         b"<a id=go href=/two onclick=\"return confirm('Leave?')\">Two</a><a id=part href=#end>Part</a>"
+         b"<script>onbeforeunload = (e) => { e.preventDefault(); e.returnValue = '' }</script>")
+
+
+class PageBoxes(Base):
+    """#5674: a page's alert, confirm and prompt boxes in a real Chrome: the action that opens one replies with it,
+    every later command is refused at once and names it, maxpm browser dialog accept|dismiss answers it, the pane's
+    status carries it, and a box that asks whether to leave the page is accepted by itself."""
+
+    def test_a_confirm_box_replies_with_its_text_and_dialog_accept_goes_on(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"<title>Two</title>" if self.path == "/two" else BOXES
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/")
+
+        # The click that opens the box replies at once, with the box; the reply prints the way to answer it.
+        t0 = time.time()
+        out = act(action="click", selector="#del")
+        self.assertLess(time.time() - t0, 2.0)
+        self.assertEqual(out["dialog"], {"type": "confirm", "message": "Delete this?", "default": "",
+                                         "url": f"http://127.0.0.1:{port}/"})
+        self.assertIn('dialog confirm "Delete this?": maxpm browser dialog accept, or dismiss',
+                      cli._browser_result("click", out))
+        # Every other command fails at once and names the box; the status shows it.
+        t0 = time.time()
+        for a in ({"action": "snapshot"}, {"action": "click", "selector": "#ask"}, {"action": "text"}):
+            with self.assertRaisesRegex(RiverError, 'the page shows a confirm box "Delete this\\?": maxpm browser '
+                                                    'dialog accept, or maxpm browser dialog dismiss'):
+                act(**a)
+        self.assertLess(time.time() - t0, 1.0)
+        self.assertEqual(act(action="status")["dialog"]["message"], "Delete this?")
+        with self.assertRaisesRegex(RiverError, "a confirm box takes no text"):
+            act(action="dialog", text="x")
+        t0 = time.time()
+        out = act(action="dialog", accept=True)
+        self.assertLess(time.time() - t0, 0.3)  # no next page: no wait for one
+        self.assertEqual((out["dialog"], out["answered"]["accept"], b.evaluate("document.title")),
+                         (None, True, "deleted"))
+        t0 = time.time()
+        act(action="click", selector="#part")  # a link in the same page: no wait for a next page
+        self.assertLess(time.time() - t0, 0.3)
+        self.assertIn("(accepted the confirm box)", cli._browser_result("dialog", out)[0])
+        act(action="click", selector="#del")
+        act(action="dialog", accept=False)
+        self.assertEqual(b.evaluate("document.title"), "kept")
+        with self.assertRaisesRegex(RiverError, "the page shows no alert, confirm or prompt box"):
+            act(action="dialog")
+
+        # A prompt box with its default text; the answer is the text.
+        out = act(action="click", selector="#ask")
+        self.assertEqual((out["dialog"]["type"], out["dialog"]["default"]), ("prompt", "Ann"))
+        act(action="dialog", accept=True, text="Bob")
+        self.assertEqual(b.evaluate("document.title"), "hi Bob")
+
+        # A box that opens later than the action: the next command names it.
+        act(action="click", selector="#al")
+        time.sleep(0.6)
+        with self.assertRaisesRegex(RiverError, 'alert box "Saved"'):
+            act(action="text")
+        act(action="dialog")
+        self.assertEqual(b.evaluate("document.title"), "after alert")
+
+        # A link that asks first: after the yes, the reply is the next page. The page before asks whether to leave
+        # it (beforeunload, after the clicks): that box is accepted by itself.
+        self.assertEqual(act(action="click", selector="#go")["dialog"]["message"], "Leave?")
+        t0 = time.time()
+        out = act(action="dialog")
+        self.assertEqual((out["navigated"], out["title"], out["dialog"]), (True, "Two", None))
+        self.assertLess(time.time() - t0, 3.0)
+        # A batch: the step that opens the box replies with it; the next step is refused, which ends the batch.
+        act(action="back")
+        res = act(action="batch", steps=[{"action": "click", "selector": "#del"}, {"action": "text"},
+                                         {"action": "dialog"}])
+        self.assertEqual(res["steps"][0]["result"]["dialog"]["message"], "Delete this?")
+        self.assertIn("confirm box", res["steps"][1]["error"])
+        res = act(action="batch", steps=[{"action": "dialog", "accept": False}, {"action": "text"}])
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(b.evaluate("document.title"), "kept")
 
 
 class AttachedChrome(Base):

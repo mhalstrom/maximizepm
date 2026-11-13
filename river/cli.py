@@ -924,6 +924,10 @@ def build_parser(only=None):
     x = brs.add_parser("key", parents=[bp, ap], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., or "
                        "one character")
     x.add_argument("key")
+    x = brs.add_parser("dialog", parents=[bp, ap], help="answer the page's alert, confirm or prompt box (#5674): "
+                       "accept [text], or dismiss")
+    x.add_argument("answer", choices=["accept", "dismiss"])
+    x.add_argument("text", nargs="?", help="the answer of a prompt box")
     x = brs.add_parser("eval", parents=[bp], help="run JavaScript in the page and print its value (JSON)")
     x.add_argument("js")
     x = brs.add_parser("batch", parents=[bp], help="several actions in one command: one on each line of the standard "
@@ -2542,6 +2546,10 @@ def _browser_args(a):
         args["selector"] = a.target
     elif b == "key":
         args["key"] = a.key
+    elif b == "dialog":
+        if a.text is not None and a.answer == "dismiss":
+            raise RiverError("dismiss takes no text: maxpm browser dialog dismiss")
+        args.update(accept=a.answer == "accept", text=a.text)
     elif b == "eval":
         args["js"] = a.js
     elif b == "give":
@@ -4982,7 +4990,8 @@ def render_annotations(a, res):
               f"(or not-fixed <n> --note \"<why>\")")
 
 
-BROWSER_ACTS = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload"}
+BROWSER_ACTS = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload",
+                "dialog"}
 
 
 def _snapshot_lines(s, title=True):
@@ -5014,8 +5023,16 @@ def _browser_result(action, res):
         what.append("picked " + ", ".join(res["picked"]))
     if "checked" in res:
         what.append("checked" if res["checked"] else "not checked")
+    if res.get("answered"):
+        what.append(("accepted" if res["answered"]["accept"] else "dismissed") + f" the {res['answered']['type']} box")
     head = ("new page: " if res.get("navigated") else "") + f"{res.get('title') or '(no title)'}  {res.get('url') or ''}"
     out = [head + (f"  ({'; '.join(what)})" if what else "")]
+    d = res.get("dialog")
+    if d:  # #5674: the page waits for this box; every other command is refused until it is answered
+        out.append(f"dialog {d['type']} {json.dumps(d['message'], ensure_ascii=False)}"
+                   + (f" (default {json.dumps(d['default'], ensure_ascii=False)})" if d.get("default") else "")
+                   + ": maxpm browser dialog " + ('accept "<text>"' if d["type"] == "prompt" else "accept")
+                   + ", or dismiss")
     if res.get("snapshot"):
         out += _snapshot_lines(res["snapshot"], title=False)
     return out
@@ -5059,6 +5076,8 @@ def render_browser(a, res):
     else:
         print(f"browser of {res['project']}: {'a window' if res.get('window') else 'in the side panel (headless)'}")
         print(f"  page: {res.get('title') or '(no title)'}  {res.get('url') or ''}")
+        if res.get("dialog"):
+            print("  " + _browser_result("status", {"dialog": res["dialog"]})[1])
         if len(res.get("tabs") or []) > 1:
             for t in res["tabs"]:
                 print(f"  {'*' if t['on'] else ' '} tab {t['id']}: {_cut(t['title'] or t['url'], 70)}")

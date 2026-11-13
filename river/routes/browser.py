@@ -75,7 +75,7 @@ def _person(conn, who):
 
 # action -> whether it changes the page (the controller rule holds for it)
 CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload", "eval",
-           "tab", "new_tab", "close_tab"}
+           "tab", "new_tab", "close_tab", "dialog"}
 INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key"}  # a session's first one shows its panel
 # What a batch may hold (#5663): the actions whose answer is text.
 BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status"}
@@ -105,7 +105,19 @@ def batch(conn, a, who):
 
 def act(conn, a, who):
     """One browser action. a: action, and project, or agent (its item's project), or cwd (the project of the folder);
-    then url, selector, x, y, text, key, js, full, sub, target, w, h, window as the action needs."""
+    then url, selector, x, y, text, key, js, full, sub, target, w, h, window as the action needs.
+    #5674: an action that opens a box of the page (alert, confirm, prompt) replies with the page and the box; a box
+    that was open before the action refuses it, and the refusal names the box."""
+    at = time.time()
+    try:
+        return _act(conn, a, who)
+    except browser.DialogOpen as e:
+        if e.dialog["at"] < at:
+            raise
+        return {**e.browser.info(), "navigated": False}
+
+
+def _act(conn, a, who):
     action = a.get("action") or "status"
     if action == "batch":
         return batch(conn, a, who)
@@ -115,7 +127,7 @@ def act(conn, a, who):
     # shows; a page walk uses the project's own browser, so a check never starts a Chrome for a session.
     owner = None if action == "walk" else (a.get("session") or a.get("agent") or None) if person else who
     b = browser.get(project, owner, conn)
-    if action in CHANGES:
+    if action in CHANGES and not (person and action == "dialog"):  # the person answers a box in the pane at any time
         browser.may_change(conn, b, who, person)
         if person:
             b.person_at = time.time()
@@ -176,6 +188,10 @@ def act(conn, a, who):
         return then(browser.history(b, -1 if action == "back" else 1, wait=wait))
     if action == "reload":
         return then(browser.reload(b, wait=wait))
+    if action == "dialog":
+        text = a.get("text")
+        return then(browser.answer_dialog(b, a.get("accept", True), None if text is None else str(text), who=sess,
+                                          wait=wait))
     if action == "eval":
         return {**b.info(), "value": b.evaluate(a.get("js") or "")}
     if action == "html":

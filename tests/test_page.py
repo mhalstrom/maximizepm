@@ -1097,6 +1097,63 @@ try {
     def test_the_pane_shows_binary_frames_at_phone_width(self):
         self.assertEqual(self._frames("390,844"), {"blob": True, "msg": True, "drawn": True, "wide": False})
 
+    def _box(self, size):
+        """#5674: a prompt box of the page shows over the frame with its text, its default answer, OK and Cancel, inside
+        the pane (p57: also at 390 px); OK sends the typed answer (op browser, action dialog) and the box goes."""
+        import base64
+        import time as _time
+        from unittest import mock
+        from river import browser
+        project = browser.project_of(self.c, agent="ag")
+        b = browser.get(project, "ag")
+        self.addCleanup(browser.BROWSERS.clear)
+        b.ws = object()  # running, with no Chrome: the test gives the frame and the box
+        with b.cond:
+            b.seq += 1
+            b.frame = {"seq": b.seq, "data": base64.b64encode(gray_jpeg(8)).decode(), "w": 400, "h": 400}
+            b.dialog = {"type": "prompt", "message": "Your name for the order? " * 4, "default": "Ann", "url": "u",
+                        "session": "S", "at": _time.time()}
+        answers = []
+
+        def answer(b, accept=True, text=None, who=None, wait=None):
+            answers.append((accept, text))
+            with b.cond:
+                b.dialog = None
+                b.seq += 1
+                b.cond.notify_all()
+            return {**b.info(), "navigated": False}
+        for p in (mock.patch.object(browser, "no_chrome", lambda: "no Chrome in this test"),
+                  mock.patch.object(browser, "answer_dialog", answer)):
+            p.start()
+            self.addCleanup(p.stop)
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag", "session ag shown");
+  const { openBrowser } = await import("./components/browserTool.js");
+  await openBrowser("ag");
+  const box = () => q(".br-box");
+  await until(() => box() && !box().classList.contains("hidden"), "the box");
+  const r = box().getBoundingClientRect(), st = q(".br-stage").getBoundingClientRect(), ok = q('[data-br="dialog_yes"]');
+  const out = { text: q(".br-boxt").textContent.startsWith("Your name for the order?"), value: q(".br-boxin").value,
+    cancel: !q(".br-boxno").classList.contains("hidden"),
+    inside: r.left >= st.left && r.right <= st.right && r.top >= st.top && ok.getBoundingClientRect().bottom <= st.bottom,
+    wide: document.documentElement.scrollWidth > innerWidth };
+  q(".br-boxin").value = "Bob";
+  ok.click();
+  await until(() => box().classList.contains("hidden"), "the box goes");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        out = self.drive(driver, "/sessions/ag", size=size)
+        self.assertEqual(answers, [(True, "Bob")])
+        return out
+
+    def test_the_pane_shows_a_box_of_the_page_at_desktop_width(self):
+        self.assertEqual(self._box("1280,900"), {"text": True, "value": "Ann", "cancel": True,
+                                                 "inside": True, "wide": False})
+
+    def test_the_pane_shows_a_box_of_the_page_at_phone_width(self):
+        self.assertEqual(self._box("390,844"), {"text": True, "value": "Ann", "cancel": True,
+                                                "inside": True, "wide": False})
+
     def _annotate(self, size):
         """#5655: Annotate in the Browser pane, with a real Chrome as the session's browser: the frame stops, a box, a
         pen line, an arrow, a text note and a selected element go on the layer, and Send stores the set and puts one

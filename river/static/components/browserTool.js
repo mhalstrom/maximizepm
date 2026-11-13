@@ -11,6 +11,8 @@
 // <session>" gives the browser to the session of this panel and puts the page's address in its chat.
 // #5635: the address field suggests as the person types: the addresses this browser visited (serve keeps them in
 // memory: Chrome's History and the pages its tabs showed), and a last row that searches Google for the words.
+// #5674: a box of the page (alert, confirm, prompt) shows over the frame with OK and Cancel; the person answers it
+// at any time, also while a session controls the browser.
 import { esc, toast, actor, pageToken, typeAction } from "../lib.js";
 import { button } from "./button.js";
 import { makeSuggest } from "./suggestList.js";
@@ -88,6 +90,12 @@ function render(box, project, session) {
         <div class="br-typed hidden"><span class="br-tw"></span> <span class="br-tt"><bdi></bdi></span></div>
       </div>
       <textarea class="br-keys" aria-label="Keys for the browser" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
+      <form class="br-box hidden" role="alertdialog" aria-label="The page asks" autocomplete="off">
+        <div class="br-boxt t-m"></div>
+        <input class="br-boxin hidden" aria-label="Answer" autocapitalize="off" spellcheck="false">
+        <div class="br-boxb">${button("Cancel", { cls: "br-boxno", data: { br: "dialog_no" } })}${
+          button("OK", { kind: "primary", data: { br: "dialog_yes" } })}</div>
+      </form>
       <div class="br-msg muted t-m">Starting the browser of ${esc(project)}…</div>
     </div>
   </div>`;
@@ -168,6 +176,7 @@ function render(box, project, session) {
       : we && Date.now() - Date.parse(we.at) < 600000 ? `Back in the panel at ${hm(we.at)}: ${we.why}.` : "";
     wby.classList.toggle("hidden", !wby.textContent);
     stage.classList.toggle("br-locked", !v.mine);
+    dialog(j.running && j.dialog);
     if (document.activeElement !== addr) addr.value = j.url && j.url !== "about:blank" ? j.url : "";
     strip(j.tabs || []);
     msg.classList.toggle("hidden", j.running && !!v.w);
@@ -178,6 +187,23 @@ function render(box, project, session) {
       : `The browser of ${esc(project)} is not running. ${button("Start", { kind: "primary", data: { br: "start" } })}`;
     draw(j);
   }
+
+  // A box of the page (#5674): alert, confirm, prompt. A headless Chrome draws no box in its frames, and the page
+  // waits until someone answers it: the person here, or the session (maxpm browser dialog accept|dismiss).
+  const dbox = $$(".br-box"), din = $$(".br-boxin");
+  let dkey = "";
+  function dialog(d) {
+    const key = d ? JSON.stringify(d) : "";
+    if (key === dkey) return;
+    dkey = key;
+    dbox.classList.toggle("hidden", !d);
+    if (!d) return;
+    $$(".br-boxt").textContent = d.message || (d.type === "alert" ? "The page shows an alert." : "The page asks.");
+    din.classList.toggle("hidden", d.type !== "prompt");
+    din.value = d.default || "";
+    $$(".br-boxno").classList.toggle("hidden", d.type === "alert");  // no focus: the person may type in the chat
+  }
+  dbox.addEventListener("submit", (e) => { e.preventDefault(); dbox.querySelector("[data-br=dialog_yes]").click(); });
 
   // A frame (#5637): the JPEG bytes of the binary answer, shown from a blob address. A poll that was slower than
   // another brings an older frame: it is dropped. The addresses that no longer show are freed once the new one loads.
@@ -357,6 +383,12 @@ function render(box, project, session) {
     e.preventDefault();
     const what = b.dataset.br;
     if (what === "annotate") return ann.toggle();
+    if (what === "dialog_yes" || what === "dialog_no") {  // the answer to the page's box (#5674)
+      const args = { project, pane, accept: what === "dialog_yes" };
+      if (what === "dialog_yes" && !din.classList.contains("hidden")) args.text = din.value;
+      try { show(await call("dialog", args)); } catch (err) { /* call showed it */ }
+      return;
+    }
     try {
       if (what === "hand") {  // #5616: the session controls it now, and its chat has the page's address
         const r = await typeAction("browser_hand", { project, session, to: b.dataset.to });

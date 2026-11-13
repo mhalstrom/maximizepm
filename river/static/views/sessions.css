@@ -347,6 +347,12 @@ button.srow-it { cursor: pointer; }
 .br-msg.hidden { display: none; }
 .br-msg:has(.br-dl) { flex-direction: column; }  /* no Chrome (#5624): the sentence, then its buttons */
 .br-dl { display: flex; flex-wrap: wrap; gap: var(--sp-3); justify-content: center; }
+/* #5674: the page's alert, confirm or prompt box, at the top of the page as Chrome shows it; the page waits for it. */
+.br-box { position: absolute; top: var(--sp-6); left: 50%; transform: translateX(-50%); z-index: 2; width: var(--w-dlg-s); max-width: calc(100% - 2 * var(--sp-6)); display: flex; flex-direction: column; gap: var(--sp-4); padding: var(--sp-5); background: var(--panel); color: var(--ink); border: var(--hair) solid var(--line); border-radius: var(--r-m); box-shadow: var(--shadow-pop); }
+.br-box.hidden, .br-boxin.hidden, .br-boxno.hidden { display: none; }
+.br-boxt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: var(--h-above-box); overflow: auto; }
+.br-boxin { font: inherit; }
+.br-boxb { display: flex; gap: var(--sp-3); justify-content: flex-end; }
 /* #5616: the pointer of the session that drives, a ring at each press, its name, and the keys it types. They lie over
    the page and take no click; the pointer moves by transform only, so it glides (browserTool.js sets the time). */
 .br-over { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
