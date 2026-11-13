@@ -106,7 +106,8 @@ function render(box, project, session) {
   const isWheel = (e) => e && e.action === "wheel", isMove = (e) => e && e.action === "move";
   const opposite = (a, b) => a * b < 0;  // two deltas of other directions
   const send = (ev) => {
-    if (!v.mine) return isMove(ev) || isWheel(ev) ? null : toast("A session controls the browser: press Take control first", true);
+    if (isMove(ev) && (!v.mine || !v.running)) return;  // a hover over a browser that stopped, or a session's: nothing
+    if (!v.mine) return toast("A session controls the browser: press Take control first", true);
     const last = pending[pending.length - 1];
     if (isMove(ev) && isMove(last)) pending[pending.length - 1] = ev;
     else if (isWheel(ev) && isWheel(last))
@@ -116,9 +117,9 @@ function render(box, project, session) {
   };
   function flush() {
     while (pending.length && flying < 4) {
-      const evs = pending; pending = []; flying++;
+      const evs = pending, quiet = evs.every(isMove); pending = []; flying++;  // a refused hover shows no error
       typeAction("browser_input", { project, session, pane, n: ++nth, evs })
-        .then(r => { if (r && r.error) toast(r.error, true); }, e => toast(e.message, true))
+        .then(r => { if (r && r.error && !quiet) toast(r.error, true); }, e => quiet || toast(e.message, true))
         .finally(() => { flying--; flush(); });
     }
   }
