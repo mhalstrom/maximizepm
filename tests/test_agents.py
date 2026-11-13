@@ -464,11 +464,12 @@ class HookState(Env):
         self.assertEqual([(e[0], e[2]) for e in entries],
                          [(agents.get(m).label,
                            " ".join(agents.get(m).input["native"]).replace("{text}", "{message}"))
-                          for m in ("codex", "pi", "claude")])
-        # Every other built-in adapter has no native path yet (#5691 read their docs): OpenCode, Copilot CLI and Hermes
-        # document one that needs its own work (#5702, #5703, #5704); Gemini CLI, Cursor CLI, Grok, Amp,
-        # Goose and Aider document none that reaches a running session without an install in their home folder.
-        self.assertEqual({m for m in agents.BUILTIN if agents.get(m).input.get("native")}, {"codex", "pi", "claude"})
+                          for m in ("codex", "pi", "opencode", "claude")])
+        # Every other built-in adapter has no native path yet (#5691 read their docs): Copilot CLI and Hermes document
+        # one that needs its own work (#5703, #5704); Gemini CLI, Cursor CLI, Grok, Amp, Goose and Aider document none
+        # that reaches a running session without an install in their home folder.
+        self.assertEqual({m for m in agents.BUILTIN if agents.get(m).input.get("native")},
+                         {"codex", "pi", "opencode", "claude"})
         self.assertEqual(agents.get("claude").detect["image_paste"].format(n=1), "[Image #1]")
 
 

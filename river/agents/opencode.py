@@ -129,7 +129,8 @@ DETECT = {
 }
 
 # Stop on the Sessions tab (#5547): the first Esc shows 'esc again to interrupt'; the second ends the turn.
-INPUT = {"native": None, "interrupt": ["Escape", "Escape"]}
+# Messages reach it through the state plugin's listener (core.native_message 'wake', #5702).
+INPUT = {"native": ["wake", "{address}", "{text}"], "interrupt": ["Escape", "Escape"]}
 
 # The built-in slash commands of the TUI (its "/" list, OpenCode 2.2.7).
 COMMANDS = [
@@ -341,20 +342,34 @@ PLUGIN_DIR = "maxpm-state"
 # command as a JSON list, __RESUME__ the words of the resume command before the session id. It is herdr's V2 plugin
 # (Apache-2.0, herdrdev/herdr src/integration/assets/opencode/herdr-tui-session.js, setup()), changed to call maxpm
 # report and to report a failed turn's error as the message.
+#
+# It is also the session's listener for messages (#5702; core.native_message 'OpenCode=OPENCODE_SESSION_ID: wake'), as
+# MaximizePM's hook is for Claude Code: for the session that the pane shows, it owns the folder of that session id under
+# __WAKE__ (the same hash as core.wake_dir), touches 'alive' every second, and gives each '.msg' file that a sender
+# writes there to OpenCode with client.session.prompt (opencode.ai/docs/build/plugins/cli: 'context.client is the
+# generated OpenCode client and can call the connected server'; docs/api: session.prompt 'Durably admit one session
+# input and schedule agent-loop execution'), delivery steer.
 PLUGIN = """\
-// MaximizePM: reports this OpenCode session's state with maxpm report (written by river/agents/opencode.py; do not
-// edit). From herdr's V2 opencode plugin (Apache-2.0, github.com/herdrdev/herdr), changed to call maxpm report.
+// MaximizePM: reports this OpenCode session's state with maxpm report, and brings MaximizePM's messages into it
+// (written by river/agents/opencode.py; do not edit). From herdr's V2 opencode plugin (Apache-2.0,
+// github.com/herdrdev/herdr), changed to call maxpm report.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const REPORT = __REPORT__;
 const RESUME = __RESUME__;
+const WAKE = __WAKE__;
 const RELEASE = REPORT.map((w) => (w === "report" ? "release" : w));
 const POLL_MS = 250;
 
 function run(argv) {
   // A report never waits for maxpm, and its failure never stops OpenCode.
   try {
-    spawn(argv[0], argv.slice(1), { stdio: "ignore", detached: true }).unref();
+    const child = spawn(argv[0], argv.slice(1), { stdio: "ignore", detached: true });
+    child.on("error", () => {}); // a missing maxpm emits 'error' later; unhandled, it would end OpenCode's process
+    child.unref();
   } catch {}
 }
 
@@ -415,6 +430,7 @@ function setup(api) {
       if (id) state = api.data.session.status(id) === "running" ? "working" : "idle";
     }
     publish();
+    listen();
   }
 
   function receive(payload) {
@@ -464,8 +480,48 @@ function setup(api) {
     publish();
   }
 
+  let wake; // the listener of the selected session: {id, dir, me, beat}
+
+  function unwake() {
+    try {
+      if (wake && readFileSync(join(wake.dir, "owner"), "utf8") === wake.me) unlinkSync(join(wake.dir, "alive"));
+    } catch {}
+    wake = undefined;
+  }
+
+  function listen() {
+    // A failure here never stops OpenCode: the messages then wait in MaximizePM's inbox.
+    if (disposed || !selected) return unwake();
+    try {
+      if (!wake || wake.id !== selected) {
+        unwake();
+        const dir = join(WAKE, createHash("sha1").update(selected).digest("hex").slice(0, 16));
+        mkdirSync(dir, { recursive: true });
+        wake = { id: selected, dir, me: `${process.pid}-${Date.now()}`, beat: 0 };
+        writeFileSync(join(dir, "owner"), wake.me);
+      }
+      if (readFileSync(join(wake.dir, "owner"), "utf8") !== wake.me) return;
+      if (Date.now() - wake.beat >= 1000) {
+        const t = new Date();
+        try { utimesSync(join(wake.dir, "alive"), t, t); } catch { writeFileSync(join(wake.dir, "alive"), ""); }
+        wake.beat = Date.now();
+      }
+      const texts = [];
+      for (const f of readdirSync(wake.dir).filter((n) => n.endsWith(".msg")).sort()) {
+        try {
+          texts.push(readFileSync(join(wake.dir, f), "utf8"));
+          unlinkSync(join(wake.dir, f));
+        } catch {}
+      }
+      if (texts.length) {
+        Promise.resolve(api.client.session.prompt({ sessionID: wake.id, text: texts.join("\\n"), delivery: "steer" }))
+          .catch(() => {});
+      }
+    } catch {}
+  }
+
   const unsubscribe = api.data.listen(receive);
-  const poll = setInterval(sync, POLL_MS);
+  const poll = setInterval(sync, POLL_MS); // sync also runs the listener
   poll.unref?.();
   sync();
   // The TUI disposes its plugins when it quits (and on /reload, after which setup reports the state again).
@@ -473,6 +529,7 @@ function setup(api) {
     disposed = true;
     clearInterval(poll);
     unsubscribe();
+    unwake();
     run(RELEASE);
   };
 }
@@ -483,7 +540,9 @@ export default { id: "maxpm.state", setup };
 
 def plugin_text(report, resume):
     """The plugin's text for the maxpm report command `report` (argv words) and the resume words `resume`."""
-    return PLUGIN.replace("__REPORT__", json.dumps(list(report))).replace("__RESUME__", json.dumps(list(resume)))
+    from ..core import river_dir
+    return (PLUGIN.replace("__REPORT__", json.dumps(list(report))).replace("__RESUME__", json.dumps(list(resume)))
+            .replace("__WAKE__", json.dumps(str(Path(river_dir()) / "wake"))))
 
 
 def _user_cli_plugins(env=None):

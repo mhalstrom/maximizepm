@@ -644,12 +644,53 @@ class State(Env):
         for c in reports:
             self.assertEqual(c[c.index("--session-id") + 1], sid)
             self.assertEqual(c[-4:], ["opencode", "--standalone", "--session", sid])
+        # The session that the pane showed had a listener, which the dispose ended (#5702).
+        self.assertTrue((core.wake_dir(sid) / "owner").exists())
+        self.assertFalse((core.wake_dir(sid) / "alive").exists())
         out2 = subprocess.run(["node", str(harness), plugin.as_uri(), str(FIX / "events.jsonl")], capture_output=True,
                               text=True, timeout=60, env={k: v for k, v in env.items() if k != "MAXPM_AGENT"})
         self.assertEqual(out2.returncode, 0, out2.stderr)
         self.assertEqual(json.loads(out2.stdout), [])
         time.sleep(0.3)
         self.assertEqual(len(out.read_text(encoding="utf-8").splitlines()), len(calls))  # not started by MaximizePM: no report
+
+    @unittest.skipUnless(shutil.which("node"), "no node")
+    def test_the_plugin_brings_a_message_into_the_session_that_the_pane_shows(self):
+        """#5702: the plugin listens in the folder of the session that the pane shows (the hash of core.wake_dir); a
+        message that a sender writes there goes to OpenCode's server with client.session.prompt, delivery steer."""
+        # A maxpm that is not there: its failed start must not end the plugin's process.
+        self.a.install_hooks("/work/demo", [os.path.join(self.root, "no-such-maxpm"), "report"])
+        plugin = Path(core.river_dir()) / "opencode" / opencode.PLUGIN_DIR / "tui.js"
+        harness = self.root / "listen.mjs"
+        harness.write_text("""
+            const plugin = (await import(process.argv[2])).default;
+            const sent = [];
+            const api = {
+              data: { listen: () => () => {}, session: { get: () => undefined, status: () => "idle" } },
+              ui: { router: { current: () => ({ type: "session", sessionID: "ses_1" }) } },
+              client: { session: { prompt: (body) => { sent.push(body); return Promise.resolve({}); } } },
+            };
+            const dispose = plugin.setup(api);
+            const t0 = Date.now();
+            while (!sent.length && Date.now() - t0 < 20000) await new Promise((r) => setTimeout(r, 50));
+            dispose?.();
+            console.log(JSON.stringify(sent));
+        """, encoding="utf-8")
+        p = subprocess.Popen(["node", str(harness), plugin.as_uri()], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, env={**os.environ, "MAXPM_AGENT": "oc1"})
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        alive = core.wake_dir("ses_1") / "alive"
+        for _ in range(200):
+            if alive.exists() or p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertTrue(alive.exists(), p.poll() is not None and p.stderr.read())
+        self.assertEqual(core._wake_send("ses_1", "[maxpm alert from mark] the build is red"), (0, ""))
+        out, err = p.communicate(timeout=30)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]),
+                         [{"sessionID": "ses_1", "text": "[maxpm alert from mark] the build is red", "delivery": "steer"}],
+                         err)
+        self.assertFalse(alive.exists())
 
 
 if __name__ == "__main__":
