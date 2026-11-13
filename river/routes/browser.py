@@ -171,6 +171,9 @@ def _act(conn, a, who):
         if not person and a.get("show", True):
             _ask_open(project, who, who)
         return then(out)
+    if action in ("click", "type", "fill", "select", "check", "uncheck") and a.get("selector"):
+        # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named
+        a = {**a, "selector": browser.resolve_target(b, a["selector"], a.get("within"), action)}
     if action == "click":
         x, y = a.get("x"), a.get("y")
         return then(browser.click(b, a.get("selector"), None if x is None else float(x),
@@ -196,7 +199,7 @@ def _act(conn, a, who):
     if action == "eval":
         return {**b.info(), "value": b.evaluate(a.get("js") or "")}
     if action == "html":  # #5671: --scope (a ref or a CSS selector) gives one part of the page, the fallback of a name
-        sc = a.get("scope")
+        sc = browser.resolve_target(b, a.get("scope"), verb="html --scope") if a.get("scope") else None
         html = browser.on_element(b, sc, "(el) => el.outerHTML") if sc else b.evaluate("document.documentElement.outerHTML")
         return {**b.info(), "html": html, "bytes": len((html or "").encode())}
     if action == "text":

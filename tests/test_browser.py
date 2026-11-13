@@ -485,9 +485,20 @@ class Command(Base):
         self.assertEqual(self.asked("click", "#go")[0]["selector"], "#go")
         a = self.asked("click", "10", "20.5")[0]
         self.assertEqual((a["x"], a["y"], a.get("selector")), (10.0, 20.5, None))
-        self.assertEqual(self.asked("click", "--selector", "a.more")[0]["selector"], "a.more")
+        self.assertEqual(self.asked("click", "--selector", "a.more")[0]["selector"], "css:a.more")
         with mock.patch.object(cli, "ask_server", lambda *a, **k: {}), self.assertRaisesRegex(RiverError, "x and y"):
             self.run_cli("-q", "--as", "ag1", "browser", "click", "10")
+
+    def test_an_action_takes_a_name_a_role_and_name_and_its_row(self):
+        """#5667: click "Comments", click link Comments (two words), --in "<row>"; fill "Month" 2026-10."""
+        self.assertEqual(self.asked("click", "Comments")[0]["selector"], "Comments")
+        a = self.asked("click", "link", "Comments", "--in", "Invoice 1042")[0]
+        self.assertEqual((a["selector"], a["within"]), ('link "Comments"', "Invoice 1042"))
+        self.assertEqual(self.asked("fill", "Month", "2026-10")[0]["selector"], "Month")
+        self.assertEqual(self.asked("type", "--selector", "#q", "hi")[0]["selector"], "css:#q")
+        with mock.patch.object(cli, "ask_server", lambda *a, **k: {}), \
+                self.assertRaisesRegex(RiverError, 'name its role first \\(link "Two"\\)'):
+            self.run_cli("-q", "--as", "ag1", "browser", "click", "One", "Two")
 
     def test_type_fill_select_check_and_the_wait(self):
         a, out = self.asked("type", "@e5", "two words", "--wait", "load", "--snapshot")
@@ -1644,6 +1655,33 @@ class SnapshotLimits(Base):
         everything = act(action="snapshot", interactive=True, all=True)["snapshot"]
         self.assertEqual(everything["outside"], 0)
         self.assertIn("Far link 24", "\n".join(everything["lines"]))
+
+        # #5667: an action by name, with no snapshot first. One match: its ref, the same as the snapshot's.
+        lines = "\n".join(everything["lines"])
+        ref_of = lambda pat: "@" + __import__("re").search(r"@(e\d+) " + pat, lines).group(1)  # noqa: E731
+        t0 = time.time()
+        self.assertEqual(browser.resolve_target(b, "Invoice 1042"), rows[1].split()[1])
+        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147: no page load, under 100 ms
+        self.assertEqual(browser.resolve_target(b, 'link "Far link 24"'), ref_of('link "Far link 24"'))
+        self.assertEqual(browser.resolve_target(b, "Remove", "card b"), ref_of(r'button "Remove" \(in "Card B"\)'))
+        self.assertEqual(browser.resolve_target(b, "Edit", "Invoice 1043"), rows[2].split()[-2])
+        with self.assertRaisesRegex(RiverError, '^11 elements are "Far link 1…"'):  # a cut name: the names so started
+            browser.resolve_target(b, "Far link 1…")
+        # Several: the candidates with their rows, and nothing happens.
+        with self.assertRaises(RiverError) as e:
+            act(action="click", selector="Edit")
+        msg = str(e.exception)
+        self.assertTrue(msg.startswith('3 elements are "Edit"; nothing was done. Name one: maxpm browser click @e<n>'), msg)
+        self.assertIn('button "Edit" (in "Invoice 1042")', msg)
+        # None: the nearest names and the way on; a CSS selector that matches still works.
+        with self.assertRaisesRegex(RiverError, 'no element is button "Home"; the nearest: link "Home". Else: maxpm '
+                                                'browser html --scope'):
+            act(action="click", selector='button "Home"')
+        self.assertEqual(browser.resolve_target(b, "nav a"), "css:nav a")
+        h = act(action="html", scope="Invoice 1041")
+        self.assertEqual(h["html"], '<a href="/i/1041">Invoice 1041</a>')
+        out = act(action="click", selector="Help")
+        self.assertEqual((out["navigated"], out["url"]), (True, f"http://127.0.0.1:{port}/help"))
 
 
 BOXES = (b"<title>Boxes</title>"

@@ -836,6 +836,9 @@ def parse_args(argv=None):
 
 
 BROWSER_WAITS = ("auto", "load", "idle", "none")  # browser.WAITS, without the import of browser at each command
+BROWSER_ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
+                 "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file",
+                 "clickable"}  # browser.ROLES: click link "Comments" (#5667)
 
 
 def build_parser(only=None):
@@ -914,21 +917,24 @@ def build_parser(only=None):
     x.add_argument("--out", help="write it to this file")
     x.add_argument("--scope", help="only one element: a ref (@e3) or a CSS selector")
     x = brs.add_parser("text", parents=[bp], help="the text of the page as a person reads it")
-    x = brs.add_parser("click", parents=[bp, ap], help="click an element (a ref such as @e3, or a CSS selector) or a "
-                       "point (x y, CSS pixels)")
-    x.add_argument("target", nargs="?", help="@e3 (a ref of maxpm browser snapshot), a CSS selector, or x")
-    x.add_argument("y", nargs="?", type=float)
+    # #5667: an element by its name as a snapshot prints it, or by role and name, in its row with --in
+    ep = argparse.ArgumentParser(add_help=False)
+    ep.add_argument("--in", dest="within", metavar="TEXT", help="only in the row, card or region whose text holds this")
+    x = brs.add_parser("click", parents=[bp, ap, ep], help="click an element (its name, role and name as link "
+                       "\"Comments\", or a ref such as @e3) or a point (x y, CSS pixels)")
+    x.add_argument("target", nargs="?", help="\"Comments\" (a name), link (a role, then the name), @e3, or x")
+    x.add_argument("y", nargs="?", help="the name after a role, or y")
     x.add_argument("--selector", help="a CSS selector; the first element that matches")
-    x = brs.add_parser("type", parents=[bp, ap], help="type text key by key: type @e5 'text' clicks the field first; "
-                       "type 'text' types where the focus is")
+    x = brs.add_parser("type", parents=[bp, ap, ep], help="type text key by key: type \"Search\" 'text' clicks the "
+                       "field first; type 'text' types where the focus is")
     x.add_argument("words", nargs="+", metavar="[target] text"); x.add_argument("--selector")
-    x = brs.add_parser("fill", parents=[bp, ap], help="set a field's text at once (its old text goes)")
-    x.add_argument("target", help="@e5 or a CSS selector"); x.add_argument("text")
-    x = brs.add_parser("select", parents=[bp, ap], help="pick the options of a select, by value or label")
+    x = brs.add_parser("fill", parents=[bp, ap, ep], help="set a field's text at once (its old text goes)")
+    x.add_argument("target", help="\"Month\" (its name), @e5, or a CSS selector"); x.add_argument("text")
+    x = brs.add_parser("select", parents=[bp, ap, ep], help="pick the options of a select, by value or label")
     x.add_argument("target"); x.add_argument("values", nargs="+")
     for name, h in (("check", "make a checkbox, a radio button or a switch checked"),
                     ("uncheck", "make a checkbox or a switch not checked")):
-        brs.add_parser(name, parents=[bp, ap], help=h).add_argument("target")
+        brs.add_parser(name, parents=[bp, ap, ep], help=h).add_argument("target")
     x = brs.add_parser("key", parents=[bp, ap], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., or "
                        "one character")
     x.add_argument("key")
@@ -2528,6 +2534,8 @@ def _browser_args(a):
         args["wait"] = a.wait
     if getattr(a, "snapshot", False):
         args["snapshot"] = True
+    if getattr(a, "within", None):
+        args["within"] = a.within
     if b == "open":
         args.update(url=a.url, show=not a.no_show)
     elif b == "snapshot":
@@ -2539,24 +2547,28 @@ def _browser_args(a):
     elif b == "screenshot":
         args.update(full=a.full, cursor=a.cursor)
     elif b == "click":
-        t = a.target
+        t, css = a.target, "css:" + a.selector if a.selector else None
         if t is not None and _is_number(t):
-            if a.y is None:
+            if a.y is None or not _is_number(a.y):
                 raise RiverError("a point needs x and y: maxpm browser click <x> <y>")
-            args.update(x=float(t), y=a.y, selector=a.selector)
-        elif t is not None or a.selector:
+            args.update(x=float(t), y=float(a.y), selector=css)
+        elif t is not None or css:
             if t is not None and a.y is not None:
-                raise RiverError(f"click takes one element or a point, not {t!r} and {a.y}")
-            args["selector"] = t if t is not None else a.selector
+                if t not in BROWSER_ROLES:
+                    raise RiverError(f"click takes one element or a point, not {t!r} and {a.y!r}: put a name in "
+                                     f"quotes, or name its role first (link \"{a.y}\")")
+                t = f'{t} "{a.y}"'
+            args["selector"] = t if t is not None else css
         else:
-            raise RiverError("name what to click: maxpm browser click @e3 (a ref of maxpm browser snapshot), "
-                             "maxpm browser click '<css>', or maxpm browser click <x> <y>")
+            raise RiverError("name what to click: maxpm browser click \"<its name>\", maxpm browser click @e3 (a ref "
+                             "of maxpm browser snapshot), --selector '<css>', or maxpm browser click <x> <y>")
     elif b == "type":
         if len(a.words) > 2:
             raise RiverError("type takes the text in one argument, in quotes: maxpm browser type @e5 'two words'")
         if len(a.words) == 2 and a.selector:
             raise RiverError("name the field once: maxpm browser type @e5 'text', or --selector")
-        args.update(text=a.words[-1], selector=a.words[0] if len(a.words) == 2 else a.selector)
+        args.update(text=a.words[-1], selector=a.words[0] if len(a.words) == 2 else
+                    "css:" + a.selector if a.selector else None)
     elif b == "fill":
         args.update(selector=a.target, text=a.text)
     elif b == "select":

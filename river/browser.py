@@ -2834,6 +2834,58 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const r = e.getBoundingClientRect();
     return r.width + r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
   };
+  // #5667: the elements of the page with one name (and role), in a row, card or region whose text holds o.target.within;
+  // each match gets a ref. A name that ends with … (as a snapshot cuts it) matches the names that start so.
+  if (o.target) {
+    const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase(), t = o.target;
+    const want = norm(t.name), pre = want.endsWith('…') ? want.slice(0, -1) : null, inn = t.within ? norm(t.within) : null;
+    const rowText = e => {  // the first text of the nearest repeated row that has text besides e (cells of a row: the row)
+      for (const {g, row} of chain(e)) {
+        for (const k of [...g.idx].filter(([, r]) => r === row).map(([k]) => k)) { const s = firstText(k, e); if (s) return s; }
+      }
+      return '';
+    };
+    const inside = e => {
+      if (!inn) return true;
+      for (const {g, row} of chain(e))
+        if (norm([...g.idx].filter(([, r]) => r === row).map(([k]) => k.innerText).join(' ')).includes(inn)) return true;
+      for (let c = e.parentElement; c && c !== document.documentElement; c = c.parentElement) {
+        if (c.matches(CONT) && norm(firstText(c, e)).includes(inn)) return true;
+        if (c.matches(REGION) && (norm(regionName(c)).includes(inn) || norm(firstText(c, e)).includes(inn))) return true;
+      }
+      return false;
+    };
+    const hits = [], names = new Map();
+    const look = node => {
+      const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+      for (let e = w.currentNode; e; e = w.nextNode()) {
+        if (e.nodeType === 1 && e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden') && shown(e)) {
+          const r = role(e), full = name(e), nm = norm(full);
+          if ((nm === want || (pre && nm.startsWith(pre))) && (!t.role || r === t.role)) { if (inside(e)) hits.push(e); }
+          else if (nm && names.size < 3000) names.set(r + ' ' + JSON.stringify(cut(full, 60)), nm);
+        }
+        if (e.nodeType === 1 && e.shadowRoot) look(e.shadowRoot);
+      }
+    };
+    look(document.documentElement);
+    let n = start;
+    const out = {next: n, hits: hits.slice(0, 12).map(e => {
+      let ref = R.ref.get(e);
+      if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
+      R.els.set(ref, new WeakRef(e));
+      const nm = cut(name(e), 60), c = rowText(e) || context(e, nm) || column(e);
+      return {ref, line: '@' + ref + ' ' + role(e) + ' ' + JSON.stringify(nm) + extra(e, role(e)) +
+        (c ? ' (in ' + JSON.stringify(c) + ')' : '') + (inView(e) ? '' : ' (out of the window)')};
+    }), count: hits.length};
+    out.next = n;
+    if (!hits.length) {  // the nearest names: they hold the name, the name holds them, or they share words with it
+      const ws = want.split(' ').filter(x => x.length > 1), score = nm =>
+        (nm.includes(want) ? 3 : 0) + (nm.length > 2 && want.includes(nm) ? 2 : 0) + ws.filter(x => nm.includes(x)).length;
+      out.near = [...names].map(([k, nm]) => [score(nm), k]).filter(([s]) => s > 0).sort((a, b) => b[0] - a[0])
+        .slice(0, 5).map(([, k]) => k);
+    }
+    return out;
+  }
   const view = o.view && !scoped && !o.find && !delta;
   const words = o.find ? [o.find.toLowerCase().replace(/\s+/g, ' ').trim()] : null;  // the words as one phrase
   const items = [], now = {};
@@ -3002,10 +3054,56 @@ def as_ref(target):
     return m.group(1) if m else None
 
 
+ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
+         "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file", "clickable"}
+
+
+def resolve_target(b, target, within=None, verb="click"):
+    """#5667: the element that an action names, as a ref (@e3) or a CSS selector (css:<selector>). target: a ref, a
+    name as a snapshot prints it ("Comments"), a role and a name (link "Comments"), or css:<selector>; within: the
+    text of its row, card or region. One element with that name: its ref. Several: an error that lists them, and
+    nothing happens. None: a CSS selector that matches (as before names), else an error with the nearest names."""
+    t = (target or "").strip()
+    if not t or as_ref(t) or t.startswith("css:"):
+        if within and t:
+            raise RiverError("--in takes a name, not a ref or a CSS selector: maxpm browser click \"<name>\" --in \"<row>\"")
+        return t or None
+    m = re.fullmatch(r'([a-z]+)\s+"(.*)"', t)
+    role, name = (m.group(1), m.group(2)) if m and m.group(1) in ROLES else (None, t)
+    loading(b)
+    r = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps(
+        {"target": {"name": name, "role": role, "within": within}})))
+    if r is NO_WORLD or not isinstance(r, dict):
+        raise RiverError("the page did not answer: run the command again")
+    b.refs = max(b.refs, r.get("next") or 0)
+    what = (f'{role} "{name}"' if role else f'"{name}"') + (f' in "{within}"' if within else "")
+    if r["count"] == 1:
+        return "@" + r["hits"][0]["ref"]
+    if r["count"] > 1:
+        more = f"\n  ... {r['count'] - len(r['hits'])} more" if r["count"] > len(r["hits"]) else ""
+        raise RiverError(f"{r['count']} elements are {what}; nothing was done. Name one: maxpm browser {verb} @e<n>, "
+                         f"or add --in \"<the text of its row or card>\":\n  " + "\n  ".join(h["line"] for h in r["hits"])
+                         + more)
+    if not role and not within:
+        try:  # a CSS selector, as maxpm browser took before names (#5663)
+            if b.evaluate("(() => { try { return !!document.querySelector(%s); } catch (e) { return false; } })()"
+                          % json.dumps(t)):
+                return "css:" + t
+        except DialogOpen:
+            raise
+        except RiverError:
+            pass
+    near = ("; the nearest: " + ", ".join(r.get("near") or [])) if r.get("near") else ""
+    raise RiverError(f"no element is {what}{near}. Else: maxpm browser html --scope <ref or css> for that part of the "
+                     f"page, then --selector '<css>' or a point (x y)")
+
+
 def on_element(b, target, fn, *args):
     """fn(el, ...args) in the page, for the element that target names: a ref of a snapshot (@e3, in the snapshot's
-    world) or a CSS selector (the first element that matches, in the page's world)."""
+    world) or a CSS selector (the first element that matches, in the page's world; css:<selector> too)."""
     rest = "".join(", " + json.dumps(x) for x in args)
+    if target and target.startswith("css:"):
+        target = target[4:]
     ref = as_ref(target)
     loading(b)
     if ref:
