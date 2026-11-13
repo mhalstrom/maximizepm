@@ -59,7 +59,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from urllib.parse import quote_plus, urlsplit
+from urllib.parse import quote_plus, urldefrag, urlsplit
 
 from . import core
 from .core import RiverError
@@ -563,6 +563,8 @@ class Browser:
         self.navs = 0
         self.stops = 0
         self.asks = self.asks_end = 0  # #5674: next pages that the page asked for, and those that started or stayed
+        self.within = 0  # #5717: address changes in the same document (pushState, replaceState, a #part)
+        self.stale = False  # #5717: such a change came after the last read of the page's title (here)
         self.nav = threading.Event()
         self.requests = {}
         self.net_at = 0.0
@@ -1148,10 +1150,17 @@ class Browser:
             self.targets[self.target] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
         except (RiverError, KeyError, TypeError):
             pass
-        try:  # #5663: right after a load, the target's info can still hold the page before; the page knows its own
+        self.here()
+
+    def here(self):
+        """The shown tab's address and title as the page knows them now. #5663: right after a load, the target's info
+        can still hold the page before. #5717: a page's script that changes the address (a client route, pushState)
+        changes no title in Chrome's target info, so the replies named the page before."""
+        try:
             url, title = self.evaluate("[location.href, document.title]", 5)
             if self.target in self.targets:
                 self.targets[self.target].update(url=url, title=title)
+            self.stale = False
         except (RiverError, TypeError, ValueError):
             pass
 
@@ -2488,6 +2497,9 @@ NAV_GRACE = 0.02    # seconds in which a navigation that an action caused has st
                     # Chrome said so within 2 ms on a local page; a later start is caught by loading() below
 LOADING_WAIT = 5.0  # seconds that a snapshot or a ref waits for the page that loads now
 NAV_START = 3.0     # --wait load: seconds in which the next page must start to load
+                    # #5717: also what a click on a link to another address of the same site waits for the page's
+                    # script to change the address (a client route: The Infatuation's did after 1.2 s)
+ROUTE_TITLE = 1.0   # #5717: seconds that a client route waits for its new title (the page's script sets it later)
 IDLE_QUIET = 0.5    # --wait idle: seconds with no request in flight
 IDLE_WAIT = 10.0    # --wait idle: seconds that it waits at most
 IDLE_OLD = 10.0     # a request open longer than this (a long poll, a stream) does not count
@@ -2518,6 +2530,11 @@ def track_nav(b, method, p):
         return
     if method in ("Page.frameClearedScheduledNavigation", "Page.navigatedWithinDocument"):
         b.asks_end = b.asks  # it started, or it stays in this document (a link to #part)
+        if method == "Page.navigatedWithinDocument":  # #5717: the page's script changed the address
+            b.within += 1
+            b.stale = True
+            if b.target in b.targets and p.get("url"):
+                b.targets[b.target]["url"] = p["url"]
     elif method == "Page.frameStartedLoading":
         b.navs += 1
         b.nav.set()
@@ -2617,7 +2634,22 @@ def answer_dialog(b, accept=True, text=None, who=None, wait=None):
 def nav_mark(b):
     """Before an action: what after() compares with."""
     b.nav.clear()
-    return {"navs": b.navs, "opened": b.opened, "target": b.target, "asks": b.asks}
+    return {"navs": b.navs, "opened": b.opened, "target": b.target, "asks": b.asks, "within": b.within,
+            "title": (b.targets.get(b.target) or {}).get("title"), "url": (b.targets.get(b.target) or {}).get("url")}
+
+
+def route_title(b, mark):
+    """After the page's script went to another address (#5717): wait ROUTE_TITLE at most for its new title, then
+    read the address and title from the page."""
+    end = time.time() + (ROUTE_TITLE if mark.get("link") else 0)
+    while time.time() < end:
+        try:
+            if b.evaluate("document.title", 1) != mark.get("title"):
+                break
+        except RiverError:
+            break
+        _pause(0.05)
+    b.here()
 
 
 def net_idle(b):
@@ -2633,17 +2665,24 @@ def net_idle(b):
 def after(b, wait, mark):
     """Wait as --wait says after an action (auto: for the next page when the action led to one, else not at all;
     load: for the next page, which must start within NAV_START; idle: also until no request is in flight; none:
-    not at all). True when a new page or a new tab came."""
+    not at all). True when a new page or a new tab came, or the page's script went to another address (#5717)."""
     wait = wait or "auto"
     if wait == "none":
         return False
     moved = lambda: b.navs != mark["navs"] or b.opened != mark["opened"]  # noqa: E731
+    routed = lambda: b.within != mark.get("within", b.within)  # noqa: E731
     if not moved() and not b.dialog:
         b.nav.wait(NAV_START if wait == "load" else NAV_GRACE)
     if not moved() and b.asks != mark["asks"] and b.asks_end != b.asks and not b.dialog:
         with b.cond:  # the page asked for the next page, which has not started to load yet
             b.cond.wait_for(lambda: moved() or b.asks_end == b.asks or b.dialog, NAV_START)
+    if not moved() and not routed() and mark.get("link") and not b.dialog:
+        with b.cond:  # #5717: a link to another address of the site, which the page's script may follow later
+            b.cond.wait_for(lambda: moved() or routed() or b.dialog, NAV_START)
     if not moved():
+        if routed() and not b.dialog:
+            route_title(b, mark)
+            return urldefrag(b.info()["url"])[0] != urldefrag(mark.get("url") or "")[0]  # a #part is no new page
         if wait == "idle" and not b.dialog:
             net_idle(b)
         return False
@@ -2656,9 +2695,14 @@ def after(b, wait, mark):
             b.cond.wait_for(lambda: b.stops == b.navs or b.target != mark["target"] or b.dialog,
                             max(0.0, end - time.time()))
     b.settle(max(0.5, end - time.time()))
+    new = True
+    if routed() and not b.dialog:  # Chrome also says 'loading' for a client route; its title comes after (#5717)
+        route_title(b, mark)
+        new = b.navs - mark["navs"] > b.within - mark["within"] or b.opened != mark["opened"] or \
+            urldefrag(b.info()["url"])[0] != urldefrag(mark.get("url") or "")[0]  # a #part is no new page
     if wait == "idle":
         net_idle(b)
-    return True
+    return new
 
 
 # ---- the snapshot (#5663): the interactive elements of the page, each with a ref (@e1, ...) that later actions name
@@ -3091,6 +3135,7 @@ def snapshot(b, interactive=False, scope=None, delta=False, limit=SNAP_MAX, view
     if r.get("error"):
         raise RiverError(r["error"])
     b.refs = max(b.refs, r.pop("next"))
+    b.here()  # #5717: the header names the page as it is now, also after its script changed the address
     return {**b.info(), "snapshot": r}
 
 
@@ -3253,8 +3298,14 @@ def on_element(b, target, fn, *args):
     return r.get("v")
 
 
+# The point to click, and (#5717) the address of the element's link when it is another address of the same site in the
+# same tab: the page's script may follow it as a client route, and the click then waits for that.
 POINT_JS = ("(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); const r = el.getBoundingClientRect(); "
-            "return [r.left + r.width / 2, r.top + r.height / 2]; }")
+            "const a = el.closest('a[href]'); let link = null; "
+            "if (a && (!a.target || a.target === '_self')) { const u = new URL(a.href, location.href), "
+            "h = new URL(location.href); u.hash = h.hash = ''; "
+            "if (u.origin === h.origin && u.href !== h.href) link = u.href; } "
+            "return [r.left + r.width / 2, r.top + r.height / 2, link]; }")
 # Focus a field and select what it holds, so the text that comes next replaces it. What kind of field it is: text
 # (Input.insertText types it), value (a date, a color: the value is set), select, or no:<what> (fill refuses).
 FOCUS_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); el.focus();
@@ -3301,14 +3352,16 @@ def point_of(b, target):
 def click(b, selector=None, x=None, y=None, who=None, wait=None):
     """Click an element (a ref of a snapshot, or a CSS selector) or a point. While someone watches, the pointer glides
     there first; then the action waits as after() says."""
+    link = None
     if selector:
-        x, y = point_of(b, selector)
+        x, y, *rest = point_of(b, selector)
+        link = rest[0] if rest else None
     if x is None or y is None:
         raise RiverError("name what to click: maxpm browser click @e3 (a ref of maxpm browser snapshot), "
                          "--selector '<css>', or x and y")
     who = driver(b, who)
     glide(b, who, x, y)
-    mark = nav_mark(b)
+    mark = {**nav_mark(b), "link": link}
     for t in ("mousePressed", "mouseReleased"):
         b.page("Input.dispatchMouseEvent", {"type": t, "x": float(x), "y": float(y), "button": "left", "clickCount": 1})
         if t == "mousePressed":
@@ -3317,8 +3370,11 @@ def click(b, selector=None, x=None, y=None, who=None, wait=None):
 
 
 def done(b, wait, mark, **out):
-    """The answer of an action: the page as it is after the wait."""
+    """The answer of an action: the page as it is after the wait. #5717: with no new page, the address and title
+    are read from the page (its script may have changed them), not from Chrome's target info."""
     moved = after(b, wait, mark)
+    if not moved and not b.dialog:
+        b.here()
     return {**b.info(), **out, "navigated": moved}
 
 

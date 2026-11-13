@@ -1610,6 +1610,68 @@ class AgentActions(Base):
         self.assertIn("is no longer on the page", res["steps"][2]["error"])
 
 
+# A page whose script follows its links as a client route (as Next.js does): the address changes 0.6 s after the click,
+# the title a moment later.
+ROUTED = (b"<title>Guide</title><a id=r href=/reviews/x>Review X</a> <a href=#part>Part</a> "
+          b"<button onclick=\"history.pushState({}, '', '/later'); document.title = 'Later'\">Route</button>"
+          b"<script>document.getElementById('r').addEventListener('click', e => { e.preventDefault();"
+          b" setTimeout(() => { history.pushState({}, '', '/reviews/x');"
+          b" setTimeout(() => { document.title = 'Review X' }, 100) }, 600) })</script>")
+
+
+class ClientRoutes(Base):
+    """#5717 in a real Chrome: after the page's script changes the address, the reply of the action, the snapshot's
+    header and status name the new address and title, not the page before."""
+
+    def test_a_route_of_the_pages_script_is_the_page_the_replies_name(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(ROUTED)))
+                self.end_headers()
+                self.wfile.write(ROUTED)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        b.open(f"http://127.0.0.1:{port}/guide")
+        lines = browser.snapshot(b, interactive=True)["snapshot"]["lines"]
+        ref = {line.split('"')[1]: line.split()[0] for line in lines}
+        # A link that the script follows later: the click waits for the new address and its title.
+        t0 = time.time()
+        out = browser.click(b, ref["Review X"])
+        self.assertLess(time.time() - t0, timing.limit(1.5, below=browser.NAV_START + browser.ROUTE_TITLE))
+        self.assertEqual((out["navigated"], out["url"], out["title"]),
+                         (True, f"http://127.0.0.1:{port}/reviews/x", "Review X"))
+        self.assertEqual(browser.snapshot(b, interactive=True)["url"], f"http://127.0.0.1:{port}/reviews/x")
+        # A link to a part of the page is no new page, and it does not wait for a title.
+        t0 = time.time()
+        out = browser.click(b, ref["Part"])
+        self.assertLess(time.time() - t0, timing.limit(0.5, below=browser.ROUTE_TITLE))
+        self.assertEqual((out["navigated"], out["url"]), (False, f"http://127.0.0.1:{port}/reviews/x#part"))
+        # A button whose script changes the address and the title at once.
+        out = browser.click(b, ref["Route"])
+        self.assertEqual((out["url"], out["title"]), (f"http://127.0.0.1:{port}/later", "Later"))
+        # A change that no action made: status reads the page again.
+        b.evaluate("history.pushState({}, '', '/elsewhere'); document.title = 'Elsewhere'; 1")
+        timing.wait_for(lambda: b.stale, what="Chrome's event of the new address")
+        res = routes.act(self.c, {"action": "status", "project": "web"}, None)
+        self.assertEqual((res["url"], res["title"]), (f"http://127.0.0.1:{port}/elsewhere", "Elsewhere"))
+
+
 LONG = (b"<title>Invoices</title><nav aria-label=Site><a href=/>Home</a> <a href=/help>Help</a></nav><main>"
         b"<table><thead><tr><th>Invoice</th><th>Status</th><th>Actions</th></tr></thead><tbody>"
         + b"".join(b"<tr><td><a href=/i/%d>Invoice %d</a></td><td>paid</td><td><button>Edit</button>"

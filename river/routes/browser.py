@@ -136,6 +136,8 @@ def _act(conn, a, who):
     if person and a.get("pane") and action in CHANGES:
         b.drive(a.get("pane"))  # the person uses the browser in this panel: its size is the page's size (#5625)
     if action == "status":
+        if getattr(b, "stale", False) and b.running() and not b.dialog:
+            b.here()  # #5717: the page's script changed the address since the last read of its title
         return b.info()
     if action == "suggest":  # the address bar, as the person types (#5635): from memory, no Chrome call
         return {"items": browser.suggest(b, a.get("text") or "")}
