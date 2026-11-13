@@ -3788,3 +3788,50 @@ class TextBesideMap(Base):
         self.assertNotIn("Other stories", t["text"])
         with self.assertRaisesRegex(RiverError, 'no heading "Related"'):
             act(action="text", section="Related")
+
+
+HIDDEN_MATCH = (b"<title>Lithium</title><main><details><summary>Minerals</summary><a href=/m>Spodumene</a></details>"
+                b"<div style='width:0;height:0;overflow:hidden'><a href=/z>Spodumene</a></div>"
+                b"<p>Ores such as <a href=/s>Spodumene</a> have a relatively high lithium content.</p></main>")
+
+
+class HiddenMatches(Base):
+    """#5779 in a real Chrome: of several elements with one name, the ones with no place to click (in a closed
+    details, of zero size) say 'hidden' and come last; several matches still do nothing."""
+
+    def test_hidden_matches_are_marked_and_last(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(HIDDEN_MATCH)))
+                self.end_headers()
+                self.wfile.write(HIDDEN_MATCH)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        routes.act(self.c, {"project": "web", "action": "open", "url": f"http://127.0.0.1:{port}/"}, None)
+        with self.assertRaises(browser.BrowserError) as e:
+            browser.resolve_target(b, 'link "Spodumene"')
+        # The link of the closed details has no box, so it is no match; the clipped one is, and says hidden.
+        lines = e.exception.candidates
+        self.assertEqual(e.exception.code, "ambiguous")
+        self.assertEqual(len(lines), 2, lines)
+        self.assertFalse(lines[0].endswith("(hidden)"), lines)
+        self.assertTrue(lines[1].endswith("(hidden)"), lines)
+        ref = lines[0].split()[0]
+        out = routes.act(self.c, {"project": "web", "action": "click", "selector": ref}, None)
+        self.assertTrue(out["url"].endswith("/s"), out["url"])  # the visible one, the first time

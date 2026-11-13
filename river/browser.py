@@ -3371,6 +3371,23 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     };
     look(document.documentElement);
     hits = hits.length ? smallest(hits) : inWords.length ? smallest(inWords) : [];
+    // #5779: a match with no place to click (in a closed details or box, zero size) says 'hidden' and goes last, so
+    // the agent picks a visible one the first time (a closed navbox of Wikipedia held one of six 'Spodumene' links)
+    const hid = e => {
+      if (e.checkVisibility && !e.checkVisibility({contentVisibilityAuto: true, visibilityProperty: true})) return true;
+      const r = e.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return true;
+      // a box around it that clips (overflow other than visible) and leaves nothing of it: a collapsed box
+      for (let a = e.parentElement, i = 0; a && a !== document.body && i < 20; a = a.parentElement, i++) {
+        const cs = getComputedStyle(a);
+        if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+        const q = a.getBoundingClientRect();
+        if (Math.min(r.right, q.right) - Math.max(r.left, q.left) < 1 || Math.min(r.bottom, q.bottom) - Math.max(r.top, q.top) < 1)
+          return true;
+      }
+      return false;
+    };
+    hits = hits.filter(e => !hid(e)).concat(hits.filter(hid));
     let n = start;
     const out = {next: n, hits: hits.slice(0, 12).map(e => {
       let ref = R.ref.get(e);
@@ -3379,7 +3396,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       const nm = cut(name(e), 60), c = rowText(e) || context(e, nm) || column(e), g = e.closest(REGION);
       (R.info || (R.info = new Map())).set(ref, [role(e), nm, g ? regionName(g) : '']);  // #5668
       return {ref, line: '@' + ref + ' ' + role(e) + ' ' + JSON.stringify(nm) + extra(e, role(e)) +
-        (c ? ' (in ' + JSON.stringify(c) + ')' : '') + (inView(e) ? '' : ' (out of the window)')};
+        (c ? ' (in ' + JSON.stringify(c) + ')' : '') + (hid(e) ? ' (hidden)' : inView(e) ? '' : ' (out of the window)')};
     }), count: hits.length};
     out.next = n;
     if (!hits.length) {  // the nearest names: they hold the name, the name holds them, or they share words with it
