@@ -969,6 +969,16 @@ def build_parser(only=None):
     x = brs.add_parser("batch", parents=[bp], help="several actions in one command: one on each line of the standard "
                        "input (or --file), as after 'maxpm browser'; the first that fails ends it")
     x.add_argument("--file", help="read the lines from this file, not the standard input")
+    x.add_argument("--lines", help="the lines themselves, in one argument (the MCP tool)")
+    # #5680: a session's walk as lines, and the lines as one call with inputs
+    x = brs.add_parser("steps", parents=[bp], help="the actions of your walk in this browser, as lines that run takes "
+                       "(names, not refs); put {name} where an input goes")
+    x.add_argument("--clear", action="store_true", help="forget the walk so far (start a new one)")
+    x = brs.add_parser("run", parents=[bp], help="the lines of a walk (stdin or --file) as one call: each {name} takes "
+                       "the input name=value; the result is the last extract's rows; a failed step stops it")
+    x.add_argument("inputs", nargs="*", metavar="name=value")
+    x.add_argument("--file", help="read the lines from this file, not the standard input")
+    x.add_argument("--lines", help="the lines themselves, in one argument (the MCP tool)")
     for name, h in (("back", "go back"), ("forward", "go forward"), ("reload", "load the page again")):
         brs.add_parser(name, parents=[bp, ap], help=h)
     for name, h in (("release", "give control up"), ("close", "close the browser (its profile and sign-ins stay)"),
@@ -2543,6 +2553,16 @@ def _browser_ask(conn, a, actor):
         steps = _browser_batch(a)
         return ask_server(conn, "browser", {"action": "batch", "steps": steps, "project": a.project, "tab": a.tab,
                                             "cwd": os.getcwd()}, actor, timeout=120 + 30 * len(steps))
+    if b == "run":  # #5680: the lines of a walk with their inputs, as one call
+        inputs = {}
+        for x in a.inputs:
+            k, eq, v = x.partition("=")
+            if not eq or not k:
+                raise RiverError(f"an input is name=value, not {x!r}: maxpm browser run q=rust < walk.txt")
+            inputs[k] = v
+        steps = _browser_batch(a, inputs)
+        return ask_server(conn, "browser", {"action": "run", "steps": steps, "project": a.project, "tab": a.tab,
+                                            "cwd": os.getcwd()}, actor, timeout=120 + 30 * len(steps))
     args = {**_browser_args(a), "project": a.project, "cwd": os.getcwd()}
     if a.tab:
         args["tab"] = a.tab
@@ -2631,6 +2651,8 @@ def _browser_args(a):
         args["selector"] = a.target
     elif b == "key":
         args["key"] = a.key
+    elif b == "steps":  # #5680
+        args["clear"] = a.clear
     elif b == "upload":  # #5679: full paths, as serve runs in another folder
         args.update(selector=a.target, files=[str(Path(f).expanduser().resolve()) for f in a.files])
     elif b == "dialog":
@@ -2652,28 +2674,39 @@ def _browser_args(a):
     return args
 
 
-def _browser_batch(a):
-    """The steps of maxpm browser batch: each line of the input, as after 'maxpm browser' (# starts a note)."""
+def _browser_batch(a, inputs=None):
+    """The steps of maxpm browser batch and run: each line of the input, as after 'maxpm browser' (# starts a note).
+    inputs (run, #5680): each {name} in a word takes the input's value."""
+    import re
     import shlex
-    text = Path(a.file).expanduser().read_text(encoding="utf-8") if a.file else sys.stdin.read()
+    text = a.lines if getattr(a, "lines", None) is not None else \
+        Path(a.file).expanduser().read_text(encoding="utf-8") if a.file else sys.stdin.read()
     parser, steps = build_parser(only="browser"), []
+    what = "run" if inputs is not None else "batch"
     for n, line in enumerate(text.splitlines(), 1):
         try:
             words = shlex.split(line, comments=True)
         except ValueError as e:
-            raise RiverError(f"line {n} of the batch: {e}")
+            raise RiverError(f"line {n} of the {what}: {e}")
         if not words:
             continue
         if words[0] == "maxpm" and words[1:2] == ["browser"]:
             words = words[2:]
         elif words[0] == "browser":
             words = words[1:]
-        if words and words[0] in ("batch", "screenshot", "html", "annotations", "annotation"):
-            raise RiverError(f"line {n} of the batch: {words[0]} is not for a batch; run it as its own command")
+        if inputs is not None:
+            def put(m, n=n):
+                if m.group(1) not in inputs:
+                    raise RiverError(f"line {n} of the run needs the input {m.group(1)}: maxpm browser run "
+                                     f"{m.group(1)}=<value>")
+                return inputs[m.group(1)]
+            words = [re.sub(r"\{([A-Za-z_]\w*)\}", put, w) for w in words]
+        if words and words[0] in ("batch", "run", "steps", "screenshot", "html", "annotations", "annotation"):
+            raise RiverError(f"line {n} of the {what}: {words[0]} is not for a {what}; run it as its own command")
         try:
             sub = parser.parse_args(["browser"] + words)
         except _Retry as e:  # the parser of one command says its mistake this way, with no exit
-            raise RiverError(f"line {n} of the batch ({line.strip()}): {e}")
+            raise RiverError(f"line {n} of the {what} ({line.strip()}): {e}")
         step = _browser_args(sub)
         if sub.project:
             step["project"] = sub.project
@@ -2681,8 +2714,42 @@ def _browser_batch(a):
             step["tab"] = sub.tab
         steps.append(step)
     if not steps:
-        raise RiverError("the batch is empty: one action on each line, such as: click @e3")
+        raise RiverError(f"the {what} is empty: one action on each line, such as: click \"Comments\"")
     return steps
+
+
+def _step_words(s):
+    """#5680: one step of a session's walk (as the route recorded it) as the words of its maxpm browser line."""
+    act, sel = s.get("action"), s.get("selector")
+    w = {"new_tab": ["new-tab"], "close_tab": ["close-tab"]}.get(act, [act])
+    if act == "open":
+        w.append(s.get("url") or "")
+    elif act == "click":
+        w += [sel] if sel else [str(s.get("x")), str(s.get("y"))]
+    elif act == "type":
+        w += ([sel] if sel else []) + [s.get("text") or ""]
+    elif act == "fill":
+        w += [sel or "", s.get("text") or ""]
+    elif act in ("select", "upload"):
+        w += [sel or ""] + [str(v) for v in s.get("values") or s.get("files") or []]
+    elif act in ("check", "uncheck"):
+        w.append(sel or "")
+    elif act == "key":
+        w.append(s.get("key") or "")
+    elif act == "dialog":
+        w.append("accept" if s.get("accept", True) else "dismiss")
+        w += [s["text"]] if s.get("text") is not None else []
+    elif act == "extract":
+        if s.get("rows"):
+            w += ["--rows", s["rows"]]
+        if s.get("limit"):
+            w += ["--limit", str(s["limit"])]
+        w += [f"{f[0]}={f[1]}" + (f"@{f[2]}" if f[2] else "") for f in s.get("fields") or []]
+    if s.get("within"):
+        w += ["--in", s["within"]]
+    if s.get("wait"):
+        w += ["--wait", s["wait"]]
+    return w
 
 def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     """Ask the maxpm serve of this queue to do one page action (server.OPS) and return its result; RiverError
@@ -5244,6 +5311,19 @@ def render_browser(a, res):
         if res.get("count", 0) > len(res.get("data") or []):
             print(f"maxpm: {len(res['data'])} of {res['count']} rows: --limit <n> for more", file=sys.stderr)
         return
+    if b == "steps":  # #5680: the walk as lines for run
+        import shlex
+        print("\n".join(shlex.join(_step_words(s)) for s in res.get("steps") or []) or "(no steps yet in this browser)")
+        return
+    if b == "run":  # #5680: the result (the last extract's rows), or the step that failed and the page
+        if res.get("ok"):
+            print(_browser_result("extract", {"data": res["result"]})[0] if res.get("result") is not None else
+                  f"done: {res['done']} steps; {res.get('title') or '(no title)'}  {res.get('url') or ''}")
+            return
+        f = res["failed"]
+        print(f"step {f['step']} ({f['line']}) failed after {res['done']} steps: {f['code']}: {f['message']}")
+        print("\n".join(res.get("outline") or []))
+        raise SystemExit(2)
     if b == "html" and "html" in res:
         print(res["html"])
         return

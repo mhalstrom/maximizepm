@@ -2635,7 +2635,7 @@ class BrowserError(RiverError):
 ERROR_CODES = ("not_found", "ambiguous", "covered", "dialog_open", "not_controller", "timeout", "refused_address",
                "refused_file", "error")
 # What each action does: a read changes nothing on the page (a recorder may run it with no yes); a change does.
-READS = {"status", "snapshot", "outline", "text", "extract", "html", "screenshot", "suggest", "annotations"}
+READS = {"status", "snapshot", "outline", "text", "extract", "html", "screenshot", "suggest", "annotations", "steps"}
 _PAGE = {"project", "owner", "running", "window", "source", "modes", "refused", "url", "title", "controller", "before",
          "window_by", "window_idle", "window_end", "size", "dialog", "tabs", "navigated", "changes", "outline", "notes"}
 
@@ -3026,7 +3026,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const look = node => {
       const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
       for (let e = w.currentNode; e; e = w.nextNode()) {
-        if (e.nodeType === 1 && e.matches(SEL) && role(e) === info[0] && norm(name(e)) === info[1] && shown(e)) {
+        if (e.nodeType === 1 && e.matches(SEL) && role(e) === info[0] && norm(name(e)) === info[1].toLowerCase() && shown(e)) {
           const g = e.closest(REGION);
           if ((g ? regionName(g) : '') === info[2]) hits.push(e);
         }
@@ -3216,7 +3216,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
       R.els.set(ref, new WeakRef(e));
       const nm = cut(name(e), 60), c = rowText(e) || context(e, nm) || column(e), g = e.closest(REGION);
-      (R.info || (R.info = new Map())).set(ref, [role(e), nm.toLowerCase(), g ? regionName(g) : '']);  // #5668
+      (R.info || (R.info = new Map())).set(ref, [role(e), nm, g ? regionName(g) : '']);  // #5668
       return {ref, line: '@' + ref + ' ' + role(e) + ' ' + JSON.stringify(nm) + extra(e, role(e)) +
         (c ? ' (in ' + JSON.stringify(c) + ')' : '') + (inView(e) ? '' : ' (out of the window)')};
     }), count: hits.length};
@@ -3259,7 +3259,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
     R.els.set(ref, new WeakRef(e));
     const x = extra(e, r), g = e.closest(REGION);
-    (R.info || (R.info = new Map())).set(ref, [r, nm.toLowerCase(), g ? regionName(g) : '']);  // #5668: to find it again
+    (R.info || (R.info = new Map())).set(ref, [r, nm, g ? regionName(g) : '']);  // #5668: to find it again
     now[ref] = '@' + ref + ' ' + r + ' ' + JSON.stringify(nm) + x;
     items.push({e, ref, r, nm, x});
   };
@@ -3625,6 +3625,18 @@ def page_text(b, section=None, grep=None, start=0, limit=TEXT_MAX, everything=Fa
     return r
 
 
+def step_target(b, target):
+    """#5680: the element of a step as its role and name: a ref ends with its page, a name runs again the next day."""
+    ref = as_ref(target or "")
+    if not ref:
+        return target
+    r = in_world(b, "(() => { const R = window.__maxpm, i = R && R.info && R.info.get(%s); return i || null; })()"
+                 % json.dumps(ref), create=False)
+    if r is NO_WORLD or not r or not r[1]:
+        return target
+    return f'{r[0]} "{r[1]}"'
+
+
 def resolve_target(b, target, within=None, verb="click"):
     """#5667: the element that an action names, as a ref (@e3) or a CSS selector (css:<selector>). target: a ref, a
     name as a snapshot prints it ("Comments"), a role and a name (link "Comments"), or css:<selector>; within: the
@@ -3879,7 +3891,11 @@ def type_text(b, text, selector=None, who=None, wait=None):
         note_keys(b, who, text, secret=hide)
         return done(b, wait, mark, typed=len(text))
     gap = min(KEY_TIME, TYPE_MAX / len(text))
-    for ch in text:
+    for n, ch in enumerate(text):
+        c = b.state.get("controller") or {}
+        if who and c.get("kind") == "person":  # #5680: the person took control: the text stops before its next key
+            raise BrowserError(f"{c.get('who') or 'the person'} took control of the browser after {n} of {len(text)} "
+                               f"characters; wait until they hand it back", "not_controller")
         for p in char_events(ch):
             b.page("Input.dispatchKeyEvent", p)
         if ch in "\r\n\t":

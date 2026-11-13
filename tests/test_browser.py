@@ -1881,6 +1881,104 @@ FILES = (b"<title>Files</title><a href=/report.csv>Report</a> <label for=f>Choos
          b"<input id=f type=file style='display:none' onchange=\"document.title = 'got ' + this.files[0].name\">")
 
 
+SEARCH = (b"<title>Search</title><form action=/results><label>Search <input name=q></label><button>Go</button></form>"
+          b"<button onclick=\"document.title = 'four'\">Four</button><button onclick=\"document.title = 'five'\">Five</button>")
+
+
+class RunWalk(Base):
+    """#5680 in a real Chrome: a session's walk is kept as steps with names (not refs); the steps with {q} in place
+    of the word run the next day as one call with another input and give the last extract's rows; a failed step
+    stops the run with its code and the page's outline; the person's Take control stops a run before its next step."""
+
+    def test_record_steps_run_with_another_input_a_failed_step_and_the_person_s_control(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        import sys
+        from urllib.parse import parse_qs, urlsplit
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                q = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
+                body = SEARCH if not self.path.startswith("/results") else (
+                    b"<title>Results</title><ul>" + b"".join(
+                        b"<li><a href=/item/%d>%s result %d</a> <span>info</span></li>" % (n, q.encode(), n)
+                        for n in (1, 2, 3)) + b"</ul>")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        core.register(self.c, "mark", human=True)
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        patch = mock.patch.object(cli, "ask_server", lambda conn, op, args, actor=None, timeout=5, retries=3:
+                                  server.OPS[op](conn, args, actor))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        def maxpm(*words, stdin=""):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.object(sys, "stdin", io.StringIO(stdin)):
+                try:
+                    code = cli.run(["-q", "--as", "ag1", "browser", *words, "--project", "web"])
+                except SystemExit as e:
+                    code = e.code
+            return code, out.getvalue()
+        url = f"http://127.0.0.1:{port}/"
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=url, show=False)
+        act(action="fill", selector="Search", text="rust")
+        lines = act(action="snapshot", interactive=True)["snapshot"]["lines"]
+        go = next(x for x in lines if '"Go"' in x).split()[0]
+        act(action="click", selector=go)  # by its ref: the step keeps its role and name
+        act(action="extract", rows="li", fields=[["title", "a", None]])
+        code, steps = maxpm("steps")
+        self.assertEqual(steps.splitlines(), [f"open {url}", "fill Search rust", "click 'button \"Go\"'",
+                                              "extract --rows li title=a"])
+        # The next day: the same lines with {q}, another input, one call.
+        walk = steps.replace("rust", "{q}")
+        code, out = maxpm("run", "q=python", stdin=walk)
+        self.assertEqual((code, json.loads(out)), (0, [{"title": f"python result {n}"} for n in (1, 2, 3)]))
+        self.assertEqual(maxpm("steps")[1], steps)  # a run's steps do not join the walk
+        with self.assertRaisesRegex(RiverError, "line 2 of the run needs the input q"):
+            cli.run(["-q", "--as", "ag1", "browser", "run", "--lines", walk, "--project", "web"])
+        # A failed step: its number, its code, and the outline of the page it stopped on.
+        code, out = maxpm("run", "--lines", f"open {url}\nclick Nope\nclick Go")
+        self.assertEqual(code, 2)
+        self.assertTrue(out.startswith("step 2 (click Nope) failed after 1 steps: not_found: no element is \"Nope\""), out)
+        self.assertIn("[page] 3 buttons, 1 field", out)
+        # The person takes control after step 2: steps 3 to 5 do not happen.
+        real, n = routes.act, [0]
+
+        def counted(conn, a, who):
+            out = real(conn, a, who)
+            n[0] += 1
+            if n[0] == 2:
+                browser.take(conn, b, "mark")
+            return out
+        with mock.patch.object(routes, "act", counted):
+            res = routes.run(self.c, {"project": "web", "steps": [
+                {"action": "open", "url": url}, {"action": "fill", "selector": "Search", "text": "x"},
+                {"action": "click", "selector": "Four"}, {"action": "click", "selector": "Five"},
+                {"action": "snapshot"}]}, "ag1")
+        self.assertEqual((res["ok"], res["done"], res["failed"]["step"], res["failed"]["code"]),
+                         (False, 2, 3, "not_controller"))
+        self.assertEqual(b.evaluate("document.title"), "Search")
+
+
 class Files(Base):
     """#5679 in a real Chrome: a click that downloads replies with the file's path and size (a second one with the
     same name gets its own); an upload gives a file of the downloads to a hidden file field, and refuses a file from

@@ -79,6 +79,12 @@ CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key",
 INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key", "upload"}  # a session's first one shows its panel
 # What a batch may hold (#5663): the actions whose answer is text.
 BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status", "outline", "extract"}
+# #5680: the actions that join a session's walk, and the arguments a step keeps
+RECORD = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "dialog", "upload", "back", "forward",
+          "reload", "extract"}
+STEP_KEYS = ("action", "url", "selector", "x", "y", "text", "values", "files", "key", "accept", "rows", "fields",
+             "limit", "within", "wait")
+WALK_KEEP = 200  # the steps of a walk that a browser remembers
 
 
 def batch(conn, a, who):
@@ -94,13 +100,55 @@ def batch(conn, a, who):
     done = []
     for s in steps:
         step = {k: v for k, v in a.items() if k in ("project", "agent", "cwd", "session")}
-        step.update(s)
+        step.update(s, _guard=True)
         try:
             done.append({"step": s, "result": act(conn, step, who)})
         except RiverError as e:
             done.append({"step": s, "error": str(e), "code": getattr(e, "code", "error")})
             break
     return {"steps": done, "ok": "error" not in done[-1], "left": len(steps) - len(done)}
+
+
+RUN = BATCH | {"upload"}
+
+
+def run(conn, a, who):
+    """#5680: a walk as one call (maxpm browser run): the steps in order, each as act() runs it, the controller
+    checked before each one (when the person takes control, the run stops before its next step: not_controller).
+    The result is the data of the last extract. A failed step ends it: its number, its code, and the page's outline."""
+    steps = a.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise RiverError("a run needs steps: one action on each line")
+    for s in steps:
+        name = (s or {}).get("action") if isinstance(s, dict) else None
+        if name not in RUN:
+            raise RiverError(f"a run takes {', '.join(sorted(RUN))}; not {name}")
+    result, res = None, {}
+    for i, s in enumerate(steps, 1):
+        step = {k: v for k, v in a.items() if k in ("project", "agent", "cwd", "session")}
+        step.update(s, _guard=True, _run=True)
+        try:
+            res = act(conn, step, who)
+        except RiverError as e:
+            b = _browser_of(conn, step, who)
+            try:
+                outline = browser.outline(b)["lines"] if b.running() and not b.dialog else []
+            except RiverError:
+                outline = []
+            line = " ".join(str(x) for x in [s["action"], s.get("selector") or s.get("url") or s.get("key") or ""] if x)
+            return {**(b.info() if b.running() else {}), "ok": False, "done": i - 1, "result": result,
+                    "failed": {"step": i, "line": line, "code": getattr(e, "code", None) or "error",
+                               "message": str(e), "candidates": getattr(e, "candidates", None) or []},
+                    "outline": outline}
+        if s["action"] == "extract":
+            result = res.get("data")
+    return {**res, "ok": True, "done": len(steps), "result": result}
+
+
+def _browser_of(conn, a, who):
+    person = _person(conn, who)
+    project = browser.project_of(conn, a.get("project"), a.get("agent") or (None if person else who), a.get("cwd"))
+    return browser.get(project, (a.get("session") or a.get("agent") or None) if person else who, conn)
 
 
 def call(conn, a, who):
@@ -131,13 +179,22 @@ def _act(conn, a, who):
     action = a.get("action") or "status"
     if action == "batch":
         return batch(conn, a, who)
+    if action == "run":
+        return run(conn, a, who)
     person = _person(conn, who)
     project = browser.project_of(conn, a.get("project"), a.get("agent") or (None if person else who), a.get("cwd"))
     # Whose browser (#5636): a session's own (maxpm browser, its Playwright); the person's panel names the session it
     # shows; a page walk uses the project's own browser, so a check never starts a Chrome for a session.
     owner = None if action == "walk" else (a.get("session") or a.get("agent") or None) if person else who
     b = browser.get(project, owner, conn)
-    if action in CHANGES and not (person and action == "dialog"):  # the person answers a box in the pane at any time
+    if action == "steps":  # #5680: this browser's walk so far
+        if a.get("clear"):
+            b.walk = []
+        return {**b.info(), "steps": list(getattr(b, "walk", []))}
+    # #5680: a step of a batch or a run checks the controller before it runs, reads too: the person's Take control
+    # stops the sequence before its next step
+    guard = a.get("_guard") and not person and action not in CHANGES
+    if (action in CHANGES and not (person and action == "dialog")) or guard:  # the person answers a box at any time
         try:
             browser.may_change(conn, b, who, person)
         except browser.BrowserError:
@@ -186,8 +243,21 @@ def _act(conn, a, who):
 
     pre = None  # #5673: the page's elements before a session's action, for the reply that says what changed
     b.said = []  # #5668: what the action did on its own (a ref found again), for its reply
+    # #5680: a session's action joins its walk once it succeeds, with the role and name of a ref (refs end with
+    # the page); maxpm browser steps prints the walk for run. A run's own steps do not join it.
+    rec = None
+    if not person and action in RECORD and not a.get("_run"):
+        rec = {k: v for k, v in a.items() if k in STEP_KEYS}
+        for k in ("selector", "rows"):
+            if rec.get(k):
+                rec[k] = browser.step_target(b, rec[k])
+
+    def record():
+        if rec is not None:
+            b.walk = (getattr(b, "walk", []) + [rec])[-WALK_KEEP:]
 
     def then(out):  # --snapshot: the snapshot of the page that the action left (#5663)
+        record()
         if b.said:
             out["notes"] = b.said
         if pre is not None and not out.get("dialog"):  # a new page: its outline; else what changed on this one
@@ -217,6 +287,7 @@ def _act(conn, a, who):
         return {**b.info(), "outline": browser.outline(b, int(a.get("heads") or browser.OUTLINE_HEADS))["lines"]}
     if action == "extract":  # #5677: rows with named fields, as JSON
         r = browser.extract(b, a.get("rows") or None, a.get("fields") or [], int(a.get("limit") or browser.EXTRACT_MAX))
+        record()
         return {**b.info(), "data": r["rows"], "count": r["count"]}
     if action in ("click", "type", "fill", "select", "check", "uncheck", "upload") and a.get("selector"):
         # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named

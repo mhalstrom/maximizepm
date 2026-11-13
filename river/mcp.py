@@ -27,7 +27,7 @@ PROTOCOL = "2025-06-18"
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
 BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
                    "check", "uncheck", "key", "dialog", "upload", "back", "forward", "reload", "screenshot", "status",
-                   "tab", "new-tab", "close-tab")
+                   "tab", "new-tab", "close-tab", "steps", "run")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "
@@ -100,7 +100,8 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["action"], "properties": {
          "action": {"type": "string", "enum": list(BROWSER_ACTIONS)},
          "target": {"type": "string", "description": "the element: a name, role \"name\", @e3; tab, close-tab: the tab"},
-         "text": {"type": "string", "description": "type, fill: the text; find: the words; dialog: a prompt's answer"},
+         "text": {"type": "string", "description": "type, fill: the text; find: the words; dialog: a prompt's answer; "
+                                                   "run: the lines of a walk (as steps prints them, {name} for inputs)"},
          "url": {"type": "string", "description": "open, new-tab: the address"},
          "x": {"type": "number"}, "y": {"type": "number"},
          "key": {"type": "string", "description": "key: Enter, Tab, Escape, ArrowDown, or one character"},
@@ -171,6 +172,9 @@ def browser_argv(a):
         pos = [need("the select (target)", t)] + [str(v) for v in need("the options (values)", a.get("values"))]
     elif act == "upload":
         pos = [need("the file field (target)", t)] + [str(v) for v in need("the files (values)", a.get("values"))]
+    elif act == "run":  # #5680: the lines of the walk in text, the inputs (name=value) in values
+        flags += ["--lines", need("the lines of the walk (text)", text)]
+        pos = [str(v) for v in a.get("values") or []]
     elif act in ("check", "uncheck"):
         pos = [need("the element (target)", t)]
     elif act == "key":
