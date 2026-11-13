@@ -16048,7 +16048,7 @@ def _held_item(conn, actor, project_id=None):
     """The one item that the actor holds (in progress or held), in the project when one is named; else None."""
     if not actor:
         return None
-    q = "SELECT id, project_id FROM items WHERE assignee=? AND status IN ('in_progress','held')"
+    q = "SELECT id, project_id, kind FROM items WHERE assignee=? AND status IN ('in_progress','held')"
     args = [actor]
     if project_id is not None:
         q += " AND project_id=?"

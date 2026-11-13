@@ -11578,6 +11578,13 @@ class OpsNoise(Base):
     def items(self):
         return [r[0] for r in self.c.execute("SELECT title FROM items WHERE kind='operational' ORDER BY id")]
 
+    def test_an_agent_that_holds_an_item_can_add_a_rule(self):
+        core.ops_add(self.c, "site", "job", "plugin", {"command": "x", "fail_after": 1}, actor="boss")
+        i = self.add("site", "build the thing")
+        core.claim(self.c, i, "dev")
+        r = core.ops_noise_add(self.c, "site", "job", "the job's host is being retired", actor="dev")["rule"]
+        self.assertEqual(r["created_by"], "dev")
+
     def test_a_rule_keeps_a_fault_out_of_the_queue_and_an_agents_rule_ends_within_30_days(self):
         core.ops_add(self.c, "site", "job", "plugin", {"command": "x", "fail_after": 1}, actor="boss")
         with self.assertRaisesRegex(RiverError, "ends within ops_noise_max"):
