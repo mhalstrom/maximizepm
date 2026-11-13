@@ -4063,6 +4063,19 @@ def render_manage(b):
             print("STOP REQUESTED" + (f": {b['stop']['stop_reason']}" if b["stop"].get("stop_reason") else "")
                   + f". Tell the user what you did, then run {r} go to end the session.")
             return
+        msgs = b["messages"]
+        if b.get("blocked_only"):
+            # A blocked message comes alone, with no findings, so a reader of any part of the output sees it: a
+            # manager that read only the tail of a long output missed a blocked alert for 18 minutes (#5666).
+            names = ", ".join(f"#{m['id']} {m['kind']} from {m['from_agent']}"
+                              + (f" about #{m['item_id']}" if m["item_id"] else "") for m in msgs)
+            print(f"BLOCKED MESSAGES ({len(msgs)}): the sender stands still until you answer. Only "
+                  f"{'this comes' if len(msgs) == 1 else 'these come'} now; the findings"
+                  + (f" and {b['later']} other new message(s)" if b.get("later") else "") + " come with the next watch.")
+            for m in msgs:
+                print(_fmt_msg(m, "  "))
+            print(f"Answer {names} now, then start {r} manage --watch again in the background.")
+            return
         lines = _findings_lines(b["findings"], r)
         # New messages always open the output, and the last line counts them again: on 2026-11-12 a manager read
         # only the end of a watch that began with CHANGED, and missed a blocked alert for 18 minutes (#5685).
@@ -4129,7 +4142,7 @@ def render_manage(b):
              + (", " if b.get("native") else
                 f", a message to you (a blocked one or a person's at once, another after manage_wait_high "
                 f"{b.get('wait_high', '10m')}, a low one after manage_wait_low {b.get('wait_low', '30m')}; it prints "
-                f"every message that waits), ")
+                f"every message that waits; a blocked one comes alone, the rest with the next watch), ")
              + f"or after manage_every {b['every']} with one line; start it again each time. It is your only "
                f"watcher: MaximizePM refuses a second wait for your messages."),
             *([] if b.get("chat") or not b.get("native") else [

@@ -50,7 +50,8 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    message: answer it first. A person's message always wakes you at once. The findings "an agent waits" and "an item is
    ready for a person" wait `manage_wait_low`; another finding waits
    `manage_settle`. Each exit of the watch brings every message and finding
-   that waits, so they do not wake you again. Send your own notes that need
+   that waits, so they do not wake you again; an exit for a blocked message
+   brings only the blocked ones, and the next watch the rest. Send your own notes that need
    no action with `--level low`. When the briefing says MaximizePM delivers
    messages into your session itself (`native_message`), only a blocked
    message and a person's message come that way, and they do not wake the

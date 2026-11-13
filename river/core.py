@@ -20542,26 +20542,42 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
             low_due = now() + waits["low"]
         if (settled and now() >= settled) or (low_due and now() >= low_due) or mail or st or now() >= deadline:
             try:
-                rows = inbox(conn, actor) if waiting else []  # all that waits comes along
+                rows = inbox(conn, actor, mark_read=False) if waiting else []  # all that waits comes along
+                new = [m for m in rows if m["unread"]]
+                # A blocked message comes alone: a manager that read only the tail of a long output with findings
+                # missed a blocked alert for 18 minutes (#5666). The findings and the other messages stay new for
+                # the next watch, which returns for them soon.
+                blocked = [m for m in new if m["blocked"] and not _brought(native, m)] if not st else []
+                shown = blocked or new
+                with tx(conn):
+                    _mark_read(conn, [m["id"] for m in shown])
             except RiverLocked:  # nothing is marked read: the next poll returns with the messages
                 sleep(poll)
                 continue
-            mail = any(m["unread"] for m in rows)
+            mail = bool(shown)
             try:
                 with tx(conn):  # watch_seen: the watch ran until now (#1898)
                     conn.execute("UPDATE agents SET manage_seen=?, watch_seen=? WHERE name=?",
-                                 (json.dumps(sorted(keys)), iso(now()), actor))
+                                 (json.dumps(sorted(base if blocked else keys)), iso(now()), actor))
             except RiverLocked:
                 pass  # the messages are read already, so return them; the next watch names these findings again
             return {"agent": actor,
-                    "result": "stop" if st else "change" if keys - base else "messages" if mail else "tick",
-                    "new": sorted(keys - base), "gone": sorted(base - keys), "findings": f, "stop": st,
+                    "result": "stop" if st else "messages" if blocked else "change" if keys - base
+                    else "messages" if mail else "tick",
+                    "new": [] if blocked else sorted(keys - base), "gone": [] if blocked else sorted(base - keys),
+                    "findings": f, "stop": st, "blocked_only": bool(blocked),
                     # A blocked message first: its sender stands still.
-                    "messages": sorted((m for m in rows if m["unread"]), key=lambda m: (not m["blocked"], m["id"])),
-                    "still_open": sum(1 for m in rows if not m["unread"]),
+                    "messages": sorted(shown, key=lambda m: (not m["blocked"], m["id"])),
+                    "later": len(new) - len(shown), "still_open": sum(1 for m in rows if not m["unread"]),
                     "unread": unread(conn, actor)["unread"], "native": native}
         poll_activity(conn, actor, watch=True)
         sleep(poll)
+
+
+def _brought(native, m):
+    """True when the platform brought the message m into the manager's session already (native_message): the
+    watch does not bring it again."""
+    return bool(native and (m["native_status"] is None or m["native_status"] == "sent"))
 
 
 def _watch_mail(conn, actor, native, waits):
@@ -20574,7 +20590,7 @@ def _watch_mail(conn, actor, native, waits):
         f"SELECT m.level, m.blocked, m.created_at, m.native_status, a.kind sender FROM messages m "
         f"LEFT JOIN agents a ON a.name=m.from_agent WHERE {_TO_ME} "
         f"AND m.from_agent<>? AND m.read_at IS NULL", (actor, actor, actor)).fetchall()
-        if not (native and (m["native_status"] is None or m["native_status"] == "sent"))]
+        if not _brought(native, m)]
     return waiting, [m for m in waiting if m["blocked"] or m["sender"] == "human" or m["level"] == WAKE_LEVEL
                      or parse_iso(m["created_at"]) + waits[m["level"] or DEFAULT_LEVEL] <= now()]
 
