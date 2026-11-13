@@ -3199,8 +3199,23 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     };
     look(document.documentElement);
     const regionOf = e => { const g = e.closest(REGION); return g ? regionName(g) : ''; };
+    // #5759: the headings and a hash of the page's text (its text nodes, not scripts and styles; no layout work), so
+    // an action that changed only a heading or a paragraph does not say 'no change'
+    const heads = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6'), e => e.tagName.toLowerCase() + ' ' +
+      JSON.stringify(cut(e.textContent, 80))).filter(s => !s.endsWith('""')).slice(0, 300);
+    let th = 2166136261, tl = 0;
+    {
+      const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+      const w = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+      for (let t = w.nextNode(); t; t = w.nextNode()) {
+        if (t.parentElement && SKIP.has(t.parentElement.tagName)) continue;
+        const s = t.data; tl += s.length;
+        for (let i = 0; i < s.length; i++) { th ^= s.charCodeAt(i); th = Math.imul(th, 16777619); }
+      }
+    }
     if (o.keys === 'before') {
-      R.pre = {sigs: now, url: location.href, title: document.title, regions: new Set([...els.values()].map(regionOf))};
+      R.pre = {sigs: now, url: location.href, title: document.title, regions: new Set([...els.values()].map(regionOf)),
+        heads, th, tl};
       return {next: n};
     }
     const pre = R.pre;
@@ -3215,7 +3230,11 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const regions = {};
     added.forEach(([, g]) => { if (g) regions[g] = 0; });
     els.forEach(e => { const g = Object.keys(regions).length ? regionOf(e) : ''; if (g in regions) regions[g]++; });
+    const had = new Map();
+    (pre.heads || []).forEach(s => had.set(s, (had.get(s) || 0) + 1));
+    const newHeads = heads.filter(s => { const c = had.get(s); if (c) { had.set(s, c - 1); return false; } return true; });
     return {next: n, url: location.href, title: document.title, url0: pre.url, title0: pre.title, added: added.slice(0, o.max),
+      heads: newHeads.slice(0, o.max), text: pre.th === undefined || pre.th === th ? null : tl - pre.tl,
       more: Math.max(0, added.length - o.max), changed: changed.slice(0, o.max), gone: [...pre.sigs.keys()].filter(k => !now.has(k)),
       before: [...pre.regions], regions};
   }
@@ -3596,6 +3615,11 @@ def changes(b, pre=True):
     if gone:
         lines.append(f"- {len(gone)} gone: " + " ".join("@" + k for k in gone[:CHANGE_MAX])
                      + (" ..." if len(gone) > CHANGE_MAX else ""))
+    # #5759: a heading with new text, and the page's text when no line above says what changed
+    lines += ["~ heading " + h for h in r.get("heads") or []]
+    if not lines and r.get("text") is not None:
+        d = r["text"]
+        lines.append("~ text changed (" + (f"{d:+d} characters" if d else "the same length") + "): maxpm browser text")
     return lines or ["no change"]
 
 

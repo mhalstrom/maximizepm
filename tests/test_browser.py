@@ -2660,8 +2660,10 @@ class ThreeDoors(Base):
 MENU = (b"<title>Menu</title><nav aria-label=Top><button onclick=\"menu.hidden = !menu.hidden\">Account</button>"
         b"<div id=menu role=menu aria-label=Account hidden><a role=menuitem href=/p>Profile</a>"
         b"<a role=menuitem href=/s>Settings</a><button role=menuitem>Sign out</button></div></nav>"
-        b"<main><label><input type=checkbox> Agree</label><button>Nothing</button>"
-        b"<button onclick=\"this.remove()\">Remove me</button><a href=/two>Two</a></main>")
+        b"<main><h1>Orders</h1><p id=note>No note</p><label><input type=checkbox> Agree</label><button>Nothing</button>"
+        b"<button onclick=\"this.remove()\">Remove me</button><a href=/two>Two</a>"
+        b"<button onclick=\"document.querySelector('h1').textContent = 'Order 42 saved'\">Save</button>"
+        b"<button onclick=\"note.textContent = 'A longer note now'\">Note</button></main>")
 
 
 class ActionChanges(Base):
@@ -2706,6 +2708,12 @@ class ActionChanges(Base):
         self.assertLess(time.time() - t0, timing.limit(0.1))  # p147
         self.assertRegex(act(action="check", selector="Agree")["changes"][0], r'^~ @e\d+ checkbox "Agree" checked$')
         self.assertRegex(act(action="click", selector="Remove me")["changes"][0], r"^- 1 gone: @e\d+$")
+        # #5759: a heading or a paragraph that changed is no 'no change'
+        self.assertEqual(act(action="click", selector="Save")["changes"], ['~ heading h1 "Order 42 saved"'])
+        t0 = time.time()
+        self.assertEqual(act(action="click", selector="Note")["changes"],
+                         ["~ text changed (+10 characters): maxpm browser text"])
+        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147
         out = act(action="click", selector="Two")
         self.assertEqual((out["navigated"], out.get("changes"), out["outline"]), (True, None, ["[main] 1 link"]))
 
