@@ -952,6 +952,49 @@ class Fit(Base):
         self.assertEqual(b.size, (1200, 900))
 
 
+class SharpWhenStill(Base):
+    """#5637 (mark 2026-11-12: 'the layout in the browser keeps flashing'): while the page moves, the panel gets the
+    screencast frames only; one sharp frame follows when the page holds still, and the repaint of its screenshot
+    does not take its place. A poll of a panel that watches asks for no screenshot."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(browser, "SHARP_QUIET", 0.15)
+        p.start()
+        self.addCleanup(p.stop)
+        self.b = b = browser.Browser("web")
+        b.session, b.size, b.dsf, b.watched = "s1", (500, 400), 2, time.time()
+        self.shots = []
+
+        def call(method, params=None, session=None, timeout=None):
+            self.shots.append(method)
+            return {"data": base64.b64encode(b"sharp").decode()}
+        b.call = call
+        b.send = lambda *a, **k: None
+
+    def paint(self, data):
+        self.b.watched = time.time()
+        self.b._event("Page.screencastFrame", {"sessionId": 1, "data": base64.b64encode(data).decode(),
+                                               "metadata": {"deviceWidth": 500, "deviceHeight": 400}}, "s1")
+
+    def test_no_sharp_frame_while_the_page_moves(self):
+        b = self.b
+        for i in range(10):  # a scroll: a new frame each 50 ms, each one shown at once
+            self.paint(b"frame %d" % i)
+            self.assertEqual((b.frame["data"], b.frame.get("sharp")), (base64.b64encode(b"frame %d" % i).decode(), None))
+            browser.frame(b, b.seq, 0.01, "pane")  # the panel polls while it watches
+            time.sleep(0.05)
+        self.assertEqual(self.shots, [])
+        time.sleep(0.4)  # the page holds still: one sharp frame
+        self.assertEqual((self.shots, b.frame.get("sharp")), (["Page.captureScreenshot"], True))
+        self.paint(b"frame 9")  # the screenshot painted the page again: the sharp frame stays
+        self.assertTrue(b.frame.get("sharp"))
+        self.paint(b"frame 10")  # the page changes: the new frame at once
+        self.assertIsNone(b.frame.get("sharp"))
+        time.sleep(0.4)
+        self.assertEqual(len(self.shots), 2)
+
+
 class RealChrome(Base):
     """One real headless Chrome: a page through the proxy, the text, a click, typing, and a blocked address."""
 

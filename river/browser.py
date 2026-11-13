@@ -75,6 +75,10 @@ SCREEN = (1512, 982) if sys.platform == "darwin" else (1920, 1080)
 DSF_MAX = 2.0        # a phone's density of 3 sends 2.25 times the pixels of 2 through the relay, for little more
 PANE_GONE = 30.0     # seconds after a panel's last frame poll that it counts as closed
 SHARP_SEEN = 8       # frames whose bytes a sharp frame skips: a screenshot paints the page again, twice (#5625)
+# The sharp frame waits until the page holds still this long (#5637): while the page moves (a scroll, typing, a video)
+# the panel gets the screencast frames only. A screenshot after each frame sent each change twice, the second about
+# four times larger, and it took the place of the frames that came after it.
+SHARP_QUIET = 0.3
 
 
 def chrome_path():
@@ -519,6 +523,7 @@ class Browser:
         self.dsf = 1         # the pixel density of the panel's screen (#5625)
         self.screen = None   # (w, h) of the panel's screen, CSS px
         self.sharp = threading.Event()  # a sharp frame is due: _sharpen takes a screenshot of the page
+        self.sharp_due = 0.0  # when: SHARP_QUIET after the last new frame
         self.sharp_thread = None
         self.seen = []       # the bytes (a hash) of the last screencast frames, for the sharp frames
         self.panes = {}      # the open panels: pane id -> {size, dsf, screen, at}
@@ -748,9 +753,10 @@ class Browser:
             sw, sh = SCREEN
         self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": self.dsf,
                   "mobile": False, "screenWidth": sw, "screenHeight": sh}, session=self.session)
-        self._want_sharp()  # a page that does not paint again after the change sends no frame of its new size
+        self._want_sharp(now=True)  # a page that does not paint again after the change sends no frame of its new size
 
-    def _want_sharp(self):
+    def _want_sharp(self, now=False):
+        self.sharp_due = time.time() + (0 if now else SHARP_QUIET)
         if self.sharp_thread is None:
             self.sharp_thread = threading.Thread(target=self._sharpen, daemon=True, name=f"browser-sharp-{self.project}")
             self.sharp_thread.start()
@@ -759,20 +765,25 @@ class Browser:
     def _sharpen(self):
         """The frames at the panel's pixel density (#5625). A headless Chrome sends its screencast frames at one pixel
         for each CSS pixel, whatever the emulated density, and with --force-device-scale-factor its screencast stops
-        when the emulation changes the density (Chrome 157). So each new frame is followed by a screenshot of the page,
-        at most one at a time; the next one waits for the next change."""
+        when the emulation changes the density (Chrome 157). So when the page holds still for SHARP_QUIET after a new
+        frame, a screenshot of the page follows (#5637), at most one at a time; the next one waits for the next change."""
         while True:
             self.sharp.wait()
-            self.sharp.clear()
-            s, size = self.session, self.size
+            while self.sharp_due > time.time():  # each new frame moves the time on: the page still moves
+                time.sleep(max(0.01, self.sharp_due - time.time()))
+            self.sharp.clear()  # the frames of the wait ask for this one screenshot; a frame after now asks again
+            s, size, due = self.session, self.size, self.sharp_due
+            if due > time.time():  # a frame came just now
+                self.sharp.set()
+                continue
             if not s or not size or self._windowed():
                 continue
             try:
                 data = self.call("Page.captureScreenshot", {"format": "jpeg", "quality": 70}, session=s, timeout=10)["data"]
             except (RiverError, KeyError):
                 continue
-            if s != self.session or size != self.size:
-                continue  # another tab or size: the next frame asks again
+            if s != self.session or size != self.size or self.sharp_due != due:
+                continue  # another tab or size, or a new frame came while it ran: the next quiet time asks again
             with self.cond:
                 self.seq += 1
                 self.frame = {"seq": self.seq, "data": data, "w": size[0], "h": size[1], "sharp": True}
@@ -870,14 +881,15 @@ class Browser:
             if session == self.session:
                 m = p.get("metadata") or {}
                 if self.dsf > 1 and self.size and not self._windowed() and self.watched > time.time() - WATCH_GAP:
-                    # Someone watches at a density above 1: a screenshot gives the sharp frame. The screenshot
-                    # paints the page again, which sends frames that it saw already: those ask for none.
+                    # Someone watches at a density above 1: a screenshot gives the sharp frame once the page holds
+                    # still. The screenshot paints the page again, which sends frames that it saw already: those
+                    # ask for none, and the sharp frame stays. A new frame shows at once (#5637).
                     h = hashlib.sha1(p["data"].encode()).digest()
+                    if h in self.seen and self.frame and self.frame.get("sharp"):
+                        return
                     if h not in self.seen:
                         self.seen = (self.seen + [h])[-SHARP_SEEN:]
                         self._want_sharp()
-                    if self.frame and self.frame.get("sharp"):
-                        return
                 with self.cond:
                     self.seq += 1
                     self.frame = {"seq": self.seq, "data": p["data"], "w": m.get("deviceWidth"), "h": m.get("deviceHeight")}
@@ -1961,9 +1973,11 @@ def frame(b, after, timeout=8, pane=None):
     """The newest frame after seq `after` (a long poll); with no new frame within timeout, the status only. pane: the
     panel that asks; pane_known says whether serve has its size (after a restart of serve it has none)."""
     known = b.pane_seen(pane) if pane else None
-    end = time.time() + timeout
-    b.watched = time.time()
-    if b.dsf > 1 and b.frame and not b.frame.get("sharp"):
+    start = time.time()
+    end = start + timeout
+    again = not b.watching and start - b.watched > WATCH_GAP
+    b.watched = start
+    if again and b.dsf > 1 and b.frame and not b.frame.get("sharp"):
         b._want_sharp()  # the panel watches again: the frame that came while nobody watched is not sharp
     with b.cond:
         b.watching += 1
