@@ -5132,10 +5132,16 @@ class Handler(BaseHTTPRequestHandler):
             conn = core.connect()
             try:
                 iid = int(path.rsplit("/", 1)[1])
-                res = core.item_show(conn, iid)
-                res["tree"] = core.blockers(conn, iid)
-                res["messages"] = core.item_messages(conn, iid)
-                return self._send(200, res)
+
+                def show():
+                    res = core.item_show(conn, iid)
+                    res["tree"] = core.blockers(conn, iid)
+                    res["messages"] = core.item_messages(conn, iid)
+                    return res
+                from . import space
+                if space.is_archived(conn, iid):  # the drawer of an archived item (#5712)
+                    return self._send(200, dict(space.with_archive(conn, show, [iid]), archived=True))
+                return self._send(200, show())
             except (RiverError, ValueError) as e:
                 return self._send(404, {"error": str(e)})
             finally:

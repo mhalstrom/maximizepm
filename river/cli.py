@@ -346,7 +346,8 @@ def render_search(res, limit):
     if res["items"]:
         print(f"{res['total']} item(s) with every word of \"{q}\", newest first:")
         for m in res["items"]:
-            print(f"  #{m['id']:<5} [{_match_state(m)}] [{m['project']}] {m['title']}")
+            print(f"  #{m['id']:<5} [{_match_state(m)}{', archived' if m.get('archived') else ''}] [{m['project']}] "
+                  f"{m['title']}")
             if m.get("output"):
                 print(f"         output: {_cut(' '.join(m['output'].split()), 160)}")
         if res["total"] > len(res["items"]):
@@ -1547,12 +1548,14 @@ def build_parser(only=None):
                        "and the medians for fresh and forked sessions")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; all for everything)")
     x.add_argument("--measure", type=int, metavar="ID", help="read this item's usage from the transcripts again first")
+    x.add_argument("--archive", action="store_true", help="the archived items too (slower)")
     x.add_argument("--limit", "-n", type=int, default=20, help="how many items to list (default 20)")
     x = sub.add_parser("health", help="does MaximizePM work: person minutes per done item, items done per day, the "
                        "rework rate, the person's waits, session idle time and cost, against the time before")
     x.add_argument("--project"); x.add_argument("--since", default="7d", help="how far back (default 7d; 30d; all)")
     x.add_argument("--until", help="the end of the time (default now)")
     x.add_argument("--by", choices=["goal"], help="goal: items with a goal tag against items without one, per project")
+    x.add_argument("--archive", action="store_true", help="the archived items too (slower)")
     x = sub.add_parser("change", help="the change log of maxpm health: when a change to the way of work shipped")
     chs = x.add_subparsers(dest="chcmd", required=True)
     y = chs.add_parser("add", help="record a change (a person or the manager)")
@@ -3614,10 +3617,15 @@ def dispatch(conn, a, actor):
     if c == "list":
         return core.item_list(conn, a.project, a.status, a.all, a.goal, a.ref)
     if c == "show":
-        res = core.item_show(conn, a.id)
-        res["related"] = core.related(conn, a.id)
-        res["artifacts"] = _item_artifacts(conn, res)
-        return res
+        def show():
+            res = core.item_show(conn, a.id)
+            res["related"] = core.related(conn, a.id)
+            res["artifacts"] = _item_artifacts(conn, res)
+            return res
+        from . import space
+        if space.is_archived(conn, a.id):  # read as if it were back, then roll back (#5712)
+            return dict(space.with_archive(conn, show, [a.id]), archived=True)
+        return show()
     if c == "artifacts":
         return artifacts_cmd(conn, a)
     if c == "search":
@@ -3629,6 +3637,12 @@ def dispatch(conn, a, actor):
     if c == "status":
         from . import relay
         return {**core.status(conn, a.recent), "relay": relay.saved_status()}
+    if c in ("usage", "health") and a.archive:  # the archived items too, read on demand (#5712)
+        if c == "usage" and a.measure:
+            raise RiverError("--measure writes the item's usage: run it without --archive")
+        from . import space
+        a.archive = False
+        return space.with_archive(conn, lambda: dispatch(conn, a, actor))
     if c == "usage":
         return core.usage_report(conn, a.project, a.since, a.measure)
     if c == "health":
@@ -4863,6 +4877,16 @@ def render_space(res):
     d, f = res["db"], res["folder"]
     verb = "would remove" if res["dry_run"] else "removed"
     print(("DRY RUN: nothing is removed. " if res["dry_run"] else "") + "Size limits (db_max_size, folder_max_size):")
+    ar = res.get("archive") or {}
+    if ar.get("items"):
+        print(f"  archive: {'would move' if res['dry_run'] else 'moved'} {ar['items']} items closed more than "
+              f"{ar['after']} ago, with {ar['rows']} rows of their history, into the archive file (archive_after)")
+    ad = res.get("archive_db")
+    if ad:
+        print(f"  archive file: {sz(ad['used'])}, limit {sz(ad['limit'])}"
+              + (f" -> {sz(ad['used_after'])}" if ad["used_after"] != ad["used"] else ""))
+        for r in ad["removed"]:
+            print(f"    {verb} {r['rows']} rows of {r['what']}, {sz(r['bytes'])} (older than {r['older_than']})")
     for name, x, now_, after in (("database", d, d["used"], d["used_after"]), ("folder", f, f["size"], f["size_after"])):
         state = "off" if not x["limit"] else ("over" if now_ > x["limit"] else "under")
         line = f"  {name}: {sz(now_)}, limit {sz(x['limit'])} ({state})"
@@ -5740,6 +5764,8 @@ def render(a, res):
         else:
             print(f"{'removed' if a.chcmd == 'remove' else 'added'} c{res['id']}: {res['name']} at {res['at'][:16]}")
         return
+    if c == "show" and isinstance(res, dict) and res.get("archived"):
+        print(f"ARCHIVED: #{res['id']} is in the archive of old items; a command that changes it brings it back")
     if c == "show" and a.brief:
         return _print_brief(res)
     if c == "cleanup" and isinstance(res, dict) and "folder" in res:

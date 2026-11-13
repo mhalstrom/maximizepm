@@ -457,6 +457,12 @@ DEFAULT_SETTINGS = {
     # policies, goal handoffs, browser sign-ins and the newest backup never go.
     "db_max_size": "200MB",
     "folder_max_size": "2GB",
+    # The archive (#5712): items closed longer than archive_after (or off) move with their history into
+    # <queue>-archive.db beside the queue; maxpm show and search read it, any command that names such an item
+    # brings it back, and the Done tab, usage and health read it on demand. archive_max_size: over it, the
+    # archive's oldest history goes (the items, titles, outputs and decisions stay).
+    "archive_after": "30d",
+    "archive_max_size": "1GB",
     # The minimum age of each kind of data that a cleanup removes: nothing younger goes, even over a limit.
     # ops: runs of the operations checks and their history; notices: read notices and the send records of closed
     # needs-you rows; events: the history of items closed this long ago (the decisions, answers, checks and the
@@ -1634,6 +1640,8 @@ def _setup(conn):
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=10000")
     _upgrade(conn)
+    from . import space
+    space.attach(conn)  # the archive of old items, when there is one (#5712)
     return conn
 
 
@@ -2178,8 +2186,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
             "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
-        parse_duration(value)
-    elif key in ("db_max_size", "folder_max_size"):
+        if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
+            parse_duration(value)
+    elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
         from . import space
         space.parse_size(value)
     elif key == "expert_fresh_min":
@@ -8481,6 +8490,9 @@ def deploy_now(conn, target, review=False, actor=None):
 def _item(conn, item_id):
     r = conn.execute("SELECT * FROM items WHERE id=?", (int(item_id),)).fetchone()
     if not r:
+        from . import space
+        if space.restore(conn, item_id):  # an archived item that a command names comes back (#5712)
+            return conn.execute("SELECT * FROM items WHERE id=?", (int(item_id),)).fetchone()
         raise RiverError(f"no item {item_id}")
     return r
 
@@ -9832,15 +9844,20 @@ def _word(w):
     return _stem(w) if w not in _STOP_WORDS and (len(w) > 2 or w.isdigit()) else ""
 
 
-def _text_rows(conn, where="1", params=(), full=True, keys=True):
+def _text_rows(conn, where="1", params=(), full=True, keys=True, archive=False):
     """Items with their words: `key` (title twice, context once) for the score, `all` (title, context, notes,
-    output) for a search. full=False leaves `all` out: the notes and outputs are most of the text (#5491)."""
+    output) for a search. full=False leaves `all` out: the notes and outputs are most of the text (#5491).
+    archive: the archived items instead (#5712), each with archived True."""
     rows = []
+    src = ("archive.items i JOIN main.projects p ON p.id=i.project_id WHERE i.id NOT IN (SELECT id FROM main.items) "
+           "AND " if archive else "items i JOIN projects p ON p.id=i.project_id WHERE ")
     for r in conn.execute("SELECT i.id, i.project_id, p.name project, p.path, i.title, i.context, "
                           + ("i.notes, i.output, " if full else "NULL notes, i.output, ") +
                           "i.status, i.kind, i.doer, i.assignee, i.touches, i.created_at, i.closed_at, i.backlog_at, "
-                          "i.found_during FROM items i JOIN projects p ON p.id=i.project_id WHERE " + where, params):
+                          "i.found_during FROM " + src + "(" + where + ")", params):
         d = dict(r)
+        if archive:
+            d["archived"] = True
         if not keys:  # the caller makes the key when it needs it (_item_vector)
             rows.append(d)
             continue
@@ -10046,7 +10063,7 @@ def _state(d):
 def _match(d, score):
     return {"id": d["id"], "title": d["title"], "project": d["project"], "status": _state(d), "doer": d["doer"],
             "assignee": d["assignee"], "output": d["output"], "created_at": d["created_at"],
-            "closed_at": d["closed_at"], "score": round(score, 2)}
+            "closed_at": d["closed_at"], "score": round(score, 2), **({"archived": True} if d.get("archived") else {})}
 
 
 def _since(conn, text):
@@ -10090,6 +10107,9 @@ def search(conn, text, project=None, status=None, since=None, limit=20, kinds=Fa
                 "COALESCE(i.output,'')) LIKE ? ESCAPE '\\'")
     pats = ["%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" for w in want]
     rows = _text_rows(conn, " AND ".join(where + [text_sql] * len(want)), params + pats)
+    from . import space
+    if space.attached(conn) and status not in ("open", "in_progress", "held", "backlog"):  # the archive (#5712)
+        rows += _text_rows(conn, " AND ".join(where + [text_sql] * len(want)), params + pats, archive=True)
     hits = sorted((d for d in rows if all(w in d["all"] for w in want)), key=lambda d: (d["created_at"], d["id"]),
                   reverse=True)
     res = {"query": text, "words": want, "total": len(hits), "items": [_match(d, 1) for d in hits[:limit]],

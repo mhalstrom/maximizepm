@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -81,11 +82,11 @@ def db_file(conn):
     return Path(conn.execute("PRAGMA database_list").fetchone()[2])
 
 
-def db_used(conn):
+def db_used(conn, s="main"):
     """The bytes the data takes: the pages in use (free pages are space that a VACUUM gives back)."""
-    ps = conn.execute("PRAGMA page_size").fetchone()[0]
-    pc = conn.execute("PRAGMA page_count").fetchone()[0]
-    fl = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    ps = conn.execute(f"PRAGMA {s}.page_size").fetchone()[0]
+    pc = conn.execute(f"PRAGMA {s}.page_count").fetchone()[0]
+    fl = conn.execute(f"PRAGMA {s}.freelist_count").fetchone()[0]
     return (pc - fl) * ps
 
 
@@ -200,15 +201,16 @@ def _ops(conn, cutoff, n):
     return _gone(conn, "ops_detections", rows)
 
 
-def _notices(conn, cutoff, n):
+def _notices(conn, cutoff, n, s="main"):
     rows = conn.execute(
-        "SELECT m.id, length(m.body) FROM messages m WHERE m.kind='notice' AND m.read_at IS NOT NULL AND m.state<>'open' "
-        "AND m.created_at<? AND m.id NOT IN (SELECT message_id FROM needs_you WHERE message_id IS NOT NULL) "
-        "AND m.id NOT IN (SELECT reply_to FROM messages WHERE reply_to IS NOT NULL) "
-        "AND m.id NOT IN (SELECT thread_id FROM messages WHERE thread_id<>id) ORDER BY m.id LIMIT ?",
+        f"SELECT m.id, length(m.body) FROM {s}.messages m WHERE m.kind='notice' AND m.read_at IS NOT NULL "
+        f"AND m.state<>'open' AND m.created_at<? "
+        f"AND m.id NOT IN (SELECT message_id FROM {s}.needs_you WHERE message_id IS NOT NULL) "
+        f"AND m.id NOT IN (SELECT reply_to FROM {s}.messages WHERE reply_to IS NOT NULL) "
+        f"AND m.id NOT IN (SELECT thread_id FROM {s}.messages WHERE thread_id<>id) ORDER BY m.id LIMIT ?",
         (cutoff, n)).fetchall()
-    if rows:
-        return _gone(conn, "messages", rows)
+    if rows or s != "main":
+        return _gone(conn, f"{s}.messages", rows)
     # The send records of needs-you rows that are closed: the dispatcher sends nothing more for them.
     rows = conn.execute(
         "SELECT s.id, COALESCE(length(s.last_error),0) FROM notifications s JOIN needs_you y ON y.id=s.event_id "
@@ -222,17 +224,17 @@ _KEEP_EVENT = ("done%", "dropped%", "marked done%", "reopened%", "check %", "%an
                "%takeover%", "%took over%")
 
 
-def _events(conn, cutoff, n):
+def _events(conn, cutoff, n, s="main"):
     keep = " OR ".join("e.change LIKE ?" for _ in _KEEP_EVENT)
     rows = conn.execute(
-        "SELECT e.id, length(e.change)+COALESCE(length(e.actor),0) FROM events e JOIN items i ON i.id=e.item_id "
-        "WHERE i.status IN ('done','dropped') AND i.closed_at<? "
-        "AND e.id<>(SELECT MIN(id) FROM events f WHERE f.item_id=e.item_id) "
-        "AND e.id<>(SELECT MAX(id) FROM events f WHERE f.item_id=e.item_id) "
+        f"SELECT e.id, length(e.change)+COALESCE(length(e.actor),0) FROM {s}.events e JOIN {s}.items i "
+        "ON i.id=e.item_id WHERE i.status IN ('done','dropped') AND i.closed_at<? "
+        f"AND e.id<>(SELECT MIN(id) FROM {s}.events f WHERE f.item_id=e.item_id) "
+        f"AND e.id<>(SELECT MAX(id) FROM {s}.events f WHERE f.item_id=e.item_id) "
         f"AND NOT ({keep}) "
-        "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.name=e.actor AND a.kind='human') ORDER BY e.id LIMIT ?",
+        "AND NOT EXISTS (SELECT 1 FROM main.agents a WHERE a.name=e.actor AND a.kind='human') ORDER BY e.id LIMIT ?",
         (cutoff, *_KEEP_EVENT, n)).fetchall()
-    return _gone(conn, "events", rows)
+    return _gone(conn, f"{s}.events", rows)
 
 
 def _canvases(conn, cutoff, n):
@@ -279,20 +281,29 @@ STAGES = (("ops records", "space_ops_after", _ops),
           ("ended sessions", "space_sessions_after", _sessions))
 
 
-def _vacuum(conn):
+# The archive file over archive_max_size: its oldest history goes; items, their titles, outputs and decisions stay.
+ARCHIVE_STAGES = (("archived read notices", "space_notices_after", _notices),
+                  ("archived events", "space_events_after", _events))
+
+
+def _vacuum(conn, s="main"):
     """Give the free pages back to the disk. Other commands wait for it (about a second for 100 MB)."""
     try:
-        conn.execute("VACUUM")
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute(f"VACUUM {s}")
+        conn.execute(f"PRAGMA {s}.wal_checkpoint(TRUNCATE)")
         return None
     except Exception as e:  # a busy queue: the next run tries again
         return f"{type(e).__name__}: {e}"
 
 
-def _db_part(conn, dry_run, t):
-    limit = parse_size(setting(conn, "db_max_size"))
-    used = db_used(conn)
-    out = {"limit": limit, "used": used, "file": db_files_bytes(conn), "removed": []}
+def _db_part(conn, dry_run, t, s="main"):
+    """The database (s main, with db_max_size and STAGES) or the archive file (s archive, archive_max_size and
+    ARCHIVE_STAGES) over its limit: the stages remove the oldest rows first. The caller compacts the file."""
+    limit = parse_size(setting(conn, "db_max_size" if s == "main" else "archive_max_size"))
+    used = db_used(conn, s)
+    out = {"limit": limit, "used": used, "removed": []}
+    if s == "main":
+        out["file"] = db_files_bytes(conn)
     if not limit or used <= limit:
         out.update(used_after=used, over=False)
         return out
@@ -304,15 +315,15 @@ def _db_part(conn, dry_run, t):
     if dry_run:
         conn.execute("BEGIN IMMEDIATE")
     try:
-        for what, key, fn in STAGES:
+        for what, key, fn in (STAGES if s == "main" else ARCHIVE_STAGES):
             cutoff = iso(t - parse_duration(setting(conn, key)))
             rows = freed = 0
             while est > target:
                 if dry_run:
-                    k, b = fn(conn, cutoff, BATCH)
+                    k, b = fn(conn, cutoff, BATCH) if s == "main" else fn(conn, cutoff, BATCH, s)
                 else:
                     with tx(conn):
-                        k, b = fn(conn, cutoff, BATCH)
+                        k, b = fn(conn, cutoff, BATCH) if s == "main" else fn(conn, cutoff, BATCH, s)
                 if not k:
                     break
                 rows, freed, est = rows + k, freed + b, est - b
@@ -325,12 +336,7 @@ def _db_part(conn, dry_run, t):
         if dry_run:
             conn.execute("ROLLBACK")
         conn.execute("PRAGMA foreign_keys=ON")
-    if dry_run or not out["removed"]:
-        out.update(used_after=max(est, 0), over=est > limit)
-        return out
-    out["vacuum_error"] = _vacuum(conn)
-    out.update(used_after=db_used(conn), file_after=db_files_bytes(conn))
-    out["over"] = out["used_after"] > limit
+    out.update(used_after=max(est, 0), over=est > limit)  # run() measures again after it compacts the file
     return out
 
 
@@ -410,20 +416,288 @@ def _folder_part(conn, dry_run, t):
     return out
 
 
+# ---------------------------------------------------------------- the archive (#5712)
+#
+# mark 2026-11-13: 'we can also probably separate out old tasks from the rest of the items that need to be cleaned'.
+# Items closed longer than archive_after move, with their history, into <queue>-archive.db beside the queue (its
+# own SQLite file, ATTACHed as 'archive'), so the main database keeps open items, recent ones and what they link to,
+# and each page build and command reads less. The archive holds copies: the move copies first and commits, then
+# deletes from the main database, so a crash between leaves a copy in both, never in neither. The main database wins:
+# an item in both is the main one. Reads: maxpm show and search read the archive too (marked archived); the Done tab
+# ('with archived'), maxpm usage --archive and health --archive bring it in on demand (the manager decided
+# 2026-11-13: the page builds read only the main database). Any command that names an archived item by id
+# (reopen, dep, edit, add --found-during, ...) brings it back first (core._item).
+
+ARCHIVE = "archive"
+# The tables that move with an item: (table, the columns that name the item, the columns that name a row).
+ARCHIVE_TABLES = (("items", ("id",), ("id",)), ("events", ("item_id",), ("id",)), ("messages", ("item_id",), ("id",)),
+                  ("needs_you", ("item_id",), ("id",)), ("deps", ("item_id", "blocked_by"), ("item_id", "blocked_by")),
+                  ("item_goals", ("item_id",), ("item_id", "goal_id")), ("item_refs", ("item_id",), ("item_id", "ref")),
+                  ("holds", ("item_id",), ("id",)), ("item_usage", ("item_id",), ("item_id", "session_id")),
+                  ("close_checks", ("closed_id", "item_id"), ("closed_id", "item_id")))
+ARCHIVE_BATCH = 200  # items in one move
+
+
+class _Undo(Exception):
+    """Raised inside a tx to roll it back: a read of archived items as if they were in the main database."""
+
+
+def archive_path(conn):
+    f = db_file(conn)
+    return f.with_name(f.stem + "-archive" + (f.suffix or ".db"))
+
+
+def attached(conn):
+    return any(r[1] == ARCHIVE for r in conn.execute("PRAGMA database_list"))
+
+
+def attach(conn, create=False):
+    """ATTACH the archive file when it exists (create: make it). SQLite attaches only outside a transaction: inside
+    one this returns whether it is attached already. core.connect attaches it, so a command sees it at once."""
+    if attached(conn):
+        return True
+    p = archive_path(conn)
+    if conn.in_transaction or not (create or p.exists()):
+        return False
+    conn.execute("ATTACH DATABASE ? AS archive", (str(p),))
+    if create:
+        conn.execute("PRAGMA archive.journal_mode=WAL")
+    return True
+
+
+def _cols(conn, s, table):
+    return [r[1] for r in conn.execute(f"PRAGMA {s}.table_info({table})")]
+
+
+def _sync_tables(conn):
+    """The archive's tables have the main tables' columns (a later release adds columns to the main ones), without
+    their constraints: a foreign key cannot reach across two files."""
+    for t, keys, _ in ARCHIVE_TABLES:
+        have = _cols(conn, ARCHIVE, t)
+        main = list(conn.execute(f"PRAGMA main.table_info({t})"))
+        if not have:
+            conn.execute(f"CREATE TABLE archive.{t} (" + ", ".join(f'"{r[1]}" {r[2] or ""}' for r in main) + ")")
+            for k in keys:
+                conn.execute(f"CREATE INDEX archive.{t}_{k} ON {t}({k})")
+            continue
+        for r in main:
+            if r[1] not in have:
+                conn.execute(f'ALTER TABLE archive.{t} ADD COLUMN "{r[1]}" {r[2] or ""}')
+
+
+def _ids(conn, sql, params=()):
+    try:
+        return {r[0] for r in conn.execute(sql, params) if r[0] is not None}
+    except sqlite3.OperationalError:  # a table of another schema version
+        return set()
+
+
+def archivable(conn, cutoff):
+    """The items closed before cutoff that may move, oldest close first. One stays when an open item links to it
+    (a dep either way), when a row that stays names it (a queue entry, a canvas, a marked-up page, an open needs-you
+    row, an open goal, an operations record, a schedule, a policy, a message of another item that answers one of its
+    messages), when it is the newest closed deploy item of its target (a release cadence counts from it), or when an
+    item that stays was found during it (its found_during would name an item the main database lacks)."""
+    rows = conn.execute("SELECT id, closed_at FROM items WHERE status IN ('done','dropped') AND closed_at<?",
+                        (cutoff,)).fetchall()
+    cand = {r[0]: r[1] for r in rows}
+    if not cand:
+        return []
+    open_ids = _ids(conn, f"SELECT id FROM items WHERE status IN {core.OPEN_STATES}")
+    keep = set()
+    for a, b in conn.execute("SELECT item_id, blocked_by FROM deps"):
+        if a in open_ids:
+            keep.add(b)
+        if b in open_ids:
+            keep.add(a)
+    for sql in ("SELECT item_id FROM queue_entries", "SELECT item_id FROM canvases", "SELECT item_id FROM annotations",
+                "SELECT item_id FROM expert_proposals", "SELECT item_id FROM ops_causes",
+                "SELECT item_id FROM ops_detections", "SELECT item_id FROM ops_proposals", "SELECT item_id FROM ops_systems",
+                "SELECT last_item FROM schedules", "SELECT item_id FROM needs_you WHERE closed_at IS NULL",
+                "SELECT ig.item_id FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE g.status='open'",
+                "SELECT MAX(id) FROM items WHERE kind='deploy' AND status IN ('done','dropped') GROUP BY target",
+                "SELECT m.item_id FROM messages m JOIN needs_you y ON y.message_id=m.id "
+                "WHERE y.item_id IS NULL OR y.item_id<>m.item_id",
+                "SELECT p.item_id FROM messages c JOIN messages p ON p.id=c.reply_to OR (p.id=c.thread_id AND c.id<>p.id) "
+                "WHERE c.item_id IS NULL OR c.item_id<>p.item_id"):
+        keep |= _ids(conn, sql)
+    for r in conn.execute("SELECT items FROM policies WHERE items IS NOT NULL AND items<>''"):
+        keep |= {int(x) for x in re.findall(r"\d+", str(r[0]))}
+    S = set(cand) - keep
+    children = {}
+    for i, f in conn.execute("SELECT id, found_during FROM items WHERE found_during IS NOT NULL"):
+        children.setdefault(f, []).append(i)
+    while True:
+        drop = {i for i in S if any(c not in S for c in children.get(i, ()))}
+        if not drop:
+            break
+        S -= drop
+    return sorted(S, key=lambda i: (cand[i], i))
+
+
+def _cond(keys, ids, prefix=""):
+    marks = ",".join("?" * len(ids))
+    return " OR ".join(f"{prefix}{k} IN ({marks})" for k in keys), list(ids) * len(keys)
+
+
+def _move(conn, ids):
+    """Copy the items and their rows into the archive (one transaction), then delete them from the main database
+    (another), with the foreign key checks off: archivable() keeps every item that a staying row names."""
+    with tx(conn):
+        for t, keys, row in ARCHIVE_TABLES:
+            cond, params = _cond(keys, ids)
+            cols = ",".join(f'"{c}"' for c in _cols(conn, "main", t))
+            rk = ",".join(row)
+            # Copies of the same rows from an earlier move (the item came back): the main rows replace them, and
+            # rows that only the archive holds (a link to an item that stayed archived) stay.
+            conn.execute(f"DELETE FROM archive.{t} WHERE ({rk}) IN (SELECT {rk} FROM main.{t} WHERE {cond})", params)
+            conn.execute(f"INSERT INTO archive.{t} ({cols}) SELECT {cols} FROM main.{t} WHERE {cond}", params)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        with tx(conn):
+            ny, params = _cond(("item_id",), ids)
+            conn.execute(f"DELETE FROM main.notifications WHERE event_id IN (SELECT id FROM main.needs_you WHERE {ny})",
+                         params)
+            for t, keys, _ in reversed(ARCHIVE_TABLES):  # the items last
+                cond, params = _cond(keys, ids)
+                conn.execute(f"DELETE FROM main.{t} WHERE {cond}", params)
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _archive_part(conn, dry_run, t):
+    after = setting(conn, "archive_after")
+    out = {"after": after, "items": 0, "rows": 0}
+    if str(after).strip().lower() == "off":
+        return out
+    ids = archivable(conn, iso(t - parse_duration(after)))
+    out["items"] = len(ids)
+    if not ids:
+        return out
+    if not dry_run:
+        attach(conn, create=True)
+        with tx(conn):
+            _sync_tables(conn)
+    for i in range(0, len(ids), ARCHIVE_BATCH):
+        part = ids[i:i + ARCHIVE_BATCH]
+        for tname, keys, _ in ARCHIVE_TABLES[1:]:  # the rows that go with the items
+            cond, params = _cond(keys, part)
+            out["rows"] += conn.execute(f"SELECT COUNT(*) FROM main.{tname} WHERE {cond}", params).fetchone()[0]
+        if not dry_run:
+            _move(conn, part)
+    return out
+
+
+def is_archived(conn, iid):
+    """The item is in the archive and not in the main database."""
+    if not attach(conn):
+        return False
+    return bool(conn.execute("SELECT 1 FROM archive.items WHERE id=?", (int(iid),)).fetchone()) and \
+        not conn.execute("SELECT 1 FROM main.items WHERE id=?", (int(iid),)).fetchone()
+
+
+def _restore_rows(conn, ids):
+    """Copy archived items back into the main database, with their rows, inside the caller's transaction. A link to
+    an item that stays archived does not come (a dep, a close check), and a message's answer to a message that is
+    not in the main database loses that link. The archive keeps its copies; the main database wins from now on."""
+    conn.execute("PRAGMA defer_foreign_keys=ON")  # the items come in id order; one may be found during a later one
+    ids = set(ids)
+    todo = list(ids)
+    while todo:  # the items they were found during, when those are archived too
+        cond, params = _cond(("id",), todo)
+        todo = [r[0] for r in conn.execute(
+            f"SELECT found_during FROM archive.items WHERE ({cond}) AND found_during IS NOT NULL "
+            f"AND found_during NOT IN (SELECT id FROM main.items)", params) if r[0] not in ids
+            and conn.execute("SELECT 1 FROM archive.items WHERE id=?", (r[0],)).fetchone()]
+        ids |= set(todo)
+    for i in range(0, len(ids), 400):
+        part = sorted(ids)[i:i + 400]
+        for t, keys, row in ARCHIVE_TABLES:
+            cond, params = _cond(keys, part, "a.")
+            cols = _cols(conn, "main", t)
+            have = set(_cols(conn, ARCHIVE, t))
+            sel = ",".join(f'a."{c}"' if c in have else "NULL" for c in cols)
+            extra = ""
+            if t == "items":
+                extra = " AND a.id NOT IN (SELECT id FROM main.items)"
+            elif t in ("deps", "close_checks"):  # both of its items must be in the main database
+                extra = "".join(f" AND a.{k} IN (SELECT id FROM main.items)" for k in keys)
+            elif t == "item_goals":
+                extra = " AND a.goal_id IN (SELECT id FROM main.goals)"
+            conn.execute(f"INSERT OR IGNORE INTO main.{t} ({','.join(chr(34) + c + chr(34) for c in cols)}) "
+                         f"SELECT {sel} FROM archive.{t} a WHERE ({cond}){extra}", params)
+        marks = ",".join("?" * len(part))
+        conn.execute(f"UPDATE main.messages SET reply_to=NULL WHERE item_id IN ({marks}) AND reply_to IS NOT NULL "
+                     f"AND reply_to NOT IN (SELECT id FROM main.messages)", part)
+        conn.execute(f"DELETE FROM main.needs_you WHERE item_id IN ({marks}) AND message_id IS NOT NULL "
+                     f"AND message_id NOT IN (SELECT id FROM main.messages)", part)
+    return ids
+
+
+def restore(conn, iid):
+    """Bring an archived item back into the main database (core._item calls it for an id it does not find). Returns
+    True when the item is in the main database now."""
+    if not is_archived(conn, iid):
+        return False
+    conn.execute("SAVEPOINT maxpm_restore")
+    try:
+        _restore_rows(conn, [int(iid)])
+        core._event(conn, int(iid), "maxpm", "back from the archive: a command named it")
+        conn.execute("RELEASE maxpm_restore")
+    except BaseException:
+        conn.execute("ROLLBACK TO maxpm_restore")
+        conn.execute("RELEASE maxpm_restore")
+        raise
+    return True
+
+
+def with_archive(conn, fn, ids=None):
+    """fn() as if the archived items (ids, or all) were in the main database: they come back inside a transaction
+    that is then rolled back, so the code that reads the main database reads them too, and nothing changes."""
+    if not attach(conn):
+        return fn()
+    out = {}
+    try:
+        with tx(conn):
+            if ids is None:
+                ids = [r[0] for r in conn.execute("SELECT id FROM archive.items WHERE id NOT IN (SELECT id FROM main.items)")]
+            if ids:
+                _restore_rows(conn, ids)
+            out["res"] = fn()
+            raise _Undo
+    except _Undo:
+        pass
+    return out["res"]
+
+
+def archived_rows(conn, where="1", params=()):
+    """Rows of archived items (not in the main database) with the columns of a search: for core.search."""
+    if not attach(conn):
+        return []
+    return [dict(r, archived=True) for r in conn.execute(
+        "SELECT i.id, i.project_id, p.name project, p.path, i.title, i.context, i.notes, i.output, i.status, i.kind, "
+        "i.doer, i.assignee, i.touches, i.created_at, i.closed_at, i.backlog_at, i.found_during "
+        "FROM archive.items i JOIN main.projects p ON p.id=i.project_id "
+        f"WHERE i.id NOT IN (SELECT id FROM main.items) AND {where}", params)]
+
+
 # ---------------------------------------------------------------- the run
 
 def summary(res):
     """One line for the event and the note."""
     parts = []
-    for side, key in (("db", "rows"), ("folder", "files")):
-        for r in res[side]["removed"]:
+    a = res.get("archive") or {}
+    moved = (f"{'would archive' if res.get('dry_run') else 'archived'} {a['items']} items closed more than "
+             f"{a['after']} ago, with {a['rows']} rows of their history; ") if a.get("items") else ""
+    for side, key in (("db", "rows"), ("archive_db", "rows"), ("folder", "files")):
+        for r in (res.get(side) or {}).get("removed", []):
             parts.append(f"{r[key]} {key} of {r['what']} ({show_size(r['bytes'])})")
     d, f = res["db"], res["folder"]
     verb = "would remove " if res.get("dry_run") else "removed "
-    line = ("space cleanup: " + (verb + ", ".join(parts) if parts else "nothing to remove")
+    line = ("space cleanup: " + moved + (verb + ", ".join(parts) if parts else "nothing to remove")
             + f"; database {show_size(d['used'])} -> {show_size(d['used_after'])} (limit {show_size(d['limit'])})"
             + f", folder {show_size(f['size'])} -> {show_size(f['size_after'])} (limit {show_size(f['limit'])})")
-    over = [n for n, x in (("database", d), ("folder", f)) if x.get("over")]
+    over = [n for n, x in (("database", d), ("archive", res.get("archive_db") or {}), ("folder", f)) if x.get("over")]
     if over:
         line += f"; still over the limit: {' and '.join(over)} (nothing older is removable: maxpm cleanup --dry-run)"
     return line
@@ -433,14 +707,28 @@ def run(conn, dry_run=False, actor=None):
     """Remove the oldest removable data until each size is under its limit (see the module text). dry_run: remove
     nothing, say what would go."""
     t = now()
-    res = {"dry_run": dry_run, "db": _db_part(conn, dry_run, t), "folder": _folder_part(conn, dry_run, t)}
+    res = {"dry_run": dry_run, "archive": _archive_part(conn, dry_run, t), "db": _db_part(conn, dry_run, t)}
+    if attach(conn):
+        res["archive_db"] = _db_part(conn, dry_run, t, ARCHIVE)
+    if not dry_run:  # compact what changed, then measure again
+        if res["archive"]["items"] or res["db"]["removed"]:
+            res["db"]["vacuum_error"] = _vacuum(conn)
+            res["db"].update(used_after=db_used(conn), file_after=db_files_bytes(conn))
+            res["db"]["over"] = bool(res["db"]["limit"] and res["db"]["used_after"] > res["db"]["limit"])
+        ad = res.get("archive_db")
+        if ad and ad["removed"]:
+            ad["vacuum_error"] = _vacuum(conn, ARCHIVE)
+            ad["used_after"] = db_used(conn, ARCHIVE)
+            ad["over"] = bool(ad["limit"] and ad["used_after"] > ad["limit"])
+    res["folder"] = _folder_part(conn, dry_run, t)
     res["summary"] = summary(res)
     if dry_run:
         return res
     m = _meta(conn)
     m.update(last_run=iso(t), folder=res["folder"]["size_after"], folder_at=iso(t),
-             removed=bool(res["db"]["removed"] or res["folder"]["removed"]))
-    over = res["db"].get("over") or res["folder"].get("over")
+             removed=bool(res["archive"]["items"] or res["db"]["removed"] or res["folder"]["removed"]
+                          or (res.get("archive_db") or {}).get("removed")))
+    over = res["db"].get("over") or res["folder"].get("over") or (res.get("archive_db") or {}).get("over")
     tell = m["removed"] or (over and (not m.get("told_over") or t - parse_iso(m["told_over"]) >= TELL_OVER_EVERY))
     if over and tell:
         m["told_over"] = iso(t)

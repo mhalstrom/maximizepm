@@ -14,6 +14,9 @@ def log(h, path):
     conn = core.connect()
     try:
         since = q.get("since", "7d")
+        if since == "archived":  # all time, the archived items too, read on demand (#5712)
+            from .. import space
+            return h._send(200, space.with_archive(conn, lambda: core.completed(conn, q.get("project") or None, None)))
         return h._send(200, core.completed(conn, q.get("project") or None, None if since == "all" else since))
     except RiverError as e:
         return h._send(400, {"error": str(e)})

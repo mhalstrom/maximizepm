@@ -27,6 +27,7 @@ class SpaceBase(unittest.TestCase):
         self.c = core.connect(self.path)
         self.addCleanup(self.c.close)
         core.config_set(self.c, "folder_max_size", "off")
+        core.config_set(self.c, "archive_after", "off")  # the Archive tests turn it on
 
     def closed_item(self, title, n_events=40):
         """A done item, closed long ago, with many mechanical events and one answer and one person's event."""
@@ -250,6 +251,94 @@ class Serve(SpaceBase):
         space._save_meta(self.c, m)
         res = space.serve_pass(self.c)
         self.assertTrue(res["db"]["removed"])
+
+
+class Archive(SpaceBase):
+    def setUp(self):
+        super().setUp()
+        core.config_set(self.c, "db_max_size", "off")
+        core.config_unset(self.c, "archive_after")
+        core.project_add(self.c, "p")
+        self.old = [self.closed_item(f"old work {i}", n_events=3) for i in range(4)]
+        self.recent = core.item_add(self.c, "p", "recent work", 2, "", "any", (), "t")["id"]
+        core.done(self.c, self.recent, "finished", "t")
+        self.open = core.item_add(self.c, "p", "open work", 2, "", "any", (), "t")["id"]
+        # The open item waits on old[1], and old[2] was found during old[3] (which therefore stays only if old[2]
+        # stays): old[1] stays; the rest move.
+        core.dep_add(self.c, self.open, [self.old[1]], "t")
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET found_during=? WHERE id=?", (self.old[3], self.old[2]))
+            self.c.execute("INSERT INTO messages (kind, from_agent, to_agent, item_id, thread_id, body, state, created_at) "
+                           "VALUES ('note','a','b',?,0,'about the old work','read',?)", (self.old[0], OLD))
+            self.c.execute("UPDATE messages SET thread_id=id")
+
+    def ids(self, s="main"):
+        return {r[0] for r in self.c.execute(f"SELECT id FROM {s}.items")}
+
+    def test_old_closed_items_move_with_their_history(self):
+        dry = space.run(self.c, dry_run=True)
+        self.assertEqual(dry["archive"]["items"], 3)
+        self.assertFalse(space.archive_path(self.c).exists())  # a dry run makes no archive
+        res = space.run(self.c)
+        self.assertEqual(res["archive"]["items"], 3)
+        self.assertTrue(space.archive_path(self.c).exists())
+        moved = {self.old[0], self.old[2], self.old[3]}
+        self.assertEqual(self.ids() & moved, set())
+        self.assertIn(self.old[1], self.ids())  # an open item waits on it
+        self.assertIn(self.recent, self.ids())
+        self.assertEqual(self.ids("archive"), moved)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM main.events WHERE item_id=?", (self.old[0],)).fetchone()[0], 0)
+        self.assertGreater(self.c.execute("SELECT COUNT(*) FROM archive.events WHERE item_id=?",
+                                          (self.old[0],)).fetchone()[0], 3)
+        self.assertEqual(self.c.execute("SELECT body FROM archive.messages WHERE item_id=?", (self.old[0],)).fetchone()[0],
+                         "about the old work")
+        self.assertEqual(self.c.execute("PRAGMA main.foreign_key_check").fetchall(), [])
+        # A new connection attaches the archive by itself.
+        c2 = core.connect(self.path)
+        self.addCleanup(c2.close)
+        self.assertTrue(space.attached(c2))
+
+    def test_show_and_search_read_the_archive_and_change_nothing(self):
+        space.run(self.c)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["show", str(self.old[0])])
+        self.assertIn("ARCHIVED", out.getvalue())
+        self.assertIn("old work 0", out.getvalue())
+        self.assertNotIn(self.old[0], self.ids())  # still archived
+        found = core.search(self.c, "old work")
+        archived = {m["id"] for m in found["items"] if m.get("archived")}
+        self.assertEqual(archived, {self.old[0], self.old[2], self.old[3]})
+        self.assertEqual(core.search(self.c, "old work", status="open")["items"], [])
+
+    def test_a_command_that_names_it_brings_it_back(self):
+        space.run(self.c)
+        core.reopen(self.c, self.old[2], "t")
+        self.assertIn(self.old[2], self.ids())
+        self.assertIn(self.old[3], self.ids())  # the item it was found during came too
+        self.assertGreater(self.c.execute("SELECT COUNT(*) FROM main.events WHERE item_id=?", (self.old[2],)).fetchone()[0], 3)
+        self.assertEqual(self.c.execute("PRAGMA main.foreign_key_check").fetchall(), [])
+        # It may move again later: the archive's copies are replaced, not doubled.
+        with core.tx(self.c):
+            self.c.execute("UPDATE items SET status='done', closed_at=? WHERE id=?", (OLD, self.old[2]))
+        space.run(self.c)
+        self.assertNotIn(self.old[2], self.ids())
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM archive.items WHERE id=?", (self.old[2],)).fetchone()[0], 1)
+
+    def test_with_archive_reads_them_on_demand(self):
+        space.run(self.c)
+        n_main = len(core.completed(self.c, None, None)["by_day"] and
+                     [i for d in core.completed(self.c, None, None)["by_day"] for i in d["items"]])
+        both = space.with_archive(self.c, lambda: core.completed(self.c, None, None))
+        n_both = len([i for d in both["by_day"] for i in d["items"]])
+        self.assertEqual(n_both - n_main, 3)
+        self.assertNotIn(self.old[0], self.ids())  # rolled back
+
+    def test_archive_after_off(self):
+        core.config_set(self.c, "archive_after", "off")
+        self.assertEqual(space.run(self.c)["archive"]["items"], 0)
+        with self.assertRaises(core.RiverError):
+            core.config_set(self.c, "archive_after", "never")
 
 
 class Cli(SpaceBase):
