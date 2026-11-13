@@ -17,6 +17,7 @@ from unittest import mock
 
 from river import core, server
 from river.core import RiverError
+from tests import timing
 
 
 class LaunchAgent(unittest.TestCase):
@@ -3243,7 +3244,7 @@ class LaunchInTmux(unittest.TestCase):
             server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": name, "command": command}, {"MAXPM_FOCUS": "needs:"})
 
         def panes(want):
-            for _ in range(100):
+            for _ in range(int(timing.limit(100))):
                 got = {p["name"]: p for p in server.tmux_view(None)["panes"]}
                 if all(want(p) for p in got.values()):
                     return got
@@ -3267,6 +3268,9 @@ class LaunchInTmux(unittest.TestCase):
                          "agents top")
         server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#4 fourth", "command": "sleep 60"}, {})
         self.assertEqual(len({p["window"] for p in server.tmux_view(None)["panes"]}), 1)  # it joined the others
+        # START_GRACE is 0 now: a tidy while the new pane still shows its shell closes it as ended, as on a slow
+        # ubuntu runner (#5705). Wait until it runs its command.
+        panes(lambda p: p["name"] != "#4 fourth" or p["running"] == "sleep")
         v = server.tmux_view("windows", tidy=True)
         self.assertEqual(([c["name"] for c in v["closed"]], len(v["panes"]), len({p["window"] for p in v["panes"]})),
                          (["needs you"], 3, 3))
@@ -4451,7 +4455,7 @@ class StateCache(unittest.TestCase):
             ts = [threading.Thread(target=lambda: got.append(server.page_state(False))) for _ in range(3)]
             for t in ts:
                 t.start()
-            time.sleep(0.2)
+            timing.wait_for(lambda: built, 5, "the first build")
             gate.set()
             for t in ts:
                 t.join(10)
@@ -5346,12 +5350,13 @@ class Ops(unittest.TestCase):
         self.fail(f"fewer than {n} runs ended")
 
     def test_the_loop_step_starts_each_due_check_in_a_thread_and_never_waits_for_it(self):
-        slow = f"{sys.executable} -c 'import time; time.sleep(1); print(\"SLOW OK\")'"
-        core.ops_add(self.c, "site", "slow", "cmd", {"command": slow, "timeout": "10s"}, actor="boss")
+        took = timing.limit(1)
+        slow = f"{sys.executable} -c 'import time; time.sleep({took}); print(\"SLOW OK\")'"
+        core.ops_add(self.c, "site", "slow", "cmd", {"command": slow, "timeout": "20s"}, actor="boss")
         core.ops_add(self.c, "site", "nightly", "beat", {"period": "1h"}, actor="boss")
         t0 = time.monotonic()
         started = server.ops_watch(self.c)
-        self.assertLess(time.monotonic() - t0, 0.9)  # the slow command runs in its thread
+        self.assertLess(time.monotonic() - t0, timing.limit(0.9, below=took))  # the slow command runs in its thread
         self.assertEqual(len(started), 2)
         self.assertEqual(server.ops_watch(self.c), [])  # nothing is due again
         self.wait_runs(2)

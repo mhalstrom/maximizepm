@@ -1,0 +1,24 @@
+import time
+import unittest
+
+
+class Bad(unittest.TestCase):
+    def test_sleeps_then_checks(self):
+        start()
+        time.sleep(0.4)
+        self.assertTrue(done())
+
+    def test_bounds_a_time(self):
+        t = time.monotonic()
+        step()
+        self.assertLess(time.monotonic() - t, 0.5)
+
+    def test_allowed(self):
+        while not done():
+            time.sleep(0.1)  # a poll
+        time.sleep(0.1)  # timing: only orders two writes in the file's mtime
+
+        def slow():
+            time.sleep(1)  # a fake that acts slow
+        t = time.monotonic()
+        self.assertLess(time.monotonic() - t, timing.limit(1))

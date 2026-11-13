@@ -14,6 +14,7 @@ from unittest import mock
 
 from river import agents, core, sessions
 from river.agents import opencode
+from tests import timing
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "opencode"
 SESSION_ID = "ses_e366d1e13ffe0SgSDgPP6MNKXx"
@@ -107,7 +108,7 @@ class Describe(Env):
             t = time.monotonic()
             self.assertIsNone(opencode.read_models())  # no list yet: the build goes on with the described models
             self.assertEqual(self.a.read_models(), opencode.DESCRIBE["models"])
-            self.assertLess(time.monotonic() - t, 1)
+            self.assertLess(time.monotonic() - t, timing.limit(1, below=5))  # the runner waits 5 s
         finally:
             core.BUILD_MEMO.reset(token)
         go.set()
@@ -470,7 +471,7 @@ class Database(Env):
         before = p.stat().st_mtime_ns
         self.assertEqual(self.a.chat_path(SESSION_ID), p)
         self.assertEqual(p.stat().st_mtime_ns, before)  # the database did not change
-        time.sleep(0.01)
+        time.sleep(0.01)  # timing: a later mtime for the next write; a slow machine only makes it later
         conn = sqlite3.connect(db)
         conn.execute("INSERT INTO session_message VALUES ('m9', ?, 'user', 99, 1, 1, ?)",
                      (SESSION_ID, json.dumps({"time": {"created": 1794383500000}, "text": "one more"})))
@@ -651,7 +652,7 @@ class State(Env):
                               text=True, timeout=60, env={k: v for k, v in env.items() if k != "MAXPM_AGENT"})
         self.assertEqual(out2.returncode, 0, out2.stderr)
         self.assertEqual(json.loads(out2.stdout), [])
-        time.sleep(0.3)
+        time.sleep(0.3)  # timing: a check that no report came; a slow machine can only make it pass
         self.assertEqual(len(out.read_text(encoding="utf-8").splitlines()), len(calls))  # not started by MaximizePM: no report
 
     @unittest.skipUnless(shutil.which("node"), "no node")

@@ -857,8 +857,16 @@ class Browser:
             try:
                 self.proc.wait(5)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(5)
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (OSError, AttributeError):
+                    self.proc.kill()
+                try:
+                    self.proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    # A slow GitHub macOS runner took longer to end a killed Chrome (#5705): the close goes on, and
+                    # Python reaps the process when it ends.
+                    pass
             return
         end = time.time() + 5
         while time.time() < end and core.pid_alive(pid):

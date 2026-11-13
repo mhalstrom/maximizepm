@@ -561,7 +561,7 @@ class LinkTest(Base):
         side.send_json({"t": "bye", "reason": "revoked"})
         self.until(lambda: relay.STATE.get("state") == "error", "error")
         self.assertIn("run maxpm connect", relay.STATE["error"])
-        time.sleep(1.5)
+        time.sleep(1.5)  # timing: a check that no connection came; a slow machine can only make it pass
         self.assertTrue(self.fake.sides.empty(), "no new connection with a revoked token")
 
     def test_a_401_waits_for_a_new_connect(self):

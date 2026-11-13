@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests import chrome
+from tests import chrome, timing
 from river import browser, cli, core, server
 from river.core import RiverError
 from river.routes import browser as routes
@@ -1097,11 +1097,12 @@ class Routes(Base):
         got, patches = self._sent(b)
         inp = lambda n, k, pane="p1": server.OPS["browser_input"](
             self.c, {"project": "web", "pane": pane, "n": n, "ev": {"type": "text", "text": k}}, None)
-        with patches[0], patches[1]:
+        # #5705: on a slow runner the held batches passed INPUT_GAP before the check; the gap scales on CI.
+        with patches[0], patches[1], mock.patch.object(browser, "INPUT_GAP", timing.limit(browser.INPUT_GAP)):
             inp(2, "b")
             inp(3, "c")
             inp(1, "a", "p2")  # another pane counts on its own
-            time.sleep(0.05)
+            timing.wait_for(lambda: self._keys(got), 5, "the other pane's key")
             self.assertEqual(self._keys(got), ["a"])
             inp(1, "a")
             self.assertTrue(b.inputs.settle())
@@ -1309,7 +1310,9 @@ class SharpWhenStill(Base):
 
     def setUp(self):
         super().setUp()
-        p = mock.patch.object(browser, "SHARP_QUIET", 0.15)
+        # #5705: a GitHub macOS runner took longer than 0.15 s between two frames of the test, so a sharp frame came
+        # while the page moved; the quiet time scales on CI.
+        p = mock.patch.object(browser, "SHARP_QUIET", timing.limit(0.2))
         p.start()
         self.addCleanup(p.stop)
         self.b = b = browser.Browser("web")
@@ -1329,19 +1332,19 @@ class SharpWhenStill(Base):
 
     def test_no_sharp_frame_while_the_page_moves(self):
         b = self.b
-        for i in range(10):  # a scroll: a new frame each 50 ms, each one shown at once
+        for i in range(10):  # a scroll: new frames one after the other, each one shown at once
             self.paint(b"frame %d" % i)
             self.assertEqual((b.frame["data"], b.frame.get("sharp")), (base64.b64encode(b"frame %d" % i).decode(), None))
             browser.frame(b, b.seq, 0.01, "pane")  # the panel polls while it watches
-            time.sleep(0.05)
         self.assertEqual(self.shots, [])
-        time.sleep(0.4)  # the page holds still: one sharp frame
-        self.assertEqual((self.shots, b.frame.get("sharp")), (["Page.captureScreenshot"], True))
+        # The page holds still: one sharp frame.
+        timing.wait_for(lambda: b.frame.get("sharp"), 10, "the sharp frame")
+        self.assertEqual(self.shots, ["Page.captureScreenshot"])
         self.paint(b"frame 9")  # the screenshot painted the page again: the sharp frame stays
         self.assertTrue(b.frame.get("sharp"))
         self.paint(b"frame 10")  # the page changes: the new frame at once
         self.assertIsNone(b.frame.get("sharp"))
-        time.sleep(0.4)
+        timing.wait_for(lambda: b.frame.get("sharp"), 10, "the next sharp frame")
         self.assertEqual(len(self.shots), 2)
 
 
@@ -1358,14 +1361,14 @@ class ManyPolls(Base):
     def test_each_poll_gets_the_next_change(self):
         b = browser.Browser("web")
         self.put(b, b"one")
-        got, polls = [], []
+        got, polls, seq = [], [], b.seq
         for _ in range(2):
-            t = threading.Thread(target=lambda: got.append(browser.frame(b, b.seq, 3, "p", many=True)))
+            t = threading.Thread(target=lambda: got.append(browser.frame(b, seq, timing.limit(3), "p", many=True)))
             t.start()
             polls.append(t)
-        time.sleep(0.2)
+        timing.wait_for(lambda: b.watching == 2, 5, "two polls that wait")
         self.put(b, b"two")
-        time.sleep(0.1)
+        timing.wait_for(lambda: len(got) == 1 and b.watching == 1, 5, "one poll that took the change")
         self.put(b, b"three")
         for t in polls:
             t.join(5)
@@ -1451,7 +1454,7 @@ class RealChrome(Base):
         b.watched = __import__("time").time()
         f = browser.frame(b, 0, 5)
         sharp = None
-        for _ in range(50):
+        for _ in range(int(timing.limit(50))):  # it failed once on a loaded Mac in the full run (#5705)
             sharp = b.frame if b.frame.get("sharp") else None  # read once: a new screencast frame can follow it
             if sharp:
                 break
@@ -1544,7 +1547,7 @@ class AgentActions(Base):
         browser.check(b, ref["Agree"])
         browser.check(b, ref["Agree"])  # checked already: no click
         out = browser.click(b, ref["Send"])
-        self.assertLess(time.time() - t0, 2.0)
+        self.assertLess(time.time() - t0, timing.limit(2.0, below=browser.NAV_START))
         self.assertEqual((b.evaluate("document.title"), out["navigated"]), ("sent Bob m true", False))
         d = browser.snapshot(b, interactive=True, delta=True)["snapshot"]
         self.assertTrue(d["delta"])
@@ -1687,7 +1690,7 @@ class PageBoxes(Base):
         # The click that opens the box replies at once, with the box; the reply prints the way to answer it.
         t0 = time.time()
         out = act(action="click", selector="#del")
-        self.assertLess(time.time() - t0, 2.0)
+        self.assertLess(time.time() - t0, timing.limit(2.0, below=browser.NAV_START))
         self.assertEqual(out["dialog"], {"type": "confirm", "message": "Delete this?", "default": "",
                                          "url": f"http://127.0.0.1:{port}/"})
         self.assertIn('dialog confirm "Delete this?": maxpm browser dialog accept, or dismiss',
@@ -1698,18 +1701,18 @@ class PageBoxes(Base):
             with self.assertRaisesRegex(RiverError, 'the page shows a confirm box "Delete this\\?": maxpm browser '
                                                     'dialog accept, or maxpm browser dialog dismiss'):
                 act(**a)
-        self.assertLess(time.time() - t0, 1.0)
+        self.assertLess(time.time() - t0, timing.limit(1.0, below=browser.LOADING_WAIT))
         self.assertEqual(act(action="status")["dialog"]["message"], "Delete this?")
         with self.assertRaisesRegex(RiverError, "a confirm box takes no text"):
             act(action="dialog", text="x")
         t0 = time.time()
         out = act(action="dialog", accept=True)
-        self.assertLess(time.time() - t0, 0.3)  # no next page: no wait for one
+        self.assertLess(time.time() - t0, timing.limit(0.3, below=browser.NAV_START))  # no next page: no wait for one
         self.assertEqual((out["dialog"], out["answered"]["accept"], b.evaluate("document.title")),
                          (None, True, "deleted"))
         t0 = time.time()
         act(action="click", selector="#part")  # a link in the same page: no wait for a next page
-        self.assertLess(time.time() - t0, 0.3)
+        self.assertLess(time.time() - t0, timing.limit(0.3, below=browser.NAV_START))
         self.assertIn("(accepted the confirm box)", cli._browser_result("dialog", out)[0])
         act(action="click", selector="#del")
         act(action="dialog", accept=False)
@@ -1725,7 +1728,7 @@ class PageBoxes(Base):
 
         # A box that opens later than the action: the next command names it.
         act(action="click", selector="#al")
-        time.sleep(0.6)
+        timing.wait_for(lambda: act(action="status").get("dialog"), 10, "the alert box")
         with self.assertRaisesRegex(RiverError, 'alert box "Saved"'):
             act(action="text")
         act(action="dialog")
@@ -1737,7 +1740,7 @@ class PageBoxes(Base):
         t0 = time.time()
         out = act(action="dialog")
         self.assertEqual((out["navigated"], out["title"], out["dialog"]), (True, "Two", None))
-        self.assertLess(time.time() - t0, 3.0)
+        self.assertLess(time.time() - t0, timing.limit(3.0, below=browser.IDLE_WAIT))
         # A batch: the step that opens the box replies with it; the next step is refused, which ends the batch.
         act(action="back")
         res = act(action="batch", steps=[{"action": "click", "selector": "#del"}, {"action": "text"},
@@ -1784,13 +1787,14 @@ class AttachedChrome(Base):
                               "--no-first-run", "about:blank"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.addCleanup(self._stop_chrome, p, prof)
-        port, end = None, time.monotonic() + browser.START_WAIT
+        wait = timing.limit(browser.START_WAIT)  # on CI the wait scales (#5705)
+        port, end = None, time.monotonic() + wait
         while port is None and time.monotonic() < end and p.poll() is None:
             try:
                 port = int(Path(prof, "DevToolsActivePort").read_text(encoding="utf-8").split()[0])
             except (OSError, ValueError, IndexError):
                 time.sleep(0.1)
-        self.assertTrue(port, f"the shared Chrome did not start within {browser.START_WAIT}s (exit {p.poll()})")
+        self.assertTrue(port, f"the shared Chrome did not start within {wait:g}s (exit {p.poll()})")
         core.config_set(self.c, "browser_source", f"cdp:{port}", project="web")
         return port
 
@@ -1820,8 +1824,8 @@ class AttachedChrome(Base):
         self.assertIn("new_sign_in", [c["name"] for c in base.call("Storage.getCookies")["cookies"]])
         gone = a.context
         a.close()  # the session ends: its context and tabs go with serve's connection
-        time.sleep(0.5)
-        self.assertNotIn(gone, base.call("Target.getBrowserContexts")["browserContextIds"])
+        timing.wait_for(lambda: gone not in base.call("Target.getBrowserContexts")["browserContextIds"], 10,
+                        "the end of the session's context")
 
     def test_attach_uses_its_own_tab_and_leaves_the_browser_open(self):
         chrome_ = chrome() and browser.chrome_path()
@@ -1836,14 +1840,16 @@ class AttachedChrome(Base):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.addCleanup(self._stop_chrome, p, prof)
         # The first Chrome of a fresh GitHub runner took more than 10 s to write its port (#5602): wait as long as
-        # serve waits for its own Chrome (browser.START_WAIT), and stop at once when Chrome ended.
-        port, end = None, time.monotonic() + browser.START_WAIT
+        # serve waits for its own Chrome (browser.START_WAIT), and stop at once when Chrome ended. On CI the wait
+        # scales: an ubuntu runner took more than 20 s once (#5705).
+        wait = timing.limit(browser.START_WAIT)
+        port, end = None, time.monotonic() + wait
         while port is None and time.monotonic() < end and p.poll() is None:
             try:
                 port = int(Path(prof, "DevToolsActivePort").read_text(encoding="utf-8").split()[0])
             except (OSError, ValueError, IndexError):
                 time.sleep(0.1)
-        self.assertTrue(port, f"the shared Chrome did not start within {browser.START_WAIT}s (exit {p.poll()})")
+        self.assertTrue(port, f"the shared Chrome did not start within {wait:g}s (exit {p.poll()})")
         core.config_set(self.c, "browser_source", f"cdp:{port}", project="web")
         b = browser.get("web")
         b.start()

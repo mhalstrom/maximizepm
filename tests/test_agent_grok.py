@@ -131,7 +131,7 @@ class Hooks(Home):
         self.assertIn(repr(str(ROOT)), code)
         self.assertIn(repr(str(q / "grok-hooks")), code)
         before = (script.stat().st_mtime_ns, agent.stat().st_mtime_ns)
-        time.sleep(0.01)
+        time.sleep(0.01)  # timing: a later mtime for a write that must not happen; a slow machine only makes it later
         grok.install_hooks("/p", REPORT, python="/usr/bin/python3", where=q)
         self.assertEqual(before, (script.stat().st_mtime_ns, agent.stat().st_mtime_ns))
         self.assertEqual(list(self.gh.iterdir()), [])

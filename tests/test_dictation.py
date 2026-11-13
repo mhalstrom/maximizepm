@@ -134,7 +134,7 @@ class RealHelper(unittest.TestCase):
         s = dictation.start("en-US")
         for i in range(0, len(pcm), 3200):
             dictation.audio(s["id"], base64.b64encode(pcm[i:i + 3200]).decode())
-            time.sleep(0.1)
+            time.sleep(0.1)  # timing: the audio comes at the speed of speech; a slow machine sends it slower
         end = dictation.stop(s["id"])
         self.assertIsNone(end["error"], end)
         self.assertIn("header", end["text"].lower(), end)

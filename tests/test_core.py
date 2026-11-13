@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from river import core
 from river.core import RiverError
 from river.agents import claude as claude_agent
+from tests import timing
 
 
 class Base(unittest.TestCase):
@@ -3384,7 +3385,7 @@ class Upgrade(Base):
         t = time.time()
         c = core.connect(path)
         self.addCleanup(c.close)
-        self.assertLess(time.time() - t, 1)  # before #5396 it waited busy_timeout (10s), then died
+        self.assertLess(time.time() - t, timing.limit(1, below=10))  # before #5396 it waited busy_timeout (10s), then died
         self.assertTrue(c.execute("SELECT 1 FROM meta WHERE key=?", ("schema:" + core.schema_print(),)).fetchone())
         holder.execute("ROLLBACK")
 
@@ -3419,7 +3420,7 @@ class Upgrade(Base):
         t = time.time()
         self.assertEqual(len(core.needs_you(self.c)), 1)  # before #5396 it waited for the lock, 2-4 s each time
         core.sync_needs_you_now(self.c)
-        self.assertLess(time.time() - t, 0.5)
+        self.assertLess(time.time() - t, timing.limit(0.5, below=2))
         holder.execute("ROLLBACK")
 
     def test_a_sync_that_meets_a_newer_write_runs_again_in_a_tx(self):
@@ -4387,7 +4388,7 @@ class ReleaseReview(Base):
         t = time.monotonic()
         with self.assertRaises(RiverError) as e:
             core.review_pass(self.c, self.review, None, "rev")
-        self.assertLess(time.monotonic() - t, 20)
+        self.assertLess(time.monotonic() - t, timing.limit(20, below=30))  # the child sleeps 30 s
         msg = str(e.exception)
         self.assertIn("review_timeout (2s)", msg)
         self.assertIn("maxpm config set review_timeout", msg)
@@ -8276,7 +8277,7 @@ class Hooks(Base):
         core.target_cut(self.c, "web", None, "mark")
         t = time.monotonic()
         h = core.run_hooks(self.c)[0]
-        self.assertLess(time.monotonic() - t, 20)
+        self.assertLess(time.monotonic() - t, timing.limit(20, below=30))  # the child sleeps 30 s
         self.assertEqual((h["ok"], h["timed_out"], h["alerted"]), (False, True, "ops"))
         self.assertIn("stopped at hook_timeout (2s)", h["result"])
         self.assertIn("started", h["output"])
@@ -11020,7 +11021,7 @@ class Ops(Base):
                                                     "timeout": "1s", "every": "1m", "fail_after": 1}, actor="boss")
         t0 = time.monotonic()
         self.run_at("site", "slow", core.now())
-        self.assertLess(time.monotonic() - t0, 20)
+        self.assertLess(time.monotonic() - t0, timing.limit(20, below=30))  # the command sleeps 30 s
         run = core.ops_history(self.c, "site", "slow", 1)["runs"][0]
         self.assertEqual((run["status"], run["timed_out"]), ("unknown", 1))
         self.assertEqual(self.state("site", "slow"), "fault")
@@ -11239,7 +11240,7 @@ class Ops(Base):
         with mock.patch.object(core, "OPS_DEADMAN_GET", get), mock.patch.object(core, "_monotonic", lambda: clock[0]):
             t0 = time.monotonic()
             self.assertEqual(core.ops_deadman(self.c), "https://hc-ping.example/abc")
-            self.assertLess(time.monotonic() - t0, 1)  # the GET waits in its thread, not in the loop
+            self.assertLess(time.monotonic() - t0, timing.limit(1, below=5))  # the GET waits in its thread, not in the loop
             clock[0] += 70
             self.assertIsNone(core.ops_deadman(self.c))  # the first one still runs: no second at the same time
             gate.set()

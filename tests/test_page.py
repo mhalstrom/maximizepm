@@ -8,6 +8,7 @@ from pathlib import Path
 import struct
 
 from river import core, server
+from tests import timing
 from tests.test_view_sessions import TmuxBase, claude_line
 
 
@@ -30,7 +31,7 @@ class PageBrowser(TmuxBase):
     HEAD = r'''
 const q = s => document.querySelector(s);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const until = async (f, what) => { for (let i = 0; i < 150; i++) { if (f()) return; await sleep(100); } throw new Error(what); };
+const until = async (f, what) => { for (let i = 0; i < UNTIL_TRIES; i++) { if (f()) return; await sleep(100); } throw new Error(what); };
 const check = (v, what) => { if (!v) throw new Error(what); };
 const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON.stringify(o));
 '''
@@ -58,7 +59,9 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
                     (steps or {})[self.path[len("/__step/"):]]()
                     return self._send(204, b"")
                 if self.path == "/__drive.js":
-                    return self._send(200, (PageBrowser.HEAD + driver).encode(), "text/javascript; charset=utf-8")
+                    # until() waits 15 s on a fast machine; on CI it scales (#5705).
+                    head = f"const UNTIL_TRIES = {int(timing.limit(150))};" + PageBrowser.HEAD
+                    return self._send(200, (head + driver).encode(), "text/javascript; charset=utf-8")
                 page = server.page_html(self.path.split("?")[0])
                 if page is not None:
                     assert tag in page
@@ -90,7 +93,7 @@ const post = o => navigator.sendBeacon(new URL("/__result", location).href, JSON
             *([f"--window-size={window}"] if window else []), *flags,
             f"http://127.0.0.1:{httpd.server_address[1]}{'/__frame' if frame else path}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            ran = got.wait(40)
+            ran = got.wait(timing.limit(40))  # a slow GitHub macOS runner took longer (#5705)
         finally:
             chrome.kill()
             chrome.wait()

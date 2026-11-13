@@ -359,7 +359,9 @@ class Timing(Base):
         prof = t["profile"]
         self.assertEqual(set(prof), {"samples", "sample_ms", "lines", "functions", "others"})
         if prof["samples"]:  # a fast machine can build before the first sample
-            self.assertTrue(any(" state" in f for f in prof["functions"]), prof)
+            # The sampler starts inside page_state, so each sample holds it; a slow runner took one sample, in a
+            # part of the build outside core.state (#5705).
+            self.assertIn(f"{prof['samples']} server.py page_state", prof["functions"], prof)
         self.assertFalse(any(th.name == "maxpm-build-sampler" for th in threading.enumerate()))
         server.state_changed()
         wire("/api/state?since=", {})
