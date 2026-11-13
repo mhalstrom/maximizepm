@@ -5270,8 +5270,9 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 if body.get("op") not in LIGHT_OPS:
                     state_changed()
-        except RiverError as e:
-            return self._send(409, {"error": str(e)})
+        except RiverError as e:  # a browser refusal carries its code and candidates (#5678)
+            return self._send(409, {"error": str(e), **({"code": e.code, "candidates": getattr(e, "candidates", [])}
+                                                       if getattr(e, "code", None) else {})})
         except (KeyError, ValueError, TypeError) as e:
             return self._send(400, {"error": f"bad request: {e}"})
 

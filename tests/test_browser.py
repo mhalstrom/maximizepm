@@ -1877,6 +1877,91 @@ class Aim(Base):
             act(action="click", selector=ref)
 
 
+class ThreeDoors(Base):
+    """#5678 in a real Chrome: the same walk gives the same replies through HTTP (op browser_call), the command with
+    --json and the MCP tool browser: one shape, a read or a change, and the error codes with their candidates."""
+
+    def test_one_shape_through_http_the_command_and_mcp(self):
+        import re
+        from river import mcp
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(LONG)))
+                self.end_headers()
+                self.wfile.write(LONG)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        # serve's answer to the command and the MCP tool: the same ops, in this process (ask_server asks serve)
+        patch = mock.patch.object(cli, "ask_server", lambda conn, op, args, actor=None, timeout=5, retries=3:
+                                  server.OPS[op](conn, args, actor))
+        patch.start()
+        self.addCleanup(patch.stop)
+        url = f"http://127.0.0.1:{port}/"
+        walk = [  # (HTTP args, the command's words, the MCP arguments)
+            ({"action": "open", "url": url, "show": False}, ["open", url, "--no-show"], {"action": "open", "url": url}),
+            ({"action": "find", "find": "card b", "interactive": True} | {"action": "snapshot"}, ["find", "card b"],
+             {"action": "find", "text": "card b"}),
+            ({"action": "click", "selector": "Edit"}, ["click", "Edit"], {"action": "click", "target": "Edit"}),
+            ({"action": "click", "selector": "Edit", "within": "Invoice 1042"},
+             ["click", "Edit", "--in", "Invoice 1042"], {"action": "click", "target": "Edit", "in": "Invoice 1042"}),
+            ({"action": "extract", "rows": "tbody tr", "fields": [["inv", "a", None]], "limit": 2},
+             ["extract", "--rows", "tbody tr", "--limit", "2", "inv=a"],
+             {"action": "extract", "rows": "tbody tr", "fields": ["inv=a"], "limit": 2}),
+            ({"action": "click", "selector": "Help"}, ["click", "Help"], {"action": "click", "target": "Help"}),
+        ]
+        refs = lambda o: json.loads(re.sub(r"@e\d+", "@e", json.dumps(o)))  # noqa: E731  (each walk gives new refs)
+        doors = {"http": [], "command": [], "mcp": []}
+        m = mcp.Server()
+        for http_args, words, mcp_args in walk:
+            doors["http"].append(refs(routes.call(self.c, {"project": "web", **http_args}, "ag1")))
+        for http_args, words, mcp_args in walk:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    cli.run(["-q", "--as", "ag1", "--json", "browser"] + words + ["--project", "web"])
+                except SystemExit:
+                    pass
+            doors["command"].append(refs(json.loads(out.getvalue())))
+        for http_args, words, mcp_args in walk:
+            text, bad = m.call("browser", {**mcp_args, "project": "web", "json": True, "as": "ag1"})
+            reply = json.JSONDecoder().raw_decode(text)[0]  # the JSON, then maxpm's footer line
+            self.assertEqual(bad, not reply["ok"])
+            doors["mcp"].append(refs(reply))
+        self.assertEqual(doors["http"], doors["command"])
+        self.assertEqual(doors["http"], doors["mcp"])
+        r = doors["http"]
+        self.assertEqual([(x["action"], x["kind"], x["ok"]) for x in r],
+                         [("open", "change", True), ("snapshot", "read", True), ("click", "change", False),
+                          ("click", "change", True), ("extract", "read", True), ("click", "change", True)])
+        self.assertEqual((r[2]["error"]["code"], len(r[2]["error"]["candidates"])), ("ambiguous", 3))
+        self.assertEqual(r[0]["changed"][:1], ['[nav "Site"] 2 links'])
+        self.assertEqual(r[3]["changed"], ["no change"])
+        self.assertEqual(r[4]["data"]["data"], [{"inv": "Invoice 1041"}, {"inv": "Invoice 1042"}])
+        self.assertTrue(r[5]["navigated"])
+        # The other codes: no element, a cover, a refused address.
+        self.assertEqual(routes.call(self.c, {"project": "web", "action": "click", "selector": "Nope"}, "ag1")
+                         ["error"]["code"], "not_found")
+        self.assertEqual(routes.call(self.c, {"project": "web", "action": "open", "url": "http://10.1.2.3/"}, "ag1")
+                         ["error"]["code"], "refused_address")
+
+
 MENU = (b"<title>Menu</title><nav aria-label=Top><button onclick=\"menu.hidden = !menu.hidden\">Account</button>"
         b"<div id=menu role=menu aria-label=Account hidden><a role=menuitem href=/p>Profile</a>"
         b"<a role=menuitem href=/s>Settings</a><button role=menuitem>Sign out</button></div></nav>"

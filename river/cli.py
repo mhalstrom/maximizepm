@@ -888,6 +888,7 @@ def build_parser(only=None):
     brs = br.add_subparsers(dest="bcmd", required=True)
     bp = argparse.ArgumentParser(add_help=False)
     bp.add_argument("--project", help="default: the project of the item you hold, or of this folder")
+    bp.add_argument("--tab", help="the tab (its id from maxpm browser status); default: the tab that shows")
     # #5663: what an action waits for, and the snapshot after it
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--wait", choices=BROWSER_WAITS, help="auto (default): for the next page when the action led to "
@@ -2514,12 +2515,36 @@ def _browser_cmd(conn, a, actor):
             for s in annotate.sets(conn, agent=actor, item_id=i, project=project, open_only=a.open):
                 out[s["id"]] = s
         return {"sets": sorted(out.values(), key=lambda s: -s["id"])}
+    if getattr(a, "json", False):  # #5678: the one reply shape (browser.shape), as op browser_call and the MCP tool
+        from .browser import shape
+        action = "batch" if b == "batch" else None
+        try:
+            res = _browser_ask(conn, a, actor)
+            action = action or res.pop("_action")
+            out = shape(action, res)
+        except RiverError as e:
+            out = shape(action or _browser_args(a)["action"], error=e)
+        if not out["ok"]:
+            print(json.dumps(out))
+            raise SystemExit(2)
+        return out
+    return _browser_ask(conn, a, actor)
+
+
+def _browser_ask(conn, a, actor):
+    """One maxpm browser command to serve (op browser), and what the command does with the reply: a screenshot's file,
+    the HTML's file or size."""
+    b = a.bcmd
     if b == "batch":
         steps = _browser_batch(a)
-        return ask_server(conn, "browser", {"action": "batch", "steps": steps, "project": a.project,
+        return ask_server(conn, "browser", {"action": "batch", "steps": steps, "project": a.project, "tab": a.tab,
                                             "cwd": os.getcwd()}, actor, timeout=120 + 30 * len(steps))
     args = {**_browser_args(a), "project": a.project, "cwd": os.getcwd()}
+    if a.tab:
+        args["tab"] = a.tab
     res = ask_server(conn, "browser", args, actor, timeout=120)
+    if getattr(a, "json", False):
+        res["_action"] = args["action"]
     if b == "screenshot":
         import base64
         import tempfile
@@ -2646,6 +2671,8 @@ def _browser_batch(a):
         step = _browser_args(sub)
         if sub.project:
             step["project"] = sub.project
+        if sub.tab:
+            step["tab"] = sub.tab
         steps.append(step)
     if not steps:
         raise RiverError("the batch is empty: one action on each line, such as: click @e3")
@@ -2677,10 +2704,16 @@ def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
         except urllib.error.HTTPError as e:
             with e:
                 text = e.read().decode(errors="replace").strip()
+            said = {}
             try:
-                why = json.loads(text)["error"]  # maxpm serve refused: its own words
+                said = json.loads(text)
+                why = said["error"]  # maxpm serve refused: its own words
             except (ValueError, KeyError, TypeError):
                 why = None
+            if why and isinstance(said, dict) and said.get("code"):  # a browser refusal's code (#5678)
+                err = RiverError(why)
+                err.code, err.candidates = said["code"], said.get("candidates") or []
+                raise err
             if why is None and proxy and (e.code == 403 or e.headers.get("X-Proxy-Error")):
                 raise RiverError(f"the sandbox around this session refused the connection to maxpm serve on {host}"
                                  f" ({text.splitlines()[0] if text else e.reason}). Allow the host {host} for this "

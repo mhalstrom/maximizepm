@@ -25,6 +25,9 @@ from .core import RiverError
 PROTOCOL = "2025-06-18"
 
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
+BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
+                   "check", "uncheck", "key", "dialog", "back", "forward", "reload", "screenshot", "status", "tab",
+                   "new-tab", "close-tab")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "
@@ -88,6 +91,29 @@ TOOLS = [
          "path": {"type": "string", "description": "comment: the part's CSS path; save: the file to write"},
          "session": {"type": "string", "description": "open: the agent whose side panel shows it (default: you)"},
          "as": _AS}}},
+    {"name": "browser",
+     "description": "Your project's browser (maxpm browser): open (replies with the page's outline), snapshot, find, "
+                    "outline, text, extract, html, click, type, fill, select, check, uncheck, key, dialog, back, "
+                    "forward, reload, screenshot, status, tab, new-tab, close-tab. A target is a name as the "
+                    "snapshot prints it, role and name (link \"Comments\"), or a ref (@e3). The reply says what "
+                    "changed; json: the reply as {ok, kind, url, title, changed, data, error {code, candidates}}.",
+     "inputSchema": {"type": "object", "required": ["action"], "properties": {
+         "action": {"type": "string", "enum": list(BROWSER_ACTIONS)},
+         "target": {"type": "string", "description": "the element: a name, role \"name\", @e3; tab, close-tab: the tab"},
+         "text": {"type": "string", "description": "type, fill: the text; find: the words; dialog: a prompt's answer"},
+         "url": {"type": "string", "description": "open, new-tab: the address"},
+         "x": {"type": "number"}, "y": {"type": "number"},
+         "key": {"type": "string", "description": "key: Enter, Tab, Escape, ArrowDown, or one character"},
+         "values": {"type": "array", "items": {"type": "string"}, "description": "select: the options"},
+         "accept": {"type": "boolean", "description": "dialog: true accepts (default), false dismisses"},
+         "in": {"type": "string", "description": "the text of the target's row, card or region"},
+         "rows": {"type": "string", "description": "extract: the rows (a ref or name in a repeated row, or CSS)"},
+         "fields": {"type": "array", "items": {"type": "string"}, "description": "extract: name=<css>[@attr]"},
+         "region": {"type": "string"}, "scope": {"type": "string"}, "all": {"type": "boolean"},
+         "section": {"type": "string"}, "grep": {"type": "string"}, "limit": {"type": "integer"},
+         "wait": {"type": "string", "enum": ["auto", "load", "idle", "none"]},
+         "tab": {"type": "string", "description": "the tab to act in (default: the one that shows)"},
+         "project": {"type": "string"}, "json": {"type": "boolean"}, "as": _AS}}},
     {"name": "inbox",
      "description": "Your unread messages and the questions that wait for your answer.",
      "inputSchema": {"type": "object", "properties": {"as": _AS}}},
@@ -104,6 +130,58 @@ CHAT_INSTRUCTIONS = ("MaximizePM is the user's work queue for AI agents. In this
                      "(maxpm tool: [\"needs-you\"], then [\"prompt\", \"--all\"]), and do items that need no code, "
                      "such as writing or research (go; the result goes in done). Call the tool, then follow its briefing; "
                      "for other maxpm commands use the maxpm tool with the words after `maxpm`.")
+
+
+def browser_argv(a):
+    """#5678: the maxpm browser words of an MCP browser call: the flags, then -- and the positional words (so a text
+    that starts with - stays text). json goes before browser: it is a flag of maxpm."""
+    act = a.get("action")
+    if act not in BROWSER_ACTIONS:
+        raise RiverError(f"browser action is one of {', '.join(BROWSER_ACTIONS)}")
+    t, text = a.get("target"), a.get("text")
+
+    def need(what, v):
+        if v in (None, "", []):
+            raise RiverError(f"browser {act} needs {what}")
+        return v
+    flags = []
+    for key, flag in (("in", "--in"), ("wait", "--wait"), ("region", "--region"), ("scope", "--scope"),
+                      ("section", "--section"), ("grep", "--grep"), ("rows", "--rows"), ("tab", "--tab"),
+                      ("project", "--project")):
+        if a.get(key) not in (None, ""):
+            flags += [flag, str(a[key])]
+    if a.get("limit"):
+        flags += ["--limit", str(int(a["limit"]))]
+    if a.get("all"):
+        flags.append("--all")
+    pos = []
+    if act == "open":
+        pos = [need("the address (url)", a.get("url"))]
+    elif act == "new-tab" and a.get("url"):
+        pos = [a["url"]]
+    elif act == "click":
+        pos = [str(a["x"]), str(a["y"])] if a.get("x") is not None and a.get("y") is not None else \
+            [need("the element (target) or a point (x, y)", t)]
+    elif act == "type":
+        pos = ([t] if t else []) + [need("the text (text)", text)]
+    elif act == "fill":
+        pos = [need("the field (target)", t), text or ""]
+    elif act == "select":
+        pos = [need("the select (target)", t)] + [str(v) for v in need("the options (values)", a.get("values"))]
+    elif act in ("check", "uncheck"):
+        pos = [need("the element (target)", t)]
+    elif act == "key":
+        pos = [need("the key (key)", a.get("key"))]
+    elif act == "dialog":
+        accept = a.get("accept", True) is not False
+        pos = ["accept" if accept else "dismiss"] + ([text] if accept and text is not None else [])
+    elif act == "find":
+        pos = [need("the words (text)", text)]
+    elif act == "extract":
+        pos = [str(f) for f in a.get("fields") or []]
+    elif act in ("tab", "close-tab") and t:
+        pos = [t]
+    return (["--json"] if a.get("json") else []) + ["browser", act] + flags + (["--"] + pos if pos else [])
 
 
 def canvas_argv(a):
@@ -200,6 +278,8 @@ class Server:
                 words += ["--result", a.get("result") or ""]
         elif name == "canvas":
             words = canvas_argv(a)
+        elif name == "browser":
+            words = browser_argv(a)
         elif name == "inbox":
             words = ["inbox"]
         elif name == "manage":

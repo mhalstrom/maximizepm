@@ -98,9 +98,19 @@ def batch(conn, a, who):
         try:
             done.append({"step": s, "result": act(conn, step, who)})
         except RiverError as e:
-            done.append({"step": s, "error": str(e)})
+            done.append({"step": s, "error": str(e), "code": getattr(e, "code", "error")})
             break
     return {"steps": done, "ok": "error" not in done[-1], "left": len(steps) - len(done)}
+
+
+def call(conn, a, who):
+    """#5678: op browser_call, the HTTP door: one action as act() runs it, always in the reply shape (browser.shape);
+    a refusal is a reply with ok false and its error code, not an HTTP error."""
+    action = a.get("action") or "status"
+    try:
+        return browser.shape(action, act(conn, a, who))
+    except RiverError as e:
+        return browser.shape(action, error=e)
 
 
 def act(conn, a, who):
@@ -128,13 +138,23 @@ def _act(conn, a, who):
     owner = None if action == "walk" else (a.get("session") or a.get("agent") or None) if person else who
     b = browser.get(project, owner, conn)
     if action in CHANGES and not (person and action == "dialog"):  # the person answers a box in the pane at any time
-        browser.may_change(conn, b, who, person)
+        try:
+            browser.may_change(conn, b, who, person)
+        except browser.BrowserError:
+            raise
+        except RiverError as e:  # #5678: its code
+            raise browser.BrowserError(str(e), "not_controller")
         if person:
             b.person_at = time.time()
         if not person and action in INPUTS:
             first_input(project, who)
     if person and a.get("pane") and action in CHANGES:
         b.drive(a.get("pane"))  # the person uses the browser in this panel: its size is the page's size (#5625)
+    tab = a.get("tab")
+    if tab and action not in ("tab", "new_tab", "close_tab", "suggest", "walk", "start") and b.running() \
+            and tab != b.target:  # #5678: a call names its tab, and depends on no tab that shows by chance
+        browser.may_change(conn, b, who, person)
+        browser.switch_tab(b, tab)
     if action == "status":
         if getattr(b, "stale", False) and b.running() and not b.dialog:
             b.here()  # #5717: the page's script changed the address since the last read of its title
@@ -455,6 +475,7 @@ GET = [
 
 OPS = {
     "browser": act,
+    "browser_call": call,  # #5678: the same action, in the one reply shape
     "browser_input": person_input,
     "browser_hand": hand,
     "browser_annotate": annotate_send,

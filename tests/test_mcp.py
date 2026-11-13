@@ -68,6 +68,25 @@ class Mcp(unittest.TestCase):
         self.assertEqual(core.goal_show(c, "ship")["status"], "complete")
         c.close()
 
+    def test_browser_tool_builds_the_words_of_the_command(self):
+        """#5678: one tool browser with an action field; the flags, then -- and the positional words."""
+        tool = next(t for t in mcp.TOOLS if t["name"] == "browser")
+        self.assertIn("click", tool["inputSchema"]["properties"]["action"]["enum"])
+        self.assertEqual(mcp.browser_argv({"action": "click", "target": "Edit", "in": "Invoice 1042", "json": True}),
+                         ["--json", "browser", "click", "--in", "Invoice 1042", "--", "Edit"])
+        self.assertEqual(mcp.browser_argv({"action": "fill", "target": "Amount", "text": "-5"}),
+                         ["browser", "fill", "--", "Amount", "-5"])
+        self.assertEqual(mcp.browser_argv({"action": "click", "x": 10, "y": 20}), ["browser", "click", "--", "10", "20"])
+        self.assertEqual(mcp.browser_argv({"action": "dialog", "accept": False}), ["browser", "dialog", "--", "dismiss"])
+        self.assertEqual(mcp.browser_argv({"action": "extract", "rows": "tr", "fields": ["t=a"], "limit": 2}),
+                         ["browser", "extract", "--rows", "tr", "--limit", "2", "--", "t=a"])
+        self.assertEqual(mcp.browser_argv({"action": "snapshot", "all": True, "tab": "T1"}),
+                         ["browser", "snapshot", "--tab", "T1", "--all"])
+        with self.assertRaisesRegex(core.RiverError, "browser open needs the address"):
+            mcp.browser_argv({"action": "open"})
+        with self.assertRaisesRegex(core.RiverError, "browser action is one of"):
+            mcp.browser_argv({"action": "fly"})
+
     def test_canvas_tool_has_the_operations_of_the_command(self):
         """#4648: put with the text itself (also text that starts with a dash), show, comments, reply, resolve."""
         c = core.connect()

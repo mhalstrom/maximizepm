@@ -1105,7 +1105,7 @@ class Browser:
         try:
             ws.send(json.dumps(msg))
             if not w[0].wait(timeout):
-                raise RiverError(f"the browser did not answer {method} within {timeout}s")
+                raise BrowserError(f"the browser did not answer {method} within {timeout}s", "timeout")
         except OSError as e:
             raise RiverError(f"the browser connection broke: {e}")
         finally:
@@ -1165,7 +1165,12 @@ class Browser:
         url = norm_url(url)
         u = urlsplit(url)
         if u.scheme in ("http", "https") and not self._attached_now():
-            resolve(u.hostname, u.port or (443 if u.scheme == "https" else 80), self.proxy_allow())
+            try:
+                resolve(u.hostname, u.port or (443 if u.scheme == "https" else 80), self.proxy_allow())
+            except BrowserError:
+                raise
+            except RiverError as e:  # the network rule (decision 4)
+                raise BrowserError(str(e), "refused_address")
         self.start()
         r = self.page("Page.navigate", {"url": url})
         if r.get("errorText"):
@@ -2612,12 +2617,52 @@ def loading(b):
 DIALOG_CLOSE = 1.0  # seconds that an answer waits for Chrome's word that the box closed
 
 
-class DialogOpen(RiverError):
+class BrowserError(RiverError):
+    """#5678: a refusal of maxpm browser with a code that a program can act on (ERROR_CODES), and its candidates
+    (the elements of an ambiguous name, the cover and its buttons)."""
+
+    def __init__(self, message, code, candidates=None):
+        self.code, self.candidates = code, list(candidates or [])
+        super().__init__(message)
+
+
+ERROR_CODES = ("not_found", "ambiguous", "covered", "dialog_open", "not_controller", "timeout", "refused_address",
+               "error")
+# What each action does: a read changes nothing on the page (a recorder may run it with no yes); a change does.
+READS = {"status", "snapshot", "outline", "text", "extract", "html", "screenshot", "suggest", "annotations"}
+_PAGE = {"project", "owner", "running", "window", "source", "modes", "refused", "url", "title", "controller", "before",
+         "window_by", "window_idle", "window_end", "size", "dialog", "tabs", "navigated", "changes", "outline", "notes"}
+
+
+def shape(action, res=None, error=None):
+    """#5678: every browser operation in one reply shape, for --json, the MCP tool and HTTP (op browser_call): ok, the
+    action and whether it reads or changes, the page (url, title, tab), navigated, dialog, changed (what the action
+    changed, or the new page's outline), notes, data (what the action gives), and error {code, message, candidates}."""
+    res = res or {}
+    out = {"ok": error is None and res.get("ok", True) is not False, "action": action,
+           "kind": "read" if action in READS else "change",
+           "url": res.get("url"), "title": res.get("title"),
+           "tab": next((t["id"] for t in res.get("tabs") or [] if t.get("on")), None),
+           "navigated": bool(res.get("navigated")), "dialog": res.get("dialog"),
+           "changed": res.get("changes") or res.get("outline") or [], "notes": res.get("notes") or [],
+           "data": {k: v for k, v in res.items() if k not in _PAGE}, "error": None}
+    if action == "batch":
+        out["data"] = {"steps": [{"step": s["step"], **({"error": {"code": s.get("code", "error"), "message": s["error"]}}
+                                                        if "error" in s else {"reply": shape(s["step"]["action"],
+                                                                                             s["result"])})}
+                                 for s in res.get("steps") or []], "left": res.get("left", 0)}
+    if error is not None:
+        out["error"] = {"code": getattr(error, "code", None) or "error", "message": str(error),
+                        "candidates": getattr(error, "candidates", None) or []}
+    return out
+
+
+class DialogOpen(BrowserError):
     """A box of the page waits for an answer."""
 
     def __init__(self, b, dialog):
         self.browser, self.dialog = b, dialog
-        super().__init__(dialog_text(dialog))
+        super().__init__(dialog_text(dialog), "dialog_open")
 
 
 def dialog_info(d):
@@ -3565,9 +3610,10 @@ def resolve_target(b, target, within=None, verb="click"):
         return "@" + r["hits"][0]["ref"]
     if r["count"] > 1:
         more = f"\n  ... {r['count'] - len(r['hits'])} more" if r["count"] > len(r["hits"]) else ""
-        raise RiverError(f"{r['count']} elements are {what}; nothing was done. Name one: maxpm browser {verb} @e<n>, "
-                         f"or add --in \"<the text of its row or card>\":\n  " + "\n  ".join(h["line"] for h in r["hits"])
-                         + more)
+        raise BrowserError(f"{r['count']} elements are {what}; nothing was done. Name one: maxpm browser {verb} "
+                           f"@e<n>, or add --in \"<the text of its row or card>\":\n  "
+                           + "\n  ".join(h["line"] for h in r["hits"]) + more, "ambiguous",
+                           [h["line"] for h in r["hits"]])
     if not role and not within:
         try:  # a CSS selector, as maxpm browser took before names (#5663)
             if b.evaluate("(() => { try { return !!document.querySelector(%s); } catch (e) { return false; } })()"
@@ -3578,8 +3624,8 @@ def resolve_target(b, target, within=None, verb="click"):
         except RiverError:
             pass
     near = ("; the nearest: " + ", ".join(r.get("near") or [])) if r.get("near") else ""
-    raise RiverError(f"no element is {what}{near}. Else: maxpm browser html --scope <ref or css> for that part of the "
-                     f"page, then --selector '<css>' or a point (x y)")
+    raise BrowserError(f"no element is {what}{near}. Else: maxpm browser html --scope <ref or css> for that part of "
+                       f"the page, then --selector '<css>' or a point (x y)", "not_found", r.get("near"))
 
 
 def on_element(b, target, fn, *args):
@@ -3597,7 +3643,7 @@ def on_element(b, target, fn, *args):
     expr = "((el) => el && el.isConnected ? {v: (%s)(el%s)} : {gone: true})(%s)" % (fn, rest, find)
     r = in_world(b, expr, create=False) if ref else b.evaluate(expr)
     if r is NO_WORLD:
-        raise RiverError(f"@{ref} is from an earlier page: run maxpm browser snapshot")
+        raise BrowserError(f"@{ref} is from an earlier page: run maxpm browser snapshot", "not_found")
     if not r or r.get("gone"):
         if ref:  # #5668: the page drew it again; the role, name and region that the snapshot kept find it
             again = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps({"again": ref})),
@@ -3608,10 +3654,11 @@ def on_element(b, target, fn, *args):
                     b.said = getattr(b, "said", []) + [f"@{ref} was drawn again; it is {again['lines'][0]} now"]
                     return on_element(b, again["lines"][0].split(" ", 1)[0], fn, *args)
                 if again.get("count"):
-                    raise RiverError(f"@{ref} is no longer on the page, and {again['count']} elements have its role "
-                                     f"and name; name one:\n  " + "\n  ".join(again["lines"]))
-            raise RiverError(f"@{ref} is no longer on the page: run maxpm browser snapshot")
-        raise RiverError(f"no element matches {target!r} in {b.info()['url']}")
+                    raise BrowserError(f"@{ref} is no longer on the page, and {again['count']} elements have its role "
+                                       f"and name; name one:\n  " + "\n  ".join(again["lines"]), "ambiguous",
+                                       again["lines"])
+            raise BrowserError(f"@{ref} is no longer on the page: run maxpm browser snapshot", "not_found")
+        raise BrowserError(f"no element matches {target!r} in {b.info()['url']}", "not_found")
     return r.get("v")
 
 
@@ -3675,21 +3722,23 @@ CHECKED_JS = ("(el) => el.type === 'checkbox' || el.type === 'radio' ? el.checke
 def point_of(b, target):
     pos = on_element(b, target, POINT_JS)
     if not pos:
-        raise RiverError(f"{target} has no place on the page to click")
+        raise BrowserError(f"{target} has no place on the page to click", "not_found")
     if isinstance(pos, dict) and pos.get("covered"):  # #5668: another element is on top: no click
         x, y = pos["covered"]
-        raise RiverError(f"{target} is covered by {cover_of(b, x, y)}; nothing was clicked. Close that first, or "
-                         f"click the point if you mean it: maxpm browser click {round(x)} {round(y)}")
+        cover = cover_of(b, x, y)
+        raise BrowserError(f"{target} is covered by {cover[0]}" + ("; in it: " + ", ".join(cover[1:]) if cover[1:] else "")
+                           + f"; nothing was clicked. Close that first, or click the point if you mean it: maxpm "
+                             f"browser click {round(x)} {round(y)}", "covered", cover)
     return pos
 
 
 def cover_of(b, x, y):
-    """#5668: the element on top at a point, as a line with its ref, and the buttons in its dialog (to close it)."""
+    """#5668: the element on top at a point, as a line with its ref, then the buttons in its dialog (to close it)."""
     r = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps({"cover": [x, y]})))
     if r is NO_WORLD or not isinstance(r, dict) or not r.get("line"):
-        return "another element"
+        return ["another element"]
     b.refs = max(b.refs, r.get("next") or 0)
-    return r["line"] + ("; in it: " + ", ".join(r["buttons"]) if r.get("buttons") else "")
+    return [r["line"]] + list(r.get("buttons") or [])
 
 
 # ---- what a session does (maxpm browser ...)
@@ -3874,7 +3923,8 @@ def screenshot(b, full=False, cursor=False):
 
 def switch_tab(b, target):
     if target not in b.targets:
-        raise RiverError(f"no tab {target} in the browser of {b.project}: maxpm browser status lists them")
+        raise BrowserError(f"no tab {target} in the browser of {b.project}: maxpm browser status lists them",
+                           "not_found")
     with b.lock:
         b._attach(target)
     _notify(b)
