@@ -394,6 +394,16 @@ class ContinueTree(Base):
         b = core.go(self.c, self.dir.name, "w1", focus=focus)
         self.assertEqual((b["role"], b.get("tree_done")), ("idle", True))
 
+    def test_a_session_the_page_started_takes_its_own_queue_after_its_first_item(self):
+        # #5662: _go skips its own queue step while MAXPM_FOCUS is set, but next_item puts the session's queue first
+        # (any project, outside the tree), so the queued item still comes after the focused one.
+        x = core.item_add(self.c, "p", "X queued for w1", priority=4)["id"]
+        core.queue_add(self.c, "w1", x, actor="mark")
+        focus = f"item:{self.a}"
+        self.assertEqual(core.go(self.c, self.dir.name, "w1", focus=focus)["item"]["id"], self.a)  # the focus first
+        core.done(self.c, self.a, "did A", "w1")
+        self.assertEqual(core.go(self.c, self.dir.name, "w1", focus=focus)["item"]["id"], x)
+
 
 class Go(Base):
     def setUp(self):
