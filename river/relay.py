@@ -66,6 +66,7 @@ PART = 1024 * 1024  # bytes of a body in one frame (the relay takes frames of 2 
 # The largest page request river takes: the page sends at most 5 files of 10 MB with one message (server.py
 # UPLOAD_MAX, UPLOADS_PER_SEND), as base64 in JSON.
 MAX_REQUEST = 72 * 1024 * 1024
+RELAY_CALLS = 32  # requests of the relay that serve answers at the same time
 INCOMPLETE_LIMIT = 120  # seconds: a request whose parts stop coming is forgotten
 # gzip (#4895): when the welcome's limits say gzip, river gzips a text answer that maxpm serve sent plain, for a
 # browser that accepts gzip. The page's first state is about 2 MB of JSON, and the river-relay socket is the slow
@@ -505,7 +506,9 @@ class Link:
     def __init__(self, stop: threading.Event, sleep=None):
         self.stop = stop
         self.wait = sleep or stop.wait
-        self.pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="maxpm-relay-call")
+        # #5651: a Browser pane keeps up to four frame polls open, each up to 8 s; with 8 threads two panes held them
+        # all, and a click or a key of the person waited for a poll to end. A thread that waits costs little.
+        self.pool = ThreadPoolExecutor(max_workers=RELAY_CALLS, thread_name_prefix="maxpm-relay-call")
         self.refused_token = None  # a token the relay refused: wait for a new maxpm connect
         self.part = PART  # bytes of a body in one frame: the relay's welcome may ask for less
         self.app_ping = None  # seconds between text pings, when the relay's welcome asks for them (#4860)

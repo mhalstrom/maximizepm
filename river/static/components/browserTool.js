@@ -1,7 +1,8 @@
 // The browser of a project in the side panel (#4631, design #4641): a tool tab of the panel (openTool). maxpm serve
 // runs a headless Google Chrome for each session of a project (river/browser.py, #5636); this tab shows the page of
 // the Chrome of the panel's session as frames (long polls of GET api/browser/frame, binary: #5637), and sends the
-// person's clicks, wheel, keys and pasted text (op browser_input, with the page's token). Back, Forward, Reload, an address field, the tabs of the browser, and who controls it: nobody, the
+// person's clicks, wheel, keys and pasted text (op browser_input, with the page's token; numbered batches that go at
+// once, #5651). Back, Forward, Reload, an address field, the tabs of the browser, and who controls it: nobody, the
 // person (Take control, Give back), or a session (maxpm browser control) and the subagent it names. While a session
 // controls it, the person's input waits until Take control. "Open as a window" shows the same browser as a normal
 // window, for a site that refuses a headless browser (a sign-in); "Back to the panel" ends that.
@@ -94,19 +95,35 @@ function render(box, project, session) {
   const v = { seq: 0, w: 0, h: 0, mine: true, running: false, window: false };
   const pane = Math.random().toString(36).slice(2, 12);  // this panel, for the size rule (#5625)
   const ptr = $$(".br-ptr"), ring = $$(".br-ring"), typed = $$(".br-typed");
-  // One request at a time; what the person types or clicks while it runs goes in the next one, in order (#5479: one
-  // request for each key took about 0.7 s a key when serve was busy).
-  let pending = [], busy = false, token = null;
-  const send = (ev) => { if (!v.mine) return toast("A session controls the browser: press Take control first", true);
-    pending.push(ev); if (!busy) flush(); };
-  async function flush() {
-    busy = true;
-    while (pending.length) {
-      const evs = pending; pending = [];
-      try { await typeAction("browser_input", { project, session, pane, evs }); } catch (e) { toast(e.message, true); }
+  // #5651: each batch of input goes at once, with its number (serve sends them to Chrome in that order), and does not
+  // wait for the answer of the one before: over a phone's link that wait put the person's clicks and keys in a queue.
+  // At most four are on the way; the input after them waits for an answer and goes as one batch (#5479).
+  // What waits never forms a queue of moves or wheel steps: a move replaces the move before it, a wheel step adds to
+  // the one before it, and a step the other way replaces it, so the page turns at once (mark: a scroll up went on
+  // down first). Serve joins the steps that wait there in the same way (browser.Inputs).
+  let pending = [], flying = 0, nth = 0, token = null;
+  const isWheel = (e) => e && e.action === "wheel", isMove = (e) => e && e.action === "move";
+  const opposite = (a, b) => a * b < 0;  // two deltas of other directions
+  const send = (ev) => {
+    if (!v.mine) return isMove(ev) || isWheel(ev) ? null : toast("A session controls the browser: press Take control first", true);
+    const last = pending[pending.length - 1];
+    if (isMove(ev) && isMove(last)) pending[pending.length - 1] = ev;
+    else if (isWheel(ev) && isWheel(last))
+      pending[pending.length - 1] = opposite(ev.dy, last.dy) || opposite(ev.dx, last.dx) ? ev : { ...ev, dx: last.dx + ev.dx, dy: last.dy + ev.dy };
+    else pending.push(ev);
+    flush();
+  };
+  function flush() {
+    while (pending.length && flying < 4) {
+      const evs = pending; pending = []; flying++;
+      typeAction("browser_input", { project, session, pane, n: ++nth, evs })
+        .then(r => { if (r && r.error) toast(r.error, true); }, e => toast(e.message, true))
+        .finally(() => { flying--; flush(); });
     }
-    busy = false;
   }
+  // The side panel shows each tab in the same box: this pane ends when its own elements leave it (#5651: the frame
+  // polls of each earlier showing went on, and over the relay they held every thread that answers the phone).
+  const root = $$(".br"), alive = () => root.isConnected;
 
   // Who controls it: the line, the buttons, and whether the person's input goes through. Drawn again only when the
   // status changed (#5637): most poll answers bring a frame and the same status.
@@ -247,7 +264,7 @@ function render(box, project, session) {
   // most four; serve gives each one the next change, so at most that many frames are on the way, never a backlog.
   let slots = 1, trips = [];
   async function poll(i) {
-    while (box.isConnected) {
+    while (alive()) {
       if (document.hidden || i >= slots) { await sleep(i ? 250 : 1000); continue; }
       try {
         token = token || await pageToken();
@@ -256,7 +273,7 @@ function render(box, project, session) {
         if (r.status === 403) { token = await pageToken(true); continue; }
         if (!r.ok) { await sleep(2000); continue; }
         const buf = await r.arrayBuffer();
-        if (!box.isConnected) break;
+        if (!alive()) break;
         const n = new DataView(buf).getUint32(0), j = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
         trips = trips.concat(performance.now() - t - (j.waited || 0)).slice(-20);
         slots = Math.max(1, Math.min(4, Math.ceil(Math.min(...trips) / 30)));
@@ -282,23 +299,33 @@ function render(box, project, session) {
   // The point in the page's CSS pixels.
   const at = (e) => { const r = img.getBoundingClientRect();
     return { x: (e.clientX - r.left) * (v.w || r.width) / r.width, y: (e.clientY - r.top) * (v.h || r.height) / r.height }; };
-  // A drag's moves and the wheel go once for each frame of the screen (#5637); a move that waits goes before the up.
-  let down = false, move = null, moving = 0, wheel = null;
+  // The moves and the wheel go once for each frame of the screen (#5637); a move that waits goes before a press.
+  // #5651: every move goes, also with no button held, so the page shows its hover (a menu, a tooltip); down: the
+  // button held, which a drag's moves carry, so the page sees a drag (a selection, a slider).
+  let down = "", move = null, moving = 0, wheel = null;
+  const btn = (e) => ["left", "middle", "right"][e.button] || "left";
   const sendMove = () => { cancelAnimationFrame(moving); moving = 0; if (move) { const m = move; move = null; send(m); } };
   img.addEventListener("pointerdown", (e) => {
     e.preventDefault(); keys.focus({ preventScroll: true });
     if (!v.mine) return toast("A session controls the browser: press Take control first", true);
-    down = true; img.setPointerCapture(e.pointerId);
-    send({ type: "mouse", action: "down", ...at(e), button: ["left", "middle", "right"][e.button] || "left", clicks: e.detail || 1, mods: mods(e) });
+    sendMove();
+    down = btn(e); img.setPointerCapture(e.pointerId);
+    send({ type: "mouse", action: "down", ...at(e), button: down, clicks: e.detail || 1, mods: mods(e) });
   });
   img.addEventListener("pointerup", (e) => {
-    if (!down) return; down = false;
+    if (!down) return; down = "";
     sendMove();
-    send({ type: "mouse", action: "up", ...at(e), button: ["left", "middle", "right"][e.button] || "left", clicks: e.detail || 1, mods: mods(e) });
+    send({ type: "mouse", action: "up", ...at(e), button: btn(e), clicks: e.detail || 1, mods: mods(e) });
   });
   img.addEventListener("pointermove", (e) => {
-    if (!down || !v.mine) return;
-    move = { type: "mouse", action: "move", ...at(e), mods: mods(e) };
+    if (!v.mine || e.pointerType === "touch" && !down) return;
+    move = { type: "mouse", action: "move", ...at(e), ...(down ? { button: down } : {}), mods: mods(e) };
+    if (!moving) moving = requestAnimationFrame(sendMove);
+  });
+  // The pointer left the frame: a move outside the page ends its hover.
+  img.addEventListener("pointerleave", () => {
+    if (down || !v.mine) return;
+    move = { type: "mouse", action: "move", x: -1, y: -1 };
     if (!moving) moving = requestAnimationFrame(sendMove);
   });
   img.addEventListener("contextmenu", (e) => e.preventDefault());

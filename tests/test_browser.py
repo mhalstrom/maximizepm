@@ -863,17 +863,101 @@ class Routes(Base):
         with self.assertRaisesRegex(RiverError, "not running"):
             server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "text", "text": "x"}}, None)
 
-    def test_the_input_of_one_request_goes_in_order(self):
-        # #5479: the keys typed while a request runs come in the next one, as a list.
-        b = browser.get("web")
+    def _sent(self, b, slow=0.0):
+        """b.page records each call to Chrome (a key: its keyDown and its char/keyUp; slow: seconds each call takes)."""
         got = []
-        with mock.patch.object(b, "running", lambda: True), \
-                mock.patch.object(browser, "person_input", lambda b, ev: got.append(ev) or {"ok": len(got)}):
+
+        def page(method, params, timeout=None):
+            time.sleep(slow)
+            got.append((method, params))
+        return got, [mock.patch.object(b, "running", lambda: True), mock.patch.object(b, "page", page)]
+
+    @staticmethod
+    def _keys(got):
+        return [p.get("text") for m, p in got if m == "Input.insertText" or p.get("type") in ("keyDown", "char")
+                if p.get("text")]
+
+    def test_the_input_of_one_request_goes_in_order(self):
+        # #5479: the keys typed while a request runs come in the next one, as a list. #5651: the request answers at
+        # once, and serve sends the calls to Chrome after it, in order.
+        b = browser.get("web")
+        got, patches = self._sent(b)
+        with patches[0], patches[1]:
             out = server.OPS["browser_input"](self.c, {"project": "web", "evs": [
                 {"type": "key", "key": "h"}, {"type": "key", "key": "i"}, {"type": "key", "key": "Enter"}]}, None)
             server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "text", "text": "x"}}, None)
-        self.assertEqual([e.get("key") or e.get("text") for e in got], ["h", "i", "Enter", "x"])
-        self.assertEqual(out, {"ok": 3})
+            self.assertTrue(b.inputs.settle())
+            with self.assertRaisesRegex(RiverError, "unknown input"):  # a bad input is refused in the request itself
+                server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "dance"}}, None)
+        self.assertEqual(self._keys(got), ["h", "i", "\r", "x"])
+        self.assertEqual(out, {"ok": True, "error": None})
+
+    def test_numbered_batches_go_in_the_panes_order(self):
+        # #5651: the pane sends each batch at once; a later one can come first (another thread of serve, the relay's
+        # pool). It waits for the ones before it, and a batch that never comes is passed after INPUT_GAP.
+        b = browser.get("web")
+        got, patches = self._sent(b)
+        inp = lambda n, k, pane="p1": server.OPS["browser_input"](
+            self.c, {"project": "web", "pane": pane, "n": n, "ev": {"type": "text", "text": k}}, None)
+        with patches[0], patches[1]:
+            inp(2, "b")
+            inp(3, "c")
+            inp(1, "a", "p2")  # another pane counts on its own
+            time.sleep(0.05)
+            self.assertEqual(self._keys(got), ["a"])
+            inp(1, "a")
+            self.assertTrue(b.inputs.settle())
+            self.assertEqual(self._keys(got), ["a", "a", "b", "c"])
+            inp(3, "old")  # a number that went already: a request that came twice
+            inp(5, "e")    # 4 is lost
+            t = time.monotonic()
+            self.assertTrue(b.inputs.settle())
+            self.assertGreaterEqual(time.monotonic() - t, browser.INPUT_GAP * 0.8)
+            inp(6, "f")
+            self.assertTrue(b.inputs.settle())
+        self.assertEqual(self._keys(got), ["a", "a", "b", "c", "e", "f"])
+
+    def test_moves_and_wheel_steps_that_wait_join(self):
+        # #5651: while Chrome is slow, of the moves that wait only the newest goes, and wheel steps add up; a press
+        # never joins, so the order of a drag holds.
+        b = browser.get("web")
+        got, patches = self._sent(b, slow=0.1)
+        mv = lambda x: {"type": "mouse", "action": "move", "x": x, "y": 5, "button": "left"}
+        wh = lambda dy: {"type": "mouse", "action": "wheel", "x": 1, "y": 1, "dx": 0, "dy": dy}
+        with patches[0], patches[1]:
+            server.OPS["browser_input"](self.c, {"project": "web", "evs": [
+                {"type": "mouse", "action": "down", "x": 1, "y": 5}, mv(2), mv(3), mv(4),
+                {"type": "mouse", "action": "up", "x": 4, "y": 5}, wh(40), wh(40), wh(-10), wh(-20)]}, None)
+            self.assertTrue(b.inputs.settle())
+        # The steps down add up (80); the step up replaces them (mark: the page went on down before it turned); the
+        # next step up adds to it.
+        kinds = [(p["type"], p.get("x"), p.get("deltaY")) for m, p in got]
+        self.assertEqual(kinds, [("mousePressed", 1, None), ("mouseMoved", 4, None), ("mouseReleased", 4, None),
+                                 ("mouseWheel", 1, -30)])
+        self.assertEqual((got[1][1]["button"], got[1][1]["buttons"]), ("left", 1))  # a drag: the button is held
+
+    def test_the_first_click_takes_a_browser_that_nobody_controls(self):
+        # #5651 (mark: the browser was 'controlled by nobody' while he used it): a hover takes nothing; the first
+        # click, wheel step or key of the person takes control, with no Take control first.
+        b = browser.get("web")
+        got, patches = self._sent(b)
+        with patches[0], patches[1]:
+            server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "mouse", "action": "move", "x": 1, "y": 1}}, None)
+            self.assertIsNone(b.state.get("controller"))
+            server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "mouse", "action": "down", "x": 1, "y": 1}}, None)
+            self.assertTrue(b.inputs.settle())
+        self.assertEqual(b.state["controller"]["kind"], "person")
+
+    def test_a_refusal_of_chrome_comes_in_the_next_answer(self):
+        b = browser.get("web")
+
+        def page(method, params, timeout=None):
+            raise RiverError("the browser refused Input.insertText: no")
+        with mock.patch.object(b, "running", lambda: True), mock.patch.object(b, "page", page):
+            server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "text", "text": "x"}}, None)
+            self.assertTrue(b.inputs.settle())
+            out = server.OPS["browser_input"](self.c, {"project": "web", "ev": {"type": "text", "text": "y"}}, None)
+        self.assertIn("refused", out["error"])
 
     def test_a_session_open_asks_the_page_to_show_it(self):
         routes._ask_open("web", "ag1", "ag1")
@@ -1164,6 +1248,21 @@ class RealChrome(Base):
         self.assertIn(got, ("ERR", "got 403"))  # the proxy's refusal, or Chrome's own
         self.assertNotIn("/sneak", hits)
         browser.person_input(b, {"type": "key", "key": "Tab"})
+        # #5651: a Chrome that starts at density 2 put a hover (a move with no button held) at half its point, until
+        # the density was set again after a page loaded; serve sets it again after the first load.
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port},localhost:{port}", project="web")
+        b.close()
+        b.resize(500, 400, 2, [390, 844])
+        for url in (f"http://127.0.0.1:{port}/page", f"http://127.0.0.1:{port}/again",
+                    f"http://localhost:{port}/other-site"):
+            b.open(url)
+            b.evaluate("addEventListener('mousemove', (e) => { window.__at = [e.clientX, e.clientY]; }); 1")
+            for i in range(50):
+                browser.person_input(b, {"type": "mouse", "action": "move", "x": 120 + i % 2, "y": 90})
+                if b.evaluate("window.__at") == [120 + i % 2, 90]:
+                    break
+                time.sleep(0.1)  # the density is set again just after the first load
+            self.assertEqual(b.evaluate("window.__at"), [120 + i % 2, 90], url)
 
 
 class AttachedChrome(Base):

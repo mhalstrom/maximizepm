@@ -258,12 +258,20 @@ def person_input(conn, a, who):
     if b is None or not b.running():
         raise RiverError("the browser is not running: open a page first")
     browser.may_change(conn, b, who, True)
+    evs = [ev or {} for ev in a.get("evs") or [a.get("ev") or {}]]  # what came while the batches before were on their way (#5479)
+    calls = []
+    for ev in evs:
+        calls += browser.input_calls(ev)
+    # #5651: nobody controls the browser, and the person clicks, scrolls or types in it: they control it from now on
+    # (a session's maxpm browser waits then), with no Take control first. A hover alone takes nothing.
+    if not b.state.get("controller") and any(ev.get("action") != "move" for ev in evs):
+        browser.take(conn, b, who)
     b.person_at = time.time()
     b.drive(a.get("pane"))
-    out = None
-    for ev in a.get("evs") or [a.get("ev") or {}]:  # the page sends what came during its last request at once (#5479)
-        out = browser.person_input(b, ev or {})
-    return out
+    # #5651: the request answers at once; serve sends the calls to Chrome in the pane's order (browser.Inputs).
+    n = a.get("n")
+    b.inputs.put(a.get("pane"), int(n) if isinstance(n, (int, float)) and n >= 1 else None, calls)
+    return {"ok": True, "error": b.inputs.refusal()}
 
 
 HAND_TEXT = "The browser is at {title} ({url}). Take it from here."

@@ -528,6 +528,7 @@ class Browser:
         self.sent = {}       # pane id -> the seq that its last answered poll had (#5637: several polls at once)
         self.sharp_thread = None
         self.seen = []       # the bytes (a hash) of the last screencast frames, for the sharp frames
+        self.look = None     # the hash of the screencast frame that shows now, or that the sharp frame shows (#5651)
         self.panes = {}      # the open panels: pane id -> {size, dsf, screen, at}
         self.driver = None   # the panel where a person last clicked, typed or took control: it sets the size
         self.pane_lock = threading.Lock()
@@ -542,6 +543,8 @@ class Browser:
         self.watched = 0.0   # when the panel last asked for a frame: someone watches (browser_pace watch)
         self.watching = 0    # frame polls that wait now
         self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
+        self.inputs = Inputs(self)  # the person's input, to Chrome in order without a wait in the request (#5651)
+        self.refit_ws = None  # the CDP connection of the Chrome whose density was set again after a load (#5651)
         self.visits = {}     # url -> {url, title, n, at}: the pages its tabs showed, for the address bar (#5635)
         self.history = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's History in memory
         self.icons = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's Favicons (#5632)
@@ -765,6 +768,13 @@ class Browser:
                   "mobile": False, "screenWidth": sw, "screenHeight": sh}, session=self.session)
         self._want_sharp(now=True)  # a page that does not paint again after the change sends no frame of its new size
 
+    def _refit(self):
+        try:
+            with self.lock:
+                self._fit()
+        except (RiverError, OSError):
+            self.refit_ws = None  # the next load tries again
+
     def _want_sharp(self, now=False):
         self.sharp_due = time.time() + (0 if now else SHARP_QUIET)
         if self.sharp_thread is None:
@@ -900,16 +910,28 @@ class Browser:
                     # Someone watches at a density above 1: a screenshot gives the sharp frame once the page holds
                     # still. The screenshot paints the page again, which sends frames that it saw already: those
                     # ask for none, and the sharp frame stays. A new frame shows at once (#5637).
+                    # #5651: the look that shows now (the sharp frame's) comes again: the screenshot's echo. Another
+                    # look seen before shows only after the person's input (a hover on, off, and on again); with no
+                    # input it is a caret that blinks.
                     h = hashlib.sha1(p["data"].encode()).digest()
-                    if h in self.seen and self.frame and self.frame.get("sharp"):
+                    sharp = self.frame and self.frame.get("sharp")
+                    if sharp and (h == self.look or (h in self.seen and time.time() - self.person_at > INPUT_SHOWS)):
                         return
+                    self.look = h
                     if h not in self.seen:
                         self.seen = (self.seen + [h])[-SHARP_SEEN:]
-                        self._want_sharp()
+                    self._want_sharp()
                 with self.cond:
                     self.seq += 1
                     self.frame = {"seq": self.seq, "data": p["data"], "w": m.get("deviceWidth"), "h": m.get("deviceHeight")}
                     self.cond.notify_all()
+        elif method == "Page.loadEventFired" and session == self.session and self.refit_ws is not self.ws:
+            # #5651: a Chrome that took the panel's density before its first page load put each hover (a move with
+            # no button held) at x / density: at density 2 a move to (300, 300) reached the page at (150, 150), so
+            # no hover showed under the person's pointer. The same density set again after a load ends it for this
+            # Chrome, also for other sites and new tabs (set twice at once, or a second later, it does not).
+            self.refit_ws = self.ws
+            threading.Thread(target=self._refit, daemon=True, name=f"browser-refit-{self.project}").start()
         elif method in ("Target.targetCreated", "Target.targetInfoChanged"):
             t = p["targetInfo"]
             if t["type"] != "page":
@@ -2035,8 +2057,12 @@ def frame_bytes(out):
     return struct.pack(">I", len(head)) + head + jpeg
 
 
-def person_input(b, ev):
-    """The person's mouse, wheel and keys from the panel, in the page's CSS pixels."""
+BUTTONS = {"left": 1, "right": 2, "middle": 4}  # CDP's buttons: the bit of each button that is held
+
+
+def input_calls(ev):
+    """The CDP calls of one input of the person (mouse, wheel, a key, a pasted text), in the page's CSS pixels:
+    [(method, params)]. RiverError for an input it does not know."""
     kind = ev.get("type")
     if kind == "mouse":
         action = ev.get("action")
@@ -2046,17 +2072,136 @@ def person_input(b, ev):
         p = {"type": t, "x": float(ev.get("x", 0)), "y": float(ev.get("y", 0)), "modifiers": modifiers(ev.get("mods"))}
         if t in ("mousePressed", "mouseReleased"):
             p.update(button=ev.get("button") or "left", clickCount=int(ev.get("clicks") or 1))
+        if t == "mouseMoved" and ev.get("button") in BUTTONS:  # a drag: the page sees the button held
+            p.update(button=ev["button"], buttons=BUTTONS[ev["button"]])
         if t == "mouseWheel":
             p.update(deltaX=float(ev.get("dx", 0)), deltaY=float(ev.get("dy", 0)))
-        b.page("Input.dispatchMouseEvent", p)
-    elif kind == "key":
-        for p in key_events(ev.get("key") or "", ev.get("mods")):
-            b.page("Input.dispatchKeyEvent", p)
-    elif kind == "text":
-        b.page("Input.insertText", {"text": str(ev.get("text") or "")})
-    else:
-        raise RiverError(f"unknown input {kind!r}")
+        return [("Input.dispatchMouseEvent", p)]
+    if kind == "key":
+        return [("Input.dispatchKeyEvent", p) for p in key_events(ev.get("key") or "", ev.get("mods"))]
+    if kind == "text":
+        return [("Input.insertText", {"text": str(ev.get("text") or "")})]
+    raise RiverError(f"unknown input {kind!r}")
+
+
+def person_input(b, ev):
+    """One input of the person, sent to the page now; the call returns after Chrome took it."""
+    for method, params in input_calls(ev):
+        b.page(method, params)
     return {"ok": True}
+
+
+INPUT_GAP = 0.3     # seconds that a pane's batch waits for the batches before it (they took another path) at most
+INPUT_SHOWS = 1.5   # seconds after the person's input in which a frame of a look seen before still shows
+INPUT_IDLE = 30.0   # seconds with no input after which the thread that sends it to Chrome ends
+
+
+class Inputs:
+    """The person's input of one browser, sent to Chrome in the order the person made it (#5651). The panel sends each
+    batch at once, with its number (n, counted by the pane), and does not wait for the answer of the one before: a
+    queue of requests behind the slow answers of a phone's link was the lag. Requests can come out of order (each
+    has a thread of serve, and the relay serves several at once), so a batch waits until the batches before it came,
+    at most INPUT_GAP. The request answers at once; one thread sends the calls to Chrome and waits for each answer,
+    so Chrome takes them in order. When Chrome is slower than the input, the calls that wait join: of several
+    moves in a row only the newest goes, and wheel steps in a row add up. A press, a release or a key never joins."""
+
+    def __init__(self, b):
+        self.b = b
+        self.cond = threading.Condition()
+        self.calls = []      # (method, params) to send, in order
+        self.next = {}       # pane -> the number of its next batch
+        self.held = {}       # pane -> {n: (calls, when it came)}: batches that came before the ones before them
+        self.thread = None
+        self.busy = False    # a call is with Chrome now
+        self.error = None    # the last refusal of Chrome: the next answer to the panel says it
+
+    def put(self, pane, n, calls):
+        """Take a batch of the pane (n: its number; None: no number, it goes in the order it came)."""
+        with self.cond:
+            if n is None:
+                self.calls.extend(calls)
+            else:
+                pane = str(pane or "")[:40]
+                if len(self.next) > 50:
+                    self.next.clear()
+                # A pane counts from 1; a high first number is a pane that a serve before this one knew.
+                want = self.next.setdefault(pane, 1 if n <= 8 else n)
+                if n < want:
+                    return  # an old number: a pane that started again counts from 1 (#5651)
+                self.held.setdefault(pane, {})[n] = (calls, time.monotonic())
+                self._release(pane)
+            if self.thread is None:
+                self.thread = threading.Thread(target=self._run, daemon=True, name=f"maxpm-input-{self.b.project}")
+                self.thread.start()
+            self.cond.notify_all()
+
+    def _release(self, pane, late=False):
+        """Inside cond: move the pane's batches that are next in turn to the calls; late: also go past a missing
+        batch that did not come in INPUT_GAP."""
+        held = self.held.get(pane)
+        while held:
+            want = self.next[pane]
+            if want not in held:
+                first = min(held)
+                if not (late and time.monotonic() - held[first][1] >= INPUT_GAP):
+                    return
+                want = first  # the batch before it is lost (a request that failed): go on without it
+            self.calls.extend(held.pop(want)[0])
+            self.next[pane] = want + 1
+        self.held.pop(pane, None)
+
+    def _take(self):
+        """Inside cond: the next call, joined with the moves and wheel steps after it."""
+        method, params = self.calls.pop(0)
+        if method == "Input.dispatchMouseEvent" and params["type"] in ("mouseMoved", "mouseWheel"):
+            while self.calls and self.calls[0][0] == method and self.calls[0][1]["type"] == params["type"] \
+                    and self.calls[0][1]["modifiers"] == params["modifiers"]:
+                nxt = self.calls.pop(0)[1]
+                # Wheel steps the same way add up; a step the other way replaces them: the page turns at once.
+                if params["type"] == "mouseWheel" and not (params["deltaY"] * nxt["deltaY"] < 0
+                                                           or params["deltaX"] * nxt["deltaX"] < 0):
+                    nxt = {**nxt, "deltaX": params["deltaX"] + nxt["deltaX"], "deltaY": params["deltaY"] + nxt["deltaY"]}
+                params = nxt
+        return method, params
+
+    def _run(self):
+        idle = time.monotonic()
+        while True:
+            with self.cond:
+                self.busy = False
+                self.cond.notify_all()
+                while not self.calls:
+                    for pane in list(self.held):
+                        self._release(pane, late=True)
+                    if self.calls:
+                        break
+                    if not self.held and time.monotonic() - idle > INPUT_IDLE:
+                        self.thread = None
+                        return
+                    self.cond.wait(INPUT_GAP / 3 if self.held else 1.0)
+                method, params = self._take()
+                self.busy = True
+            try:
+                if self.b.running():  # a browser that closed meanwhile: page() would start it again
+                    self.b.page(method, params)
+            except RiverError as e:
+                self.error = str(e)
+            except Exception as e:  # the thread must not end with calls in the queue
+                self.error = f"the browser did not take the input: {e}"
+            idle = time.monotonic()
+
+    def settle(self, timeout=5.0):
+        """Wait until every call that came went to Chrome (tests, and the speed script)."""
+        end = time.monotonic() + timeout
+        with self.cond:
+            while (self.calls or self.held or self.busy) and time.monotonic() < end:
+                self.cond.wait(0.05)
+            return not (self.calls or self.held or self.busy)
+
+    def refusal(self):
+        """The last refusal of Chrome since the last answer, once."""
+        e, self.error = self.error, None
+        return e
 
 
 # ---- what the panel draws over the page (#5616): the driving session's pointer and the keys it types

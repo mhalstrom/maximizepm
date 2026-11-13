@@ -3922,6 +3922,12 @@ TYPING_OPS = ("terminal_keys", "session_send", "session_interrupt", "pending_sen
               "browser_input",  # the person's mouse and keys in a project's browser (#4631)
               "browser_hand",  # Hand to <session>: it types a line into that session's chat (#5616)
               "browser_annotate")  # Send of Annotate: the marked-up page goes into the session's chat (#5655)
+# Ops that come many times a second (#5651: the Browser pane's moves, up to one each screen frame) and change no row
+# of the queue: they renew the person (core.activity) at most once in LIGHT_GAP seconds, and leave the page's state
+# as it is (state_changed): each move would have made the next GET /api/state build the whole state again.
+LIGHT_OPS = ("browser_input",)
+LIGHT_GAP = 10.0
+_light_at = {}  # actor -> when a typing op last ran core.activity for them
 
 
 REPO = PKG.parent
@@ -5145,7 +5151,10 @@ class Handler(BaseHTTPRequestHandler):
                     result = op(conn, body.get("args", {}), actor)
                 finally:
                     hooks_soon(conn, core.hook_token())  # a release event of this action: its hook runs after the answer
+                if body.get("op") in LIGHT_OPS and time.time() - _light_at.get(actor, 0) < LIGHT_GAP:
+                    return self._send(200, {"ok": True, "result": result})
                 if typing:
+                    _light_at[actor] = time.time()
                     return self._answer_first(conn, actor, result)
                 core.sync_needs_you_now(conn)
                 return self._send(200, {"ok": True, "result": result})
@@ -5153,7 +5162,8 @@ class Handler(BaseHTTPRequestHandler):
                 share.__exit__(None, None, None)
                 core.EVENT_VIA.reset(via)
                 conn.close()
-                state_changed()
+                if body.get("op") not in LIGHT_OPS:
+                    state_changed()
         except RiverError as e:
             return self._send(409, {"error": str(e)})
         except (KeyError, ValueError, TypeError) as e:
