@@ -215,20 +215,72 @@ if __name__ == "__main__":
 ''' % {"states": repr({k: v for k, v in HOOK_EVENTS.items() if v})}
 
 
+# The plugin's extension (#5703): the session's listener for MaximizePM's messages, as MaximizePM's hook is for Claude
+# Code. It owns the wake folder of its session id (the same hash as core.wake_dir), touches 'alive' every second, and
+# gives each '.msg' file that a sender writes there to Copilot with session.send, which Copilot's SDK documents ('Use
+# session.send() to programmatically inject a new user message'); at an idle prompt it starts a turn (seen with Copilot
+# 1.0.109). Copilot loads extensions only in its experimental mode, and --experimental saves that mode in the person's
+# settings.json (seen 2026-11-13), so MaximizePM never passes it: with experimental mode on (the person's own choice,
+# /settings experimental on) messages come at once; without it the extension does not load, the delivery fails, and
+# the inbox brings the message. __WAKE__ is the folder of the listeners beside the queue.
+EXTENSION = """\
+// MaximizePM: brings MaximizePM's messages into this Copilot session (written by river/agents/copilot.py; do not edit).
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, readdirSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { joinSession } from "@github/copilot-sdk/extension";
+
+const WAKE = __WAKE__;
+
+if (process.env.MAXPM_AGENT) { // a session that MaximizePM did not start: no listener
+  const session = await joinSession({});
+  const id = session.sessionId;
+  const dir = join(WAKE, createHash("sha1").update(id).digest("hex").slice(0, 16));
+  const me = `${process.pid}-${Date.now()}`;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "owner"), me);
+  let beat = 0;
+  const timer = setInterval(() => {
+    // A failure here never stops Copilot: the messages then wait in MaximizePM's inbox.
+    try {
+      if (readFileSync(join(dir, "owner"), "utf8") !== me) return clearInterval(timer);
+      if (Date.now() - beat >= 1000) {
+        const t = new Date();
+        try { utimesSync(join(dir, "alive"), t, t); } catch { writeFileSync(join(dir, "alive"), ""); }
+        beat = Date.now();
+      }
+      const texts = [];
+      for (const f of readdirSync(dir).filter((n) => n.endsWith(".msg")).sort()) {
+        try {
+          texts.push(readFileSync(join(dir, f), "utf8"));
+          unlinkSync(join(dir, f));
+        } catch {}
+      }
+      if (texts.length) Promise.resolve(session.send({ prompt: texts.join("\\n") })).catch(() => {});
+    } catch {}
+  }, 200);
+}
+"""
+
+
 def plugin_files(report, folder, python=None):
     """{file name: text} of the hook plugin in `folder`. report: the argv words of `maxpm` (the program and any flags
     before the command), which the hook program runs with report or release after them. Each hook runs the program
-    with no shell (exec), so no quoting differs between macOS, Linux and Windows."""
+    with no shell (exec), so no quoting differs between macOS, Linux and Windows. The plugin also brings the listener
+    extension (EXTENSION, #5703)."""
     import sys
+    from ..core import river_dir
     exe = python or sys.executable
     hooks = {e: [{"type": "command", "exec": exe, "args": [str(Path(folder) / "maxpm_hook.py"), e, *report], "timeoutSec": 10}]
              for e in HOOK_EVENTS}
     return {
         "plugin.json": json.dumps({"name": "maxpm", "version": "1.0.0",
-                                   "description": "MaximizePM: reports the session's state with maxpm report"},
+                                   "description": "MaximizePM: reports the session's state with maxpm report",
+                                   "extensions": "extensions"},
                                   indent=2) + "\n",
         "hooks.json": json.dumps({"version": 1, "hooks": hooks}, indent=2) + "\n",
         "maxpm_hook.py": HOOK_SCRIPT,
+        "extensions/maxpm-wake/extension.mjs": EXTENSION.replace("__WAKE__", json.dumps(str(Path(river_dir()) / "wake"))),
     }
 
 
@@ -246,6 +298,7 @@ def install_hooks(folder, report):
         for fname, text in plugin_files(words, d).items():
             f = d / fname
             if not f.exists() or f.read_text(encoding="utf-8") != text:
+                f.parent.mkdir(parents=True, exist_ok=True)
                 f.write_text(text, encoding="utf-8")
     except OSError as e:
         raise RiverError(f"cannot write the Copilot hook plugin in {d}: {e}")
@@ -269,7 +322,9 @@ DETECT = {
 }
 
 # Stop on the Sessions tab (#5547): Ctrl+C ends the turn ('ctrl+c interrupt'); a second one at the prompt quits.
-INPUT = {"native": None, "interrupt": ["C-c"]}
+# Messages reach it through the plugin's listener extension, in Copilot's experimental mode (core.native_message
+# 'wake', #5703).
+INPUT = {"native": ["wake", "{address}", "{text}"], "interrupt": ["C-c"]}
 
 # ---------------------------------------------------------------------------------------------------------------
 # Chat log: ~/.copilot/session-state/<id>/events.jsonl

@@ -162,7 +162,13 @@ class Hooks(Env):
         words = a.install_hooks("/p", MAXPM + ["report"])
         d = Path(core.river_dir()) / copilot.PLUGIN_DIR
         self.assertEqual(words, ["--plugin-dir", str(d)])
-        self.assertEqual(json.loads((d / "plugin.json").read_text(encoding="utf-8"))["name"], "maxpm")
+        manifest = json.loads((d / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual((manifest["name"], manifest["extensions"]), ("maxpm", "extensions"))
+        # The listener extension (#5703): the wake folder beside the queue, session.send, only in a session of MaximizePM.
+        ext = (d / "extensions" / "maxpm-wake" / "extension.mjs").read_text(encoding="utf-8")
+        self.assertIn(f"const WAKE = {json.dumps(str(Path(core.river_dir()) / 'wake'))};", ext)
+        self.assertIn("session.send({ prompt:", ext)
+        self.assertIn("if (process.env.MAXPM_AGENT)", ext)
         hooks = json.loads((d / "hooks.json").read_text(encoding="utf-8"))
         self.assertEqual(hooks["version"], 1)
         self.assertEqual(sorted(hooks["hooks"]), sorted(copilot.HOOK_EVENTS))
