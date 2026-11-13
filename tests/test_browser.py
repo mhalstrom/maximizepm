@@ -2017,7 +2017,8 @@ class ActionChanges(Base):
 
 DOC = (b"<title>Doc</title><nav>Menu one</nav><main><h1>Doc</h1><p>Intro line</p><nav>Inner menu</nav>"
        b"<h2>Alpha</h2><p>alpha text</p><h3>Alpha sub</h3><p>sub text</p><h2>Beta</h2>"
-       + b"".join(b"<p>beta line %d</p>" % n for n in range(40)) + b"<aside>Side box</aside></main><footer>Foot</footer>")
+       + b"".join(b"<p>beta line %d</p>" % n for n in range(40)) + b"<aside>Side box</aside>"
+       b"<form>Search: <input name=q></form><p>3044 comments</p><a href=#c>3044 comments</a></main><footer>Foot</footer>")
 
 
 class PageText(Base):
@@ -2052,6 +2053,16 @@ class PageText(Base):
         out = act(action="open", url=f"http://127.0.0.1:{port}/", read=True, outline=False)
         t = out["text"]
         self.assertTrue(t.startswith("Doc\n\nIntro line"), t)
+        # #5719: back from the tab's first page stays; a field with no label is named by the text before it, and its
+        # name attribute finds it too; a name matches as a word inside a longer one.
+        with self.assertRaisesRegex(RiverError, "there is no page before this one in this tab; it stays on"):
+            act(action="back")
+        self.assertEqual(b.info()["url"], f"http://127.0.0.1:{port}/")
+        field = browser.resolve_target(b, "Search")
+        self.assertEqual((browser.resolve_target(b, "q"), browser.resolve_target(b, 'textbox "search"')), (field, field))
+        self.assertIn(f'{field} textbox "Search"', act(action="snapshot", interactive=True, find="search")["snapshot"]
+                      ["lines"])
+        self.assertEqual(act(action="html", scope="comments")["html"], '<a href="#c">3044 comments</a>')
         self.assertIn("beta line 39", t)
         for gone in ("Menu one", "Inner menu", "Side box", "Foot"):
             self.assertNotIn(gone, t)

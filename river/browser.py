@@ -2858,6 +2858,18 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     if (t === 'TEXTAREA' || e.isContentEditable) return 'textbox';
     return 'clickable';
   };
+  // #5719: the text just before a field with no label ("Search: <input>"), in its parent or the parent's parent
+  const before = e => {
+    for (let n = e, up = 0; n && n !== document.body && up < 2; n = n.parentElement, up++) {
+      for (let p = n.previousSibling, k = 0; p && k < 3; p = p.previousSibling, k++) {
+        const s = (p.nodeType === 3 ? p.textContent : p.nodeType === 1 && !p.matches(SEL) ? p.innerText : '') || '';
+        const w = s.replace(/\s+/g, ' ').trim().replace(/[:*]+$/, '').trim();
+        if (/[\p{L}\p{N}]{2,}/u.test(w)) return w.length > 40 ? w.slice(-40) : w;
+        if (p.nodeType === 1 && p.matches(SEL)) break;  // another control stands between
+      }
+    }
+    return '';
+  };
   const name = e => {
     let s = e.getAttribute('aria-label');
     if (s && s.trim()) return s;
@@ -2868,7 +2880,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const t = e.tagName, ty = (e.type || '').toLowerCase();
     if (t === 'INPUT' && ['submit', 'button', 'reset'].includes(ty)) return e.value || ty;
     if (t === 'INPUT' && ty === 'image') return e.alt || 'image';
-    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return e.placeholder || e.title || e.name || '';
+    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return e.placeholder || e.title || before(e) || e.name || '';
     s = text(e);
     if (!s || !s.trim()) {
       const i = e.querySelector('img[alt],[aria-label],[title],svg title');
@@ -2902,7 +2914,8 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     for (let t = w.nextNode(); t; t = w.nextNode()) {
       if (skip.contains(t)) continue;
       const s = t.textContent.replace(/\s+/g, ' ').trim();
-      if (/[\p{L}\p{N}]{2,}/u.test(s) && t.parentElement && t.parentElement.getClientRects().length) return cut(s, 40);
+      // two letters: a rank or a count ("10.") names no row (#5719)
+      if (/\p{L}{2,}/u.test(s) && t.parentElement && t.parentElement.getClientRects().length) return cut(s, 40);
     }
     return '';
   };
@@ -2967,6 +2980,12 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       if (g && g.idx.has(a)) out.push({g, row: g.idx.get(a)});
     }
     return out;
+  };
+  const rowText = e => {  // the first text of the nearest repeated row that has text besides e (cells of a row: the row)
+    for (const {g, row} of chain(e)) {
+      for (const k of [...g.idx].filter(([, r]) => r === row).map(([k]) => k)) { const s = firstText(k, e); if (s) return s; }
+    }
+    return '';
   };
   const inView = e => {
     const r = e.getBoundingClientRect();
@@ -3143,35 +3162,46 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
   if (o.target) {
     const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase(), t = o.target;
     const want = norm(t.name), pre = want.endsWith('…') ? want.slice(0, -1) : null, inn = t.within ? norm(t.within) : null;
-    const rowText = e => {  // the first text of the nearest repeated row that has text besides e (cells of a row: the row)
-      for (const {g, row} of chain(e)) {
-        for (const k of [...g.idx].filter(([, r]) => r === row).map(([k]) => k)) { const s = firstText(k, e); if (s) return s; }
-      }
-      return '';
-    };
+    // #5719: no element with the name itself: the names that hold it as whole words ("comments" in "3044 comments")
+    const wre = new RegExp('(^|[^\\p{L}\\p{N}])' + want.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^\\p{L}\\p{N}])', 'u');
+    // --in: the size of the nearest part around e (a repeated row with all its rows, a card, a region) whose text holds
+    // the words; 0: none. Of the matches, the ones in the smallest such part win (#5719: the outer table of Hacker News
+    // holds every title too).
     const inside = e => {
-      if (!inn) return true;
-      for (const {g, row} of chain(e))
-        if (norm([...g.idx].filter(([, r]) => r === row).map(([k]) => k.innerText).join(' ')).includes(inn)) return true;
-      for (let c = e.parentElement; c && c !== document.documentElement; c = c.parentElement) {
-        if (c.matches(CONT) && norm(firstText(c, e)).includes(inn)) return true;
-        if (c.matches(REGION) && (norm(regionName(c)).includes(inn) || norm(firstText(c, e)).includes(inn))) return true;
+      if (!inn) return 1;
+      chain(e);  // the groups of e's parents
+      for (let c = e; c && c !== document.documentElement; c = c.parentElement) {
+        const g = c.parentElement && groups.get(c.parentElement);
+        if (g && g.idx.has(c)) {
+          const r = g.idx.get(c), s = norm([...g.idx].filter(([, x]) => x === r).map(([k]) => k.innerText).join(' '));
+          if (s.includes(inn)) return s.length;
+        }
+        if (c !== e && (c.matches(CONT) || c.matches(REGION)) && (norm(firstText(c, e)).includes(inn)
+            || (c.matches(REGION) && norm(regionName(c)).includes(inn)))) return Math.max(1, norm(c.innerText).length);
       }
-      return false;
+      return 0;
     };
-    const hits = [], names = new Map();
+    const smallest = list => { const m = Math.min(...list.map(x => x[1])); return list.filter(x => x[1] === m).map(x => x[0]); };
+    let hits = [];
+    const names = new Map(), inWords = [];
+    const field = e => ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.tagName);
     const look = node => {
       const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
       for (let e = w.currentNode; e; e = w.nextNode()) {
         if (e.nodeType === 1 && e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden') && shown(e)) {
           const r = role(e), full = name(e), nm = norm(full);
-          if ((nm === want || (pre && nm.startsWith(pre))) && (!t.role || r === t.role)) { if (inside(e)) hits.push(e); }
-          else if (nm && names.size < 3000) names.set(r + ' ' + JSON.stringify(cut(full, 60)), nm);
+          const same = nm === want || (pre && nm.startsWith(pre)) || (field(e) && (norm(e.name) === want || norm(e.id) === want));
+          if (same && (!t.role || r === t.role)) { const z = inside(e); if (z) hits.push([e, z]); }
+          else {
+            if (want && (!t.role || r === t.role) && wre.test(nm)) { const z = inside(e); if (z) inWords.push([e, z]); }
+            if (nm && names.size < 3000) names.set(r + ' ' + JSON.stringify(cut(full, 60)), nm);
+          }
         }
         if (e.nodeType === 1 && e.shadowRoot) look(e.shadowRoot);
       }
     };
     look(document.documentElement);
+    hits = hits.length ? smallest(hits) : inWords.length ? smallest(inWords) : [];
     let n = start;
     const out = {next: n, hits: hits.slice(0, 12).map(e => {
       let ref = R.ref.get(e);
@@ -3259,7 +3289,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     let s = '@' + i.ref + ' ' + i.r + ' ' + JSON.stringify(i.nm) + i.x;
     const low = i.nm.toLowerCase();  // find: an element that matched by its row or column shows that row or column
     if (weak(i.nm) || seen.get(i.r + i.nm) > 1 || (words && !words.every(w => low.includes(w)))) {
-      const c = context(i.e, i.nm), col = column(i.e);
+      const c = context(i.e, i.nm) || rowText(i.e), col = column(i.e);  // #5719: a card in a repeated list too
       if (c) s += ' (in ' + JSON.stringify(c) + ')';
       if (col) s += ' (column ' + JSON.stringify(col) + ')';
       if (!c && !col && weak(i.nm)) s += hint(i.e);
@@ -3854,8 +3884,10 @@ def press(b, key, who=None, wait=None):
 def history(b, step, wait=None):
     h = b.page("Page.getNavigationHistory")
     i = h["currentIndex"] + step
-    if not 0 <= i < len(h["entries"]):
-        return {**b.info(), "navigated": False}
+    # #5719: the empty page that a new tab starts with is no page to go back to: the agent stays on its page
+    if not 0 <= i < len(h["entries"]) or h["entries"][i].get("url") in ("about:blank", ""):
+        raise BrowserError(f"there is no page {'before' if step < 0 else 'after'} this one in this tab; it stays on "
+                           f"{b.info().get('url') or 'its page'}", "not_found")
     mark = nav_mark(b)
     b.page("Page.navigateToHistoryEntry", {"entryId": h["entries"][i]["id"]})
     return done(b, wait, mark)
