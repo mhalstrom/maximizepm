@@ -60,9 +60,12 @@ REMOTE = {"show", "next", "list", "status", "who", "inbox", "needs-you", "blocke
           "push", "blocked", "unblock", "replanned", "reopen", "takeover", "undo-takeover", "synced", "thread",
           "register", "session", "unregister", "capacity", "log", "project", "goal", "target", "queue", "stop",
           "check", "backlog", "activate", "merge", "duplicates", "policy", "prompt", "health", "config", "change",
-          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage"}
+          "plan", "manage", "guide", "db", "ship", "notify", "artifacts", "usage", "browser"}
 # Words that keep a command in its own process: it waits, it reads stdin, or it reads or writes a file it names.
 FILE_WORDS = ("--wait", "--watch", "--from", "--file", "--put", "--out", "--summary-file")
+# maxpm browser (#5665): a screenshot writes a PNG file, and batch reads stdin; they run in their own process. Its
+# --wait is what one page action waits for (a load, seconds at most), not a long wait.
+BROWSER_LOCAL = {"screenshot", "batch"}
 
 
 def _command(words):
@@ -76,6 +79,19 @@ def _command(words):
         elif not w.startswith("-"):
             return w
     return None
+
+
+def _at(words):
+    """The index of the command word (see _command), or len(words)."""
+    i = 0
+    while i < len(words):
+        if words[i] == "--as":
+            i += 2
+        elif words[i].startswith("-"):
+            i += 1
+        else:
+            return i
+    return len(words)
 
 
 def serve_file(env=None):
@@ -165,7 +181,12 @@ def run_remote(words, env=None, cwd=None):
     if env.get("MAXPM_LOCAL"):
         return None
     cmd = _command(words)
-    if cmd not in REMOTE or "-" in words or any(w.split("=", 1)[0] in FILE_WORDS for w in words):
+    files = FILE_WORDS
+    if cmd == "browser":
+        if _command(words[_at(words) + 1:]) in BROWSER_LOCAL:
+            return None
+        files = tuple(w for w in FILE_WORDS if w != "--wait")
+    if cmd not in REMOTE or "-" in words or any(w.split("=", 1)[0] in files for w in words):
         return None
     if cmd == "artifacts" and "show" in words:  # it prints the text of a file
         return None

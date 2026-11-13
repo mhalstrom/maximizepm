@@ -34,6 +34,21 @@ class Client(unittest.TestCase):
                 self.assertIsNone(client.run_remote(words, self.env), words)
             self.assertIsNone(client.run_remote(["show", "3"], {**self.env, "MAXPM_LOCAL": "1"}))
 
+    def test_browser_runs_in_serve_but_not_a_screenshot_or_a_batch(self):
+        # #5665: a page action answers in tens of milliseconds; a screenshot writes a file, a batch reads stdin.
+        self.serve_file()
+        with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):
+            for words in (["--as", "browser", "browser", "screenshot"], ["browser", "batch"],
+                          ["browser", "batch", "--file", "steps"], ["browser", "html", "--out", "p.html"]):
+                self.assertIsNone(client.run_remote(words, self.env), words)
+        for words in (["--as", "ag", "browser", "click", "@e3", "--wait", "load"], ["browser", "snapshot", "-i"],
+                      ["--as", "screenshot", "browser", "status"]):
+            with mock.patch.object(client, "_post", return_value=(200, b'{"code": 0}')) as post:
+                self.assertEqual(client.run_remote(words, self.env), 0, words)
+            post.assert_called_once()
+        with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):
+            self.assertIsNone(client.run_remote(["inbox", "--wait"], self.env))  # --wait stays local elsewhere
+
     def test_no_serve_file_runs_here(self):
         with mock.patch.object(client, "_post", side_effect=AssertionError("asked serve")):
             self.assertIsNone(client.run_remote(["show", "3"], self.env))
