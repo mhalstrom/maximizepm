@@ -506,6 +506,9 @@ and uses it in the side panel of your session (Browser), and you drive the same 
 - The browser opens no loopback or private address (your dev server, a test database): the user allows one for
   the project with `maxpm config set browser_allow "localhost:5173" --project <name>`. Only the user signs in;
   never type a password. A site that refuses a headless browser: the user presses Open as a window.
+- The user marks up the page (Annotate in the panel) and sends it: your chat gets `[maxpm annotations a<id> ...]`
+  with the picture and numbered notes. `maxpm browser annotation <id>` reads it again; after each fix, run
+  `maxpm browser annotation <id> fix <n> --note "<what you changed>"` (or `not-fixed <n> --note "<why>"`).
 
 ## Expert sessions
 

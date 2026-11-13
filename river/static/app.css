@@ -75,6 +75,7 @@
   /* The same in both themes: a page in a frame is white, and the marks of Find are the marks of a browser. */
   --frame-bg: #fff; --find: #ffe066; --find-on: #ff9632; --find-ink: #000; --flash: #d29922;
   --ptr: #111; --ptr-edge: #fff; --ptr-mark: #e8590c;
+  --ann-1: #e03131; --ann-2: #f08c00; --ann-3: #1971c2; --ann-4: #2f9e44;  /* the pens of Annotate (#5655): on any page */
 }
 :root { color-scheme: light dark; }
 :root[data-theme="light"] { color-scheme: light; }

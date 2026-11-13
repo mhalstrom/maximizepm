@@ -912,6 +912,17 @@ def build_parser(only=None):
     x = brs.add_parser("tab", parents=[bp], help="show another tab (its id from maxpm browser status)"); x.add_argument("id")
     x = brs.add_parser("new-tab", parents=[bp], help="open a new tab"); x.add_argument("url", nargs="?", default="about:blank")
     x = brs.add_parser("close-tab", parents=[bp], help="close a tab (default: the one that shows)"); x.add_argument("id", nargs="?")
+    x = brs.add_parser("annotations", parents=[bp], help="the pages that the person marked up in the Browser pane "
+                       "and sent (#5655): yours and your item's; --all: every set of the project")
+    x.add_argument("--all", action="store_true", help="every set of the project, not only yours")
+    x.add_argument("--open", action="store_true", help="only sets with notes that are not fixed")
+    x = brs.add_parser("annotation", help="one marked-up page: its picture, each note and its element, and its state; "
+                       "mark a note: maxpm browser annotation <id> fix <n> --note \"<what you changed>\"")
+    x.add_argument("id", help="the set, for example 7 or a7")
+    x.add_argument("change", nargs="?", choices=["fix", "not-fixed", "reopen"],
+                   help="fix: you fixed note <n>; not-fixed: you could not; reopen: it is open again")
+    x.add_argument("n", nargs="?", type=int, help="the note's number (in the picture)")
+    x.add_argument("--note", help="one line: what you changed, or why it is not fixed")
     cv = sub.add_parser("canvas", help="canvases: pages that a session makes and maxpm keeps (HTML, Markdown, SVG), "
                         "with versions and the comments people write on them")
     cvs = cv.add_subparsers(dest="cvcmd", required=True)
@@ -2383,6 +2394,26 @@ RETRY_WAIT = 1.0  # seconds between two tries to reach a maxpm serve that does n
 def _browser_cmd(conn, a, actor):
     """maxpm browser: maxpm serve runs the browser (river/browser.py); the command asks it (ask_server)."""
     b = a.bcmd
+    if b in ("annotations", "annotation"):  # the queue's own table (#5655): no need of maxpm serve
+        from . import annotate
+        if b == "annotation":
+            if a.change:
+                if a.n is None:
+                    raise RiverError(f"name the note: maxpm browser annotation {a.id} {a.change} <n> --note \"...\"")
+                return annotate.mark(conn, a.id, a.n, a.change, a.note, actor)
+            return annotate.show(conn, a.id)
+        held = conn.execute("SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held')",
+                            (actor,)).fetchall() if actor else []
+        project = a.project
+        if a.all or not actor:
+            from . import browser
+            project = project or browser.project_of(conn, None, actor, os.getcwd())
+            return {"sets": annotate.sets(conn, project=project, open_only=a.open)}
+        out = {}
+        for i in [None] + [r["id"] for r in held]:
+            for s in annotate.sets(conn, agent=actor, item_id=i, project=project, open_only=a.open):
+                out[s["id"]] = s
+        return {"sets": sorted(out.values(), key=lambda s: -s["id"])}
     action = {"new-tab": "new_tab", "close-tab": "close_tab", "headless": "window"}.get(b, b)
     args = {"action": action, "project": a.project, "cwd": os.getcwd()}
     if b == "open":
@@ -4386,6 +4417,9 @@ def render_go(b):
             out.append("  unblocks: " + ", ".join(f"#{d['id']} {d['title']}" for d in it["unblocks_detail"]))
         if it.get("output"):
             out.append(f"  earlier output: {it['output']}")
+        for an in b.get("annotations") or []:  # #5655
+            out.append(f"  marked-up page a{an['id']} ({_cut(an['url'], 60)}): {an['open']} of {an['notes']} note(s) "
+                       f"open: {r} browser annotation {an['id']}")
         for cv in b.get("canvases") or []:  # #4769
             out.append(f"  canvas {cv['name']} v{cv['version']}: "
                        + (f"{cv['open_comments']} open comment(s) wait for a change: {r} canvas comments {cv['name']} --open"
@@ -4743,8 +4777,41 @@ def _comment_lines(r, indent="  "):
 
 
 
+def render_annotations(a, res):
+    """maxpm browser annotations and annotation <id> (#5655)."""
+    from . import annotate
+    if a.bcmd == "annotations":
+        if not res["sets"]:
+            print("no marked-up pages" + (" with open notes" if a.open else "")
+                  + ": the person makes them with Annotate in the Browser pane")
+        for s in res["sets"]:
+            print(f"a{s['id']}  {s['created_at'][:16].replace('T', ' ')}  {len(s['notes'])} note(s), {s['open']} open"
+                  f"  {_cut(s['url'], 60)}  from {s['author'] or 'the person'} to {s['agent'] or '(no session)'}"
+                  + (f"  #{s['item_id']}" if s["item_id"] else ""))
+        if res["sets"]:
+            print("read one: maxpm browser annotation <id>")
+        return
+    s = res
+    print(f"a{s['id']} from {s['author'] or 'the person'} to {s['agent'] or '(no session)'}, "
+          f"{s['created_at'][:16].replace('T', ' ')}" + (f", item #{s['item_id']}" if s["item_id"] else ""))
+    print(f"page: {s['url']}" + (f" ({s['title']})" if s["title"] else "") + f", {s['w']} × {s['h']} px")
+    print(f"picture: {s['picture']}  (read it: the numbers in it are the notes')")
+    for x in s["notes"]:
+        st = {"open": "open", "fixed": "fixed", "not_fixed": "not fixed"}[x["state"]]
+        print(f"{x['n']}. [{st}] {annotate.note_line(x)}")
+        if x.get("fix"):
+            print(f"   {x['fix']['by']}: {x['fix']['note']}")
+    if s.get("drawings") and annotate._drawn(s["drawings"]):
+        print(f"drawings in the picture: {annotate._drawn(s['drawings'])}")
+    if s["open"]:
+        print(f"after each fix: maxpm browser annotation {s['id']} fix <n> --note \"<what you changed>\" "
+              f"(or not-fixed <n> --note \"<why>\")")
+
+
 def render_browser(a, res):
     b = a.bcmd
+    if b in ("annotations", "annotation"):
+        return render_annotations(a, res)
     if b == "html" and "html" in res:
         print(res["html"])
         return

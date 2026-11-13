@@ -14,6 +14,7 @@ import { esc, toast, actor, pageToken, typeAction } from "../lib.js";
 import { button } from "./button.js";
 import { makeSuggest } from "./suggestList.js";
 import { openTool, panelSession } from "./sidePanel.js";
+import { makeAnnotate } from "./browserAnnotate.js";
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -70,6 +71,7 @@ function render(box, project, session) {
     </form>
     <div class="br-ctl"><span class="br-who muted t-s"></span>
       <span class="br-refused hidden t-s">This site refuses a browser with no window: open it as a window.</span><span class="br-sp"></span>
+      ${button("Annotate", { cls: "br-annbtn hidden", title: "Mark up the page", pressed: false, data: { br: "annotate" } })}
       ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
       ${button("Give back", { cls: "br-back hidden", title: "Hand the browser on", data: { br: "give_back" } })}
       ${button("Open as a window", { cls: "br-win", title: "Show it as a normal window", data: { br: "window" } })}
@@ -114,7 +116,9 @@ function render(box, project, session) {
     const key = JSON.stringify(status);
     if (key === shownKey) return draw(j);
     shownKey = key;
-    v.running = !!j.running; v.window = !!j.window;
+    v.running = !!j.running; v.window = !!j.window; v.url = j.url || ""; v.title = j.title || "";
+    $$(".br-annbtn").classList.toggle("hidden", !j.running || !!j.window);  // Annotate draws on the panel's frames
+    if (ann.on && (!j.running || j.window)) ann.stop();
     // No Chrome on this computer (#5624): the answer of start says so; it holds until a start runs Chrome.
     if ("no_chrome" in j || j.running) v.noChrome = j.running ? "" : j.no_chrome || "";
     const c = j.controller, me = actor();
@@ -151,9 +155,11 @@ function render(box, project, session) {
 
   // A frame (#5637): the JPEG bytes of the binary answer, shown from a blob address. A poll that was slower than
   // another brings an older frame: it is dropped. The addresses that no longer show are freed once the new one loads.
-  let shown = 0, urls = [];
+  let shown = 0, urls = [], held = null, lastFrame = null;
   function paint(f, jpeg) {
+    if (ann.on) { held = [f, jpeg]; return; }  // Annotate (#5655): the frame stays; the newest waits
     if (f.seq && f.seq <= shown) return;
+    lastFrame = [f, jpeg];
     shown = f.seq || shown;
     const u = URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" }));
     urls.push(u);
@@ -162,6 +168,10 @@ function render(box, project, session) {
     msg.classList.add("hidden");
   }
   img.addEventListener("load", () => { const keep = img.src; urls = urls.filter(u => u === keep || URL.revokeObjectURL(u)); });
+  const ann = makeAnnotate({ box, stage, img, view: v, project, session, call, typeAction,
+    url: () => v.url || "", title: () => v.title || "",
+    // Back to the live page: the newest frame that came while the mode was on, else the last one shown before it.
+    resume: () => { const f = held || lastFrame; held = null; if (f) { shown = 0; paint(...f); } } });
 
   // The tab strip (#5632), like Chrome's: each tab with its icon and title (a click shows it), x closes it, + opens a
   // new one; the session whose pointer is on a tab is named on it. Drawn again only when a tab changed.
@@ -222,6 +232,7 @@ function render(box, project, session) {
   let sized = "", fitting = null;
   const fitNow = () => {
     fitting = null;
+    if (ann.on) return;  // the tools of Annotate take room: the page keeps the size it had when the drawing began
     const r = stage.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
     const w = Math.floor(r.width), h = Math.floor(r.height), key = `${w}x${h}@${dpr}`;
     if (r.width < 50 || key === sized || !v.running) return;
@@ -292,13 +303,13 @@ function render(box, project, session) {
   });
   img.addEventListener("contextmenu", (e) => e.preventDefault());
   stage.addEventListener("wheel", (e) => {
-    e.preventDefault(); if (!v.mine) return;
+    e.preventDefault(); if (!v.mine || ann.on) return;
     if (wheel) { wheel.dx += e.deltaX; wheel.dy += e.deltaY; return; }
     wheel = { type: "mouse", action: "wheel", ...at(e), dx: e.deltaX, dy: e.deltaY };
     requestAnimationFrame(() => { const w = wheel; wheel = null; send(w); });
   }, { passive: false });
   keys.addEventListener("keydown", (e) => {
-    if (MODS.has(e.key)) return;
+    if (MODS.has(e.key) || ann.on) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") return;  // the paste event sends the text
     e.preventDefault();
     if (KEYS.has(e.key) || e.key.length === 1) send({ type: "key", key: e.key, mods: mods(e) });
@@ -309,6 +320,7 @@ function render(box, project, session) {
     const b = e.target.closest("[data-br]"); if (!b) return;
     e.preventDefault();
     const what = b.dataset.br;
+    if (what === "annotate") return ann.toggle();
     try {
       if (what === "hand") {  // #5616: the session controls it now, and its chat has the page's address
         const r = await typeAction("browser_hand", { project, session, to: b.dataset.to });

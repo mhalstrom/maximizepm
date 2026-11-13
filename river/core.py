@@ -971,6 +971,27 @@ CREATE TABLE IF NOT EXISTS canvases (
   deleted_at  TEXT,
   UNIQUE (project_id, name)
 );
+-- Annotations of a session's browser (#5655, river/annotate.py): a page that the person marked up in the Browser
+-- pane and sent to the session. notes: JSON, the numbered notes with their elements and their states (open, fixed,
+-- not_fixed) and the session's line of what it changed; picture: the PNG with the drawings, in the queue's folder.
+-- Read by maxpm browser annotation(s), the Browser pane, and the go briefing of the session and of its item.
+CREATE TABLE IF NOT EXISTS annotations (
+  id          INTEGER PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  agent       TEXT,                         -- the session it went to
+  item_id     INTEGER REFERENCES items(id), -- the item that session held
+  author      TEXT,                         -- the person
+  url         TEXT NOT NULL,
+  title       TEXT,
+  width       INTEGER,
+  height      INTEGER,
+  picture     TEXT,
+  notes       TEXT NOT NULL,
+  drawings    TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  sent_at     TEXT
+);
 CREATE TABLE IF NOT EXISTS canvas_versions (
   id          INTEGER PRIMARY KEY,
   canvas_id   INTEGER NOT NULL REFERENCES canvases(id),
@@ -18786,6 +18807,9 @@ def _go_brief(conn, cwd, actor=None, project=None, role=None, session=None, focu
         # The item's canvases (#4769): the pages a session made for it, and the comments that wait for a change.
         brief["canvases"] = [{"name": x["name"], "version": x["version"], "open_comments": x["open_comments"]}
                              for x in canvas_heads(conn) if x["item_id"] == it["id"]]
+        # The pages that the person marked up for the item or the session, with notes still open (#5655).
+        from . import annotate
+        brief["annotations"] = annotate.brief(conn, brief.get("agent"), it["id"])
         # Items of a shared goal have no owner who plans them: the agent tags the items it adds itself.
         brief["shared_goals"] = [r["name"] for r in conn.execute(
             "SELECT g.name FROM item_goals ig JOIN goals g ON g.id=ig.goal_id WHERE ig.item_id=? AND g.shared=1 "

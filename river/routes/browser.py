@@ -7,7 +7,7 @@ import hmac
 import threading
 import time
 
-from .. import browser, core, server  # noqa: F401  (server: read at call time, so tests that replace its globals work)
+from .. import annotate, browser, core, server  # noqa: F401  (server: read at call time, so tests that replace its globals work)
 from ..core import RiverError
 
 # Requests to show a browser in a session's side panel (maxpm browser open): the state carries them, as with
@@ -183,7 +183,69 @@ def act(conn, a, who):
             raise RiverError("only a person saves a browser's sign-ins for the project: the Browser pane has the "
                              "button Save sign-ins for the project")
         return browser.save_signins(b)
+    if action in ("pick", "area"):  # Annotate (#5655): the element at a point, or what a dragged box holds
+        if not b.running():
+            raise RiverError("the browser is not running: open a page first")
+        arg = {"x": float(a.get("x") or 0), "y": float(a.get("y") or 0)} if action == "pick" else \
+            {k: float((a.get("box") or {}).get(k) or 0) for k in ("x", "y", "w", "h")}
+        return annotate.page_call(b, action, arg) or {}
+    if action == "annotations":  # the pane: this session's marked-up pages, and where their notes are on this page now
+        return {"sets": annotations_here(b, annotate.sets(conn, agent=owner, project=project, limit=20))}
+    if action == "annotation_mark":  # the person reopens a note (#5655); a session marks with maxpm browser annotation
+        if not person:
+            raise RiverError("a session marks a note with maxpm browser annotation <id> fix <n> --note \"...\"")
+        annotate.mark(conn, a.get("id"), a.get("n"), "open", a.get("note"), who or "the person")
+        return {"sets": annotations_here(b, annotate.sets(conn, agent=owner, project=project, limit=20))}
     raise RiverError(f"unknown browser action {action!r}")
+
+
+def annotations_here(b, sets):
+    """The sets for the pane; each note of a set on the page that shows now gets 'here': its place in the view (the
+    element of an element note where the page has it now, else its place on the page less the scroll)."""
+    url = b.info().get("url") if b.running() else None
+    on = [s for s in sets if url and s["url"] == url]
+    if on:
+        try:
+            got = annotate.page_call(b, "locate", [x.get("ref") if x["kind"] == "element" else None
+                                                   for s in on for x in s["notes"]]) or {}
+        except RiverError:
+            got = {}
+        sx, sy = (got.get("scroll") or [0, 0])[:2]
+        at = iter(got.get("at") or [])
+        for s in on:
+            for x in s["notes"]:
+                el, p = next(at, None), x.get("page") or x.get("at")
+                if x["kind"] == "element" and el:
+                    x["here"] = {"x": el["x"], "y": el["y"], "w": el["w"], "h": el["h"]}
+                elif p:
+                    x["here"] = {"x": p["x"] - sx, "y": p["y"] - sy, "w": p.get("w", 0), "h": p.get("h", 0)}
+    return sets
+
+
+def annotate_send(conn, a, who):
+    """Send or Copy of Annotate (#5655): store the set (the picture with the drawings, the notes), and with send, put
+    one message in the session's chat: the picture attached, the page's address, and the numbered notes with their
+    elements. A typing op: it types into the session's chat, so it needs the page's token."""
+    if not _person(conn, who):
+        raise RiverError("only a person sends a marked-up page; a session reads it with maxpm browser annotation <id>")
+    project, session = a.get("project") or "", (a.get("session") or "").strip()
+    send = bool(a.get("send"))
+    if send and not session:
+        raise RiverError("this browser has no session to send to: Copy puts the text on the clipboard")
+    s = annotate.save(conn, project, session or None, who or None, a.get("url") or "", a.get("title") or "",
+                      a.get("w"), a.get("h"), a.get("png"), a.get("notes") or [], a.get("drawings"), a.get("id"))
+    out = {**s, "prompt": annotate.prompt(s, who), "sent": False}
+    if send:
+        text = annotate.prompt(s, who, limit=annotate.SEND_MAX, attached=True)
+        try:
+            server.session_send(conn, session, text, who=who, hold=True,
+                                files=[{"name": f"annotations-a{s['id']}.png", "data": a.get("png")}])
+        except RiverError as e:
+            raise RiverError(f"stored as a{s['id']}, but the chat of {session} did not get it: {e}. "
+                             f"The session reads it with maxpm browser annotation {s['id']}")
+        annotate.mark_sent(conn, s["id"])
+        out.update(sent=True, told=session)
+    return out
 
 
 def person_input(conn, a, who):
@@ -277,4 +339,5 @@ OPS = {
     "browser": act,
     "browser_input": person_input,
     "browser_hand": hand,
+    "browser_annotate": annotate_send,
 }

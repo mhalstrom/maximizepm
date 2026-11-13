@@ -1076,6 +1076,162 @@ try {
     def test_the_pane_shows_binary_frames_at_phone_width(self):
         self.assertEqual(self._frames("390,844"), {"blob": True, "msg": True, "drawn": True, "wide": False})
 
+    def _annotate(self, size):
+        """#5655: Annotate in the Browser pane, with a real Chrome as the session's browser: the frame stops, a box, a
+        pen line, an arrow, a text note and a selected element go on the layer, and Send stores the set and puts one
+        message with the picture into the session's chat; the list then shows the set, and a fixed note's state and
+        line. With MAXPM_ANNOTATE_SHOTS=<folder>, the pane and the picture are saved there."""
+        import http.server
+        import shutil
+        import threading
+        from unittest import mock
+        from river import annotate, browser
+        if not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        body = (b"<title>Pricing</title><style>body{font:16px system-ui;margin:24px} .plan{border:1px solid #ccc;"
+                b"padding:16px;margin:12px 0;width:260px} button{font-size:16px;width:70px;white-space:nowrap;overflow:"
+                b"hidden}</style><h1>Pricing</h1><div class=plan id=pro><h2>Pro</h2><p>$12 a month</p>"
+                b"<button id=buy>Buy the Pro plan</button></div><div class=plan><h2>Team</h2><p>$40 a month</p></div>")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        try:
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        except PermissionError:
+            self.skipTest("no local port here")
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        project = browser.project_of(self.c, agent="ag")
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{srv.server_address[1]}", project=project)
+        b = browser.get(project, "ag")
+        self.addCleanup(browser.BROWSERS.clear)
+        self.addCleanup(b.close)
+        b.open(f"http://127.0.0.1:{srv.server_address[1]}/pricing")
+        sent = []
+        patched = mock.patch.object(server, "session_send", lambda conn, to, text, **kw: sent.append((to, text, kw)) or {})
+        patched.start()
+        self.addCleanup(patched.stop)
+        shots = os.environ.get("MAXPM_ANNOTATE_SHOTS")
+        tag = size.replace(",", "x")
+        import socket
+        with socket.socket() as s:  # a free port for the test browser's own CDP: never a Chrome of the person
+            s.bind(("127.0.0.1", 0))
+            cdp_port = s.getsockname()[1]
+
+        def shot(name):
+            def go():
+                if not shots:
+                    return
+                import base64
+                import urllib.request
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # no proxy for this computer
+                tabs = json.loads(opener.open(f"http://127.0.0.1:{cdp_port}/json").read())
+                ws = browser.WS(next(t for t in tabs if t["type"] == "page" and t["url"].startswith("http://127.0.0.1:")
+                                     and ("/sessions/ag" in t["url"] or t["url"].endswith("/__frame")))[
+                    "webSocketDebuggerUrl"])
+                ws.send(json.dumps({"id": 1, "method": "Page.captureScreenshot", "params": {"format": "png"}}))
+                while True:
+                    m = json.loads(ws.recv())
+                    if m.get("id") == 1:
+                        break
+                ws.close()
+                Path(shots, f"{tag}-{name}.png").write_bytes(base64.b64decode(m["result"]["data"]))
+            return go
+
+        def fix():
+            conn = core.connect()  # the step runs in a thread of the test server
+            try:
+                s = annotate.sets(conn, agent="ag")[0]
+                annotate.mark(conn, s["id"], 3, "fix", "The button is wider now: it fits its label", "ag")
+            finally:
+                conn.close()
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag", "session ag shown");
+  // The dialogs of the fixture's session (its prompt, the setup) would cover the pane in the screenshots.
+  document.head.insertAdjacentHTML("beforeend", "<style>.dlg, dialog { display: none !important; }</style>");
+  const { openBrowser } = await import("./components/browserTool.js");
+  await openBrowser("ag");
+  const img = () => q(".br-img");
+  await until(() => img() && img().naturalWidth > 100 && !q(".br-annbtn").classList.contains("hidden"), "the page and Annotate");
+  q(".br-annbtn").click();
+  await until(() => !q(".br-draw").classList.contains("hidden") && img().src.startsWith("data:image/png"), "the mode and its PNG");
+  const layer = q(".br-draw"), out = { frozen: true };
+  await sleep(200);
+  const R = () => layer.getBoundingClientRect(), vb = layer.viewBox.baseVal;
+  const at = (x, y) => ({ clientX: R().left + x * R().width / vb.width, clientY: R().top + y * R().height / vb.height });
+  const ev = (type, x, y) => layer.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, pointerType: "touch", ...at(x, y) }));
+  const tool = (t) => q(`[data-ann="tool"][data-tool="${t}"]`).click();
+  const note = async (text) => { await until(() => !q(".br-annnote").classList.contains("hidden"), "the note field");
+    q(".br-nt").value = text; q(".br-annnote").requestSubmit(); };
+  const drag = (pts) => { ev("pointerdown", ...pts[0]); for (const p of pts.slice(1)) ev("pointermove", ...p); ev("pointerup", ...pts[pts.length - 1]); };
+  // A box over the Team plan, a pen line under the price, an arrow, a text note, the Buy button selected.
+  tool("box"); drag([[16, 248], [330, 248], [330, 398]]); await note("Too much space in this plan");
+  tool("pen"); drag([[42, 192], [70, 196], [100, 191], [130, 197], [150, 192]]);
+  tool("arrow"); drag([[220, 60], [135, 45]]);
+  tool("text"); ev("pointerdown", 230, 40); await note("Make the title bigger");
+  tool("element"); ev("pointerdown", 60, 214);
+  await until(() => [...layer.querySelectorAll("rect")].length >= 2, "the selected element's box");
+  await note("The label is cut off");
+  out.shapes = layer.querySelectorAll("[data-i]").length;
+  out.numbers = [...layer.querySelectorAll("circle + text")].map(t => t.textContent);
+  out.wide = document.documentElement.scrollWidth > innerWidth;
+  await fetch("/__step/drawn");
+  q('[data-ann="send"]').click();
+  await until(() => q(".br-draw").classList.contains("hidden"), "Send ends the mode");
+  out.live = !img().src.startsWith("data:image/png");
+  await fetch("/__step/fix");
+  q(".br-annbtn").click();
+  await until(() => q(".br-set"), "the list of sets");
+  await until(() => q(".br-st-fixed"), "a fixed note");
+  out.fixed = q(".br-st-fixed").textContent.includes("The button is wider now");
+  out.reopen = !!q('.br-st-fixed [data-ann="reopen"]');
+  out.marks = layer.querySelectorAll(".br-old").length;
+  await fetch("/__step/list");
+  q('.br-st-fixed [data-ann="reopen"]').click();
+  await until(() => !q(".br-st-fixed"), "reopened");
+  document.activeElement.blur();
+  q(".br").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  out.esc = q(".br-draw").classList.contains("hidden");
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        got = self.drive(driver, "/sessions/ag", size=size, steps={"drawn": shot("1-drawn"), "fix": fix,
+                                                                   "list": shot("3-list")},
+                         flags=(f"--remote-debugging-port={cdp_port}",) if shots else ())
+        s = annotate.sets(self.c, agent="ag")[0]
+        if shots:
+            shutil.copy(s["picture"], Path(shots, f"{tag}-2-picture.png"))
+            Path(shots, f"{tag}-2-message.txt").write_text(sent[0][1], encoding="utf-8")
+        return got, s, sent
+
+    def test_annotate_at_desktop_width(self):
+        got, s, sent = self._annotate("1280,900")
+        self.assertEqual(got, {"frozen": True, "shapes": 7, "numbers": ["1", "2", "3"], "wide": False, "live": True,
+                               "fixed": True, "reopen": True, "marks": 3, "esc": True})
+        self.assertEqual([(x["kind"], x["text"]) for x in s["notes"]],
+                         [("box", "Too much space in this plan"), ("text", "Make the title bigger"),
+                          ("element", "The label is cut off")])
+        self.assertEqual((s["notes"][2]["ref"]["selector"], s["drawings"]), ("#buy", {"pen": 1, "arrow": 1}))
+        self.assertEqual(s["notes"][2]["state"], "open")  # the person reopened it
+        to, text, kw = sent[0]
+        self.assertEqual((to, kw["files"][0]["name"]), ("ag", f"annotations-a{s['id']}.png"))
+        self.assertIn('3. Element `<button>` found by `#buy`, text "Buy the Pro plan"', text)
+        with open(s["picture"], "rb") as f:
+            head = f.read(24)
+        self.assertEqual(struct.unpack(">II", head[16:24]), (s["w"], s["h"]))  # the page's size
+
+    def test_annotate_at_phone_width(self):
+        got, s, sent = self._annotate("390,844")
+        self.assertEqual((got["shapes"], got["wide"], got["fixed"], got["esc"]), (7, False, True, True), got)
+
     def test_the_tab_strip_at_desktop_width(self):
         got = self._tab_strip("1280,900")
         self.assertEqual({k: got.get(k) for k in ("tabs", "on", "plus", "closes", "wide", "visible")},
