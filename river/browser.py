@@ -533,6 +533,7 @@ class Browser:
         self.pane_lock = threading.Lock()
         self.attached = None # the debugging port of a Chrome that serve did not start (browser_source cdp:<port>)
         self.mine = set()    # attached: the tabs serve opened in it, and the tabs that they opened
+        self.context = None  # attached, a session's: its browser context in that Chrome (#5634)
         self.attached_window = None  # attached: whether that Chrome has a window (None: not known)
         self.modes = False   # attached: the project has browser_mode, so the panel offers a window and back
         self.listeners = {}  # CDP session -> fn(method, params): the events of a tab that a page walk opened
@@ -613,8 +614,9 @@ class Browser:
         return bool(self.attached_window) if self.attached else bool(self.state.get("window"))
 
     def _new_target(self, url="about:blank"):
-        """A new tab; attached, it is one of serve's own tabs."""
-        t = self.call("Target.createTarget", {"url": url})["targetId"]
+        """A new tab; attached, it is one of serve's own tabs (in the session's own context, #5634)."""
+        t = self.call("Target.createTarget", {"url": url, **({"browserContextId": self.context} if self.context else {})}
+                      )["targetId"]
         if self.attached:
             self.mine.add(t)
             self.targets.setdefault(t, {"url": url, "title": "", "opener": None})
@@ -705,6 +707,12 @@ class Browser:
         pages = [t for t in self.call("Target.getTargets")["targetInfos"] if t["type"] == "page"]
         if self.attached:  # only serve's own tab: the other tabs are other sessions' and the person's (#5406)
             self.targets = {}
+            if self.owner:  # a session: a browser context of its own, with the sign-ins of the default one (#5634)
+                self.context = self.call("Target.createBrowserContext", {"disposeOnDetach": True})["browserContextId"]
+                cookies = cookie_params(self.call("Storage.getCookies").get("cookies") or [])
+                if cookies:
+                    self.call("Storage.setCookies", {"cookies": cookies, "browserContextId": self.context})
+                self.state.pop("tab", None)  # the tab of an earlier connection went with its context
             own = [t for t in pages if t["targetId"] == self.state.get("tab")]
             if own:
                 t = own[0]
@@ -817,10 +825,10 @@ class Browser:
             except RiverError:
                 pass
         ws, self.ws = self.ws, None
-        if self.attached:  # a Chrome that serve did not start: only leave it
+        if self.attached:  # a Chrome that serve did not start: only leave it (a session's context goes with the socket)
             if ws:
                 ws.close()
-            self.attached = self.attached_window = None
+            self.attached = self.attached_window = self.context = None
             self.session = self.target = None
             self.targets, self.mine = {}, set()
             return
@@ -1605,17 +1613,9 @@ def setting_of(project, key, parse=None):
 
 
 def get(project, owner=None, conn=None):
-    """The browser of one session in a project (#5636), or the project's own with no session (page walks). A project
-    with browser_source (a Chrome that serve did not start) keeps one browser for every session (#5634 decides that
-    case). Each call counts as a use for browser_idle_end."""
-    if owner:
-        if conn is not None:
-            r = conn.execute("SELECT id FROM projects WHERE name=?", (project,)).fetchone()
-            src = core.setting(conn, "browser_source", project_id=r[0] if r else None)
-        else:
-            src = setting_of(project, "browser_source")
-        if core.browser_cdp_port(src):
-            owner = None
+    """The browser of one session in a project (#5636), or the project's own with no session (page walks). In a Chrome
+    that serve did not start (browser_source), a session's browser is a browser context of its own there (#5634).
+    Each call counts as a use for browser_idle_end."""
     with _lock:
         b = BROWSERS.get((project, owner))
         if b is None:
@@ -2352,22 +2352,34 @@ COOKIE_PARAMS = ("name", "value", "domain", "path", "secure", "httpOnly", "sameS
                  "sameParty", "sourceScheme", "sourcePort", "partitionKey")
 
 
-def save_signins(b):
-    """Save sign-ins for the project (#5633): the cookies of a session's browser go into the project's profile, so
-    the sessions that start later begin signed in. Chrome writes both profiles itself (Storage.getCookies from the
-    session's Chrome, Storage.setCookies into a Chrome on the project's profile); a project Chrome that this started
-    closes again, and writes its cookies to disk as it closes. Local storage stays in the session's profile."""
-    if not b.owner or b.attached:
-        raise RiverError("only the browser of a session saves sign-ins for its project")
-    if not b.running():
-        raise RiverError("the browser is not running: open a page first")
-    cookies = b.call("Storage.getCookies").get("cookies") or []
+def cookie_params(cookies):
+    """Cookies of Storage.getCookies as Storage.setCookies takes them; a session cookie stays one."""
     keep = []
     for c in cookies:
         p = {k: c[k] for k in COOKIE_PARAMS if k in c}
         if c.get("session") or (p.get("expires") or 0) <= 0:
             p.pop("expires", None)  # a cookie for this run of Chrome only: it stays one
         keep.append(p)
+    return keep
+
+
+def save_signins(b):
+    """Save sign-ins for the project (#5633): the cookies of a session's browser go into the project's profile, so
+    the sessions that start later begin signed in. Chrome writes both profiles itself (Storage.getCookies from the
+    session's Chrome, Storage.setCookies into a Chrome on the project's profile); a project Chrome that this started
+    closes again, and writes its cookies to disk as it closes. Local storage stays in the session's profile.
+    In a Chrome that serve did not start (#5634), the cookies of the session's context go into that Chrome's default
+    context, whose profile is the shared one."""
+    if not b.owner or (b.attached and not b.context):
+        raise RiverError("only the browser of a session saves sign-ins for its project")
+    if not b.running():
+        raise RiverError("the browser is not running: open a page first")
+    if b.attached:
+        keep = cookie_params(b.call("Storage.getCookies", {"browserContextId": b.context}).get("cookies") or [])
+        if keep:
+            b.call("Storage.setCookies", {"cookies": keep})
+        return {**b.info(), "saved": len(keep)}
+    keep = cookie_params(b.call("Storage.getCookies").get("cookies") or [])
     project = get(b.project)
     started = not project.running()
     try:

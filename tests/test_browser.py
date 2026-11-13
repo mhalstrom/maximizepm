@@ -735,8 +735,8 @@ class SessionBrowsers(Base):
         with mock.patch.object(browser, "walk", lambda b, pages, settle, timeout: {"owner": b.owner}):
             self.assertEqual(routes.act(self.c, {"action": "walk", "project": "web", "pages": ["a.test"]}, "ag1"),
                              {"owner": None})
-        core.config_set(self.c, "browser_source", "cdp:9339", project="web")  # an attached Chrome: shared (#5634)
-        self.assertIsNone(browser.get("web", "ag2", self.c).owner)
+        core.config_set(self.c, "browser_source", "cdp:9339", project="web")  # an attached Chrome: a context each (#5634)
+        self.assertEqual(browser.get("web", "ag2", self.c).owner, "ag2")
 
     def test_the_first_start_copies_the_sign_ins_and_no_caches(self):
         src = browser.browser_dir("web") / "profile"
@@ -1187,6 +1187,58 @@ class AttachedChrome(Base):
             if not os.path.exists(prof):
                 break
             time.sleep(0.1)
+
+    def _shared(self):
+        """A shared headless Chrome on a free port, as browser_source cdp:<port> of web; skips with no Chrome."""
+        chrome_ = chrome() and browser.chrome_path()
+        if not chrome_:
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        import subprocess
+        prof = os.path.join(self.tmp.name, "shared")
+        p = subprocess.Popen([chrome_, "--headless=new", f"--user-data-dir={prof}", "--remote-debugging-port=0",
+                              "--no-first-run", "about:blank"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(self._stop_chrome, p, prof)
+        port, end = None, time.monotonic() + browser.START_WAIT
+        while port is None and time.monotonic() < end and p.poll() is None:
+            try:
+                port = int(Path(prof, "DevToolsActivePort").read_text(encoding="utf-8").split()[0])
+            except (OSError, ValueError, IndexError):
+                time.sleep(0.1)
+        self.assertTrue(port, f"the shared Chrome did not start within {browser.START_WAIT}s (exit {p.poll()})")
+        core.config_set(self.c, "browser_source", f"cdp:{port}", project="web")
+        return port
+
+    def test_each_session_has_a_context_of_its_own_with_the_sign_ins(self):
+        """#5634: in the shared test browser each session's tabs are its own (a browser context), with the cookies of
+        the default context; Save sign-ins puts a session's cookies back there; a closed session's context goes."""
+        self._shared()
+        core.register(self.c, "ag1"); core.register(self.c, "ag2")
+        base = browser.get("web")  # the default context, as the shared tools see it
+        self.addCleanup(base.close)
+        base.start()
+        base.call("Storage.setCookies", {"cookies": [{"name": "signed_in", "value": "yes", "domain": ".example.test",
+                                                       "path": "/", "expires": time.time() + 86400}]})
+        a, b = browser.get("web", "ag1"), browser.get("web", "ag2")
+        self.addCleanup(a.close); self.addCleanup(b.close)
+        a.start(); b.start()
+        self.assertTrue(a.context and b.context and a.context != b.context)
+        ids = lambda x: {t["id"] for t in x.info()["tabs"]}
+        self.assertFalse(ids(a) & ids(b))  # each sees only its own tab
+        names = lambda x, ctx: [c["name"] for c in x.call("Storage.getCookies", {"browserContextId": ctx})["cookies"]]
+        self.assertIn("signed_in", names(a, a.context))  # the sign-ins came along
+        a.call("Storage.setCookies", {"cookies": [{"name": "new_sign_in", "value": "1", "domain": ".other.test",
+                                                    "path": "/", "expires": time.time() + 86400}],
+                                      "browserContextId": a.context})
+        self.assertNotIn("new_sign_in", [c["name"] for c in base.call("Storage.getCookies")["cookies"]])
+        self.assertGreaterEqual(browser.save_signins(a)["saved"], 2)
+        self.assertIn("new_sign_in", [c["name"] for c in base.call("Storage.getCookies")["cookies"]])
+        gone = a.context
+        a.close()  # the session ends: its context and tabs go with serve's connection
+        time.sleep(0.5)
+        self.assertNotIn(gone, base.call("Target.getBrowserContexts")["browserContextIds"])
 
     def test_attach_uses_its_own_tab_and_leaves_the_browser_open(self):
         chrome_ = chrome() and browser.chrome_path()

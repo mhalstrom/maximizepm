@@ -134,7 +134,7 @@ function render(box, project, session) {
     win.textContent = j.window ? "Back to the panel" : "Open as a window";
     win.dataset.br = j.window ? "headless" : "window";
     win.classList.toggle("hidden", !j.modes || !!v.noChrome);  // a Chrome that runs already (browser_source) needs browser_mode (#5619)
-    $$(".br-save").classList.toggle("hidden", !(j.running && j.owner && !j.source));  // a session's own Chrome (#5633)
+    $$(".br-save").classList.toggle("hidden", !(j.running && j.owner));  // a session's browser (#5633, #5634)
     win.classList.toggle("primary", !!j.refused && !j.window);
     $$(".br-refused").classList.toggle("hidden", !(j.refused && !j.window));
     stage.classList.toggle("br-locked", !v.mine);
