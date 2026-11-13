@@ -5436,3 +5436,50 @@ class ItemContext(unittest.TestCase):
         self.assertEqual([n["id"] for n in got["body"]["now"]], [x])
         self.assertEqual(self.get("/api/item/999/context")["code"], 404)
         self.assertEqual(self.get(f"/api/item/{x}")["body"]["id"], x)  # the item route itself is unchanged
+
+
+class HermesWake(unittest.TestCase):
+    """#5704: maxpm serve is the listener of a Hermes session: a message that a sender writes into the session's wake
+    folder goes in with hermes chat --resume when the pane shows the session idle, never during a turn."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        env = mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "t.db"),
+                                           "HERMES_HOME": self.dir.name})  # nothing reads ~/.hermes
+        env.start()
+        self.addCleanup(env.stop)
+        self.c = core.connect()
+        self.addCleanup(self.c.close)
+        core.register(self.c, "h1")
+        core.register(self.c, "mark", human=True)
+        core.set_native(self.c, "h1", "Hermes", "local-abc")
+        self.screen = "  ⏲ 12s"
+        self.ran = []
+        for name, value in (("agent_terminals", lambda conn: {"h1": "%7"}),
+                            ("_pane_screen", lambda agent, pane: {"text": self.screen + "\n"}),
+                            ("DELIVER_RUNNER", self.ran.append)):
+            p = mock.patch.object(server, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_message_goes_in_at_the_idle_prompt_and_waits_during_a_turn(self):
+        seen = {}
+        self.assertEqual(server.wake_pass(self.c, seen), [])  # nothing to give; the listener says it runs
+        self.assertTrue((core.wake_dir("local-abc") / "alive").exists())
+        self.screen = "  ⏱ 3s  type to redirect this turn"  # a turn runs
+        m = core.send(self.c, "alert", "the build is red", to="h1", actor="mark", blocked=True)
+        self.assertEqual(m["native_status"], "sent")
+        self.assertEqual((server.wake_pass(self.c, seen), self.ran), ([], []))  # the turn is never cut
+        self.screen = "  ⏲ 1s"
+        self.assertEqual(server.wake_pass(self.c, seen), ["h1"])
+        # No state.db of Hermes in this test: no provider or model to name (agents.hermes.deliver_command adds them).
+        self.assertEqual(self.ran, [["hermes", "chat", "--resume", "local-abc", "-q",
+                                     "[maxpm alert from mark] the build is red (maxpm --as <you> inbox; maxpm go "
+                                     "shows your queue)"]])
+        self.assertEqual(list(core.wake_dir("local-abc").glob("*.msg")), [])
+
+    def test_a_session_with_no_pane_has_no_listener(self):
+        with mock.patch.object(server, "agent_terminals", lambda conn: {}):
+            server.wake_pass(self.c, {})
+        self.assertTrue(core.send(self.c, "note", "x", to="h1", actor="mark")["native_status"].startswith("failed:"))

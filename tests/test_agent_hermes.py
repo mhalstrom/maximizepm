@@ -453,5 +453,19 @@ class Setup(unittest.TestCase):
         self.assertEqual(hermes.SETUP["instructions"], "AGENTS.md")
 
 
+class Deliver(HomeCase):
+    def test_the_delivery_names_the_sessions_provider_and_model(self):
+        """#5704: without --provider, hermes chat --resume used the config's default provider (Nous Portal) for a
+        session on openai-codex and stopped: 'No access token found for Nous Portal login'."""
+        with sqlite3.connect(self.home / "state.db") as c:
+            c.execute("CREATE TABLE sessions (id TEXT, billing_provider TEXT, model TEXT)")
+            c.execute("INSERT INTO sessions VALUES ('local-ab', 'openai-codex', 'gpt-6.1-terra')")
+        self.assertEqual(hermes.deliver_command("local-ab", "hello"),
+                         ["hermes", "chat", "--resume", "local-ab", "--provider", "openai-codex", "-m", "gpt-6.1-terra",
+                          "-q", "hello"])
+        self.assertEqual(hermes.deliver_command("local-zz", "hello"),
+                         ["hermes", "chat", "--resume", "local-zz", "-q", "hello"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -161,12 +161,16 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   changed. The silence alert of `activity_watch` stays for agents with hooks, and `background_work` returns nothing
   for an adapter whose `STATE['background']` is false.
 - Copies left for #5185: the default of `prompt_pattern` (the built-in adapters' blocked words) and of
-  `native_message` (the `INPUT['native']` of Codex, Pi, OpenCode, Copilot CLI and Claude Code); a test checks that they
-  match the adapters. The built-in command `wake {address} {text}` (#5686, #5691, #5702, #5703) writes the message
+  `native_message` (the `INPUT['native']` of Codex, Pi, OpenCode, Copilot CLI, Hermes and Claude Code); a test checks
+  that they match the adapters. The built-in command `wake {address} {text}` (#5686, #5691, #5702, #5703) writes the message
   beside the queue for the session's listener: Claude Code's is the hook `maxpm report --wake claude` (asyncRewake),
   Pi's is its state extension (`pi.sendUserMessage`), OpenCode's is its state plugin (`client.session.prompt`,
   delivery steer), Copilot CLI's is an extension of its hook plugin (`session.send`), which Copilot loads only in its
-  experimental mode (MaximizePM never passes `--experimental`: it saves that mode in the person's settings).
+  experimental mode (MaximizePM never passes `--experimental`: it saves that mode in the person's settings). For an
+  adapter whose module has `deliver_command(address, text)` (Hermes, #5704), `maxpm serve` is the listener
+  (`server.wake_pass`, a thread of its loop): it runs that command when the session's pane shows it idle, never during
+  a turn. Hermes: `hermes chat --resume <id> --provider <p> -m <model> -q <text>`; the turn runs in the same session
+  of Hermes's gateway, but the classic CLI in the pane does not show it.
 
 ## As built in #5182
 

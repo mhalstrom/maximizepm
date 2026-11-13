@@ -2034,6 +2034,106 @@ def _screen_state(tail, detect):
     return None
 
 
+# maxpm serve is the listener for a platform whose adapter module has deliver_command (Hermes, #5704): a sender writes
+# the message into the session's wake folder (core.native_message 'wake', core._wake_send), as for Claude Code, and this
+# thread of serve, which runs outside any agent sandbox, gives it to the session with that command (Hermes: hermes chat
+# --resume <id> --provider <p> -m <model> -q <text>) once the session's pane shows it idle: a running turn is never cut (mark
+# 2026-11-13 through the manager, #15795). It touches 'alive' only for a session whose pane it can read, so a sender
+# to another one gets a failure and the inbox brings the message.
+WAKE_LOOP_STEP = 0.3   # seconds between the passes of the listener thread
+WAKE_SETTLE = 5.0      # seconds after a delivery before the next one to the same session: its turn starts first
+DELIVER_RUNNER = None  # tests set a fake: f(argv) -> None; else the command starts detached
+
+
+def _deliver_adapters():
+    """{platform label: adapter} of the adapters whose module has deliver_command."""
+    from . import agents
+    out = {}
+    for m in agents.ids():
+        ad = agents.get(m)
+        if ad is not None and callable(getattr(ad.module, "deliver_command", None)) and ad.detect:
+            out[ad.label] = ad
+    return out
+
+
+def wake_pass(conn, seen):
+    """One pass of the listener for the DELIVER platforms. seen: {agent: {"beat": t, "sent": t}} kept between passes.
+    Returns the agents it delivered to."""
+    import subprocess
+    import time
+    ads = _deliver_adapters()
+    if not ads:
+        return []
+    rows = [r for r in conn.execute("SELECT name, platform, native_address FROM agents WHERE platform IS NOT NULL "
+                                    "AND native_address IS NOT NULL AND kind='ai'") if r["platform"] in ads]
+    if not rows:
+        return []
+    panes = agent_terminals(conn)
+    out = []
+    for r in rows:
+        name, ad, pane = r["name"], ads[r["platform"]], panes.get(r["name"])
+        if not pane:
+            continue  # no pane to read: no listener, so a sender gets a failure
+        d = core.wake_dir(r["native_address"])
+        mine = seen.setdefault(name, {"beat": 0.0, "sent": 0.0})
+        try:
+            if time.monotonic() - mine["beat"] >= core.WAKE_BEAT:
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "alive").touch()
+                mine["beat"] = time.monotonic()
+            files = sorted(d.glob("*.msg"))
+        except OSError:
+            continue
+        if not files or time.monotonic() - mine["sent"] < WAKE_SETTLE:
+            continue
+        try:
+            tail = _prompt_tail(_plain(_pane_screen(name, pane)["text"]))
+        except RiverError:
+            continue
+        if any(re.search(b, x) for b in ad.detect.get("blocked") or () for x in tail) \
+                or _screen_state(tail, ad.detect) != "idle":
+            continue  # a turn runs, or a question waits: the message waits for the idle prompt
+        texts = []
+        for f in files:
+            try:
+                texts.append(f.read_text(encoding="utf-8"))
+                f.unlink()
+            except OSError:
+                continue
+        if not texts:
+            continue
+        text = " ".join("\n".join(texts).split())
+        try:
+            argv = ad.module.deliver_command(r["native_address"], text)
+            if DELIVER_RUNNER is not None:
+                DELIVER_RUNNER(argv)
+            else:
+                subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        except Exception:  # noqa: BLE001 - one failed start never stops the listener; the message is gone from the
+            continue       # folder, and the inbox still holds it
+        mine["sent"] = time.monotonic()
+        out.append(name)
+    return out
+
+
+def wake_loop(stop):
+    """The listener thread of maxpm serve (wake_pass every WAKE_LOOP_STEP) until stop is set. No error ends it."""
+    seen, conn = {}, None
+    while not stop.is_set():
+        try:
+            if conn is None:
+                conn = core.connect()
+            wake_pass(conn, seen)
+        except Exception:  # noqa: BLE001 - the next pass tries again, with a new connection
+            try:
+                conn and conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            conn = None
+        stop.wait(WAKE_LOOP_STEP)
+
+
 def _prompt_parts(tail, layout=None):
     """What a person needs to answer a prompt, read from a pane's last lines (_prompt_tail): {"question": the
     sentence that asks (up to its question mark), or None; "options": [(text, selected)]: a menu, with the line
@@ -5406,6 +5506,9 @@ def serve(port: int, open_browser=False, dev=False):
     from . import notify
     notify.SERVE_PORT["port"] = port
     stop = threading.Event()
+    # The listener for the sessions that serve brings messages into (Hermes, #5704): a thread of its own, since a pass
+    # of the loop comes only every notify_interval.
+    threading.Thread(target=wake_loop, args=(stop,), daemon=True, name="maxpm-wake").start()
     conn = core.connect()
     try:
         runners = core.setting(conn, "serve_runners") == "on"

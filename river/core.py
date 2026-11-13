@@ -223,7 +223,9 @@ DEFAULT_SETTINGS = {
     # listens for the session that its pane shows and gives the message to OpenCode's server with
     # client.session.prompt; the address is OPENCODE_SESSION_ID of its shell tool. GitHub Copilot CLI (#5703):
     # MaximizePM's plugin brings an extension that calls session.send; Copilot loads it only in its experimental
-    # mode, which the person turns on; the address is COPILOT_AGENT_SESSION_ID of its shell commands.
+    # mode, which the person turns on; the address is COPILOT_AGENT_SESSION_ID of its shell commands. Hermes
+    # (#5704): maxpm serve is the listener (server.wake_pass) and gives the message to the session with hermes
+    # chat --resume when its pane shows it idle; the address is HERMES_SESSION_ID of its tools.
     # "uds {address} {message}" writes the message as one line to that Unix socket.
     # (Claude Code's own session inbox, CLAUDE_CODE_MESSAGING_SOCKET, has no documented message format.)
     # A platform without an entry, or a failed delivery, keeps the other path: the message waits in the queue
@@ -234,6 +236,7 @@ DEFAULT_SETTINGS = {
                       "Pi=PI_SESSION_ID: wake {address} {message}; "
                       "OpenCode=OPENCODE_SESSION_ID: wake {address} {message}; "
                       "GitHub Copilot CLI=COPILOT_AGENT_SESSION_ID: wake {address} {message}; "
+                      "Hermes=HERMES_SESSION_ID: wake {address} {message}; "
                       "Claude Code=CLAUDE_CODE_SESSION_ID: wake {address} {message}",
     "setup_done": "off",
     # Review before release: with review on, each deploy item waits on a review item that waits on

@@ -272,7 +272,31 @@ DETECT = {
 }
 
 # Stop on the Sessions tab (#5547): Ctrl+C ends the turn; a second one at the prompt quits.
-INPUT = {"native": None, "interrupt": ["C-c"]}
+# Messages reach it through maxpm serve (core.native_message 'wake', server.wake_pass, #5704): serve runs DELIVER when
+# the pane shows the session idle. Hermes's docs (user-guide/cli.md): hermes chat discovers the profile's gateway,
+# resumes the session there and attaches to it, the same live session as the pane's; on a non-TTY it sends the text,
+# waits for the reply and exits.
+INPUT = {"native": ["wake", "{address}", "{text}"], "interrupt": ["C-c"]}
+
+
+def deliver_command(session_id, text, root=None):
+    """The command that maxpm serve runs to bring text into the running session session_id (server.wake_pass). It names
+    the session's provider and model (its sessions row: billing_provider, model): without them hermes chat uses the
+    default provider of Hermes's config, and a test (2026-11-13) answered 'No access token found for Nous Portal
+    login' for a session on openai-codex."""
+    words = ["hermes", "chat", "--resume", str(session_id)]
+    path = db_path(root)
+    if path.is_file():
+        try:
+            with _connect(path) as conn:
+                row = conn.execute("SELECT billing_provider, model FROM sessions WHERE id = ?", (str(session_id),)).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row and row[0]:
+            words += ["--provider", row[0]]
+        if row and row[1]:
+            words += ["-m", row[1]]
+    return words + ["-q", text]
 
 # ---------------------------------------------------------------------------------------------------------------
 # 6. Chat log
