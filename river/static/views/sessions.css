@@ -303,7 +303,7 @@ button.srow-it { cursor: pointer; }
 /* The tab strip (#5632), like Chrome's: one row that scrolls sideways when the tabs do not fit (a phone, p57). */
 .br-strip { display: flex; align-items: stretch; gap: var(--sp-0); flex: none; overflow-x: auto; overflow-y: hidden;
   padding: var(--sp-1) var(--sp-3) 0; background: var(--bg); border-bottom: var(--hair) solid var(--line); scrollbar-width: thin; }
-.br-tab { display: flex; align-items: center; flex: 0 1 var(--w-card); min-width: var(--w-bar); max-width: var(--w-card);
+.br-tab { display: flex; align-items: center; flex: 0 1 var(--w-card); min-width: calc(var(--w-col) / 2); max-width: var(--w-card);
   border-radius: var(--r-s) var(--r-s) 0 0; color: var(--muted); }
 .br-tab.on { background: var(--panel); color: var(--ink); }
 .br-tab .br-go { display: flex; align-items: center; gap: var(--sp-2); flex: 1 1 auto; min-width: 0; color: inherit;
