@@ -890,12 +890,19 @@ def build_parser(only=None):
                     "one; load: for the next page; idle: also until no request is in flight; none: not at all")
     ap.add_argument("--snapshot", action="store_true", help="print the snapshot (-i) of the page after the action")
     x = brs.add_parser("status", parents=[bp], help="whether it runs, its tabs, and who controls it")
-    x = brs.add_parser("snapshot", parents=[bp], help="the page's interactive elements, one line each with a ref "
-                       "(@e3) that click, type, fill, select and check take; with its headings unless -i")
+    x = brs.add_parser("snapshot", parents=[bp], help="the page's interactive elements in the window, one line each "
+                       "with a ref (@e3) that click, type, fill, select and check take (repeated rows: one line each); "
+                       "with its headings unless -i")
     x.add_argument("-i", "--interactive", action="store_true", help="only the interactive elements")
+    x.add_argument("--all", action="store_true", help="the whole page, not only what shows in the window")
+    x.add_argument("--region", help="one region: header, nav, main, footer, aside, dialog, search, menu, or its label "
+                   "or heading")
     x.add_argument("--scope", help="only the part of the page in this CSS selector's first element")
     x.add_argument("--delta", action="store_true", help="only what changed since the last snapshot of this page")
-    x.add_argument("--max", type=int, help="the lines it prints at most (default 400)")
+    x.add_argument("--max", type=int, help="the elements it lists at most (default 400)")
+    x = brs.add_parser("find", parents=[bp], help="the elements anywhere on the page whose name, row or column holds "
+                       "these words, with refs")
+    x.add_argument("words", nargs="+")
     x = brs.add_parser("open", parents=[bp, ap], help="open an address in the tab the panel shows (and show the "
                        "browser in your side panel)")
     x.add_argument("url"); x.add_argument("--no-show", action="store_true", help="do not open it in your side panel")
@@ -905,6 +912,7 @@ def build_parser(only=None):
     x.add_argument("--cursor", action="store_true", help="draw the driving session's pointer and its last click ring in")
     x = brs.add_parser("html", parents=[bp], help="the HTML of the page (the DOM as it is now)")
     x.add_argument("--out", help="write it to this file")
+    x.add_argument("--scope", help="only one element: a ref (@e3) or a CSS selector")
     x = brs.add_parser("text", parents=[bp], help="the text of the page as a person reads it")
     x = brs.add_parser("click", parents=[bp, ap], help="click an element (a ref such as @e3, or a CSS selector) or a "
                        "point (x y, CSS pixels)")
@@ -2493,7 +2501,9 @@ def _browser_cmd(conn, a, actor):
             print("maxpm: no session pointed in this tab yet: the picture has no pointer", file=sys.stderr)
     if b == "html" and a.out:
         Path(a.out).expanduser().write_text(res.pop("html"), encoding="utf-8")
-        res["file"] = str(Path(a.out).expanduser().resolve())
+        res["file"] = str(Path(a.out).expanduser().resolve()) + f" ({res.get('bytes', 0)} bytes)"
+    elif b == "html" and not getattr(a, "json", False):
+        print(f"maxpm: {res.get('bytes', 0)} bytes of HTML", file=sys.stderr)  # #5671: the size, apart from the HTML
     return res
 
 
@@ -2516,7 +2526,11 @@ def _browser_args(a):
     if b == "open":
         args.update(url=a.url, show=not a.no_show)
     elif b == "snapshot":
-        args.update(interactive=a.interactive, scope=a.scope, delta=a.delta, max=a.max)
+        args.update(interactive=a.interactive, scope=a.scope, delta=a.delta, max=a.max, all=a.all, region=a.region)
+    elif b == "find":  # #5671: a snapshot of the matching elements
+        args.update(action="snapshot", interactive=True, find=" ".join(a.words))
+    elif b == "html" and a.scope:
+        args["scope"] = a.scope
     elif b == "screenshot":
         args.update(full=a.full, cursor=a.cursor)
     elif b == "click":
@@ -5004,7 +5018,11 @@ def _snapshot_lines(s, title=True):
     else:
         out += s["lines"] or ["(no interactive element in view of the snapshot)"]
     if s.get("more"):
-        out.append(f"... {s['more']} more: --scope '<css>' for a part of the page, or --max <n>")
+        out.append(f"... {s['more']} more: --region <name> or --scope '<css>' for a part of the page, or --max <n>")
+    if s.get("outside"):  # #5671: the default lists what shows in the window
+        regs = "|".join(s.get("regions") or []) or "name"
+        out.append(f"... {s['outside']} more out of the window: --all, --region <{regs}>, or maxpm browser find "
+                   f"\"<word>\"")
     if s.get("frames"):
         out.append(f"({s['frames']} frame{'s' if s['frames'] > 1 else ''} not listed: open the frame's address)")
     return out
@@ -5056,8 +5074,8 @@ def render_browser(a, res):
             raise RiverError(f"the batch stopped at line {len(res['steps'])}"
                              + (f"; the {left} after it did not run" if left else ""))
         return
-    if b == "snapshot" or b in BROWSER_ACTS:
-        print("\n".join(_browser_result(b, res)))
+    if b in ("snapshot", "find") or b in BROWSER_ACTS:
+        print("\n".join(_browser_result("snapshot" if b == "find" else b, res)))
         return
     if b == "html" and "html" in res:
         print(res["html"])

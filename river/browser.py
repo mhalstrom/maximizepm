@@ -2660,12 +2660,36 @@ SNAP_WORLD = "maxpm"
 # It runs in a world of its own (Page.createIsolatedWorld): the page's scripts do not see the refs, and a new
 # document ends the world, so a ref of an earlier page fails instead of naming another element. A ref stays with its
 # element while the element stays: a later snapshot of the same page gives it the same ref.
-SNAP_JS = r"""(function (scope, all, start, delta, max) {
+# #5671: by default it lists what is in the view (o.view), with a last line that counts the rest; o.region lists one
+# region of the page (nav, main, a label or a heading), o.find the elements whose name or context holds the words.
+# Repeated rows (siblings of the same structure, as the stories of Hacker News) print one line each, and a name that
+# says too little (empty, one sign, or the same as another's) gets its row, card or column, then a test id or class.
+SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
+  o = o || {};
   const R = window.__maxpm || (window.__maxpm = {ref: new WeakMap(), els: new Map(), last: null});
-  let root = document.documentElement;
+  const REGION = 'header,nav,main,footer,aside,dialog,[role=banner],[role=navigation],[role=main],[role=contentinfo],' +
+    '[role=complementary],[role=dialog],[role=alertdialog],[role=search],[role=menu],[role=form]';
+  const KIND = {HEADER: 'header', NAV: 'nav', MAIN: 'main', FOOTER: 'footer', ASIDE: 'aside', DIALOG: 'dialog',
+    banner: 'header', navigation: 'nav', main: 'main', contentinfo: 'footer', complementary: 'aside', dialog: 'dialog',
+    alertdialog: 'dialog', search: 'search', menu: 'menu', form: 'form'};
+  const kindOf = r => KIND[(r.getAttribute('role') || '').trim()] || KIND[r.tagName] || 'region';
+  const regionName = r => { const l = (r.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    return kindOf(r) + (l ? ' ' + JSON.stringify(l.slice(0, 30)) : ''); };
+  let root = document.documentElement, scoped = false;
   if (scope) {
     try { root = document.querySelector(scope); } catch (e) { return {error: 'not a CSS selector: ' + scope}; }
     if (!root) return {error: 'no element matches ' + scope};
+    scoped = true;
+  }
+  const regions = () => Array.from(document.querySelectorAll(REGION)).filter(r => r.getClientRects().length);
+  if (o.region) {
+    const want = o.region.toLowerCase().trim(), rs = regions();
+    const head = r => { const h = r.querySelector('h1,h2,h3,h4,h5,h6'); return h ? h.textContent.toLowerCase() : ''; };
+    root = rs.find(r => kindOf(r) === want) || rs.find(r => regionName(r).toLowerCase().includes(want))
+      || rs.find(r => head(r).includes(want));
+    if (!root) return {error: 'no region ' + JSON.stringify(o.region) + ' on the page; it has ' +
+      (Array.from(new Set(rs.map(regionName))).slice(0, 12).join(', ') || 'none: use --all or --scope <css>')};
+    scoped = true;
   }
   const SEL = 'a[href],button,input,select,textarea,summary,[contenteditable=""],[contenteditable=true],[onclick],' +
     '[tabindex]:not([tabindex="-1"]),[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],' +
@@ -2702,8 +2726,9 @@ SNAP_JS = r"""(function (scope, all, start, delta, max) {
     if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return e.placeholder || e.title || e.name || '';
     s = text(e);
     if (!s || !s.trim()) {
-      const i = e.querySelector('img[alt],[aria-label],[title]');
-      s = i ? (i.getAttribute('alt') || i.getAttribute('aria-label') || i.getAttribute('title')) : '';
+      const i = e.querySelector('img[alt],[aria-label],[title],svg title');
+      s = i ? (i.tagName.toLowerCase() === 'title' ? i.textContent
+        : i.getAttribute('alt') || i.getAttribute('aria-label') || i.getAttribute('title')) : '';
     }
     return s || e.title || '';
   };
@@ -2721,39 +2746,187 @@ SNAP_JS = r"""(function (scope, all, start, delta, max) {
     if (r === 'link' && !name(e).trim()) s += ' href=' + JSON.stringify(cut(e.getAttribute('href'), 50));
     return s;
   };
-  const lines = [], now = {};
-  let n = start, more = 0, frames = 0;
+  // The context of an element whose name says too little: the first heading or text of its row, card or list item
+  // (not its own), or the header of its table column; else a test id or a class (icon-trash).
+  const CONT = 'li,tr,article,section,fieldset,dialog,dd,[role=row],[role=listitem],[role=dialog],[role=article],' +
+    '[role=gridcell],[role=group]';
+  const firstText = (c, skip) => {
+    const h = c.querySelector('h1,h2,h3,h4,h5,h6,legend,caption,[role=heading]');
+    if (h && !h.contains(skip) && !skip.contains(h) && text(h).trim()) return cut(text(h), 40);
+    const w = document.createTreeWalker(c, NodeFilter.SHOW_TEXT);
+    for (let t = w.nextNode(); t; t = w.nextNode()) {
+      if (skip.contains(t)) continue;
+      const s = t.textContent.replace(/\s+/g, ' ').trim();
+      if (/[\p{L}\p{N}]{2,}/u.test(s) && t.parentElement && t.parentElement.getClientRects().length) return cut(s, 40);
+    }
+    return '';
+  };
+  const context = (e, own) => {
+    for (let c = e.parentElement, i = 0; c && c !== document.body && i < 8; c = c.parentElement, i++) {
+      if (!c.matches(CONT)) continue;
+      const t = firstText(c, e);
+      if (t && t !== own) return t;
+    }
+    return '';
+  };
+  const column = e => {
+    const td = e.closest('td'), tb = td && td.closest('table');
+    const hr = tb && (tb.querySelector('thead tr') || tb.rows[0]), th = hr && hr.cells[td.cellIndex];
+    return th && th.tagName === 'TH' && !th.contains(e) ? cut(text(th), 30) : '';
+  };
+  const hint = e => {
+    const t = e.getAttribute('data-testid') || e.getAttribute('data-test') || e.getAttribute('data-qa');
+    if (t) return ' testid=' + cut(t, 30);
+    const c = e.querySelector('[class]'), cls = Array.from(e.classList).concat(c ? Array.from(c.classList) : []);
+    const k = cls.find(x => /icon|ico-|fa-|close|delete|trash|edit|menu|search|arrow|vote|like|share|more/i.test(x)) || cls[0];
+    return k ? ' class=' + cut(k, 30) : '';
+  };
+  const weak = s => !/[\p{L}\p{N}]{2,}/u.test(s);
+  // Rows: the children of one parent whose structure (tag and classes) repeats, in chunks of 1 to 3 children (a story
+  // of Hacker News is three rows of a table), at least 3 times.
+  const sig = e => e.tagName + '.' + Array.from(e.classList).sort().join('.');
+  const groups = new Map();
+  let gid = 0;
+  const groupOf = p => {
+    if (groups.has(p)) return groups.get(p);
+    let best = null;
+    const ch = p.children;
+    if (ch.length >= 3 && ch.length <= 3000) {
+      const s = Array.from(ch, sig);
+      for (let per = 1; per <= 3; per++) {
+        for (let off = 0; off < per; off++) {
+          let runAt = off, run = 0, prev = null;
+          for (let i = off; i + per <= s.length; i += per) {
+            const k = s.slice(i, i + per).join('|');
+            if (per > 1 && s.slice(i, i + per).every(x => x === s[i])) { prev = null; run = 0; continue; }
+            if (k === prev) run++; else { prev = k; run = 1; runAt = i; }
+            if (run >= 3 && (!best || run * per > best.n * best.per || (run * per === best.n * best.per && per < best.per)))
+              best = {at: runAt, per, n: run};
+          }
+        }
+      }
+    }
+    if (best) {
+      best.id = ++gid;
+      best.idx = new Map();
+      for (let i = best.at; i < best.at + best.n * best.per; i++) best.idx.set(ch[i], Math.floor((i - best.at) / best.per));
+    }
+    groups.set(p, best);
+    return best;
+  };
+  const chain = e => {  // the groups that hold e, nearest first, with its row in each
+    const out = [];
+    for (let a = e, i = 0; a && a.parentElement && i < 12; a = a.parentElement, i++) {
+      const g = groupOf(a.parentElement);
+      if (g && g.idx.has(a)) out.push({g, row: g.idx.get(a)});
+    }
+    return out;
+  };
+  const inView = e => {
+    const r = e.getBoundingClientRect();
+    return r.width + r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+  };
+  const view = o.view && !scoped && !o.find && !delta;
+  const words = o.find ? [o.find.toLowerCase().replace(/\s+/g, ' ').trim()] : null;  // the words as one phrase
+  const items = [], now = {};
+  let n = start, more = 0, outside = 0, frames = 0;
   const visit = node => {
     const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
     for (let e = w.currentNode; e; e = w.nextNode()) {
       if (e.nodeType !== 1) continue;  // a shadow root
-      const head = all && /^H[1-6]$/.test(e.tagName);
+      const head = all && !words && /^H[1-6]$/.test(e.tagName);
       if (e.tagName === 'IFRAME' && shown(e)) frames++;
-      else if ((head || e.matches(SEL)) && !(e.tagName === 'INPUT' && e.type === 'hidden') && shown(e)) {
-        if (lines.length >= max) { more++; }
-        else if (head) lines.push('#'.repeat(+e.tagName[1]) + ' ' + cut(text(e), 80));
-        else {
-          let ref = R.ref.get(e);
-          if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
-          R.els.set(ref, new WeakRef(e));
-          const r = role(e), line = '@' + ref + ' ' + r + ' ' + JSON.stringify(cut(name(e), 60)) + extra(e, r);
-          now[ref] = line;
-          lines.push(line);
-        }
+      else if ((head || e.matches(SEL)) && !(e.tagName === 'INPUT' && e.type === 'hidden')) {
+        if (view && !inView(e)) { if (e.getClientRects().length) outside++; }
+        else if (!shown(e)) { /* hidden */ }
+        else if (head) items.push({head: '#'.repeat(+e.tagName[1]) + ' ' + cut(text(e), 80), e});
+        else add(e);
       }
       if (e.shadowRoot) visit(e.shadowRoot);
     }
   };
+  const add = e => {
+    const r = role(e), nm = cut(name(e), 60);
+    if (words) {
+      const hay = (r + ' ' + nm + ' ' + context(e, nm) + ' ' + column(e)).toLowerCase();
+      if (!words.every(x => hay.includes(x))) return;
+    }
+    if (items.length >= max) { more++; return; }
+    let ref = R.ref.get(e);
+    if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
+    R.els.set(ref, new WeakRef(e));
+    const x = extra(e, r);
+    now[ref] = '@' + ref + ' ' + r + ' ' + JSON.stringify(nm) + x;
+    items.push({e, ref, r, nm, x});
+  };
   visit(root);
   for (const [k, w] of R.els) { const e = w.deref(); if (!e || !e.isConnected) R.els.delete(k); }
-  const out = {lines, more, frames, next: n, url: location.href, title: document.title};
+  const out = {lines: [], more, outside, frames, next: n, url: location.href, title: document.title};
   const last = R.last && R.last.scope === scope ? R.last.lines : null;
-  if (delta && last) {
-    out.delta = true;
-    out.lines = lines.filter(l => !l.startsWith('@') || last[l.split(' ')[0].slice(1)] !== l);
-    out.removed = Object.keys(last).filter(k => !(k in now)).map(k => '@' + k);
-  }
   R.last = {scope, lines: now};
+  if (delta && last) {  // one line for each element that is new or changed, not folded
+    out.delta = true;
+    out.lines = items.filter(i => i.head || last[i.ref] !== now[i.ref]).map(i => i.head || now[i.ref]);
+    out.removed = Object.keys(last).filter(k => !(k in now)).map(k => '@' + k);
+    return out;
+  }
+  if (outside) out.regions = Array.from(new Set(regions().map(kindOf))).slice(0, 8);
+  // Each element goes to its nearest group whose rows hold two or more listed elements on average (a list of single
+  // links stays one line each).
+  if (!words) {
+    const per = new Map(), chains = items.map(i => i.ref ? chain(i.e) : []);
+    chains.forEach(c => c.forEach(({g, row}) => { const k = g.id + ':' + row; per.set(k, (per.get(k) || 0) + 1); }));
+    const rows = new Map();
+    per.forEach((v, k) => { const id = k.split(':')[0]; const a = rows.get(id) || [0, 0]; a[0]++; a[1] += v; rows.set(id, a); });
+    items.forEach((i, x) => {
+      const c = chains[x].find(({g}) => { const a = rows.get(String(g.id)); return a && a[0] >= 2 && a[1] / a[0] >= 2; });
+      if (c) { i.g = c.g; i.row = c.row; }
+    });
+    items.forEach((i, x) => {  // a heading inside a row joins the row
+      if (i.head) { const c = chain(i.e).find(({g}) => items.some(j => j.g === g)); if (c) { i.g = c.g; i.row = c.row; } }
+    });
+  }
+  const label = i => '@' + i.ref + (i.r === 'link' ? '' : ' ' + i.r) + ' ' + JSON.stringify(i.nm) + i.x;
+  const solo = items.filter(i => i.ref && !i.g), seen = new Map();
+  solo.forEach(i => { const k = i.r + i.nm; seen.set(k, (seen.get(k) || 0) + 1); });
+  const plain = i => {
+    let s = '@' + i.ref + ' ' + i.r + ' ' + JSON.stringify(i.nm) + i.x;
+    const low = i.nm.toLowerCase();  // find: an element that matched by its row or column shows that row or column
+    if (weak(i.nm) || seen.get(i.r + i.nm) > 1 || (words && !words.every(w => low.includes(w)))) {
+      const c = context(i.e, i.nm), col = column(i.e);
+      if (c) s += ' (in ' + JSON.stringify(c) + ')';
+      if (col) s += ' (column ' + JSON.stringify(col) + ')';
+      if (!c && !col && weak(i.nm)) s += hint(i.e);
+    }
+    return s;
+  };
+  let region = null;
+  const at = e => { const r = e.closest(REGION); if (r !== region) { region = r; if (r && !scoped) out.lines.push('[' + regionName(r) + ']'); } };
+  for (let x = 0; x < items.length;) {
+    const i = items[x];
+    at(i.e);
+    if (!i.g) { out.lines.push(i.head || plain(i)); x++; continue; }
+    let y = x;  // the block: the items of this group that follow each other
+    while (y < items.length && items[y].g === i.g) y++;
+    const block = items.slice(x, y), byRow = new Map();
+    block.forEach(j => { if (!byRow.has(j.row)) byRow.set(j.row, []); byRow.get(j.row).push(j); });
+    const keys = it => it.filter(j => j.ref).map(j => j.r + ' ' + j.nm);
+    let same = null;  // the names that every row has: printed once, in the head
+    if (byRow.size >= 2) byRow.forEach(r => { const k = new Set(keys(r)); same = same ? new Set([...same].filter(s => k.has(s))) : k; });
+    same = same ? [...same] : [];
+    const first = [...byRow.values()][0], tell = s => {  // a weak name in the head: its role and test id or class
+      const j = first.find(j => j.ref && j.r + ' ' + j.nm === s);
+      return weak(j.nm) ? (j.r + hint(j.e)).trim() : JSON.stringify(j.nm);
+    };
+    out.lines.push(byRow.size + (byRow.size < i.g.n ? ' of ' + i.g.n : '') + ' rows' +
+      (same.length ? ' (each ends with ' + same.map(tell).join(', ') + ')' : '') + ':');
+    byRow.forEach((r, k) => {
+      const ends = same.map(s => r.find(j => j.ref && j.r + ' ' + j.nm === s)).filter(Boolean);
+      const mid = r.filter(j => !ends.includes(j)).map(j => j.head ? JSON.stringify(j.head.replace(/^#+ /, '')) : label(j));
+      out.lines.push('  ' + (k + 1) + '. ' + mid.join(' ') + (ends.length ? ' · ' + ends.map(j => '@' + j.ref).join(' ') : ''));
+    });
+    x = y;
+  }
   return out;
 })"""
 
@@ -2798,13 +2971,15 @@ def in_world(b, expr, create=True):
     return NO_WORLD
 
 
-def snapshot(b, interactive=False, scope=None, delta=False, limit=SNAP_MAX):
+def snapshot(b, interactive=False, scope=None, delta=False, limit=SNAP_MAX, view=True, region=None, find=None):
     """The page's interactive elements as short lines, each with a ref; without interactive, its headings too.
     delta: only the lines that are new or changed since the last snapshot of the same page and scope, and the refs
-    that went."""
+    that went. #5671: view (the default) lists what shows in the window and counts the rest; region: one region of
+    the page; find: the elements whose name or context holds the words (as one phrase), anywhere on the page."""
     loading(b)
-    r = in_world(b,"(%s)(%s, %s, %d, %s, %d)" % (SNAP_JS, json.dumps(scope), json.dumps(not interactive), b.refs,
-                                                  json.dumps(bool(delta)), int(limit)))
+    opts = {"view": bool(view), "region": region or None, "find": find or None}
+    r = in_world(b, "(%s)(%s, %s, %d, %s, %d, %s)" % (SNAP_JS, json.dumps(scope), json.dumps(not interactive), b.refs,
+                                                       json.dumps(bool(delta)), int(limit), json.dumps(opts)))
     if r is NO_WORLD or not isinstance(r, dict):
         raise RiverError("the page did not answer the snapshot: run maxpm browser snapshot again")
     if r.get("error"):

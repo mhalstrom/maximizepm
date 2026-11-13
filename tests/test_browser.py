@@ -570,11 +570,30 @@ class Command(Base):
         self.assertEqual((a["interactive"], a["scope"], a["delta"]), (True, "form", False))
         self.assertEqual(out.splitlines(), [
             "page: Form  https://x.test/", "# Sign up", '@e1 textbox "Name" value="Bob"',
-            "... 3 more: --scope '<css>' for a part of the page, or --max <n>",
+            "... 3 more: --region <name> or --scope '<css>' for a part of the page, or --max <n>",
             "(1 frame not listed: open the frame's address)"])
         _, out = self.asked("snapshot", "--delta", res={"snapshot": {**snap, "delta": True, "lines": [], "more": 0,
                                                                      "frames": 0, "removed": ["@e2", "@e4"]}})
         self.assertEqual(out.splitlines()[1:], ["(no new or changed element)", "gone: @e2 @e4"])
+
+    def test_the_window_a_region_find_and_html_scope(self):
+        """#5671: the default lists the window and names the way to the rest; --all, --region and find; html --scope
+        says the size apart from the HTML."""
+        snap = {"lines": ['@e1 link "Home"'], "more": 0, "outside": 40, "regions": ["nav", "main"], "frames": 0,
+                "url": "u", "title": "T"}
+        a, out = self.asked("snapshot", "-i", res={"snapshot": snap})
+        self.assertEqual((a["all"], a["region"]), (False, None))
+        self.assertEqual(out.splitlines()[-1], '... 40 more out of the window: --all, --region <nav|main>, or maxpm '
+                                               'browser find "<word>"')
+        a, _ = self.asked("snapshot", "--all", "--region", "main", res={"snapshot": snap})
+        self.assertEqual((a["all"], a["region"]), (True, "main"))
+        a, out = self.asked("find", "invoice", "1042", res={"snapshot": {**snap, "outside": 0}})
+        self.assertEqual((a["action"], a["find"], a["interactive"]), ("snapshot", "invoice 1042", True))
+        self.assertEqual(out.splitlines(), ["page: T  u", '@e1 link "Home"'])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            a, out = self.asked("html", "--scope", "@e3", res={"html": "<b>x</b>", "bytes": 8})
+        self.assertEqual((a["scope"], out.strip(), err.getvalue().strip()), ("@e3", "<b>x</b>", "maxpm: 8 bytes of HTML"))
 
     def test_batch_sends_the_lines_as_one_request(self):
         f = os.path.join(self.tmp.name, "steps")
@@ -1553,6 +1572,75 @@ class AgentActions(Base):
                          [(False, "back"), (False, "snapshot"), (True, "click")])
         self.assertEqual((res["ok"], res["left"], res["steps"][0]["result"]["url"]), (False, 1, f"http://127.0.0.1:{port}/one"))
         self.assertIn("is no longer on the page", res["steps"][2]["error"])
+
+
+LONG = (b"<title>Invoices</title><nav aria-label=Site><a href=/>Home</a> <a href=/help>Help</a></nav><main>"
+        b"<table><thead><tr><th>Invoice</th><th>Status</th><th>Actions</th></tr></thead><tbody>"
+        + b"".join(b"<tr><td><a href=/i/%d>Invoice %d</a></td><td>paid</td><td><button>Edit</button>"
+                   b"<button class='btn icon-trash' title=''></button></td></tr>" % (n, n) for n in (1041, 1042, 1043))
+        + b"</tbody></table><section><h2>Card A</h2><button>Remove</button></section>"
+          b"<section><h2>Card B</h2><button>Remove</button></section><button data-testid=chat-open></button>"
+          b"<div style='height:3000px'></div>"
+        + b"".join(b"<a href=/far/%d>Far link %d</a> " % (n, n) for n in range(25)) + b"</main>")
+
+
+class SnapshotLimits(Base):
+    """#5671 in a real Chrome: the window by default with a count of the rest, repeated rows folded with the names
+    that every row has once, a name that says too little with its card or a test id, a region, find, html --scope."""
+
+    def test_the_window_rows_context_region_find_and_html_scope(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(LONG)))
+                self.end_headers()
+                self.wfile.write(LONG)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/")
+        s = act(action="snapshot", interactive=True)["snapshot"]
+        text = "\n".join(s["lines"])
+        self.assertEqual((s["outside"], s["regions"]), (25, ["nav", "main"]), text)
+        self.assertNotIn("Far link", text)
+        self.assertEqual(s["lines"][0], '[nav "Site"]')
+        rows = [x for x in s["lines"] if x.startswith("  ")]
+        self.assertIn('3 rows (each ends with "Edit", button class=icon-trash):', s["lines"])
+        self.assertEqual(len(rows), 3, text)
+        self.assertRegex(rows[1], r'^  2\. @e\d+ "Invoice 1042" · @e\d+ @e\d+$')
+        self.assertRegex(text, r'@e\d+ button "Remove" \(in "Card A"\)\n@e\d+ button "Remove" \(in "Card B"\)')
+        self.assertRegex(text, r'@e\d+ button "" testid=chat-open')
+        # A region; find, also by the row's text; one element's HTML by its ref, with its size.
+        nav = act(action="snapshot", interactive=True, region="site")["snapshot"]["lines"]
+        self.assertEqual([x.split(" ", 1)[1] for x in nav], ['link "Home"', 'link "Help"'])
+        with self.assertRaisesRegex(RiverError, 'no region "footer" on the page; it has nav "Site", main'):
+            act(action="snapshot", region="footer")
+        found = act(action="snapshot", interactive=True, find="card b")["snapshot"]["lines"]
+        self.assertEqual(len(found), 2, found)  # the region line and the button
+        self.assertRegex(found[1], r'button "Remove" \(in "Card B"\)')
+        far = act(action="snapshot", interactive=True, find="far link 24")["snapshot"]["lines"]
+        self.assertRegex(far[-1], r'^@e\d+ link "Far link 24"$')
+        ref = rows[0].split()[1]
+        h = act(action="html", scope=ref)
+        self.assertEqual((h["html"], h["bytes"]), ('<a href="/i/1041">Invoice 1041</a>', 34))
+        everything = act(action="snapshot", interactive=True, all=True)["snapshot"]
+        self.assertEqual(everything["outside"], 0)
+        self.assertIn("Far link 24", "\n".join(everything["lines"]))
 
 
 BOXES = (b"<title>Boxes</title>"

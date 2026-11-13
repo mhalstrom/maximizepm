@@ -162,7 +162,8 @@ def _act(conn, a, who):
         return out
     if action == "snapshot":
         return browser.snapshot(b, bool(a.get("interactive")), a.get("scope") or None, bool(a.get("delta")),
-                                int(a.get("max") or browser.SNAP_MAX))
+                                int(a.get("max") or browser.SNAP_MAX), view=not a.get("all"),
+                                region=a.get("region") or None, find=a.get("find") or None)
     if action == "open":
         out = b.open(a.get("url") or "")
         if wait == "idle":
@@ -194,8 +195,10 @@ def _act(conn, a, who):
                                           wait=wait))
     if action == "eval":
         return {**b.info(), "value": b.evaluate(a.get("js") or "")}
-    if action == "html":
-        return {**b.info(), "html": b.evaluate("document.documentElement.outerHTML")}
+    if action == "html":  # #5671: --scope (a ref or a CSS selector) gives one part of the page, the fallback of a name
+        sc = a.get("scope")
+        html = browser.on_element(b, sc, "(el) => el.outerHTML") if sc else b.evaluate("document.documentElement.outerHTML")
+        return {**b.info(), "html": html, "bytes": len((html or "").encode())}
     if action == "text":
         return {**b.info(), "text": b.evaluate("document.body ? document.body.innerText : ''")}
     if action == "screenshot":
