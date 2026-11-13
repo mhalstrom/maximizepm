@@ -1109,6 +1109,31 @@ CREATE TABLE IF NOT EXISTS canvas_pages (
   checked_at     TEXT                         -- the last read of the responses (#5790)
 );
 
+-- The names of the secrets that sessions saved (#5757, river/vault.py), never their values: those are in the macOS
+-- Keychain (or secrets/ beside the queue). Readers: maxpm secret list, and get (an unknown name is refused).
+CREATE TABLE IF NOT EXISTS secrets (
+  name        TEXT PRIMARY KEY,
+  project_id  INTEGER REFERENCES projects(id),
+  note        TEXT,
+  created_by  TEXT,
+  created_at  TEXT NOT NULL,
+  updated_by  TEXT,
+  updated_at  TEXT,
+  used_by     TEXT,
+  used_at     TEXT,
+  uses        INTEGER NOT NULL DEFAULT 0
+);
+-- Each put, use and delete of a secret, by name, with who and the item they held (#5757). Reader: maxpm secret log.
+CREATE TABLE IF NOT EXISTS secret_log (
+  id       INTEGER PRIMARY KEY,
+  name     TEXT NOT NULL,
+  at       TEXT NOT NULL,
+  actor    TEXT NOT NULL,
+  action   TEXT NOT NULL,                     -- put | replace | use | delete
+  detail   TEXT,                              -- how it came (stdin, browser) or where it went (the command, the file)
+  item_id  INTEGER
+);
+
 -- The prompts that people sent to a session from the Sessions tab's message box (#4855): Up and Down in the box
 -- bring them back, newest first, on every device and through the relay. At most sessions.PROMPTS_KEEP a session.
 CREATE TABLE IF NOT EXISTS sent_prompts (

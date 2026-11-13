@@ -496,6 +496,18 @@ Each project has one browser; the user watches and uses it in your side panel.
 - Only the user signs in: never type a password.
 - The rest (pointer actions, extract, run, control): `maxpm browser -h`.
 
+## Secrets
+
+A token or key that a vendor page shows once: save it by name, so later steps can use it. No `maxpm secret`
+command prints a value; never print one yourself.
+
+- Save: `maxpm secret put <name> --from-browser "<field name>" [--match '<regex>']` (from the project's browser),
+  or pipe it in: `<command> | maxpm secret put <name>`. Add `--note "<what it is>"`.
+- Use: `maxpm secret pipe <name> -- wrangler secret put <VAR>` (the value on the command's stdin), or
+  `maxpm secret env <name> <file> [--key VAR]` (a `.env` line). `maxpm secret list` shows the names.
+- Only the person has it: add a person item `Run in a terminal: maxpm secret put <name>` (it asks for the
+  value, unseen) that blocks your item.
+
 ## Expert sessions
 
 An expert is a session that the user talks with for hours or days about one

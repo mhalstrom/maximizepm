@@ -1151,6 +1151,34 @@ def build_parser(only=None):
     rqs.add_parser("connect", help="print the address that connects MaximizePM to realquicksite (maxpm serve must run)")
     rqs.add_parser("disconnect", help="delete the key file (then click Remove on the realquicksite setup screen)")
 
+    se = sub.add_parser("secret", help="secrets saved by name (a token, a client secret, a key file) and passed to a "
+                        "command or a .env file; no command prints a value (#5757)")
+    ses = se.add_subparsers(dest="secmd", required=True)
+    x = ses.add_parser("put", help="save a value under a name: it asks for it (no echo), reads stdin, or reads the "
+                       "project's browser; a new value replaces the old one")
+    x.add_argument("name", help="letters, digits, '.', '_', '-': for example cloudflare-api-token")
+    x.add_argument("--from-browser", metavar="TARGET", help="read it from the project's browser: a field or text by its "
+                   "name as maxpm browser snapshot prints it, a ref (@e3), css:<selector>, or page (the whole text)")
+    x.add_argument("--match", help="with --from-browser: a regex over that text; its first group (else the match)")
+    x.add_argument("--in", dest="within", help="with --from-browser: the text of the row or card around the element")
+    x.add_argument("--project", help="the project it belongs to (default: this folder's)")
+    x.add_argument("--note", help="what it is and where it came from (never the value)")
+    x = ses.add_parser("pipe", help="run a command with the value on its stdin: maxpm secret pipe <name> -- wrangler "
+                       "secret put GOOGLE_CLIENT_SECRET")
+    x.add_argument("name")
+    x.add_argument("command", nargs=argparse.REMAINDER, help="the command, after --")
+    x = ses.add_parser("env", help="write NAME=value into a .env file (replaces that key's line, or adds it)")
+    x.add_argument("name")
+    x.add_argument("file", help="the .env file")
+    x.add_argument("--key", help="the variable (default: the name in capitals, '-' and '.' as '_')")
+    x = ses.add_parser("list", help="the names, their project, who saved and used each, when (never the values)")
+    x.add_argument("--project")
+    x = ses.add_parser("log", help="each put, use and delete, newest first")
+    x.add_argument("name", nargs="?")
+    x.add_argument("-n", type=int, default=30)
+    x = ses.add_parser("delete", help="delete the value and its name")
+    x.add_argument("name")
+
     gl = sub.add_parser("goal", help="goals: outcomes in a project that one agent owns and works toward")
     gls = gl.add_subparsers(dest="gcmd", required=True)
     x = gls.add_parser("add", help="maxpm goal add <project> <name> --outcome \"...\" --done-when \"...\"")
@@ -3737,6 +3765,8 @@ def dispatch(conn, a, actor):
         return _browser_cmd(conn, a, actor)
     if c == "canvas":
         return _canvas_dispatch(conn, a, actor)
+    if c == "secret":
+        return _secret_cmd(conn, a, actor)
     if c == "realquicksite":
         if a.rqcmd == "status":
             return core.rqs_status(conn)
@@ -5253,6 +5283,105 @@ def render_wait(res):
               + ". Stop now, and tell the user this session has ended and its tab can be closed.")
 
 
+def _secret_op(conn, args, actor, timeout=30):
+    """Op "secret" (routes/secrets.py) here, or through maxpm serve when this command cannot reach the store (the
+    Keychain from an agent's sandbox) or reads the project's browser, which runs in maxpm serve."""
+    from . import vault
+    if vault.needs_server() or args.get("from_browser") is not None:
+        return ask_server(conn, "secret", args, actor=actor, timeout=timeout)
+    from .routes import secrets
+    return secrets.act(conn, args, actor)
+
+
+def _secret_value(conn, name, actor, use):
+    import base64
+    return base64.b64decode(_secret_op(conn, {"action": "get", "name": name, "use": use}, actor)["value_b64"])
+
+
+def _secret_cmd(conn, a, actor):
+    """maxpm secret ... (#5757): no reply and no output of this command holds a value."""
+    import base64
+    import re
+    import shlex
+    import subprocess
+    from . import vault
+    cmd = a.secmd
+    if cmd == "put":
+        vault.check_name(a.name)
+        project = a.project
+        if not project:
+            here = core.projects_for_dir(conn, os.getcwd())
+            project = here[0]["name"] if len(here) == 1 else None
+        args = {"action": "put", "name": a.name, "project": project, "note": a.note}
+        if a.from_browser is not None:
+            return _secret_op(conn, {**args, "from_browser": a.from_browser, "match": a.match, "within": a.within,
+                                     "cwd": os.getcwd()}, actor, timeout=60)
+        if sys.stdin.isatty():
+            import getpass
+            data, how = getpass.getpass(f"The value of {a.name} (it is not shown): ").encode(), "typed"
+        else:
+            data, how = sys.stdin.buffer.read(), "stdin"
+        if not data:
+            raise RiverError("no value came: a person types it at the prompt of maxpm secret put <name> in a terminal; "
+                             "a session pipes it in (... | maxpm secret put <name>) or uses --from-browser")
+        return _secret_op(conn, {**args, "value_b64": base64.b64encode(data).decode(), "how": how}, actor)
+    if cmd == "pipe":
+        argv = a.command[1:] if a.command[:1] == ["--"] else a.command
+        if not argv:
+            raise RiverError("name the command after --: maxpm secret pipe <name> -- gh secret set <NAME>")
+        data = _secret_value(conn, a.name, actor, "pipe: " + shlex.join(argv))
+        try:
+            rc = subprocess.run(argv, input=data).returncode
+        except OSError as e:
+            raise RiverError(f"the command did not start: {e.strerror or e}")
+        if rc:
+            raise RiverError(f"{argv[0]} ended with exit {rc}; it read the secret {a.name} on its stdin")
+        return {"secret": a.name, "piped_to": shlex.join(argv), "exit": rc}
+    if cmd == "env":
+        key = a.key or re.sub(r"[^A-Za-z0-9_]", "_", a.name).upper()
+        if key[:1].isdigit():
+            key = "_" + key
+        data = _secret_value(conn, a.name, actor, f"env: {a.file} {key}")
+        out = vault.set_env_line(a.file, key, data)
+        return {"secret": a.name, "file": a.file, "key": key, **out}
+    if cmd == "list":
+        return _secret_op(conn, {"action": "list", "project": a.project}, actor)
+    if cmd == "log":
+        return _secret_op(conn, {"action": "log", "name": a.name, "limit": a.n}, actor)
+    if cmd == "delete":
+        return _secret_op(conn, {"action": "delete", "name": a.name}, actor)
+    raise RiverError(f"secret: no command {cmd}")
+
+
+def render_secret(a, res):
+    cmd = a.secmd
+    if cmd == "put":
+        print(f"saved secret {res['secret']}" + (" (it replaced the old value)" if res["replaced"] else "")
+              + f": {res['bytes']} bytes in the {res['store']} store. Give it to a command with "
+              f"maxpm secret pipe {res['secret']} -- <command>")
+    elif cmd == "pipe":
+        print(f"gave secret {res['secret']} to {res['piped_to']} on its stdin (exit 0)")
+    elif cmd == "env":
+        print(f"{'replaced' if res['replaced'] else 'added'} {res['key']} in {res['file']} from secret {res['secret']}")
+    elif cmd == "delete":
+        print(f"deleted secret {res['secret']}")
+    elif cmd == "list":
+        rows = res["secrets"]
+        if not rows:
+            print(f"no secrets ({res['store']} store). Save one: maxpm secret put <name>")
+        for r in rows:
+            used = f"used {r['uses']}x, last {core.show_time(r['used_at'])} by {r['used_by'] or 'a person'}" \
+                if r["uses"] else "never used"
+            print(f"  {r['name']:<28} {r['project'] or '-':<14} saved {core.show_time(r['updated_at'])} by "
+                  f"{r['updated_by'] or 'a person'}; {used}" + (f"  ({r['note']})" if r["note"] else ""))
+    elif cmd == "log":
+        for r in res["log"]:
+            print(f"  {core.show_time(r['at'])}  {r['name']:<24} {r['action']:<8} {r['actor']}"
+                  + (f"  #{r['item_id']}" if r["item_id"] else "") + (f"  {r['detail']}" if r["detail"] else ""))
+        if not res["log"]:
+            print("no puts or uses yet")
+
+
 def _canvas_dispatch(conn, a, actor):
     """maxpm canvas ...: the canvas operations of core (#4648); MCP and HTTP call the same functions."""
     v = a.cvcmd
@@ -6299,6 +6428,8 @@ def render(a, res):
         return render_browser(a, res)
     if c == "canvas":
         return render_canvas(a, res)
+    if c == "secret":
+        return render_secret(a, res)
     if c == "goal" and a.gcmd == "handoff":
         return render_handoff(res, a)
     if c == "goal" and a.gcmd == "base":

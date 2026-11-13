@@ -4659,8 +4659,8 @@ OPS = {
 
 def _view_routes():
     """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
-    from .routes import artifacts, browser, canvas, done, projects, sessions, settings, targets, terminal, you
-    views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal, browser)
+    from .routes import artifacts, browser, canvas, done, projects, secrets, sessions, settings, targets, terminal, you
+    views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal, browser, secrets)
     for v in views:
         for key in v.OPS:
             assert key not in OPS, key
