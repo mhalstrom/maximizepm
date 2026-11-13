@@ -200,6 +200,16 @@ def _reap_loop():
                     return
 
 
+# Chrome downloads its components and model files into each profile (#5716): about 125 MB in each of 9 profiles on
+# mark's Mac (2026-11-13: optimization_guide_model_store 47 MB, component_crx_cache 47 MB, WasmTtsEngine 25 MB,
+# OnDeviceHeadSuggestModel 8 MB), and each session's profile is new (#5636), so each session downloaded them again.
+# The panel's browser needs none of them. Puppeteer and Playwright start Chrome with --disable-component-update too;
+# Safe Browsing keeps its own updates (it is not a component).
+NO_DOWNLOADS = ("--disable-component-update",
+                "--disable-features=OptimizationGuideModelDownloading,OptimizationHintsFetching,"
+                "OptimizationTargetPrediction,OptimizationHints")
+
+
 def session_dir(project, owner):
     """The folder of one session's browser of a project (#5636): its own profile, downloads and state.json."""
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", owner).strip("._") or "session"
@@ -733,7 +743,7 @@ class Browser:
         w, h = VIEW
         args = [chrome, f"--user-data-dir={profile}", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
                 "--no-first-run", "--no-default-browser-check", "--disable-default-apps", "--disable-sync",
-                "--disable-blink-features=AutomationControlled",
+                "--disable-blink-features=AutomationControlled", *NO_DOWNLOADS,
                 f"--proxy-server=http://127.0.0.1:{self.proxy.port}", "--proxy-bypass-list=<-loopback>",
                 f"--window-size={w},{h}", "about:blank"]
         if not self.state.get("window"):

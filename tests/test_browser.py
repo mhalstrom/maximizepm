@@ -1464,6 +1464,11 @@ class RealChrome(Base):
         # The traits of a Chrome with a window (#5619): Google's search sent plain headless Chrome a CAPTCHA.
         self.assertEqual(b.evaluate("[navigator.webdriver, /Headless/.test(navigator.userAgent), outerWidth]"),
                          [False, False, browser.VIEW[0]])
+        if os.name != "nt":  # #5716: no component and model downloads into the profile; the page works as above
+            import subprocess
+            ran = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(b.state["pid"])], capture_output=True,
+                                 text=True).stdout
+            self.assertIn("--disable-component-update", ran)
         self.assertTrue(base64.b64decode(browser.screenshot(b)["png"]).startswith(b"\x89PNG"))
         f = browser.frame(b, 0, 5)
         self.assertEqual((f["frame"]["w"], f["frame"]["h"]), (640, 480))
