@@ -16,7 +16,7 @@
 // (components/itemView.js), an artifact too. The X of the last tab shows the Artifacts list (#4646); the panel's
 // own X closes it. Find (#4877): a box over the tab marks each place of the words in the canvas, item, list or file it
 // shows (in an HTML canvas through its helper script), with "n of m", Enter and Shift+Enter, and Esc.
-import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText, targetKey } from "../lib.js";
+import { $, esc, ago, clip, store, toast, act, actor, pageToken, copyText, targetKey, ownSignIn } from "../lib.js";
 import { canvasMarkdown, drawDiagrams } from "./canvasMd.js";
 import { chip } from "./chip.js";
 import { itemViewHtml } from "./itemView.js";
@@ -836,6 +836,7 @@ export function openInPanel(target, by) {
   target = String(target || "").trim().replace(/^#(\d+)$/, "item:$1");  // #12 in the address bar: the item
   if (!target) return;
   if (!isFile(target) && !itemOf(target) && !canvasOf(target) && !/^https?:\/\//i.test(target)) return toast("The side panel opens a web address (http, https), a full file path, an item (#12), or a canvas (canvas:3)", true);
+  if (ownSignIn(target)) { window.open(target, "_blank", "noopener"); return; }  // the person's own browser (#5804)
   reveal(true);
   if (isWeb(target)) return openBrowserTab(target);  // every site shows and works there (#5628)
   // The same thing again, from any link, list, or session: its tab shows and reads it again (#5000).

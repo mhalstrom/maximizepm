@@ -1,4 +1,4 @@
-import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, left, getJson } from "./lib.js";
+import { $, esc, store, actor, toast, act, clip, fillSelect, hooks, artId, ago, left, getJson, ownSignIn } from "./lib.js";
 import { chip, prioNumChip, doerChip, projectChip, personChip } from "./components/chip.js";
 import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
@@ -812,6 +812,8 @@ async function openArtifact(session, id) {
 window.addEventListener("popstate", openFromUrl);
 // A link to a session's file or page anywhere on the page (#4689): the Sessions tab, that session, its side panel.
 window.riverOpenInPanel = async (session, target) => {
+  // A page with the person's own sign-in opens in a new tab in the click itself, before an await can lose it (#5804).
+  if (ownSignIn(target)) return openInPanel(target, session);
   if (tab !== "sessions") await setTab("sessions");
   if (session) sessionsTab.pick(session);
   openInPanel(target, session);

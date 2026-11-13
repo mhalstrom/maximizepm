@@ -101,6 +101,17 @@ export function targetKey(target) {
   return s;
 }
 
+// A realquicksite page needs the person's own Google sign-in (#5804, mark 2026-11-13): it opens in a new tab of the
+// person's browser (the desktop app hands it to the system browser), never in the project's browser of the side
+// panel, which has none of the person's sign-ins.
+export function ownSignIn(target) {
+  let u;
+  try { u = new URL(String(target || "").trim()); } catch (e) { return false; }
+  if (!/^https?:$/.test(u.protocol)) return false;
+  const host = u.hostname.toLowerCase();
+  return host === "realquicksite.com" || host.endsWith(".realquicksite.com");
+}
+
 // The id of an artifact in the page's address (#4653): a short hash of its target (a file path or a web address),
 // the same in every browser, so /sessions/<session>/artifacts/<id> names one thing. 53 bits (cyrb53), in base 36.
 export function artId(target) {

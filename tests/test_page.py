@@ -1648,6 +1648,13 @@ try {
     await until(() => where() === "/sessions/ag/artifacts/" + id, "the artifact in the address: " + where());
     openInPanel("http://127.0.0.1:9/other");
     await until(() => where() === "/sessions/ag/artifacts/" + artId("http://127.0.0.1:9/other"), "another tab: " + where());
+    // #5804: a realquicksite page needs the person's own sign-in: a new tab of the browser, not the panel.
+    const opened = [], open = window.open;
+    window.open = (u) => { opened.push(u); return null; };
+    openInPanel("https://p1.realquicksite.com/a");
+    window.open = open;
+    check(opened[0] === "https://p1.realquicksite.com/a" && where() === "/sessions/ag/artifacts/" + artId("http://127.0.0.1:9/other"),
+          "a realquicksite page opens in a new tab: " + JSON.stringify(opened) + " " + where());
     [...document.querySelectorAll("#spTabs .sp-tab-l")].find(b => b.textContent.includes("plan.md")).click();
     await until(() => where() === "/sessions/ag/artifacts/" + id, "a click on a tab: " + where());
     sessionStorage.setItem("step", "reload");

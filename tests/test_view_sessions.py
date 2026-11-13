@@ -2361,6 +2361,26 @@ class SideFiles(Base):
                                                      "/a/b", "http://localhost:5173/", "http://localhost:5173/#/a"], js.stderr)
             self.assertEqual([sessions.artifact_key(x) for x in cases[:3]], json.loads(js.stdout)[:3])
 
+    def test_a_page_with_the_persons_own_sign_in_opens_outside_the_project_browser(self):
+        # #5804: realquicksite pages open in a new tab of the person's browser; a claude.ai artifact stays in the
+        # project browser (#5628).
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("no node")
+        lib = (Path(server.__file__).parent / "static" / "lib.js").as_uri()
+        cases = {"https://p1.realquicksite.com/a": True, "https://my.realquicksite.com/x?y=1": True,
+                 "https://realquicksite.com/": True, "https://P2.RealQuickSite.com/b": True,
+                 "https://claude.ai/artifact/9bimT1": False, "https://claude.ai/new": False,
+                 "https://evilrealquicksite.com/": False, "https://realquicksite.com.evil.io/": False,
+                 "http://127.0.0.1:5173/": False, "https://example.com/": False, "/a/b.md": False, "canvas:3": False}
+        js = subprocess.run([node, "--input-type=module", "-e",
+                             f"import {{ ownSignIn }} from {json.dumps(lib)}; "
+                             "console.log(JSON.stringify(JSON.parse(process.argv[1]).map(ownSignIn)))", json.dumps(list(cases))],
+                            capture_output=True, text=True, timeout=30)
+        self.assertEqual(dict(zip(cases, json.loads(js.stdout))), cases, js.stderr)
+
     def test_maxpm_artifacts_lists_and_shows_what_the_sessions_of_an_item_made(self):
         # #4838: a manager in the terminal: --item (what was made while the item was held), --since, show <n>, the
         # line in maxpm show, and the hint in the manager's findings for a Look at item.
