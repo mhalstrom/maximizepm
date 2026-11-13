@@ -5311,7 +5311,7 @@ def _secret_cmd(conn, a, actor):
         project = a.project
         if not project:
             here = core.projects_for_dir(conn, os.getcwd())
-            project = here[0]["name"] if len(here) == 1 else None
+            project = here[0] if len(here) == 1 else None
         args = {"action": "put", "name": a.name, "project": project, "note": a.note}
         if a.from_browser is not None:
             return _secret_op(conn, {**args, "from_browser": a.from_browser, "match": a.match, "within": a.within,

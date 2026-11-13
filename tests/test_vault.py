@@ -76,6 +76,15 @@ class Vault(unittest.TestCase):
         self.assertIn("use", out3)
         self.assertIn("put", out3)
 
+    def test_put_takes_the_project_of_the_folder(self):
+        core.project_add(self.c, "site", path=self.dir.name)
+        here = os.getcwd()
+        os.chdir(self.dir.name)
+        self.addCleanup(os.chdir, here)
+        rc, out = self.run_cli(["secret", "put", "k"], b"v")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(vault.listing(self.c)["secrets"][0]["project"], "site")
+
     def test_failed_command_is_an_error(self):
         self.run_cli(["secret", "put", "k"], b"v")
         rc, out = self.run_cli(["secret", "pipe", "k", "--", sys.executable, "-c", "import sys; sys.exit(3)"])
