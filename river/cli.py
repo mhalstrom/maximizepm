@@ -907,8 +907,11 @@ def build_parser(only=None):
                        "these words, with refs")
     x.add_argument("words", nargs="+")
     x = brs.add_parser("open", parents=[bp, ap], help="open an address in the tab the panel shows (and show the "
-                       "browser in your side panel)")
+                       "browser in your side panel); the reply is the page's outline")
     x.add_argument("url"); x.add_argument("--no-show", action="store_true", help="do not open it in your side panel")
+    x.add_argument("--no-outline", action="store_true", help="reply with the title and address only")
+    x = brs.add_parser("outline", parents=[bp], help="the page's regions with their counts of links, buttons, fields "
+                       "and rows, and its headings (about 0.5 KB)")
     x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab; prints the file's path")
     x.add_argument("--out", help="the file to write (default: a new file in the temporary folder)")
     x.add_argument("--full", action="store_true", help="the whole page, not only what shows")
@@ -2537,7 +2540,7 @@ def _browser_args(a):
     if getattr(a, "within", None):
         args["within"] = a.within
     if b == "open":
-        args.update(url=a.url, show=not a.no_show)
+        args.update(url=a.url, show=not a.no_show, outline=not a.no_outline)
     elif b == "snapshot":
         args.update(interactive=a.interactive, scope=a.scope, delta=a.delta, max=a.max, all=a.all, region=a.region)
     elif b == "find":  # #5671: a snapshot of the matching elements
@@ -5099,6 +5102,8 @@ def _browser_result(action, res):
                    + (f" (default {json.dumps(d['default'], ensure_ascii=False)})" if d.get("default") else "")
                    + ": maxpm browser dialog " + ('accept "<text>"' if d["type"] == "prompt" else "accept")
                    + ", or dismiss")
+    if res.get("outline"):  # #5670: the reply of open, and maxpm browser outline
+        out += res["outline"]
     if res.get("snapshot"):
         out += _snapshot_lines(res["snapshot"], title=False)
     return out
@@ -5122,7 +5127,7 @@ def render_browser(a, res):
             raise RiverError(f"the batch stopped at line {len(res['steps'])}"
                              + (f"; the {left} after it did not run" if left else ""))
         return
-    if b in ("snapshot", "find") or b in BROWSER_ACTS:
+    if b in ("snapshot", "find", "outline") or b in BROWSER_ACTS:
         print("\n".join(_browser_result("snapshot" if b == "find" else b, res)))
         return
     if b == "html" and "html" in res:

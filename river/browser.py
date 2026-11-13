@@ -2816,6 +2816,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     }
     if (best) {
       best.id = ++gid;
+      best.parent = p;
       best.idx = new Map();
       for (let i = best.at; i < best.at + best.n * best.per; i++) best.idx.set(ch[i], Math.floor((i - best.at) / best.per));
     }
@@ -2834,6 +2835,51 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const r = e.getBoundingClientRect();
     return r.width + r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
   };
+  // #5670: the outline, the map from which the agent picks a region or a section: each region with its counts of
+  // links, buttons, fields and repeated rows, and the headings h1 to h3 under it (OUTLINE_HEADS at most).
+  if (o.outline) {
+    const FIELD = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider',
+      'spinbutton', 'file']);
+    const regs = new Map(), heads = [], per = new Map(), els = [];
+    const at = e => { const r = e.closest(REGION); if (!regs.has(r)) regs.set(r, {link: 0, button: 0, field: 0, rows: 0, heads: []}); return regs.get(r); };
+    const look = node => {
+      const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+      for (let e = w.currentNode; e; e = w.nextNode()) {
+        if (e.nodeType !== 1) continue;
+        if (/^H[1-3]$/.test(e.tagName)) { if (shown(e) && text(e).trim()) { const h = [+e.tagName[1], cut(text(e), 50)]; heads.push(h); at(e).heads.push(h); } }
+        else if (e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden') && e.getClientRects().length) {
+          const r = role(e), c = at(e);
+          c[r === 'link' ? 'link' : FIELD.has(r) ? 'field' : 'button']++;
+          const ch = chain(e);
+          els.push(ch);
+          ch.forEach(({g, row}) => { const k = g.id + ':' + row; per.set(k, (per.get(k) || 0) + 1); });
+        }
+        if (e.shadowRoot) look(e.shadowRoot);
+      }
+    };
+    look(document.documentElement);
+    const fill = new Map();  // group id -> [rows with elements, elements]
+    per.forEach((v, k) => { const id = k.split(':')[0], a = fill.get(id) || [0, 0]; a[0]++; a[1] += v; fill.set(id, a); });
+    const counted = new Set();
+    els.forEach(ch => {
+      const c = ch.find(({g}) => { const a = fill.get(String(g.id)); return a && a[0] >= 2 && a[1] / a[0] >= 2; });
+      if (c && !counted.has(c.g)) { counted.add(c.g); at(c.g.parent).rows += c.g.n; }
+    });
+    // The headings to print: h1 and h2 first, then h3, in page order, OUTLINE_HEADS at most.
+    let keep = new Set(heads.filter(h => h[0] < 3).slice(0, o.heads));
+    heads.filter(h => h[0] === 3).slice(0, Math.max(0, o.heads - keep.size)).forEach(h => keep.add(h));
+    const lines = [], plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+    regs.forEach((c, r) => {
+      const nums = [c.link && plural(c.link, 'link'), c.button && plural(c.button, 'button'),
+        c.field && plural(c.field, 'field'), c.rows && plural(c.rows, 'row')].filter(Boolean);
+      const hs = c.heads.filter(h => keep.has(h));
+      if (!nums.length && !hs.length) return;
+      lines.push('[' + (r ? regionName(r) : 'page') + '] ' + (nums.join(', ') || 'no elements'));
+      hs.forEach(h => lines.push('  ' + '#'.repeat(h[0]) + ' ' + h[1]));
+    });
+    if (heads.length > keep.size) lines.push('(' + (heads.length - keep.size) + ' more headings: maxpm browser snapshot --all)');
+    return {lines, url: location.href, title: document.title};
+  }
   // #5667: the elements of the page with one name (and role), in a row, card or region whose text holds o.target.within;
   // each match gets a ref. A name that ends with … (as a snapshot cuts it) matches the names that start so.
   if (o.target) {
@@ -3056,6 +3102,20 @@ def as_ref(target):
 
 ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
          "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file", "clickable"}
+
+
+OUTLINE_HEADS = 12  # headings that an outline prints at most
+
+
+def outline(b, heads=OUTLINE_HEADS):
+    """#5670: the page's regions with their counts of links, buttons, fields and repeated rows, and its headings h1 to
+    h3: about 0.5 KB, from which the agent picks a region (snapshot --region) or a section."""
+    loading(b)
+    r = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps({"outline": True,
+                                                                                           "heads": int(heads)})))
+    if r is NO_WORLD or not isinstance(r, dict):
+        raise RiverError("the page did not answer the outline: run maxpm browser outline again")
+    return r
 
 
 def resolve_target(b, target, within=None, verb="click"):

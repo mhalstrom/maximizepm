@@ -605,6 +605,12 @@ class Command(Base):
         with contextlib.redirect_stderr(err):
             a, out = self.asked("html", "--scope", "@e3", res={"html": "<b>x</b>", "bytes": 8})
         self.assertEqual((a["scope"], out.strip(), err.getvalue().strip()), ("@e3", "<b>x</b>", "maxpm: 8 bytes of HTML"))
+        # #5670: open asks for the outline and prints it under the page line; --no-outline does not ask.
+        a, out = self.asked("open", "x.test", res={"title": "X", "url": "u", "outline": ["[main] 3 links"]})
+        self.assertEqual((a["outline"], out.splitlines()), (True, ["X  u", "[main] 3 links"]))
+        self.assertFalse(self.asked("open", "x.test", "--no-outline")[0]["outline"])
+        a, out = self.asked("outline", res={"title": "X", "url": "u", "outline": ["[page] 1 link"]})
+        self.assertEqual((a["action"], out.splitlines()), ("outline", ["X  u", "[page] 1 link"]))
 
     def test_batch_sends_the_lines_as_one_request(self):
         f = os.path.join(self.tmp.name, "steps")
@@ -1682,6 +1688,13 @@ class SnapshotLimits(Base):
         self.assertEqual(h["html"], '<a href="/i/1041">Invoice 1041</a>')
         out = act(action="click", selector="Help")
         self.assertEqual((out["navigated"], out["url"]), (True, f"http://127.0.0.1:{port}/help"))
+
+        # #5670: open replies with the outline (for a session; the pane asks for none); maxpm browser outline.
+        want = ['[nav "Site"] 2 links', "[main] 28 links, 9 buttons, 3 rows", "  ## Card A", "  ## Card B"]
+        self.assertEqual(act(action="open", url=f"http://127.0.0.1:{port}/", outline=True)["outline"], want)
+        self.assertNotIn("outline", act(action="open", url=f"http://127.0.0.1:{port}/"))
+        self.assertEqual(act(action="outline", heads=1)["outline"], want[:3] + ["(1 more headings: maxpm browser "
+                                                                                 "snapshot --all)"])
 
 
 BOXES = (b"<title>Boxes</title>"

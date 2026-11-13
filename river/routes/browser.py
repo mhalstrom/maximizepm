@@ -78,7 +78,7 @@ CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key",
            "tab", "new_tab", "close_tab", "dialog"}
 INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key"}  # a session's first one shows its panel
 # What a batch may hold (#5663): the actions whose answer is text.
-BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status"}
+BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status", "outline"}
 
 
 def batch(conn, a, who):
@@ -170,7 +170,11 @@ def _act(conn, a, who):
             browser.net_idle(b)
         if not person and a.get("show", True):
             _ask_open(project, who, who)
+        if a.get("outline", not person) and not out.get("dialog"):  # #5670: the map of the page; the pane needs none
+            out["outline"] = browser.outline(b)["lines"]
         return then(out)
+    if action == "outline":
+        return {**b.info(), "outline": browser.outline(b, int(a.get("heads") or browser.OUTLINE_HEADS))["lines"]}
     if action in ("click", "type", "fill", "select", "check", "uncheck") and a.get("selector"):
         # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named
         a = {**a, "selector": browser.resolve_target(b, a["selector"], a.get("within"), action)}
