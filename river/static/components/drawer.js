@@ -23,9 +23,9 @@ export function makeDrawer(el) {
   return api;
 }
 
-// A message on one line: kind, from, to, when, then the body.
+// A message on one line: kind, from, to, when, where it is (delivered, read, answered: #5685), then the body.
 export function msgLine(m) {
-  return `<div class="ev">${chip("c-p", esc(m.kind))} <b>${esc(m.from_agent)}</b> → ${esc(m.to_agent || "next holder")} · ${ago(m.created_at)}${m.state !== "open" && m.state !== "read" ? " · " + esc(m.state) : ""}<div class="body" style="white-space:pre-wrap">${esc(clip(m.body, 600))}</div></div>`;
+  return `<div class="ev">${chip("c-p", esc(m.kind))} <b>${esc(m.from_agent)}</b> → ${esc(m.to_agent || "next holder")} · ${ago(m.created_at)}${m.state !== "open" && m.state !== "read" ? " · " + esc(m.state) : ""}${m.delivery ? ` · <span class="muted">${esc(m.delivery)}</span>` : ""}<div class="body" style="white-space:pre-wrap">${esc(clip(m.body, 600))}</div></div>`;
 }
 
 // The tree of open work an item waits on, as text.

@@ -453,6 +453,13 @@ DEFAULT_SETTINGS = {
     # waits. On 2026-10-08, 141 of 181 wakes of the manager were for events that could wait. 0s: at once.
     "manage_wait_high": "10m",
     "manage_wait_low": "30m",
+    # A blocked message stays open for the manager until it answers it (an answer, send --reply, or an action on
+    # its item): each watch lists it at the top with its age, and the watch wakes the manager again for it
+    # manage_rewake after it last showed it, until manage_unanswered after the send. Then maxpm serve tells the
+    # sender that the manager has not answered, so the sender can ask the person (#5685: a manager read a watch
+    # output wrongly, and a blocked alert waited 18 minutes).
+    "manage_rewake": "2m",
+    "manage_unanswered": "10m",
     # The manager session's context: Claude Code compacts it at this size (claude --autocompact; 100k to 1M,
     # for example 200k). The session stays the same, with the same name and Remote Control link, and the next
     # maxpm manage briefing shows the queue again. A manager reads its whole context on each wake, so a small
@@ -821,7 +828,14 @@ CREATE TABLE IF NOT EXISTS messages (
   blocked     TEXT,  -- who said that its item stands still until the answer (BLOCKED_SIGNS); NULL: nobody
   asker_reminded TEXT, -- a question: when the Stop hook reminded its asker to close it (#5001)
   held_for    TEXT,  -- a question to a person: the manager that answers or forwards it first (#5307); NULL: the person has it
-  held_until  TEXT   -- then it goes to the person by itself (question_hold)
+  held_until  TEXT,  -- then it goes to the person by itself (question_hold)
+  -- The states of a message (#5685): sent (created_at), delivered (a watch, a wait or native delivery showed its
+  -- text to the receiving session), read (read_at: the session itself acted on it: inbox, thread, an answer, a
+  -- reply, or an action on its item), answered (a blocked message: answered_at, or state answered/accepted/declined).
+  delivered_at  TEXT,  -- the first time it was delivered
+  delivered_via TEXT,  -- how: watch, wait, native, read (it was read before any delivery)
+  shown_at      TEXT,  -- a blocked message to a manager: the last time a watch showed it (manage_rewake)
+  answered_at   TEXT   -- a blocked message: when the receiver answered it or acted on its item
 );
 
 -- Something needs a person: a human item became ready, or a question or alert went to a human.
@@ -1877,6 +1891,14 @@ def _migrate(conn):
     if "held_for" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
         conn.execute("ALTER TABLE messages ADD COLUMN held_for TEXT")
         conn.execute("ALTER TABLE messages ADD COLUMN held_until TEXT")
+    if "delivered_at" not in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
+        for col in ("delivered_at", "delivered_via", "shown_at", "answered_at"):
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
+        # Before #5685 a watch or a wait that printed a message marked it read: such a read is a delivery. The
+        # read time stays too, so old messages do not come back as unread.
+        conn.execute("UPDATE messages SET delivered_at=read_at, delivered_via='read' WHERE read_at IS NOT NULL")
+        # An old blocked message that was read counts as answered: else every watch would list them all.
+        conn.execute("UPDATE messages SET answered_at=read_at WHERE blocked IS NOT NULL AND read_at IS NOT NULL")
     if "fresh_start" not in icols:
         conn.execute("ALTER TABLE items ADD COLUMN fresh_start TEXT")
         conn.execute("DELETE FROM settings WHERE key='wake_after'")  # the pane wake of #729 is gone (#758)
@@ -2029,6 +2051,17 @@ def _event(conn, item_id, actor, change):
     if actor and actor != "maxpm" and conn.execute(
             "SELECT 1 FROM agents WHERE name=? AND role='manager'", (actor,)).fetchone():
         change += f" (by manager {actor})"
+    if actor and actor != "maxpm" and item_id is not None:
+        # An action of the receiver on a message's item reads the message, and answers it when it is blocked
+        # (#5685): the manager launched, queued or closed what the sender waits for. Only a message that was
+        # delivered: the receiver saw its text before it acted.
+        t = iso(now())
+        conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), "
+                     "state=CASE WHEN kind IN ('question','offer') OR state<>'open' THEN state ELSE 'read' END, "
+                     "answered_at=CASE WHEN blocked IS NULL THEN answered_at ELSE COALESCE(answered_at, ?) END "
+                     "WHERE item_id=? AND to_agent=? AND from_agent<>? AND delivered_at IS NOT NULL "
+                     "AND (read_at IS NULL OR (blocked IS NOT NULL AND answered_at IS NULL))",
+                     (t, t, item_id, actor, actor))
     via = EVENT_VIA.get()
     if via and actor and not actor.endswith(f"@{via}"):
         actor = f"{actor}@{via}"  # a command that came through the relay (mcp.Server.via): the history says so
@@ -2110,7 +2143,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
     if key not in DEFAULT_SETTINGS:
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
-            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "connect_within",
+            "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
             "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
     elif key == "expert_fresh_min":
@@ -15225,6 +15258,7 @@ def _msg_dict(r):
     m["unread"] = m["read_at"] is None
     m["level_set"] = bool(m.get("level"))  # the sender gave it
     m["level"] = m.get("level") or DEFAULT_LEVEL
+    m["delivery"] = delivery_text(m)  # for the sender: delivered, read, answered (#5685); the page shows it
     return m
 
 
@@ -15310,7 +15344,7 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
         if reply_to is not None:
             # Replying to a message means the sender read it.
             if conn.execute(f"SELECT 1 FROM messages m WHERE m.id=? AND {_TO_ME}", (reply_to, actor, actor)).fetchone():
-                _mark_read(conn, [reply_to])
+                _mark_answered(conn, [reply_to])  # and a blocked one leaves the unanswered list (#5685)
         if item is not None:
             _event(conn, item, actor, f"{kind} #{mid} to {to or 'the next holder'}")
     got = conn.execute("SELECT role FROM agents WHERE name=? AND kind='ai' AND platform IS NOT NULL",
@@ -15323,11 +15357,15 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
               else deliver_native(conn, to, _native_text(kind, actor, body.strip())))
         with tx(conn):
             conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
+            if st == "sent":
+                _mark_delivered(conn, [mid], "native")
     if held:
         # The manager's watch wakes at once for it (blocked); a platform with native_message brings it into the session.
         st = deliver_native(conn, held["manager"], _native_text("alert", "maxpm", held["body"]))
         with tx(conn):
             conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, held["alert"]))
+            if st == "sent":
+                _mark_delivered(conn, [held["alert"]], "native")
     res = message_show(conn, mid)
     if held:
         res["held_note"] = (f"held for the manager {held['manager']}: it answers you, or sends the question on to {to}; "
@@ -15381,8 +15419,9 @@ def _unhold_question(conn, q, why=None):
         return
     t = iso(now())
     conn.execute("UPDATE messages SET held_for=NULL, held_until=NULL WHERE id=?", (q["id"],))
-    conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state=CASE WHEN state='open' THEN 'read' ELSE state END "
-                 "WHERE reply_to=? AND from_agent='maxpm' AND kind='alert' AND to_agent=?", (t, q["id"], q["held_for"]))
+    conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state=CASE WHEN state='open' THEN 'read' ELSE state END, "
+                 "answered_at=COALESCE(answered_at, ?) "
+                 "WHERE reply_to=? AND from_agent='maxpm' AND kind='alert' AND to_agent=?", (t, t, q["id"], q["held_for"]))
     if why and q["item_id"] is not None:
         _event(conn, q["item_id"], "maxpm", f"question #{q['id']} goes to {q['to_agent']}: {why}")
 
@@ -15447,6 +15486,7 @@ def forward(conn, msg_id=None, note=None, actor=None, item=None, drop=False):
             _unhold_question(conn, q)
             conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state='read' WHERE id=?",
                          (iso(now()), msg_id))
+            _mark_answered(conn, [int(msg_id)])
             if q["item_id"] is not None:
                 _event(conn, q["item_id"], actor, f"closed alert #{msg_id} to {q['to_agent']} (the manager dealt with it)"
                        + (f": {note}" if note else ""))
@@ -15461,9 +15501,10 @@ def _unhold_item(conn, it, why):
     """Inside a tx. Person item it goes to the person (#5311): the manager forwarded it, or its hold ended. The
     manager's alert about it is read. '' marks the item as looked at, so it is not held a second time."""
     conn.execute("UPDATE items SET held_for='', held_until=NULL WHERE id=?", (it["id"],))
-    conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state=CASE WHEN state='open' THEN 'read' ELSE state END "
+    conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), state=CASE WHEN state='open' THEN 'read' ELSE state END, "
+                 "answered_at=COALESCE(answered_at, ?) "
                  "WHERE item_id=? AND from_agent='maxpm' AND kind='alert' AND to_agent=? AND reply_to IS NULL",
-                 (iso(now()), it["id"], it["held_for"]))
+                 (iso(now()), iso(now()), it["id"], it["held_for"]))
     if why:
         _event(conn, it["id"], "maxpm", f"goes to the person: {why}")
 
@@ -15587,10 +15628,13 @@ def _deliver_answer(conn, q, mid, sender, body, for_person=None):
     st = deliver_native(conn, q["from_agent"], answer_text(q, sender, body, for_person))
     how = "sent into its session" if st == "sent" else (
         ("" if st.startswith("no native channel") else f"native {st}; ") + "maxpm serve types it into its pane")
-    if st != "sent":
+    sent = st == "sent"
+    if not sent:
         st = ANSWER_TO_PANE
     with tx(conn):
         conn.execute("UPDATE messages SET native_status=? WHERE id=?", (st, mid))
+        if sent:
+            _mark_delivered(conn, [mid], "native")
         if q["item_id"] is not None:
             _event(conn, q["item_id"], "maxpm", f"answer #{mid} to {q['from_agent']}, which waits at its prompt: {how}")
 
@@ -15676,11 +15720,46 @@ def answered_in_chat(conn, agent, prompt, at=None):
 
 
 def _mark_read(conn, ids):
+    """Inside a tx. The receiving session acted on these messages itself (inbox, thread, a reply): read. A read
+    message is delivered too."""
     t = iso(now())
     for i in ids:
         # Questions and offers stay open until someone answers, accepts, or declines them.
-        conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), "
-                     "state=CASE WHEN kind IN ('question','offer') THEN state ELSE 'read' END WHERE id=?", (t, i))
+        conn.execute("UPDATE messages SET read_at=COALESCE(read_at, ?), delivered_at=COALESCE(delivered_at, ?), "
+                     "delivered_via=COALESCE(delivered_via, 'read'), "
+                     "state=CASE WHEN kind IN ('question','offer') THEN state ELSE 'read' END WHERE id=?", (t, t, i))
+
+
+def _mark_delivered(conn, ids, via):
+    """Inside a tx. A watch, a wait or native delivery (via) showed these messages to the receiving session: they
+    are delivered, not read (#5685). The manager's watch printed blocked alert #15707 and marked it read; the
+    manager missed it in the output, and nothing brought it back for 18 minutes."""
+    t = iso(now())
+    for i in ids:
+        conn.execute("UPDATE messages SET delivered_at=COALESCE(delivered_at, ?), delivered_via=COALESCE(delivered_via, ?), "
+                     "shown_at=CASE WHEN blocked IS NULL THEN shown_at ELSE ? END WHERE id=?", (t, via, t, i))
+
+
+def _mark_answered(conn, ids):
+    """Inside a tx. The receiver answered these messages (a reply, a forward): read, and a blocked one leaves the
+    list of unanswered messages."""
+    _mark_read(conn, ids)
+    t = iso(now())
+    for i in ids:
+        conn.execute("UPDATE messages SET answered_at=COALESCE(answered_at, ?) WHERE id=? AND blocked IS NOT NULL", (t, i))
+
+
+# A blocked message that waits for its receiver's answer (#5685): delivered, not answered, not closed.
+_UNANSWERED = ("m.blocked IS NOT NULL AND m.kind IN ('alert','question') AND m.delivered_at IS NOT NULL "
+               "AND m.answered_at IS NULL AND m.closed_at IS NULL AND m.state NOT IN ('answered','accepted','declined')")
+
+
+def unanswered(conn, actor):
+    """The blocked messages to the actor that it got and did not answer, oldest first: each watch of a manager
+    lists them at the top, with their age (#5685)."""
+    return [_msg_dict(r) for r in conn.execute(
+        f"SELECT m.*, i.title item_title FROM messages m LEFT JOIN items i ON i.id=m.item_id "
+        f"WHERE m.to_agent=? AND m.from_agent<>? AND {_UNANSWERED} ORDER BY m.id", (actor, actor))]
 
 
 def inbox(conn, actor, include_read=False, mark_read=True):
@@ -15731,15 +15810,19 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
         st = stop_request(conn, actor)
         if st:
             return {"result": "stop", "agent": actor, "stop": st, "messages": []}
-        # Unread only: an open question already read stays in the inbox and would wake it at once, every time.
-        if unread(conn, actor)["unread"]:
+        # Unread and not delivered only: an open question already read, or a message an earlier wait printed,
+        # stays in the inbox and would wake it at once, every time.
+        if unread(conn, actor)["new"]:
             try:
-                rows = inbox(conn, actor)
-            except RiverLocked:  # nothing is marked read: the next poll brings the messages
+                rows = inbox(conn, actor, mark_read=False)
+                new = [m for m in rows if m["unread"] and not m["delivered_at"]]
+                with tx(conn):  # printed is delivered, not read: the session reads it with its own command (#5685)
+                    _mark_delivered(conn, [m["id"] for m in new], "wait")
+            except RiverLocked:  # nothing is marked delivered: the next poll brings the messages
                 rows = None
             if rows is not None:
-                return {"result": "messages", "agent": actor, "messages": [m for m in rows if m["unread"]],
-                        "still_open": sum(1 for m in rows if not m["unread"])}
+                return {"result": "messages", "agent": actor, "messages": new,
+                        "still_open": len(rows) - len(new)}
         if now() >= deadline:
             return {"result": "timeout", "agent": actor, "messages": [], "waited": timeout or INBOX_WAIT}
         sleep(poll)
@@ -15761,16 +15844,17 @@ def has_native(conn, agent):
 def unread(conn, actor):
     """Counts for the line every command prints: unread messages and open questions to the actor."""
     if not actor:
-        return {"unread": 0, "alerts": 0, "questions": 0, "questions_waiting": 0, "nudge_after": ""}
+        return {"unread": 0, "new": 0, "alerts": 0, "questions": 0, "questions_waiting": 0, "nudge_after": ""}
     nudge = setting(conn, "question_nudge_after", agent=actor)
     old = iso(now() - parse_duration(nudge))
     r = conn.execute(
-        f"SELECT SUM(m.read_at IS NULL) unread, SUM(m.read_at IS NULL AND m.kind='alert') alerts, "
+        f"SELECT SUM(m.read_at IS NULL) unread, SUM(m.read_at IS NULL AND m.delivered_at IS NULL) new, "
+        f"SUM(m.read_at IS NULL AND m.kind='alert') alerts, "
         f"SUM(m.kind='question' AND m.state='open') questions, "
         f"SUM(m.kind='question' AND m.state='open' AND m.created_at <= ?) waiting "
         f"FROM messages m WHERE {_TO_ME} AND m.from_agent<>?",
         (old, actor, actor, actor)).fetchone()
-    return {"unread": r["unread"] or 0, "alerts": r["alerts"] or 0, "questions": r["questions"] or 0,
+    return {"unread": r["unread"] or 0, "new": r["new"] or 0, "alerts": r["alerts"] or 0, "questions": r["questions"] or 0,
             "questions_waiting": r["waiting"] or 0, "nudge_after": nudge}
 
 
@@ -20594,7 +20678,8 @@ def manage(conn, cwd, actor=None, takeover=None):
 def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     """maxpm manage --watch: block until something new needs the manager (a new finding, an unread message
     or a stop request), at most manage_every (or step). Findings it reported before do not count as new;
-    the messages it returns are marked read, as maxpm inbox --wait does, so the manager needs one watcher.
+    the messages it returns are marked delivered (not read), as maxpm inbox --wait does, so the manager needs
+    one watcher. Each return lists the blocked messages that the manager got and did not answer (unanswered).
     After the first new finding it waits manage_settle more, so a group of findings wakes the manager once.
     Each message has a level and may be blocked (#1583, #1608): a blocked message (the sender's item cannot
     move until the answer), a person's message, or a stop request returns at once; a high message (the
@@ -20620,6 +20705,8 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
     native = has_native(conn, actor)
     waits = {"high": parse_duration(setting(conn, "manage_wait_high", agent=actor)),
              "low": parse_duration(setting(conn, "manage_wait_low", agent=actor))}
+    rewake = parse_duration(setting(conn, "manage_rewake", agent=actor))
+    limit = parse_duration(setting(conn, "manage_unanswered", agent=actor))
     settled = None  # when the first new finding that is not low has waited manage_settle
     low_due = None  # when the first new low finding has waited manage_wait_low
     while True:
@@ -20627,7 +20714,13 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
         keys = set(_finding_keys(f))
         st = stop_request(conn, actor)
         waiting, due = _watch_mail(conn, actor, native, waits)
-        mail = bool(due)
+        # A blocked message that the watch showed and the manager did not answer wakes it again, each
+        # manage_rewake, until manage_unanswered after the send; then the sender hears of it (tell_unanswered).
+        again = [m for m in conn.execute(
+            f"SELECT m.created_at, COALESCE(m.shown_at, m.delivered_at) shown FROM messages m "
+            f"WHERE m.to_agent=? AND m.from_agent<>? AND {_UNANSWERED}", (actor, actor))
+            if parse_iso(m["shown"]) + rewake <= now() < parse_iso(m["created_at"]) + limit]
+        mail = bool(due) or bool(again)
         low = {k for k in keys - base if k.partition(":")[0] in LOW_FINDINGS}
         if not keys - base - low:
             settled = None  # a finding that went away again wakes nothing
@@ -20638,17 +20731,21 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
         elif low_due is None:
             low_due = now() + waits["low"]
         if (settled and now() >= settled) or (low_due and now() >= low_due) or mail or st or now() >= deadline:
+            # All that waits comes along. Printed is delivered, not read (#5685): the manager reads a message with
+            # its own command (inbox, thread, an answer, a reply, an action on its item).
             try:
-                rows = inbox(conn, actor, mark_read=False) if waiting else []  # all that waits comes along
-                new = [m for m in rows if m["unread"]]
+                rows = inbox(conn, actor, mark_read=False) if waiting else []
+                new = [m for m in rows if m["unread"] and not m["delivered_at"]]
                 # A blocked message comes alone: a manager that read only the tail of a long output with findings
                 # missed a blocked alert for 18 minutes (#5666). The findings and the other messages stay new for
                 # the next watch, which returns for them soon.
                 blocked = [m for m in new if m["blocked"] and not _brought(native, m)] if not st else []
                 shown = blocked or new
                 with tx(conn):
-                    _mark_read(conn, [m["id"] for m in shown])
-            except RiverLocked:  # nothing is marked read: the next poll returns with the messages
+                    _mark_delivered(conn, [m["id"] for m in shown], "watch")
+                    old = [m for m in unanswered(conn, actor) if m["id"] not in {n["id"] for n in shown}]
+                    _mark_delivered(conn, [m["id"] for m in old], "watch")  # shown again: the next re-wake waits
+            except RiverLocked:  # nothing is marked delivered: the next poll returns with the messages
                 sleep(poll)
                 continue
             mail = bool(shown)
@@ -20657,15 +20754,16 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
                     conn.execute("UPDATE agents SET manage_seen=?, watch_seen=? WHERE name=?",
                                  (json.dumps(sorted(base if blocked else keys)), iso(now()), actor))
             except RiverLocked:
-                pass  # the messages are read already, so return them; the next watch names these findings again
+                pass  # the messages are delivered already, so return them; the next watch names these findings again
             return {"agent": actor,
                     "result": "stop" if st else "messages" if blocked else "change" if keys - base
-                    else "messages" if mail else "tick",
+                    else "messages" if mail else "unanswered" if again else "tick",
                     "new": [] if blocked else sorted(keys - base), "gone": [] if blocked else sorted(base - keys),
                     "findings": f, "stop": st, "blocked_only": bool(blocked),
                     # A blocked message first: its sender stands still.
                     "messages": sorted(shown, key=lambda m: (not m["blocked"], m["id"])),
-                    "later": len(new) - len(shown), "still_open": sum(1 for m in rows if not m["unread"]),
+                    "unanswered": old, "later": len(new) - len(shown),
+                    "still_open": len(rows) - len(new) - sum(1 for m in old if m["id"] in {r["id"] for r in rows}),
                     "unread": unread(conn, actor)["unread"], "native": native}
         poll_activity(conn, actor, watch=True)
         sleep(poll)
@@ -20679,15 +20777,15 @@ def _brought(native, m):
 
 
 def _watch_mail(conn, actor, native, waits):
-    """(waiting, due) for the watch of the manager `actor`. waiting: its unread messages. Unread only: an open
-    question already read would wake it at once, every time. Not what the platform brought into the session
-    already (_brought). due: those the watch returns for now. A blocked message and a person's
+    """(waiting, due) for the watch of the manager `actor`. waiting: its unread messages that no watch or wait
+    delivered yet. Unread only: an open question already read would wake it at once, every time. Not what the
+    platform brought into the session already (_brought). due: those the watch returns for now. A blocked message and a person's
     message do not wait (MaximizePM may mark one blocked after the send); another one waits the time of its
     level (waits: {"high": ..., "low": ...})."""
     waiting = [m for m in conn.execute(
         f"SELECT m.level, m.blocked, m.created_at, m.native_status, a.kind sender FROM messages m "
         f"LEFT JOIN agents a ON a.name=m.from_agent WHERE {_TO_ME} "
-        f"AND m.from_agent<>? AND m.read_at IS NULL", (actor, actor, actor)).fetchall()
+        f"AND m.from_agent<>? AND m.read_at IS NULL AND m.delivered_at IS NULL", (actor, actor, actor)).fetchall()
         if not _brought(native, m)]
     return waiting, [m for m in waiting if m["blocked"] or m["sender"] == "human" or m["level"] == WAKE_LEVEL
                      or parse_iso(m["created_at"]) + waits[m["level"] or DEFAULT_LEVEL] <= now()]
@@ -20744,3 +20842,49 @@ def tell_watch_late(conn):
         if told or closed:
             sync_needs_you(conn)
     return {"late": {n: len(d) for n, (_, d) in late.items()}, "told": told, "closed": closed}
+
+
+UNANSWERED_NOTE = "The manager has not answered"
+
+
+def delivery_text(m):
+    """Where a message is, for its sender (#5685): 'answered 04:16:02', 'read 04:15:10, not answered', 'delivered
+    04:13:48 (watch), not read', or 'not delivered yet'."""
+    hms = lambda s: parse_iso(s).astimezone(local_zone("")).strftime("%H:%M:%S")
+    done = m.get("answered_at") or (m.get("closed_at") if m.get("state") in ("answered", "accepted", "declined") else None)
+    if done:
+        return f"answered {hms(done)}"
+    if m.get("read_at"):
+        return f"read {hms(m['read_at'])}" + (", not answered" if m.get("blocked") else "")
+    if m.get("delivered_at"):
+        return f"delivered {hms(m['delivered_at'])}" + (f" ({m['delivered_via']})" if m.get("delivered_via") else "") + ", not read"
+    return "not delivered yet"
+
+
+def tell_unanswered(conn):
+    """One pass of maxpm serve (#5685). A blocked alert or question to a manager session that it has not answered
+    manage_unanswered after the send: its sender gets one notice, with where the message is (delivered, read), so
+    it can ask the person itself. On 2026-11-12 a blocked alert waited 18 minutes, and its sender did not know.
+    Returns the ids of the messages whose senders were told."""
+    t = now()
+    rows = conn.execute(
+        "SELECT m.* FROM messages m JOIN agents a ON a.name=m.to_agent AND a.role='manager' AND a.kind='ai' "
+        "WHERE m.blocked IS NOT NULL AND m.kind IN ('alert','question') AND m.answered_at IS NULL "
+        "AND m.closed_at IS NULL AND m.state NOT IN ('answered','accepted','declined') AND m.from_agent<>'maxpm' "
+        "AND m.created_at > ? AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.reply_to=m.id "
+        "AND n.from_agent='maxpm' AND n.kind='notice' AND n.body LIKE ?)",
+        (iso(t - timedelta(days=1)), UNANSWERED_NOTE + "%")).fetchall()
+    late = [m for m in rows
+            if parse_iso(m["created_at"]) + parse_duration(setting(conn, "manage_unanswered", agent=m["to_agent"])) <= t]
+    if not late:
+        return []  # the usual pass: no write
+    with tx(conn):
+        person = conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY name").fetchone()
+        person = person["name"] if person else "<person>"
+        for m in late:
+            ask = f"maxpm ask {person} \"<what you need>\"" + (f" --item {m['item_id']}" if m["item_id"] else "") + " --blocked"
+            _send(conn, "notice", "maxpm",
+                  f"{UNANSWERED_NOTE} your blocked {m['kind']} #{m['id']} for {_short(t - parse_iso(m['created_at']))} "
+                  f"({m['to_agent']}: {delivery_text(dict(m))}). If you cannot wait longer, ask the person: {ask}",
+                  to=m["from_agent"], item_id=m["item_id"], reply_to=m["id"])
+    return [m["id"] for m in late]

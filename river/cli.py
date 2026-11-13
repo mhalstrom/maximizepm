@@ -744,7 +744,9 @@ def _footer(conn, actor):
         print(f"[{actor}: {'; '.join(bits)}]", file=sys.stderr)
 
 
-def _fmt_msg(m, indent=""):
+def _fmt_msg(m, indent="", states=False):
+    """One message for a reader. states: the sender's view (maxpm thread), with where the message is: delivered,
+    read, answered (#5685)."""
     to = m["to_agent"] or (f"the holder of #{m['item_id']}" if m["item_id"] else "?")
     about = f" about #{m['item_id']}" + (f" {m['item_title']}" if m.get("item_title") else "") if m["item_id"] else ""
     by = f" for {m['for_person']}" if m.get("for_person") else ""  # the manager answered for the person (#5307)
@@ -758,7 +760,9 @@ def _fmt_msg(m, indent=""):
                  "item": ", blocked (the sender released or blocked its item)"}.get(m["blocked"], ", blocked")
     if m.get("held_for"):
         head += f", held for the manager {m['held_for']}"
-    if m["unread"]:
+    if states:
+        head += ", " + core.delivery_text(m)
+    elif m["unread"]:
         head += ", new"
     if m["reply_to"]:
         head += f", reply to #{m['reply_to']}"
@@ -4080,6 +4084,16 @@ def policy_lines(pols, other=0):
     return out + [""]
 
 
+def _unanswered_line(m, r):
+    """A blocked message that the manager got and did not answer: each watch shows it again, with its age (#5685)."""
+    age = core._short(core.now() - core.parse_iso(m["created_at"]))
+    body = " ".join(m["body"].split())
+    return (f"UNANSWERED blocked #{m['id']} {m['kind']} from {m['from_agent']}, {age}"
+            + (f" (#{m['item_id']})" if m["item_id"] else "") + f": {body[:100]}" + ("..." if len(body) > 100 else "")
+            + f"  answer: {r} " + (f"answer {m['id']} \"...\"" if m["kind"] == "question"
+                                   else f"send note --reply {m['id']} \"...\""))
+
+
 def render_manage(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
@@ -4099,18 +4113,25 @@ def render_manage(b):
                   + (f" and {b['later']} other new message(s)" if b.get("later") else "") + " come with the next watch.")
             for m in msgs:
                 print(_fmt_msg(m, "  "))
-            print(f"Answer {names} now, then start {r} manage --watch again in the background.")
+            old = b.get("unanswered") or []
+            for m in old:
+                print(_unanswered_line(m, r))
+            print(f"Answer {names} now" + (f" (and the {len(old)} UNANSWERED above)" if old else "")
+                  + f", then start {r} manage --watch again in the background.")
             return
         lines = _findings_lines(b["findings"], r)
         # New messages always open the output, and the last line counts them again: on 2026-11-12 a manager read
         # only the end of a watch that began with CHANGED, and missed a blocked alert for 18 minutes (#5685).
         n, k = len(b["messages"]), sum(1 for m in b["messages"] if m.get("blocked"))
+        old = b.get("unanswered") or []
         gone = f"; resolved: {', '.join(b['gone'])}" if b["gone"] else ""
         if n:
             print(f"NEW MESSAGES ({n}" + (f", blocked: {k}" if k else "") + ")" + ("" if b["new"] else gone))
+        for m in old:
+            print(_unanswered_line(m, r))
         if b["new"]:
             print("CHANGED: " + ", ".join(b["new"]) + gone)
-        elif not n:
+        elif not n and not old:
             print("NOTHING NEW" + gone)
         for m in b["messages"]:
             print(_fmt_msg(m, "  "))
@@ -4120,9 +4141,12 @@ def render_manage(b):
             print("\n".join(lines))
         elif any(b["findings"].values()) and not b["messages"]:  # the standing findings: reported before
             print(f"  {len(lines)} standing finding(s), reported before: {r} manage lists them")
-        seen = (f": {n} new message{'s' if n > 1 else ''} above" + (f" ({k} blocked)" if k else "")) if n else ""
-        print((f"Act on what is new{seen}, then start {r} manage --watch again in the background."
-               if b["new"] or n else f"Start {r} manage --watch again in the background."))
+        seen = [f"{n} new message{'s' if n > 1 else ''} above" + (f" ({k} blocked)" if k else "")] if n else []
+        seen += [f"{len(old)} blocked message{'s' if len(old) > 1 else ''} not answered (UNANSWERED above: answer "
+                 f"or reply, or act on its item)"] if old else []
+        print((f"Act on what is new" + (": " + "; ".join(seen) if seen else "")
+               + f", then start {r} manage --watch again in the background."
+               if b["new"] or seen else f"Start {r} manage --watch again in the background."))
         return
     out = [f"You are the MaximizePM MANAGER {me}" + (f" (you took over from {b['took_over']})" if b.get("took_over") else "") + "."]
     if b["new_name"]:
@@ -6172,6 +6196,8 @@ def render(a, res):
             else:
                 print(f"NEW MESSAGES for {res['agent']}:" + (f" (and {res['still_open']} older, still open: maxpm "
                                                              f"--as {res['agent']} inbox)" if res.get("still_open") else ""))
+                # Delivered, not read (#5685): the sender sees that until the session acts on them.
+                print(f"  (delivered, not read: maxpm --as {res['agent']} inbox, an answer or a reply marks them read)")
             res = res["messages"]
         elif not res:
             print("(inbox empty)")
@@ -6182,7 +6208,7 @@ def render(a, res):
         if not res["messages"]:
             print("(no messages)")
         for m in res["messages"]:
-            print(_fmt_msg(m, "  " if m["reply_to"] else ""))
+            print(_fmt_msg(m, "  " if m["reply_to"] else "", states=True))
         return
     if c == "who":
         if not res:

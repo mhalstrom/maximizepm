@@ -625,7 +625,8 @@ the command again only when it still applies.
 - `maxpm inbox`: unread messages and questions that wait for your answer.
   Add `--all` for read ones, `--peek` to leave them unread.
 - `maxpm inbox --wait`: blocks until a new message comes, prints it, and
-  exits (after 25 minutes with nothing, it exits too). Run it as a background
+  exits (after 25 minutes with nothing, it exits too). Printed is delivered;
+  `maxpm inbox`, an answer or a reply marks it read, and the sender sees which. Run it as a background
   command (Claude Code: `run_in_background`) when you must answer messages
   while you work, and start it again after each exit. Not needed when MaximizePM
   delivers messages into your session itself (`native_message`).

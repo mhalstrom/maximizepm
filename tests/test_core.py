@@ -5837,17 +5837,23 @@ class NativeDelivery(Base):
         self.assertEqual(core.send(self.c, "alert", "the build is red", to="cx", actor="cc")["native_status"],
                          "waits: the manager's watch brings a high message after its wait")
         self.assertEqual(self.sent, [])
-        self.assertEqual(core.send(self.c, "question", "which db? I cannot go on", to="cx", actor="cc",
-                                   blocked=True)["native_status"], "sent")
+        q = core.send(self.c, "question", "which db? I cannot go on", to="cx", actor="cc", blocked=True)
+        self.assertEqual((q["native_status"], q["delivered_via"]), ("sent", "native"))
         self.assertEqual(len(self.sent), 1)
         core.register(self.c, "mark", human=True)
         self.assertEqual(core.send(self.c, "note", "stop the release", to="cx", actor="mark")["native_status"], "sent")
         # The watch does not return for what the platform brought; it returns for the others when their wait ends.
+        core.answer(self.c, q["id"], "postgres", actor="cx")
         t0, naps = core.now(), []
         with mock.patch.object(core, "now", side_effect=lambda: t0 + timedelta(minutes=len(naps))):
             w = core.manage_watch(self.c, "cx", step="2h", sleep=naps.append)
-        self.assertEqual((w["result"], len(naps)), ("messages", 10))
-        self.assertLessEqual({"#12 is on main", "the build is red"}, {x["body"] for x in w["messages"]})
+            self.assertEqual((w["result"], len(naps), w["unanswered"]), ("messages", 10, []))
+            self.assertLessEqual({"#12 is on main", "the build is red"}, {x["body"] for x in w["messages"]})
+            # A blocked question that the platform brought and the manager did not answer wakes the watch
+            # again after manage_rewake (#5685).
+            q = core.send(self.c, "question", "which port?", to="cx", actor="cc", blocked=True)
+            w = core.manage_watch(self.c, "cx", step="2h", sleep=naps.append)
+        self.assertEqual((w["result"], len(naps), [x["id"] for x in w["unanswered"]]), ("unanswered", 12, [q["id"]]))
         # A worker gets every message at once, as before.
         core.set_native(self.c, "cc", "Codex", "thread-3")
         self.assertEqual(core.send(self.c, "note", "fyi", to="cc", actor="cx", level="low")["native_status"], "sent")
@@ -6518,7 +6524,8 @@ class Manager(Base):
         core.send(self.c, "alert", "hello boss", to="boss", actor="w1", blocked=True)
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait with a message unread"))
         self.assertEqual((w["result"], [m["body"] for m in w["messages"]]), ("messages", ["hello boss"]))
-        self.assertEqual(core.unread(self.c, "boss")["unread"], 0)  # marked read: the next watch blocks
+        # Delivered, not read (#5685): the next watch blocks, and the manager reads it with its own command.
+        self.assertEqual((core.unread(self.c, "boss")["unread"], core.unread(self.c, "boss")["new"]), (1, 0))
         # A message that comes while it watches ends the watch; an open question already read does not wake it.
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: core.send(
             self.c, "question", "which db?", to="boss", actor="w1", blocked=True))
@@ -6540,6 +6547,7 @@ class Manager(Base):
         self.assertNotIn("inbox --wait", out.getvalue())
         # With native delivery the platform brings messages: what it brought (sent) does not wake the watch (#5686:
         # a message that no delivery tried still does).
+        core.inbox(self.c, "boss")  # the manager reads what the watches delivered (#5685)
         with mock.patch.object(core, "has_native", return_value=True):
             mid = core.send(self.c, "note", "native", to="boss", actor="w1")["id"]
             with core.tx(self.c):
@@ -6611,8 +6619,9 @@ class Manager(Base):
         self.assertNotIn("uncovered", out.getvalue())
         self.assertEqual(text[-1], f"Answer #{alert} alert from w1 now, then start maxpm --as boss manage --watch "
                                    f"again in the background.")
-        self.assertEqual(self.c.execute("SELECT read_at IS NULL FROM messages WHERE id=?", (note,)).fetchone()[0], 1)
-        # The next watch brings the finding (still new) and the note; both ends of its output name the note.
+        self.assertEqual(self.c.execute("SELECT delivered_at IS NULL FROM messages WHERE id=?", (note,)).fetchone()[0], 1)
+        # The next watch brings the finding (still new) and the note; both ends of its output name the note. The
+        # blocked alert, not answered, comes again under it (#5685).
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
@@ -6620,9 +6629,112 @@ class Manager(Base):
         self.assertEqual((w["result"], w["blocked_only"], [m["id"] for m in w["messages"]], w["new"]),
                          ("change", False, [note], ["uncovered:z"]))
         text = out.getvalue().splitlines()
-        self.assertEqual(text[:2], ["NEW MESSAGES (1)", "CHANGED: uncovered:z"])
-        self.assertTrue(text[-1].startswith("Act on what is new: 1 new message above, then start"), text[-1])
-        self.assertEqual(core.unread(self.c, "boss")["unread"], 0)
+        self.assertEqual(text[0], "NEW MESSAGES (1)")
+        self.assertTrue(text[1].startswith(f"UNANSWERED blocked #{alert} alert from w1, "), text[1])
+        self.assertEqual(text[2], "CHANGED: uncovered:z")
+        self.assertTrue(text[-1].startswith("Act on what is new: 1 new message above; 1 blocked message not answered"),
+                        text[-1])
+        self.assertEqual(core.unread(self.c, "boss")["new"], 0)
+
+    def test_a_blocked_message_comes_back_until_the_manager_answers_it(self):
+        # #5685: the watch printed blocked alert #15707 and marked it read; the manager misread the output, and
+        # nothing brought the alert back for 18 minutes. Printed is delivered now; read and answered need an act
+        # of the manager, and the watch wakes it again after manage_rewake.
+        core.manage(self.c, self.dir.name, "boss")
+        core.register(self.c, "mark", human=True)
+        x = self.add("a", "page")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        self.assertEqual((core.DEFAULT_SETTINGS["manage_rewake"], core.DEFAULT_SETTINGS["manage_unanswered"]), ("2m", "10m"))
+        clock = [core.now()]
+
+        def watch(step="1h"):
+            return core.manage_watch(self.c, "boss", step=step,
+                                     sleep=lambda s: clock.__setitem__(0, clock[0] + timedelta(minutes=1)))
+        with mock.patch.object(core, "now", side_effect=lambda: clock[0]):
+            a = core.send(self.c, "alert", "w2 is stuck", to="boss", actor="w1", item=x, blocked=True)
+            w = watch()
+            self.assertEqual(([m["id"] for m in w["messages"]], w["unanswered"]), ([a["id"]], []))
+            m = core.message_show(self.c, a["id"])
+            self.assertEqual((m["delivered_via"], m["read_at"], m["answered_at"]), ("watch", None, None))
+            self.assertRegex(core.delivery_text(m), r"^delivered \d\d:\d\d:\d\d \(watch\), not read$")
+            # No answer: the next watch wakes the manager again after 2 minutes, with the alert at the top.
+            t1 = clock[0]
+            w = watch()
+            self.assertEqual((w["result"], clock[0] - t1, [m["id"] for m in w["unanswered"]]),
+                             ("unanswered", timedelta(minutes=2), [a["id"]]))
+            from river import cli
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render_manage(w)
+            text = out.getvalue().splitlines()
+            self.assertEqual(text[0], f"UNANSWERED blocked #{a['id']} alert from w1, 2m (#{x}): w2 is stuck  "
+                                      f"answer: maxpm --as boss send note --reply {a['id']} \"...\"")
+            self.assertTrue(text[-1].startswith("Act on what is new: 1 blocked message not answered"), text[-1])
+            # The manager reads it in its inbox: read, still not answered.
+            core.inbox(self.c, "boss")
+            self.assertRegex(core.delivery_text(core.message_show(self.c, a["id"])), r"^read .*, not answered$")
+            # After manage_unanswered the sender hears of it, once.
+            self.assertEqual(core.tell_unanswered(self.c), [])
+            clock[0] = clock[0] + timedelta(minutes=9)  # 11 minutes after the send
+            self.assertEqual(core.tell_unanswered(self.c), [a["id"]])
+            self.assertEqual(core.tell_unanswered(self.c), [])
+            note = [m for m in core.inbox(self.c, "w1") if m["reply_to"] == a["id"]]
+            self.assertEqual(len(note), 1)
+            self.assertTrue(note[0]["body"].startswith(f"The manager has not answered your blocked alert #{a['id']} for 11m "
+                                                       f"(boss: read "), note[0]["body"])
+            self.assertIn(f"ask the person: maxpm ask mark \"<what you need>\" --item {x} --blocked", note[0]["body"])
+            # After that the watch wakes the manager no more for it, but each watch still lists it.
+            w = watch(step="5m")
+            self.assertEqual((w["result"], [m["id"] for m in w["unanswered"]]), ("tick", [a["id"]]))
+            # An action of the manager on the alert's item answers it.
+            core.item_prio(self.c, x, 1, actor="boss")
+            m = core.message_show(self.c, a["id"])
+            self.assertEqual((bool(m["answered_at"]), core.unanswered(self.c, "boss")), (True, []))
+            self.assertTrue(core.delivery_text(m).startswith("answered "))
+
+    def test_a_wait_delivers_a_message_and_the_receiver_reads_it(self):
+        # #5685: inbox --wait prints a message: delivered. The receiver reads it with its own command.
+        from river import cli
+        core.register(self.c, "w1")
+        y = self.add("a", "page")
+        n = core.send(self.c, "note", "about the page", to="w1", actor="boss", item=y)
+        # An action on the item before the message was delivered reads nothing: w1 did not see the text.
+        core.item_prio(self.c, y, 1, actor="w1")
+        self.assertEqual(core.message_show(self.c, n["id"])["read_at"], None)
+        a = core.send(self.c, "alert", "stop the push", to="w1", actor="boss")
+        w = core.inbox_wait(self.c, "w1", timeout="0s", sleep=lambda s: None)
+        self.assertEqual([m["id"] for m in w["messages"]], [n["id"], a["id"]])
+        m = core.message_show(self.c, a["id"])
+        self.assertEqual((m["delivered_via"], m["read_at"]), ("wait", None))
+        self.assertEqual((core.unread(self.c, "w1")["unread"], core.unread(self.c, "w1")["new"]), (2, 0))
+        # The next wait does not wake for them again.
+        self.assertEqual(core.inbox_wait(self.c, "w1", timeout="0s", sleep=lambda s: None)["result"], "timeout")
+        # The sender's view says where the message is.
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "boss", "-q", "thread", str(a["id"])])
+        self.assertRegex(out.getvalue(), r"delivered \d\d:\d\d:\d\d \(wait\), not read")
+        # Now an action on the item reads the delivered note, and the inbox reads the alert.
+        core.item_prio(self.c, y, 2, actor="w1")
+        self.assertTrue(core.message_show(self.c, n["id"])["read_at"])
+        core.inbox(self.c, "w1")
+        self.assertRegex(core.delivery_text(core.message_show(self.c, a["id"])), r"^read \d\d:\d\d:\d\d$")
+
+    def test_old_read_messages_become_delivered_and_old_blocked_ones_answered(self):
+        # #5685: before the states, a watch that printed a message marked it read; that read is a delivery.
+        core.register(self.c, "boss")
+        core.send(self.c, "alert", "old", to="boss", actor="w1", blocked=True)
+        core.send(self.c, "note", "unread", to="boss", actor="w1")
+        self.c.execute("UPDATE messages SET read_at='2026-11-01T00:00:00Z' WHERE body='old'")
+        for col in ("delivered_at", "delivered_via", "shown_at", "answered_at"):
+            self.c.execute(f"ALTER TABLE messages DROP COLUMN {col}")
+        self.c.execute("DELETE FROM meta WHERE key LIKE 'schema:%'")  # a database of the code before
+        self.c.close()
+        self.c = core.connect(self.path)
+        got = {r["body"]: tuple(r)[1:] for r in self.c.execute(
+            "SELECT body, read_at, delivered_at, delivered_via, answered_at FROM messages")}
+        self.assertEqual(got, {"old": ("2026-11-01T00:00:00Z",) * 2 + ("read", "2026-11-01T00:00:00Z"),
+                               "unread": (None, None, None, None)})
 
     def test_a_manager_with_no_watch_hears_it_and_the_person_too(self):
         # #1898: on 2026-10-09 a manager ended a turn and started no watch: for 16 minutes nothing could wake
@@ -6745,6 +6857,7 @@ class Manager(Base):
         self.assertEqual((b["blocked"], "manager_wait" in b), ("sender", False))
         w, minutes = self.watch_minutes(step="2h")
         self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["which db? I cannot go on"], 0))
+        core.answer(self.c, b["id"], "postgres", actor="boss")  # else it wakes the watch again after 2m (#5685)
         w, minutes = self.watch_minutes(step="2h")
         self.assertEqual(([x["body"] for x in w["messages"]], minutes), (["one", "two"], 10))
         self.assertEqual(self.watch_minutes(step="5m")[0]["result"], "tick")
@@ -9363,7 +9476,7 @@ class ManagerWake(Base):
         core.claim(self.c, y, "w1")
         core.done(self.c, y, "def456", "w1")
         core.ship(self.c, y, "boss")
-        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='boss' AND read_at IS NULL").fetchone()[0], 0)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM messages WHERE to_agent='boss' AND delivered_at IS NULL").fetchone()[0], 0)
 
 
 class Canvas(Base):

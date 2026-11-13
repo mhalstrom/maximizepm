@@ -34,8 +34,8 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    watcher. It exits when a new finding needs you (an agent is stuck or gone,
    an agent waits longer than `wait_too_long`, a project has ready agent work
    and no agent, a target owner is away or gone, a question for the user), and
-   when a message or question comes to you: it prints the message and marks it
-   read. After the first new finding it waits `manage_settle` (2m) more and
+   when a message or question comes to you: it prints the message, which is
+   then delivered, not read. After the first new finding it waits `manage_settle` (2m) more and
    returns every finding that came meanwhile, so a group of findings wakes you
    once. A finding it reported before does not wake it again. With nothing new
    it exits after `manage_every` with one line. Each message has a level,
@@ -47,7 +47,11 @@ time: a second `maxpm manage` names the active one and refuses. To replace it,
    `--blocked` because its item cannot move until your answer, or MaximizePM
    saw that the sender stands still (it runs `maxpm inbox --wait`, or it
    released or blocked the item). `maxpm inbox` shows "blocked" on such a
-   message: answer it first. A person's message always wakes you at once. The findings "an agent waits" and "an item is
+   message: answer it first. A blocked message stays open until you answer it
+   (`maxpm answer`, `send --reply`) or act on its item: each watch lists it at
+   the top (UNANSWERED, with its age) and wakes you again after
+   `manage_rewake` (2m); after `manage_unanswered` (10m) its sender hears that
+   you did not answer. A person's message always wakes you at once. The findings "an agent waits" and "an item is
    ready for a person" wait `manage_wait_low`; another finding waits
    `manage_settle`. Each exit of the watch brings every message and finding
    that waits, so they do not wake you again; an exit for a blocked message
