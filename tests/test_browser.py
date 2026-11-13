@@ -1377,11 +1377,14 @@ class RealChrome(Base):
         b.resize(500, 400, 2, [390, 844])
         b.watched = __import__("time").time()
         f = browser.frame(b, 0, 5)
+        sharp = None
         for _ in range(50):
-            if b.frame.get("sharp"):
+            sharp = b.frame if b.frame.get("sharp") else None  # read once: a new screencast frame can follow it
+            if sharp:
                 break
             f = browser.frame(b, f["seq"], 1)
-        self.assertEqual((b.frame["w"], b.frame["h"], jpeg_size(b.frame["data"])), (500, 400, (1000, 800)))
+        self.assertIsNotNone(sharp, "no sharp frame came")
+        self.assertEqual((sharp["w"], sharp["h"], jpeg_size(sharp["data"])), (500, 400, (1000, 800)))
         self.assertEqual(b.evaluate("[innerWidth, innerHeight, devicePixelRatio, screen.width >= outerWidth]"),
                          [500, 400, 2, True])
         shot = base64.b64decode(browser.screenshot(b)["png"])
