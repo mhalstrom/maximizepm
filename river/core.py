@@ -212,14 +212,18 @@ DEFAULT_SETTINGS = {
     # How river reaches a running session through its own platform, so a working agent sees a queue
     # instruction, a stop, or a message at once: "Label=ENV_VAR: command" entries separated by ";". maxpm go
     # records the platform whose ENV_VAR is set in the session's environment, and its value as the address;
-    # delivery runs the command with {address} and {message} filled in. The command "uds {address} {message}"
-    # is built in: river writes the message as one line to that Unix socket. Claude Code's session inbox
-    # (CLAUDE_CODE_MESSAGING_SOCKET, code.claude.com/docs/en/cross-session-messaging) takes such a connection,
-    # but its message format is not documented, and a probe did not see the line arrive, so Claude Code is
-    # not in the default: add "Claude Code=CLAUDE_CODE_MESSAGING_SOCKET: uds {address} {message}" to try it.
-    # A platform without an entry has no native path: the message waits in the queue and the inbox for the
-    # agent's next river command.
-    "native_message": "Codex=CODEX_THREAD_ID: codex queue --thread {address} --message {message}",
+    # delivery runs the command with {address} and {message} filled in. Two commands are built in.
+    # "wake {address} {message}" (Claude Code, #5686): the address is the session id; MaximizePM's hook in that
+    # session (maxpm report --wake, a Claude Code hook with asyncRewake) waits for the message and ends with exit
+    # code 2, and Claude Code then shows it to the session at once, also at an idle prompt
+    # (code.claude.com/docs/en/hooks). A session that runs without MaximizePM's hooks has no listener, and the
+    # delivery fails. "uds {address} {message}" writes the message as one line to that Unix socket.
+    # (Claude Code's own session inbox, CLAUDE_CODE_MESSAGING_SOCKET, has no documented message format.)
+    # A platform without an entry, or a failed delivery, keeps the other path: the message waits in the queue
+    # and the inbox for the agent's next maxpm command, and the manager's watch brings it. The first entry whose
+    # ENV_VAR is set wins: Codex first, since a Codex started from a Claude Code shell keeps its variables.
+    "native_message": "Codex=CODEX_THREAD_ID: codex queue --thread {address} --message {message}; "
+                      "Claude Code=CLAUDE_CODE_SESSION_ID: wake {address} {message}",
     "setup_done": "off",
     # Review before release: with review on, each deploy item waits on a review item that waits on
     # everything the release ships. review_prompt tells the reviewer what to do (your review process);
@@ -11811,6 +11815,8 @@ def deliver_native(conn, agent, text):
             code, out = NATIVE_RUNNER(args)
         elif args[0] == "uds":
             code, out = _uds_send(args[1], args[2])
+        elif args[0] == "wake":
+            code, out = _wake_send(args[1], args[2])
         else:
             p = subprocess.run(args, capture_output=True, text=True, timeout=15)
             code, out = p.returncode, (p.stderr or p.stdout)
@@ -11832,6 +11838,91 @@ def _uds_send(path, text, timeout=5):
     except OSError as e:
         return 1, f"{path}: {e.strerror or e}"
     return 0, ""
+
+
+# The wake transport (#5686). A Claude Code session that MaximizePM's hooks run in has a listener: the hook
+# maxpm report --wake, which Claude Code starts in the background (asyncRewake) at each prompt and at each end of a
+# turn. It owns a folder beside the queue for its session: it writes its token into 'owner' (a newer listener of the
+# same session takes over, and the older one ends), touches 'alive' every WAKE_BEAT, and reads the '.msg' files that
+# a sender writes there. A file, not a socket: an agent's sandbox refuses Unix sockets but lets it write beside the
+# queue. The listener prints what it read and ends with exit code 2: Claude Code wakes the session with that text.
+WAKE_BEAT = 1.0     # seconds between the listener's touches of 'alive'
+WAKE_FRESH = 5.0    # a listener whose 'alive' is older than this has ended: the delivery fails
+WAKE_STEP = 0.2     # seconds between the listener's reads of its folder
+
+
+def wake_dir(session_id):
+    """The folder of a Claude Code session's listener, beside the queue (a hash of the session id: a short name)."""
+    import hashlib
+    return Path(river_dir()) / "wake" / hashlib.sha1(str(session_id).encode()).hexdigest()[:16]
+
+
+def _wake_age(session_id):
+    """Seconds since the listener of a Claude Code session last touched 'alive'; infinity when it has none."""
+    import time
+    try:
+        return time.time() - (wake_dir(session_id) / "alive").stat().st_mtime
+    except OSError:
+        return float("inf")
+
+
+def _wake_send(session_id, text):
+    """Write text for the listener of a Claude Code session. Returns (code, error text): 1 when no listener runs."""
+    import time
+    d = wake_dir(session_id)
+    age = _wake_age(session_id)
+    if age == float("inf"):
+        return 1, "no MaximizePM hook listens in that session (it runs without maxpm's hooks, or it ended)"
+    if age > WAKE_FRESH:
+        return 1, f"the MaximizePM hook of that session stopped listening {int(age)}s ago"
+    name = f"{time.time_ns()}-{os.getpid()}"
+    try:
+        (d / f"{name}.tmp").write_text(text, encoding="utf-8")
+        os.replace(d / f"{name}.tmp", d / f"{name}.msg")  # whole: the listener never reads half a message
+    except OSError as e:
+        return 1, f"{d}: {e.strerror or e}"
+    return 0, ""
+
+
+def wake_listen(session_id, parent=None, sleep=None, stop=None):
+    """The listener of maxpm report --wake: wait for messages to Claude Code session session_id and return their text
+    (oldest first), or None when a newer listener of the session took over, or when the session's process (parent)
+    ended. stop: a test hook, a function that ends the wait when it returns True."""
+    import time
+    sleep = sleep or time.sleep
+    d = wake_dir(session_id)
+    d.mkdir(parents=True, exist_ok=True)
+    me = f"{os.getpid()}-{time.time_ns()}"
+    (d / "owner").write_text(me, encoding="utf-8")
+    alive, beat = d / "alive", 0.0
+    while not (stop and stop()):
+        try:
+            if (d / "owner").read_text(encoding="utf-8") != me:
+                return None
+        except OSError:
+            return None
+        if parent and not pid_alive(parent):
+            return None
+        if time.monotonic() - beat >= WAKE_BEAT:
+            alive.touch()
+            beat = time.monotonic()
+        texts = []
+        for f in sorted(d.glob("*.msg")):
+            try:
+                texts.append(f.read_text(encoding="utf-8"))
+                f.unlink()
+            except OSError:
+                continue
+        if texts:
+            # The session wakes now and this listener ends: a sender waits for the next one (its prompt or its
+            # end of turn starts one), so 'alive' goes at once.
+            try:
+                alive.unlink()
+            except OSError:
+                pass
+            return "\n".join(texts)
+        sleep(WAKE_STEP)
+    return None
 
 
 def _native_text(kind, sender, body):
@@ -15655,10 +15746,16 @@ def inbox_wait(conn, actor, timeout=None, sleep=None, poll=3.0):
 
 
 def has_native(conn, agent):
-    """True when river delivers messages into the agent's running session itself (native_message)."""
+    """True when river delivers messages into the agent's running session itself (native_message). For the wake
+    transport (Claude Code), only while the session's listener runs (#5686): a session without MaximizePM's hooks
+    has none."""
     r = conn.execute("SELECT platform, native_address FROM agents WHERE name=?", (agent,)).fetchone()
-    return bool(r and r["platform"] and r["native_address"]
-                and any(e[0] == r["platform"] for e in parse_native(setting(conn, "native_message"))))
+    if not (r and r["platform"] and r["native_address"]):
+        return False
+    entry = next((e for e in parse_native(setting(conn, "native_message")) if e[0] == r["platform"]), None)
+    if entry is None:
+        return False
+    return not entry[2].startswith("wake ") or _wake_age(r["native_address"]) <= WAKE_FRESH
 
 
 def unread(conn, actor):
@@ -20576,14 +20673,15 @@ def manage_watch(conn, actor, step=None, sleep=None, poll=3.0):
 
 def _brought(native, m):
     """True when the platform brought the message m into the manager's session already (native_message): the
-    watch does not bring it again."""
-    return bool(native and (m["native_status"] is None or m["native_status"] == "sent"))
+    watch does not bring it again. Only a delivery that worked (sent) counts: a message that no delivery tried (no
+    status) or whose delivery failed comes through the watch (#5686)."""
+    return bool(native and m["native_status"] == "sent")
 
 
 def _watch_mail(conn, actor, native, waits):
     """(waiting, due) for the watch of the manager `actor`. waiting: its unread messages. Unread only: an open
     question already read would wake it at once, every time. Not what the platform brought into the session
-    already (native: native_message). due: those the watch returns for now. A blocked message and a person's
+    already (_brought). due: those the watch returns for now. A blocked message and a person's
     message do not wait (MaximizePM may mark one blocked after the send); another one waits the time of its
     level (waits: {"high": ..., "low": ...})."""
     waiting = [m for m in conn.execute(

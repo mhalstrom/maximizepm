@@ -136,17 +136,28 @@ DETECT = {
 }
 
 # Stop on the Sessions tab (#5547): Esc ends the turn ('esc to interrupt'); the session keeps its context.
-INPUT = {"native": None, "interrupt": ["Escape"]}  # messages reach it by tmux paste (or its Unix socket inbox: core.native_message)
+# Messages reach it through MaximizePM's listener hook (core.native_message 'wake', #5686).
+INPUT = {"native": ["wake", "{address}", "{text}"], "interrupt": ["Escape"]}
+
+# The listener (#5686): at each prompt and each end of a turn, Claude Code starts `report --wake claude` in the
+# background (asyncRewake). It ends with exit code 2 when a message comes, and Claude Code then wakes the session
+# with its text, also at an idle prompt (code.claude.com/docs/en/hooks, asyncRewake). Claude Code still enforces
+# the timeout on such a hook: a day, after which the next prompt starts a new one.
+WAKE_EVENTS = ("UserPromptSubmit", "Stop")
+WAKE_TIMEOUT = 86400
 
 
 def hook_settings(report):
     """The Claude Code settings (claude --settings) with MaximizePM's hooks: each event runs `report --hook claude`,
-    which reads the hook's JSON on stdin. report: the maxpm report command (argv words)."""
+    which reads the hook's JSON on stdin, and WAKE_EVENTS also start the listener `report --wake claude`. report: the
+    maxpm report command (argv words)."""
     import shlex
     run = [{"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--hook", "claude"]),
             "timeout": 10}]
+    wake = {"type": "command", "command": " ".join(shlex.quote(w) for w in [*report, "--wake", "claude"]),
+            "asyncRewake": True, "timeout": WAKE_TIMEOUT}
     return {"hooks": {ev: [{"matcher": MATCHERS[ev], "hooks": run}] if ev in MATCHERS
-                      else [{"hooks": run}] for ev in HOOK_EVENTS}}
+                      else [{"hooks": run + [wake] if ev in WAKE_EVENTS else run}] for ev in HOOK_EVENTS}}
 
 
 def install_hooks(folder, report):

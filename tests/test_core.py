@@ -5898,6 +5898,85 @@ class NativeDelivery(Base):
         core.set_native(self.c, "cc", "Claude Code", os.path.join(d, "gone.sock"))
         self.assertTrue(core.deliver_native(self.c, "cc", "x").startswith("failed: exit 1:"))
 
+    def test_a_claude_code_session_is_native_by_default(self):
+        """#5686: the default lists Claude Code by its session id; Codex comes first, since a Codex started from a
+        Claude Code shell keeps CLAUDE_CODE_SESSION_ID."""
+        self.assertEqual(core.native_from_env(self.c, {"CLAUDE_CODE_SESSION_ID": "s-1", "CLAUDECODE": "1"}),
+                         ("Claude Code", "s-1"))
+        self.assertEqual(core.native_from_env(self.c, {"CLAUDE_CODE_SESSION_ID": "s-1", "CODEX_THREAD_ID": "t-1"}),
+                         ("Codex", "t-1"))
+
+    def _listen(self, sid, out, ended):
+        import threading
+        t = threading.Thread(target=lambda: out.append(core.wake_listen(sid, sleep=lambda s: ended.wait(0.01),
+                                                                        stop=ended.is_set)))
+        t.start()
+        alive = core.wake_dir(sid) / "alive"
+        for _ in range(500):
+            if alive.exists():
+                break
+            ended.wait(0.01)
+        return t, alive
+
+    def test_the_wake_listener_brings_a_message_into_a_claude_code_session(self):
+        """#5686: a sender writes the message beside the queue, the session's listener (maxpm report --wake) reads it
+        and ends; with no listener, or one that stopped, the delivery fails and the other paths keep the message."""
+        import threading
+        core.NATIVE_RUNNER = None
+        core.set_native(self.c, "cc", "Claude Code", "sess-1")
+        self.assertRegex(core.deliver_native(self.c, "cc", "x"), r"^failed: exit 1: no MaximizePM hook listens")
+        self.assertFalse(core.has_native(self.c, "cc"))  # a session without the hooks: the briefings say no native path
+        got, ended = [], threading.Event()
+        self.addCleanup(ended.set)
+        t, alive = self._listen("sess-1", got, ended)
+        self.assertTrue(core.has_native(self.c, "cc"))
+        m = core.send(self.c, "alert", "the build is red\non main", to="cc", actor="mark", blocked=True)
+        self.assertEqual(m["native_status"], "sent")
+        t.join(5)
+        self.assertEqual(got, ["[maxpm alert from mark] the build is red on main (maxpm --as <you> inbox; maxpm go "
+                               "shows your queue)"])
+        self.assertFalse(alive.exists())  # the listener ended: the next message waits for the next one
+        self.assertTrue(core.send(self.c, "note", "x", to="cc", actor="mark")["native_status"].startswith("failed:"))
+        # A newer listener of the same session takes over; the older one ends with nothing.
+        old = []
+        t, alive = self._listen("sess-1", old, ended)
+        (core.wake_dir("sess-1") / "owner").write_text("another listener", encoding="utf-8")
+        t.join(5)
+        self.assertEqual(old, [None])
+        # A listener that stopped touching 'alive' gets no message.
+        os.utime(alive, (0, 0))
+        self.assertRegex(core.deliver_native(self.c, "cc", "x"), r"stopped listening \d+s ago")
+
+    def test_the_wake_hook_prints_the_message_and_exits_2(self):
+        from river import cli
+        d = core.wake_dir("sess-2")
+        d.mkdir(parents=True)
+        (d / "1-1.msg").write_text("[maxpm alert from mark] hello", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = cli.wake_command(io.StringIO('{"hook_event_name": "Stop", "session_id": "sess-2"}'), env={})
+        self.assertEqual((code, err.getvalue()), (2, "[maxpm alert from mark] hello\n"))
+        # No session id, or input that is not JSON: nothing to listen for, and the hook never fails the session.
+        self.assertEqual(cli.wake_command(io.StringIO("{}"), env={}), 0)
+        self.assertEqual(cli.wake_command(io.StringIO("not json"), env={}), 0)
+
+    def test_the_managers_watch_brings_what_no_delivery_brought(self):
+        """#5686: with Claude Code native for every session, the watch skips only what the session got (sent); a
+        message that no delivery tried, or whose delivery failed, comes through the watch."""
+        core.manage(self.c, self.dir.name, "cx")
+        core.set_native(self.c, "cx", "Claude Code", "sess-9")
+        core.NATIVE_RUNNER = None
+        d = core.wake_dir("sess-9")
+        d.mkdir(parents=True)
+        (d / "alive").touch()  # the session's listener runs
+        self.assertTrue(core.has_native(self.c, "cx"))
+        m = core.send(self.c, "question", "which db? I cannot go on", to="cx", actor="cc", blocked=True)
+        self.assertEqual(m["native_status"], "sent")
+        with core.tx(self.c):
+            core._send(self.c, "alert", "maxpm", "a blocked notice with no delivery", to="cx", blocked="sender")
+        w = core.manage_watch(self.c, "cx", step="0s", sleep=lambda s: None)
+        self.assertEqual([x["body"] for x in w["messages"]], ["a blocked notice with no delivery"])
+
 
 class Kill(Base):
     """maxpm stop --kill: emergency only; ends the agent's process on this host and releases what it held (#428)."""
@@ -6459,9 +6538,12 @@ class Manager(Base):
                       "one after manage_wait_low 30m; it prints every message that waits; a blocked one comes alone, "
                       "the rest with the next watch)", out.getvalue())
         self.assertNotIn("inbox --wait", out.getvalue())
-        # With native delivery the platform brings messages: they do not wake the watch.
+        # With native delivery the platform brings messages: what it brought (sent) does not wake the watch (#5686:
+        # a message that no delivery tried still does).
         with mock.patch.object(core, "has_native", return_value=True):
-            core.send(self.c, "note", "native", to="boss", actor="w1")
+            mid = core.send(self.c, "note", "native", to="boss", actor="w1")["id"]
+            with core.tx(self.c):
+                self.c.execute("UPDATE messages SET native_status='sent' WHERE id=?", (mid,))
             w = core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
         self.assertEqual((w["result"], w["messages"], w["unread"]), ("tick", [], 1))
         core.inbox(self.c, "boss")
@@ -9077,6 +9159,11 @@ class Activity(Base):
         self.assertEqual(sorted(settings["hooks"]), sorted(agents.get("claude").module.HOOK_EVENTS))
         self.assertTrue(all(h["hooks"][0]["command"].endswith(" report --hook claude")
                             for hs in settings["hooks"].values() for h in hs))
+        # The listener (#5686) starts at each prompt and each end of a turn, in the background, and wakes the session.
+        wake = {ev: h["hooks"][1:] for ev, hs in settings["hooks"].items() for h in hs if len(h["hooks"]) > 1}
+        self.assertEqual(sorted(wake), ["Stop", "UserPromptSubmit"])
+        self.assertTrue(all(w[0]["command"].endswith(" report --wake claude") and w[0]["asyncRewake"]
+                            for w in wake.values()))
         with mock.patch.dict(os.environ, {"MAXPM_DB": self.path}):
             f = core.activity_hook_file()
             self.assertEqual(_json.loads(Path(f).read_text(encoding="utf-8")), settings)

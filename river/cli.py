@@ -2046,6 +2046,29 @@ def activity_command(stdin=None, agent_id="claude"):
     return 0
 
 
+def wake_command(stdin=None, env=None):
+    """maxpm report --wake claude: the listener hook of a Claude Code session (#5686; core.wake_listen). Claude Code
+    runs it in the background (asyncRewake) and passes the hook's JSON on stdin, with the session id. It waits for a
+    message to the session; then it prints the text on stderr and exits 2, and Claude Code shows the text to the
+    session at once. It exits 0 with no output when a newer listener took over or the session ended, and on any
+    error: a hook must never fail the session."""
+    import json
+    env = os.environ if env is None else env
+    try:
+        payload = json.loads((stdin or sys.stdin).read() or "{}")
+        sid = (payload.get("session_id") if isinstance(payload, dict) else None) or env.get("CLAUDE_CODE_SESSION_ID")
+        if not sid:
+            return 0
+        parent = int(env["CLAUDE_PID"]) if str(env.get("CLAUDE_PID") or "").isdigit() else os.getppid()
+        text = core.wake_listen(sid, parent=parent)
+    except Exception:  # noqa: BLE001 - a hook must never fail the session
+        return 0
+    if not text:
+        return 0
+    sys.stderr.write(text.rstrip("\n") + "\n")
+    return 2
+
+
 # The commands that name the agent of the session they run in: a session may take a new name with them (its agent
 # ended, or MaximizePM names it), and its session id, link and process then go to that name.
 NAMING = ("go", "register", "session", "manage")
@@ -2142,6 +2165,8 @@ def run(argv=None):
         return activity_command()  # first: a hook runs on every tool call, so it skips the parser and the briefing
     if words[:2] == ["report", "--hook"] and len(words) == 3:
         return activity_command(agent_id=words[2])
+    if words[:2] == ["report", "--wake"] and len(words) == 3:
+        return wake_command()
     args = parse_args(argv)
     if args.cmd is None:
         print(QUICKSTART)
@@ -4147,7 +4172,8 @@ def render_manage(b):
                f"watcher: MaximizePM refuses a second wait for your messages."),
             *([] if b.get("chat") or not b.get("native") else [
             "Messages: MaximizePM delivers a blocked one and a person's into this session itself (native_message); "
-            "they do not wake the watch. The watch brings each other message after its wait."]),
+            "what reached this session does not wake the watch. The watch brings each other message after its wait, "
+            "and one that did not reach the session."]),
             "The rules: maxpm guide manager"]
     if b.get("chat"):
         out += [""] + _chat_lines(r, False)[:1] + [

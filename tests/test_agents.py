@@ -460,8 +460,9 @@ class HookState(Env):
         words = {w for m in ("claude", "codex") for w in agents.get(m).detect["blocked"]}
         self.assertEqual(set(core.DEFAULT_SETTINGS["prompt_pattern"].split("|")) - {"Do you (want to", "trust)"},
                          words - {"Do you (want to|trust)"})
-        native = " ".join(agents.get("codex").input["native"]).replace("{text}", "{message}")
-        self.assertTrue(core.DEFAULT_SETTINGS["native_message"].endswith(": " + native))
+        cmds = [e[2] for e in core.parse_native(core.DEFAULT_SETTINGS["native_message"])]
+        self.assertEqual(cmds, [" ".join(agents.get(m).input["native"]).replace("{text}", "{message}")
+                                for m in ("codex", "claude")])
         self.assertEqual(agents.get("claude").detect["image_paste"].format(n=1), "[Image #1]")
 
 
