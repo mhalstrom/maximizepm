@@ -6453,7 +6453,7 @@ class Manager(Base):
         with contextlib.redirect_stdout(out):
             cli.render_manage(core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: None))
             cli.render_manage(core.manage(self.c, self.dir.name, "boss"))
-        self.assertIn("NEW MESSAGES (1)", out.getvalue())
+        self.assertIn("NEW MESSAGES (1, blocked: 1)", out.getvalue())
         self.assertIn("w2 is stuck", out.getvalue())
         self.assertIn("a message to you (a blocked one or a person's at once, another after manage_wait_high 10m, a low "
                       "one after manage_wait_low 30m; it prints every message that waits)", out.getvalue())
@@ -6468,6 +6468,41 @@ class Manager(Base):
         core.stop_agent(self.c, "boss", "done for the day", actor="mark")
         w = core.manage_watch(self.c, "boss", step="1h", sleep=lambda s: self.fail("no wait after a stop"))
         self.assertEqual(w["result"], "stop")
+
+    def test_the_watch_names_new_messages_on_its_first_and_last_line(self):
+        # #5685: a watch that began with CHANGED had its messages above the last 10 lines, and the manager,
+        # who read only the end, missed a blocked alert for 18 minutes.
+        from river import cli
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+
+        def watch(step="1h"):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cli.render_manage(core.manage_watch(self.c, "boss", step=step, sleep=lambda s: None))
+            return out.getvalue().splitlines()
+        # Findings changed and messages came: the messages come first, CHANGED on the next line.
+        self.add("a", "first")
+        core.send(self.c, "alert", "w2 is stuck", to="boss", actor="w1", blocked=True)
+        core.send(self.c, "note", "fyi", to="boss", actor="w1")
+        out = watch()
+        self.assertEqual(out[0], "NEW MESSAGES (2, blocked: 1)")
+        self.assertTrue(out[1].startswith("CHANGED: uncovered:a"), out[1])
+        self.assertIn("w2 is stuck", "\n".join(out))
+        self.assertTrue(out[-1].startswith("Act on what is new: 2 new messages above (1 blocked), then start"), out[-1])
+        # Only a message: no CHANGED line, and no blocked count when none is blocked.
+        core.send(self.c, "note", "later", to="boss", actor="w1")
+        later = core.now() + timedelta(minutes=11)  # after manage_wait_high: the note is due
+        with mock.patch.object(core, "now", return_value=later):
+            out = watch()
+        self.assertEqual(out[0], "NEW MESSAGES (1)")
+        self.assertNotIn("CHANGED", "\n".join(out))
+        self.assertTrue(out[-1].startswith("Act on what is new: 1 new message above, then start"), out[-1])
+        # Only findings: CHANGED first, and the last line names no messages.
+        self.add("b", "second")
+        out = watch(step="0s")
+        self.assertTrue(out[0].startswith("CHANGED: uncovered:b"), out[0])
+        self.assertTrue(out[-1].startswith("Act on what is new, then start"), out[-1])
 
     def test_a_manager_with_no_watch_hears_it_and_the_person_too(self):
         # #1898: on 2026-10-09 a manager ended a turn and started no watch: for 16 minutes nothing could wake

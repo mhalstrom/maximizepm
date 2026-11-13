@@ -4064,9 +4064,16 @@ def render_manage(b):
                   + f". Tell the user what you did, then run {r} go to end the session.")
             return
         lines = _findings_lines(b["findings"], r)
-        print(("CHANGED: " + ", ".join(b["new"]) if b["new"] else
-               f"NEW MESSAGES ({len(b['messages'])})" if b["messages"] else "NOTHING NEW")
-              + (f"; resolved: {', '.join(b['gone'])}" if b["gone"] else ""))
+        # New messages always open the output, and the last line counts them again: on 2026-11-12 a manager read
+        # only the end of a watch that began with CHANGED, and missed a blocked alert for 18 minutes (#5685).
+        n, k = len(b["messages"]), sum(1 for m in b["messages"] if m.get("blocked"))
+        gone = f"; resolved: {', '.join(b['gone'])}" if b["gone"] else ""
+        if n:
+            print(f"NEW MESSAGES ({n}" + (f", blocked: {k}" if k else "") + ")" + ("" if b["new"] else gone))
+        if b["new"]:
+            print("CHANGED: " + ", ".join(b["new"]) + gone)
+        elif not n:
+            print("NOTHING NEW" + gone)
         for m in b["messages"]:
             print(_fmt_msg(m, "  "))
         if b.get("still_open"):
@@ -4075,8 +4082,9 @@ def render_manage(b):
             print("\n".join(lines))
         elif any(b["findings"].values()) and not b["messages"]:  # the standing findings: reported before
             print(f"  {len(lines)} standing finding(s), reported before: {r} manage lists them")
-        print((f"Act on what is new, then start {r} manage --watch again in the background."
-               if b["new"] or b["messages"] else f"Start {r} manage --watch again in the background."))
+        seen = (f": {n} new message{'s' if n > 1 else ''} above" + (f" ({k} blocked)" if k else "")) if n else ""
+        print((f"Act on what is new{seen}, then start {r} manage --watch again in the background."
+               if b["new"] or n else f"Start {r} manage --watch again in the background."))
         return
     out = [f"You are the MaximizePM MANAGER {me}" + (f" (you took over from {b['took_over']})" if b.get("took_over") else "") + "."]
     if b["new_name"]:
