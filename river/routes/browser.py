@@ -322,6 +322,9 @@ def cdp(h, path):
             upstream = browser.WS(b._version(b.port)["webSocketDebuggerUrl"])
         except (RiverError, OSError, ValueError, KeyError) as e:
             return h._send(409, {"error": f"the browser of {project} did not start: {e}"})
+        # RFC 6455 wants an HTTP/1.1 status line; the handler writes HTTP/1.0 by default, which Playwright accepts
+        # but a strict client refuses (agent-browser: "HTTP version must be 1.1 or higher", #5657).
+        h.protocol_version = "HTTP/1.1"
         h.send_response_only(101, "Switching Protocols")
         h.send_header("Upgrade", "websocket")
         h.send_header("Connection", "Upgrade")

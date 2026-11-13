@@ -1418,6 +1418,31 @@ class CdpAddress(Base):
         self.assertEqual(h.sent[0], 400)
         self.assertTrue(any(r[0]("/cdp/ag1") and r[1] is routes.cdp for r in routes.GET))
 
+    def test_the_upgrade_answers_with_an_http_1_1_status_line(self):
+        # #5657: agent-browser (a Rust WebSocket client) refuses 'HTTP/1.0 101'; RFC 6455 wants HTTP/1.1.
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+        class FakeBrowser:
+            port = 1
+            def _attached_now(self): return False
+            def start(self): pass
+            def _version(self, port): return {"webSocketDebuggerUrl": "ws://127.0.0.1:1/x"}
+        with mock.patch.object(browser, "get", lambda *a, **k: FakeBrowser()), \
+                mock.patch.object(browser, "WS", lambda url: mock.Mock()), \
+                mock.patch.object(browser, "cdp_session", lambda *a, **k: None):
+            s = socket.create_connection(srv.server_address, timeout=5)
+            self.addCleanup(s.close)
+            s.sendall((f"GET /cdp/ag1?project=web&token={browser.cdp_token('web', 'ag1')} HTTP/1.1\r\n"
+                       f"Host: 127.0.0.1:{srv.server_address[1]}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                       "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+            first = s.makefile("rb").readline().decode()
+        self.assertTrue(first.startswith("HTTP/1.1 101 "), first)
+
     def test_browser_mcp_puts_playwright_mcp_into_the_launch_command(self):
         pid = core._project(self.c, "web")["id"]
         self.assertNotIn("--mcp-config", core._launch_agent_cmd(self.c, pid, None, name="web-1a2b")["command"])
