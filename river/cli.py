@@ -5150,6 +5150,8 @@ def _browser_result(action, res):
                    + ", or dismiss")
     if res.get("outline"):  # #5670: the reply of open, and maxpm browser outline
         out += res["outline"]
+    if res.get("changes"):  # #5673: what the action changed on the page, or 'no change'
+        out += res["changes"]
     if "text" in res:  # #5672: open --text
         out += _text_lines(res)
     if res.get("snapshot"):

@@ -2927,6 +2927,52 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const r = e.getBoundingClientRect();
     return r.width + r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
   };
+  // #5673: the interactive elements of the whole page that a person can see (not only the window: an action scrolls
+  // its element into view), each with its ref, line and region, for the reply that says what an action changed.
+  // 'before' keeps a short signature of each element in the page's world (no layout work); 'after' compares and
+  // returns full lines only for the elements that came or changed.
+  if (o.keys) {
+    const now = new Map(), els = new Map();
+    let n = start;
+    const seen = e => e.checkVisibility ? e.checkVisibility({visibilityProperty: true}) : shown(e);
+    const sig = e => [e.tagName, e.getAttribute('role'), e.getAttribute('aria-label'), (e.textContent || '').trim().slice(0, 80),
+      e.value, e.checked, e.getAttribute('aria-checked'), e.getAttribute('aria-expanded'), e.getAttribute('aria-selected'),
+      e.disabled, e.getAttribute('aria-disabled')].join('|');
+    const look = node => {
+      const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+      for (let e = w.currentNode; e; e = w.nextNode()) {
+        if (e.nodeType === 1 && now.size < 3000 && e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden') && seen(e)) {
+          let ref = R.ref.get(e);
+          if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
+          R.els.set(ref, new WeakRef(e));
+          now.set(ref, sig(e));
+          els.set(ref, e);
+        }
+        if (e.nodeType === 1 && e.shadowRoot) look(e.shadowRoot);
+      }
+    };
+    look(document.documentElement);
+    const regionOf = e => { const g = e.closest(REGION); return g ? regionName(g) : ''; };
+    if (o.keys === 'before') {
+      R.pre = {sigs: now, url: location.href, title: document.title, regions: new Set([...els.values()].map(regionOf))};
+      return {next: n};
+    }
+    const pre = R.pre;
+    if (!pre) return {next: n, none: true};
+    R.pre = null;
+    const line = (ref, e) => { const r = role(e); return '@' + ref + ' ' + r + ' ' + JSON.stringify(cut(name(e), 60)) + extra(e, r); };
+    const added = [], changed = [];
+    now.forEach((s, ref) => {
+      if (!pre.sigs.has(ref)) added.push([line(ref, els.get(ref)), regionOf(els.get(ref))]);
+      else if (pre.sigs.get(ref) !== s) changed.push(line(ref, els.get(ref)));
+    });
+    const regions = {};
+    added.forEach(([, g]) => { if (g) regions[g] = 0; });
+    els.forEach(e => { const g = Object.keys(regions).length ? regionOf(e) : ''; if (g in regions) regions[g]++; });
+    return {next: n, url: location.href, title: document.title, url0: pre.url, title0: pre.title, added: added.slice(0, o.max),
+      more: Math.max(0, added.length - o.max), changed: changed.slice(0, o.max), gone: [...pre.sigs.keys()].filter(k => !now.has(k)),
+      before: [...pre.regions], regions};
+  }
   // #5677: rows with named fields. The rows: the elements of a CSS selector, or the repeated rows (as the snapshot
   // folds them) of the element of a ref; none: the page as one row. A field is [name, css, attr]: the text of the
   // first element in the row that matches css ('' : the row), or its attribute (href and src as full addresses).
@@ -3231,6 +3277,54 @@ def as_ref(target):
 
 ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
          "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file", "clickable"}
+
+
+CHANGE_MAX = 15  # new or changed elements that the reply of an action lists at most
+
+
+def _keys(b, when):
+    loading(b)
+    r = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps({"keys": when,
+                                                                                           "max": CHANGE_MAX})))
+    if r is NO_WORLD or not isinstance(r, dict):
+        return None
+    b.refs = max(b.refs, r.get("next") or 0)
+    return r
+
+
+def view_keys(b):
+    """#5673: before an action, the page keeps the signature of each visible interactive element (in the snapshot's
+    world); True when it did."""
+    return _keys(b, "before") is not None
+
+
+def changes(b, pre=True):
+    """#5673: what an action changed on the page, as lines: the address and title when they changed, the new
+    elements with their refs (a line for a region that came with them: a dialog, a menu), the changed ones (~), the
+    refs of the ones that went (-); 'no change' when nothing did, which says that the action had no effect."""
+    r = _keys(b, "after") if pre else None
+    if not r or r.get("none"):
+        return []
+    lines = []
+    if r["url"] != r["url0"]:
+        lines.append(f"address: {r['url']}")
+    if r["title"] != r["title0"]:
+        lines.append(f"title: {r['title']}")
+    before, at = set(r["before"]), None
+    for line, region in r["added"]:
+        if region and region not in before and region != at:
+            n = r["regions"].get(region, 0)
+            lines.append(f"+ [{region}] {n} element{'' if n == 1 else 's'}:")
+            at = region
+        lines.append("+ " + line)
+    if r["more"]:
+        lines.append(f"+ {r['more']} more new: maxpm browser snapshot")
+    lines += ["~ " + x for x in r["changed"]]
+    gone = r["gone"]
+    if gone:
+        lines.append(f"- {len(gone)} gone: " + " ".join("@" + k for k in gone[:CHANGE_MAX])
+                     + (" ..." if len(gone) > CHANGE_MAX else ""))
+    return lines or ["no change"]
 
 
 EXTRACT_MAX = 100  # rows that maxpm browser extract gives at most by default

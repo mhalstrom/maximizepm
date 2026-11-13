@@ -164,7 +164,14 @@ def _act(conn, a, who):
                               10 ** 9 if every else int(a.get("max") or browser.TEXT_MAX), every)
         return {k: t.get(k) for k in ("text", "rest", "next", "section", "matches")}
 
+    pre = None  # #5673: the page's elements before a session's action, for the reply that says what changed
+
     def then(out):  # --snapshot: the snapshot of the page that the action left (#5663)
+        if pre is not None and not out.get("dialog"):  # a new page: its outline; else what changed on this one
+            if out.get("navigated"):
+                out["outline"] = browser.outline(b)["lines"]
+            else:
+                out["changes"] = browser.changes(b, pre)
         if a.get("snapshot"):
             out["snapshot"] = browser.snapshot(b, interactive=True)["snapshot"]
         return out
@@ -191,6 +198,9 @@ def _act(conn, a, who):
     if action in ("click", "type", "fill", "select", "check", "uncheck") and a.get("selector"):
         # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named
         a = {**a, "selector": browser.resolve_target(b, a["selector"], a.get("within"), action)}
+    if action in ("click", "type", "fill", "select", "check", "uncheck", "key", "dialog") and not person \
+            and a.get("changes", True):
+        pre = browser.view_keys(b) if not b.dialog else None
     if action == "click":
         x, y = a.get("x"), a.get("y")
         return then(browser.click(b, a.get("selector"), None if x is None else float(x),

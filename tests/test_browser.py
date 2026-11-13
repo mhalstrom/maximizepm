@@ -1809,6 +1809,59 @@ class SnapshotLimits(Base):
             act(action="extract", rows="Help")
 
 
+MENU = (b"<title>Menu</title><nav aria-label=Top><button onclick=\"menu.hidden = !menu.hidden\">Account</button>"
+        b"<div id=menu role=menu aria-label=Account hidden><a role=menuitem href=/p>Profile</a>"
+        b"<a role=menuitem href=/s>Settings</a><button role=menuitem>Sign out</button></div></nav>"
+        b"<main><label><input type=checkbox> Agree</label><button>Nothing</button>"
+        b"<button onclick=\"this.remove()\">Remove me</button><a href=/two>Two</a></main>")
+
+
+class ActionChanges(Base):
+    """#5673 in a real Chrome: the reply of a session's action says what changed: a menu that opened with its items,
+    'no change', a changed checkbox, an element that went, and a new page's outline."""
+
+    def test_the_reply_lists_what_came_what_changed_and_what_went(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"<title>Two</title><main><a href=/>Back</a></main>" if self.path == "/two" else MENU
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+        out = act(action="click", selector="Account")
+        self.assertEqual([x.split(" ", 2)[-1] if x.startswith("+ @") else x for x in out["changes"]],
+                         ['+ [menu "Account"] 3 elements:', 'menuitem "Profile"', 'menuitem "Settings"',
+                          'menuitem "Sign out"'])
+        self.assertIn('+ [menu "Account"] 3 elements:', cli._browser_result("click", out))
+        t0 = time.time()
+        self.assertEqual(act(action="click", selector="Nothing")["changes"], ["no change"])
+        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147
+        self.assertRegex(act(action="check", selector="Agree")["changes"][0], r'^~ @e\d+ checkbox "Agree" checked$')
+        self.assertRegex(act(action="click", selector="Remove me")["changes"][0], r"^- 1 gone: @e\d+$")
+        out = act(action="click", selector="Two")
+        self.assertEqual((out["navigated"], out.get("changes"), out["outline"]), (True, None, ["[main] 1 link"]))
+
+
 DOC = (b"<title>Doc</title><nav>Menu one</nav><main><h1>Doc</h1><p>Intro line</p><nav>Inner menu</nav>"
        b"<h2>Alpha</h2><p>alpha text</p><h3>Alpha sub</h3><p>sub text</p><h2>Beta</h2>"
        + b"".join(b"<p>beta line %d</p>" % n for n in range(40)) + b"<aside>Side box</aside></main><footer>Foot</footer>")
