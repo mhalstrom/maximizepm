@@ -13029,6 +13029,9 @@ def claim(conn, item_id, actor=None):
 
 
 def _close(conn, item_id, status, actor, output=None, note=None, force=None):
+    # The close check (_close_check) weighs words by the queue's word table. It is read here, before the write lock:
+    # after an edit of a title it counts the words of every work item again, 0.27 s on 5,600 items (#5419).
+    _df(conn)
     with tx(conn):
         it = _item(conn, item_id)
         if it["status"] in CLOSED_STATES:
@@ -13070,31 +13073,36 @@ def _close(conn, item_id, status, actor, output=None, note=None, force=None):
         newly, resumed = [], []
         if status in CLOSED_STATES:
             resumed = _resume_holds(conn, it["id"])
-            ann = annotate(conn, closed=False)
-            newly = [d for d in ann[it["id"]]["unblocks"] if ann[d]["ready"]]
-            # An item that waited on an item nobody needs now is ready only because of the close: its real
-            # precondition may still be false (#3292). The close check says so, and the closer relinks it.
-            if unneeded:
-                for d in newly:
-                    conn.execute("UPDATE close_checks SET why=why || ?, ready=1 WHERE closed_id=? AND item_id=? "
-                                 "AND ready=0", ("; the close makes it ready", it["id"], d))
-                unneeded = _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL", (it["id"],))
-            # A person answered: an agent item that waited on this person's item starts in a fresh session.
-            if it["doer"] == "human":
-                for d in newly:
-                    _want_fresh(conn, d, f"[#{it['id']} {it['title']}: {status} by {actor or 'a person'}]"
-                                + (f" {output}" if output else "") + (f" ({note})" if note else ""))
-            # Tell whoever holds an item that waits on this one (design 7.4: "a prerequisite you waited on is done").
-            for d in ann[it["id"]]["unblocks"]:
-                a = ann[d]
-                if a["assignee"] and a["status"] in ("in_progress", "held") and a["assignee"] != actor:
-                    left_ = a["open_blockers"]
+    if status in CLOSED_STATES:
+        # The graph of the whole queue is read after the commit, with no write lock (#5419): inside the transaction
+        # it held the lock 0.3-0.5 s in a new command, and 22 s in a busy maxpm serve (locked.log, 2026-11-12).
+        ann = annotate(conn, closed=False)
+        newly = [d for d in ann[it["id"]]["unblocks"] if ann[d]["ready"]]
+        # Tell whoever holds an item that waits on this one (design 7.4: "a prerequisite you waited on is done").
+        held = [d for d in ann[it["id"]]["unblocks"] if ann[d]["assignee"] and ann[d]["assignee"] != actor
+                and ann[d]["status"] in ("in_progress", "held")]
+        if ((unneeded or it["doer"] == "human") and newly) or held:  # most closes write nothing more
+            with tx(conn):
+                # An item that waited on an item nobody needs now is ready only because of the close: its real
+                # precondition may still be false (#3292). The close check says so, and the closer relinks it.
+                if unneeded:
+                    for d in newly:
+                        conn.execute("UPDATE close_checks SET why=why || ?, ready=1 WHERE closed_id=? AND item_id=? "
+                                     "AND ready=0", ("; the close makes it ready", it["id"], d))
+                    unneeded = _close_rows(conn, "c.closed_id=? AND c.decided_at IS NULL", (it["id"],))
+                # A person answered: an agent item that waited on this person's item starts in a fresh session.
+                if it["doer"] == "human":
+                    for d in newly:
+                        _want_fresh(conn, d, f"[#{it['id']} {it['title']}: {status} by {actor or 'a person'}]"
+                                    + (f" {output}" if output else "") + (f" ({note})" if note else ""))
+                for d in held:
+                    left_ = ann[d]["open_blockers"]
                     _send(conn, "notice", "maxpm", f"#{it['id']} {it['title']} is {status}"
                           + (f" (output: {output})" if output else "") + f"; your #{d} waits on it. "
                           + (f"Still open before #{d}: " + ", ".join(f"#{x}" for x in left_) if left_
                              else (f"Nothing is left before #{d}; it is in progress again" if d in resumed
                                    else f"Nothing is left before #{d}")),
-                          to=a["assignee"], item_id=d)
+                          to=ann[d]["assignee"], item_id=d)
     res = item_show(conn, item_id)
     res["now_ready"] = newly
     res["resumed"] = resumed

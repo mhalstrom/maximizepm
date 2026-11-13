@@ -184,6 +184,34 @@ class Claims(Base):
         core.register(self.c, "ag2")
         core.register(self.c, "sam", human=True)
 
+    def test_a_close_reads_the_graph_and_the_word_table_with_no_write_lock(self):
+        """#5419: done ran annotate() of the whole queue inside its write transaction (22 s in a busy serve), and a
+        cold word table counted every work item there. Both run outside it now; the notice to the holder of the
+        item that waited still goes."""
+        x = self.add("a", "x")
+        y = self.add("a", "y", after=[x])
+        z = self.add("a", "z")
+        core.claim(self.c, z, "ag2")
+        core.dep_add(self.c, z, [x], "ag2")  # ag2 holds z, which waits on x
+        seen = []
+        real_ann, real_df = core.annotate, core._df
+
+        def ann(conn, *a, **k):
+            seen.append(("annotate", conn.in_transaction))
+            return real_ann(conn, *a, **k)
+
+        def df(conn):
+            seen.append(("df", conn.in_transaction))
+            return real_df(conn)
+        core.claim(self.c, x, "ag1")
+        with mock.patch.object(core, "annotate", ann), mock.patch.object(core, "_df", df):
+            res = core.done(self.c, x, "built", "ag1")
+        self.assertEqual(res["now_ready"], [y])
+        self.assertIn(("annotate", False), seen)
+        self.assertIn(("df", False), seen)
+        self.assertNotIn(("annotate", True), seen)
+        self.assertTrue([m for m in core.inbox(self.c, "ag2") if f"your #{z} waits on it" in m["body"]])
+
     def test_claim_needs_ready(self):
         x = self.add("a", "x")
         y = self.add("a", "y", after=[x])
