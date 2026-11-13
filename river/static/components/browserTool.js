@@ -157,7 +157,7 @@ function render(box, project, session) {
     const el = $$(".br-strip");
     el.innerHTML = tabs.map(t => `<div class="br-tab${t.on ? " on" : ""}">${button(
         (t.icon ? `<img class="br-ico" src="${esc(t.icon)}" alt="">` : `<span class="br-ico br-ico0"></span>`)
-        + `<span class="br-tt">${esc(t.title || (t.url !== "about:blank" && t.url) || "New tab")}</span>`
+        + `<span class="br-tabt">${esc(t.title || (t.url !== "about:blank" && t.url) || "New tab")}</span>`
         + (t.agent ? `<span class="br-ta t-s">${esc(t.agent)}</span>` : ""),
         { cls: "br-go", data: { br: "tab", target: t.id }, attrs: `role="tab" aria-selected="${t.on ? "true" : "false"}"` })}${
       button("×", { kind: "icon", label: "Close tab", title: "Close tab", data: { br: "close_tab", target: t.id } })}</div>`).join("")

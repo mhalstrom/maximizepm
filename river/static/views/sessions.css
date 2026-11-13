@@ -310,7 +310,7 @@ button.srow-it { cursor: pointer; }
   font-weight: 400; font-size: var(--fs-s); text-align: left; }
 .br-ico { width: var(--fs-base); height: var(--fs-base); flex: none; border-radius: var(--r-xs); }
 .br-ico0 { background: var(--line); }
-.br-tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.br-tabt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }  /* not .br-tt: typed keys */
 .br-ta { flex: none; color: var(--accent); }  /* the session whose pointer is on this tab */
 .br-strip > .iconbtn { flex: none; align-self: center; }
 .br-sp { flex: 1; }
