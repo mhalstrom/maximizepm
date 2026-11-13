@@ -3387,15 +3387,21 @@ TEXT_JS = r"""(function (o) {
   const main = o.all ? document.body : document.querySelector('main,[role=main]') || document.querySelector('article')
     || document.body;
   if (!main) return {text: '', total: 0, rest: 0, next: null, heads: []};
-  let text = main.innerText || '';
-  if (!o.all) for (const x of main.querySelectorAll(OUT)) {
-    const up = x.parentElement && x.parentElement.closest(OUT);
-    if (up && main.contains(up)) continue;  // its text went with the part around it
-    const t = x.innerText; if (t && t.trim()) text = text.replace(t, '');
+  const undo = marks(main, norm);
+  let text, heads;
+  try {
+    text = main.innerText || '';
+    if (!o.all) for (const x of main.querySelectorAll(OUT)) {
+      const up = x.parentElement && x.parentElement.closest(OUT);
+      if (up && main.contains(up)) continue;  // its text went with the part around it
+      const t = x.innerText; if (t && t.trim()) text = text.replace(t, '');
+    }
+    heads = Array.from(main.querySelectorAll('h1,h2,h3,h4,h5,h6')).filter(h => h.innerText.trim())
+      .map(h => [+h.tagName[1], h.innerText.trim().split('\n')[0]]);
+  } finally {
+    for (const f of undo.reverse()) f();
   }
-  text = text.replace(/\n{3,}/g, '\n\n').trim();
-  const heads = Array.from(main.querySelectorAll('h1,h2,h3,h4,h5,h6')).filter(h => h.innerText.trim())
-    .map(h => [+h.tagName[1], h.innerText.trim().split('\n')[0]]);
+  text = text.replace(/\n{3,}/g, '\n\n').replace(/ {2,}\[/g, ' [').replace(/\] {2,}/g, '] ').trim();
   const out = {heads: heads.slice(0, 40).map(h => h[1])};
   if (o.section) {
     const want = norm(o.section), lines = text.split('\n');
@@ -3433,6 +3439,52 @@ TEXT_JS = r"""(function (o) {
   out.next = from + cutAt < text.length ? from + cutAt : null;
   out.rest = out.next === null ? 0 : enc.encode(text.slice(out.next)).length;
   return out;
+
+  // #5718: what a person reads that innerText leaves out, put in the page for the one read and taken out again in the
+  // same script (the page's own scripts run only after it): the alt text of a small image or of an image that is
+  // the whole label of its link (star scores: 'rating: 4.5'), in brackets; and a row of one repeated sign as the
+  // signs that are on, on one line (a price of $$$ of four with the fourth grey or at a lower opacity). A large
+  // photo's alt stays out (it is no text of the page), and so does an icon of a button (the snapshot names the
+  // button: The Infatuation put '[SAVE SPOT]' on each card). Returns the steps that undo it.
+  function marks(main, norm) {
+    const undo = [];
+    const put = (where, el, s) => { const sp = document.createElement('span'); sp.textContent = s; el[where](sp);
+      undo.push(() => sp.remove()); };
+    const imgs = main.querySelectorAll('img[alt],[role=img][aria-label]');
+    for (let i = 0; i < imgs.length && i < 300; i++) {
+      const im = imgs[i], s = (im.getAttribute('alt') || im.getAttribute('aria-label') || '').trim();
+      if (!s || im.closest('[aria-hidden=true]')) continue;
+      const r = im.getBoundingClientRect();
+      if (!r.width || !r.height || getComputedStyle(im).visibility === 'hidden') continue;
+      if (im.closest('button,[role=button]')) continue;
+      const host = im.closest('a');
+      if (r.height > 64 && !(host && !norm(host.innerText))) continue;
+      if (im.parentElement && norm(im.parentElement.innerText).includes(norm(s))) continue;
+      put('after', im, ' [' + s + '] ');
+    }
+    const seen = new Set(), groups = [], walk = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+    const look = e => { const c = getComputedStyle(e); return c.color + '/' + c.opacity; };
+    for (let n = walk.nextNode(), k = 0; n && k < 5000; n = walk.nextNode(), k++) {
+      const t = n.data.trim(), el = n.parentElement, g = el && el.parentElement;
+      if (t.length !== 1 || !g || el.childElementCount || seen.has(g)) continue;
+      seen.add(g);
+      const kids = Array.from(g.children);
+      if (kids.length < 2 || kids.length > 10 || kids.some(c => c.childElementCount || c.textContent.trim() !== t)
+          || g.textContent.replace(/\s+/g, '') !== t.repeat(kids.length)) continue;  // the group holds only the signs
+      const ls = kids.map(look), off = ls.findIndex(l => l !== ls[0]), on = off < 0 ? kids.length : off;
+      if (on < 1 || ls.slice(on).some(l => l === ls[0])) continue;  // the 'on' signs come first
+      groups.push([g, t.repeat(on)]);
+    }
+    for (const [g, s] of groups) {  // after the walk: it walks no part that left the page
+      // The group goes out of the page for the read and comes back (a style on it stayed as style="" in Chrome).
+      const sp = document.createElement('span'), shown = getComputedStyle(g).display;
+      sp.textContent = s;
+      sp.style.display = shown === 'flex' || shown === 'grid' ? 'block' : shown;
+      g.replaceWith(sp);
+      undo.push(() => sp.replaceWith(g));
+    }
+    return undo;
+  }
 })"""
 
 

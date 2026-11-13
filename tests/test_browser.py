@@ -1921,6 +1921,51 @@ class PageText(Base):
         self.assertTrue(cli._text_lines(sec)[-1].startswith(f'... ') and f'--section "Beta" --from {sec["next"]}'
                         in cli._text_lines(sec)[-1])
 
+    def test_star_images_and_grey_signs_read_as_a_person_sees_them(self):
+        """#5718: DuckDuckGo shows a Yelp score as an image with alt 'rating: 4.5'; The Infatuation shows a price as
+        four $ with the unused ones grey. The text has the score and $$$; a large photo's alt stays out; the page
+        is as before."""
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        svg = b"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/%3E"
+        page = (b"<title>Places</title><main><h1>Places</h1><p>La Stanza <img alt='rating: 4.5' width=60 height=12 src=\""
+                + svg + b"\"> Yelp (475)</p><div style='display:flex'><span>$</span><span>$</span><span>$</span>"
+                b"<span style='color:#bbb'>$</span></div><p>Cheap: <span><b>$</b><b style='opacity:.3'>$</b></span> "
+                b"and all on: <span><b>$</b><b>$</b></span></p>"
+                b"<img alt='A big plate of pasta' width=400 height=300 src=\"" + svg + b"\">"
+                b"<a href=/x><img alt='Next page' width=200 height=80 src=\"" + svg + b"\"></a></main>")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        b.open(f"http://127.0.0.1:{port}/")
+        before = b.evaluate("document.body.outerHTML")
+        t = browser.page_text(b)["text"]
+        self.assertIn("La Stanza [rating: 4.5] Yelp (475)", t)
+        self.assertIn("$$$", t)
+        self.assertNotIn("$$$$", t)
+        self.assertIn("Cheap: $ and all on: $$", t)
+        self.assertIn("[Next page]", t)  # the whole label of its link
+        self.assertNotIn("pasta", t)
+        self.assertEqual(b.evaluate("document.body.outerHTML"), before)
+
 
 BOXES = (b"<title>Boxes</title>"
          b"<button id=del onclick=\"document.title = confirm('Delete this?') ? 'deleted' : 'kept'\">Delete</button>"
