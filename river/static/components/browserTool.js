@@ -73,6 +73,7 @@ function render(box, project, session) {
       ${button("Take control", { cls: "br-take", title: "Take control of the browser", data: { br: "control" } })}
       ${button("Give back", { cls: "br-back hidden", title: "Hand the browser on", data: { br: "give_back" } })}
       ${button("Open as a window", { cls: "br-win", title: "Show it as a normal window", data: { br: "window" } })}
+      ${button("Save sign-ins for the project", { cls: "br-save hidden", title: "Save sign-ins", data: { br: "save_signins" } })}
       ${button("Close", { kind: "warn", title: "Close it; the sign-ins stay", data: { br: "close" } })}
     </div>
     <div class="br-stage" tabindex="-1">
@@ -133,6 +134,7 @@ function render(box, project, session) {
     win.textContent = j.window ? "Back to the panel" : "Open as a window";
     win.dataset.br = j.window ? "headless" : "window";
     win.classList.toggle("hidden", !j.modes || !!v.noChrome);  // a Chrome that runs already (browser_source) needs browser_mode (#5619)
+    $$(".br-save").classList.toggle("hidden", !(j.running && j.owner && !j.source));  // a session's own Chrome (#5633)
     win.classList.toggle("primary", !!j.refused && !j.window);
     $$(".br-refused").classList.toggle("hidden", !(j.refused && !j.window));
     stage.classList.toggle("br-locked", !v.mine);
@@ -316,9 +318,11 @@ function render(box, project, session) {
       const args = { project, pane };
       if (what === "window" || what === "headless") args.window = what === "window";
       if (b.dataset.target) args.target = b.dataset.target;  // a tab of the strip (#5632)
-      show(await call(what === "headless" ? "window" : what, args));
+      const r = await call(what === "headless" ? "window" : what, args);
+      show(r);
       if (what === "start") { sized = ""; fit(); }
       if (what === "new_tab") addr.focus();  // a new tab: type its address
+      if (what === "save_signins") toast(`Saved ${r.saved} sign-in cookie${r.saved === 1 ? "" : "s"} for ${project}: new sessions start signed in`);
     } catch (err) { if (what === "hand") toast(err.message, true); }
   });
   const go = async (url) => {

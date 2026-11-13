@@ -178,6 +178,11 @@ def act(conn, a, who):
                 raise RiverError(f"the browser of {project} is controlled by {c['who']}; maxpm browser status")
         b.close()
         return b.info()
+    if action == "save_signins":  # Save sign-ins for the project (#5633): the person's choice, never a session's
+        if not person:
+            raise RiverError("only a person saves a browser's sign-ins for the project: the Browser pane has the "
+                             "button Save sign-ins for the project")
+        return browser.save_signins(b)
     raise RiverError(f"unknown browser action {action!r}")
 
 

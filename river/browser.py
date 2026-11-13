@@ -68,6 +68,7 @@ MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 START_WAIT = 20      # seconds for Chrome to write its DevToolsActivePort
 CALL_WAIT = 20       # seconds for one CDP answer
 LOAD_WAIT = 15       # seconds that open() waits for the page's load
+CLOSE_WAIT = 5       # seconds that a close waits for Chrome to end by itself (it writes its cookies), then stops it
 VIEW = (1280, 860)   # the size of the page before the panel says its own
 # The screen that the page sees, when the panel's screen is smaller than the window (a phone through the relay): a
 # headless Chrome says 800x600, smaller than its own window, which no Chrome with a window says (#5625).
@@ -810,6 +811,11 @@ class Browser:
             time.sleep(0.1)
 
     def _stop_chrome(self):
+        if self.ws is not None and not self.attached:
+            try:  # wait for its answer: a socket closed at once made Chrome miss the command (#5633)
+                self.call("Browser.close", timeout=2)
+            except RiverError:
+                pass
         ws, self.ws = self.ws, None
         if self.attached:  # a Chrome that serve did not start: only leave it
             if ws:
@@ -819,12 +825,13 @@ class Browser:
             self.targets, self.mine = {}, set()
             return
         if ws:
-            try:
-                ws.send(json.dumps({"id": 0, "method": "Browser.close"}))
-            except OSError:
-                pass
             ws.close()
         pid = self.state.get("pid")
+        if ws and pid:  # Chrome writes its cookies to disk as it closes: give it that time (#5633), then stop it
+            end = time.time() + CLOSE_WAIT
+            while time.time() < end and (self.proc.poll() is None if self.proc is not None and self.proc.pid == pid
+                                         else core.pid_alive(pid)):
+                time.sleep(0.05)
         if pid and (core.pid_alive(pid) or (self.proc is not None and self.proc.pid == pid)):
             self._kill(pid)
         self.proc = None
@@ -2338,6 +2345,39 @@ def close_tab(b, target=None):
     b.call("Target.closeTarget", {"targetId": target})
     time.sleep(0.3)
     return b.info()
+
+
+# The fields of a cookie that Storage.setCookies takes (CDP CookieParam); getCookies gives more (size, session).
+COOKIE_PARAMS = ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite", "expires", "priority",
+                 "sameParty", "sourceScheme", "sourcePort", "partitionKey")
+
+
+def save_signins(b):
+    """Save sign-ins for the project (#5633): the cookies of a session's browser go into the project's profile, so
+    the sessions that start later begin signed in. Chrome writes both profiles itself (Storage.getCookies from the
+    session's Chrome, Storage.setCookies into a Chrome on the project's profile); a project Chrome that this started
+    closes again, and writes its cookies to disk as it closes. Local storage stays in the session's profile."""
+    if not b.owner or b.attached:
+        raise RiverError("only the browser of a session saves sign-ins for its project")
+    if not b.running():
+        raise RiverError("the browser is not running: open a page first")
+    cookies = b.call("Storage.getCookies").get("cookies") or []
+    keep = []
+    for c in cookies:
+        p = {k: c[k] for k in COOKIE_PARAMS if k in c}
+        if c.get("session") or (p.get("expires") or 0) <= 0:
+            p.pop("expires", None)  # a cookie for this run of Chrome only: it stays one
+        keep.append(p)
+    project = get(b.project)
+    started = not project.running()
+    try:
+        project.start()
+        if keep:
+            project.call("Storage.setCookies", {"cookies": keep})
+    finally:
+        if started:
+            project.close()
+    return {**b.info(), "saved": len(keep)}
 
 
 # ---- the page walk (#5516): a check opens each page of a list in a tab of its own and records what went wrong

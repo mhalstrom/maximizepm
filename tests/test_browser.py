@@ -641,6 +641,55 @@ class FakeHandler:
         self.sent = (code, body)
 
 
+class SaveSignins(Base):
+    """#5633: Save sign-ins for the project copies the cookies of a session's browser into the project's profile."""
+
+    def test_only_a_person_saves_and_the_cookies_go_through_the_project_chrome(self):
+        core.register(self.c, "ag1"); core.register(self.c, "mark", human=True)
+        with self.assertRaisesRegex(RiverError, "only a person"):
+            routes.act(self.c, {"action": "save_signins", "project": "web"}, "ag1")
+        s = browser.get("web", "ag1")
+        s.running = lambda: True
+        s.call = lambda method, params=None, **k: {"cookies": [
+            {"name": "sid", "value": "1", "domain": ".example.test", "path": "/", "expires": 2e9, "size": 4,
+             "session": False, "httpOnly": True, "secure": True},
+            {"name": "tmp", "value": "2", "domain": "example.test", "path": "/", "expires": -1, "size": 4, "session": True}]}
+        p = browser.get("web")
+        got, events = [], []
+        p.running = lambda: False  # the project's Chrome does not run: it starts for this and closes again
+        p.start = lambda window=None: events.append("start")
+        p.close = lambda: events.append("close")
+        p.call = lambda method, params=None, **k: got.append((method, params))
+        out = routes.act(self.c, {"action": "save_signins", "project": "web", "session": "ag1"}, "mark")
+        self.assertEqual(out["saved"], 2)
+        self.assertEqual(events, ["start", "close"])
+        sent = got[0][1]["cookies"]
+        self.assertEqual(got[0][0], "Storage.setCookies")
+        self.assertNotIn("size", sent[0])  # only what setCookies takes
+        self.assertEqual((sent[0]["expires"], "expires" in sent[1]), (2e9, False))  # a session cookie stays one
+        with self.assertRaisesRegex(RiverError, "only the browser of a session"):
+            browser.save_signins(p)
+
+    def test_a_real_cookie_reaches_the_project_profile(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        core.register(self.c, "ag1")
+        s = browser.get("web", "ag1")
+        self.addCleanup(s.close)
+        s.start()
+        s.call("Storage.setCookies", {"cookies": [{"name": "signed_in", "value": "yes", "domain": ".example.test",
+                                                    "path": "/", "expires": time.time() + 86400}]})
+        self.assertEqual(browser.save_signins(s)["saved"], 1)
+        p = browser.get("web")
+        self.addCleanup(p.close)
+        self.assertFalse(p.running())  # it started for the copy and closed again: the cookie is on disk
+        p.start()
+        names = [c["name"] for c in p.call("Storage.getCookies")["cookies"]]
+        self.assertIn("signed_in", names)
+
+
 class TabStrip(Base):
     """#5632: the pane's tab strip shows each tab with its icon (Chrome's Favicons of the profile) and the session whose
     pointer is on it."""
