@@ -112,6 +112,27 @@ try {
         self.assertEqual(self.drive(driver, "/", size="390,844"), {"w": 390, "h": 844, "phone": True})
         self.assertEqual(self.drive(driver, "/", size="1280,900")["w"], 1280)
 
+    def test_the_item_drawer_fits_a_390_px_screen(self):
+        """#5701: at 390 px (a real phone frame) no part of the item drawer, its buttons, its fields and a long
+        message text, reaches past the right edge of the screen."""
+        item = core.item_add(self.c, "site", "logo")["id"]
+        core.send(self.c, "note", "x" * 300 + " " + "/very/long/path/" * 20, item=item, actor="ag")
+        driver = r'''try {
+  await until(() => window.__appReady, "app.js loaded");
+  history.pushState({}, "", "/?item=''' + str(item) + r'''");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+  await until(() => q("#drawer").classList.contains("open") && q("#drawer [data-do=save]") && q("#drawer .ev .body"), "the drawer with its message");
+  await new Promise(r => setTimeout(r, 400));
+  const d = q("#drawer");
+  const over = [...d.querySelectorAll("*")].filter(e => e.getBoundingClientRect().width && e.getBoundingClientRect().right > innerWidth + 0.5)
+    .map(e => e.tagName + "." + e.className + "#" + e.id + " " + Math.round(e.getBoundingClientRect().right));
+  post({ w: innerWidth, scroll: d.scrollWidth, client: d.clientWidth, over: over.slice(0, 8) });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        r = self.drive(driver, "/", size="390,844")
+        self.assertEqual(r["w"], 390, r)
+        self.assertEqual(r["over"], [], r)
+        self.assertLessEqual(r["scroll"], r["client"], r)
+
     def test_every_view_draws_and_its_controls_answer(self):
         """#4656: each tab of the page is a module of its own (views/*.js); each one draws with the queue's data, and
         its controls (and the frame's) still answer a click, with no error on the page."""
