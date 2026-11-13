@@ -2088,12 +2088,22 @@ class Reaper(unittest.TestCase):
 
     @unittest.skipIf(not hasattr(os, "posix_spawn"), "POSIX zombies")
     def test_serve_reaps_the_children_that_ended_before_its_start(self):
-        pid = os.posix_spawn("/bin/sh", ["sh", "-c", "exit 0"], os.environ)  # no Popen knows it, as after an exec
-        end = time.time() + 5
-        while time.time() < end and server.reap_orphans() == 0:
-            time.sleep(0.05)
-        with self.assertRaises(ChildProcessError):
-            os.waitpid(pid, os.WNOHANG)
+        # In a Python of its own: reap_orphans waits for any ended child, and this process has other tests' children.
+        import subprocess
+        import sys
+        code = ("import os, time; from river import server\n"
+                "pid = os.posix_spawn('/bin/sh', ['sh', '-c', 'exit 0'], os.environ)\n"  # no Popen knows it
+                "end = time.time() + 5\n"
+                "n = 0\n"
+                "while time.time() < end and not n:\n"
+                "    n = server.reap_orphans(); time.sleep(0.05)\n"
+                "try:\n"
+                "    os.waitpid(pid, os.WNOHANG); print('left', n)\n"
+                "except ChildProcessError:\n"
+                "    print('reaped', n)\n")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30,
+                             cwd=str(Path(__file__).resolve().parent.parent))
+        self.assertEqual(out.stdout.strip(), "reaped 1", out.stderr)
 
 
 if __name__ == "__main__":
