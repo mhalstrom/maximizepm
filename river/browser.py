@@ -3808,7 +3808,7 @@ def on_element(b, target, fn, *args):
 # #5668: the aim. After the scroll, up to five points of each visible part of the element (the middle first) are hit
 # tested, through open shadow roots; the first point where the element itself (or its label) is on top is the point.
 # None: {covered: the middle}, and nothing is clicked (point_of names the cover).
-POINT_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'});
+POINT_JS = r"""(el, at) => { el.scrollIntoView({block: 'center', inline: 'center'});
   const a = el.closest('a[href]'); let link = null;
   if (a && (!a.target || a.target === '_self')) { const u = new URL(a.href, location.href), h = new URL(location.href);
     u.hash = h.hash = ''; if (u.origin === h.origin && u.href !== h.href) link = u.href; }
@@ -3816,6 +3816,17 @@ POINT_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'});
     while (h && h.shadowRoot) { const i = h.shadowRoot.elementFromPoint(x, y); if (!i || i === h) break; h = i; } return h; };
   const mine = h => { for (let n = h; n; n = n.parentNode || n.host) if (n === el) return true;
     return !!(el.labels && Array.from(el.labels).some(l => l.contains(h))); };
+  if (at) {  // #5689: one point of the box: [x, x is a percent, y, y is a percent]; the window scrolls to it when needed
+    /*BOX_OF*/
+    const pos = () => { const r = boxOf(el);
+      const x = at[1] ? r.width * at[0] / 100 : at[0], y = at[3] ? r.height * at[2] / 100 : at[2];
+      return [r.left + Math.min(x, r.width - 0.5), r.top + Math.min(y, r.height - 0.5), x, y, r]; };
+    let [x, y, dx, dy, r] = pos();
+    if (dx < 0 || dy < 0 || dx > r.width || dy > r.height) return {outside: [Math.round(r.width), Math.round(r.height)]};
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) { scrollBy(x - innerWidth / 2, y - innerHeight / 2); [x, y] = pos(); }
+    const h = deep(x, y);
+    return h && mine(h) ? [x, y, link] : {covered: [x, y]};
+  }
   const pts = [];
   for (const r of el.getClientRects()) {
     const l = Math.max(r.left, 0), t = Math.max(r.top, 0), rt = Math.min(r.right, innerWidth), bt = Math.min(r.bottom, innerHeight);
@@ -3826,6 +3837,17 @@ POINT_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'});
   if (!pts.length) return null;
   for (const [x, y] of pts) { const h = deep(x, y); if (h && mine(h)) return [x, y, link]; }
   return {covered: pts[0]}; }"""
+# #5689: the box of an element as a person sees it: an inline element (a link around a picture) is the union of its
+# child elements' boxes, and of its own lines when it has its own text.
+BOX_OF = r"""const boxOf = el => { const r = el.getBoundingClientRect();
+    if (getComputedStyle(el).display !== 'inline' || !el.children.length) return r;
+    const rs = Array.from(el.children).slice(0, 50).map(c => c.getBoundingClientRect()).filter(q => q.width && q.height);
+    if (Array.from(el.childNodes).some(n => n.nodeType === 3 && /\S/.test(n.textContent))) rs.push(...el.getClientRects());
+    if (!rs.length) return r;
+    const l = Math.min(...rs.map(q => q.left)), t = Math.min(...rs.map(q => q.top));
+    const rt = Math.max(...rs.map(q => q.right)), bt = Math.max(...rs.map(q => q.bottom));
+    return {left: l, top: t, right: rt, bottom: bt, width: rt - l, height: bt - t}; };"""
+POINT_JS = POINT_JS.replace("/*BOX_OF*/", BOX_OF)
 # Focus a field and select what it holds, so the text that comes next replaces it. What kind of field it is: text
 # (Input.insertText types it), value (a date, a color: the value is set), select, or no:<what> (fill refuses).
 FOCUS_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); el.focus();
@@ -3860,8 +3882,23 @@ CHECKED_JS = ("(el) => el.type === 'checkbox' || el.type === 'radio' ? el.checke
               "el.hasAttribute('aria-checked') ? el.getAttribute('aria-checked') === 'true' : null")
 
 
-def point_of(b, target):
-    pos = on_element(b, target, POINT_JS)
+def parse_at(at):
+    """#5689: --at <x>,<y> inside a target's box: each a percent of the box (30%) or pixels from its top left (12)."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)(%?)\s*[,\s]\s*(\d+(?:\.\d+)?)(%?)\s*", str(at or ""))
+    if not m:
+        raise RiverError(f"--at takes x,y inside the element: 30%,70% of its box, or 12,40 pixels from its top left; "
+                         f"not {at!r}")
+    return [float(m.group(1)), m.group(2) == "%", float(m.group(3)), m.group(4) == "%"]
+
+
+def point_of(b, target, at=None):
+    """The point to press on target (its middle, or another visible point where it is on top), and its same-site
+    link; at (#5689): that point of its box instead. A covered point refuses with the cover."""
+    pos = on_element(b, target, POINT_JS, *([parse_at(at)] if at else []))
+    if isinstance(pos, dict) and pos.get("outside"):
+        w, h = pos["outside"]
+        raise BrowserError(f"--at {at} is outside {target}, a box of {w}x{h} pixels: name 0% to 100%, or 0,0 to "
+                           f"{w},{h} pixels", "not_found")
     if not pos:
         raise BrowserError(f"{target} has no place on the page to click", "not_found")
     if isinstance(pos, dict) and pos.get("covered"):  # #5668: another element is on top: no click
@@ -3884,15 +3921,17 @@ def cover_of(b, x, y):
 
 # ---- what a session does (maxpm browser ...)
 
-def click(b, selector=None, x=None, y=None, who=None, wait=None, button="left", count=1, mods=()):
+def click(b, selector=None, x=None, y=None, who=None, wait=None, button="left", count=1, mods=(), at=None):
     """Click an element (a ref of a snapshot, or a CSS selector) or a point. While someone watches, the pointer glides
     there first; then the action waits as after() says. #5669: button left, right or middle; count 2 is a double
-    click; mods: the keys held (shift, ctrl, alt, meta)."""
+    click; mods: the keys held (shift, ctrl, alt, meta). #5689: at, a point inside the element's box."""
     if button not in BUTTONS:
         raise RiverError(f"a button is left, right or middle, not {button!r}")
+    if at and not selector:
+        raise RiverError("--at is a point inside an element: name the element too (maxpm browser click @e5 --at 30%,70%)")
     link = None
     if selector:
-        x, y, *rest = point_of(b, selector)
+        x, y, *rest = point_of(b, selector, at)
         link = rest[0] if rest else None
     if x is None or y is None:
         raise RiverError("name what to click: maxpm browser click @e3 (a ref of maxpm browser snapshot), "
@@ -3929,18 +3968,20 @@ def held(mods):
     return modifiers({m: True for m in mods or ()})
 
 
-def _aim(b, target, x=None, y=None, what="the element"):
+def _aim(b, target, x=None, y=None, what="the element", at=None):
+    if at and not target:
+        raise RiverError("--at is a point inside an element: name the element too")
     if target:
-        x, y, *_ = point_of(b, target)
+        x, y, *_ = point_of(b, target, at)
     if x is None or y is None:
         raise RiverError(f"name {what}: its name, a ref (@e3), --selector '<css>', or x and y")
     return float(x), float(y)
 
 
-def hover(b, target=None, x=None, y=None, who=None, wait=None, mods=()):
+def hover(b, target=None, x=None, y=None, who=None, wait=None, mods=(), at=None):
     """#5669: move the pointer onto an element (or a point) and leave it there; a menu or a tooltip that the page
     opens on the move shows in the reply (the route's list of what changed)."""
-    x, y = _aim(b, target, x, y, "what to hover")
+    x, y = _aim(b, target, x, y, "what to hover", at)
     who = driver(b, who)
     mark = nav_mark(b)
     glide(b, who, x, y)
@@ -3950,7 +3991,7 @@ def hover(b, target=None, x=None, y=None, who=None, wait=None, mods=()):
     return done(b, wait or "none", mark, hovered=target or [x, y])
 
 
-def scroll(b, target=None, amount=None, who=None, wait=None, x=None, y=None):
+def scroll(b, target=None, amount=None, who=None, wait=None, x=None, y=None, at=None):
     """#5669: wheel input over an element (a list that scrolls by itself) or over the middle of the window. amount:
     pixels (negative: up), or down, up, left, right (SCROLL_STEP). The reply says where the page stands now."""
     words = {"down": (0, SCROLL_STEP), "up": (0, -SCROLL_STEP), "right": (SCROLL_STEP, 0), "left": (-SCROLL_STEP, 0)}
@@ -3962,8 +4003,8 @@ def scroll(b, target=None, amount=None, who=None, wait=None, x=None, y=None):
             dx, dy = 0, float(a)
         except ValueError:
             raise RiverError(f"scroll takes pixels (600, -300) or down, up, left, right, not {amount!r}")
-    if target:
-        x, y = _aim(b, target)
+    if target or at:
+        x, y = _aim(b, target, at=at)
     elif x is None or y is None:
         x, y = (float(v) / 2 for v in b.evaluate("[innerWidth, innerHeight]", 5))
     who = driver(b, who)
@@ -3977,17 +4018,18 @@ def scroll(b, target=None, amount=None, who=None, wait=None, x=None, y=None):
     return {**out, "scrolled": {"x": round(sx), "y": round(sy), "end": round(end)}}
 
 
-def drag(b, source, dest, who=None, wait=None, mods=()):
+def drag(b, source, dest, who=None, wait=None, mods=(), at=None, to_at=None):
     """#5669: press on source, move to dest in DRAG_STEPS with the button held, release there (a slider, a card to
-    another list, a selection). source and dest: a ref, css:<selector>, or [x, y]."""
-    x0, y0 = source if isinstance(source, (list, tuple)) else _aim(b, source, what="where the drag starts")
+    another list, a selection). source and dest: a ref, css:<selector>, or [x, y]. #5689: at and to_at, a point inside
+    the source's and the dest's box (a line drawn on a canvas: the same element twice)."""
+    x0, y0 = source if isinstance(source, (list, tuple)) else _aim(b, source, what="where the drag starts", at=at)
     who = driver(b, who)
     glide(b, who, x0, y0)
     m = held(mods)
     b.page("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x0, "y": y0, "button": "left", "buttons": 1,
                                         "clickCount": 1, "modifiers": m})
     note_pointer(b, who, x0, y0, press=True)
-    x1, y1 = dest if isinstance(dest, (list, tuple)) else _aim(b, dest, what="where the drag ends")
+    x1, y1 = dest if isinstance(dest, (list, tuple)) else _aim(b, dest, what="where the drag ends", at=to_at)
     mark = nav_mark(b)
     for i in range(1, DRAG_STEPS + 1):
         px, py = x0 + (x1 - x0) * i / DRAG_STEPS, y0 + (y1 - y0) * i / DRAG_STEPS
@@ -4420,6 +4462,72 @@ def screenshot(b, full=False, cursor=False):
             cursor_off(b)
 
 
+# #5689: a picture of one element (a map, a chart, a canvas, an element with no usable name), its long side at most
+# ELEMENT_LONG pixels (about 1 to 1.5k tokens) and a small one made larger up to ELEMENT_MIN; --grid draws light lines
+# at each 10% of the box, with labels, so the agent names a point for --at. Never of a CAPTCHA test (policy g5).
+ELEMENT_LONG = 1000
+ELEMENT_MIN = 400
+BOX_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); /*BOX_OF*/ const r = boxOf(el);
+  const C = '[id*="captcha" i],[class*="captcha" i]';
+  return {x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height, vw: innerWidth, vh: innerHeight,
+    captcha: !!(el.closest(C) || el.querySelector(C + ',iframe[src*="captcha" i],iframe[src*="challenges.cloudflare.com"]'))}; }""" \
+    .replace("/*BOX_OF*/", BOX_OF)
+GRID_ID = "__maxpm_grid"
+GRID_JS = """((x, y, w, h, s) => {
+  const old = document.getElementById(%(id)s); if (old) old.remove();
+  const g = document.createElement('div'); g.id = %(id)s; g.setAttribute('aria-hidden', 'true');
+  g.style.cssText = `position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;z-index:2147483647;pointer-events:none`;
+  const r = g.attachShadow({mode: 'closed'}), px = 1 / s, f = 11 / s;
+  const lab = 'position:absolute;font:600 ' + f + 'px/1.2 system-ui,sans-serif;color:#111;background:rgba(255,255,255,.85);padding:0 ' + 2 * px + 'px';
+  let html = '';
+  for (let i = 1; i < 10; i++) {
+    html += `<div style="position:absolute;left:${w * i / 10}px;top:0;width:${px}px;height:100%%;background:rgba(230,0,110,.5)"></div>`;
+    html += `<div style="position:absolute;top:${h * i / 10}px;left:0;height:${px}px;width:100%%;background:rgba(230,0,110,.5)"></div>`;
+    html += `<div style="${lab};left:${w * i / 10 + 2 * px}px;top:0">${i * 10}</div>`;
+    html += `<div style="${lab};top:${h * i / 10 + 2 * px}px;left:0">${i * 10}</div>`;
+  }
+  r.innerHTML = html; document.documentElement.appendChild(g); setTimeout(() => g.remove(), 15000);
+})""" % {"id": json.dumps(GRID_ID)}
+GRID_OFF = "(() => { const e = document.getElementById(%s); if (e) e.remove(); })()" % json.dumps(GRID_ID)
+
+
+def element_shot(b, target, grid=False, cursor=False):
+    """#5689: a PNG of one element (target: a ref or css:<selector>) and its scale: the picture's pixels for one
+    pixel of the page."""
+    box = on_element(b, target, BOX_JS)
+    if not isinstance(box, dict) or box["w"] < 1 or box["h"] < 1:
+        raise BrowserError(f"{target} has no box on the page (it is hidden)", "not_found")
+    if box["captcha"]:
+        raise BrowserError("this element is a CAPTCHA test. maxpm never solves one: ask the person "
+                           "(maxpm ask <person> \"...\" --blocked)", "captcha")
+    long = max(box["w"], box["h"])
+    scale = min(ELEMENT_LONG / long, max(1.0, min(4.0, ELEMENT_MIN / long)))
+    base = 1 / b.dsf if b.dsf > 1 and b.size and not b._windowed() else 1  # one pixel for each CSS pixel (#5625)
+    p = {"format": "png", "clip": {"x": box["x"], "y": box["y"], "width": box["w"], "height": box["h"],
+                                   "scale": base * scale}}
+    if box["w"] > box["vw"] or box["h"] > box["vh"]:
+        p["captureBeyondViewport"] = True  # larger than the window: the whole box
+    drew_grid = False
+    if grid:
+        b.evaluate(GRID_JS + "(%s)" % ",".join(json.dumps(v) for v in (box["x"], box["y"], box["w"], box["h"], scale)))
+        drew_grid = True
+    drew = cursor and cursor_on(b)
+    try:
+        png = b.page("Page.captureScreenshot", p, timeout=60)["data"]
+    finally:
+        if drew_grid:
+            try:
+                b.evaluate(GRID_OFF, 5)
+            except RiverError:
+                pass  # it goes by itself after 15 s
+        if drew:
+            cursor_off(b)
+    w, h = round(box["w"]), round(box["h"])
+    return {**b.info(), "png": png, "cursor": bool(drew),
+            "element": {"target": target, "box": [w, h], "scale": round(scale, 3), "grid": bool(grid),
+                        "picture": [round(box["w"] * scale), round(box["h"] * scale)]}}
+
+
 SIZES = {"phone": (390, 844, True), "desktop": (VIEW[0], VIEW[1], False)}  # #5676: name -> (w, h, mobile)
 
 
@@ -4657,6 +4765,10 @@ def step_words(s):
         w.append(str(s.get({"size": "size", "eval": "js"}.get(act, "target")) or ""))
     if s.get("within"):
         w += ["--in", s["within"]]
+    if s.get("at"):  # #5689
+        w += ["--at", s["at"]]
+    if s.get("to_at"):
+        w += ["--to-at", s["to_at"]]
     if s.get("mods"):
         w += ["--with", ",".join(s["mods"])]
     if s.get("wait"):

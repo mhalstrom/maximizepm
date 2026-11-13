@@ -121,6 +121,10 @@ TOOLS = [
          "wait": {"type": "string", "enum": ["auto", "load", "idle", "none"]},
          "tab": {"type": "string", "description": "the tab to act in (default: the one that shows)"},
          "out": {"type": "string", "description": "image: the file to write (full path; default: the downloads)"},
+         "at": {"type": "string", "description": "click, hover, scroll, drag: a point inside the target's box, "
+                                                 "30%,70% or 12,40 pixels (screenshot of the target with grid shows it)"},
+         "to_at": {"type": "string", "description": "drag: the point inside the to element where it ends"},
+         "grid": {"type": "boolean", "description": "screenshot of a target: lines at each 10% of its box"},
          "project": {"type": "string"}, "json": {"type": "boolean"}, "as": _AS}}},
     {"name": "inbox",
      "description": "Your unread messages and the questions that wait for your answer.",
@@ -155,9 +159,11 @@ def browser_argv(a):
     flags = []
     for key, flag in (("in", "--in"), ("wait", "--wait"), ("region", "--region"), ("scope", "--scope"),
                       ("section", "--section"), ("grep", "--grep"), ("rows", "--rows"), ("tab", "--tab"),
-                      ("project", "--project"), ("out", "--out")):
+                      ("project", "--project"), ("out", "--out"), ("at", "--at"), ("to_at", "--to-at")):
         if a.get(key) not in (None, ""):
             flags += [flag, str(a[key])]
+    if a.get("grid"):  # #5689
+        flags.append("--grid")
     if a.get("limit"):
         flags += ["--limit", str(int(a["limit"]))]
     if a.get("all"):
@@ -204,6 +210,8 @@ def browser_argv(a):
         pos = (text or "status").split()
     elif act == "image":  # #5688
         pos = [need("the image (target)", t)]
+    elif act == "screenshot" and t:  # #5689: one element
+        pos = [t]
     elif act == "extract":
         pos = [str(f) for f in a.get("fields") or []]
     elif act in ("tab", "close-tab") and t:

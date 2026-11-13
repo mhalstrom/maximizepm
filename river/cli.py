@@ -839,6 +839,7 @@ def parse_args(argv=None):
 BROWSER_WAITS = ("auto", "load", "idle", "none")  # browser.WAITS, without the import of browser at each command
 BROWSER_ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
                  "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file",
+                 "image",
                  "clickable"}  # browser.ROLES: click link "Comments" (#5667)
 
 
@@ -921,7 +922,12 @@ def build_parser(only=None):
     x.add_argument("--rows", help="the rows: a ref or name of an element in a repeated row (its rows, as the snapshot "
                    "folds them), or a CSS selector; none: the page as one row")
     x.add_argument("--limit", type=int, help="the rows it gives at most (default 100)")
-    x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab; prints the file's path")
+    x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab, or of one element (about 1000 pixels on its "
+                       "long side at most); prints the file's path")
+    x.add_argument("target", nargs="?", help="only this element: its name, role and name, or @e5 (a map, a chart, a "
+                   "canvas, an element with no usable name)")
+    x.add_argument("--grid", action="store_true", help="with a target: light lines at each 10%% of its box, with "
+                   "labels, to name a point for --at")
     x.add_argument("--out", help="the file to write (default: a new file in the temporary folder)")
     x.add_argument("--full", action="store_true", help="the whole page, not only what shows")
     x.add_argument("--cursor", action="store_true", help="draw the driving session's pointer and its last click ring in")
@@ -938,7 +944,11 @@ def build_parser(only=None):
     # #5667: an element by its name as a snapshot prints it, or by role and name, in its row with --in
     ep = argparse.ArgumentParser(add_help=False)
     ep.add_argument("--in", dest="within", metavar="TEXT", help="only in the row, card or region whose text holds this")
-    x = brs.add_parser("click", parents=[bp, ap, ep], help="click an element (its name, role and name as link "
+    # #5689: a point inside the target's box: a map, a chart, a canvas, an editor, an element with no usable name
+    atp = argparse.ArgumentParser(add_help=False)
+    atp.add_argument("--at", metavar="X,Y", help="a point inside the element: 30%%,70%% of its box, or 12,40 pixels "
+                     "from its top left (maxpm browser screenshot <target> --grid shows the box)")
+    x = brs.add_parser("click", parents=[bp, ap, ep, atp], help="click an element (its name, role and name as link "
                        "\"Comments\", or a ref such as @e3) or a point (x y, CSS pixels)")
     x.add_argument("target", nargs="?", help="\"Comments\" (a name), link (a role, then the name), @e3, or x")
     x.add_argument("y", nargs="?", help="the name after a role, or y")
@@ -950,16 +960,18 @@ def build_parser(only=None):
     x.add_argument("--with", dest="mods", metavar="KEYS", help=with_help)
     wp = argparse.ArgumentParser(add_help=False)
     wp.add_argument("--with", dest="mods", metavar="KEYS", help=with_help)
-    x = brs.add_parser("hover", parents=[bp, ap, ep, wp], help="move the pointer onto an element and leave it there; "
+    x = brs.add_parser("hover", parents=[bp, ap, ep, wp, atp], help="move the pointer onto an element and leave it there; "
                        "the reply lists what opened (a menu, a tooltip)")
     x.add_argument("target", nargs="?", help="the element (its name, role and name, @e3), or x")
     x.add_argument("y", nargs="?", help="the name after a role, or y")
-    x = brs.add_parser("scroll", parents=[bp, ap, ep], help="wheel input over the page (or over an element that "
+    x = brs.add_parser("scroll", parents=[bp, ap, ep, atp], help="wheel input over the page (or over an element that "
                        "scrolls by itself): down (default), up, left, right, or pixels (-300 is up)")
     x.add_argument("words", nargs="*", metavar="[target] [amount]")
-    x = brs.add_parser("drag", parents=[bp, ap, wp], help="press on one element (or x,y), move with the button held, "
-                       "release on another (or x,y): a slider, a card to another list")
+    x = brs.add_parser("drag", parents=[bp, ap, wp, atp], help="press on one element (or x,y), move with the button "
+                       "held, release on another (or x,y): a slider, a card to another list")
     x.add_argument("source", metavar="from"); x.add_argument("dest", metavar="to")
+    x.add_argument("--to-at", dest="to_at", metavar="X,Y", help="the point inside the element where the drag ends "
+                   "(--at: where it starts)")
     x = brs.add_parser("type", parents=[bp, ap, ep], help="type text key by key: type \"Search\" 'text' clicks the "
                        "field first; type 'text' types where the focus is")
     x.add_argument("words", nargs="+", metavar="[target] text"); x.add_argument("--selector")
@@ -2611,6 +2623,11 @@ def _browser_ask(conn, a, actor):
             f"maxpm-browser-{res['project']}-{time.strftime('%Y%m%d-%H%M%S')}.png")
         out.write_bytes(base64.b64decode(res.pop("png")))
         res["file"] = str(out.resolve())
+        e = res.get("element")
+        if e:  # #5689: the scale, so a point in the picture becomes --at
+            res["file"] += (f"  ({e['picture'][0]}x{e['picture'][1]} pixels of a box of {e['box'][0]}x{e['box'][1]}, "
+                            f"scale {e['scale']:g}" + ("; the grid lines are each 10%" if e["grid"] else "") +
+                            f"; a point: maxpm browser click {e['target']} --at <x%>,<y%>)")
         if a.cursor and not res.get("cursor"):
             print("maxpm: no session pointed in this tab yet: the picture has no pointer", file=sys.stderr)
     if b == "html" and a.out:
@@ -2641,6 +2658,9 @@ def _browser_args(a):
         args["within"] = a.within
     if getattr(a, "mods", None):  # #5669: --with shift,ctrl
         args["mods"] = [m.strip().lower() for m in a.mods.split(",") if m.strip()]
+    for k in ("at", "to_at"):  # #5689: a point inside the target's box
+        if getattr(a, k, None):
+            args[k] = a.at if k == "at" else a.to_at
     if b == "open":
         args.update(url=a.url, show=not a.no_show, outline=not a.no_outline, read=a.text)
     elif b == "extract":  # #5677: the fields are checked here, before serve gets them
@@ -2656,7 +2676,9 @@ def _browser_args(a):
     elif b == "html" and a.scope:
         args["scope"] = a.scope
     elif b == "screenshot":
-        args.update(full=a.full, cursor=a.cursor)
+        args.update(full=a.full, cursor=a.cursor, grid=a.grid, selector=a.target)
+        if a.target and a.full:
+            raise RiverError("a picture of one element is not of the whole page: leave out --full")
     elif b == "click":
         t, css = a.target, "css:" + a.selector if a.selector else None
         if t is not None and _is_number(t):

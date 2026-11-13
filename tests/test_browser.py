@@ -490,6 +490,26 @@ class Command(Base):
         with mock.patch.object(cli, "ask_server", lambda *a, **k: {}), self.assertRaisesRegex(RiverError, "x and y"):
             self.run_cli("-q", "--as", "ag1", "browser", "click", "10")
 
+    def test_a_point_inside_an_element_and_its_picture(self):
+        """#5689: --at on click, hover, scroll and drag (--to-at: where a drag ends); screenshot <target> --grid."""
+        self.assertEqual(self.asked("click", "Map", "--at", "30%,70%")[0]["at"], "30%,70%")
+        self.assertEqual(self.asked("hover", "@e4", "--at", "12,40")[0]["at"], "12,40")
+        self.assertEqual(self.asked("scroll", "Map", "--at", "50%,50%")[0]["at"], "50%,50%")
+        a = self.asked("drag", "@e5", "@e5", "--at", "10%,10%", "--to-at", "90%,90%")[0]
+        self.assertEqual((a["selector"], a["to"], a["at"], a["to_at"]), ("@e5", "@e5", "10%,10%", "90%,90%"))
+        a = self.asked("screenshot", "Map", "--grid", res={"project": "web", "png": base64.b64encode(b"x").decode(),
+                                                          "element": {"target": "@e7", "box": [300, 200], "scale": 2,
+                                                                      "picture": [600, 400], "grid": True}})
+        self.assertEqual((a[0]["selector"], a[0]["grid"]), ("Map", True))
+        self.assertIn("(600x400 pixels of a box of 300x200, scale 2; the grid lines are each 10%; a point: maxpm "
+                      "browser click @e7 --at <x%>,<y%>)", a[1])
+        self.assertEqual(browser.parse_at("30%, 70%"), [30.0, True, 70.0, True])
+        self.assertEqual(browser.parse_at("12,40.5"), [12.0, False, 40.5, False])
+        with self.assertRaises(RiverError):
+            browser.parse_at("left")
+        self.assertEqual(browser.step_words({"action": "click", "selector": "Map", "at": "30%,70%"}),
+                         ["click", "Map", "--at", "30%,70%"])
+
     def test_the_other_pointer_actions(self):
         """#5669: click --double --right --with; hover a name or a point; scroll [target] [amount]; drag from to."""
         a = self.asked("click", "Row", "--double", "--right", "--with", "shift,Ctrl")[0]
@@ -2215,6 +2235,89 @@ class Images(Base):
         self.assertEqual(e.exception.code, "captcha")
         self.assertEqual(browser.image_size(_png(7, 5)), [7, 5])
         self.assertEqual(browser.image_type(b"<svg xmlns='x'/>"), ("image/svg+xml", ".svg"))
+
+
+CANVAS = (b"<title>Canvas</title><style>body{margin:0}</style>"
+          b"<div style='position:relative;width:400px;height:200px;margin:20px'>"
+          b"<canvas id=c width=400 height=200 style='background:#eee'></canvas>"
+          b"<div id=cover style='position:absolute;right:0;top:0;width:100px;height:200px;background:#c00'></div></div>"
+          b"<button id=icon style='width:20px;height:20px;padding:0;border:0;background:#08f'></button>"
+          b"<div id=tall style='width:600px;height:3000px;background:linear-gradient(#fff,#000)'></div>"
+          b"<div class=h-captcha style='width:300px;height:80px'>check</div>"
+          b"<script>const c = document.getElementById('c'); let down = null;"
+          b"let dragged = false;"
+          b"c.onclick = e => { if (dragged) { dragged = false; return; } document.title = e.offsetX + ',' + e.offsetY; };"
+          b"c.onmousemove = e => { if (!down) document.title = 'move ' + e.offsetX + ',' + e.offsetY; };"
+          b"c.onmousedown = e => { down = [e.offsetX, e.offsetY]; };"
+          b"c.onmouseup = e => { if (down[0] !== e.offsetX || down[1] !== e.offsetY) { dragged = true;"
+          b"  document.title = 'drag ' + down + '-' + e.offsetX + ',' + e.offsetY; } down = null; };"
+          b"</script>")
+
+
+class PointInside(Base):
+    """#5689 in a real Chrome: --at presses a point of an element's box (a canvas has no elements to name), with the
+    aim check for that point; screenshot <target> is a picture of the element, scaled to about 1000 pixels at most
+    (a small one larger), with a grid on request; a CAPTCHA element is refused."""
+
+    def test_a_point_inside_a_canvas_and_the_picture_of_one_element(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(CANVAS)))
+                self.end_headers()
+                self.wfile.write(CANVAS)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+        self.assertEqual(act(action="click", selector="css:#c", at="25%,50%")["title"], "100,100")
+        self.assertEqual(act(action="click", selector="css:#c", at="10,20")["title"], "10,20")
+        with self.assertRaises(browser.BrowserError) as e:  # the red box covers the right quarter: nothing is pressed
+            act(action="click", selector="css:#c", at="90%,50%")
+        self.assertEqual(e.exception.code, "covered")
+        with self.assertRaises(browser.BrowserError) as e:
+            act(action="click", selector="css:#c", at="120%,50%")
+        self.assertEqual(e.exception.code, "not_found")
+        self.assertIn("a box of 400x200 pixels", str(e.exception))
+        with self.assertRaises(RiverError):
+            act(action="click", at="50%,50%")
+        self.assertEqual(act(action="hover", selector="css:#c", at="50%,50%")["title"], "move 200,100")
+        self.assertEqual(act(action="drag", selector="css:#c", to="css:#c", at="10%,10%", to_at="60%,80%")["title"],
+                         "drag 40,20-240,160")
+
+        def picture(**a):
+            out = act(action="screenshot", **a)
+            return out["element"], browser.image_size(base64.b64decode(out["png"]))
+        e, size = picture(selector="css:#c")
+        self.assertEqual((e["box"], e["scale"], size), ([400, 200], 1, [400, 200]))
+        e, size = picture(selector="css:#icon")  # small: larger, up to 4 times
+        self.assertEqual((e["scale"], size), (4, [80, 80]))
+        e, size = picture(selector="css:#tall")  # taller than the window: the whole box, 1000 pixels long
+        self.assertEqual((e["box"], size), ([600, 3000], [200, 1000]))
+        plain = act(action="screenshot", selector="css:#c")["png"]
+        out = act(action="screenshot", selector="css:#c", grid=True)
+        self.assertTrue(out["element"]["grid"])
+        self.assertNotEqual(out["png"], plain)  # the lines are in the picture
+        self.assertIsNone(b.evaluate("document.getElementById('__maxpm_grid')"))  # and gone from the page
+        with self.assertRaises(browser.BrowserError) as e:
+            act(action="screenshot", selector="css:.h-captcha")
+        self.assertEqual(e.exception.code, "captcha")
 
 
 POINTER = (b"<title>Pointer</title><style>#mm{display:none;position:absolute;background:#fff} #m:hover #mm{display:block}"

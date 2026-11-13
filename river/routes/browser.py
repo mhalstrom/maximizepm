@@ -85,7 +85,7 @@ BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "stat
 RECORD = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "dialog", "upload", "back", "forward",
           "reload", "extract", "hover", "scroll", "drag"}
 STEP_KEYS = ("action", "url", "selector", "x", "y", "text", "values", "files", "key", "accept", "rows", "fields",
-             "limit", "within", "wait", "button", "count", "mods", "to", "amount")
+             "limit", "within", "wait", "button", "count", "mods", "to", "amount", "at", "to_at")
 # the actions on one element: a name becomes its ref (#5667); the page's elements are read before them (#5673)
 ON_ELEMENT = ("click", "type", "fill", "select", "check", "uncheck", "upload", "hover", "scroll", "drag")
 WALK_KEEP = 200  # the steps of a walk that a browser remembers
@@ -379,18 +379,19 @@ def _act(conn, a, who):
         return then(browser.upload(b, conn, a.get("selector") or "", a.get("files") or [], who=sess, wait=wait))
     x, y, mods = a.get("x"), a.get("y"), a.get("mods") or ()
     x, y = (None if x is None else float(x)), (None if y is None else float(y))
+    at = a.get("at") or None  # #5689: a point inside the target's box
     if action == "click":
         return then(browser.click(b, a.get("selector"), x, y, who=sess, wait=wait, button=a.get("button") or "left",
-                                  count=int(a.get("count") or 1), mods=mods))
+                                  count=int(a.get("count") or 1), mods=mods, at=at))
     if action == "hover":  # #5669
-        return then(browser.hover(b, a.get("selector"), x, y, who=sess, wait=wait, mods=mods))
+        return then(browser.hover(b, a.get("selector"), x, y, who=sess, wait=wait, mods=mods, at=at))
     if action == "scroll":
-        return then(browser.scroll(b, a.get("selector"), a.get("amount"), who=sess, wait=wait, x=x, y=y))
+        return then(browser.scroll(b, a.get("selector"), a.get("amount"), who=sess, wait=wait, x=x, y=y, at=at))
     if action == "drag":
         src = a.get("selector") or ([x, y] if x is not None and y is not None else None)
         if not src or not a.get("to"):
             raise RiverError("a drag needs where it starts and where it ends: maxpm browser drag <from> <to>")
-        return then(browser.drag(b, src, a["to"], who=sess, wait=wait, mods=mods))
+        return then(browser.drag(b, src, a["to"], who=sess, wait=wait, mods=mods, at=at, to_at=a.get("to_at") or None))
     if action == "type":
         return then(browser.type_text(b, a.get("text") or "", a.get("selector"), who=sess, wait=wait))
     if action == "fill":
@@ -423,6 +424,9 @@ def _act(conn, a, who):
     if action == "text":
         return {**b.info(), **page_text(a)}
     if action == "screenshot":
+        if a.get("selector"):  # #5689: one element, with its scale (and a grid to name a point for --at)
+            sel = browser.resolve_target(b, a["selector"], a.get("within"), "screenshot")
+            return browser.element_shot(b, sel, bool(a.get("grid")), bool(a.get("cursor")))
         return browser.screenshot(b, bool(a.get("full")), bool(a.get("cursor")))
     if action == "tab":
         return browser.switch_tab(b, a.get("target") or "")
