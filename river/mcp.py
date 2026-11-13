@@ -27,7 +27,7 @@ PROTOCOL = "2025-06-18"
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
 BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
                    "check", "uncheck", "key", "dialog", "upload", "back", "forward", "reload", "screenshot", "status",
-                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag", "errors", "size", "record")
+                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag", "errors", "size", "record", "image")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "
@@ -120,6 +120,7 @@ TOOLS = [
          "section": {"type": "string"}, "grep": {"type": "string"}, "limit": {"type": "integer"},
          "wait": {"type": "string", "enum": ["auto", "load", "idle", "none"]},
          "tab": {"type": "string", "description": "the tab to act in (default: the one that shows)"},
+         "out": {"type": "string", "description": "image: the file to write (full path; default: the downloads)"},
          "project": {"type": "string"}, "json": {"type": "boolean"}, "as": _AS}}},
     {"name": "inbox",
      "description": "Your unread messages and the questions that wait for your answer.",
@@ -154,7 +155,7 @@ def browser_argv(a):
     flags = []
     for key, flag in (("in", "--in"), ("wait", "--wait"), ("region", "--region"), ("scope", "--scope"),
                       ("section", "--section"), ("grep", "--grep"), ("rows", "--rows"), ("tab", "--tab"),
-                      ("project", "--project")):
+                      ("project", "--project"), ("out", "--out")):
         if a.get(key) not in (None, ""):
             flags += [flag, str(a[key])]
     if a.get("limit"):
@@ -201,6 +202,8 @@ def browser_argv(a):
         pos = [need("the size (text): phone, desktop, pane or <width>x<height>", text)]
     elif act == "record":  # #5682: start, stop, status, step <n>
         pos = (text or "status").split()
+    elif act == "image":  # #5688
+        pos = [need("the image (target)", t)]
     elif act == "extract":
         pos = [str(f) for f in a.get("fields") or []]
     elif act in ("tab", "close-tab") and t:

@@ -977,6 +977,11 @@ def build_parser(only=None):
                        "file in the project's folder or the browser's downloads")
     x.add_argument("target", help="the file field: its name, role and name, @e5, or a CSS selector")
     x.add_argument("files", nargs="+")
+    x = brs.add_parser("image", parents=[bp, ep], help="save an image element's file at full size (the largest of "
+                       "its sizes) and print its path, type and size; open the file to see it")
+    x.add_argument("target", help="the image, or a link or button with an image: its name, image \"name\", or @e5")
+    x.add_argument("--out", help="the file to write, in the project's folder or the browser's downloads (default: "
+                   "the downloads, under the image's own name)")
     x = brs.add_parser("dialog", parents=[bp, ap], help="answer the page's alert, confirm or prompt box (#5674): "
                        "accept [text], or dismiss")
     x.add_argument("answer", choices=["accept", "dismiss"])
@@ -2725,6 +2730,8 @@ def _browser_args(a):
         args.update(record=a.do, name=a.name, n=a.n)
     elif b == "upload":  # #5679: full paths, as serve runs in another folder
         args.update(selector=a.target, files=[str(Path(f).expanduser().resolve()) for f in a.files])
+    elif b == "image":  # #5688: serve writes the file, so a full path
+        args.update(selector=a.target, out=str(Path(a.out).expanduser().resolve()) if a.out else None)
     elif b == "dialog":
         if a.text is not None and a.answer == "dismiss":
             raise RiverError("dismiss takes no text: maxpm browser dialog dismiss")
@@ -5306,6 +5313,8 @@ def _snapshot_lines(s, title=True):
                    f"\"<word>\"")
     if s.get("frames"):
         out.append(f"({s['frames']} frame{'s' if s['frames'] > 1 else ''} not listed: open the frame's address)")
+    if s.get("captcha"):  # #5688, policy g5
+        out.append("This page shows a CAPTCHA test. Do not solve it: ask the person (maxpm ask <person> \"...\" --blocked)")
     return out
 
 
@@ -5430,6 +5439,11 @@ def render_browser(a, res):
         raise SystemExit(2)
     if b == "html" and "html" in res:
         print(res["html"])
+        return
+    if b == "image" and res.get("image"):  # #5688
+        m = res["image"]
+        size = f"{m['size'][0]}x{m['size'][1]}, " if m.get("size") else ""
+        print(f"saved {m['path']} ({m['type']}, {size}{m['bytes'] / 1000:.1f} KB)")
         return
     if b == "text":
         print("\n".join(_text_lines(res)))

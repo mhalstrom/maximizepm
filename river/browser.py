@@ -59,7 +59,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from urllib.parse import quote_plus, urldefrag, urlsplit
+from urllib.parse import quote_plus, unquote, unquote_to_bytes, urldefrag, urlsplit
 
 from . import core
 from .core import RiverError
@@ -2671,10 +2671,10 @@ class BrowserError(RiverError):
 
 
 ERROR_CODES = ("not_found", "ambiguous", "covered", "dialog_open", "not_controller", "timeout", "refused_address",
-               "refused_file", "error")
+               "refused_file", "captcha", "error")
 # What each action does: a read changes nothing on the page (a recorder may run it with no yes); a change does.
 READS = {"status", "snapshot", "outline", "text", "extract", "html", "screenshot", "suggest", "annotations", "steps",
-         "errors"}
+         "errors", "record", "image"}
 _PAGE = {"project", "owner", "running", "window", "source", "modes", "refused", "url", "title", "controller", "before",
          "window_by", "window_idle", "window_end", "size", "dialog", "tabs", "navigated", "changes", "outline", "notes"}
 
@@ -2886,6 +2886,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     '[tabindex]:not([tabindex="-1"]),[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],' +
     '[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=combobox],[role=textbox],' +
     '[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem]';
+  const IMG = 'img,svg[role=img],[role=img]';  // #5688: the images that a snapshot lists as elements
   const INPUT = {checkbox: 'checkbox', radio: 'radio', submit: 'button', button: 'button', reset: 'button',
     image: 'button', range: 'slider', number: 'spinbutton', search: 'searchbox', file: 'file'};
   const cut = (s, n) => { s = (s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
@@ -2895,8 +2896,11 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const v = getComputedStyle(e).visibility; return v !== 'hidden' && v !== 'collapse';
   };
   const role = e => {
-    const r = (e.getAttribute('role') || '').trim().split(/\s+/)[0]; if (r) return r;
+    const r = (e.getAttribute('role') || '').trim().split(/\s+/)[0];
+    if (r === 'img' || r === 'image') return 'image';
+    if (r) return r;
     const t = e.tagName;
+    if (t === 'IMG' || (e.localName === 'svg' && e.matches(IMG))) return 'image';
     if (t === 'A') return 'link';
     if (t === 'BUTTON' || t === 'SUMMARY') return 'button';
     if (t === 'INPUT') return INPUT[(e.type || 'text').toLowerCase()] || 'textbox';
@@ -2926,6 +2930,8 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const t = e.tagName, ty = (e.type || '').toLowerCase();
     if (t === 'INPUT' && ['submit', 'button', 'reset'].includes(ty)) return e.value || ty;
     if (t === 'INPUT' && ty === 'image') return e.alt || 'image';
+    if (t === 'IMG') return e.getAttribute('alt') || e.title || '';  // #5688
+    if (e.localName === 'svg') { const q = e.querySelector('title'); return q ? q.textContent : ''; }
     if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return e.placeholder || e.title || before(e) || e.name || '';
     s = text(e);
     if (!s || !s.trim()) {
@@ -2935,8 +2941,44 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     }
     return s || e.title || '';
   };
+  // #5688: an image's file (the last part of its address; data:<type>; svg when the page draws it) and shown size
+  const srcOf = e => {
+    if (e.tagName === 'IMG') return e.currentSrc || e.src || '';
+    if (e.localName === 'svg') return '';
+    const m = /url\(["']?(.*?)["']?\)/.exec(getComputedStyle(e).backgroundImage || '');
+    return m ? m[1] : '';
+  };
+  const fileOf = (u, e) => {
+    if (!u) return e && e.localName === 'svg' ? 'svg' : '';
+    if (u.startsWith('data:')) return 'data:' + (u.slice(5).split(/[;,]/)[0] || '');
+    try { const a = new URL(u, location.href); return cut(decodeURIComponent(a.pathname.split('/').filter(Boolean).pop() || a.host), 40); }
+    catch (x) { return cut(u, 40); }
+  };
+  const box = e => { const r = e.getBoundingClientRect(); return Math.round(r.width) + 'x' + Math.round(r.height); };
+  const picText = e => { const f = fileOf(srcOf(e), e); return (f ? f + ' ' : '') + box(e); };
+  // An image is an element of its own when it says something (an alt, at least 8 px) or is large (48 px), and it is
+  // not inside an interactive element (that one's line names it: one line, not two) or inside another image.
+  const isPic = e => {
+    if (!e.matches(IMG) || e.closest('[aria-hidden=true]')) return false;
+    const p = e.parentElement;
+    if (p && (p.closest(SEL) || p.closest(IMG))) return false;
+    const r = e.getBoundingClientRect();
+    return /[\p{L}\p{N}]/u.test(name(e)) ? r.width >= 8 && r.height >= 8 : r.width >= 48 && r.height >= 48;
+  };
+  // The image of an interactive element: an image in it that is large or all that it shows, else its own CSS
+  // background image when it has no text.
+  const picIn = e => {
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.tagName)) return '';  // a field's icon says nothing
+    const bare = !(text(e) || '').trim(), i = e.querySelector(IMG);
+    if (i) {
+      const r = i.getBoundingClientRect();
+      if (r.width && r.height && (bare || (r.width >= 48 && r.height >= 48))) return picText(i);
+    }
+    return bare && srcOf(e) ? picText(e) : '';
+  };
   const extra = (e, r) => {
     let s = '';
+    if (r === 'image') return ' ' + picText(e);
     const t = e.tagName, ty = (e.type || '').toLowerCase();
     if (t === 'SELECT') s += ' value=' + JSON.stringify(cut(Array.from(e.selectedOptions).map(o => o.label).join(', '), 40));
     else if ((t === 'INPUT' && !['checkbox', 'radio', 'submit', 'button', 'reset', 'image'].includes(ty)) || t === 'TEXTAREA') {
@@ -2947,7 +2989,8 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     if (e.getAttribute('aria-selected') === 'true') s += ' selected';
     if (e.disabled || e.getAttribute('aria-disabled') === 'true') s += ' disabled';
     if (r === 'link' && !name(e).trim()) s += ' href=' + JSON.stringify(cut(e.getAttribute('href'), 50));
-    return s;
+    const p = picIn(e);
+    return p ? s + ' image=' + p : s;
   };
   // The context of an element whose name says too little: the first heading or text of its row, card or list item
   // (not its own), or the header of its table column; else a test id or a class (icon-trash).
@@ -3066,7 +3109,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const look = node => {
       const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
       for (let e = w.currentNode; e; e = w.nextNode()) {
-        if (e.nodeType === 1 && e.matches(SEL) && role(e) === info[0] && norm(name(e)) === info[1].toLowerCase() && shown(e)) {
+        if (e.nodeType === 1 && (e.matches(SEL) || isPic(e)) && role(e) === info[0] && norm(name(e)) === info[1].toLowerCase() && shown(e)) {
           const g = e.closest(REGION);
           if ((g ? regionName(g) : '') === info[2]) hits.push(e);
         }
@@ -3164,7 +3207,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const FIELD = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider',
       'spinbutton', 'file']);
     const regs = new Map(), heads = [], per = new Map(), els = [];
-    const at = e => { const r = e.closest(REGION); if (!regs.has(r)) regs.set(r, {link: 0, button: 0, field: 0, rows: 0, heads: []}); return regs.get(r); };
+    const at = e => { const r = e.closest(REGION); if (!regs.has(r)) regs.set(r, {link: 0, button: 0, field: 0, image: 0, rows: 0, heads: []}); return regs.get(r); };
     const look = node => {
       const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
       for (let e = w.currentNode; e; e = w.nextNode()) {
@@ -3172,11 +3215,12 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
         if (/^H[1-3]$/.test(e.tagName)) { if (shown(e) && text(e).trim()) { const h = [+e.tagName[1], cut(text(e), 50)]; heads.push(h); at(e).heads.push(h); } }
         else if (e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden') && e.getClientRects().length) {
           const r = role(e), c = at(e);
-          c[r === 'link' ? 'link' : FIELD.has(r) ? 'field' : 'button']++;
+          c[r === 'link' ? 'link' : FIELD.has(r) ? 'field' : r === 'image' ? 'image' : 'button']++;
           const ch = chain(e);
           els.push(ch);
           ch.forEach(({g, row}) => { const k = g.id + ':' + row; per.set(k, (per.get(k) || 0) + 1); });
         }
+        else if (isPic(e)) at(e).image++;  // #5688
         if (e.shadowRoot) look(e.shadowRoot);
       }
     };
@@ -3194,7 +3238,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const lines = [], plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
     regs.forEach((c, r) => {
       const nums = [c.link && plural(c.link, 'link'), c.button && plural(c.button, 'button'),
-        c.field && plural(c.field, 'field'), c.rows && plural(c.rows, 'row')].filter(Boolean);
+        c.field && plural(c.field, 'field'), c.image && plural(c.image, 'image'), c.rows && plural(c.rows, 'row')].filter(Boolean);
       const hs = c.heads.filter(h => keep.has(h));
       if (!nums.length && !hs.length) return;
       lines.push('[' + (r ? regionName(r) : 'page') + '] ' + (nums.join(', ') || 'no elements'));
@@ -3235,7 +3279,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
       for (let e = w.currentNode; e; e = w.nextNode()) {
         // a file field is often hidden behind a button that opens it (#5679): an upload finds it too
-        if (e.nodeType === 1 && e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden')
+        if (e.nodeType === 1 && (e.matches(SEL) || isPic(e)) && !(e.tagName === 'INPUT' && e.type === 'hidden')
             && (shown(e) || (t.files && e.tagName === 'INPUT' && e.type === 'file'))) {
           const r = role(e), full = name(e), nm = norm(full);
           const same = nm === want || (pre && nm.startsWith(pre)) || (field(e) && (norm(e.name) === want || norm(e.id) === want));
@@ -3279,7 +3323,7 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
       if (e.nodeType !== 1) continue;  // a shadow root
       const head = all && !words && /^H[1-6]$/.test(e.tagName);
       if (e.tagName === 'IFRAME' && shown(e)) frames++;
-      else if ((head || e.matches(SEL)) && !(e.tagName === 'INPUT' && e.type === 'hidden')) {
+      else if ((head || e.matches(SEL) || isPic(e)) && !(e.tagName === 'INPUT' && e.type === 'hidden')) {
         if (view && !inView(e)) { if (e.getClientRects().length) outside++; }
         else if (!shown(e)) { /* hidden */ }
         else if (head) items.push({head: '#'.repeat(+e.tagName[1]) + ' ' + cut(text(e), 80), e});
@@ -3306,6 +3350,11 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
   visit(root);
   for (const [k, w] of R.els) { const e = w.deref(); if (!e || !e.isConnected) R.els.delete(k); }
   const out = {lines: [], more, outside, frames, next: n, url: location.href, title: document.title};
+  // #5688, policy g5: a CAPTCHA test that shows (not the badge of an invisible one): the agent asks the person
+  const cap = Array.from(document.querySelectorAll('iframe[src*="captcha" i],iframe[src*="challenges.cloudflare.com"],' +
+    'iframe[title*="captcha" i],[id*="captcha" i],[class*="captcha" i],img[alt*="captcha" i],img[src*="captcha" i]'))
+    .find(c => !c.closest('.grecaptcha-badge') && !/size=invisible/.test(c.getAttribute('src') || '') && shown(c));
+  if (cap) out.captcha = true;
   const last = R.last && R.last.scope === scope ? R.last.lines : null;
   R.last = {scope, lines: now};
   if (delta && last) {  // one line for each element that is new or changed, not folded
@@ -3440,7 +3489,8 @@ def as_ref(target):
 
 
 ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
-         "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file", "clickable"}
+         "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file", "clickable",
+         "image"}
 
 
 CHANGE_MAX = 15  # new or changed elements that the reply of an action lists at most
@@ -3999,12 +4049,7 @@ def track_download(b, method, p):
         state = p.get("state", d["state"])
         if state == "completed" and not d["path"]:
             folder = b.dir / "downloads"
-            stem, dot, ext = d["name"].rpartition(".")
-            stem, ext = (stem, dot + ext) if stem else (d["name"], "")
-            target, n = folder / d["name"], 1
-            while target.exists():
-                n += 1
-                target = folder / f"{stem} ({n}){ext}"
+            target = free_path(folder, d["name"])
             try:
                 (folder / d["guid"]).replace(target)
                 d["path"] = str(target)
@@ -4025,6 +4070,163 @@ def downloads_since(b, mark):
         b.cond.wait_for(lambda: all(d["state"] != "inProgress" for d in mine), DOWNLOAD_WAIT)
     return [{"name": d["name"], "path": d["path"], "bytes": d["bytes"], "state": d["state"], "url": d["url"]}
             for d in mine]
+
+
+def free_path(folder, name):
+    """folder/name, or folder/name (2).ext when that is taken (a download, a saved image)."""
+    stem, dot, ext = name.rpartition(".")
+    stem, ext = (stem, dot + ext) if stem else (name, "")
+    target, n = Path(folder) / name, 1
+    while target.exists():
+        n += 1
+        target = Path(folder) / f"{stem} ({n}){ext}"
+    return target
+
+
+# #5688: the file of an image element, at full size. The element: an img (its largest srcset candidate), an svg drawn
+# in the page (its markup), an element with a CSS background image, or an interactive element with an image in it.
+IMAGE_JS = r"""(el) => {
+  const P = 'img,svg[role=img],[role=img],svg';
+  const i = el.matches(P) ? el : (el.querySelector('img,svg[role=img],[role=img]') || el);
+  const cap = /captcha/i, src = i.getAttribute('src') || '';
+  const out = {tag: i.localName, alt: i.getAttribute('alt') || i.getAttribute('aria-label') || '',
+    captcha: !!el.closest('[id*="captcha" i],[class*="captcha" i]') || cap.test(src) || cap.test(i.getAttribute('alt') || '')};
+  const abs = u => { try { return new URL(u, document.baseURI).href; } catch (e) { return ''; } };
+  if (i.localName === 'svg') { out.svg = new XMLSerializer().serializeToString(i); return out; }
+  if (i.tagName === 'IMG') {
+    out.natural = [i.naturalWidth, i.naturalHeight];
+    out.src = i.currentSrc || i.src;
+    let best = null;
+    const sets = [i.getAttribute('srcset') || ''];
+    if (i.parentElement && i.parentElement.tagName === 'PICTURE')
+      i.parentElement.querySelectorAll('source[srcset]').forEach(s => sets.push(s.getAttribute('srcset')));
+    sets.join(',').split(/,\s+/).forEach(c => {
+      const [u, d] = c.trim().split(/\s+/);
+      if (!u || u.startsWith('data:')) return;
+      const n = parseFloat(d) || 1, k = /w$/.test(d || '') ? n : n * 1e6;  // a width descriptor before a density one
+      if (!best || k > best.k) best = {u: abs(u), k};
+    });
+    out.best = best ? best.u : out.src;
+    return out;
+  }
+  const m = /url\(["']?(.*?)["']?\)/.exec(getComputedStyle(i).backgroundImage || '');
+  out.src = out.best = m ? abs(m[1]) : '';
+  return out;
+}"""
+IMAGE_TYPES = {b"\x89PNG": ("image/png", ".png"), b"\xff\xd8\xff": ("image/jpeg", ".jpg"), b"GIF8": ("image/gif", ".gif"),
+               b"RIFF": ("image/webp", ".webp"), b"<svg": ("image/svg+xml", ".svg"), b"<?xm": ("image/svg+xml", ".svg")}
+
+
+def image_type(data):
+    """The type and extension of an image file by its first bytes; (None, '') when it is not a known image."""
+    head = data[:16].lstrip()
+    for magic, kind in IMAGE_TYPES.items():
+        if head.startswith(magic) and (magic != b"RIFF" or data[8:12] == b"WEBP"):
+            return kind
+    if b"ftypavif" in data[:16]:
+        return "image/avif", ".avif"
+    return None, ""
+
+
+def image_size(data):
+    """The width and height of a PNG, GIF, JPEG or WebP file from its header; None for another kind."""
+    try:
+        if data[:4] == b"\x89PNG":
+            return list(struct.unpack(">II", data[16:24]))
+        if data[:4] == b"GIF8":
+            return list(struct.unpack("<HH", data[6:10]))
+        if data[:4] == b"RIFF" and data[12:16] == b"VP8X":
+            return [int.from_bytes(data[24:27], "little") + 1, int.from_bytes(data[27:30], "little") + 1]
+        if data[:4] == b"RIFF" and data[12:16] == b"VP8 ":
+            return [struct.unpack("<H", data[26:28])[0] & 0x3FFF, struct.unpack("<H", data[28:30])[0] & 0x3FFF]
+        if data[:3] == b"\xff\xd8\xff":
+            i = 2
+            while i + 9 < len(data):
+                kind, n = data[i + 1], struct.unpack(">H", data[i + 2:i + 4])[0]
+                if kind in (0xC0, 0xC1, 0xC2, 0xC3):
+                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    return [w, h]
+                i += 2 + n
+    except struct.error:
+        return None
+    return None
+
+
+def image_bytes(b, url):
+    """The bytes of the image at url: from the page's own resources (Chrome's cache: no new request), else loaded in
+    the page's session (its cookies and sign-ins, through the browser's address rule)."""
+    if url.startswith("data:"):
+        head, _, body = url.partition(",")
+        return base64.b64decode(body) if head.endswith(";base64") else unquote_to_bytes(body)
+    try:
+        r = b.page("Page.getResourceContent", {"frameId": b.target, "url": url}, timeout=10)
+        return base64.b64decode(r["content"]) if r.get("base64Encoded") else r["content"].encode()
+    except RiverError:
+        pass  # not among the page's resources (a larger srcset candidate): load it
+    r = b.page("Network.loadNetworkResource", {"frameId": b.target, "url": url,
+                                               "options": {"disableCache": False, "includeCredentials": True}},
+               timeout=30)["resource"]
+    if not r.get("success"):
+        raise BrowserError(f"the image did not load from {url}: {r.get('netErrorName') or r.get('httpStatusCode')}",
+                           "error")
+    chunks = []
+    try:
+        while True:
+            c = b.page("IO.read", {"handle": r["stream"], "size": 1 << 20}, timeout=30)
+            chunks.append(base64.b64decode(c["data"]) if c.get("base64Encoded") else c["data"].encode())
+            if c.get("eof"):
+                break
+    finally:
+        try:
+            b.page("IO.close", {"handle": r["stream"]}, timeout=5)
+        except RiverError:
+            pass
+    return b"".join(chunks)
+
+
+def save_image(b, conn, target, out=None):
+    """#5688: maxpm browser image <target> [--out <file>]: save the file of an image element at full size and say
+    its path, type, size in pixels and bytes. --out must be in the project's folder or the browser's downloads (the
+    rule of upload); the default is the downloads folder, under the file's own name. Never for a CAPTCHA test (g5)."""
+    info = on_element(b, target, IMAGE_JS)
+    if not isinstance(info, dict):
+        raise BrowserError(f"{target} is not on the page: run maxpm browser snapshot", "not_found")
+    if info.get("captcha"):
+        raise BrowserError("this image is part of a CAPTCHA test. maxpm never solves one: ask the person "
+                           "(maxpm ask <person> \"...\" --blocked)", "captcha")
+    url = None
+    if info.get("svg"):
+        data = info["svg"].encode()
+    else:
+        url = info.get("best") or info.get("src")
+        if not url:
+            raise BrowserError(f"{target} shows no image file", "not_found")
+        try:
+            data = image_bytes(b, url)
+        except BrowserError:
+            if not info.get("src") or info["src"] == url:
+                raise
+            url = info["src"]  # the largest candidate did not load: the one that shows
+            data = image_bytes(b, url)
+    kind, ext = image_type(data)
+    if not kind:
+        raise BrowserError(f"{url or target} is not an image file ({len(data)} bytes)", "error")
+    if out:
+        path = Path(out).expanduser().resolve()
+        if not _upload_ok(conn, b, str(path)):
+            raise BrowserError(f"{path} is not in the project's folder or the browser's downloads "
+                               f"({b.dir / 'downloads'})", "refused_file")
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        name = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1] if url and not url.startswith("data:") else ""
+        name = re.sub(r"[^\w.\- ()]+", "_", unquote(name))[:80].strip("._ ") or "image"
+        if not name.lower().endswith(ext) and not (ext == ".jpg" and name.lower().endswith(".jpeg")):
+            name += ext
+        (b.dir / "downloads").mkdir(parents=True, exist_ok=True)
+        path = free_path(b.dir / "downloads", name)
+    path.write_bytes(data)
+    return {**b.info(), "image": {"path": str(path), "type": kind, "bytes": len(data), "url": url,
+                                  "size": image_size(data) or info.get("natural"), "alt": info.get("alt") or ""}}
 
 
 def type_text(b, text, selector=None, who=None, wait=None):

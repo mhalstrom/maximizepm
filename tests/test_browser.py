@@ -2113,6 +2113,110 @@ class StepRecord(Base):
                                              "mods": ["alt"]}), ["drag", 'button "Card"', "120,40", "--with", "alt"])
 
 
+def _png(w, h):
+    """A grey PNG of w x h pixels."""
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    rows = b"".join(b"\x00" + b"\x80" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+IMAGES = (b"<title>Shop</title><h1>Chairs</h1>"
+          b"<img id=logo src='/img/small.png' srcset='/img/small.png 100w, /img/big.png 400w' sizes='100px' alt='Logo' "
+          b"width=100 height=50 onclick=\"document.title = 'logo'\">"
+          b"<img src='/img/dot.png' alt='' width=16 height=16>"
+          b"<img src='/img/banner.png' alt='' width=200 height=100>"
+          b"<svg role=img width=60 height=40><title>Sales chart</title><rect width=60 height=40 fill=teal></rect></svg>"
+          b"<ul>" + b"".join(b"<li><a href='/p/%d'><img src='/img/chair%d.png' alt='%s chair' width=120 height=90></a> "
+                              b"<span>%s Chair</span> <img src='/img/star.png' alt='rating: 4.%d' width=60 height=12> "
+                              b"<a href='/b/%d'>Buy</a></li>" % (i, i, c, c, i, i)
+                              for i, c in enumerate((b"Blue", b"Red", b"Green"), 1)) + b"</ul>")
+CAPTCHA = (b"<title>Check</title><p>Prove you are a person</p><div class=g-captcha>"
+           b"<img src='/img/code.png' alt='letters' width=120 height=40></div>")
+
+
+class Images(Base):
+    """#5688 in a real Chrome: an image is an element (alt, file, size, its row), an image in a link is one line, a
+    small image with no alt is not listed; images act by name; image saves the file at its largest size; a CAPTCHA
+    test is named and never saved."""
+
+    def test_images_are_elements_and_image_saves_the_file(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        sizes = {"small": (100, 50), "big": (400, 200), "dot": (16, 16), "banner": (200, 100), "star": (60, 12),
+                 "code": (120, 40)}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/img/"):
+                    stem = self.path[5:].split(".")[0]
+                    body, kind = _png(*sizes.get(stem, (120, 90))), "image/png"
+                else:
+                    body, kind = CAPTCHA if self.path == "/cap" else IMAGES, "text/html"
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+        lines = act(action="snapshot", interactive=True)["snapshot"]["lines"]
+        text = "\n".join(lines)
+        self.assertRegex(text, r'@e\d+ image "Logo" small\.png 100x50')
+        self.assertRegex(text, r'@e\d+ image "Sales chart" svg 60x40')
+        self.assertRegex(text, r'@e\d+ image "" banner\.png 200x100')  # large: listed, with no name
+        self.assertNotIn("dot.png", text)  # small and no alt: a decoration
+        self.assertRegex(text, r'"Blue chair" image=chair1\.png 120x90 @e\d+ image "rating: 4\.1" star\.png 60x12')
+        self.assertEqual(text.count("chair1.png"), 1)  # the image in the link is the link's line
+        self.assertIn("[page] 6 links, 6 images, 3 rows", act(action="outline")["outline"])
+        found = act(action="snapshot", interactive=True, find="rating: 4.2")["snapshot"]["lines"]
+        self.assertEqual(len(found), 1, found)
+        self.assertEqual(act(action="click", selector='image "Logo"')["title"], "logo")
+        out = act(action="image", selector="Logo")["image"]
+        self.assertEqual((Path(out["path"]).name, out["type"], out["size"]), ("big.png", "image/png", [400, 200]))
+        self.assertEqual(Path(out["path"]).parent, b.dir / "downloads")
+        self.assertEqual(_render(lambda r: cli.render_browser(type("A", (), {"bcmd": "image"})(), r), {"image": out}),
+                         f"saved {out['path']} (image/png, 400x200, {out['bytes'] / 1000:.1f} KB)\n")
+        a1 = act(action="image", selector="Blue chair")["image"]
+        a2 = act(action="image", selector="Blue chair")["image"]
+        self.assertEqual((Path(a1["path"]).name, Path(a2["path"]).name), ("chair1.png", "chair1 (2).png"))
+        self.assertEqual(a1["size"], [120, 90])
+        svg = act(action="image", selector="Sales chart")["image"]
+        self.assertEqual(svg["type"], "image/svg+xml")
+        self.assertIn("<title>Sales chart</title>", Path(svg["path"]).read_text())
+        with self.assertRaises(browser.BrowserError) as e:
+            act(action="image", selector="Logo", out=str(Path(tempfile.gettempdir()) / "x.png"))
+        self.assertEqual(e.exception.code, "refused_file")
+        mine = b.dir / "downloads" / "logo-copy.png"
+        self.assertEqual(act(action="image", selector="Logo", out=str(mine))["image"]["path"], str(mine.resolve()))
+        act(action="open", url=f"http://127.0.0.1:{port}/cap", show=False)
+        snap = act(action="snapshot", interactive=True)["snapshot"]
+        self.assertTrue(snap.get("captcha"))
+        self.assertIn("CAPTCHA test. Do not solve it", "\n".join(cli._snapshot_lines(snap)))
+        with self.assertRaises(browser.BrowserError) as e:
+            act(action="image", selector="letters")
+        self.assertEqual(e.exception.code, "captcha")
+        self.assertEqual(browser.image_size(_png(7, 5)), [7, 5])
+        self.assertEqual(browser.image_type(b"<svg xmlns='x'/>"), ("image/svg+xml", ".svg"))
+
+
 POINTER = (b"<title>Pointer</title><style>#mm{display:none;position:absolute;background:#fff} #m:hover #mm{display:block}"
            b"</style><nav aria-label=Main>"
            b"<div id=m style='display:inline-block;padding:8px'>Products<div role=menu aria-label=Products id=mm>"

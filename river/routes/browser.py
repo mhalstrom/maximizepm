@@ -415,6 +415,11 @@ def _act(conn, a, who):
         sc = browser.resolve_target(b, a.get("scope"), verb="html --scope") if a.get("scope") else None
         html = browser.on_element(b, sc, "(el) => el.outerHTML") if sc else b.evaluate("document.documentElement.outerHTML")
         return {**b.info(), "html": html, "bytes": len((html or "").encode())}
+    if action == "image":  # #5688: an image element's file at full size, in the downloads or --out
+        sel = browser.resolve_target(b, a.get("selector") or "", a.get("within"), "image")
+        if not sel:
+            raise RiverError("name the image: maxpm browser image <name, role \"name\" or @ref> [--out <file>]")
+        return browser.save_image(b, conn, sel, a.get("out"))
     if action == "text":
         return {**b.info(), **page_text(a)}
     if action == "screenshot":
