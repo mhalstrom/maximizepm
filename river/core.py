@@ -4261,6 +4261,31 @@ def _item_loops(conn, where, setting_key):
     return n, win, rows
 
 
+# The events that the release-loop probe counts: a release or a reopen. A release that a session made after a
+# person or the manager asked it to stop (maxpm stop logs 'stop requested for <agent>: ...' on each item it held,
+# since its last claim of the item) is the stop, not a loop (#5710).
+_RELEASE_LOOP_EVENTS = (
+    "e.change='reopened' OR (e.change LIKE 'released%' AND NOT EXISTS (SELECT 1 FROM events s WHERE "
+    "s.item_id=e.item_id AND s.id<e.id AND s.change LIKE 'stop requested for ' || e.actor || ':%' AND s.id>"
+    "COALESCE((SELECT MAX(k.id) FROM events k WHERE k.item_id=e.item_id AND k.actor=e.actor AND k.id<e.id AND "
+    "k.change LIKE 'claimed%'), 0)))")
+
+
+def _probe_fault_prefixes(conn, name):
+    """The title starts of the fault items of the checks that run probe `name` (ops:<scope>:<check> and a space or a
+    colon): the release-loop probe never counts them, because they reopen at each run of the check that found the
+    loop, and would make the check find itself (#5710)."""
+    out = []
+    for r in conn.execute("SELECT scope, name, config FROM checks"):
+        try:
+            cmd = str(json.loads(r["config"] or "{}").get("command") or "")
+        except ValueError:
+            continue
+        if re.search(rf"\bops probe {re.escape(name)}\b", cmd):
+            out += [_ops_key(r) + " ", _ops_key(r) + ":"]
+    return tuple(out)
+
+
 def ops_probe(conn, name):
     """One of MaximizePM's own checks (OPS_PROBES): {"name", "status" ok|critical, "summary", "perf", "subjects"}.
     It only reads the queue."""
@@ -4306,10 +4331,12 @@ def ops_probe(conn, name):
         bad = bool(subjects)
     else:
         loop = name == "lease-loop"
-        n, win, rows = _item_loops(conn, "e.change LIKE 'lease expired (was %'" if loop
-                                   else "e.change LIKE 'released%' OR e.change='reopened'",
+        n, win, rows = _item_loops(conn, "e.change LIKE 'lease expired (was %'" if loop else _RELEASE_LOOP_EVENTS,
                                    "ops_lease_loop" if loop else "ops_release_loop")
         what = "lease expiries" if loop else "releases or reopens"
+        if not loop:
+            own = _probe_fault_prefixes(conn, name)
+            rows = [r for r in rows if not r["title"].startswith(own)]
         for r in rows:
             subjects[f"#{r['item_id']}"] = f"{r['n']} {what} in {_short(win)}: {r['title'][:80]}"
         perf = {"items": len(subjects)}
@@ -4987,20 +5014,29 @@ def _ops_noise_patterns(rules):
     return out
 
 
-def _ops_noise_match(c, key, rules, summary):
+def _ops_noise_match(c, key, rules, res):
     """The rule that makes a fault key of check c noise, or None: a rule with no pattern for the check (and for the
-    subject, when it names one), or a rule whose pattern matches the subject's name or the run's summary."""
+    subject, when it names one), or a rule whose pattern matches one of the texts of the key. For a subject: its
+    name ('#5551'), its key ('ops:maximizepm:release-loop:#5551') and its line as the check printed it
+    ('#5551: 4 releases or reopens in 24h: ...'), so a pattern written from the output or from a fault item's title
+    matches (#5710). For the check itself: the run's summary."""
     subject = key[len(c["key"]) + 1:] if key.startswith(c["key"] + ":") else None
+    if subject is None:
+        texts = [res.get("summary") or ""]
+    else:
+        text = ((res.get("subjects") or {}).get(subject) or {}).get("text")
+        texts = [subject, key, f"{subject}: {text}" if text else subject]
     for r in rules:
         if r["subject"] and r["subject"] != subject:
             continue
         if not r["pattern"]:
             return r
         try:
-            if re.search(r["pattern"], subject or summary or ""):
-                return r
+            pat = re.compile(r["pattern"])
         except re.error:
             continue
+        if any(pat.search(t) for t in texts):
+            return r
     return None
 
 
@@ -6242,7 +6278,7 @@ def ops_kind(conn, c, key, res, at=None, noise=None):
             return {"kind": kind, "rule": 1, "why": f"the output names {where}: {pat.search(text).group(0)!r}"}
     # 2. Noise.
     rules = noise if noise is not None else ops_noise_rules(conn, c, at)
-    rule = _ops_noise_match(c, key, rules, res.get("summary")) if rules else None
+    rule = _ops_noise_match(c, key, rules, res) if rules else None
     if rule:
         return {"kind": "noise", "rule": 2, "why": f"noise rule n{rule['id']}: {rule['reason']}", "noise": rule}
     related = _ops_related(conn, c)

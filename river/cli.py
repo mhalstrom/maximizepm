@@ -1305,7 +1305,9 @@ def build_parser(only=None):
     y = nz.add_parser("add", help="add a rule (an agent's rule ends within ops_noise_max, 30d; the manager gets a note)")
     y.add_argument("scope"); y.add_argument("name", help="the check")
     y.add_argument("--reason", required=True, help="what it is, and why nobody needs to act")
-    y.add_argument("--pattern", help="a regular expression over the log lines, the subject names and the run's summary")
+    y.add_argument("--pattern", help="a regular expression over the log lines and the run's summary; for a check with "
+                   "subjects, over each subject's name (#5551), its key (ops:<scope>:<check>:#5551, as a fault item's "
+                   "title starts) and its output line (#5551: <text>)")
     y.add_argument("--subject", help="only this subject of the check")
     y.add_argument("--until", help="when the rule ends: 30d, or a date (default ops_noise_max)")
     y.add_argument("--fault", type=int, help="the fault item that showed it (default: the fault item you hold)")

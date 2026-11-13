@@ -9965,6 +9965,31 @@ class OpsProbes(Base):
             with self.assertRaises(RiverError):
                 core.config_set(self.c, "ops_release_loop", bad)
 
+    def test_release_loop_skips_its_own_fault_items_and_releases_after_a_stop(self):
+        """#5710: the check's own fault items reopen at each run, and a session that a person stopped releases its
+        item; neither is a loop. A fault item of another check still counts."""
+        core.project_add(self.c, "web")
+        core.register(self.c, "mark", human=True)
+        core.ops_add(self.c, "web", "release-loop", "plugin", {"command": "maxpm ops probe release-loop"}, actor="mark")
+        own = self.add("web", "ops:web:release-loop:#7 RELEASE-LOOP CRITICAL - 1 item(s)")
+        other = self.add("web", "ops:web:edge-errors stopped at its timeout 90s")
+        for _ in range(4):
+            core._event(self.c, own, "maxpm", "reopened")
+            core._event(self.c, other, "maxpm", "reopened")
+        self.assertEqual(list(core.ops_probe(self.c, "release-loop")["subjects"]), [f"#{other}"])
+        core.register(self.c, "w1")
+        i = self.add("web", "Stopped often")
+        core.claim(self.c, i, "w1")
+        core.stop_agent(self.c, "w1", "nothing to do", actor="mark")
+        core.release(self.c, i, actor="w1", note="stopped")  # after the stop: not counted
+        for _ in range(3):
+            core._event(self.c, i, "w1", "claimed (lease 30m)")
+            core._event(self.c, i, "w1", "released: later")  # a later claim: the stop does not cover these
+        self.assertNotIn(f"#{i}", core.ops_probe(self.c, "release-loop")["subjects"])  # 3 of 4
+        core._event(self.c, i, "w1", "claimed (lease 30m)")
+        core._event(self.c, i, "w1", "released: again")
+        self.assertIn("4 releases or reopens", core.ops_probe(self.c, "release-loop")["subjects"][f"#{i}"])
+
     def test_the_command_prints_a_plugin_answer_and_its_exit_code(self):
         core.project_add(self.c, "web")
         a = self.add("web", "Loops")
@@ -11632,6 +11657,19 @@ class OpsNoise(Base):
         self.assertEqual(res["status"], "ok")  # one line counts (Traceback), the limit is 2
         run = core.ops_history(self.c, "site", "errs", 1)["runs"][0]
         self.assertEqual(json.loads(run["evidence"])["noise"], 2)
+
+    def test_a_pattern_for_an_item_id_matches_the_subjects_line_and_key(self):
+        """#5710: a rule written from the probe's output ('#5551: ...') or from a fault item's title
+        ('ops:site:loops:#5551 ...') matches that subject, and only it."""
+        core.ops_add(self.c, "site", "loops", "plugin", {"command": "x", "fail_after": 1, "subject": True}, actor="boss")
+        core.ops_noise_add(self.c, "site", "loops", "handoffs", pattern="#(5551|5550):", actor="dev")
+        core.ops_noise_add(self.c, "site", "loops", "a test item", pattern=r"loops:#12\b", actor="dev")
+        out = ("LOOPS CRITICAL - 4 item(s)\n#5551: 4 releases or reopens in 24h: a\n#5550: 5 releases or reopens in "
+               "24h: b\n#12: 4 releases or reopens in 24h: c\n#13: 4 releases or reopens in 24h: d\n")
+        res = self.run_at("site", "loops", core.now(), self.proc(2, out))
+        self.assertEqual(sorted(x["key"] for x in res["items"] if x["action"] == "noise"),
+                         ["ops:site:loops:#12", "ops:site:loops:#5550", "ops:site:loops:#5551"])
+        self.assertIn("ops:site:loops:#13", [x["key"] for x in res["items"]])  # no rule: it reaches the queue
 
 
 class OpsKinds(Base):
