@@ -5,8 +5,10 @@ reaches the browser through its own CDP address, GET /cdp/<agent> (#5405)."""
 
 import hmac
 import shlex
+import sqlite3
 import threading
 import time
+from urllib.parse import urlsplit
 
 from .. import annotate, browser, core, server  # noqa: F401  (server: read at call time, so tests that replace its globals work)
 from ..core import RiverError
@@ -244,6 +246,86 @@ def record_action(conn, a, who, b, project, person):
     return out
 
 
+# #5692: the log of fallbacks. A failed name (nothing or several) of a session is a case at once. After it, on the
+# same page (host and path) within FALLBACK_WINDOW, each fallback is a case: html of a part, the whole html, an
+# element picture, a CSS selector, a point. With no failed name, html, a selector or a point is a case only on a
+# public site (the session skipped the names); on the person's own dev page (browser.dev_page) it is plain dev work.
+# The first action on an element after a failed name records that element on the failed name's row ("used").
+FALLBACK_WINDOW = 600
+
+
+def _page(b):
+    return (b.targets.get(b.target) or {}).get("url", "")
+
+
+def _is_name(t):
+    t = (t or "").strip() if isinstance(t, str) else ""
+    return bool(t) and not browser.as_ref(t) and not t.startswith("css:")
+
+
+def _missed(b):
+    m = getattr(b, "missed", None)
+    key = urlsplit(_page(b))
+    if m and m["page"] == (key.netloc, key.path) and time.time() - m["at"] < FALLBACK_WINDOW:
+        return m
+    return None
+
+
+def _log(conn, b, who, kind, **kw):
+    try:
+        return core.fallback_log(conn, b.project, who, kw.pop("url", None) or _page(b), kind, **kw)
+    except (sqlite3.Error, RiverError):
+        return None  # the log never stops the action
+
+
+def _resolve(conn, b, who, action, target, within=None, verb=None):
+    """browser.resolve_target; for a session, a name that finds nothing or several is a case of the log (#5692)."""
+    try:
+        return browser.resolve_target(b, target, within, verb or action)
+    except browser.BrowserError as e:
+        if who and e.code in ("not_found", "ambiguous") and _is_name(target):
+            tried = target.strip() + (f' in "{within}"' if within else "")
+            rid = _log(conn, b, who, e.code, action=action, tried=tried)
+            if rid:
+                u = urlsplit(_page(b))
+                b.missed = {"page": (u.netloc, u.path), "at": time.time(), "id": rid, "tried": tried}
+        raise
+
+
+def _fallback_before(conn, b, who, action, sel=None, x=None, y=None, kind=None, target=None):
+    """#5692: before a session's action, whether it is a fallback (kind), and the element it acts on (read now: a
+    click may leave the page). None when there is nothing to log."""
+    m = _missed(b)
+    if kind is None:
+        if sel and sel.startswith("css:"):
+            kind, target = "selector", sel[4:]
+        elif not sel and x is not None and y is not None:
+            kind, target = "point", f"{x:g},{y:g}"
+    url = _page(b)
+    if kind is None and m is None:
+        return None
+    if kind and m is None and (kind == "picture" or browser.dev_page(conn, b.project, url)):
+        return None  # a picture of a named element is the way for a map; dev work on the person's own page
+    act_on = action not in ("html", "screenshot")
+    used = browser.describe(b, sel, None if sel else x, None if sel else y) if act_on and (sel or kind == "point") else None
+    return {"kind": kind, "target": target, "used": used, "miss": m, "url": url, "action": action, "act_on": act_on}
+
+
+def _fallback_after(conn, b, who, fb):
+    """#5692: the action succeeded: log the fallback; an action on an element ends the failed name's case."""
+    m = fb["miss"]
+    if fb["kind"]:
+        _log(conn, b, who, fb["kind"], url=fb["url"], action=fb["action"], tried=m and m["tried"],
+             target=fb["target"], used=fb["used"], miss=m and m["id"])
+    if m and fb["act_on"]:
+        if fb["used"]:
+            try:
+                core.fallback_used(conn, m["id"], fb["used"])
+            except (sqlite3.Error, RiverError):
+                pass
+        b.missed = None
+
+
 def _act(conn, a, who):
     action = a.get("action") or "status"
     if action == "batch":
@@ -335,8 +417,13 @@ def _act(conn, a, who):
         if rec is not None:
             b.walk = (getattr(b, "walk", []) + [rec])[-WALK_KEEP:]
 
+    fb = None  # #5692: the fallback of this action, logged when it succeeds
+    sess_of = None if person else who  # a name that the person's pane misses is no case of the log
+
     def then(out):  # --snapshot: the snapshot of the page that the action left (#5663)
         record()
+        if fb:
+            _fallback_after(conn, b, who, fb)
         if b.said:
             out["notes"] = b.said
         if pre is not None and not out.get("dialog"):  # a new page: its outline; else what changed on this one
@@ -370,15 +457,17 @@ def _act(conn, a, who):
         return {**b.info(), "data": r["rows"], "count": r["count"]}
     if action in ON_ELEMENT and a.get("selector"):
         # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named
-        a = {**a, "selector": browser.resolve_target(b, a["selector"], a.get("within"), action)}
+        a = {**a, "selector": _resolve(conn, b, sess_of, action, a["selector"], a.get("within"))}
     if action == "drag" and isinstance(a.get("to"), str):
-        a = {**a, "to": browser.resolve_target(b, a["to"], None, "drag")}
+        a = {**a, "to": _resolve(conn, b, sess_of, "drag", a["to"])}
     if action in ON_ELEMENT + ("key", "dialog") and not person and a.get("changes", True):
         pre = browser.view_keys(b) if not b.dialog else None
-    if action == "upload":  # #5679
-        return then(browser.upload(b, conn, a.get("selector") or "", a.get("files") or [], who=sess, wait=wait))
     x, y, mods = a.get("x"), a.get("y"), a.get("mods") or ()
     x, y = (None if x is None else float(x)), (None if y is None else float(y))
+    if action in ON_ELEMENT and not person and not b.dialog:
+        fb = _fallback_before(conn, b, who, action, a.get("selector"), x, y)
+    if action == "upload":  # #5679
+        return then(browser.upload(b, conn, a.get("selector") or "", a.get("files") or [], who=sess, wait=wait))
     at = a.get("at") or None  # #5689: a point inside the target's box
     if action == "click":
         return then(browser.click(b, a.get("selector"), x, y, who=sess, wait=wait, button=a.get("button") or "left",
@@ -413,11 +502,16 @@ def _act(conn, a, who):
     if action == "eval":
         return {**b.info(), "value": b.evaluate(a.get("js") or "")}
     if action == "html":  # #5671: --scope (a ref or a CSS selector) gives one part of the page, the fallback of a name
-        sc = browser.resolve_target(b, a.get("scope"), verb="html --scope") if a.get("scope") else None
+        sc = _resolve(conn, b, sess_of, "html", a.get("scope"), verb="html --scope") if a.get("scope") else None
+        if not person:  # #5692: html after a failed name, or on a public site
+            fb = _fallback_before(conn, b, who, "html", kind="html_part" if sc else "html_whole",
+                                  target=a.get("scope") or None)
         html = browser.on_element(b, sc, "(el) => el.outerHTML") if sc else b.evaluate("document.documentElement.outerHTML")
+        if fb:
+            _fallback_after(conn, b, who, fb)
         return {**b.info(), "html": html, "bytes": len((html or "").encode())}
     if action == "image":  # #5688: an image element's file at full size, in the downloads or --out
-        sel = browser.resolve_target(b, a.get("selector") or "", a.get("within"), "image")
+        sel = _resolve(conn, b, sess_of, "image", a.get("selector") or "", a.get("within"))
         if not sel:
             raise RiverError("name the image: maxpm browser image <name, role \"name\" or @ref> [--out <file>]")
         return browser.save_image(b, conn, sel, a.get("out"))
@@ -425,8 +519,13 @@ def _act(conn, a, who):
         return {**b.info(), **page_text(a)}
     if action == "screenshot":
         if a.get("selector"):  # #5689: one element, with its scale (and a grid to name a point for --at)
-            sel = browser.resolve_target(b, a["selector"], a.get("within"), "screenshot")
-            return browser.element_shot(b, sel, bool(a.get("grid")), bool(a.get("cursor")))
+            sel = _resolve(conn, b, sess_of, "screenshot", a["selector"], a.get("within"))
+            if not person:  # #5692: an element picture after a failed name
+                fb = _fallback_before(conn, b, who, "screenshot", kind="picture", target=a["selector"])
+            out = browser.element_shot(b, sel, bool(a.get("grid")), bool(a.get("cursor")))
+            if fb:
+                _fallback_after(conn, b, who, fb)
+            return out
         return browser.screenshot(b, bool(a.get("full")), bool(a.get("cursor")))
     if action == "tab":
         return browser.switch_tab(b, a.get("target") or "")

@@ -3769,6 +3769,56 @@ def resolve_target(b, target, within=None, verb="click"):
                        f"the page, then --selector '<css>' or a point (x y)", "not_found", r.get("near"))
 
 
+# #5692: the element that a fallback acted on, in a few words: its role (or tag), its name, its class and test id, so
+# a logged case shows what the name step missed.
+DESCRIBE_JS = """(el) => {
+  if (!el || el.nodeType !== 1) return null;
+  const cut = (s, n) => (s || '').replace(/\\s+/g, ' ').trim().slice(0, n);
+  const role = el.getAttribute('role') || el.tagName.toLowerCase();
+  const lab = el.id && document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+  const name = cut(el.getAttribute('aria-label') || el.getAttribute('alt') || el.getAttribute('title')
+    || (lab && lab.innerText) || el.getAttribute('placeholder') || el.innerText || el.value, 60);
+  const cls = cut(typeof el.className === 'string' ? el.className : el.getAttribute('class'), 60);
+  const tid = el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-qa') || '';
+  return [role, name ? JSON.stringify(name) : '', cls ? 'class=' + cls : '', tid ? 'testid=' + tid : '']
+    .filter(Boolean).join(' ');
+}"""
+
+
+def describe(b, target=None, x=None, y=None):
+    """#5692: the role, name, class and test id of the element that target names (a ref or css:<selector>), or of the
+    element at the point x, y; None when the page cannot say."""
+    try:
+        if target:
+            return on_element(b, target, DESCRIBE_JS)
+        if x is not None and y is not None:
+            return b.evaluate("(%s)(document.elementFromPoint(%s, %s))" % (DESCRIBE_JS, float(x), float(y)), 2)
+    except DialogOpen:
+        raise
+    except RiverError:
+        pass
+    return None
+
+
+def dev_page(conn, project, url):
+    """#5692: whether url is the person's own page in development: localhost, a loopback or private address, or a
+    host that the project's browser_allow names. A session's plain html read or selector there is no fallback."""
+    u = urlsplit(url or "")
+    host = (u.hostname or "").lower()
+    if not host:
+        return True  # about:blank, a file, a data address: no site to fix
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        if _private(host):
+            return True
+    except ValueError:
+        pass
+    r = conn.execute("SELECT id FROM projects WHERE name=?", (project,)).fetchone()
+    allow = parse_allow(core.setting(conn, "browser_allow", project_id=r[0] if r else None))
+    return allowed(host, u.port or (443 if u.scheme == "https" else 80), allow)
+
+
 def on_element(b, target, fn, *args):
     """fn(el, ...args) in the page, for the element that target names: a ref of a snapshot (@e3, in the snapshot's
     world) or a CSS selector (the first element that matches, in the page's world; css:<selector> too)."""

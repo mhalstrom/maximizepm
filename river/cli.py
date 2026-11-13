@@ -1082,6 +1082,11 @@ def build_parser(only=None):
                    help="fix: you fixed note <n>; not-fixed: you could not; reopen: it is open again")
     x.add_argument("n", nargs="?", type=int, help="the note's number (in the picture)")
     x.add_argument("--note", help="one line: what you changed, or why it is not fixed")
+    x = brs.add_parser("fallbacks", help="the cases where the names did not work and a session fell back (html, an "
+                       "element picture, a selector, a point): counts by site and kind, and the newest cases")
+    x.add_argument("--site", help="one site: its host, or the end of it (wikipedia.org)")
+    x.add_argument("--since", default="7d", help="a duration back from now (7d, 24h) or a time; default 7d")
+    x.add_argument("-n", type=int, default=core.FALLBACKS_SHOW, help="how many of the newest cases to print")
     cv = sub.add_parser("canvas", help="canvases: pages that a session makes and maxpm keeps (HTML, Markdown, SVG), "
                         "with versions and the comments people write on them")
     cvs = cv.add_subparsers(dest="cvcmd", required=True)
@@ -2585,6 +2590,8 @@ RETRY_WAIT = 1.0  # seconds between two tries to reach a maxpm serve that does n
 def _browser_cmd(conn, a, actor):
     """maxpm browser: maxpm serve runs the browser (river/browser.py); the command asks it (ask_server)."""
     b = a.bcmd
+    if b == "fallbacks":  # #5692: the queue's own table, no need of maxpm serve
+        return core.browser_fallbacks(conn, a.site, a.since, a.n)
     if b in ("annotations", "annotation"):  # the queue's own table (#5655): no need of maxpm serve
         from . import annotate
         if b == "annotation":
@@ -5437,10 +5444,41 @@ def _text_lines(res):
     return out
 
 
+FALLBACK_WORDS = {"not_found": "name not found", "ambiguous": "name ambiguous", "html_part": "html of a part",
+                  "html_whole": "whole html", "picture": "element picture", "selector": "selector", "point": "point"}
+
+
+def render_fallbacks(res):
+    """maxpm browser fallbacks (#5692): the counts by site and kind, then the newest cases."""
+    since = core.show_time(res["since"])
+    if not res["sites"]:
+        print(f"no fallbacks since {since}" + (f" on {res['site']}" if res["site"] else "")
+              + ": the names worked on every page")
+        return
+    print(f"{res['total']} case{'' if res['total'] == 1 else 's'} since {since}, by site:")
+    for s in res["sites"]:
+        print(f"  {s['host']}  {s['n']}: " + ", ".join(f"{FALLBACK_WORDS.get(k, k)} {n}" for k, n in
+                                                     sorted(s["kinds"].items(), key=lambda kv: -kv[1])))
+    print("newest:")
+    for c in res["cases"]:
+        line = f"  {core.show_time(c['at'])}  {c['host']}{_cut(c['path'], 50)}  {FALLBACK_WORDS.get(c['kind'], c['kind'])}"
+        if c["action"]:
+            line += f" ({c['action']})"
+        if c["tried"]:
+            line += f"  tried {c['tried']}"
+        if c["target"]:
+            line += f"  with {c['target']}"
+        if c["used"]:
+            line += f"  used: {c['used']}"
+        print(line + f"  {c['agent'] or ''}".rstrip())
+
+
 def render_browser(a, res):
     b = a.bcmd
     if b in ("annotations", "annotation"):
         return render_annotations(a, res)
+    if b == "fallbacks":
+        return render_fallbacks(res)
     if b == "batch":
         for s in res["steps"]:
             st = s["step"]

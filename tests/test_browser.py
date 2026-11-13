@@ -2812,6 +2812,127 @@ class PageText(Base):
         self.assertEqual(b.evaluate("document.body.outerHTML"), before)
 
 
+FALLBACK = (b"<title>Invoices</title><main><button>Delete</button><button>Delete</button>"
+            b"<button id=go class='btn primary' data-testid=go-btn style='width:80px;height:30px'"
+            b" onclick=\"document.title = 'went'\"></button></main>")
+
+
+class Fallbacks(Base):
+    """#5692: the log of the cases where a session's names did not work and it fell back, and its reader."""
+
+    def run_cli(self, *words):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(list(words))
+        return out.getvalue()
+
+    def test_the_log_keeps_host_and_path_and_the_reader_counts_by_site_and_kind(self):
+        miss = core.fallback_log(self.c, "web", "ag1", "https://en.wikipedia.org/wiki/Lithium?x=secret#top",
+                                 "not_found", action="click", tried="Edit section")
+        core.fallback_log(self.c, "web", "ag1", "https://en.wikipedia.org/wiki/Lithium", "html_part", action="html",
+                          tried="Edit section", target="css:#mw-content", miss=miss)
+        core.fallback_log(self.c, "web", "ag2", "https://news.ycombinator.com/", "selector", action="click",
+                          target=".morelink", used="a class=morelink")
+        core.fallback_used(self.c, miss, 'a "edit" class=mw-editsection')
+        rows = [dict(r) for r in self.c.execute("SELECT * FROM browser_fallbacks ORDER BY id")]
+        self.assertEqual([(r["host"], r["path"]) for r in rows][0], ("en.wikipedia.org", "/wiki/Lithium"))
+        self.assertNotIn("secret", json.dumps(rows))  # no query string
+        self.assertEqual([r["used"] for r in rows[:2]], ['a "edit" class=mw-editsection'] * 2)
+        res = core.browser_fallbacks(self.c)
+        self.assertEqual(res["total"], 3)
+        self.assertEqual(res["sites"][0], {"host": "en.wikipedia.org", "kinds": {"not_found": 1, "html_part": 1}, "n": 2})
+        self.assertEqual([c["kind"] for c in res["cases"]], ["selector", "html_part", "not_found"])
+        self.assertEqual(core.browser_fallbacks(self.c, site="wikipedia.org")["total"], 2)  # the end of a host
+        self.assertEqual(core.browser_fallbacks(self.c, site="pedia.org")["total"], 0)
+        out = self.run_cli("browser", "fallbacks", "--site", "wikipedia.org")
+        self.assertIn("2 cases since", out)
+        self.assertRegex(out, r"en\.wikipedia\.org  2: (html of a part 1, name not found 1|name not found 1, html of a "
+                              r"part 1)")
+        self.assertIn('/wiki/Lithium  name not found (click)  tried Edit section  used: a "edit" class=mw-editsection', out)
+        self.assertIn("no fallbacks since", self.run_cli("browser", "fallbacks", "--site", "example.com"))
+        with self.assertRaises(RiverError):
+            core.fallback_log(self.c, "web", "ag1", "https://a.b/", "guess")
+
+    def test_the_persons_dev_page_is_no_site_to_fix(self):
+        dev = lambda u: browser.dev_page(self.c, "web", u)  # noqa: E731
+        for u in ("http://localhost:5173/", "http://127.0.0.1:8000/x", "http://10.0.0.4/", "http://app.localhost/",
+                  "about:blank"):
+            self.assertTrue(dev(u), u)
+        self.assertFalse(dev("https://example.com/"))
+        core.config_set(self.c, "browser_allow", "myapp.test:8080", project="web")
+        self.assertTrue(dev("http://myapp.test:8080/"))
+        self.assertFalse(dev("http://myapp.test/"))
+
+    def test_a_failed_name_and_the_fallbacks_after_it_in_a_real_chrome(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(FALLBACK)))
+                self.end_headers()
+                self.wfile.write(FALLBACK)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda who="ag1", **a: routes.act(self.c, {"project": "web", **a}, who)  # noqa: E731
+        rows = lambda: [dict(r) for r in self.c.execute("SELECT * FROM browser_fallbacks ORDER BY id")]  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/inv?id=7", show=False)
+        act(action="html")  # the person's dev page, no failed name: dev work, no case
+        act(action="click", selector="css:#go")
+        self.assertEqual(rows(), [])
+        with self.assertRaises(browser.BrowserError):
+            act(action="click", selector="Go on")
+        with self.assertRaises(browser.BrowserError):  # the person's pane: no case
+            act(None, action="click", selector="Go on", agent="ag1")
+        act(action="html", scope="css:main")
+        act(action="html")
+        act(action="screenshot", selector="css:#go")
+        t0 = time.time()
+        act(action="click", selector="css:#go", changes=False)
+        self.assertLess(time.time() - t0, timing.limit(0.1))  # p147, with the case logged
+        act(action="html")  # the failed name's case ended with the click
+        r = rows()
+        self.assertEqual([(x["kind"], x["action"], x["tried"], x["target"]) for x in r],
+                         [("not_found", "click", "Go on", None), ("html_part", "html", "Go on", "css:main"),
+                          ("html_whole", "html", "Go on", None), ("picture", "screenshot", "Go on", "css:#go"),
+                          ("selector", "click", "Go on", "#go")])
+        self.assertEqual({x["used"] for x in r}, {"button class=btn primary testid=go-btn"})
+        self.assertEqual({(x["host"], x["path"], x["agent"], x["project"]) for x in r},
+                         {(f"127.0.0.1:{port}", "/inv", "ag1", "web")})
+        self.assertEqual({x["miss"] for x in r[1:]}, {r[0]["id"]})
+        with self.assertRaises(browser.BrowserError) as e:
+            act(action="click", selector="Delete")
+        ref = e.exception.candidates[0].split()[0]
+        act(action="click", selector=ref)  # the names worked in the end: the element on the case, no new case
+        r = rows()
+        self.assertEqual((r[-1]["kind"], r[-1]["tried"], r[-1]["used"]), ("ambiguous", "Delete", 'button "Delete"'))
+        with self.assertRaises(browser.BrowserError):
+            act(action="click", selector="Nope")
+        box = b.evaluate("(() => { const r = go.getBoundingClientRect(); return [r.x + 10, r.y + 10]; })()")
+        act(action="click", x=box[0], y=box[1], changes=False)
+        self.assertEqual((rows()[-1]["kind"], rows()[-1]["target"], rows()[-1]["used"]),
+                         ("point", f"{box[0]:g},{box[1]:g}", "button class=btn primary testid=go-btn"))
+        n = len(rows())
+        with mock.patch.object(browser, "dev_page", return_value=False):  # a public site: a selector skips the names
+            act(action="click", selector="css:#go", changes=False)
+            act(action="html")
+        self.assertEqual([(x["kind"], x["tried"]) for x in rows()[n:]], [("selector", None), ("html_whole", None)])
+
+
 BOXES = (b"<title>Boxes</title>"
          b"<button id=del onclick=\"document.title = confirm('Delete this?') ? 'deleted' : 'kept'\">Delete</button>"
          b"<button id=ask onclick=\"document.title = 'hi ' + prompt('Your name?', 'Ann')\">Ask</button>"

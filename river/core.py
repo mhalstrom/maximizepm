@@ -1342,6 +1342,26 @@ CREATE TABLE IF NOT EXISTS session_samples (
 );
 CREATE INDEX IF NOT EXISTS session_samples_at ON session_samples(at);
 
+-- #5692: each case where a session's browser names did not work and it fell back (a name that found nothing or
+-- several, then html, an element picture, a CSS selector or a point), so the cases can be fixed one by one.
+-- Reader: maxpm browser fallbacks (browser_fallbacks). Only the page's host and path, no query string; it stays on
+-- this computer. fallback_log keeps the newest FALLBACKS_KEEP rows.
+CREATE TABLE IF NOT EXISTS browser_fallbacks (
+  id       INTEGER PRIMARY KEY,
+  at       TEXT NOT NULL,
+  project  TEXT,
+  agent    TEXT,
+  host     TEXT NOT NULL,
+  path     TEXT NOT NULL,
+  kind     TEXT NOT NULL,                -- not_found, ambiguous, html_part, html_whole, picture, selector, point
+  action   TEXT,                         -- the browser action of the case (click, html, screenshot, ...)
+  tried    TEXT,                         -- the name that failed (with " in <row>"); none when the agent skipped names
+  target   TEXT,                         -- what the fallback used: the html scope, the selector, the point
+  used     TEXT,                         -- the element it acted on in the end: role, name, class, test id
+  miss     INTEGER                       -- the row of the failed name that this fallback followed
+);
+CREATE INDEX IF NOT EXISTS browser_fallbacks_at ON browser_fallbacks(at);
+
 CREATE INDEX IF NOT EXISTS holds_item ON holds(item_id);
 CREATE INDEX IF NOT EXISTS holds_agent ON holds(agent);
 CREATE INDEX IF NOT EXISTS items_status ON items(status);
@@ -16763,6 +16783,59 @@ def idle_share(conn, since="7d", until=None, project=None):
     return {"since": iso(t0), "until": iso(t1), "secs": by, "share": share, "total_secs": total,
             "sessions": sessions, "samples": sum(r["n"] for r in rows), "idle": share["waiting_work"],
             "first": first}
+
+
+# ---------------------------------------------------------------- browser fallbacks (#5692)
+
+FALLBACK_KINDS = ("not_found", "ambiguous", "html_part", "html_whole", "picture", "selector", "point")
+FALLBACKS_KEEP = 2000  # the newest cases that the log keeps
+FALLBACKS_SHOW = 15  # the newest cases that maxpm browser fallbacks prints
+
+
+def fallback_log(conn, project, agent, url, kind, action=None, tried=None, target=None, used=None, miss=None):
+    """#5692: one case where a session's browser names did not work, or a fallback after one (FALLBACK_KINDS).
+    Only the host and path of url are kept. Returns the row's id."""
+    from urllib.parse import urlsplit
+    if kind not in FALLBACK_KINDS:
+        raise RiverError(f"a browser fallback is one of {', '.join(FALLBACK_KINDS)}; not {kind}")
+    u = urlsplit(url or "")
+    cut = lambda s: None if s is None else str(s)[:200]
+    with tx(conn):
+        cur = conn.execute("INSERT INTO browser_fallbacks (at, project, agent, host, path, kind, action, tried, target, "
+                           "used, miss) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                           (iso(now()), project, agent, (u.netloc or u.scheme or "").lower(), u.path or "/", kind,
+                            action, cut(tried), cut(target), cut(used), miss))
+        rid = cur.lastrowid
+        if rid % 100 == 0:  # a rare cleanup: the log stays small
+            conn.execute("DELETE FROM browser_fallbacks WHERE id<=?", (rid - FALLBACKS_KEEP,))
+    return rid
+
+
+def fallback_used(conn, miss, used):
+    """#5692: the element that the session acted on in the end, on the failed name's row and on its fallbacks."""
+    with tx(conn):
+        conn.execute("UPDATE browser_fallbacks SET used=? WHERE (id=? OR miss=?) AND used IS NULL",
+                     (str(used)[:200], miss, miss))
+
+
+def browser_fallbacks(conn, site=None, since="7d", limit=FALLBACKS_SHOW):
+    """#5692: maxpm browser fallbacks: the counts by site and kind since a time (a duration back from now, or a
+    time), and the newest cases. site: a host, or the end of one (wikipedia.org matches en.wikipedia.org)."""
+    t0 = now() - parse_duration(since) if _DURATION.match(since or "") else parse_when(since)
+    sql, args = " FROM browser_fallbacks WHERE at>=?", [iso(t0)]
+    if site:
+        s = site.lower().strip().strip("/")
+        sql += " AND (host=? OR host LIKE ? ESCAPE '\\')"
+        args += [s, "%." + s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")]
+    counts = [dict(r) for r in conn.execute("SELECT host, kind, COUNT(*) AS n" + sql + " GROUP BY host, kind "
+                                            "ORDER BY host, kind", args)]
+    by = {}
+    for r in counts:
+        by.setdefault(r["host"], {})[r["kind"]] = r["n"]
+    sites = sorted(({"host": h, "kinds": k, "n": sum(k.values())} for h, k in by.items()), key=lambda x: -x["n"])
+    cases = [dict(r) for r in conn.execute("SELECT *" + sql + " ORDER BY id DESC LIMIT ?", args + [int(limit)])]
+    return {"since": iso(t0), "site": site, "sites": sites, "cases": cases,
+            "total": sum(x["n"] for x in sites)}
 
 
 # ---------------------------------------------------------------- health (#5353)
