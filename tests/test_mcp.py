@@ -78,6 +78,8 @@ class Mcp(unittest.TestCase):
                          ["browser", "fill", "--", "Amount", "-5"])
         self.assertEqual(mcp.browser_argv({"action": "click", "x": 10, "y": 20}), ["browser", "click", "--", "10", "20"])
         self.assertEqual(mcp.browser_argv({"action": "dialog", "accept": False}), ["browser", "dialog", "--", "dismiss"])
+        self.assertEqual(mcp.browser_argv({"action": "upload", "target": "Resume", "values": ["/p/cv.pdf"]}),
+                         ["browser", "upload", "--", "Resume", "/p/cv.pdf"])  # #5679
         self.assertEqual(mcp.browser_argv({"action": "extract", "rows": "tr", "fields": ["t=a"], "limit": 2}),
                          ["browser", "extract", "--rows", "tr", "--limit", "2", "--", "t=a"])
         self.assertEqual(mcp.browser_argv({"action": "snapshot", "all": True, "tab": "T1"}),

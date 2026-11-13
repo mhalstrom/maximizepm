@@ -1877,6 +1877,63 @@ class Aim(Base):
             act(action="click", selector=ref)
 
 
+FILES = (b"<title>Files</title><a href=/report.csv>Report</a> <label for=f>Choose a file</label>"
+         b"<input id=f type=file style='display:none' onchange=\"document.title = 'got ' + this.files[0].name\">")
+
+
+class Files(Base):
+    """#5679 in a real Chrome: a click that downloads replies with the file's path and size (a second one with the
+    same name gets its own); an upload gives a file of the downloads to a hidden file field, and refuses a file from
+    another folder."""
+
+    def test_a_download_names_its_file_and_an_upload_fills_a_file_field(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                csv = self.path == "/report.csv"
+                body = b"a,b\n1,2\n" if csv else FILES
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv" if csv else "text/html")
+                if csv:
+                    self.send_header("Content-Disposition", 'attachment; filename="report.csv"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/")
+        out = act(action="click", selector="Report")
+        d = out["downloads"][0]
+        self.assertEqual((d["state"], d["bytes"], os.path.basename(d["path"]), out["navigated"]),
+                         ("completed", 8, "report.csv", False))
+        self.assertEqual(Path(d["path"]).read_bytes(), b"a,b\n1,2\n")
+        self.assertIn(f"downloaded {d['path']} (8 bytes)", cli._browser_result("click", out))
+        again = act(action="click", selector="Report")["downloads"][0]
+        self.assertEqual(os.path.basename(again["path"]), "report (2).csv")
+        out = act(action="upload", selector="Choose a file", files=[d["path"]])
+        self.assertEqual((out["uploaded"], b.evaluate("document.title")), (["report.csv"], "got report.csv"))
+        self.assertIn("(uploaded report.csv)", cli._browser_result("upload", out)[0])
+        other = os.path.join(self.tmp.name, "secret.txt")
+        Path(other).write_text("x")
+        with self.assertRaises(browser.BrowserError) as e:
+            act(action="upload", selector="Choose a file", files=[other])
+        self.assertEqual(e.exception.code, "refused_file")
+
+
 class ThreeDoors(Base):
     """#5678 in a real Chrome: the same walk gives the same replies through HTTP (op browser_call), the command with
     --json and the MCP tool browser: one shape, a read or a change, and the error codes with their candidates."""

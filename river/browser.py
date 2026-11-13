@@ -618,6 +618,8 @@ class Browser:
         self.snap = None     # the snapshot's world in the shown tab: {target, session, ctx}; refs live in it (#5663)
         self.refs = 0        # the last ref number given: refs never repeat in one browser, so an old ref fails
         self.opened = 0      # tabs that a page of the shown tab opened
+        self.downloads = []  # #5679: the last downloads: {guid, url, name, state, bytes, path}
+        self.dl_n = 0        # downloads begun: an action's mark counts the ones it started
         self.dialog = None   # the alert, confirm or prompt box of the shown tab that waits for an answer (#5674)
         self.state = self._load()
         if owner:  # the sweep of a later serve finds a Chrome of this session that still runs (#5636)
@@ -797,7 +799,9 @@ class Browser:
             self.mine = set()
             return self._attach(self._new_target())
         try:
-            self.call("Browser.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(self.dir / "downloads")})
+            # #5679: under the guid, with events: an action's reply names the file, and serve gives it its name
+            self.call("Browser.setDownloadBehavior", {"behavior": "allowAndName", "eventsEnabled": True,
+                                                      "downloadPath": str(self.dir / "downloads")})
         except RiverError:
             pass
         for t in pages:
@@ -1030,6 +1034,8 @@ class Browser:
                     self.cond.notify_all()
         elif session == self.session and method in NAV_EVENTS:
             track_nav(self, method, p)
+        elif method in ("Browser.downloadWillBegin", "Browser.downloadProgress"):
+            track_download(self, method, p)
         elif session == self.session and method in ("Page.javascriptDialogOpening", "Page.javascriptDialogClosed"):
             track_dialog(self, method, p, session)
         elif method == "Page.loadEventFired" and session == self.session and self.refit_ws is not self.ws:
@@ -2627,7 +2633,7 @@ class BrowserError(RiverError):
 
 
 ERROR_CODES = ("not_found", "ambiguous", "covered", "dialog_open", "not_controller", "timeout", "refused_address",
-               "error")
+               "refused_file", "error")
 # What each action does: a read changes nothing on the page (a recorder may run it with no yes); a change does.
 READS = {"status", "snapshot", "outline", "text", "extract", "html", "screenshot", "suggest", "annotations"}
 _PAGE = {"project", "owner", "running", "window", "source", "modes", "refused", "url", "title", "controller", "before",
@@ -2727,7 +2733,7 @@ def answer_dialog(b, accept=True, text=None, who=None, wait=None):
 def nav_mark(b):
     """Before an action: what after() compares with."""
     b.nav.clear()
-    return {"navs": b.navs, "opened": b.opened, "target": b.target, "asks": b.asks, "within": b.within,
+    return {"navs": b.navs, "opened": b.opened, "target": b.target, "asks": b.asks, "within": b.within, "dl": b.dl_n,
             "title": (b.targets.get(b.target) or {}).get("title"), "url": (b.targets.get(b.target) or {}).get("url")}
 
 
@@ -3188,7 +3194,9 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const look = node => {
       const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
       for (let e = w.currentNode; e; e = w.nextNode()) {
-        if (e.nodeType === 1 && e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden') && shown(e)) {
+        // a file field is often hidden behind a button that opens it (#5679): an upload finds it too
+        if (e.nodeType === 1 && e.matches(SEL) && !(e.tagName === 'INPUT' && e.type === 'hidden')
+            && (shown(e) || (t.files && e.tagName === 'INPUT' && e.type === 'file'))) {
           const r = role(e), full = name(e), nm = norm(full);
           const same = nm === want || (pre && nm.startsWith(pre)) || (field(e) && (norm(e.name) === want || norm(e.id) === want));
           if (same && (!t.role || r === t.role)) { const z = inside(e); if (z) hits.push([e, z]); }
@@ -3621,7 +3629,8 @@ def resolve_target(b, target, within=None, verb="click"):
     """#5667: the element that an action names, as a ref (@e3) or a CSS selector (css:<selector>). target: a ref, a
     name as a snapshot prints it ("Comments"), a role and a name (link "Comments"), or css:<selector>; within: the
     text of its row, card or region. One element with that name: its ref. Several: an error that lists them, and
-    nothing happens. None: a CSS selector that matches (as before names), else an error with the nearest names."""
+    nothing happens. None: a CSS selector that matches (as before names), else an error with the nearest names.
+    verb upload: hidden file fields count too (#5679)."""
     t = (target or "").strip()
     if not t or as_ref(t) or t.startswith("css:"):
         if within and t:
@@ -3631,7 +3640,7 @@ def resolve_target(b, target, within=None, verb="click"):
     role, name = (m.group(1), m.group(2)) if m and m.group(1) in ROLES else (None, t)
     loading(b)
     r = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps(
-        {"target": {"name": name, "role": role, "within": within}})))
+        {"target": {"name": name, "role": role, "within": within, "files": verb == "upload"}})))
     if r is NO_WORLD or not isinstance(r, dict):
         raise RiverError("the page did not answer: run the command again")
     b.refs = max(b.refs, r.get("next") or 0)
@@ -3795,11 +3804,66 @@ def click(b, selector=None, x=None, y=None, who=None, wait=None):
 
 def done(b, wait, mark, **out):
     """The answer of an action: the page as it is after the wait. #5717: with no new page, the address and title
-    are read from the page (its script may have changed them), not from Chrome's target info."""
+    are read from the page (its script may have changed them), not from Chrome's target info. #5679: the downloads
+    that the action started, each when it ended (DOWNLOAD_WAIT at most)."""
     moved = after(b, wait, mark)
     if not moved and not b.dialog:
         b.here()
+    got = downloads_since(b, mark)
+    if got:
+        out["downloads"] = got
+        if (b.targets.get(b.target) or {}).get("url") == mark.get("url"):
+            moved = False  # Chrome started a load for the link, which became the download: the page stays
     return {**b.info(), **out, "navigated": moved}
+
+
+DOWNLOAD_WAIT = 60.0  # seconds that an action waits for the downloads it started to end
+DOWNLOAD_KEEP = 20    # downloads that a browser remembers
+
+
+def track_download(b, method, p):
+    """#5679: Browser.downloadWillBegin and downloadProgress (behavior allowAndName: Chrome saves the file under its
+    guid in the downloads folder). At the end the file takes its own name (name (2).pdf when that is taken)."""
+    if method == "Browser.downloadWillBegin":
+        b.downloads.append({"guid": p.get("guid"), "url": p.get("url", ""), "name": p.get("suggestedFilename") or "download",
+                            "state": "inProgress", "bytes": 0, "path": None})
+        del b.downloads[:-DOWNLOAD_KEEP]
+        b.dl_n += 1
+        b.asks_end = b.asks  # a link that the page asked to open was a download, no next page
+        b.nav.set()
+    else:
+        d = next((x for x in b.downloads if x["guid"] == p.get("guid")), None)
+        if not d:
+            return
+        d["bytes"] = p.get("receivedBytes", d["bytes"])
+        d["state"] = p.get("state", d["state"])
+        if d["state"] == "completed" and not d["path"]:
+            folder = b.dir / "downloads"
+            stem, dot, ext = d["name"].rpartition(".")
+            stem, ext = (stem, dot + ext) if stem else (d["name"], "")
+            target, n = folder / d["name"], 1
+            while target.exists():
+                n += 1
+                target = folder / f"{stem} ({n}){ext}"
+            try:
+                (folder / d["guid"]).replace(target)
+                d["path"] = str(target)
+            except OSError:  # saved under its own name (a session's Playwright set the behavior allow)
+                d["path"] = str(folder / d["name"])
+    with b.cond:
+        b.cond.notify_all()
+
+
+def downloads_since(b, mark):
+    """The downloads that began after mark, once each has ended or DOWNLOAD_WAIT went by."""
+    n = b.dl_n - mark.get("dl", b.dl_n)
+    if n <= 0:
+        return []
+    mine = b.downloads[-n:]
+    with b.cond:
+        b.cond.wait_for(lambda: all(d["state"] != "inProgress" for d in mine), DOWNLOAD_WAIT)
+    return [{"name": d["name"], "path": d["path"], "bytes": d["bytes"], "state": d["state"], "url": d["url"]}
+            for d in mine]
 
 
 def type_text(b, text, selector=None, who=None, wait=None):
@@ -3854,6 +3918,42 @@ def select_options(b, target, values, who=None, wait=None):
         raise RiverError(f"{target}: {r['err']}")
     note_keys(b, driver(b, who), ", ".join(r["picked"]))
     return done(b, wait, mark, picked=r["picked"])
+
+
+FILE_JS = "(el) => el.tagName === 'INPUT' && el.type === 'file' ? (el.multiple ? 'many' : 'one') : el.tagName.toLowerCase()"
+
+
+def upload(b, conn, target, files, who=None, wait=None):
+    """#5679: give files to a file field (target: a ref, a name, css:<selector>), as DOM.setFileInputFiles; each file
+    must be in the project's folder or the browser's downloads (the rule of the CDP door, _upload_ok)."""
+    paths = [str(Path(f).expanduser().resolve()) for f in files]
+    if not paths:
+        raise BrowserError("name the files: maxpm browser upload <field> <file> ...", "not_found")
+    for p in paths:
+        if not os.path.isfile(p):
+            raise BrowserError(f"no file {p}", "not_found")
+        if not _upload_ok(conn, b, p):
+            raise BrowserError(f"{p} is not in the project's folder or the browser's downloads "
+                               f"({b.dir / 'downloads'}): copy it there first", "refused_file")
+    kind = on_element(b, target, FILE_JS)
+    if kind not in ("one", "many"):
+        raise BrowserError(f"{target} is a {kind}, not a file field", "not_found")
+    if kind == "one" and len(paths) > 1:
+        raise BrowserError(f"{target} takes one file", "error")
+    t = target[4:] if target.startswith("css:") else target
+    ref = as_ref(t)
+    find = ("((w) => w && w.deref())(window.__maxpm && window.__maxpm.els.get(%s))" % json.dumps(ref) if ref
+            else "document.querySelector(%s)" % json.dumps(t))
+    params = {"expression": find, "returnByValue": False}
+    if ref:
+        params["contextId"] = world(b, create=False)
+    oid = (b.page("Runtime.evaluate", params).get("result") or {}).get("objectId")
+    if not oid:
+        raise BrowserError(f"{target} is no longer on the page: run maxpm browser snapshot", "not_found")
+    mark = nav_mark(b)
+    b.page("DOM.setFileInputFiles", {"files": paths, "objectId": oid})
+    driver(b, who)
+    return done(b, wait, mark, uploaded=[os.path.basename(p) for p in paths])
 
 
 def check(b, target, on=True, who=None, wait=None):

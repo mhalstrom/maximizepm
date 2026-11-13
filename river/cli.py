@@ -956,6 +956,10 @@ def build_parser(only=None):
     x = brs.add_parser("key", parents=[bp, ap], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., or "
                        "one character")
     x.add_argument("key")
+    x = brs.add_parser("upload", parents=[bp, ap, ep], help="give files to a file field (also a hidden one): each "
+                       "file in the project's folder or the browser's downloads")
+    x.add_argument("target", help="the file field: its name, role and name, @e5, or a CSS selector")
+    x.add_argument("files", nargs="+")
     x = brs.add_parser("dialog", parents=[bp, ap], help="answer the page's alert, confirm or prompt box (#5674): "
                        "accept [text], or dismiss")
     x.add_argument("answer", choices=["accept", "dismiss"])
@@ -2627,6 +2631,8 @@ def _browser_args(a):
         args["selector"] = a.target
     elif b == "key":
         args["key"] = a.key
+    elif b == "upload":  # #5679: full paths, as serve runs in another folder
+        args.update(selector=a.target, files=[str(Path(f).expanduser().resolve()) for f in a.files])
     elif b == "dialog":
         if a.text is not None and a.answer == "dismiss":
             raise RiverError("dismiss takes no text: maxpm browser dialog dismiss")
@@ -5132,7 +5138,7 @@ def render_annotations(a, res):
 
 
 BROWSER_ACTS = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload",
-                "dialog"}
+                "dialog", "upload"}
 
 
 def _snapshot_lines(s, title=True):
@@ -5173,6 +5179,8 @@ def _browser_result(action, res):
         what.append("checked" if res["checked"] else "not checked")
     if res.get("answered"):
         what.append(("accepted" if res["answered"]["accept"] else "dismissed") + f" the {res['answered']['type']} box")
+    if res.get("uploaded"):  # #5679
+        what.append("uploaded " + ", ".join(res["uploaded"]))
     head = ("new page: " if res.get("navigated") else "") + f"{res.get('title') or '(no title)'}  {res.get('url') or ''}"
     out = [head + (f"  ({'; '.join(what)})" if what else "")] + list(res.get("notes") or [])  # notes: #5668
     d = res.get("dialog")
@@ -5185,6 +5193,11 @@ def _browser_result(action, res):
         out += res["outline"]
     if res.get("changes"):  # #5673: what the action changed on the page, or 'no change'
         out += res["changes"]
+    for d in res.get("downloads") or []:  # #5679: the files that the action downloaded
+        size = f"{d['bytes'] / 1000:.1f} KB" if d["bytes"] >= 1000 else f"{d['bytes']} bytes"
+        out.append(f"downloaded {d['path']} ({size})" if d["state"] == "completed" else
+                   f"download {d['state']}: {d['name']} ({size} so far)" if d["state"] == "inProgress" else
+                   f"download {d['state']}: {d['name']}")
     if "text" in res:  # #5672: open --text
         out += _text_lines(res)
     if res.get("snapshot"):

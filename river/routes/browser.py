@@ -75,8 +75,8 @@ def _person(conn, who):
 
 # action -> whether it changes the page (the controller rule holds for it)
 CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload", "eval",
-           "tab", "new_tab", "close_tab", "dialog"}
-INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key"}  # a session's first one shows its panel
+           "tab", "new_tab", "close_tab", "dialog", "upload"}
+INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key", "upload"}  # a session's first one shows its panel
 # What a batch may hold (#5663): the actions whose answer is text.
 BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status", "outline", "extract"}
 
@@ -218,12 +218,14 @@ def _act(conn, a, who):
     if action == "extract":  # #5677: rows with named fields, as JSON
         r = browser.extract(b, a.get("rows") or None, a.get("fields") or [], int(a.get("limit") or browser.EXTRACT_MAX))
         return {**b.info(), "data": r["rows"], "count": r["count"]}
-    if action in ("click", "type", "fill", "select", "check", "uncheck") and a.get("selector"):
+    if action in ("click", "type", "fill", "select", "check", "uncheck", "upload") and a.get("selector"):
         # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named
         a = {**a, "selector": browser.resolve_target(b, a["selector"], a.get("within"), action)}
-    if action in ("click", "type", "fill", "select", "check", "uncheck", "key", "dialog") and not person \
+    if action in ("click", "type", "fill", "select", "check", "uncheck", "key", "dialog", "upload") and not person \
             and a.get("changes", True):
         pre = browser.view_keys(b) if not b.dialog else None
+    if action == "upload":  # #5679
+        return then(browser.upload(b, conn, a.get("selector") or "", a.get("files") or [], who=sess, wait=wait))
     if action == "click":
         x, y = a.get("x"), a.get("y")
         return then(browser.click(b, a.get("selector"), None if x is None else float(x),

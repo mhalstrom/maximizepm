@@ -26,8 +26,8 @@ PROTOCOL = "2025-06-18"
 
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
 BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
-                   "check", "uncheck", "key", "dialog", "back", "forward", "reload", "screenshot", "status", "tab",
-                   "new-tab", "close-tab")
+                   "check", "uncheck", "key", "dialog", "upload", "back", "forward", "reload", "screenshot", "status",
+                   "tab", "new-tab", "close-tab")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "
@@ -104,7 +104,8 @@ TOOLS = [
          "url": {"type": "string", "description": "open, new-tab: the address"},
          "x": {"type": "number"}, "y": {"type": "number"},
          "key": {"type": "string", "description": "key: Enter, Tab, Escape, ArrowDown, or one character"},
-         "values": {"type": "array", "items": {"type": "string"}, "description": "select: the options"},
+         "values": {"type": "array", "items": {"type": "string"}, "description": "select: the options; upload: the "
+                                                                                 "files (full paths)"},
          "accept": {"type": "boolean", "description": "dialog: true accepts (default), false dismisses"},
          "in": {"type": "string", "description": "the text of the target's row, card or region"},
          "rows": {"type": "string", "description": "extract: the rows (a ref or name in a repeated row, or CSS)"},
@@ -168,6 +169,8 @@ def browser_argv(a):
         pos = [need("the field (target)", t), text or ""]
     elif act == "select":
         pos = [need("the select (target)", t)] + [str(v) for v in need("the options (values)", a.get("values"))]
+    elif act == "upload":
+        pos = [need("the file field (target)", t)] + [str(v) for v in need("the files (values)", a.get("values"))]
     elif act in ("check", "uncheck"):
         pos = [need("the element (target)", t)]
     elif act == "key":
