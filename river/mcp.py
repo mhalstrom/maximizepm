@@ -27,7 +27,7 @@ PROTOCOL = "2025-06-18"
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
 BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
                    "check", "uncheck", "key", "dialog", "upload", "back", "forward", "reload", "screenshot", "status",
-                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag", "errors", "size")
+                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag", "errors", "size", "record")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "
@@ -101,7 +101,8 @@ TOOLS = [
          "action": {"type": "string", "enum": list(BROWSER_ACTIONS)},
          "target": {"type": "string", "description": "the element: a name, role \"name\", @e3; tab, close-tab: the tab"},
          "text": {"type": "string", "description": "type, fill: the text; find: the words; dialog: a prompt's answer; "
-                                                   "run: the lines of a walk (as steps prints them, {name} for inputs)"},
+                                                   "run: the lines of a walk (as steps prints them, {name} for inputs); "
+                                                   "record: start, stop, status, or step <n>"},
          "url": {"type": "string", "description": "open, new-tab: the address"},
          "x": {"type": "number"}, "y": {"type": "number"},
          "double": {"type": "boolean"}, "right": {"type": "boolean"},
@@ -198,6 +199,8 @@ def browser_argv(a):
         pos = [need("the words (text)", text)]
     elif act == "size":  # #5676: phone, desktop, pane, or <w>x<h>
         pos = [need("the size (text): phone, desktop, pane or <width>x<height>", text)]
+    elif act == "record":  # #5682: start, stop, status, step <n>
+        pos = (text or "status").split()
     elif act == "extract":
         pos = [str(f) for f in a.get("fields") or []]
     elif act in ("tab", "close-tab") and t:

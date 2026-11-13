@@ -7,6 +7,7 @@ import http.server
 import io
 import json
 import os
+import re
 import socket
 import struct
 import tempfile
@@ -502,8 +503,6 @@ class Command(Base):
         self.assertEqual((a["selector"], a["to"]), ("Card", [120.0, 40.0]))
         _, out = self.asked("click", "Row", "--double", res={"title": "X", "url": "u", "count": 2})
         self.assertEqual(out.strip(), "X  u  (double left click)")
-        self.assertEqual(cli._step_words({"action": "drag", "selector": 'button "Card"', "to": [120, 40], "mods": ["alt"]}),
-                         ["drag", 'button "Card"', "120,40", "--with", "alt"])
 
     def test_an_action_takes_a_name_a_role_and_name_and_its_row(self):
         """#5667: click "Comments", click link Comments (two words), --in "<row>"; fill "Month" 2026-10."""
@@ -2007,6 +2006,111 @@ class PageErrors(Base):
         self.assertEqual(errs[0]["url"], f"http://127.0.0.1:{port}/api/fail")
         self.assertIn("boom", errs[2]["message"])
         self.assertEqual(act(action="errors")["errors"], [])
+        self.assertEqual(act(action="errors")["lines"], [])
+
+
+def _render(fn, res):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        fn(res)
+    return out.getvalue()
+
+
+def _jpeg_size(data):
+    """The width and height of a JPEG, from its start-of-frame block."""
+    i = 2
+    while i < len(data):
+        kind, n = data[i + 1], int.from_bytes(data[i + 2:i + 4], "big")
+        if kind in (0xC0, 0xC1, 0xC2):
+            return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+        i += 2 + n
+    return None
+
+
+class StepRecord(Base):
+    """#5682 in a real Chrome: while a record is on, each action adds a step with its line (names, not refs), its page
+    errors and a JPEG; a failed action is a step too, with its code and the picture where it broke; stop puts the
+    steps as one HTML canvas of the project, and record step <n> gives one step and the path of its picture."""
+
+    def test_a_record_of_a_walk_that_fails_becomes_a_canvas(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                fail = self.path == "/api/fail"
+                body = b"no" if fail else ERRS
+                self.send_response(500 if fail else 200)
+                self.send_header("Content-Type", "text/plain" if fail else "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        self.addCleanup(browser.RECORDING.discard, b)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)  # before the record: no step
+        out = act(action="record", record="start", name="Check-Walk")
+        self.assertTrue(out["on"])
+        self.assertIn("record check-walk is on", _render(cli._record_lines, out))
+        with self.assertRaises(RiverError):
+            act(action="record", record="start")
+        act(action="reload")
+        snap = act(action="snapshot", interactive=True)["snapshot"]["lines"]  # a read: no step
+        ref = re.search(r'(@e\d+) button "Load"', "\n".join(snap)).group(1)
+        act(action="click", selector=ref)
+        act(action="batch", steps=[{"action": "click", "selector": "Fine"}])  # each step of a batch is a step
+        with self.assertRaises(RiverError):
+            act(action="click", selector="Nothing like it")
+        st = act(action="record")
+        self.assertEqual(st["record"]["steps"], 4)
+        self.assertEqual(st["record"]["failed"], [4])
+        self.assertEqual([s["line"] for s in st["steps"]],
+                         ["reload", "click 'button \"Load\"'", "click Fine", "click 'Nothing like it'"])
+        self.assertEqual(st["steps"][1]["errors"], [f"request GET http://127.0.0.1:{port}/api/fail 500"])
+        self.assertEqual(st["steps"][3]["code"], "not_found")
+        text = _render(cli._record_lines, st)
+        self.assertIn("record check-walk: 4 steps, failed at step 4", text)
+        self.assertIn("4 FAILED not_found  click 'Nothing like it'", text)
+        step = act(action="record", record="step", n=4)["step"]
+        self.assertFalse(step["ok"])
+        jpg = Path(step["picture"]).read_bytes()
+        self.assertEqual(jpg[:2], b"\xff\xd8")
+        w, h = _jpeg_size(jpg)
+        self.assertLessEqual(w, browser.SHOT_WIDTH)
+        self.assertIn("picture: " + step["picture"], _render(cli._record_lines, {"step": step}))
+        with self.assertRaises(RiverError):
+            act(action="record", record="step", n=9)
+        out = act(action="record", record="stop")
+        self.assertFalse(b.rec)
+        self.assertEqual(out["canvas"]["name"], "check-walk")
+        page = core.canvas_show(self.c, "check-walk", project="web")["shown"]["body"]
+        self.assertIn('<meta name="maxpm-kit">', page)
+        self.assertIn('<li id="s4" data-tone="bad">', page)
+        self.assertEqual(page.count("data:image/jpeg;base64,"), 4)
+        self.assertIn("request GET", page)
+        self.assertIn("canvas check-walk v1", _render(cli._record_lines, out))
+        act(action="reload")  # the record is off: no step
+        self.assertEqual(act(action="record")["record"]["steps"], 4)
+        # A page larger than the canvas limit keeps the failed step's picture inline and names the other files
+        small = browser.record_page(b.last_rec, 50_000 + len(jpg) * 2 + sum(len(json.dumps(s)) * 2 for s in
+                                                                               b.last_rec["steps"]))
+        self.assertIn(f'alt="The page after step 4" src="data:image/jpeg', small)
+        self.assertIn("Picture: ", small)
+        self.assertEqual(browser.step_words({"action": "drag", "selector": 'button "Card"', "to": [120, 40],
+                                             "mods": ["alt"]}), ["drag", 'button "Card"', "120,40", "--with", "alt"])
 
 
 POINTER = (b"<title>Pointer</title><style>#mm{display:none;position:absolute;background:#fff} #m:hover #mm{display:block}"

@@ -4,6 +4,7 @@ and keys come through op "browser_input", which needs the page's token (server.T
 reaches the browser through its own CDP address, GET /cdp/<agent> (#5405)."""
 
 import hmac
+import shlex
 import threading
 import time
 
@@ -170,12 +171,77 @@ def act(conn, a, who):
     #5674: an action that opens a box of the page (alert, confirm, prompt) replies with the page and the box; a box
     that was open before the action refuses it, and the refusal names the box."""
     at = time.time()
+    b, mark = _record_mark(conn, a, who)
     try:
-        return _act(conn, a, who)
+        out = _act(conn, a, who)
     except browser.DialogOpen as e:
         if e.dialog["at"] < at:
+            _record(b, mark, error=e)
             raise
-        return {**e.browser.info(), "navigated": False}
+        out = {**e.browser.info(), "navigated": False}
+    except RiverError as e:
+        _record(b, mark, error=e)
+        raise
+    _record(b, mark, out=out)
+    return out
+
+
+STEP_ACTIONS = CHANGES | {"extract"}  # #5682: the actions that add a step to a record that is on
+
+
+def _record_mark(conn, a, who):
+    """#5682: when a record is on in this browser, the mark of an action that joins it: its line (names, not refs),
+    who, and the page's error count before it. Each action of a batch or a run joins on its own."""
+    if not browser.RECORDING or (a.get("action") or "status") not in STEP_ACTIONS:
+        return None, None
+    try:
+        b = _browser_of(conn, a, who)
+    except RiverError:
+        return None, None
+    if not b.rec:
+        return None, None
+    s = {k: v for k, v in a.items() if k in STEP_KEYS + ("size", "js", "target")}
+    if b.running() and not b.dialog:
+        for k in ("selector", "rows", "to"):
+            if s.get(k) and isinstance(s[k], str):
+                try:
+                    s[k] = browser.step_target(b, s[k])
+                except RiverError:
+                    pass  # the ref as it was typed
+    person = _person(conn, who)
+    return b, browser.record_begin(b, browser.step_words(s), (who or "the person") if person else who)
+
+
+def _record(b, mark, out=None, error=None):
+    if mark is not None:
+        browser.record_step(b, mark, out, error)
+
+
+def record_action(conn, a, who, b, project, person):
+    """#5682: maxpm browser record start [--name] | stop | status | step <n>. Stop puts the steps as a canvas of the
+    project (the record's name), which opens in the session's side panel."""
+    do = a.get("record") or "status"
+    by = (who or "the person") if person else who
+    if do == "start":
+        return browser.record_start(b, a.get("name"), by)
+    if do == "step":
+        return {**b.info(), "step": browser.record_get(b, a.get("n"))}
+    if do == "status":
+        r = b.rec or b.last_rec
+        return {**b.info(), "on": bool(b.rec), "record": browser.record_info(r),
+                "steps": [{k: s.get(k) for k in ("n", "line", "ok", "code", "ms", "errors")} for s in (r or {}).get(
+                    "steps", [])]}
+    if do != "stop":
+        raise RiverError(f"maxpm browser record start | stop | status | step <n>; not {do}")
+    r = browser.record_stop(b)
+    out = {**b.info(), "on": False, "record": browser.record_info(r), "canvas": None}
+    if r["steps"]:
+        pid = core._project(conn, project)["id"]
+        page = browser.record_page(r, int(core.setting(conn, "canvas_max", project_id=pid)))
+        c = core.canvas_put(conn, r["name"], page, actor=who or r["by"] or "maxpm", kind="html",
+                            title=f"Browser record {r['name']}", project=project, note=f"{len(r['steps'])} steps")
+        out["canvas"] = {"name": c["name"], "version": c["shown"]["version"], "bytes": len(page.encode())}
+    return out
 
 
 def _act(conn, a, who):
@@ -193,11 +259,14 @@ def _act(conn, a, who):
     if action == "steps":  # #5680: this browser's walk so far
         if a.get("clear"):
             b.walk = []
-        return {**b.info(), "steps": list(getattr(b, "walk", []))}
+        steps = list(getattr(b, "walk", []))
+        return {**b.info(), "steps": steps, "lines": [shlex.join(browser.step_words(s)) for s in steps]}
+    if action == "record":  # #5682: a step record of the actions in this browser
+        return record_action(conn, a, who, b, project, person)
     if action == "size":  # #5676: the page's size by command (the controller rule holds above)
         return browser.set_size(b, a.get("size") or "", (who or "the person") if person else who, a.get("dpr"))
     if action == "errors":  # #5675: the shown tab's script errors and failed requests
-        out = {**b.info(), "errors": list(b.errors)}
+        out = {**b.info(), "errors": list(b.errors), "lines": [browser.error_line(e) for e in b.errors]}
         if a.get("clear"):
             b.errors = []
         return out

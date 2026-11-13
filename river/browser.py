@@ -626,6 +626,8 @@ class Browser:
         self.req_info = {}   # requestId -> {url, method, type}: what a failed request names
         self.dl_n = 0        # downloads begun: an action's mark counts the ones it started
         self.dialog = None   # the alert, confirm or prompt box of the shown tab that waits for an answer (#5674)
+        self.rec = None      # #5682: the step record that is on (record_start), and the last one that stopped
+        self.last_rec = None
         self.state = self._load()
         if owner:  # the sweep of a later serve finds a Chrome of this session that still runs (#5636)
             self.state.update(project=project, owner=owner)
@@ -4405,6 +4407,244 @@ def errors_since(b, mark):
     new = [e for e in b.errors if e["n"] > mark.get("err", b.err_n)]
     out = {"errors": sum(1 for e in new if e["kind"] == "error"), "requests": sum(1 for e in new if e["kind"] == "request")}
     return out if new else {}
+
+
+def error_line(e):
+    """One error of the page as a line: maxpm browser errors (#5675) and the step record (#5682)."""
+    if e["kind"] == "request":
+        return f"request {e.get('method', 'GET')} {e.get('url', '')} {e.get('status') or e.get('error')}"
+    f = (e.get("frames") or [{}])[0]
+    at = f" (at {f['url']}:{f.get('line', 0) + 1})" if f.get("url") else ""
+    return f"{e.get('source', 'error')}: {e['message']}{at}"
+
+
+def step_words(s):
+    """#5680: one step of a walk (as the route recorded it: names, not refs) as the words of its maxpm browser line."""
+    act, sel = s.get("action"), s.get("selector")
+    w = {"new_tab": ["new-tab"], "close_tab": ["close-tab"]}.get(act, [act])
+    if act in ("open", "new_tab"):
+        w += [s.get("url") or ""] if act == "open" or s.get("url") else []
+    elif act in ("click", "hover"):
+        w += [sel] if sel else [str(s.get("x")), str(s.get("y"))]
+        w += (["--double"] if (s.get("count") or 1) > 1 else []) + (["--right"] if s.get("button") == "right" else [])
+    elif act == "scroll":
+        w += ([sel] if sel else []) + ([str(s["amount"])] if s.get("amount") else [])
+    elif act == "drag":
+        to = s.get("to")
+        w += [sel or f"{s.get('x')},{s.get('y')}", ",".join(str(v) for v in to) if isinstance(to, list) else to or ""]
+    elif act == "type":
+        w += ([sel] if sel else []) + [s.get("text") or ""]
+    elif act == "fill":
+        w += [sel or "", s.get("text") or ""]
+    elif act in ("select", "upload"):
+        w += [sel or ""] + [str(v) for v in s.get("values") or s.get("files") or []]
+    elif act in ("check", "uncheck"):
+        w.append(sel or "")
+    elif act == "key":
+        w.append(s.get("key") or "")
+    elif act == "dialog":
+        w.append("accept" if s.get("accept", True) else "dismiss")
+        w += [s["text"]] if s.get("text") is not None else []
+    elif act == "extract":
+        if s.get("rows"):
+            w += ["--rows", s["rows"]]
+        if s.get("limit"):
+            w += ["--limit", str(s["limit"])]
+        w += [f"{f[0]}={f[1]}" + (f"@{f[2]}" if f[2] else "") for f in s.get("fields") or []]
+    elif act in ("size", "eval") or act in ("tab", "close_tab") and s.get("target"):
+        w.append(str(s.get({"size": "size", "eval": "js"}.get(act, "target")) or ""))
+    if s.get("within"):
+        w += ["--in", s["within"]]
+    if s.get("mods"):
+        w += ["--with", ",".join(s["mods"])]
+    if s.get("wait"):
+        w += ["--wait", s["wait"]]
+    return w
+
+
+# #5682: the step record. While it is on, each action in the browser adds a step: its line, what it changed, the
+# page's errors since it began, and a JPEG of the view with the pointer and the click ring. maxpm browser record stop
+# puts the steps as one canvas (the pictures inline); each picture also stays a file, so an agent reads the picture
+# of one step (maxpm browser record step <n>), not all of them. No video: the standard library has no encoder.
+RECORD_STEPS = 300   # the steps of one record; the actions after them are counted, not recorded
+SHOT_WIDTH = 800     # a step's picture is at most this wide in pixels (a wider view is scaled down)
+SHOT_QUALITY = 60    # its JPEG quality
+RECORD_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")  # it becomes the canvas's name
+RECORDING = set()    # the browsers with a record on: an action looks for its mark only then
+
+
+def record_start(b, name=None, who=None):
+    """Start a step record in browser b; name: the canvas's name (default walk-<date>-<time>)."""
+    if b.rec:
+        raise RiverError(f"a record is on in this browser already: {b.rec['name']}, {len(b.rec['steps'])} steps; "
+                         "maxpm browser record stop puts it as a canvas")
+    name = (name or time.strftime("walk-%Y%m%d-%H%M%S")).strip().lower()
+    if not RECORD_NAME.match(name):
+        raise RiverError("a record's name is 1 to 64 of a-z, 0-9, '.', '_' and '-' (it becomes the canvas's name), "
+                         "for example login-walk")
+    folder = browser_dir(b.project) / "records" / name
+    folder.mkdir(parents=True, exist_ok=True)
+    for f in folder.glob("[0-9][0-9][0-9].jpg"):  # the pictures of an earlier record of the same name
+        f.unlink()
+    b.rec = {"name": name, "by": who, "at": core.iso(core.now()), "dir": str(folder), "steps": [], "over": 0}
+    RECORDING.add(b)
+    return {**b.info(), "record": record_info(b.rec), "on": True}
+
+
+def record_info(r):
+    """A record without its steps: what status and the replies show."""
+    if not r:
+        return None
+    return {"name": r["name"], "by": r["by"], "at": r["at"], "dir": r["dir"], "steps": len(r["steps"]),
+            "failed": [s["n"] for s in r["steps"] if not s["ok"]], "over": r["over"]}
+
+
+def record_begin(b, words, who):
+    """The mark of an action before it runs, when a record is on: its line, who, and the page's error count."""
+    if not b.rec:
+        return None
+    return {"line": shlex.join(words), "by": who, "err": b.err_n, "t": time.monotonic()}
+
+
+def record_step(b, mark, out=None, error=None):
+    """Add the step of an action that ran (out, its reply) or failed (error) to the record, with its picture."""
+    r = b.rec
+    if not r or not mark:
+        return None
+    if len(r["steps"]) >= RECORD_STEPS:
+        r["over"] += 1
+        return None
+    n = len(r["steps"]) + 1
+    s = {"n": n, "line": mark["line"], "by": mark["by"], "at": core.iso(core.now()),
+         "ms": int((time.monotonic() - mark["t"]) * 1000), "ok": error is None}
+    if error is not None:
+        s.update(code=getattr(error, "code", None) or "error", error=str(error))
+    page = out if out else b.info() if b.running() else {}
+    for k in ("title", "url", "navigated", "notes", "changes"):
+        if page.get(k):
+            s[k] = page[k]
+    d = (out or {}).get("dialog") or dialog_info(b.dialog)
+    if d:
+        s["dialog"] = f"{d['type']}: {d['message']}"
+    if (out or {}).get("downloads"):
+        s["downloads"] = [x.get("path") or x.get("name") for x in out["downloads"]]
+    if out and "count" in out and "data" in out:
+        s["rows"] = out["count"]
+    errs = [error_line(e) for e in b.errors if e["n"] > mark["err"]]
+    if errs:
+        s["errors"] = errs
+    try:
+        jpg = record_shot(b)
+    except (RiverError, KeyError, TypeError, ValueError):
+        jpg = None  # the page went away, or a box of the page holds it: the step has no picture
+    if jpg:
+        path = Path(r["dir"]) / f"{n:03d}.jpg"
+        path.write_bytes(jpg)
+        s.update(picture=str(path), bytes=len(jpg))
+    r["steps"].append(s)
+    return s
+
+
+def record_shot(b):
+    """A JPEG of the shown tab's view (SHOT_WIDTH pixels wide at most), with the pointer and its last click ring."""
+    if not b.running() or b.dialog:
+        return None  # a box of the page stops every call to the page until it is answered
+    m = b.page("Page.getLayoutMetrics", timeout=5)["cssVisualViewport"]
+    base = 1 / b.dsf if b.dsf > 1 and b.size and not b._windowed() else 1  # one pixel for each CSS pixel (#5625)
+    p = {"format": "jpeg", "quality": SHOT_QUALITY,
+         "clip": {"x": m["pageX"], "y": m["pageY"], "width": m["clientWidth"], "height": m["clientHeight"],
+                  "scale": base * min(1.0, SHOT_WIDTH / max(1, m["clientWidth"]))}}
+    drew = cursor_on(b)
+    try:
+        return base64.b64decode(b.page("Page.captureScreenshot", p, timeout=10)["data"])
+    finally:
+        if drew:
+            cursor_off(b)
+
+
+def record_stop(b):
+    """End the record of browser b and return it (the route puts it as a canvas)."""
+    r = b.rec
+    if not r:
+        raise RiverError("no record is on in this browser: maxpm browser record start")
+    b.rec, b.last_rec = None, r
+    RECORDING.discard(b)
+    return r
+
+
+def record_get(b, n):
+    """One step of the record that is on, else of the last one."""
+    r = b.rec or b.last_rec
+    if not r:
+        raise RiverError("this browser has no record: maxpm browser record start")
+    try:
+        if int(n) < 1:
+            raise IndexError
+        return r["steps"][int(n) - 1]
+    except (IndexError, TypeError, ValueError):
+        raise RiverError(f"record {r['name']} has steps 1 to {len(r['steps'])}, not {n}") from None
+
+
+RECORD_CSS = """.rec-line { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.kit-timeline > li[data-tone=bad]::before { background: var(--kit-bad); border-color: var(--kit-bad); }
+.kit-timeline > li[data-tone=bad] { background: var(--kit-bad-bg); border-radius: var(--kit-radius); padding: 8px 10px; }
+.rec-list { margin: 4px 0; padding-left: 18px; font-size: 13px; overflow-wrap: anywhere; }
+.rec-bad { color: var(--kit-bad); }"""
+
+
+def record_page(r, limit=5_000_000):
+    """#5682: the steps of a record as one HTML canvas (the canvas kit: light and dark, a 390 px phone). The pictures go
+    inline while the page stays under limit bytes: the failed steps' first, then from the last step back; a step whose
+    picture does not fit names its file."""
+    from html import escape as E
+    steps = r["steps"]
+    failed = [s for s in steps if not s["ok"]]
+    budget = limit - 50_000 - sum(len(json.dumps(s)) * 2 for s in steps)
+    inline = set()
+    for s in failed + steps[::-1]:
+        cost = s.get("bytes", 0) * 4 // 3 + 200
+        if s.get("picture") and s["n"] not in inline and cost <= budget and os.path.exists(s["picture"]):
+            inline.add(s["n"])
+            budget -= cost
+    errs = sum(len(s.get("errors") or []) for s in steps)
+    sub = f"{len(steps)} steps by {r['by'] or 'a session'}, started {r['at']}."
+    if failed:
+        f = failed[0]
+        sub += f' Failed at <a href="#s{f["n"]}">step {f["n"]}</a>: {E(f["code"])}.'
+    if r["over"]:
+        sub += f" {r['over']} later actions are not recorded (at most {RECORD_STEPS} steps)."
+    out = ['<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">',
+           f'<meta name="maxpm-kit"><title>Browser record {E(r["name"])}</title><style>{RECORD_CSS}</style></head>',
+           f'<body><main class="kit"><h1>Browser record {E(r["name"])}</h1><p class="kit-sub">{sub}</p>',
+           '<div class="kit-stats">', f'<div class="kit-stat"><b>{len(steps)}</b><span>steps</span></div>',
+           f'<div class="kit-stat"><b>{len(failed)}</b><span>failed</span></div>',
+           f'<div class="kit-stat"><b>{errs}</b><span>page errors</span></div></div><ol class="kit-timeline">']
+    for s in steps:
+        tone = "good" if s["ok"] else "bad"
+        chip = "" if s["ok"] else f' <span class="kit-chip" data-tone="bad">{E(s["code"])}</span>'
+        out.append(f'<li id="s{s["n"]}" data-tone="{tone}"><h3>{s["n"]}. <span class="rec-line">{E(s["line"])}</span>'
+                   f'{chip}</h3><p class="kit-when">{E(s["at"][11:19])} · {s["ms"]} ms · {E(s["by"] or "")}</p>')
+        if s.get("error"):
+            out.append(f'<p class="rec-bad">{E(s["error"])}</p>')
+        if s.get("title") or s.get("url"):
+            out.append(f'<p>{E(s.get("title") or "")} <span class="kit-muted">{E(s.get("url") or "")}</span></p>')
+        lines = ([f"box of the page: {s['dialog']}"] if s.get("dialog") else []) + list(s.get("notes") or []) + \
+            list(s.get("changes") or []) + [f"downloaded {d}" for d in s.get("downloads") or []] + \
+            ([f"{s['rows']} rows"] if "rows" in s else [])
+        if lines:
+            out.append('<ul class="rec-list">' + "".join(f"<li>{E(str(x))}</li>" for x in lines[:20]) +
+                       (f"<li>and {len(lines) - 20} more</li>" if len(lines) > 20 else "") + "</ul>")
+        if s.get("errors"):
+            out.append('<ul class="rec-list rec-bad">' + "".join(f"<li>{E(x)}</li>" for x in s["errors"]) + "</ul>")
+        if s["n"] in inline:
+            data = base64.b64encode(Path(s["picture"]).read_bytes()).decode()
+            out.append(f'<figure class="kit-shot"><div class="kit-shot-box"><img loading="lazy" alt="The page after step '
+                       f'{s["n"]}" src="data:image/jpeg;base64,{data}"></div></figure>')
+        elif s.get("picture"):
+            out.append(f'<p class="kit-muted">Picture: {E(s["picture"])}</p>')
+        out.append("</li>")
+    out.append("</ol></main></body></html>")
+    return "".join(out)
 
 
 def walk(b, pages, settle=3.0, timeout=60.0):

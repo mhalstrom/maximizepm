@@ -995,6 +995,12 @@ def build_parser(only=None):
     x = brs.add_parser("errors", parents=[bp], help="the page's script errors, console.error calls and failed requests "
                        "(status 400 or more, or no answer), the newest last")
     x.add_argument("--clear", action="store_true", help="empty the list after it prints")
+    x = brs.add_parser("record", parents=[bp], help="a step record: start, then each action adds its line, what it "
+                       "changed, the page errors and a picture; stop puts the steps as a canvas; step <n> prints one "
+                       "step and the path of its picture")
+    x.add_argument("do", nargs="?", default="status", choices=("start", "stop", "status", "step"))
+    x.add_argument("n", nargs="?", type=int, help="the step's number (record step <n>)")
+    x.add_argument("--name", help="the record's name, also its canvas's name (default walk-<date>-<time>)")
     x = brs.add_parser("steps", parents=[bp], help="the actions of your walk in this browser, as lines that run takes "
                        "(names, not refs); put {name} where an input goes")
     x.add_argument("--clear", action="store_true", help="forget the walk so far (start a new one)")
@@ -2713,6 +2719,10 @@ def _browser_args(a):
         args.update(size=a.size, dpr=a.dpr)
     elif b in ("steps", "errors"):  # #5680, #5675
         args["clear"] = a.clear
+    elif b == "record":  # #5682
+        if a.do == "step" and a.n is None:
+            raise RiverError("name the step: maxpm browser record step <n> (maxpm browser record lists them)")
+        args.update(record=a.do, name=a.name, n=a.n)
     elif b == "upload":  # #5679: full paths, as serve runs in another folder
         args.update(selector=a.target, files=[str(Path(f).expanduser().resolve()) for f in a.files])
     elif b == "dialog":
@@ -2778,46 +2788,49 @@ def _browser_batch(a, inputs=None):
     return steps
 
 
-def _step_words(s):
-    """#5680: one step of a session's walk (as the route recorded it) as the words of its maxpm browser line."""
-    act, sel = s.get("action"), s.get("selector")
-    w = {"new_tab": ["new-tab"], "close_tab": ["close-tab"]}.get(act, [act])
-    if act == "open":
-        w.append(s.get("url") or "")
-    elif act in ("click", "hover"):
-        w += [sel] if sel else [str(s.get("x")), str(s.get("y"))]
-        w += (["--double"] if (s.get("count") or 1) > 1 else []) + (["--right"] if s.get("button") == "right" else [])
-    elif act == "scroll":
-        w += ([sel] if sel else []) + ([str(s["amount"])] if s.get("amount") else [])
-    elif act == "drag":
-        to = s.get("to")
-        w += [sel or f"{s.get('x')},{s.get('y')}", ",".join(str(v) for v in to) if isinstance(to, list) else to or ""]
-    elif act == "type":
-        w += ([sel] if sel else []) + [s.get("text") or ""]
-    elif act == "fill":
-        w += [sel or "", s.get("text") or ""]
-    elif act in ("select", "upload"):
-        w += [sel or ""] + [str(v) for v in s.get("values") or s.get("files") or []]
-    elif act in ("check", "uncheck"):
-        w.append(sel or "")
-    elif act == "key":
-        w.append(s.get("key") or "")
-    elif act == "dialog":
-        w.append("accept" if s.get("accept", True) else "dismiss")
-        w += [s["text"]] if s.get("text") is not None else []
-    elif act == "extract":
-        if s.get("rows"):
-            w += ["--rows", s["rows"]]
-        if s.get("limit"):
-            w += ["--limit", str(s["limit"])]
-        w += [f"{f[0]}={f[1]}" + (f"@{f[2]}" if f[2] else "") for f in s.get("fields") or []]
-    if s.get("within"):
-        w += ["--in", s["within"]]
-    if s.get("mods"):
-        w += ["--with", ",".join(s["mods"])]
-    if s.get("wait"):
-        w += ["--wait", s["wait"]]
-    return w
+def _record_step_line(s):
+    """#5682: one step of a record in one line: its number, ok or the error code, its line, its time and errors."""
+    errs = len(s.get("errors") or [])
+    return (f"{s['n']} {'ok' if s['ok'] else 'FAILED ' + (s.get('code') or 'error')}  {s['line']}  ({s['ms']} ms"
+            + (f", {errs} page error{'s' if errs != 1 else ''}" if errs else "") + ")")
+
+
+def _record_lines(res):
+    """#5682: maxpm browser record start | stop | status | step <n>."""
+    r, step = res.get("record"), res.get("step")
+    if step:
+        print(_record_step_line(step))
+        for k, label in (("error", "error"), ("dialog", "box of the page"), ("title", "page"), ("url", "address")):
+            if step.get(k):
+                print(f"  {label}: {step[k]}")
+        for x in (step.get("notes") or []) + (step.get("changes") or []) + (step.get("errors") or []):
+            print(f"  {x}")
+        print(f"  picture: {step['picture']}" if step.get("picture") else "  (no picture: the page was not there)")
+        return
+    if not r:
+        print("no record in this browser: maxpm browser record start")
+        return
+    failed = r.get("failed") or []
+    head = f"record {r['name']}: {r['steps']} steps" + (f", failed at step {', '.join(map(str, failed))}" if failed else "")
+    if r.get("over"):
+        head += f", {r['over']} actions after the last step not recorded"
+    if res.get("on") and "steps" not in res:  # start
+        print(f"record {r['name']} is on: each action adds a step with its picture. "
+              "maxpm browser record stop puts the steps as a canvas")
+        return
+    if "canvas" in res:  # stop
+        c = res["canvas"]
+        print(head + (f"; canvas {c['name']} v{c['version']} ({c['bytes'] // 1000} KB), in your side panel"
+                      if c else "; no steps, so no canvas"))
+        if failed:
+            print(f"maxpm browser record step {failed[0]}: the step that failed and the path of its picture")
+        return
+    print(head + ("" if res.get("on") else " (stopped)"))
+    steps = res.get("steps") or []
+    for s in steps[-10:]:
+        print("  " + _record_step_line(s))
+    if len(steps) > 10:
+        print(f"  ({len(steps) - 10} earlier steps: maxpm browser record step <n>)")
 
 def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     """Ask the maxpm serve of this queue to do one page action (server.OPS) and return its result; RiverError
@@ -5397,20 +5410,14 @@ def render_browser(a, res):
               else "size: the side panel's" + (f" ({res['size'][0]}x{res['size'][1]})" if res.get("size") else
                                                " (none open: Chrome's own)"))
         return
-    if b == "errors":  # #5675: one line each, with its first stack frame or its request
-        for e in res.get("errors") or []:
-            if e["kind"] == "request":
-                print(f"request {e.get('method', 'GET')} {e.get('url', '')} {e.get('status') or e.get('error')}")
-            else:
-                f = (e.get("frames") or [{}])[0]
-                at = f" (at {f['url']}:{f.get('line', 0) + 1})" if f.get("url") else ""
-                print(f"{e.get('source', 'error')}: {e['message']}{at}")
-        if not res.get("errors"):
-            print("(no errors on this page)")
+    if b == "errors":  # #5675: one line each, with its first stack frame or its request (browser.error_line)
+        print("\n".join(res.get("lines") or []) or "(no errors on this page)")
         return
-    if b == "steps":  # #5680: the walk as lines for run
-        import shlex
-        print("\n".join(shlex.join(_step_words(s)) for s in res.get("steps") or []) or "(no steps yet in this browser)")
+    if b == "steps":  # #5680: the walk as lines for run (browser.step_words)
+        print("\n".join(res.get("lines") or []) or "(no steps yet in this browser)")
+        return
+    if b == "record":  # #5682
+        _record_lines(res)
         return
     if b == "run":  # #5680: the result (the last extract's rows), or the step that failed and the page
         if res.get("ok"):
