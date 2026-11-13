@@ -3711,3 +3711,72 @@ class CutData(unittest.TestCase):
         html = f'<img src="{STARS}"><i style="background:url(data:image/png;base64,{"A" * 500})"></i><img src="{short}">'
         self.assertEqual(browser.cut_data(html), '<img src="data:image/svg+xml;base64,…(3300 bytes)"><i style="background:'
                                                  'url(data:image/png;base64,…(500 bytes))"></i>' f'<img src="{short}">')
+
+
+PLACE_ROWS = "".join(
+    f"<article><h2>{n}. Place {n} Cucina</h2><img width=60 height=12 alt='rating: 4.{n % 10}' "
+    f"src='data:image/gif;base64,R0lGODlhAQABAAAAACw='><span>({100 + n})</span><p>Italian · $$</p>"
+    f"<p>{n} Santa Cruz Ave, Menlo Park</p><p>{'Great pasta and a kind staff. ' * 8}</p></article>"
+    for n in range(1, 21))
+MAP = "<div class=map><canvas width=300 height=200></canvas>" + "".join(f"<b>{n}</b>" for n in range(20, 0, -1)) + \
+    "<button>Satellite</button></div>"
+
+
+class TextBesideMap(Base):
+    """#5722 in a real Chrome: when main holds only a map and a side bar (in main or beside it) holds the list, text
+    reads the list (names, ratings, counts, cuisine, addresses) under 4 KB, --section finds a place's heading, and
+    --grep finds the ratings."""
+
+    def test_the_list_of_a_map_page_is_the_text(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+        pages = {"/in": f"<title>Map</title><main>{MAP}<aside><h1>Places</h1>{PLACE_ROWS}</aside></main>",
+                 "/beside": f"<title>Map</title><main>{MAP}</main><aside><h1>Places</h1>{PLACE_ROWS}</aside>",
+                 "/article": "<title>Story</title><main><p>" + "A long story. " * 60 + "</p><aside><h2>Related</h2>"
+                             "<p>Other stories that are not the story itself, and some more words here.</p>" * 4
+                             + "</aside></main>"}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = pages[self.path].encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, None)  # noqa: E731
+        for path in ("/in", "/beside"):
+            act(action="open", url=f"http://127.0.0.1:{port}{path}")
+            t = act(action="text")
+            self.assertLess(len(t["text"].encode()), 4000, path)
+            self.assertEqual(t["rest"], 0, path)
+            for n in (1, 13, 20):
+                self.assertIn(f"{n}. Place {n} Cucina", t["text"], path)
+                self.assertIn(f"{n} Santa Cruz Ave, Menlo Park", t["text"], path)
+            self.assertIn("[rating: 4.3]", t["text"], path)
+            self.assertIn("(113)", t["text"], path)
+            sec = act(action="text", section="1. Place 1 Cucina")
+            self.assertIn("1 Santa Cruz Ave", sec["text"], path)
+            self.assertIn(("Great pasta and a kind staff. " * 8).strip(), sec["text"], path)  # a section keeps it whole
+            self.assertIn("\nGreat pasta and a kind staff. Great pasta and a kind staff.…\n", t["text"], path)  # cut
+            self.assertNotIn("2. Place 2", sec["text"], path)
+            self.assertEqual(act(action="text", grep="rating:")["matches"], 20, path)
+        # A story with a side bar of related links: the side bar stays out, and so does its heading.
+        act(action="open", url=f"http://127.0.0.1:{port}/article")
+        t = act(action="text")
+        self.assertNotIn("Other stories", t["text"])
+        with self.assertRaisesRegex(RiverError, 'no heading "Related"'):
+            act(action="text", section="Related")

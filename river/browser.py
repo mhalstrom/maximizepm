@@ -3662,17 +3662,49 @@ TEXT_JS = r"""(function (o) {
   if (!main) return {text: '', total: 0, rest: 0, next: null, heads: []};
   const undo = marks(main, norm);
   let text, heads;
-  try {
-    text = main.innerText || '';
-    if (!o.all) for (const x of main.querySelectorAll(OUT)) {
+  // The text of root without its menus, side bars and footers; keep: a side bar that stays.
+  const read = (root, keep) => {
+    let t = root.innerText || '';
+    if (!o.all) for (const x of root.querySelectorAll(OUT)) {
+      if (keep && (x === keep || x.contains(keep))) continue;
       const up = x.parentElement && x.parentElement.closest(OUT);
-      if (up && main.contains(up)) continue;  // its text went with the part around it
-      const t = x.innerText; if (t && t.trim()) text = text.replace(t, '');
+      if (up && root.contains(up)) continue;  // its text went with the part around it
+      const s = x.innerText; if (s && s.trim()) t = t.replace(s, '');
     }
-    heads = Array.from(main.querySelectorAll('h1,h2,h3,h4,h5,h6')).filter(h => h.innerText.trim())
-      .map(h => [+h.tagName[1], h.innerText.trim().split('\n')[0]]);
+    return t;
+  };
+  const headsOf = root => Array.from(root.querySelectorAll('h1,h2,h3,h4,h5,h6')).filter(h => h.innerText.trim())
+    .map(h => [+h.tagName[1], h.innerText.trim().split('\n')[0]]);
+  try {
+    text = read(main, null);
+    heads = headsOf(main);
+    // #5722: a main region that holds only a map or a canvas (DuckDuckGo's places map: 101 bytes of the map's numbers)
+    // and a side bar, in it or beside it, with the list: a person reads that list as the page's content.
+    const ml = norm(text).length;
+    if (!o.all && main !== document.body && ml < 500) {
+      let side = null, sl = 0;
+      for (const x of document.querySelectorAll('aside,[role=complementary]')) {
+        if (x.contains(main)) continue;
+        const l = norm(x.innerText).length;
+        if (l > sl) { side = x; sl = l; }
+      }
+      if (side && sl >= 200 && sl > 2 * ml) {  // the side bar alone: the map's labels (20, 19, ... Satellite) are no text
+        if (!main.contains(side)) undo.push(...marks(side, norm));
+        text = read(side, null);
+        heads = headsOf(side);
+        // A list too long for one read, with no section or word asked: each long line (a review's opening) is cut,
+        // so the rows with their names, scores, kinds and addresses fit (20 places: 6.3 KB, then under 4 KB).
+        const enc = new TextEncoder();
+        if (!o.section && !o.grep && enc.encode(text).length > o.max)
+          text = text.replace(/\n\n/g, '\n').split('\n').map(l => l.length > 100 ? l.slice(0, 60).trimEnd() + '…' : l).join('\n');
+      }
+    }
   } finally {
     for (const f of undo.reverse()) f();
+  }
+  {  // only the headings whose line is in the text (a heading in a side bar that went out is not)
+    const all = norm(text);
+    heads = heads.filter(h => all.includes(norm(h[1])));
   }
   text = text.replace(/\n{3,}/g, '\n\n').replace(/ {2,}\[/g, ' [').replace(/\] {2,}/g, '] ').trim();
   const out = {heads: heads.slice(0, 40).map(h => h[1])};
