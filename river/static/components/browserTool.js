@@ -61,13 +61,13 @@ function render(box, project, session) {
   session = session || "";
   const call = (action, args = {}) => callOp(action, { session, ...args });  // this panel's session's browser
   box.innerHTML = `<div class="br">
+    <div class="br-strip" role="tablist" aria-label="Tabs"></div>
     <form class="br-bar" autocomplete="off">
       ${button("◀", { kind: "icon", label: "Back", title: "Back", data: { br: "back" } })}
       ${button("▶", { kind: "icon", label: "Forward", title: "Forward", data: { br: "forward" } })}
       ${button("↻", { kind: "icon", label: "Reload", title: "Load the page again", data: { br: "reload" } })}
       <input class="br-addr" placeholder="Address or search" aria-label="Address or search"
         autocapitalize="off" spellcheck="false" enterkeyhint="go">
-      <select class="br-tabs hidden" aria-label="The tabs of the browser"></select>
     </form>
     <div class="br-ctl"><span class="br-who muted t-s"></span>
       <span class="br-refused hidden t-s">This site refuses a browser with no window: open it as a window.</span><span class="br-sp"></span>
@@ -132,9 +132,7 @@ function render(box, project, session) {
     $$(".br-refused").classList.toggle("hidden", !(j.refused && !j.window));
     stage.classList.toggle("br-locked", !v.mine);
     if (document.activeElement !== addr) addr.value = j.url && j.url !== "about:blank" ? j.url : "";
-    const sel = $$(".br-tabs"), tabs = j.tabs || [];
-    sel.classList.toggle("hidden", tabs.length < 2);
-    sel.innerHTML = tabs.map(t => `<option value="${esc(t.id)}"${t.on ? " selected" : ""}>${esc((t.title || t.url || "").slice(0, 60))}</option>`).join("");
+    strip(j.tabs || []);
     msg.classList.toggle("hidden", j.running && !!v.w);
     if (!j.running) msg.innerHTML = v.noChrome
       ? `The Browser needs Google Chrome, and this computer does not have it. Download it, install it, then press Check again.
@@ -147,6 +145,25 @@ function render(box, project, session) {
       msg.classList.add("hidden");
     }
     draw(j);
+  }
+
+  // The tab strip (#5632), like Chrome's: each tab with its icon and title (a click shows it), x closes it, + opens a
+  // new one; the session whose pointer is on a tab is named on it. Drawn again only when a tab changed.
+  let stripKey = "";
+  function strip(tabs) {
+    const key = JSON.stringify(tabs.map(t => [t.id, t.title, t.url, t.on, !!t.icon, t.agent]));
+    if (key === stripKey) return;
+    stripKey = key;
+    const el = $$(".br-strip");
+    el.innerHTML = tabs.map(t => `<div class="br-tab${t.on ? " on" : ""}">${button(
+        (t.icon ? `<img class="br-ico" src="${esc(t.icon)}" alt="">` : `<span class="br-ico br-ico0"></span>`)
+        + `<span class="br-tt">${esc(t.title || (t.url !== "about:blank" && t.url) || "New tab")}</span>`
+        + (t.agent ? `<span class="br-ta t-s">${esc(t.agent)}</span>` : ""),
+        { cls: "br-go", data: { br: "tab", target: t.id }, attrs: `role="tab" aria-selected="${t.on ? "true" : "false"}"` })}${
+      button("×", { kind: "icon", label: "Close tab", title: "Close tab", data: { br: "close_tab", target: t.id } })}</div>`).join("")
+      + button("+", { kind: "icon", label: "New tab", title: "New tab", data: { br: "new_tab" } });
+    const on = el.querySelector(".br-tab.on");
+    if (on) on.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 
   // The session of this panel, else the one that held the browser before the person took it.
@@ -266,8 +283,10 @@ function render(box, project, session) {
       if (what === "window" || what === "headless") { msg.classList.remove("hidden"); msg.textContent = what === "window" ? "Opening a window…" : "Back to the panel…"; }
       const args = { project, pane };
       if (what === "window" || what === "headless") args.window = what === "window";
+      if (b.dataset.target) args.target = b.dataset.target;  // a tab of the strip (#5632)
       show(await call(what === "headless" ? "window" : what, args));
       if (what === "start") { sized = ""; fit(); }
+      if (what === "new_tab") addr.focus();  // a new tab: type its address
     } catch (err) { if (what === "hand") toast(err.message, true); }
   });
   const go = async (url) => {
@@ -289,9 +308,6 @@ function render(box, project, session) {
           html: `<span class="br-st">Search Google for “${esc(text.trim())}”</span>` }]);
     },
     pick: (url) => { addr.value = url; go(url); },
-  });
-  $$(".br-tabs").addEventListener("change", async (e) => {
-    try { show(await call("tab", { project, pane, target: e.target.value })); } catch (err) { /* call showed it */ }
   });
   loop();
 }

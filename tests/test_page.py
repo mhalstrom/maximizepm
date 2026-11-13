@@ -993,6 +993,43 @@ try {
     def test_the_address_bar_suggests_at_phone_width(self):
         self._address_suggestions("390,844")
 
+    def _tab_strip(self, size):
+        """#5632: the tab strip shows each tab of the session's browser and a + button; the shown tab is marked; on a
+        phone the strip scrolls sideways and the page does not get wider (p57)."""
+        from unittest import mock
+        from river import browser
+        project = browser.project_of(self.c, agent="ag")
+        b = browser.get(project, "ag")
+        self.addCleanup(browser.BROWSERS.clear)
+        b.targets = {f"T{i}": {"url": f"https://example{i}.com/", "title": f"A long page title number {i} of the test",
+                               "opener": None} for i in range(1, 6)}
+        b.target = "T2"
+        no = mock.patch.object(browser, "no_chrome", lambda: "no Chrome in this test")  # the pane starts no Chrome
+        no.start()
+        self.addCleanup(no.stop)
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag", "session ag shown");
+  const { openBrowser } = await import("./components/browserTool.js");
+  await openBrowser("ag");
+  await until(() => document.querySelectorAll(".br-tab").length === 5, "five tabs");
+  const s = q(".br-strip"), on = q(".br-tab.on");
+  post({ tabs: document.querySelectorAll(".br-tab").length, on: on.textContent.trim(), plus: !!s.querySelector('[data-br="new_tab"]'),
+         closes: s.querySelectorAll('[data-br="close_tab"]').length, scrolls: s.scrollWidth > s.clientWidth,
+         wide: document.documentElement.scrollWidth > innerWidth, visible: on.getBoundingClientRect().right <= innerWidth });
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        return self.drive(driver, "/sessions/ag", size=size)
+
+    def test_the_tab_strip_at_desktop_width(self):
+        got = self._tab_strip("1280,900")
+        self.assertEqual({k: got.get(k) for k in ("tabs", "on", "plus", "closes", "wide", "visible")},
+                         {"tabs": 5, "on": "A long page title number 2 of the test×", "plus": True, "closes": 5,
+                          "wide": False, "visible": True}, got)
+
+    def test_the_tab_strip_at_phone_width(self):
+        got = self._tab_strip("390,844")
+        self.assertEqual({k: got.get(k) for k in ("tabs", "scrolls", "wide", "visible")},
+                         {"tabs": 5, "scrolls": True, "wide": False, "visible": True}, got)
+
     def test_the_you_row_opens_what_waits_on_you(self):
         """#5102 steps 1 and 3 (design #4657): the You row at the top of the Sessions list has a ! badge with what waits on
         the person, and opens the You view (Needs you, the inbox) at /you in place of a session's chat; a session row

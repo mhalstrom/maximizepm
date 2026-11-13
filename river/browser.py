@@ -536,6 +536,7 @@ class Browser:
         self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
         self.visits = {}     # url -> {url, title, n, at}: the pages its tabs showed, for the address bar (#5635)
         self.history = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's History in memory
+        self.icons = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's Favicons (#5632)
         self.state = self._load()
         if owner:  # the sweep of a later serve finds a Chrome of this session that still runs (#5636)
             self.state.update(project=project, owner=owner)
@@ -985,8 +986,11 @@ class Browser:
                 "url": cur.get("url", ""), "title": cur.get("title", ""), "controller": c or None,
                 "before": before.get("who"),
                 "size": list(self.size) if self.size else None,  # the panel's size that serve has (#5625)
-                "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target}
-                         for k, v in self.targets.items()]}
+                # The tab strip (#5632): each tab with its icon (from Chrome's Favicons, a data address) and the
+                # session whose pointer is on it.
+                "tabs": [{"id": k, "url": v["url"], "title": v["title"], "on": k == self.target,
+                          "icon": tab_icon(icons, v["url"]), "agent": p["who"] if p and p.get("target") == k else None}
+                         for icons, p in ((tab_icons(self), self.pointer),) for k, v in self.targets.items()]}
 
     def open(self, url):
         url = norm_url(url)
@@ -1117,29 +1121,74 @@ def _history_file(b):
 def read_history(path):
     """[{url, title, n, at}] of a Chrome History file, newest first. Chrome holds the file open and locked: serve reads a
     copy (with its journal), in a folder of its own."""
+    rows = _read_copy(path, "SELECT url, title, visit_count + 2 * typed_count, last_visit_time FROM urls WHERE hidden = 0 "
+                            "ORDER BY last_visit_time DESC LIMIT ?", (HISTORY_ROWS,))
+    # last_visit_time: microseconds since 1601-01-01; the same order as Unix time
+    return [{"url": u, "title": ti or "", "n": n or 1, "at": (at or 0) / 1e6 - 11644473600} for u, ti, n, at in rows]
+
+
+def _read_copy(path, sql, args=()):
+    """The rows of one query on a copy of a Chrome database (with its journal), in a folder of its own: Chrome holds
+    the file open and locked."""
     import sqlite3
     import tempfile
     with tempfile.TemporaryDirectory() as d:
-        copy = Path(d) / "History"
+        copy = Path(d) / Path(path).name
         shutil.copyfile(path, copy)
         for extra in ("-journal", "-wal"):
             if Path(str(path) + extra).exists():
                 shutil.copyfile(str(path) + extra, str(copy) + extra)
         con = sqlite3.connect(copy)
         try:
-            rows = con.execute("SELECT url, title, visit_count + 2 * typed_count, last_visit_time FROM urls WHERE hidden = 0 "
-                               "ORDER BY last_visit_time DESC LIMIT ?", (HISTORY_ROWS,)).fetchall()
+            return con.execute(sql, args).fetchall()
         finally:
             con.close()
-    # last_visit_time: microseconds since 1601-01-01; the same order as Unix time
-    return [{"url": u, "title": ti or "", "n": n or 1, "at": (at or 0) / 1e6 - 11644473600} for u, ti, n, at in rows]
+
+
+ICON_PX = 32  # the icon width the tab strip draws at (16 CSS px on a 2x screen)
+
+
+def read_icons(path):
+    """{"pages": {page url: data address}, "origins": {origin: data address}} of a Chrome Favicons file (#5632): for
+    each page the bitmap nearest ICON_PX wide. A tab whose own address has no icon yet takes its site's."""
+    best = {}
+    for url, width, data in _read_copy(path, "SELECT m.page_url, b.width, b.image_data FROM icon_mapping m "
+                                             "JOIN favicon_bitmaps b ON b.icon_id = m.icon_id WHERE b.image_data IS NOT NULL"):
+        if url not in best or abs((width or 0) - ICON_PX) < abs(best[url][0] - ICON_PX):
+            best[url] = (width or 0, data)
+    pages = {u: "data:image/png;base64," + base64.b64encode(d).decode() for u, (_, d) in best.items()}
+    origins = {}
+    for u, icon in pages.items():
+        origins.setdefault(_origin(u), icon)
+    return {"pages": pages, "origins": origins}
+
+
+def _origin(url):
+    u = urlsplit(url)
+    return f"{u.scheme}://{u.netloc}"
+
+
+def tab_icons(b):
+    """The icons of b's profile in memory (read as _history reads History); None for a Chrome serve did not start."""
+    return _profile_cached(b, b.icons, None if b.attached else b.dir / "profile" / "Default" / "Favicons", read_icons)
+
+
+def tab_icon(icons, url):
+    """The data address of a tab's icon, or None (the strip draws a plain mark)."""
+    if not icons or not url.startswith(("http://", "https://")):
+        return None
+    return icons["pages"].get(url) or icons["origins"].get(_origin(url))
 
 
 def _history(b):
-    """The History rows of b in memory. A changed file is read again at most each HISTORY_AGAIN seconds, in a thread:
-    the address bar answers from memory (p147, under 100 ms); only the first read waits."""
-    path = _history_file(b)
-    h = b.history
+    """The History rows of b in memory (see _profile_cached)."""
+    return _profile_cached(b, b.history, _history_file(b), read_history)
+
+
+def _profile_cached(b, h, path, reader):
+    """What reader(path) gives for a file of b's profile, from memory. A changed file is read again at most each
+    HISTORY_AGAIN seconds, in a thread: the address bar and the tab strip answer from memory (p147, under 100 ms);
+    only the first read waits."""
     try:
         mtime = path.stat().st_mtime if path else None
     except OSError:
@@ -1149,7 +1198,7 @@ def _history(b):
 
     def load():
         try:
-            rows = read_history(path)
+            rows = reader(path)
             h.update(rows=rows, mtime=mtime, at=time.time())
         except Exception:  # a copy that Chrome was writing: the next suggestion reads it again
             h["mtime"] = None

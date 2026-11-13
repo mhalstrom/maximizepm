@@ -300,7 +300,19 @@ button.srow-it { cursor: pointer; }
 .br-su { font-size: var(--fs-s); color: var(--muted); }
 .sugg-row.on .br-su { color: inherit; opacity: .85; }
 .br-addr { flex: 1 1 var(--w-m); min-width: 0; font-size: calc(var(--fs-s) + var(--hair) / 2); }
-.br-tabs { max-width: var(--w-m); font-size: var(--fs-s); }
+/* The tab strip (#5632), like Chrome's: one row that scrolls sideways when the tabs do not fit (a phone, p57). */
+.br-strip { display: flex; align-items: stretch; gap: var(--sp-0); flex: none; overflow-x: auto; overflow-y: hidden;
+  padding: var(--sp-1) var(--sp-3) 0; background: var(--bg); border-bottom: var(--hair) solid var(--line); scrollbar-width: thin; }
+.br-tab { display: flex; align-items: center; flex: 0 1 var(--w-card); min-width: var(--w-bar); max-width: var(--w-card);
+  border-radius: var(--r-s) var(--r-s) 0 0; color: var(--muted); }
+.br-tab.on { background: var(--panel); color: var(--ink); }
+.br-tab .br-go { display: flex; align-items: center; gap: var(--sp-2); flex: 1 1 auto; min-width: 0; color: inherit;
+  font-weight: 400; font-size: var(--fs-s); text-align: left; }
+.br-ico { width: var(--fs-base); height: var(--fs-base); flex: none; border-radius: var(--r-xs); }
+.br-ico0 { background: var(--line); }
+.br-tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.br-ta { flex: none; color: var(--accent); }  /* the session whose pointer is on this tab */
+.br-strip > .iconbtn { flex: none; align-self: center; }
 .br-sp { flex: 1; }
 .br .hidden { display: none; }
 /* The page fills the stage when the browser is headless (it takes the stage's size); a window keeps its own shape, so

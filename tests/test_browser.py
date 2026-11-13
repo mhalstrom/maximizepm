@@ -641,6 +641,36 @@ class FakeHandler:
         self.sent = (code, body)
 
 
+class TabStrip(Base):
+    """#5632: the pane's tab strip shows each tab with its icon (Chrome's Favicons of the profile) and the session whose
+    pointer is on it."""
+
+    def test_each_tab_has_its_icon_and_the_driving_session(self):
+        import sqlite3
+        b = browser.get("web", "ag1")
+        path = b.dir / "profile" / "Default" / "Favicons"
+        path.parent.mkdir(parents=True)
+        con = sqlite3.connect(path)
+        con.executescript("CREATE TABLE icon_mapping (page_url TEXT, icon_id INTEGER);"
+                          "CREATE TABLE favicon_bitmaps (icon_id INTEGER, width INTEGER, image_data BLOB);")
+        con.executemany("INSERT INTO icon_mapping VALUES (?,?)", [("https://example.com/", 1), ("https://github.com/", 2)])
+        con.executemany("INSERT INTO favicon_bitmaps VALUES (?,?,?)",
+                        [(1, 16, b"sixteen"), (1, 32, b"thirty-two"), (2, 64, b"gh")])
+        con.commit(); con.close()
+        b.targets = {"T1": {"url": "https://example.com/", "title": "Example", "opener": None},
+                     "T2": {"url": "https://github.com/settings", "title": "GitHub", "opener": None},  # its site's icon
+                     "T3": {"url": "about:blank", "title": "", "opener": None}}
+        b.target = "T1"
+        b.pointer = {"x": 1, "y": 2, "who": "ag1", "target": "T2", "n": 1, "press": 0}
+        tabs = {t["id"]: t for t in b.info()["tabs"]}
+        icon = lambda raw: "data:image/png;base64," + base64.b64encode(raw).decode()
+        self.assertEqual(tabs["T1"]["icon"], icon(b"thirty-two"))  # the bitmap nearest 32 px
+        self.assertEqual(tabs["T2"]["icon"], icon(b"gh"))
+        self.assertIsNone(tabs["T3"]["icon"])
+        self.assertEqual([tabs[k]["agent"] for k in ("T1", "T2", "T3")], [None, "ag1", None])
+        self.assertEqual([tabs[k]["on"] for k in ("T1", "T2", "T3")], [True, False, False])
+
+
 class SessionBrowsers(Base):
     """#5636 (mark 2026-11-12: 'I think it should be session specific'): each session drives a Chrome of its own."""
 
