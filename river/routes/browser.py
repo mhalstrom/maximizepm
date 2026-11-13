@@ -74,13 +74,41 @@ def _person(conn, who):
 
 
 # action -> whether it changes the page (the controller rule holds for it)
-CHANGES = {"open", "click", "type", "key", "back", "forward", "reload", "eval", "tab", "new_tab", "close_tab"}
+CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload", "eval",
+           "tab", "new_tab", "close_tab"}
+INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key"}  # a session's first one shows its panel
+# What a batch may hold (#5663): the actions whose answer is text.
+BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status"}
+
+
+def batch(conn, a, who):
+    """Several actions in one request (maxpm browser batch): each one as act() runs it, in order; the first that fails
+    ends the batch, and the answer says which one and why."""
+    steps = a.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise RiverError("a batch needs steps: one action on each line")
+    for s in steps:
+        name = (s or {}).get("action") if isinstance(s, dict) else None
+        if name not in BATCH:
+            raise RiverError(f"a batch takes {', '.join(sorted(BATCH))}; not {name}")
+    done = []
+    for s in steps:
+        step = {k: v for k, v in a.items() if k in ("project", "agent", "cwd", "session")}
+        step.update(s)
+        try:
+            done.append({"step": s, "result": act(conn, step, who)})
+        except RiverError as e:
+            done.append({"step": s, "error": str(e)})
+            break
+    return {"steps": done, "ok": "error" not in done[-1], "left": len(steps) - len(done)}
 
 
 def act(conn, a, who):
     """One browser action. a: action, and project, or agent (its item's project), or cwd (the project of the folder);
     then url, selector, x, y, text, key, js, full, sub, target, w, h, window as the action needs."""
     action = a.get("action") or "status"
+    if action == "batch":
+        return batch(conn, a, who)
     person = _person(conn, who)
     project = browser.project_of(conn, a.get("project"), a.get("agent") or (None if person else who), a.get("cwd"))
     # Whose browser (#5636): a session's own (maxpm browser, its Playwright); the person's panel names the session it
@@ -91,7 +119,7 @@ def act(conn, a, who):
         browser.may_change(conn, b, who, person)
         if person:
             b.person_at = time.time()
-        if not person and action in ("click", "type", "key"):
+        if not person and action in INPUTS:
             first_input(project, who)
     if person and a.get("pane") and action in CHANGES:
         b.drive(a.get("pane"))  # the person uses the browser in this panel: its size is the page's size (#5625)
@@ -111,23 +139,43 @@ def act(conn, a, who):
             return {**b.info(), "no_chrome": why, "download": browser.CHROME_DOWNLOAD}
         b.start()
         return b.info()
+    wait = a.get("wait")
+    if wait and wait not in browser.WAITS:
+        raise RiverError(f"--wait is {', '.join(browser.WAITS)}, not {wait}")
+    sess = None if person else who
+
+    def then(out):  # --snapshot: the snapshot of the page that the action left (#5663)
+        if a.get("snapshot"):
+            out["snapshot"] = browser.snapshot(b, interactive=True)["snapshot"]
+        return out
+    if action == "snapshot":
+        return browser.snapshot(b, bool(a.get("interactive")), a.get("scope") or None, bool(a.get("delta")),
+                                int(a.get("max") or browser.SNAP_MAX))
     if action == "open":
         out = b.open(a.get("url") or "")
+        if wait == "idle":
+            browser.net_idle(b)
         if not person and a.get("show", True):
             _ask_open(project, who, who)
-        return out
+        return then(out)
     if action == "click":
         x, y = a.get("x"), a.get("y")
-        return browser.click(b, a.get("selector"), None if x is None else float(x), None if y is None else float(y),
-                             who=None if person else who)
+        return then(browser.click(b, a.get("selector"), None if x is None else float(x),
+                                  None if y is None else float(y), who=sess, wait=wait))
     if action == "type":
-        return browser.type_text(b, a.get("text") or "", a.get("selector"), who=None if person else who)
+        return then(browser.type_text(b, a.get("text") or "", a.get("selector"), who=sess, wait=wait))
+    if action == "fill":
+        return then(browser.fill(b, a.get("selector") or "", a.get("text") or "", who=sess, wait=wait))
+    if action == "select":
+        return then(browser.select_options(b,a.get("selector") or "", a.get("values") or [], who=sess, wait=wait))
+    if action in ("check", "uncheck"):
+        return then(browser.check(b, a.get("selector") or "", action == "check", who=sess, wait=wait))
     if action == "key":
-        return browser.press(b, a.get("key") or "", who=None if person else who)
+        return then(browser.press(b, a.get("key") or "", who=sess, wait=wait))
     if action in ("back", "forward"):
-        return browser.history(b, -1 if action == "back" else 1)
+        return then(browser.history(b, -1 if action == "back" else 1, wait=wait))
     if action == "reload":
-        return browser.reload(b)
+        return then(browser.reload(b, wait=wait))
     if action == "eval":
         return {**b.info(), "value": b.evaluate(a.get("js") or "")}
     if action == "html":

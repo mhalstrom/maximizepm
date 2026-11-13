@@ -468,6 +468,79 @@ class Command(Base):
                 self.assertRaisesRegex(RiverError, "name what to click"):
             self.run_cli("-q", "--as", "ag1", "browser", "click")
 
+    def asked(self, *words, res=None):
+        """The arguments that maxpm browser sends to serve, and what it prints for res."""
+        core.register(self.c, "ag1")
+        got = []
+
+        def fake(conn, op, args, actor=None, timeout=5, retries=3):
+            got.append(args)
+            return res or {"project": "web", "url": "https://x.test/", "title": "X"}
+        with mock.patch.object(cli, "ask_server", fake):
+            out = self.run_cli("-q", "--as", "ag1", "browser", *words)
+        return got[0], out
+
+    def test_click_takes_a_ref_a_selector_or_a_point(self):
+        self.assertEqual(self.asked("click", "@e3")[0]["selector"], "@e3")
+        self.assertEqual(self.asked("click", "#go")[0]["selector"], "#go")
+        a = self.asked("click", "10", "20.5")[0]
+        self.assertEqual((a["x"], a["y"], a.get("selector")), (10.0, 20.5, None))
+        self.assertEqual(self.asked("click", "--selector", "a.more")[0]["selector"], "a.more")
+        with mock.patch.object(cli, "ask_server", lambda *a, **k: {}), self.assertRaisesRegex(RiverError, "x and y"):
+            self.run_cli("-q", "--as", "ag1", "browser", "click", "10")
+
+    def test_type_fill_select_check_and_the_wait(self):
+        a, out = self.asked("type", "@e5", "two words", "--wait", "load", "--snapshot")
+        self.assertEqual((a["action"], a["selector"], a["text"], a["wait"], a["snapshot"]),
+                         ("type", "@e5", "two words", "load", True))
+        self.assertEqual(self.asked("type", "hi")[0].get("selector"), None)
+        self.assertEqual(self.asked("fill", "@e5", "x")[0], {"action": "fill", "selector": "@e5", "text": "x",
+                                                            "project": None, "cwd": os.getcwd()})
+        self.assertEqual(self.asked("select", "@e7", "Small", "Large")[0]["values"], ["Small", "Large"])
+        self.assertEqual(self.asked("uncheck", "@e8")[0]["action"], "uncheck")
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.asked("click", "@e3", "--wait", "soon")
+
+    def test_an_action_prints_one_line_and_its_snapshot(self):
+        res = {"project": "web", "url": "https://x.test/two", "title": "Two", "navigated": True,
+               "snapshot": {"lines": ['@e9 link "Back"'], "more": 0, "frames": 0, "url": "", "title": ""}}
+        _, out = self.asked("click", "@e3", "--snapshot", res=res)
+        self.assertEqual(out.splitlines(), ["new page: Two  https://x.test/two", '@e9 link "Back"'])
+        _, out = self.asked("check", "@e3", res={"title": "X", "url": "u", "checked": True})
+        self.assertEqual(out.strip(), "X  u  (checked)")
+
+    def test_snapshot_prints_refs_a_delta_and_what_it_left_out(self):
+        snap = {"lines": ["# Sign up", '@e1 textbox "Name" value="Bob"'], "more": 3, "frames": 1,
+                "url": "https://x.test/", "title": "Form"}
+        a, out = self.asked("snapshot", "-i", "--scope", "form", res={"snapshot": snap})
+        self.assertEqual((a["interactive"], a["scope"], a["delta"]), (True, "form", False))
+        self.assertEqual(out.splitlines(), [
+            "page: Form  https://x.test/", "# Sign up", '@e1 textbox "Name" value="Bob"',
+            "... 3 more: --scope '<css>' for a part of the page, or --max <n>",
+            "(1 frame not listed: open the frame's address)"])
+        _, out = self.asked("snapshot", "--delta", res={"snapshot": {**snap, "delta": True, "lines": [], "more": 0,
+                                                                     "frames": 0, "removed": ["@e2", "@e4"]}})
+        self.assertEqual(out.splitlines()[1:], ["(no new or changed element)", "gone: @e2 @e4"])
+
+    def test_batch_sends_the_lines_as_one_request(self):
+        f = os.path.join(self.tmp.name, "steps")
+        Path(f).write_text("# a note\nclick @e3\n\nmaxpm browser fill @e5 'two words'\nkey Enter --wait load\n"
+                           "snapshot -i\n", encoding="utf-8")
+        steps = [{"step": {"action": "click", "selector": "@e3"}, "result": {"title": "A", "url": "a"}},
+                 {"step": {"action": "fill", "selector": "@e5"}, "error": "@e5 is no longer on the page"}]
+        a, out = self.asked("batch", "--file", f, res={"steps": steps, "ok": True})
+        self.assertEqual([s["action"] for s in a["steps"]], ["click", "fill", "key", "snapshot"])
+        self.assertEqual((a["steps"][1]["text"], a["steps"][2]["wait"]), ("two words", "load"))
+        self.assertEqual(out.splitlines(), ["> click @e3", "A  a", "> fill @e5", "maxpm: @e5 is no longer on the page"])
+        with self.assertRaisesRegex(RiverError, "the batch stopped at line 2; the 2 after it did not run"):
+            self.asked("batch", "--file", f, res={"steps": steps, "ok": False, "left": 2})
+        Path(f).write_text("screenshot\n", encoding="utf-8")
+        with self.assertRaisesRegex(RiverError, "line 1 of the batch: screenshot is not for a batch"):
+            self.asked("batch", "--file", f)
+        Path(f).write_text("click @e1\nfly away\n", encoding="utf-8")
+        with self.assertRaisesRegex(RiverError, r"line 2 of the batch \(fly away\)"):
+            self.asked("batch", "--file", f)
+
     def test_status_says_who_controls_it(self):
         core.register(self.c, "ag1")
         res = {"project": "web", "running": True, "window": False, "url": "https://example.com/", "title": "Example",
@@ -1334,6 +1407,95 @@ class RealChrome(Base):
                     break
                 time.sleep(0.1)  # the density is set again just after the first load
             self.assertEqual(b.evaluate("window.__at"), [120 + i % 2, 90], url)
+
+
+FORM = (b"<title>Form</title><h1>Sign up</h1><label>Name <input id=name></label>"
+        b"<input id=pw type=password placeholder=Password><select id=size><option value=s>Small</option>"
+        b"<option value=m>Medium</option></select><label><input type=checkbox id=ok> Agree</label>"
+        b"<button id=go onclick=\"const v = i => document.getElementById(i); "
+        b"document.title = 'sent ' + v('name').value + ' ' + v('size').value + ' ' + v('ok').checked\">Send</button>"
+        b"<a href=/two>Next page</a><div hidden><button>Hidden</button></div><div id=host></div>"
+        b"<script>host.attachShadow({mode: 'open'}).innerHTML = '<button>In shadow</button>'</script>")
+
+
+class AgentActions(Base):
+    """#5663: maxpm browser for an agent in a real Chrome: a snapshot with refs, click, fill, select and check by ref,
+    the wait for the next page that a click led to, a ref of an earlier page, and a batch."""
+
+    def test_snapshot_refs_fill_select_check_wait_and_batch(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/two":
+                    time.sleep(0.4)  # a slow next page: the click waits for it
+                body = b"<title>Two</title><a href=/one>Back to one</a>" if self.path == "/two" else FORM
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        b = browser.get("web")
+        self.addCleanup(b.close)
+        b.open(f"http://127.0.0.1:{port}/one")
+        s = browser.snapshot(b, interactive=True)["snapshot"]
+        ref = {line.split('"')[1]: line.split()[0] for line in s["lines"]}
+        self.assertEqual(sorted(ref), ["", "Agree", "In shadow", "Name", "Next page", "Password", "Send"], s["lines"])
+        self.assertIn(f'{ref[""]} combobox "" value="Small"', s["lines"])
+        self.assertIn(f'{ref["Agree"]} checkbox "Agree"', s["lines"])
+        self.assertNotIn("Hidden", json.dumps(s))
+        self.assertIn("# Sign up", browser.snapshot(b)["snapshot"]["lines"])  # without -i: the headings too
+        again = browser.snapshot(b, interactive=True)["snapshot"]
+        self.assertEqual(again["lines"], s["lines"])  # the same elements keep their refs
+        self.assertFalse(b.evaluate("'__maxpm' in window"))  # the page's own scripts do not see the refs
+        t0 = time.time()
+        browser.fill(b, ref["Name"], "Ann")
+        browser.fill(b, ref["Name"], "Bob")  # the old text goes
+        browser.fill(b, ref["Password"], "hunter2")
+        browser.select_options(b, ref[""], ["Medium"])
+        browser.check(b, ref["Agree"])
+        browser.check(b, ref["Agree"])  # checked already: no click
+        out = browser.click(b, ref["Send"])
+        self.assertLess(time.time() - t0, 2.0)
+        self.assertEqual((b.evaluate("document.title"), out["navigated"]), ("sent Bob m true", False))
+        d = browser.snapshot(b, interactive=True, delta=True)["snapshot"]
+        self.assertTrue(d["delta"])
+        self.assertEqual(sorted(d["lines"]), sorted([f'{ref["Name"]} textbox "Name" value="Bob"',
+                                                     f'{ref["Password"]} textbox "Password" value=•••',
+                                                     f'{ref[""]} combobox "" value="Medium"',
+                                                     f'{ref["Agree"]} checkbox "Agree" checked']))
+        with self.assertRaisesRegex(RiverError, "not a text field: maxpm browser check"):
+            browser.fill(b, ref["Agree"], "x")
+        with self.assertRaisesRegex(RiverError, 'no option "Large"; it has "Small", "Medium"'):
+            browser.select_options(b, ref[""], ["Large"])
+        # A click on a link waits for the next page, slow as it is; a ref of the page before fails.
+        out = browser.click(b, ref["Next page"])
+        self.assertEqual((out["navigated"], out["title"], b.evaluate("document.readyState")), (True, "Two", "complete"))
+        with self.assertRaisesRegex(RiverError, "from an earlier page: run maxpm browser snapshot"):
+            browser.click(b, ref["Send"])
+        two = browser.snapshot(b, interactive=True)["snapshot"]
+        self.assertEqual(len(two["lines"]), 1)
+        self.assertGreater(int(two["lines"][0].split()[0][2:]), max(int(r[2:]) for r in ref.values()))
+        # A batch: the steps in order, one answer; the first that fails ends it.
+        res = routes.act(self.c, {"action": "batch", "project": "web", "steps": [
+            {"action": "back"}, {"action": "snapshot", "interactive": True}, {"action": "click", "selector": "@e999"},
+            {"action": "reload"}]}, None)
+        self.assertEqual([("error" in s, s["step"]["action"]) for s in res["steps"]],
+                         [(False, "back"), (False, "snapshot"), (True, "click")])
+        self.assertEqual((res["ok"], res["left"], res["steps"][0]["result"]["url"]), (False, 1, f"http://127.0.0.1:{port}/one"))
+        self.assertIn("is no longer on the page", res["steps"][2]["error"])
 
 
 class AttachedChrome(Base):

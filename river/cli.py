@@ -831,6 +831,9 @@ def parse_args(argv=None):
     return build_parser().parse_args(words)
 
 
+BROWSER_WAITS = ("auto", "load", "idle", "none")  # browser.WAITS, without the import of browser at each command
+
+
 def build_parser(only=None):
     """The parser of every command; only: the name of the one command that gets its arguments (parse_args)."""
     p = (_QuietParser if only else argparse.ArgumentParser)(
@@ -877,9 +880,20 @@ def build_parser(only=None):
     brs = br.add_subparsers(dest="bcmd", required=True)
     bp = argparse.ArgumentParser(add_help=False)
     bp.add_argument("--project", help="default: the project of the item you hold, or of this folder")
+    # #5663: what an action waits for, and the snapshot after it
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--wait", choices=BROWSER_WAITS, help="auto (default): for the next page when the action led to "
+                    "one; load: for the next page; idle: also until no request is in flight; none: not at all")
+    ap.add_argument("--snapshot", action="store_true", help="print the snapshot (-i) of the page after the action")
     x = brs.add_parser("status", parents=[bp], help="whether it runs, its tabs, and who controls it")
-    x = brs.add_parser("open", parents=[bp], help="open an address in the tab the panel shows (and show the browser in "
-                       "your side panel)")
+    x = brs.add_parser("snapshot", parents=[bp], help="the page's interactive elements, one line each with a ref "
+                       "(@e3) that click, type, fill, select and check take; with its headings unless -i")
+    x.add_argument("-i", "--interactive", action="store_true", help="only the interactive elements")
+    x.add_argument("--scope", help="only the part of the page in this CSS selector's first element")
+    x.add_argument("--delta", action="store_true", help="only what changed since the last snapshot of this page")
+    x.add_argument("--max", type=int, help="the lines it prints at most (default 400)")
+    x = brs.add_parser("open", parents=[bp, ap], help="open an address in the tab the panel shows (and show the "
+                       "browser in your side panel)")
     x.add_argument("url"); x.add_argument("--no-show", action="store_true", help="do not open it in your side panel")
     x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab; prints the file's path")
     x.add_argument("--out", help="the file to write (default: a new file in the temporary folder)")
@@ -888,17 +902,32 @@ def build_parser(only=None):
     x = brs.add_parser("html", parents=[bp], help="the HTML of the page (the DOM as it is now)")
     x.add_argument("--out", help="write it to this file")
     x = brs.add_parser("text", parents=[bp], help="the text of the page as a person reads it")
-    x = brs.add_parser("click", parents=[bp], help="click an element (--selector) or a point (x y, CSS pixels)")
-    x.add_argument("x", nargs="?", type=float); x.add_argument("y", nargs="?", type=float)
+    x = brs.add_parser("click", parents=[bp, ap], help="click an element (a ref such as @e3, or a CSS selector) or a "
+                       "point (x y, CSS pixels)")
+    x.add_argument("target", nargs="?", help="@e3 (a ref of maxpm browser snapshot), a CSS selector, or x")
+    x.add_argument("y", nargs="?", type=float)
     x.add_argument("--selector", help="a CSS selector; the first element that matches")
-    x = brs.add_parser("type", parents=[bp], help="type text (into --selector, after a click on it; else where the focus is)")
-    x.add_argument("text"); x.add_argument("--selector")
-    x = brs.add_parser("key", parents=[bp], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., or one character")
+    x = brs.add_parser("type", parents=[bp, ap], help="type text key by key: type @e5 'text' clicks the field first; "
+                       "type 'text' types where the focus is")
+    x.add_argument("words", nargs="+", metavar="[target] text"); x.add_argument("--selector")
+    x = brs.add_parser("fill", parents=[bp, ap], help="set a field's text at once (its old text goes)")
+    x.add_argument("target", help="@e5 or a CSS selector"); x.add_argument("text")
+    x = brs.add_parser("select", parents=[bp, ap], help="pick the options of a select, by value or label")
+    x.add_argument("target"); x.add_argument("values", nargs="+")
+    for name, h in (("check", "make a checkbox, a radio button or a switch checked"),
+                    ("uncheck", "make a checkbox or a switch not checked")):
+        brs.add_parser(name, parents=[bp, ap], help=h).add_argument("target")
+    x = brs.add_parser("key", parents=[bp, ap], help="press a key: Enter, Tab, Escape, Backspace, ArrowDown, ..., or "
+                       "one character")
     x.add_argument("key")
     x = brs.add_parser("eval", parents=[bp], help="run JavaScript in the page and print its value (JSON)")
     x.add_argument("js")
-    for name, h in (("back", "go back"), ("forward", "go forward"), ("reload", "load the page again"),
-                    ("release", "give control up"), ("close", "close the browser (its profile and sign-ins stay)"),
+    x = brs.add_parser("batch", parents=[bp], help="several actions in one command: one on each line of the standard "
+                       "input (or --file), as after 'maxpm browser'; the first that fails ends it")
+    x.add_argument("--file", help="read the lines from this file, not the standard input")
+    for name, h in (("back", "go back"), ("forward", "go forward"), ("reload", "load the page again")):
+        brs.add_parser(name, parents=[bp, ap], help=h)
+    for name, h in (("release", "give control up"), ("close", "close the browser (its profile and sign-ins stay)"),
                     ("window", "show it as a normal window (for a site that refuses a headless browser, a sign-in)"),
                     ("headless", "back into the side panel, with no window")):
         brs.add_parser(name, parents=[bp], help=h)
@@ -2414,32 +2443,11 @@ def _browser_cmd(conn, a, actor):
             for s in annotate.sets(conn, agent=actor, item_id=i, project=project, open_only=a.open):
                 out[s["id"]] = s
         return {"sets": sorted(out.values(), key=lambda s: -s["id"])}
-    action = {"new-tab": "new_tab", "close-tab": "close_tab", "headless": "window"}.get(b, b)
-    args = {"action": action, "project": a.project, "cwd": os.getcwd()}
-    if b == "open":
-        args.update(url=a.url, show=not a.no_show)
-    elif b == "screenshot":
-        args.update(full=a.full, cursor=a.cursor)
-    elif b == "click":
-        if a.selector is None and (a.x is None or a.y is None):
-            raise RiverError("name what to click: maxpm browser click --selector '<css>', or maxpm browser click <x> <y>")
-        args.update(selector=a.selector, x=a.x, y=a.y)
-    elif b == "type":
-        args.update(text=a.text, selector=a.selector)
-    elif b == "key":
-        args["key"] = a.key
-    elif b == "eval":
-        args["js"] = a.js
-    elif b == "give":
-        args["sub"] = a.label
-    elif b == "control":
-        args["take"] = a.take
-    elif b in ("tab", "close-tab"):
-        args["target"] = a.id
-    elif b == "new-tab":
-        args["url"] = a.url
-    elif b in ("window", "headless"):
-        args["window"] = b == "window"
+    if b == "batch":
+        steps = _browser_batch(a)
+        return ask_server(conn, "browser", {"action": "batch", "steps": steps, "project": a.project,
+                                            "cwd": os.getcwd()}, actor, timeout=120 + 30 * len(steps))
+    args = {**_browser_args(a), "project": a.project, "cwd": os.getcwd()}
     res = ask_server(conn, "browser", args, actor, timeout=120)
     if b == "screenshot":
         import base64
@@ -2454,6 +2462,101 @@ def _browser_cmd(conn, a, actor):
         Path(a.out).expanduser().write_text(res.pop("html"), encoding="utf-8")
         res["file"] = str(Path(a.out).expanduser().resolve())
     return res
+
+
+def _is_number(s):
+    try:
+        float(s)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _browser_args(a):
+    """The arguments of one maxpm browser action for serve (routes/browser.act), from its parsed words."""
+    b = a.bcmd
+    args = {"action": {"new-tab": "new_tab", "close-tab": "close_tab", "headless": "window"}.get(b, b)}
+    if getattr(a, "wait", None):
+        args["wait"] = a.wait
+    if getattr(a, "snapshot", False):
+        args["snapshot"] = True
+    if b == "open":
+        args.update(url=a.url, show=not a.no_show)
+    elif b == "snapshot":
+        args.update(interactive=a.interactive, scope=a.scope, delta=a.delta, max=a.max)
+    elif b == "screenshot":
+        args.update(full=a.full, cursor=a.cursor)
+    elif b == "click":
+        t = a.target
+        if t is not None and _is_number(t):
+            if a.y is None:
+                raise RiverError("a point needs x and y: maxpm browser click <x> <y>")
+            args.update(x=float(t), y=a.y, selector=a.selector)
+        elif t is not None or a.selector:
+            if t is not None and a.y is not None:
+                raise RiverError(f"click takes one element or a point, not {t!r} and {a.y}")
+            args["selector"] = t if t is not None else a.selector
+        else:
+            raise RiverError("name what to click: maxpm browser click @e3 (a ref of maxpm browser snapshot), "
+                             "maxpm browser click '<css>', or maxpm browser click <x> <y>")
+    elif b == "type":
+        if len(a.words) > 2:
+            raise RiverError("type takes the text in one argument, in quotes: maxpm browser type @e5 'two words'")
+        if len(a.words) == 2 and a.selector:
+            raise RiverError("name the field once: maxpm browser type @e5 'text', or --selector")
+        args.update(text=a.words[-1], selector=a.words[0] if len(a.words) == 2 else a.selector)
+    elif b == "fill":
+        args.update(selector=a.target, text=a.text)
+    elif b == "select":
+        args.update(selector=a.target, values=a.values)
+    elif b in ("check", "uncheck"):
+        args["selector"] = a.target
+    elif b == "key":
+        args["key"] = a.key
+    elif b == "eval":
+        args["js"] = a.js
+    elif b == "give":
+        args["sub"] = a.label
+    elif b == "control":
+        args["take"] = a.take
+    elif b in ("tab", "close-tab"):
+        args["target"] = a.id
+    elif b == "new-tab":
+        args["url"] = a.url
+    elif b in ("window", "headless"):
+        args["window"] = b == "window"
+    return args
+
+
+def _browser_batch(a):
+    """The steps of maxpm browser batch: each line of the input, as after 'maxpm browser' (# starts a note)."""
+    import shlex
+    text = Path(a.file).expanduser().read_text(encoding="utf-8") if a.file else sys.stdin.read()
+    parser, steps = build_parser(only="browser"), []
+    for n, line in enumerate(text.splitlines(), 1):
+        try:
+            words = shlex.split(line, comments=True)
+        except ValueError as e:
+            raise RiverError(f"line {n} of the batch: {e}")
+        if not words:
+            continue
+        if words[0] == "maxpm" and words[1:2] == ["browser"]:
+            words = words[2:]
+        elif words[0] == "browser":
+            words = words[1:]
+        if words and words[0] in ("batch", "screenshot", "html", "annotations", "annotation"):
+            raise RiverError(f"line {n} of the batch: {words[0]} is not for a batch; run it as its own command")
+        try:
+            sub = parser.parse_args(["browser"] + words)
+        except _Retry as e:  # the parser of one command says its mistake this way, with no exit
+            raise RiverError(f"line {n} of the batch ({line.strip()}): {e}")
+        step = _browser_args(sub)
+        if sub.project:
+            step["project"] = sub.project
+        steps.append(step)
+    if not steps:
+        raise RiverError("the batch is empty: one action on each line, such as: click @e3")
+    return steps
 
 def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     """Ask the maxpm serve of this queue to do one page action (server.OPS) and return its result; RiverError
@@ -4808,10 +4911,66 @@ def render_annotations(a, res):
               f"(or not-fixed <n> --note \"<why>\")")
 
 
+BROWSER_ACTS = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload"}
+
+
+def _snapshot_lines(s, title=True):
+    """A snapshot as maxpm browser snapshot prints it (#5663)."""
+    out = [f"page: {s.get('title') or '(no title)'}  {s.get('url') or ''}"] if title else []
+    if s.get("delta"):
+        out += s["lines"] or ["(no new or changed element)"]
+        if s.get("removed"):
+            out.append("gone: " + " ".join(s["removed"]))
+    else:
+        out += s["lines"] or ["(no interactive element in view of the snapshot)"]
+    if s.get("more"):
+        out.append(f"... {s['more']} more: --scope '<css>' for a part of the page, or --max <n>")
+    if s.get("frames"):
+        out.append(f"({s['frames']} frame{'s' if s['frames'] > 1 else ''} not listed: open the frame's address)")
+    return out
+
+
+def _browser_result(action, res):
+    """The short answer of one action (#5663): the page it left, and its snapshot when asked."""
+    if action == "snapshot":
+        return _snapshot_lines(res["snapshot"])
+    if action == "text":
+        return [res.get("text", "")]
+    if action == "eval":
+        return [json.dumps(res.get("value"), ensure_ascii=False)]
+    what = []
+    if "picked" in res:
+        what.append("picked " + ", ".join(res["picked"]))
+    if "checked" in res:
+        what.append("checked" if res["checked"] else "not checked")
+    head = ("new page: " if res.get("navigated") else "") + f"{res.get('title') or '(no title)'}  {res.get('url') or ''}"
+    out = [head + (f"  ({'; '.join(what)})" if what else "")]
+    if res.get("snapshot"):
+        out += _snapshot_lines(res["snapshot"], title=False)
+    return out
+
+
 def render_browser(a, res):
     b = a.bcmd
     if b in ("annotations", "annotation"):
         return render_annotations(a, res)
+    if b == "batch":
+        for s in res["steps"]:
+            st = s["step"]
+            print("> " + " ".join(str(x) for x in [st["action"], st.get("selector") or st.get("url") or st.get("key")
+                                                    or ""] if x))
+            if "error" in s:
+                print(f"maxpm: {s['error']}")
+            else:
+                print("\n".join(_browser_result(st["action"], s["result"])))
+        if not res.get("ok"):  # the exit status says it too
+            left = res.get("left") or 0
+            raise RiverError(f"the batch stopped at line {len(res['steps'])}"
+                             + (f"; the {left} after it did not run" if left else ""))
+        return
+    if b == "snapshot" or b in BROWSER_ACTS:
+        print("\n".join(_browser_result(b, res)))
+        return
     if b == "html" and "html" in res:
         print(res["html"])
         return

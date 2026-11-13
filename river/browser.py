@@ -557,6 +557,17 @@ class Browser:
         self.visits = {}     # url -> {url, title, n, at}: the pages its tabs showed, for the address bar (#5635)
         self.history = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's History in memory
         self.icons = {"rows": None, "mtime": None, "at": 0.0, "reading": False}  # Chrome's Favicons (#5632)
+        # #5663: what an action of a session waits for. navs: the main frame of the shown tab started to load a new
+        # document; stops: it stopped loading (loaded, failed, or cancelled); nav: set at each start; requests: the
+        # shown tab's requests in flight (requestId -> when it started), for --wait idle.
+        self.navs = 0
+        self.stops = 0
+        self.nav = threading.Event()
+        self.requests = {}
+        self.net_at = 0.0
+        self.snap = None     # the snapshot's world in the shown tab: {target, session, ctx}; refs live in it (#5663)
+        self.refs = 0        # the last ref number given: refs never repeat in one browser, so an old ref fails
+        self.opened = 0      # tabs that a page of the shown tab opened
         self.state = self._load()
         if owner:  # the sweep of a later serve finds a Chrome of this session that still runs (#5636)
             self.state.update(project=project, owner=owner)
@@ -746,6 +757,8 @@ class Browser:
         old = self.session
         self.session = self.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
         self.target = target
+        self.requests = {}  # the requests of the tab shown before never finish for this one (--wait idle)
+        self.stops = self.navs  # nor does a load of that tab (loading)
         if old:
             try:
                 self.call("Target.detachFromTarget", {"sessionId": old})
@@ -953,6 +966,8 @@ class Browser:
                     self.seq += 1
                     self.frame = {"seq": self.seq, "data": p["data"], "w": m.get("deviceWidth"), "h": m.get("deviceHeight")}
                     self.cond.notify_all()
+        elif session == self.session and method in NAV_EVENTS:
+            track_nav(self, method, p)
         elif method == "Page.loadEventFired" and session == self.session and self.refit_ws is not self.ws:
             # #5651: a Chrome that took the panel's density before its first page load put each hover (a move with
             # no button held) at x / density: at density 2 a move to (300, 300) reached the page at (150, 150), so
@@ -973,6 +988,8 @@ class Browser:
             self.targets[t["targetId"]] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
             note_visit(self, t["url"], t["title"])
             if new and t.get("openerId") and t["openerId"] == self.target:  # a page opened a new tab: show it
+                self.opened += 1  # an action that led to it waits for it (after)
+                self.nav.set()
                 threading.Thread(target=self._switch_quiet, args=(t["targetId"],), daemon=True).start()
             with self.cond:
                 self.seq += 1
@@ -1109,6 +1126,12 @@ class Browser:
             t = self.call("Target.getTargetInfo", {"targetId": self.target})["targetInfo"]
             self.targets[self.target] = {"url": t["url"], "title": t["title"], "opener": t.get("openerId")}
         except (RiverError, KeyError, TypeError):
+            pass
+        try:  # #5663: right after a load, the target's info can still hold the page before; the page knows its own
+            url, title = self.evaluate("[location.href, document.title]", 5)
+            if self.target in self.targets:
+                self.targets[self.target].update(url=url, title=title)
+        except (RiverError, TypeError, ValueError):
             pass
 
     def resize(self, w, h, dpr=1, screen=None, pane=None):
@@ -2433,41 +2456,369 @@ def char_events(ch):
             {"type": "keyUp", "key": ch, "windowsVirtualKeyCode": vk}]
 
 
+# ---- what an action waits for (#5663): the next page that it led to, or nothing
+
+NAV_EVENTS = {"Page.frameStartedLoading", "Page.frameStoppedLoading", "Page.frameNavigated",
+              "Network.requestWillBeSent", "Network.loadingFinished", "Network.loadingFailed"}
+NAV_GRACE = 0.02    # seconds in which a navigation that an action caused has started (a link, a form, Enter):
+                    # Chrome said so within 2 ms on a local page; a later start is caught by loading() below
+LOADING_WAIT = 5.0  # seconds that a snapshot or a ref waits for the page that loads now
+NAV_START = 3.0     # --wait load: seconds in which the next page must start to load
+IDLE_QUIET = 0.5    # --wait idle: seconds with no request in flight
+IDLE_WAIT = 10.0    # --wait idle: seconds that it waits at most
+IDLE_OLD = 10.0     # a request open longer than this (a long poll, a stream) does not count
+WAITS = ("auto", "load", "idle", "none")
+
+
+def _pause(sec):
+    threading.Event().wait(sec)  # not time.sleep: the tests replace it to count a person's pace
+
+
+def track_nav(b, method, p):
+    """The shown tab's loads and requests, from its CDP events (Browser._event)."""
+    if method.startswith("Network."):
+        rid = p.get("requestId")
+        if method == "Network.requestWillBeSent":
+            if p.get("type") not in ("EventSource", "WebSocket"):
+                b.requests[rid] = time.time()
+        else:
+            b.requests.pop(rid, None)
+        b.net_at = time.time()
+        return
+    if p.get("frameId") != b.target and not (method == "Page.frameNavigated" and not p["frame"].get("parentId")):
+        return  # an inner frame
+    if method == "Page.frameStartedLoading":
+        b.navs += 1
+        b.nav.set()
+    elif method == "Page.frameStoppedLoading":
+        b.stops = b.navs
+    else:  # a new document: the refs of the snapshot went with the old one
+        b.snap = None
+        b.requests.clear()
+    with b.cond:
+        b.cond.notify_all()
+
+
+def loading(b):
+    """Wait (LOADING_WAIT at most) while the shown tab loads a new page: a snapshot or a ref then reads the new page,
+    also when the action before returned before the load started."""
+    if b.navs != b.stops:
+        with b.cond:
+            b.cond.wait_for(lambda: b.stops == b.navs, LOADING_WAIT)
+
+
+def nav_mark(b):
+    """Before an action: what after() compares with."""
+    b.nav.clear()
+    return {"navs": b.navs, "opened": b.opened, "target": b.target}
+
+
+def net_idle(b):
+    end = time.time() + IDLE_WAIT
+    while time.time() < end:
+        now = time.time()
+        if not any(now - t < IDLE_OLD for t in list(b.requests.values())) and now - b.net_at >= IDLE_QUIET:
+            return True
+        _pause(0.05)
+    return False
+
+
+def after(b, wait, mark):
+    """Wait as --wait says after an action (auto: for the next page when the action led to one, else not at all;
+    load: for the next page, which must start within NAV_START; idle: also until no request is in flight; none:
+    not at all). True when a new page or a new tab came."""
+    wait = wait or "auto"
+    if wait == "none":
+        return False
+    moved = lambda: b.navs != mark["navs"] or b.opened != mark["opened"]  # noqa: E731
+    if not moved():
+        b.nav.wait(NAV_START if wait == "load" else NAV_GRACE)
+    if not moved():
+        if wait == "idle":
+            net_idle(b)
+        return False
+    end = time.time() + LOAD_WAIT
+    if b.opened != mark["opened"]:  # a new tab: serve shows it once it is attached (_switch_quiet)
+        while time.time() < end and b.target == mark["target"]:
+            _pause(0.05)
+    else:
+        with b.cond:
+            b.cond.wait_for(lambda: b.stops == b.navs or b.target != mark["target"], max(0.0, end - time.time()))
+    b.settle(max(0.5, end - time.time()))
+    if wait == "idle":
+        net_idle(b)
+    return True
+
+
+# ---- the snapshot (#5663): the interactive elements of the page, each with a ref (@e1, ...) that later actions name
+
+SNAP_MAX = 400      # lines that one snapshot prints at most; --scope shows a part of a larger page
+SNAP_WORLD = "maxpm"
+# It runs in a world of its own (Page.createIsolatedWorld): the page's scripts do not see the refs, and a new
+# document ends the world, so a ref of an earlier page fails instead of naming another element. A ref stays with its
+# element while the element stays: a later snapshot of the same page gives it the same ref.
+SNAP_JS = r"""(function (scope, all, start, delta, max) {
+  const R = window.__maxpm || (window.__maxpm = {ref: new WeakMap(), els: new Map(), last: null});
+  let root = document.documentElement;
+  if (scope) {
+    try { root = document.querySelector(scope); } catch (e) { return {error: 'not a CSS selector: ' + scope}; }
+    if (!root) return {error: 'no element matches ' + scope};
+  }
+  const SEL = 'a[href],button,input,select,textarea,summary,[contenteditable=""],[contenteditable=true],[onclick],' +
+    '[tabindex]:not([tabindex="-1"]),[role=button],[role=link],[role=checkbox],[role=radio],[role=switch],[role=tab],' +
+    '[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=combobox],[role=textbox],' +
+    '[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem]';
+  const INPUT = {checkbox: 'checkbox', radio: 'radio', submit: 'button', button: 'button', reset: 'button',
+    image: 'button', range: 'slider', number: 'spinbutton', search: 'searchbox', file: 'file'};
+  const cut = (s, n) => { s = (s || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+  const text = e => e.childElementCount > 30 ? e.textContent : e.innerText;
+  const shown = e => {
+    if (!e.getClientRects().length) return false;
+    const v = getComputedStyle(e).visibility; return v !== 'hidden' && v !== 'collapse';
+  };
+  const role = e => {
+    const r = (e.getAttribute('role') || '').trim().split(/\s+/)[0]; if (r) return r;
+    const t = e.tagName;
+    if (t === 'A') return 'link';
+    if (t === 'BUTTON' || t === 'SUMMARY') return 'button';
+    if (t === 'INPUT') return INPUT[(e.type || 'text').toLowerCase()] || 'textbox';
+    if (t === 'SELECT') return e.multiple ? 'listbox' : 'combobox';
+    if (t === 'TEXTAREA' || e.isContentEditable) return 'textbox';
+    return 'clickable';
+  };
+  const name = e => {
+    let s = e.getAttribute('aria-label');
+    if (s && s.trim()) return s;
+    const by = e.getAttribute('aria-labelledby');
+    if (by) { s = by.split(/\s+/).map(i => { const n = document.getElementById(i); return n ? text(n) : ''; }).join(' ');
+      if (s.trim()) return s; }
+    if (e.labels && e.labels.length) { s = Array.from(e.labels).map(text).join(' '); if (s.trim()) return s; }
+    const t = e.tagName, ty = (e.type || '').toLowerCase();
+    if (t === 'INPUT' && ['submit', 'button', 'reset'].includes(ty)) return e.value || ty;
+    if (t === 'INPUT' && ty === 'image') return e.alt || 'image';
+    if (t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT') return e.placeholder || e.title || e.name || '';
+    s = text(e);
+    if (!s || !s.trim()) {
+      const i = e.querySelector('img[alt],[aria-label],[title]');
+      s = i ? (i.getAttribute('alt') || i.getAttribute('aria-label') || i.getAttribute('title')) : '';
+    }
+    return s || e.title || '';
+  };
+  const extra = (e, r) => {
+    let s = '';
+    const t = e.tagName, ty = (e.type || '').toLowerCase();
+    if (t === 'SELECT') s += ' value=' + JSON.stringify(cut(Array.from(e.selectedOptions).map(o => o.label).join(', '), 40));
+    else if ((t === 'INPUT' && !['checkbox', 'radio', 'submit', 'button', 'reset', 'image'].includes(ty)) || t === 'TEXTAREA') {
+      if (e.value) s += ty === 'password' ? ' value=•••' : ' value=' + JSON.stringify(cut(e.value, 40));
+    }
+    if (e.checked || e.getAttribute('aria-checked') === 'true') s += ' checked';
+    const x = e.getAttribute('aria-expanded'); if (x === 'true') s += ' expanded'; else if (x === 'false') s += ' collapsed';
+    if (e.getAttribute('aria-selected') === 'true') s += ' selected';
+    if (e.disabled || e.getAttribute('aria-disabled') === 'true') s += ' disabled';
+    if (r === 'link' && !name(e).trim()) s += ' href=' + JSON.stringify(cut(e.getAttribute('href'), 50));
+    return s;
+  };
+  const lines = [], now = {};
+  let n = start, more = 0, frames = 0;
+  const visit = node => {
+    const w = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+    for (let e = w.currentNode; e; e = w.nextNode()) {
+      if (e.nodeType !== 1) continue;  // a shadow root
+      const head = all && /^H[1-6]$/.test(e.tagName);
+      if (e.tagName === 'IFRAME' && shown(e)) frames++;
+      else if ((head || e.matches(SEL)) && !(e.tagName === 'INPUT' && e.type === 'hidden') && shown(e)) {
+        if (lines.length >= max) { more++; }
+        else if (head) lines.push('#'.repeat(+e.tagName[1]) + ' ' + cut(text(e), 80));
+        else {
+          let ref = R.ref.get(e);
+          if (!ref || !R.els.has(ref)) { ref = 'e' + (++n); R.ref.set(e, ref); }
+          R.els.set(ref, new WeakRef(e));
+          const r = role(e), line = '@' + ref + ' ' + r + ' ' + JSON.stringify(cut(name(e), 60)) + extra(e, r);
+          now[ref] = line;
+          lines.push(line);
+        }
+      }
+      if (e.shadowRoot) visit(e.shadowRoot);
+    }
+  };
+  visit(root);
+  for (const [k, w] of R.els) { const e = w.deref(); if (!e || !e.isConnected) R.els.delete(k); }
+  const out = {lines, more, frames, next: n, url: location.href, title: document.title};
+  const last = R.last && R.last.scope === scope ? R.last.lines : null;
+  if (delta && last) {
+    out.delta = true;
+    out.lines = lines.filter(l => !l.startsWith('@') || last[l.split(' ')[0].slice(1)] !== l);
+    out.removed = Object.keys(last).filter(k => !(k in now)).map(k => '@' + k);
+  }
+  R.last = {scope, lines: now};
+  return out;
+})"""
+
+
+def world(b, create=True):
+    """The execution context of the snapshot's world in the shown tab; None when it has none (and not create)."""
+    s = b.snap
+    if s and b.session and s["session"] == b.session:
+        return s["ctx"]
+    if not create:
+        return None
+    b.page("Page.getFrameTree")  # starts the browser and attaches the shown tab, when needed
+    ctx = b.page("Page.createIsolatedWorld", {"frameId": b.target, "worldName": SNAP_WORLD})["executionContextId"]
+    b.snap = {"session": b.session, "target": b.target, "ctx": ctx}
+    return ctx
+
+
+NO_WORLD = object()
+
+
+def in_world(b, expr, create=True):
+    """Run expr in the snapshot's world; NO_WORLD when the page has none (a new page since the snapshot)."""
+    for again in (False, True):
+        ctx = world(b, create=create)
+        if ctx is None:
+            return NO_WORLD
+        try:
+            r = b.page("Runtime.evaluate", {"expression": expr, "contextId": ctx, "returnByValue": True,
+                                            "awaitPromise": True, "userGesture": True})
+        except RiverError as e:
+            if "context" not in str(e).lower() or again:
+                raise
+            b.snap = None  # the page went on to a new document
+            if not create:
+                return NO_WORLD
+            continue
+        if r.get("exceptionDetails"):
+            d = r["exceptionDetails"]
+            raise RiverError("the script failed in the page: "
+                             + ((d.get("exception") or {}).get("description") or d.get("text") or "an error"))
+        return (r.get("result") or {}).get("value")
+    return NO_WORLD
+
+
+def snapshot(b, interactive=False, scope=None, delta=False, limit=SNAP_MAX):
+    """The page's interactive elements as short lines, each with a ref; without interactive, its headings too.
+    delta: only the lines that are new or changed since the last snapshot of the same page and scope, and the refs
+    that went."""
+    loading(b)
+    r = in_world(b,"(%s)(%s, %s, %d, %s, %d)" % (SNAP_JS, json.dumps(scope), json.dumps(not interactive), b.refs,
+                                                  json.dumps(bool(delta)), int(limit)))
+    if r is NO_WORLD or not isinstance(r, dict):
+        raise RiverError("the page did not answer the snapshot: run maxpm browser snapshot again")
+    if r.get("error"):
+        raise RiverError(r["error"])
+    b.refs = max(b.refs, r.pop("next"))
+    return {**b.info(), "snapshot": r}
+
+
+def as_ref(target):
+    """'@e3' or 'e3' -> 'e3'; None for a CSS selector."""
+    m = re.fullmatch(r"@?(e\d+)", (target or "").strip())
+    return m.group(1) if m else None
+
+
+def on_element(b, target, fn, *args):
+    """fn(el, ...args) in the page, for the element that target names: a ref of a snapshot (@e3, in the snapshot's
+    world) or a CSS selector (the first element that matches, in the page's world)."""
+    rest = "".join(", " + json.dumps(x) for x in args)
+    ref = as_ref(target)
+    loading(b)
+    if ref:
+        find ="((w) => w && w.deref())(window.__maxpm && window.__maxpm.els.get(%s))" % json.dumps(ref)
+    else:
+        find = "document.querySelector(%s)" % json.dumps(target)
+    expr = "((el) => el && el.isConnected ? {v: (%s)(el%s)} : {gone: true})(%s)" % (fn, rest, find)
+    r = in_world(b, expr, create=False) if ref else b.evaluate(expr)
+    if r is NO_WORLD:
+        raise RiverError(f"@{ref} is from an earlier page: run maxpm browser snapshot")
+    if not r or r.get("gone"):
+        if ref:
+            raise RiverError(f"@{ref} is no longer on the page: run maxpm browser snapshot")
+        raise RiverError(f"no element matches {target!r} in {b.info()['url']}")
+    return r.get("v")
+
+
+POINT_JS = ("(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); const r = el.getBoundingClientRect(); "
+            "return [r.left + r.width / 2, r.top + r.height / 2]; }")
+# Focus a field and select what it holds, so the text that comes next replaces it. What kind of field it is: text
+# (Input.insertText types it), value (a date, a color: the value is set), select, or no:<what> (fill refuses).
+FOCUS_JS = r"""(el) => { el.scrollIntoView({block: 'center', inline: 'center'}); el.focus();
+  const t = el.tagName, ty = (el.type || '').toLowerCase();
+  if (t === 'SELECT') return 'select';
+  if (el.isContentEditable) { const r = document.createRange(); r.selectNodeContents(el);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r); return 'text'; }
+  if (t === 'TEXTAREA') { el.select(); return 'text'; }
+  if (t !== 'INPUT') return 'no:' + (el.getAttribute('role') || t.toLowerCase());
+  if (['checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file'].includes(ty)) return 'no:' + ty;
+  if (['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range'].includes(ty)) return 'value';
+  el.select(); return 'text'; }"""
+# The value of a field set at once, with the events a page listens to; the input's own setter, so a framework that
+# watches the value (React) sees the change.
+SET_JS = r"""(el, v) => { const p = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  if (el.isContentEditable) el.textContent = v; else Object.getOwnPropertyDescriptor(p, 'value').set.call(el, v);
+  el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true}));
+  return true; }"""
+SELECT_JS = r"""(el, vals) => { if (el.tagName !== 'SELECT') return {err: 'not a select (a ' + el.tagName.toLowerCase() +
+    '): click it, then click the option'};
+  const opts = Array.from(el.options), pick = [], low = s => s.trim().toLowerCase();
+  for (const v of vals) {
+    const o = opts.find(o => o.value === v) || opts.find(o => low(o.label) === low(v));
+    if (!o) return {err: 'no option ' + JSON.stringify(v) + '; it has ' + opts.slice(0, 15).map(o => JSON.stringify(o.label.trim())).join(', ')};
+    pick.push(o);
+  }
+  if (pick.length > 1 && !el.multiple) return {err: 'this select takes one option'};
+  el.focus(); for (const o of opts) o.selected = pick.includes(o);
+  el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true}));
+  return {picked: pick.map(o => o.label.trim())}; }"""
+CHECKED_JS = ("(el) => el.type === 'checkbox' || el.type === 'radio' ? el.checked : "
+              "el.hasAttribute('aria-checked') ? el.getAttribute('aria-checked') === 'true' : null")
+
+
+def point_of(b, target):
+    pos = on_element(b, target, POINT_JS)
+    if not pos:
+        raise RiverError(f"{target} has no place on the page to click")
+    return pos
+
+
 # ---- what a session does (maxpm browser ...)
 
-def click(b, selector=None, x=None, y=None, who=None):
+def click(b, selector=None, x=None, y=None, who=None, wait=None):
+    """Click an element (a ref of a snapshot, or a CSS selector) or a point. While someone watches, the pointer glides
+    there first; then the action waits as after() says."""
     if selector:
-        pos = b.evaluate("(() => { const e = document.querySelector(%s); if (!e) return null; "
-                         "e.scrollIntoView({block: 'center', inline: 'center'}); const r = e.getBoundingClientRect(); "
-                         "return [r.left + r.width / 2, r.top + r.height / 2]; })()" % json.dumps(selector))
-        if not pos:
-            raise RiverError(f"no element matches {selector!r} in {b.info()['url']}")
-        x, y = pos
+        x, y = point_of(b, selector)
     if x is None or y is None:
-        raise RiverError("name what to click: --selector '<css>', or x and y")
+        raise RiverError("name what to click: maxpm browser click @e3 (a ref of maxpm browser snapshot), "
+                         "--selector '<css>', or x and y")
     who = driver(b, who)
     glide(b, who, x, y)
+    mark = nav_mark(b)
     for t in ("mousePressed", "mouseReleased"):
         b.page("Input.dispatchMouseEvent", {"type": t, "x": float(x), "y": float(y), "button": "left", "clickCount": 1})
         if t == "mousePressed":
             note_pointer(b, who, x, y, press=True)
-    time.sleep(0.3)
-    b.settle(5)
-    return {**b.info(), "clicked": selector or [x, y]}
+    return done(b, wait, mark, clicked=selector or [x, y])
 
 
-def type_text(b, text, selector=None, who=None):
+def done(b, wait, mark, **out):
+    """The answer of an action: the page as it is after the wait."""
+    moved = after(b, wait, mark)
+    return {**b.info(), **out, "navigated": moved}
+
+
+def type_text(b, text, selector=None, who=None, wait=None):
     """Type text where the focus is (after a click on selector). While someone watches, key by key at a pace a
     person can follow (TYPE_MAX at most), and the panel shows the keys; else all at once."""
     if selector:
-        click(b, selector, who=who)
+        click(b, selector, who=who, wait="none")
     who = driver(b, who)
     hide = secret(b)
+    mark = nav_mark(b)
     if not pace(b) or not text:
         b.page("Input.insertText", {"text": text})
         note_keys(b, who, text, secret=hide)
-        return {**b.info(), "typed": len(text)}
-    wait = min(KEY_TIME, TYPE_MAX / len(text))
+        return done(b, wait, mark, typed=len(text))
+    gap = min(KEY_TIME, TYPE_MAX / len(text))
     for ch in text:
         for p in char_events(ch):
             b.page("Input.dispatchKeyEvent", p)
@@ -2475,36 +2826,79 @@ def type_text(b, text, selector=None, who=None):
             note_keys(b, who, key="Tab" if ch == "\t" else "Enter", secret=hide)
         else:
             note_keys(b, who, ch, secret=hide)
-        time.sleep(wait)
-    return {**b.info(), "typed": len(text)}
+        time.sleep(gap)
+    return done(b, wait, mark, typed=len(text))
 
 
-def press(b, key, who=None):
+def fill(b, target, text, who=None, wait=None):
+    """Set a field's text at once (#5663): its old text goes. Not key by key, also while someone watches: the panel
+    shows the text (dots for a secret field)."""
+    kind = on_element(b, target, FOCUS_JS)
+    if kind == "select":
+        return select_options(b, target, [text], who=who, wait=wait)
+    if str(kind).startswith("no:"):
+        raise RiverError(f"{target} is a {kind[3:]}, not a text field: "
+                         + ("maxpm browser check " + target if kind[3:] in ("checkbox", "radio") else
+                            "maxpm browser click " + target))
+    hide = secret(b)
+    mark = nav_mark(b)
+    if kind == "value" or not text:
+        on_element(b, target, SET_JS, text)
+    else:
+        b.page("Input.insertText", {"text": text})
+    note_keys(b, driver(b, who), text, secret=hide)
+    return done(b, wait, mark, filled=len(text))
+
+
+def select_options(b, target, values, who=None, wait=None):
+    """Pick the options of a <select> by value or label."""
+    mark = nav_mark(b)
+    r = on_element(b, target, SELECT_JS, list(values))
+    if r.get("err"):
+        raise RiverError(f"{target}: {r['err']}")
+    note_keys(b, driver(b, who), ", ".join(r["picked"]))
+    return done(b, wait, mark, picked=r["picked"])
+
+
+def check(b, target, on=True, who=None, wait=None):
+    """Make a checkbox, a radio button or a switch checked (on) or not: a click when it is not so already."""
+    now = on_element(b, target, CHECKED_JS)
+    if now is None:
+        raise RiverError(f"{target} is not a checkbox, a radio button or a switch: maxpm browser click {target}")
+    out = {**b.info(), "navigated": False}
+    if now != on:
+        out = click(b, target, who=who, wait=wait)
+        now = on_element(b, target, CHECKED_JS) if not out.get("navigated") else on
+        if now != on:
+            raise RiverError(f"the click on {target} did not change it: the page keeps it "
+                             + ("checked" if now else "not checked"))
+    return {**out, "checked": on}
+
+
+def press(b, key, who=None, wait=None):
+    mark = nav_mark(b)
     for p in key_events(key):
         b.page("Input.dispatchKeyEvent", p)
     if len(key) == 1 or key in KEY_SIGNS:
         note_keys(b, driver(b, who), key if len(key) == 1 else "", key=key, secret=secret(b) if len(key) == 1 else None,
                   hidden=lambda: secret(b))
-    time.sleep(0.2)
-    b.settle(5)
-    return b.info()
+    return done(b, wait, mark)
 
 
-def history(b, step):
+def history(b, step, wait=None):
     h = b.page("Page.getNavigationHistory")
     i = h["currentIndex"] + step
-    if 0 <= i < len(h["entries"]):
-        b.page("Page.navigateToHistoryEntry", {"entryId": h["entries"][i]["id"]})
-        time.sleep(0.2)
-        b.settle()
-    return b.info()
+    if not 0 <= i < len(h["entries"]):
+        return {**b.info(), "navigated": False}
+    mark = nav_mark(b)
+    b.page("Page.navigateToHistoryEntry", {"entryId": h["entries"][i]["id"]})
+    return done(b, wait, mark)
 
 
-def reload(b):
+def reload(b, wait=None):
+    mark = nav_mark(b)
     b.page("Page.reload")
-    time.sleep(0.2)
-    b.settle()
-    return b.info()
+    return done(b, wait or "load", mark)
 
 
 # The pointer and the last click ring of a screenshot with --cursor (#5616): an element in a closed shadow root at
