@@ -78,7 +78,7 @@ CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key",
            "tab", "new_tab", "close_tab", "dialog"}
 INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key"}  # a session's first one shows its panel
 # What a batch may hold (#5663): the actions whose answer is text.
-BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status", "outline"}
+BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status", "outline", "extract"}
 
 
 def batch(conn, a, who):
@@ -185,6 +185,9 @@ def _act(conn, a, who):
         return then(out)
     if action == "outline":
         return {**b.info(), "outline": browser.outline(b, int(a.get("heads") or browser.OUTLINE_HEADS))["lines"]}
+    if action == "extract":  # #5677: rows with named fields, as JSON
+        r = browser.extract(b, a.get("rows") or None, a.get("fields") or [], int(a.get("limit") or browser.EXTRACT_MAX))
+        return {**b.info(), "data": r["rows"], "count": r["count"]}
     if action in ("click", "type", "fill", "select", "check", "uncheck") and a.get("selector"):
         # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named
         a = {**a, "selector": browser.resolve_target(b, a["selector"], a.get("within"), action)}

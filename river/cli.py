@@ -914,6 +914,12 @@ def build_parser(only=None):
     x.add_argument("--text", action="store_true", help="also the main text, as maxpm browser text gives it")
     x = brs.add_parser("outline", parents=[bp], help="the page's regions with their counts of links, buttons, fields "
                        "and rows, and its headings (about 0.5 KB)")
+    x = brs.add_parser("extract", parents=[bp], help="rows with named fields as JSON: extract --rows @e12 "
+                       "title='.titleline a' link='.titleline a@href' (text, or @attribute); a missing field is null")
+    x.add_argument("fields", nargs="*", metavar="name=<css>[@attr]", help="the fields of each row (default: its text)")
+    x.add_argument("--rows", help="the rows: a ref or name of an element in a repeated row (its rows, as the snapshot "
+                   "folds them), or a CSS selector; none: the page as one row")
+    x.add_argument("--limit", type=int, help="the rows it gives at most (default 100)")
     x = brs.add_parser("screenshot", parents=[bp], help="a PNG of the tab; prints the file's path")
     x.add_argument("--out", help="the file to write (default: a new file in the temporary folder)")
     x.add_argument("--full", action="store_true", help="the whole page, not only what shows")
@@ -2551,6 +2557,9 @@ def _browser_args(a):
         args["within"] = a.within
     if b == "open":
         args.update(url=a.url, show=not a.no_show, outline=not a.no_outline, read=a.text)
+    elif b == "extract":  # #5677: the fields are checked here, before serve gets them
+        from .browser import parse_field
+        args.update(rows=a.rows, fields=[parse_field(f) for f in a.fields], limit=a.limit)
     elif b == "text":  # #5672
         args.update({k: v for k, v in (("section", a.section), ("grep", a.grep), ("from", a.start), ("max", a.max),
                                        ("all", a.all)) if v})
@@ -5119,6 +5128,9 @@ def _browser_result(action, res):
         return _snapshot_lines(res["snapshot"])
     if action == "text":
         return _text_lines(res)
+    if action == "extract":  # #5677: one JSON array, one row on each line
+        return ["[" + ",\n".join(json.dumps(r, ensure_ascii=False, separators=(",", ":"))
+                                 for r in res.get("data") or []) + "]"]
     if action == "eval":
         return [json.dumps(res.get("value"), ensure_ascii=False)]
     what = []
@@ -5178,6 +5190,11 @@ def render_browser(a, res):
         return
     if b in ("snapshot", "find", "outline") or b in BROWSER_ACTS:
         print("\n".join(_browser_result("snapshot" if b == "find" else b, res)))
+        return
+    if b == "extract":  # #5677: JSON, one row on each line; the count when the limit cut it
+        print("\n".join(_browser_result("extract", res)))
+        if res.get("count", 0) > len(res.get("data") or []):
+            print(f"maxpm: {len(res['data'])} of {res['count']} rows: --limit <n> for more", file=sys.stderr)
         return
     if b == "html" and "html" in res:
         print(res["html"])

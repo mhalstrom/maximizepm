@@ -2927,6 +2927,42 @@ SNAP_JS = r"""(function (scope, all, start, delta, max, o) {
     const r = e.getBoundingClientRect();
     return r.width + r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
   };
+  // #5677: rows with named fields. The rows: the elements of a CSS selector, or the repeated rows (as the snapshot
+  // folds them) of the element of a ref; none: the page as one row. A field is [name, css, attr]: the text of the
+  // first element in the row that matches css ('' : the row), or its attribute (href and src as full addresses).
+  if (o.extract) {
+    const x = o.extract;
+    for (const [, css] of x.fields) if (css) { try { document.querySelector(css); } catch (e) { return {error: 'not a CSS selector: ' + css}; } }
+    let rows;
+    if (x.ref) {
+      const w = R.els.get(x.ref), e = w && w.deref();
+      if (!e || !e.isConnected) return {error: '@' + x.ref + ' is no longer on the page: run maxpm browser snapshot'};
+      const c = chain(e).find(({g}) => {  // a row of two or more elements on average, as the snapshot folds
+        const per = new Map();
+        g.idx.forEach((r, k) => per.set(r, (per.get(r) || 0) + k.querySelectorAll(SEL).length + (k.matches(SEL) ? 1 : 0)));
+        const v = [...per.values()].filter(q => q > 0);
+        return v.length >= 2 && v.reduce((a, q) => a + q, 0) / v.length >= 2;
+      });
+      if (!c) return {error: '@' + x.ref + ' is in no repeated row: name the rows with --rows \'<css>\''};
+      const m = new Map();
+      c.g.idx.forEach((r, k) => { if (!m.has(r)) m.set(r, []); m.get(r).push(k); });
+      rows = [...m.values()];
+    } else if (x.css) {
+      try { rows = Array.from(document.querySelectorAll(x.css), e => [e]); }
+      catch (e) { return {error: 'not a CSS selector: ' + x.css}; }
+    } else rows = [[document.body || document.documentElement]];
+    const pick = (row, css) => { for (const r of row) { if (r.matches(css)) return r; const f = r.querySelector(css); if (f) return f; } return null; };
+    const value = (row, css, attr) => {
+      const el = css ? pick(row, css) : row[0];
+      if (!el) return null;
+      if (!attr) return cut(css ? el.innerText : row.map(r => r.innerText).join(' '), 500) || null;
+      const v = (attr === 'href' || attr === 'src') && typeof el[attr] === 'string' && el[attr] ? el[attr] : el.getAttribute(attr);
+      return v === null ? null : v;
+    };
+    const fields = x.fields.length ? x.fields : [['text', '', null]];
+    return {rows: rows.slice(0, x.limit).map(row => Object.fromEntries(fields.map(([k, css, attr]) => [k, value(row, css, attr)]))),
+      count: rows.length};
+  }
   // #5670: the outline, the map from which the agent picks a region or a section: each region with its counts of
   // links, buttons, fields and repeated rows, and the headings h1 to h3 under it (OUTLINE_HEADS at most).
   if (o.outline) {
@@ -3195,6 +3231,42 @@ def as_ref(target):
 
 ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
          "spinbutton", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "file", "clickable"}
+
+
+EXTRACT_MAX = 100  # rows that maxpm browser extract gives at most by default
+
+
+def parse_field(spec):
+    """#5677: 'title=.titleline a' -> ['title', '.titleline a', None]; 'link=a@href' -> ['link', 'a', 'href'];
+    'id=@id' is an attribute of the row itself; 'text=' is the row's text."""
+    name, eq, rest = spec.partition("=")
+    if not eq or not re.fullmatch(r"[A-Za-z_][\w-]*", name.strip()):
+        raise RiverError(f"a field is name=<css> or name=<css>@<attribute>, not {spec!r}: title='.titleline a' "
+                         f"link='.titleline a@href'")
+    css, attr = rest.strip(), None
+    m = re.fullmatch(r"(.*?)@([A-Za-z_:][\w:.-]*)", css)
+    if m:
+        css, attr = m.group(1).strip(), m.group(2)
+    return [name.strip(), css, attr]
+
+
+def extract(b, rows=None, fields=(), limit=EXTRACT_MAX):
+    """#5677: one object for each row (rows: @eN, a name, or a CSS selector, as resolve_target takes them; None: the
+    page as one row), with the fields of parse_field; a field that a row lacks is null."""
+    x = {"fields": [parse_field(f) if isinstance(f, str) else list(f) for f in fields], "limit": int(limit or EXTRACT_MAX)}
+    if rows:
+        t = resolve_target(b, rows, verb="extract --rows")
+        if t.startswith("css:"):
+            x["css"] = t[4:]
+        else:
+            x["ref"] = as_ref(t)
+    loading(b)
+    r = in_world(b, "(%s)(null, false, %d, false, 0, %s)" % (SNAP_JS, b.refs, json.dumps({"extract": x})))
+    if r is NO_WORLD or not isinstance(r, dict):
+        raise RiverError("the page did not answer: run maxpm browser extract again")
+    if r.get("error"):
+        raise RiverError(r["error"])
+    return r
 
 
 OUTLINE_HEADS = 12  # headings that an outline prints at most

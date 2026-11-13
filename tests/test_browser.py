@@ -628,6 +628,22 @@ class Command(Base):
                                                                              "rest": 0})
         self.assertEqual((a["read"], out.splitlines()), (True, ["X  u", "Hi"]))
 
+    def test_extract_reads_the_fields_and_prints_one_row_a_line(self):
+        """#5677: name=<css>, name=<css>@attr, name=@attr; the JSON array with one row on each line."""
+        self.assertEqual(browser.parse_field("title=.titleline > a"), ["title", ".titleline > a", None])
+        self.assertEqual(browser.parse_field("link=a[href^='item']@href"), ["link", "a[href^='item']", "href"])
+        self.assertEqual(browser.parse_field("id=@data-id"), ["id", "", "data-id"])
+        with self.assertRaisesRegex(RiverError, "a field is name=<css>"):
+            browser.parse_field("title")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            a, out = self.asked("extract", "t=a", "--rows", "@e12", "--limit", "2", res={
+                "data": [{"t": "One"}, {"t": None}], "count": 30})
+        self.assertEqual((a["rows"], a["fields"], a["limit"]), ("@e12", [["t", "a", None]], 2))
+        self.assertEqual(out.splitlines(), ['[{"t":"One"},', '{"t":null}]'])
+        self.assertEqual(json.loads(out), [{"t": "One"}, {"t": None}])
+        self.assertIn("2 of 30 rows: --limit <n> for more", err.getvalue())
+
     def test_batch_sends_the_lines_as_one_request(self):
         f = os.path.join(self.tmp.name, "steps")
         Path(f).write_text("# a note\nclick @e3\n\nmaxpm browser fill @e5 'two words'\nkey Enter --wait load\n"
@@ -1778,6 +1794,19 @@ class SnapshotLimits(Base):
         self.assertNotIn("outline", act(action="open", url=f"http://127.0.0.1:{port}/"))
         self.assertEqual(act(action="outline", heads=1)["outline"], want[:3] + ["(1 more headings: maxpm browser "
                                                                                  "snapshot --all)"])
+
+        # #5677: extract, rows by CSS and by the ref (or name) of an element in a repeated row; a missing field is null.
+        f = [browser.parse_field(x) for x in ("inv=a", "link=a@href", "status=td:nth-child(2)", "note=.none")]
+        res = act(action="extract", rows="tbody tr", fields=f)
+        self.assertEqual((res["count"], res["data"][1]), (3, {"inv": "Invoice 1042", "status": "paid", "note": None,
+                                                              "link": f"http://127.0.0.1:{port}/i/1042"}))
+        by_name = act(action="extract", rows="Invoice 1043", fields=f[:1], limit=2)
+        self.assertEqual((by_name["count"], by_name["data"]), (3, [{"inv": "Invoice 1041"}, {"inv": "Invoice 1042"}]))
+        self.assertEqual(act(action="extract", fields=[browser.parse_field("card=h2")])["data"], [{"card": "Card A"}])
+        with self.assertRaisesRegex(RiverError, "not a CSS selector: td:::x"):
+            act(action="extract", rows="tbody tr", fields=[["x", "td:::x", None]])
+        with self.assertRaisesRegex(RiverError, "is in no repeated row: name the rows with --rows"):
+            act(action="extract", rows="Help")
 
 
 DOC = (b"<title>Doc</title><nav>Menu one</nav><main><h1>Doc</h1><p>Intro line</p><nav>Inner menu</nav>"
