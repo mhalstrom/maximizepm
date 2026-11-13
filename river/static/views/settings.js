@@ -17,9 +17,10 @@ export function renderSettings() {
       { title: "Default", field: "default", width: 240, cssClass: "muted wrap" },
       { title: "Overrides", field: "overrides", cssClass: "wrap", html: (r) => r.ov.map(x => chip("c-p", `${esc(x.scope)} = ${esc(x.value)} <span class="link" data-unset="${esc(r.key)}" data-scope="${esc(x.scope)}">×</span>`)).join(" ") },
     ] });
+  const now = S.settings.now || {};  // a size limit shows the size now (#5711)
   settingsTable.set(Object.keys(d).map(k => {
     const ov = o.filter(x => x.key === k);
-    return { key: k, default: String(d[k]), overrides: ov.map(x => `${x.scope}=${x.value}`).join(" "), ov };
+    return { key: k, default: String(d[k]) + (now[k] ? ` · ${now[k]}` : ""), overrides: ov.map(x => `${x.scope}=${x.value}`).join(" "), ov };
   }));
 }
 

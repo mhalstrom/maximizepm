@@ -1725,6 +1725,9 @@ def build_parser(only=None):
     x.add_argument("--step", help="return after this long (default: the wait_step setting)")
     x = sub.add_parser("cleanup", help="open items that may be done or stale: expired leases, commits that name them, ...")
     x.add_argument("--project"); x.add_argument("--no-git", action="store_true", help="skip the git log checks")
+    x.add_argument("--space", action="store_true", help="the size limits instead (db_max_size, folder_max_size): "
+                   "remove the oldest removable data now, until each size is under its limit")
+    x.add_argument("--dry-run", action="store_true", help="with --space (or alone): say what would go, remove nothing")
     x.add_argument("--closes", metavar="SINCE", help="first run the close check on the closes of this time (7d) that "
                    "it has not checked, such as closes before the check existed")
     x = sub.add_parser("check", help="record what a check of a suspect item found: done, partial, or open")
@@ -3699,6 +3702,9 @@ def dispatch(conn, a, actor):
     if c == "synced":
         return core.synced(conn, a.id, a.ref, actor)
     if c == "cleanup":
+        if a.space or a.dry_run:  # the size limits (#5711)
+            from . import space
+            return space.run(conn, dry_run=a.dry_run, actor=actor)
         return core.cleanup(conn, a.project, not a.no_git, a.closes, actor)
     if c == "wait":
         return core.wait(conn, os.getcwd(), actor, a.project, a.step, focus=os.environ.get("MAXPM_FOCUS"))
@@ -4836,6 +4842,34 @@ def _writeback_lines(it, r="maxpm", tracker=""):
     return out
 
 
+def render_space(res):
+    """maxpm cleanup --space / --dry-run (#5711): each size against its limit, and what goes (or went)."""
+    from .space import show_size as sz
+    d, f = res["db"], res["folder"]
+    verb = "would remove" if res["dry_run"] else "removed"
+    print(("DRY RUN: nothing is removed. " if res["dry_run"] else "") + "Size limits (db_max_size, folder_max_size):")
+    for name, x, now_, after in (("database", d, d["used"], d["used_after"]), ("folder", f, f["size"], f["size_after"])):
+        state = "off" if not x["limit"] else ("over" if now_ > x["limit"] else "under")
+        line = f"  {name}: {sz(now_)}, limit {sz(x['limit'])} ({state})"
+        if after != now_:
+            line += f" -> {sz(after)}" + (" (estimate)" if res["dry_run"] else "")
+        print(line + (f"  [{f['path']}]" if name == "folder" else ""))
+        for r in x["removed"]:
+            n = r.get("rows", r.get("files"))
+            unit = "rows" if "rows" in r else "files"
+            print(f"    {verb} {n} {unit} of {r['what']}, {sz(r['bytes'])}"
+                  + (f" (older than {r['older_than']})" if r.get("older_than") else ""))
+        if x.get("over") and x["limit"]:
+            print(f"    still over: nothing older is removable; raise the limit (maxpm config set "
+                  f"{'db' if name == 'database' else 'folder'}_max_size <size>) or lower a space_*_after age")
+    k = f.get("kept")
+    if k and k["browser_profiles"]:
+        print(f"  kept: {k['browser_profiles']} browser profiles ({sz(k['bytes'])} without their caches; "
+              f"{k['running']} running): sign-ins, never removed")
+    if d.get("vacuum_error"):
+        print(f"  the database file did not shrink (VACUUM: {d['vacuum_error']}); the next run tries again")
+
+
 def render_cleanup(rows, r="maxpm"):
     if not rows:
         print("Nothing suspect: every open item looks as the queue says.")
@@ -5691,6 +5725,8 @@ def render(a, res):
         return
     if c == "show" and a.brief:
         return _print_brief(res)
+    if c == "cleanup" and isinstance(res, dict) and "folder" in res:
+        return render_space(res)
     if c == "cleanup":
         return render_cleanup(res, f"maxpm --as {a.actor}" if a.actor else "maxpm")
     if c == "done" and isinstance(res, dict) and res.get("refs"):

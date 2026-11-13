@@ -446,6 +446,25 @@ DEFAULT_SETTINGS = {
     # (#5352, decision 5 of the canvas does-maxpm-work). 0s: no samples. sample_keep: rows older than this go.
     "sample_every": "1m",
     "sample_keep": "90d",
+    # Size limits (#5711, river/space.py): over a limit, maxpm serve removes the oldest removable data first until
+    # the size is at 90% of it (maxpm cleanup --dry-run shows what would go). db_max_size: the data in the
+    # database; folder_max_size: the whole folder beside the queue (browser caches, uploads, backups, the database).
+    # A size in KB, MB or GB, or off. A busy queue (about 800 items a week) reaches about 200 MB of data in three
+    # months; its folder passed 2 GB in six weeks, 90% of it the caches of the browsers. Items, decisions, answers,
+    # policies, goal handoffs, browser sign-ins and the newest backup never go.
+    "db_max_size": "200MB",
+    "folder_max_size": "2GB",
+    # The minimum age of each kind of data that a cleanup removes: nothing younger goes, even over a limit.
+    # ops: runs of the operations checks and their history; notices: read notices and the send records of closed
+    # needs-you rows; events: the history of items closed this long ago (the decisions, answers, checks and the
+    # close stay); canvas: versions between the first and the newest; sessions: agents not seen this long that
+    # hold nothing, sent prompts, hook runs; files: uploads and older backups.
+    "space_ops_after": "14d",
+    "space_notices_after": "30d",
+    "space_events_after": "90d",
+    "space_canvas_after": "30d",
+    "space_sessions_after": "30d",
+    "space_files_after": "14d",
     # maxpm health (#5353): the person's minutes that one needs-you row stands for. The headline 'person minutes per
     # done item' is needs-you rows x this / items done: a proxy, since MaximizePM cannot see the person's real time.
     "health_person_minutes": "3",
@@ -2157,6 +2176,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
             "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "tidy_every", "busy_max", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         parse_duration(value)
+    elif key in ("db_max_size", "folder_max_size"):
+        from . import space
+        space.parse_size(value)
     elif key == "expert_fresh_min":
         _k_tokens(value)
     elif key == "ops_deadman_url":
@@ -2299,7 +2321,9 @@ def config_list(conn):
         r["value"] = mask(r["key"], r["value"])
     # The settings of the agents that are not built in (#5169) follow the built-in ones.
     extra = {k: v for k, v in agent_setting_defaults().items() if k not in DEFAULT_SETTINGS}
-    return {"defaults": {**DEFAULT_SETTINGS, **extra} if extra else DEFAULT_SETTINGS, "overrides": rows}
+    from . import space
+    return {"defaults": {**DEFAULT_SETTINGS, **extra} if extra else DEFAULT_SETTINGS, "overrides": rows,
+            "now": space.current(conn)}  # the sizes beside their limits (#5711)
 
 
 # ---------------------------------------------------------------- models

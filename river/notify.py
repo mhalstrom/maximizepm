@@ -515,7 +515,7 @@ def loop(stop, interval_s=None):
             # Inside the try: a queue that is busy or cannot open fails this pass, not the thread (#1663).
             conn = core.connect()
             wait = interval_s or core.parse_duration(core.setting(conn, "notify_interval")).total_seconds()
-            from . import server
+            from . import server, space
             # Each step in its own try: an error of one step fails that step, not the steps after it (#5075: an
             # error in adopt_sessions stopped auto_release and every later step while one agent had no pid).
             steps = (
@@ -539,6 +539,7 @@ def loop(stop, interval_s=None):
                 server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
                 server.browser_sweep,  # a session's Chrome whose session ended or that idled browser_idle_end (#5636)
+                space.serve_pass,  # over db_max_size or folder_max_size: the oldest removable data goes (#5711)
                 server.hooks_soon,  # a hook whose command ended before it ran it
                 server.ops_watch,  # the operations checks that are due, each in a thread of its own (#5430)
                 core.schedule_due,  # a scheduled task whose time, less its lead, has come adds its item (#5507)
