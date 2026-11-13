@@ -191,6 +191,42 @@ def _serve_port(conn):
     return notify.SERVE_PORT["port"] or core.serve_port_now(conn)
 
 
+_rqs_reading = threading.Event()  # set while a thread reads responses: one at a time
+
+
+def rqs_responses(conn, wait=False):
+    """A pass of the loop of maxpm serve (#5790): the pages that are due (core.rqs_due) get their new comments and
+    votes read, one after the other, in a thread, so the loop never waits on realquicksite. Returns the canvas ids;
+    wait: in this thread (tests)."""
+    if _rqs_reading.is_set():
+        return []
+    due = core.rqs_due(conn)
+    if not due:
+        return []
+
+    def work():
+        c = core.connect()
+        try:
+            for cid in due:
+                try:
+                    core.rqs_read_responses(c, cid)
+                except Exception as e:  # one page's error (a refusal, the network) does not stop the others
+                    print(f"realquicksite responses of canvas c{cid}: {e}", flush=True)
+                    try:
+                        c.rollback()
+                    except Exception:
+                        pass
+        finally:
+            c.close()
+            _rqs_reading.clear()
+    _rqs_reading.set()
+    if wait:
+        work()
+    else:
+        threading.Thread(target=work, daemon=True).start()
+    return due
+
+
 def publish_in_thread(cid, version, actor, confirm=False):
     """canvas_publish_send in a thread with its own connection; the row records the result or the error."""
     def work():

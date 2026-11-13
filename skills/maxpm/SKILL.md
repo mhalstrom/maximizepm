@@ -483,6 +483,7 @@ this computer, with each version, and that the user opens in the MaximizePM page
   `maxpm canvas save <name> <path>` writes a version as a file when it must go into git.
 - To show a page off this computer: `maxpm canvas publish <name>`, as the button Share artifact does (a
   private realquicksite page; only the user opens it and shares it). Fix the problems it prints, and put again.
+  Comments and votes from the page come back to you like canvas comments.
 
 ## The project's browser
 
