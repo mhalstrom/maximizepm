@@ -988,6 +988,10 @@ def build_parser(only=None):
     x.add_argument("--file", help="read the lines from this file, not the standard input")
     x.add_argument("--lines", help="the lines themselves, in one argument (the MCP tool)")
     # #5680: a session's walk as lines, and the lines as one call with inputs
+    x = brs.add_parser("size", parents=[bp], help="the page's size: phone (390x844, touch), desktop, <width>x<height>, "
+                       "or pane (the side panel's size again); it holds until the person uses the pane")
+    x.add_argument("size")
+    x.add_argument("--dpr", type=float, help="the pixel density (default 1; a screenshot is that many times larger)")
     x = brs.add_parser("errors", parents=[bp], help="the page's script errors, console.error calls and failed requests "
                        "(status 400 or more, or no answer), the newest last")
     x.add_argument("--clear", action="store_true", help="empty the list after it prints")
@@ -2705,6 +2709,8 @@ def _browser_args(a):
         args["selector"] = a.target
     elif b == "key":
         args["key"] = a.key
+    elif b == "size":  # #5676
+        args.update(size=a.size, dpr=a.dpr)
     elif b in ("steps", "errors"):  # #5680, #5675
         args["clear"] = a.clear
     elif b == "upload":  # #5679: full paths, as serve runs in another folder
@@ -5384,6 +5390,13 @@ def render_browser(a, res):
         if res.get("count", 0) > len(res.get("data") or []):
             print(f"maxpm: {len(res['data'])} of {res['count']} rows: --limit <n> for more", file=sys.stderr)
         return
+    if b == "size":  # #5676
+        f = res.get("forced")
+        view = res.get("view")
+        print(f"size {f['name']}" + (f" ({view[0]}x{view[1]} in the window)" if view else "") if f
+              else "size: the side panel's" + (f" ({res['size'][0]}x{res['size'][1]})" if res.get("size") else
+                                               " (none open: Chrome's own)"))
+        return
     if b == "errors":  # #5675: one line each, with its first stack frame or its request
         for e in res.get("errors") or []:
             if e["kind"] == "request":
@@ -5425,6 +5438,9 @@ def render_browser(a, res):
     else:
         print(f"browser of {res['project']}: {'a window' if res.get('window') else 'in the side panel (headless)'}")
         print(f"  page: {res.get('title') or '(no title)'}  {res.get('url') or ''}")
+        if res.get("forced"):  # #5676
+            print(f"  size {res['forced']['name']}, set by {res['forced'].get('by') or 'a session'} "
+                  f"(maxpm browser size pane gives the side panel's size back)")
         if res.get("dialog"):
             print("  " + _browser_result("status", {"dialog": res["dialog"]})[1])
         if len(res.get("tabs") or []) > 1:

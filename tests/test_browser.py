@@ -1897,6 +1897,64 @@ FILES = (b"<title>Files</title><a href=/report.csv>Report</a> <label for=f>Choos
          b"<input id=f type=file style='display:none' onchange=\"document.title = 'got ' + this.files[0].name\">")
 
 
+class PageSize(Base):
+    """#5676 in a real Chrome: maxpm browser size phone gives the page 390 px with touch and a screenshot 390 px wide
+    with no pane open; a pane that opens does not change it, the person's use of the pane does; size pane and
+    <w>x<h>; status says who set it."""
+
+    def test_size_by_command_and_the_pane(self):
+        import struct as _struct
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"<title>Size</title><meta name=viewport content='width=device-width'><p>hello</p>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+        out = act(action="size", size="phone")
+        self.assertEqual((out["view"], out["forced"]["name"], out["forced"]["by"]), ([390, 844], "phone", "ag1"))
+        self.assertTrue(b.evaluate("matchMedia('(pointer: coarse)').matches"))
+        png = base64.b64decode(browser.screenshot(b)["png"])
+        self.assertEqual(_struct.unpack(">II", png[16:24]), (390, 844))  # the PNG's width and height
+        b.resize(1000, 700, 1, None, pane="p1")  # a pane opens: the size stays the session's
+        self.assertEqual(b.evaluate("innerWidth"), 390)
+        b.drive("p1")  # the person clicks in the pane: the pane's size again
+        self.assertEqual((b.forced, b.evaluate("innerWidth"), b.evaluate("matchMedia('(pointer: coarse)').matches")),
+                         (None, 1000, False))
+        self.assertEqual(act(action="size", size="800x600")["view"], [800, 600])
+        self.assertIn("size 800x600, set by ag1", self._status(b))
+        act(action="size", size="pane")
+        self.assertEqual(b.evaluate("innerWidth"), 1000)
+        with self.assertRaisesRegex(RiverError, "a size is phone, desktop, pane, or <width>x<height>"):
+            act(action="size", size="huge")
+
+    def _status(self, b):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_browser(type("A", (), {"bcmd": "status"})(), b.info())
+        return out.getvalue()
+
+
 ERRS = (b"<title>Err</title><button onclick=\"fetch('/api/fail')\">Load</button>"
         b"<button onclick=\"console.error('bad thing'); throw new Error('boom')\">Break</button>"
         b"<button onclick=\"document.title = 'fine'\">Fine</button>")

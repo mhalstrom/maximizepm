@@ -27,7 +27,7 @@ PROTOCOL = "2025-06-18"
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
 BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
                    "check", "uncheck", "key", "dialog", "upload", "back", "forward", "reload", "screenshot", "status",
-                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag", "errors")
+                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag", "errors", "size")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "
@@ -196,6 +196,8 @@ def browser_argv(a):
         pos = ["accept" if accept else "dismiss"] + ([text] if accept and text is not None else [])
     elif act == "find":
         pos = [need("the words (text)", text)]
+    elif act == "size":  # #5676: phone, desktop, pane, or <w>x<h>
+        pos = [need("the size (text): phone, desktop, pane or <width>x<height>", text)]
     elif act == "extract":
         pos = [str(f) for f in a.get("fields") or []]
     elif act in ("tab", "close-tab") and t:

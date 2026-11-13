@@ -75,7 +75,7 @@ def _person(conn, who):
 
 # action -> whether it changes the page (the controller rule holds for it)
 CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload", "eval",
-           "tab", "new_tab", "close_tab", "dialog", "upload", "hover", "scroll", "drag"}
+           "tab", "new_tab", "close_tab", "dialog", "upload", "hover", "scroll", "drag", "size"}
 # a session's first one shows its panel
 INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key", "upload", "hover", "scroll", "drag"}
 # What a batch may hold (#5663): the actions whose answer is text.
@@ -194,6 +194,8 @@ def _act(conn, a, who):
         if a.get("clear"):
             b.walk = []
         return {**b.info(), "steps": list(getattr(b, "walk", []))}
+    if action == "size":  # #5676: the page's size by command (the controller rule holds above)
+        return browser.set_size(b, a.get("size") or "", (who or "the person") if person else who, a.get("dpr"))
     if action == "errors":  # #5675: the shown tab's script errors and failed requests
         out = {**b.info(), "errors": list(b.errors)}
         if a.get("clear"):

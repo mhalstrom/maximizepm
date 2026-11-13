@@ -618,6 +618,8 @@ class Browser:
         self.snap = None     # the snapshot's world in the shown tab: {target, session, ctx}; refs live in it (#5663)
         self.refs = 0        # the last ref number given: refs never repeat in one browser, so an old ref fails
         self.opened = 0      # tabs that a page of the shown tab opened
+        self.forced = None   # #5676: the size a session set by command: {w, h, dsf, mobile, name, by}
+        self.touch = False
         self.downloads = []  # #5679: the last downloads: {guid, url, name, state, bytes, path}
         self.errors = []     # #5675: the shown tab's script errors and failed requests (ERRORS_KEEP), and their count
         self.err_n = 0
@@ -817,6 +819,7 @@ class Browser:
         self.session = self.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
         self.target = target
         self.dialog = None  # a box of the tab shown before waits in that tab
+        self.touch = False  # a new tab has no touch until _fit gives a phone size
         self.asks_end = self.asks
         self.requests = {}  # the requests of the tab shown before never finish for this one (--wait idle)
         self.stops = self.navs  # nor does a load of that tab (loading)
@@ -848,14 +851,26 @@ class Browser:
         panel's screen. Emulation and not Browser.setWindowBounds (#5625): the window keeps its normal size (VIEW), and
         a window of the panel's size was one of the traits that made Google answer with a CAPTCHA (#5619). The screen
         is the panel's screen, or a normal one when that is smaller than the window."""
-        if not self.size or self._windowed() or not self.session:
+        f = self.forced  # #5676: the size that a session set by command holds over the panel's
+        if (not self.size and not f) or self._windowed() or not self.session:
             return
-        w, h = self.size
-        sw, sh = self.screen or (0, 0)
-        if sw < VIEW[0] or sh < VIEW[1]:
-            sw, sh = SCREEN
-        self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": self.dsf,
-                  "mobile": False, "screenWidth": sw, "screenHeight": sh}, session=self.session)
+        if f:
+            w, h, dsf, mobile = f["w"], f["h"], f["dsf"], f["mobile"]
+            sw, sh = (w, h) if mobile else SCREEN
+        else:
+            (w, h), dsf, mobile = self.size, self.dsf, False
+            sw, sh = self.screen or (0, 0)
+            if sw < VIEW[0] or sh < VIEW[1]:
+                sw, sh = SCREEN
+        self.call("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": dsf,
+                  "mobile": mobile, "screenWidth": sw, "screenHeight": sh}, session=self.session)
+        if mobile != self.touch:  # a phone has touch: pages that ask (pointer: coarse) see it
+            self.touch = mobile
+            try:
+                self.call("Emulation.setTouchEmulationEnabled", {"enabled": mobile, "maxTouchPoints": 5 if mobile else 1},
+                          session=self.session)
+            except RiverError:
+                pass
         q = self._cast_quality()
         if self.cast_quality not in (None, q):  # the density crossed 1: the frames' quality follows
             self.cast_quality = q
@@ -1172,6 +1187,8 @@ class Browser:
                 "window_idle": setting_of(self.project, "browser_window_idle") if self._windowed() else None,
                 "window_end": self.state.get("window_end"),
                 "size": list(self.size) if self.size else None,  # the panel's size that serve has (#5625)
+                # #5676: the size a session set by command, which holds until the person uses the pane
+                "forced": {k: self.forced[k] for k in ("w", "h", "name", "by")} if self.forced else None,
                 "dialog": dialog_info(self.dialog),  # a box of the page that waits for an answer (#5674)
                 # The tab strip (#5632): each tab with its icon (from Chrome's Favicons, a data address) and the
                 # session whose pointer is on it.
@@ -1268,19 +1285,24 @@ class Browser:
         return p is not None
 
     def drive(self, pane):
-        """A person clicked, typed or took control in this panel: its size is the page's size from now on."""
-        if pane and pane != self.driver:
+        """A person clicked, typed or took control in this panel: its size is the page's size from now on (#5676:
+        also over a size that a session set by command)."""
+        if pane and self.forced:
+            self.forced = None
+            self.driver = str(pane)[:40]
+            self._choose(again=True)
+        elif pane and pane != self.driver:
             self.driver = str(pane)[:40]
             self._choose()
 
-    def _choose(self):
+    def _choose(self, again=False):
         now = time.time()
         with self.pane_lock:
             for k in [k for k, p in self.panes.items() if now - p["at"] > PANE_GONE]:
                 del self.panes[k]
             p = self.panes.get(self.driver) or max(self.panes.values(), default=None,
                                                    key=lambda p: p["size"][0] * p["size"][1])
-            if not p or (p["size"], p["dsf"], p["screen"]) == (self.size, self.dsf, self.screen):
+            if not p or ((p["size"], p["dsf"], p["screen"]) == (self.size, self.dsf, self.screen) and not again):
                 return
             self.size, self.dsf, self.screen = p["size"], p["dsf"], p["screen"]
         if self.running():
@@ -4192,6 +4214,43 @@ def screenshot(b, full=False, cursor=False):
     finally:
         if drew:
             cursor_off(b)
+
+
+SIZES = {"phone": (390, 844, True), "desktop": (VIEW[0], VIEW[1], False)}  # #5676: name -> (w, h, mobile)
+
+
+def set_size(b, spec, who=None, dpr=None):
+    """#5676: the page's size by command: phone (390x844, the mobile and touch flags), desktop, <w>x<h>, or pane
+    (the panel's size again). It holds until the person clicks or types in a pane; status says who set it."""
+    spec = (spec or "").strip().lower()
+    if b._windowed():
+        raise RiverError("the browser shows as a window: the window sets the size (maxpm browser headless first)")
+    if spec == "pane":
+        b.forced = None
+        b.start()
+        if b.size:
+            b._fit()
+        elif b.session:
+            b.call("Emulation.clearDeviceMetricsOverride", session=b.session)
+            if b.touch:
+                b.touch = False
+                b.call("Emulation.setTouchEmulationEnabled", {"enabled": False}, session=b.session)
+        return b.info()
+    if spec in SIZES:
+        w, h, mobile = SIZES[spec]
+    else:
+        m = re.fullmatch(r"(\d{2,4})\s*[x×]\s*(\d{2,4})", spec)
+        if not m:
+            raise RiverError(f"a size is phone, desktop, pane, or <width>x<height> such as 390x844, not {spec!r}")
+        w, h, mobile = max(200, min(int(m.group(1)), 3000)), max(150, min(int(m.group(2)), 3000)), False
+    try:
+        dsf = round(max(1.0, min(float(dpr or 1), 3.0)), 2)
+    except (TypeError, ValueError):
+        raise RiverError(f"--dpr is a number from 1 to 3, not {dpr!r}")
+    b.forced = {"w": w, "h": h, "dsf": dsf, "mobile": mobile, "name": spec if spec in SIZES else f"{w}x{h}", "by": who}
+    b.start()
+    b._fit()
+    return {**b.info(), "view": b.evaluate("[innerWidth, innerHeight]", 5)}
 
 
 def switch_tab(b, target):
