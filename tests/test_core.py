@@ -379,6 +379,21 @@ class ContinueTree(Base):
         self.assertIn(f, core.session_tree(self.c, "w1"))
         self.assertNotIn(self.e, core.session_tree(self.c, "w1"))
 
+    def test_a_session_the_page_started_for_one_item_keeps_to_its_tree_after_it(self):
+        # #5653: MAXPM_FOCUS=item:<id> stays set for the session's life, and every later go gave it the most
+        # important ready item of the project (E), also again right after it released E.
+        focus = f"item:{self.a}"
+        self.assertEqual(core.go(self.c, self.dir.name, "w1", focus=focus)["item"]["id"], self.a)
+        core.done(self.c, self.a, "did A", "w1")
+        got = []
+        for _ in range(2):
+            b = core.go(self.c, self.dir.name, "w1", focus=focus)
+            got.append(b["item"]["id"])
+            core.done(self.c, b["item"]["id"], "done", "w1")
+        self.assertEqual(sorted(got), sorted([self.b, self.d]))  # never the urgent unrelated E
+        b = core.go(self.c, self.dir.name, "w1", focus=focus)
+        self.assertEqual((b["role"], b.get("tree_done")), ("idle", True))
+
 
 class Go(Base):
     def setUp(self):

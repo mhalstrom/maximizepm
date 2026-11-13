@@ -18989,7 +18989,11 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
             return brief
         brief["queue_waiting"] = [e for e in queue_list(conn, actor)["entries"] if e.get("item")]
 
-    tree = None if focus else tree_mode(conn, actor)  # auto_continue tree: only the session's own tree (#4994)
+    # auto_continue tree: only the session's own tree (#4994). MAXPM_FOCUS stays in a session's environment for its
+    # whole life, but an item:, unblock: or help: focus acts on the first go only, when the session held no task and
+    # has no tree yet; after that its tree holds (#5653: page-started sessions took unrelated work after done). A
+    # deployer or reviewer focus gives every go its role (focus_role) and keeps any work.
+    tree = None if focus_role(focus) else tree_mode(conn, actor)
 
     def try_claim(**kw):
         try:
