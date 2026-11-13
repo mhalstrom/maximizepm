@@ -70,6 +70,9 @@ header.more .hdr-menu > label.sub { display: grid; grid-template-columns: calc(2
 }
 
 @media (max-width: 759px) {
+  /* The browser's tab strip (#5632): each tab keeps its width, so its title shows beside the 44 px close button, and
+     the strip scrolls sideways. */
+  .br-tab { flex: none; width: var(--w-card); }
   /* The header of a phone (#4903): one bar of 48 px under the notch. The mark; the name of the tab, which opens the
      list of all ten tabs as a sheet under the bar; the magnifier, which opens the search; the ⋯, which opens a menu
      with the theme, the relay, Update, You are, and the time of the last update. app.js hides the bar (a transform,
