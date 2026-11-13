@@ -3794,9 +3794,12 @@ def cover_of(b, x, y):
 
 # ---- what a session does (maxpm browser ...)
 
-def click(b, selector=None, x=None, y=None, who=None, wait=None):
+def click(b, selector=None, x=None, y=None, who=None, wait=None, button="left", count=1, mods=()):
     """Click an element (a ref of a snapshot, or a CSS selector) or a point. While someone watches, the pointer glides
-    there first; then the action waits as after() says."""
+    there first; then the action waits as after() says. #5669: button left, right or middle; count 2 is a double
+    click; mods: the keys held (shift, ctrl, alt, meta)."""
+    if button not in BUTTONS:
+        raise RiverError(f"a button is left, right or middle, not {button!r}")
     link = None
     if selector:
         x, y, *rest = point_of(b, selector)
@@ -3806,12 +3809,107 @@ def click(b, selector=None, x=None, y=None, who=None, wait=None):
                          "--selector '<css>', or x and y")
     who = driver(b, who)
     glide(b, who, x, y)
-    mark = {**nav_mark(b), "link": link}
-    for t in ("mousePressed", "mouseReleased"):
-        b.page("Input.dispatchMouseEvent", {"type": t, "x": float(x), "y": float(y), "button": "left", "clickCount": 1})
-        if t == "mousePressed":
-            note_pointer(b, who, x, y, press=True)
-    return done(b, wait, mark, clicked=selector or [x, y])
+    plain = button == "left" and count == 1 and not mods
+    mark = {**nav_mark(b), "link": link if plain else None}
+    m = held(mods)
+    for n in range(1, int(count) + 1):
+        for t in ("mousePressed", "mouseReleased"):
+            p = {"type": t, "x": float(x), "y": float(y), "button": button, "clickCount": n}
+            if not plain:
+                p.update(buttons=BUTTONS[button] if t == "mousePressed" else 0, modifiers=m)
+            b.page("Input.dispatchMouseEvent", p)
+            if t == "mousePressed":
+                note_pointer(b, who, x, y, press=True)
+    how = {**({"button": button} if button != "left" else {}), **({"count": int(count)} if count > 1 else {}),
+           **({"held": list(mods)} if mods else {})}
+    return done(b, wait, mark, clicked=selector or [x, y], **how)
+
+
+MOD_NAMES = ("shift", "ctrl", "alt", "meta")
+HOVER_SETTLE = 0.05  # seconds after a hover for a menu that the page opens on the move
+SCROLL_STEP = 600    # pixels of one scroll down or up
+DRAG_STEPS = 10      # moves between the press and the release of a drag
+
+
+def held(mods):
+    """#5669: the keys held during a pointer action, as CDP's bit mask (shift, ctrl, alt, meta)."""
+    bad = [m for m in mods or () if m not in MOD_NAMES]
+    if bad:
+        raise RiverError(f"--with takes {', '.join(MOD_NAMES)}, not {', '.join(bad)}")
+    return modifiers({m: True for m in mods or ()})
+
+
+def _aim(b, target, x=None, y=None, what="the element"):
+    if target:
+        x, y, *_ = point_of(b, target)
+    if x is None or y is None:
+        raise RiverError(f"name {what}: its name, a ref (@e3), --selector '<css>', or x and y")
+    return float(x), float(y)
+
+
+def hover(b, target=None, x=None, y=None, who=None, wait=None, mods=()):
+    """#5669: move the pointer onto an element (or a point) and leave it there; a menu or a tooltip that the page
+    opens on the move shows in the reply (the route's list of what changed)."""
+    x, y = _aim(b, target, x, y, "what to hover")
+    who = driver(b, who)
+    mark = nav_mark(b)
+    glide(b, who, x, y)
+    if mods:
+        b.page("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "modifiers": held(mods)})
+    _pause(HOVER_SETTLE)
+    return done(b, wait or "none", mark, hovered=target or [x, y])
+
+
+def scroll(b, target=None, amount=None, who=None, wait=None, x=None, y=None):
+    """#5669: wheel input over an element (a list that scrolls by itself) or over the middle of the window. amount:
+    pixels (negative: up), or down, up, left, right (SCROLL_STEP). The reply says where the page stands now."""
+    words = {"down": (0, SCROLL_STEP), "up": (0, -SCROLL_STEP), "right": (SCROLL_STEP, 0), "left": (-SCROLL_STEP, 0)}
+    a = str(amount or "down").strip().lower()
+    if a in words:
+        dx, dy = words[a]
+    else:
+        try:
+            dx, dy = 0, float(a)
+        except ValueError:
+            raise RiverError(f"scroll takes pixels (600, -300) or down, up, left, right, not {amount!r}")
+    if target:
+        x, y = _aim(b, target)
+    elif x is None or y is None:
+        x, y = (float(v) / 2 for v in b.evaluate("[innerWidth, innerHeight]", 5))
+    who = driver(b, who)
+    glide(b, who, x, y)
+    mark = nav_mark(b)
+    b.page("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": float(x), "y": float(y), "deltaX": float(dx),
+                                        "deltaY": float(dy)})
+    _pause(HOVER_SETTLE)
+    out = done(b, wait or "none", mark)
+    sx, sy, end = b.evaluate("[scrollX, scrollY, Math.max(0, document.documentElement.scrollHeight - innerHeight)]", 5)
+    return {**out, "scrolled": {"x": round(sx), "y": round(sy), "end": round(end)}}
+
+
+def drag(b, source, dest, who=None, wait=None, mods=()):
+    """#5669: press on source, move to dest in DRAG_STEPS with the button held, release there (a slider, a card to
+    another list, a selection). source and dest: a ref, css:<selector>, or [x, y]."""
+    x0, y0 = source if isinstance(source, (list, tuple)) else _aim(b, source, what="where the drag starts")
+    who = driver(b, who)
+    glide(b, who, x0, y0)
+    m = held(mods)
+    b.page("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x0, "y": y0, "button": "left", "buttons": 1,
+                                        "clickCount": 1, "modifiers": m})
+    note_pointer(b, who, x0, y0, press=True)
+    x1, y1 = dest if isinstance(dest, (list, tuple)) else _aim(b, dest, what="where the drag ends")
+    mark = nav_mark(b)
+    for i in range(1, DRAG_STEPS + 1):
+        px, py = x0 + (x1 - x0) * i / DRAG_STEPS, y0 + (y1 - y0) * i / DRAG_STEPS
+        b.page("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": px, "y": py, "button": "left", "buttons": 1,
+                                            "modifiers": m})
+        note_pointer(b, who, px, py)
+        if pace(b):
+            time.sleep(GLIDE_TIME / DRAG_STEPS)
+    b.page("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x1, "y": y1, "button": "left", "buttons": 0,
+                                        "clickCount": 1, "modifiers": m})
+    return done(b, wait, mark, dragged=[source if not isinstance(source, (list, tuple)) else list(source),
+                                        dest if not isinstance(dest, (list, tuple)) else list(dest)])
 
 
 def done(b, wait, mark, **out):

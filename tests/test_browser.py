@@ -489,6 +489,22 @@ class Command(Base):
         with mock.patch.object(cli, "ask_server", lambda *a, **k: {}), self.assertRaisesRegex(RiverError, "x and y"):
             self.run_cli("-q", "--as", "ag1", "browser", "click", "10")
 
+    def test_the_other_pointer_actions(self):
+        """#5669: click --double --right --with; hover a name or a point; scroll [target] [amount]; drag from to."""
+        a = self.asked("click", "Row", "--double", "--right", "--with", "shift,Ctrl")[0]
+        self.assertEqual((a["count"], a["button"], a["mods"]), (2, "right", ["shift", "ctrl"]))
+        self.assertEqual(self.asked("hover", "link", "Products")[0]["selector"], 'link "Products"')
+        self.assertEqual((lambda a: (a["x"], a["y"]))(self.asked("hover", "10", "20")[0]), (10.0, 20.0))
+        a = self.asked("scroll", "Results", "-300")[0]
+        self.assertEqual((a["selector"], a["amount"]), ("Results", "-300"))
+        self.assertEqual(self.asked("scroll")[0].get("amount"), None)
+        a = self.asked("drag", "Card", "120,40")[0]
+        self.assertEqual((a["selector"], a["to"]), ("Card", [120.0, 40.0]))
+        _, out = self.asked("click", "Row", "--double", res={"title": "X", "url": "u", "count": 2})
+        self.assertEqual(out.strip(), "X  u  (double left click)")
+        self.assertEqual(cli._step_words({"action": "drag", "selector": 'button "Card"', "to": [120, 40], "mods": ["alt"]}),
+                         ["drag", 'button "Card"', "120,40", "--with", "alt"])
+
     def test_an_action_takes_a_name_a_role_and_name_and_its_row(self):
         """#5667: click "Comments", click link Comments (two words), --in "<row>"; fill "Month" 2026-10."""
         self.assertEqual(self.asked("click", "Comments")[0]["selector"], "Comments")
@@ -1879,6 +1895,69 @@ class Aim(Base):
 
 FILES = (b"<title>Files</title><a href=/report.csv>Report</a> <label for=f>Choose a file</label>"
          b"<input id=f type=file style='display:none' onchange=\"document.title = 'got ' + this.files[0].name\">")
+
+
+POINTER = (b"<title>Pointer</title><style>#mm{display:none;position:absolute;background:#fff} #m:hover #mm{display:block}"
+           b"</style><nav aria-label=Main>"
+           b"<div id=m style='display:inline-block;padding:8px'>Products<div role=menu aria-label=Products id=mm>"
+           b"<a role=menuitem href=/a>Alpha</a> <a role=menuitem href=/b>Beta</a></div></div></nav>"
+           b"<button ondblclick=\"document.title = 'double'\">Twice</button>"
+           b"<button oncontextmenu=\"document.title = 'right'; return false\">Menu</button>"
+           b"<button onclick=\"document.title = event.shiftKey ? 'shift' : 'plain'\">Mod</button>"
+           b"<input type=range id=r min=0 max=100 value=0 style='width:200px' "
+           b"oninput=\"document.title = 'range ' + this.value\"><div style='height:3000px'></div>")
+
+
+class Pointer(Base):
+    """#5669 in a real Chrome: a hover opens a menu and its items are in the reply; a double click, a right click, a
+    click with shift held; a drag moves a slider; a scroll says where the page stands."""
+
+    def test_hover_double_right_shift_drag_and_scroll(self):
+        if not chrome() or not browser.chrome_path():
+            self.skipTest("no Chrome on this computer")
+        if not _can_bind():
+            self.skipTest("this sandbox does not allow a local port")
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(POINTER)))
+                self.end_headers()
+                self.wfile.write(POINTER)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        core.config_set(self.c, "browser_allow", f"127.0.0.1:{port}", project="web")
+        core.register(self.c, "ag1")
+        b = browser.get("web", "ag1")
+        self.addCleanup(b.close)
+        act = lambda **a: routes.act(self.c, {"project": "web", **a}, "ag1")  # noqa: E731
+        act(action="open", url=f"http://127.0.0.1:{port}/", show=False)
+        out = act(action="hover", selector="#m")
+        self.assertEqual([x.split(" ", 2)[-1] if x.startswith("+ @") else x for x in out["changes"]],
+                         ['+ [menu "Products"] 2 elements:', 'menuitem "Alpha"', 'menuitem "Beta"'])
+        act(action="click", selector="Twice", count=2)
+        self.assertEqual(b.evaluate("document.title"), "double")
+        out = act(action="click", selector="Menu", button="right")
+        self.assertEqual(b.evaluate("document.title"), "right")
+        self.assertIn("(right click)", cli._browser_result("click", out)[0])
+        act(action="click", selector="Mod", mods=["shift"])
+        self.assertEqual(b.evaluate("document.title"), "shift")
+        right, mid = b.evaluate("(() => { const r = document.getElementById('r').getBoundingClientRect(); "
+                                "return [r.right - 1, r.top + r.height / 2]; })()")
+        act(action="drag", selector="css:#r", to=[right, mid])
+        self.assertGreater(int(b.evaluate("document.getElementById('r').value")), 90)
+        out = act(action="scroll", amount="down")
+        self.assertGreater(out["scrolled"]["y"], 0)
+        self.assertIn("scrolled to", cli._browser_result("scroll", out)[0])
+        with self.assertRaisesRegex(RiverError, "--with takes shift, ctrl, alt, meta, not hyper"):
+            act(action="click", selector="Mod", mods=["hyper"])
 
 
 SEARCH = (b"<title>Search</title><form action=/results><label>Search <input name=q></label><button>Go</button></form>"

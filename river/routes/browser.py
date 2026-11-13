@@ -75,15 +75,18 @@ def _person(conn, who):
 
 # action -> whether it changes the page (the controller rule holds for it)
 CHANGES = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload", "eval",
-           "tab", "new_tab", "close_tab", "dialog", "upload"}
-INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key", "upload"}  # a session's first one shows its panel
+           "tab", "new_tab", "close_tab", "dialog", "upload", "hover", "scroll", "drag"}
+# a session's first one shows its panel
+INPUTS = {"click", "type", "fill", "select", "check", "uncheck", "key", "upload", "hover", "scroll", "drag"}
 # What a batch may hold (#5663): the actions whose answer is text.
 BATCH = (CHANGES - {"tab", "new_tab", "close_tab"}) | {"snapshot", "text", "status", "outline", "extract"}
 # #5680: the actions that join a session's walk, and the arguments a step keeps
 RECORD = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "dialog", "upload", "back", "forward",
-          "reload", "extract"}
+          "reload", "extract", "hover", "scroll", "drag"}
 STEP_KEYS = ("action", "url", "selector", "x", "y", "text", "values", "files", "key", "accept", "rows", "fields",
-             "limit", "within", "wait")
+             "limit", "within", "wait", "button", "count", "mods", "to", "amount")
+# the actions on one element: a name becomes its ref (#5667); the page's elements are read before them (#5673)
+ON_ELEMENT = ("click", "type", "fill", "select", "check", "uncheck", "upload", "hover", "scroll", "drag")
 WALK_KEEP = 200  # the steps of a walk that a browser remembers
 
 
@@ -248,8 +251,8 @@ def _act(conn, a, who):
     rec = None
     if not person and action in RECORD and not a.get("_run"):
         rec = {k: v for k, v in a.items() if k in STEP_KEYS}
-        for k in ("selector", "rows"):
-            if rec.get(k):
+        for k in ("selector", "rows", "to"):
+            if rec.get(k) and isinstance(rec[k], str):
                 rec[k] = browser.step_target(b, rec[k])
 
     def record():
@@ -289,18 +292,29 @@ def _act(conn, a, who):
         r = browser.extract(b, a.get("rows") or None, a.get("fields") or [], int(a.get("limit") or browser.EXTRACT_MAX))
         record()
         return {**b.info(), "data": r["rows"], "count": r["count"]}
-    if action in ("click", "type", "fill", "select", "check", "uncheck", "upload") and a.get("selector"):
+    if action in ON_ELEMENT and a.get("selector"):
         # #5667: a name (or role and name, --in its row) becomes the ref of the one element so named
         a = {**a, "selector": browser.resolve_target(b, a["selector"], a.get("within"), action)}
-    if action in ("click", "type", "fill", "select", "check", "uncheck", "key", "dialog", "upload") and not person \
-            and a.get("changes", True):
+    if action == "drag" and isinstance(a.get("to"), str):
+        a = {**a, "to": browser.resolve_target(b, a["to"], None, "drag")}
+    if action in ON_ELEMENT + ("key", "dialog") and not person and a.get("changes", True):
         pre = browser.view_keys(b) if not b.dialog else None
     if action == "upload":  # #5679
         return then(browser.upload(b, conn, a.get("selector") or "", a.get("files") or [], who=sess, wait=wait))
+    x, y, mods = a.get("x"), a.get("y"), a.get("mods") or ()
+    x, y = (None if x is None else float(x)), (None if y is None else float(y))
     if action == "click":
-        x, y = a.get("x"), a.get("y")
-        return then(browser.click(b, a.get("selector"), None if x is None else float(x),
-                                  None if y is None else float(y), who=sess, wait=wait))
+        return then(browser.click(b, a.get("selector"), x, y, who=sess, wait=wait, button=a.get("button") or "left",
+                                  count=int(a.get("count") or 1), mods=mods))
+    if action == "hover":  # #5669
+        return then(browser.hover(b, a.get("selector"), x, y, who=sess, wait=wait, mods=mods))
+    if action == "scroll":
+        return then(browser.scroll(b, a.get("selector"), a.get("amount"), who=sess, wait=wait, x=x, y=y))
+    if action == "drag":
+        src = a.get("selector") or ([x, y] if x is not None and y is not None else None)
+        if not src or not a.get("to"):
+            raise RiverError("a drag needs where it starts and where it ends: maxpm browser drag <from> <to>")
+        return then(browser.drag(b, src, a["to"], who=sess, wait=wait, mods=mods))
     if action == "type":
         return then(browser.type_text(b, a.get("text") or "", a.get("selector"), who=sess, wait=wait))
     if action == "fill":

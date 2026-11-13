@@ -27,7 +27,7 @@ PROTOCOL = "2025-06-18"
 _AS = {"type": "string", "description": "your MaximizePM agent name (default: the one go or plan gave you)"}
 BROWSER_ACTIONS = ("open", "snapshot", "find", "outline", "text", "extract", "html", "click", "type", "fill", "select",
                    "check", "uncheck", "key", "dialog", "upload", "back", "forward", "reload", "screenshot", "status",
-                   "tab", "new-tab", "close-tab", "steps", "run")
+                   "tab", "new-tab", "close-tab", "steps", "run", "hover", "scroll", "drag")
 TOOLS = [
     {"name": "maxpm",
      "description": "Run any maxpm command and get its text output, for example [\"go\"], "
@@ -104,6 +104,10 @@ TOOLS = [
                                                    "run: the lines of a walk (as steps prints them, {name} for inputs)"},
          "url": {"type": "string", "description": "open, new-tab: the address"},
          "x": {"type": "number"}, "y": {"type": "number"},
+         "double": {"type": "boolean"}, "right": {"type": "boolean"},
+         "with": {"type": "string", "description": "click, hover, drag: keys held, such as shift or ctrl,alt"},
+         "to": {"type": "string", "description": "drag: where it ends (a name, @e3, or x,y)"},
+         "amount": {"type": "string", "description": "scroll: down (default), up, left, right, or pixels"},
          "key": {"type": "string", "description": "key: Enter, Tab, Escape, ArrowDown, or one character"},
          "values": {"type": "array", "items": {"type": "string"}, "description": "select: the options; upload: the "
                                                                                  "files (full paths)"},
@@ -156,14 +160,22 @@ def browser_argv(a):
         flags += ["--limit", str(int(a["limit"]))]
     if a.get("all"):
         flags.append("--all")
+    if a.get("with") and act in ("click", "hover", "drag"):  # #5669
+        flags += ["--with", str(a["with"])]
+    if act == "click":
+        flags += (["--double"] if a.get("double") else []) + (["--right"] if a.get("right") else [])
     pos = []
     if act == "open":
         pos = [need("the address (url)", a.get("url"))]
     elif act == "new-tab" and a.get("url"):
         pos = [a["url"]]
-    elif act == "click":
+    elif act in ("click", "hover"):
         pos = [str(a["x"]), str(a["y"])] if a.get("x") is not None and a.get("y") is not None else \
             [need("the element (target) or a point (x, y)", t)]
+    elif act == "scroll":
+        pos = ([t] if t else []) + ([str(a["amount"])] if a.get("amount") else [])
+    elif act == "drag":
+        pos = [need("where it starts (target)", t), need("where it ends (to)", a.get("to"))]
     elif act == "type":
         pos = ([t] if t else []) + [need("the text (text)", text)]
     elif act == "fill":

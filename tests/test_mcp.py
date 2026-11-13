@@ -82,6 +82,11 @@ class Mcp(unittest.TestCase):
                          ["browser", "upload", "--", "Resume", "/p/cv.pdf"])  # #5679
         self.assertEqual(mcp.browser_argv({"action": "run", "text": "open x\nclick Go", "values": ["q=rust"]}),
                          ["browser", "run", "--lines", "open x\nclick Go", "--", "q=rust"])  # #5680
+        self.assertEqual(mcp.browser_argv({"action": "click", "target": "Row", "double": True, "with": "shift"}),
+                         ["browser", "click", "--with", "shift", "--double", "--", "Row"])  # #5669
+        self.assertEqual(mcp.browser_argv({"action": "scroll", "amount": "-300"}), ["browser", "scroll", "--", "-300"])
+        self.assertEqual(mcp.browser_argv({"action": "drag", "target": "Card", "to": "Done"}),
+                         ["browser", "drag", "--", "Card", "Done"])
         self.assertEqual(mcp.browser_argv({"action": "extract", "rows": "tr", "fields": ["t=a"], "limit": 2}),
                          ["browser", "extract", "--rows", "tr", "--limit", "2", "--", "t=a"])
         self.assertEqual(mcp.browser_argv({"action": "snapshot", "all": True, "tab": "T1"}),

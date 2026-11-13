@@ -943,6 +943,23 @@ def build_parser(only=None):
     x.add_argument("target", nargs="?", help="\"Comments\" (a name), link (a role, then the name), @e3, or x")
     x.add_argument("y", nargs="?", help="the name after a role, or y")
     x.add_argument("--selector", help="a CSS selector; the first element that matches")
+    # #5669: the other clicks, and the keys held
+    x.add_argument("--double", action="store_true", help="a double click")
+    x.add_argument("--right", action="store_true", help="a click of the right button (a context menu)")
+    with_help = "keys held: shift, ctrl, alt, meta (comma between)"
+    x.add_argument("--with", dest="mods", metavar="KEYS", help=with_help)
+    wp = argparse.ArgumentParser(add_help=False)
+    wp.add_argument("--with", dest="mods", metavar="KEYS", help=with_help)
+    x = brs.add_parser("hover", parents=[bp, ap, ep, wp], help="move the pointer onto an element and leave it there; "
+                       "the reply lists what opened (a menu, a tooltip)")
+    x.add_argument("target", nargs="?", help="the element (its name, role and name, @e3), or x")
+    x.add_argument("y", nargs="?", help="the name after a role, or y")
+    x = brs.add_parser("scroll", parents=[bp, ap, ep], help="wheel input over the page (or over an element that "
+                       "scrolls by itself): down (default), up, left, right, or pixels (-300 is up)")
+    x.add_argument("words", nargs="*", metavar="[target] [amount]")
+    x = brs.add_parser("drag", parents=[bp, ap, wp], help="press on one element (or x,y), move with the button held, "
+                       "release on another (or x,y): a slider, a card to another list")
+    x.add_argument("source", metavar="from"); x.add_argument("dest", metavar="to")
     x = brs.add_parser("type", parents=[bp, ap, ep], help="type text key by key: type \"Search\" 'text' clicks the "
                        "field first; type 'text' types where the focus is")
     x.add_argument("words", nargs="+", metavar="[target] text"); x.add_argument("--selector")
@@ -2604,6 +2621,8 @@ def _browser_args(a):
         args["snapshot"] = True
     if getattr(a, "within", None):
         args["within"] = a.within
+    if getattr(a, "mods", None):  # #5669: --with shift,ctrl
+        args["mods"] = [m.strip().lower() for m in a.mods.split(",") if m.strip()]
     if b == "open":
         args.update(url=a.url, show=not a.no_show, outline=not a.no_outline, read=a.text)
     elif b == "extract":  # #5677: the fields are checked here, before serve gets them
@@ -2636,6 +2655,38 @@ def _browser_args(a):
         else:
             raise RiverError("name what to click: maxpm browser click \"<its name>\", maxpm browser click @e3 (a ref "
                              "of maxpm browser snapshot), --selector '<css>', or maxpm browser click <x> <y>")
+        if a.double:
+            args["count"] = 2
+        if a.right:
+            args["button"] = "right"
+    elif b == "hover":  # #5669: an element or a point, as click takes them
+        t = a.target
+        if t is not None and _is_number(t):
+            if a.y is None or not _is_number(a.y):
+                raise RiverError("a point needs x and y: maxpm browser hover <x> <y>")
+            args.update(x=float(t), y=float(a.y))
+        elif t is not None:
+            args["selector"] = f'{t} "{a.y}"' if a.y is not None and t in BROWSER_ROLES else t
+        else:
+            raise RiverError("name what to hover: maxpm browser hover \"<its name>\", @e3, or <x> <y>")
+    elif b == "scroll":  # [target] [amount]: a last word that is a number or a direction is the amount
+        w = list(a.words)
+        if w and (_is_number(w[-1]) or w[-1].lower() in ("down", "up", "left", "right")):
+            args["amount"] = w.pop()
+        if len(w) > 1:
+            raise RiverError("scroll takes one element (in quotes) and an amount: maxpm browser scroll \"Results\" down")
+        if w:
+            args["selector"] = w[0]
+    elif b == "drag":
+        def point(s):
+            p = s.split(",")
+            return [float(p[0]), float(p[1])] if len(p) == 2 and all(_is_number(v) for v in p) else None
+        src, dst = point(a.source), point(a.dest)
+        if src:
+            args.update(x=src[0], y=src[1])
+        else:
+            args["selector"] = a.source
+        args["to"] = dst or a.dest
     elif b == "type":
         if len(a.words) > 2:
             raise RiverError("type takes the text in one argument, in quotes: maxpm browser type @e5 'two words'")
@@ -2724,8 +2775,14 @@ def _step_words(s):
     w = {"new_tab": ["new-tab"], "close_tab": ["close-tab"]}.get(act, [act])
     if act == "open":
         w.append(s.get("url") or "")
-    elif act == "click":
+    elif act in ("click", "hover"):
         w += [sel] if sel else [str(s.get("x")), str(s.get("y"))]
+        w += (["--double"] if (s.get("count") or 1) > 1 else []) + (["--right"] if s.get("button") == "right" else [])
+    elif act == "scroll":
+        w += ([sel] if sel else []) + ([str(s["amount"])] if s.get("amount") else [])
+    elif act == "drag":
+        to = s.get("to")
+        w += [sel or f"{s.get('x')},{s.get('y')}", ",".join(str(v) for v in to) if isinstance(to, list) else to or ""]
     elif act == "type":
         w += ([sel] if sel else []) + [s.get("text") or ""]
     elif act == "fill":
@@ -2747,6 +2804,8 @@ def _step_words(s):
         w += [f"{f[0]}={f[1]}" + (f"@{f[2]}" if f[2] else "") for f in s.get("fields") or []]
     if s.get("within"):
         w += ["--in", s["within"]]
+    if s.get("mods"):
+        w += ["--with", ",".join(s["mods"])]
     if s.get("wait"):
         w += ["--wait", s["wait"]]
     return w
@@ -5205,7 +5264,7 @@ def render_annotations(a, res):
 
 
 BROWSER_ACTS = {"open", "click", "type", "fill", "select", "check", "uncheck", "key", "back", "forward", "reload",
-                "dialog", "upload"}
+                "dialog", "upload", "hover", "scroll", "drag"}
 
 
 def _snapshot_lines(s, title=True):
@@ -5248,6 +5307,11 @@ def _browser_result(action, res):
         what.append(("accepted" if res["answered"]["accept"] else "dismissed") + f" the {res['answered']['type']} box")
     if res.get("uploaded"):  # #5679
         what.append("uploaded " + ", ".join(res["uploaded"]))
+    if res.get("count", 1) > 1 or res.get("button"):  # #5669: the other clicks
+        what.append(("double " if res.get("count", 1) > 1 else "") + (res.get("button") or "left") + " click")
+    if res.get("scrolled"):
+        s = res["scrolled"]
+        what.append(f"scrolled to {s['y']} of {s['end']}" + (" (the end)" if s["y"] >= s["end"] else ""))
     head = ("new page: " if res.get("navigated") else "") + f"{res.get('title') or '(no title)'}  {res.get('url') or ''}"
     out = [head + (f"  ({'; '.join(what)})" if what else "")] + list(res.get("notes") or [])  # notes: #5668
     d = res.get("dialog")
