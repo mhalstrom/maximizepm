@@ -176,9 +176,48 @@ IDENTITY = {"source": "log", "env": None, "log_glob": "~/.gemini/tmp/*/chats/ses
             "url": None, "inside_env": ["GEMINI_CLI"]}
 
 
-def gemini_dir():
+def gemini_dir(env=None):
     """Gemini's own folder: ~/.gemini, or $GEMINI_CLI_HOME/.gemini (Storage.getGlobalGeminiDir)."""
-    return Path(os.environ.get("GEMINI_CLI_HOME") or Path.home()) / ".gemini"
+    return Path((os.environ if env is None else env).get("GEMINI_CLI_HOME") or Path.home()) / ".gemini"
+
+
+LOG_RECENT = 600  # seconds: a command runs in a turn, and the turn wrote its session's log a short time before
+
+
+def session_from_log(folder, env=None, now=None):
+    """The id of the Gemini session that a command in `folder` runs in (#5819), for core.session_from_env: Gemini 0.68
+    gives its shell no session id variable (only GEMINI_CLI=1). Gemini records a tool call in its log only after the
+    call ends, so the log cannot name the command that runs now; the turn that runs it wrote the log a short time
+    before. So: the main log (its first line holds a sessionId; a stray session-*.jsonl with none, seen after a
+    resume, does not count) of the project of `folder` or of a folder above it (projects.json) that was written in
+    the last LOG_RECENT seconds. None when there is none, or when two main logs of the project were written in that
+    time: two Gemini sessions work in one folder, and a wrong id is worse than none."""
+    import time
+    gdir = gemini_dir(env)
+    try:
+        projects = json.loads((gdir / "projects.json").read_text(encoding="utf-8")).get("projects") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    real = {os.path.realpath(p): slug for p, slug in projects.items()}
+    here, slug = Path(os.path.realpath(folder)), None
+    for d in [here, *here.parents]:
+        slug = real.get(str(d))
+        if slug:
+            break
+    if not slug:
+        return None
+    since = (now if now is not None else time.time()) - LOG_RECENT
+    recent = []
+    for p in (gdir / "tmp" / slug / "chats").glob("session-*.jsonl"):
+        try:
+            t = p.stat().st_mtime
+        except OSError:
+            continue
+        if t >= since:
+            recent.append((t, p))
+    ids = {r.get("sessionId") for _, p in sorted(recent, reverse=True)
+           for r in [_first_record(p)] if isinstance(r, dict) and r.get("sessionId")}
+    return next(iter(ids)) if len(ids) == 1 else None
 
 
 def _first_record(path):

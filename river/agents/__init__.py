@@ -160,7 +160,9 @@ FIRST_PROMPTS = ("argv", "paste")
 # 5. Session identity. IDENTITY = {
 #      "source":     how MaximizePM learns the session's id after the start: one of IDENTITY_SOURCES,
 #      "env":        the variable that holds it ("env" source), or None,
-#      "log_glob":   the glob of the new log file in a known folder ("log" source; ~ expands), or None,
+#      "log_glob":   the glob of the new log file in a known folder ("log" source; ~ expands), or None; with the
+#                    "log" source, the module's session_from_log(folder, env) gives the id to a command inside the
+#                    agent (core.session_from_env, #5819),
 #      "pane":       a regex whose group 1 is the id in the pane's text ("pane" source), or None,
 #      "url":        its web link with {id} ("https://.../{id}"), or one link for every session (Codex's web app), or None,
 #      "inside_env": the variables that tell that a command runs inside this agent (CLAUDECODE, CODEX_THREAD_ID);

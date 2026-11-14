@@ -14932,13 +14932,27 @@ def session_from_env(env=None):
     (CHAT['ref'] 'session'), when the id matches its IDENTITY['id_pattern'] (else agents.SAFE_ID); or None. Claude
     Code: CLAUDE_CODE_SESSION_ID; Hermes: HERMES_SESSION_ID. Codex's thread id goes to native_address instead (its
     CHAT['ref'] is 'address'). The order of agents.from_env: every other agent first, then codex, then claude: an
-    agent started from a Claude Code shell keeps CLAUDE_CODE_SESSION_ID."""
+    agent started from a Claude Code shell keeps CLAUDE_CODE_SESSION_ID. Source 'log' (Gemini, #5819): inside the
+    agent (IDENTITY['inside_env']), the module's session_from_log(folder, env) reads the id from its chat logs."""
     from . import agents
     env = os.environ if env is None else env
     got = agents.load()
     for m in agents.env_order():
         ad, ident = got[m], got[m].identity or {}
-        if ident.get("source") != "env" or not ident.get("env") or ad.chat_ref() != "session":
+        if ad.chat_ref() != "session":
+            continue
+        if ident.get("source") == "log":
+            read = getattr(ad.module, "session_from_log", None)
+            if not read or not any(env.get(k) for k in ident.get("inside_env") or ()):
+                continue
+            try:
+                sid = str(read(os.getcwd(), env) or "").strip()
+            except OSError:
+                continue
+            if sid and re.fullmatch(ident.get("id_pattern") or agents.SAFE_ID, sid):
+                return sid
+            continue
+        if ident.get("source") != "env" or not ident.get("env"):
             continue
         sid = str(env.get(ident["env"]) or "").strip()
         if sid and re.fullmatch(ident.get("id_pattern") or agents.SAFE_ID, sid):

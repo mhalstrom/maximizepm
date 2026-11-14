@@ -149,6 +149,38 @@ class Identity(Home):
         self.assertEqual(gemini.chat_path("a64cec76-7a53-4be3-aa01-16aa3c4060ce", str(project)), mine / DONE.name)
         self.assertEqual(gemini.chat_path("a64cec76-7a53-4be3-aa01-16aa3c4060ce"), other / DONE.name)
 
+    def test_a_command_inside_gemini_takes_the_id_of_its_projects_newest_log(self):
+        # #5819: Gemini 0.68 gives its shell only GEMINI_CLI=1; the id comes from the log that the turn wrote.
+        project = self.home / "work" / "demo"
+        (project / "src").mkdir(parents=True)
+        (self.home / ".gemini" / "projects.json").parent.mkdir(parents=True, exist_ok=True)
+        (self.home / ".gemini" / "projects.json").write_text(json.dumps({"projects": {str(project): "demo"}}),
+                                                             encoding="utf-8")
+        chats = self.chats("demo")
+        log = chats / REAL.name
+        shutil.copy(REAL, log)
+        sid = "006c1604-f0af-40ae-b1b5-1f960f71cf3d"
+        env = {"GEMINI_CLI": "1", "GEMINI_CLI_HOME": str(self.home)}
+        self.assertEqual(gemini.session_from_log(project, env), sid)
+        self.assertEqual(gemini.session_from_log(project / "src", env), sid)  # a command after cd: the folder above
+        with mock.patch("os.getcwd", return_value=str(project)):
+            self.assertEqual(core.session_from_env(env), sid)
+            self.assertIsNone(core.session_from_env({"GEMINI_CLI_HOME": str(self.home)}))  # not inside Gemini
+        # A stray file with no metadata line (seen after a resume) does not count.
+        (chats / "session-2026-11-14T00-30-006c1604.jsonl").write_text(
+            json.dumps({"id": "x", "type": "user", "content": []}) + "\n", encoding="utf-8")
+        self.assertEqual(gemini.session_from_log(project, env), sid)
+        # A log that nobody wrote in the last ten minutes is no turn of this command.
+        self.assertIsNone(gemini.session_from_log(project, env, now=log.stat().st_mtime + gemini.LOG_RECENT + 1))
+        # Two Gemini sessions write logs in one project: no id, as a wrong one is worse.
+        (chats / "session-2026-11-14T00-40-77777777.jsonl").write_text(
+            json.dumps({"sessionId": "77777777-0000-4000-8000-000000000000", "kind": "main"}) + "\n", encoding="utf-8")
+        self.assertIsNone(gemini.session_from_log(project, env))
+        # A folder of no Gemini project, and no projects.json at all.
+        self.assertIsNone(gemini.session_from_log(self.home, env))
+        (self.home / ".gemini" / "projects.json").unlink()
+        self.assertIsNone(gemini.session_from_log(project, env))
+
 
 class Chat(unittest.TestCase):
     def test_a_finished_session_reads_as_the_page_shows_it(self):
