@@ -5349,6 +5349,24 @@ class ServerBind(unittest.TestCase):
         finally:
             httpd.server_close()
 
+    def test_many_connections_at_once_wait_in_the_listen_queue(self):
+        # #5867: tailscale serve opens a connection for each of the page's 73 files at once. With socketserver's
+        # queue of 5, the system dropped the others, and each one waited 1 to 4 s for its retry. Here nobody
+        # accepts: 40 connections must all be queued at once.
+        import socket
+        httpd = server._Server(("127.0.0.1", 0), server.Handler)
+        socks = []
+        try:
+            for _ in range(40):
+                s = socket.socket()
+                s.settimeout(0.5)
+                socks.append(s)
+                s.connect(("127.0.0.1", httpd.server_port))  # a full queue makes this time out
+        finally:
+            for s in socks:
+                s.close()
+            httpd.server_close()
+
 
 
 

@@ -5614,6 +5614,12 @@ def _restart_on_change(httpd):
 class _Server(ThreadingHTTPServer):
     """HTTPServer.server_bind asks DNS for the host's full name (socket.getfqdn), which can hang for
     a long time on a Mac with a slow or missing network. The page needs no name: skip the lookup."""
+    # The listen queue (#5867). socketserver's default of 5 dropped connections: tailscale serve opens one
+    # connection to serve for each request, and the page asks for its 73 script files at once. Each connection
+    # past the fifth waited for the client's retry (1, 2, then 4 s), and the page took 6 s over Tailscale instead of
+    # 0.1. The system limits it to kern.ipc.somaxconn (128 on macOS) or net.core.somaxconn.
+    request_queue_size = 1024
+
     def server_bind(self):
         import socketserver
         socketserver.TCPServer.server_bind(self)
