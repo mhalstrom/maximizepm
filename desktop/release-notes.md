@@ -1,4 +1,4 @@
-Fixes: when you start MaximizePM from the app, its checks and hooks find the same commands as in your terminal.
+New: a Browsers view on the Sessions tab shows every running browser, and a click opens its session. Each browser has a size menu (phone, tablet, laptop, desktop or your own size) that stays when you click or type. The Sessions list is cleaner: Capacity at the top, one Start an agent button, tabs for Agents, Artifacts and Browsers, Active or All, a Settings dialog, and an edge you drag to resize it. Fixes: a second maxpm serve on a port that is in use no longer crashes, and a launch with a long first prompt always starts its agent.
 
 ## Download
 
