@@ -1884,7 +1884,8 @@ def _layout(detect=None):
                                "other": d["other"] and item(d["other"]),
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
                                "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell),
-                               "behind": d["behind"] and re.compile(d["behind"])}
+                               "behind": d["behind"] and re.compile(d["behind"]),
+                               "header": d["header"] and re.compile(d["header"])}
     return got
 
 
@@ -2357,9 +2358,16 @@ def _prompt_command(lines, layout=None):
     """What a permission prompt asks to run, from the lines above its question: {"tool": the header ("Bash
     command (unsandboxed)"), "command": the command's first line, "why": a line that says why it asks (auto
     mode's "held this command for the server-side classifier to review")}, each None when the lines lack it.
-    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it."""
-    rule = (layout or _layout())["rule"]
+    Claude Code 2.1 puts the command between two dashed rules under the header; before, on the line under it.
+    An adapter's DETECT['header'] reads both from the header line itself (Gemini: '? Shell  touch notes.txt', #5817)."""
+    lay = layout or _layout()
+    rule = lay["rule"]
     why = next((x.strip() for x in reversed(lines) if re.search(r"classifier|held this command", x, re.I)), None)
+    if lay.get("header"):
+        m = next((m for m in map(lay["header"].match, reversed(lines)) if m), None)
+        if m:
+            cmd = m.group(2).strip() if m.re.groups >= 2 and m.group(2) else None
+            return {"tool": m.group(1).strip(), "command": cmd and cmd[:200], "why": why}
     head = next((n for n in range(len(lines) - 1, -1, -1)
                  if re.match(r"^\s*(\w+ )?(command|file|edit|fetch|tool)\b", lines[n].strip(), re.I)
                  and len(lines[n].strip()) < 60), None)

@@ -372,6 +372,21 @@ class Screen(unittest.TestCase):
         self.assertEqual(self.read("pane_blocked_auth.txt")[1]["options"], [
             ("1. Sign in with Google", True), ("2. Use Gemini API Key", False), ("3. Vertex AI", False)])
 
+    def test_a_tool_question_names_the_tool_and_what_it_runs(self):
+        # #5817: the header line over the question ('? Shell  touch notes.txt'), read with DETECT['header'].
+        for name, tool, command in (("pane_blocked_shell.txt", "Shell", "touch notes.txt"),
+                                    ("pane_blocked_edit.txt", "Edit", "calc.py: def add(a, b): => def plus(a, b):"),
+                                    ("pane_blocked_trust_dirs_tool.txt", "Shell", "touch notes.txt")):
+            _, p = self.read(name)
+            self.assertEqual((p["tool"], p["command"]), (tool, command), name)
+        self.assertEqual(self.read("pane_blocked_trust.txt")[1]["tool"], None)  # a dialog, no tool
+        # The alert to the person says what the question runs.
+        from river import server
+        ad = agents.get("gemini")
+        tail = server._prompt_tail(server._plain((FIX / "pane_blocked_shell.txt").read_text(encoding="utf-8")))
+        text = server.prompt_alert("g1", "maxpm:1.0", tail, layout=server._layout(ad.detect))[0]
+        self.assertIn("It asks to run (Shell): touch notes.txt. Question: Allow execution of [Shell]?", text)
+
     def test_the_trust_question_of_the_added_queue_folder(self):
         # #5818: real screens of Gemini CLI 0.68.0 started with --skip-trust --include-directories <queue folder>.
         trust = [("1. Yes", True), ("2. Yes, and remember the directories as trusted", False), ("3. No", False)]

@@ -293,6 +293,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #      "behind":       a regex of a question that the CLI draws under another question while the keys answer the one
 #                      above it (Gemini's added folder trust under a tool question, #5818); the page then reads the
 #                      question above. "": none,
+#      "header":       a regex of the line above a tool question that names the tool (group 1) and what it runs or
+#                      changes (group 2, optional): Gemini's "? Shell  touch notes.txt" (#5817). "": the built-in
+#                      reading (a line that starts with command, file, edit, fetch or tool),
 #    }
 # The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
 # alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
@@ -305,7 +308,7 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
                "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
-               "behind": str}
+               "behind": str, "header": str}
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -318,6 +321,7 @@ DETECT_LAYOUT = {
             r"|^\s*enter \w+ ·.*\besc \w+|←/→ to adjust",
     "row": "",
     "behind": "",
+    "header": "",
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in

@@ -552,6 +552,9 @@ DETECT = {
     # draws that question under the tool question, but the keys answer the tool question first
     # (pane_blocked_trust_dirs_tool.txt): the page must show the tool question.
     "behind": TRUST_ADDED,
+    # #5817: the header of a tool question: "?", the tool's display name, two spaces, then what it runs or changes
+    # ("? Shell  touch notes.txt", "? Edit  calc.py: def add(a, b): => def plus(a, b):").
+    "header": r"^\s*\? (\S+(?: \S+)*?)(?:\s{2,}(\S.*))?$",
 }
 
 # ---------------------------------------------------------------------------------------------------------------
