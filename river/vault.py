@@ -682,8 +682,9 @@ def _require(conn, name, actor, what, detail=None):
 
 
 def _person_only(conn, actor, what):
+    """what: the step as a verb, for example 'change a credential set'."""
     if not session_of(conn, actor)["person"]:
-        raise RiverError(f"only a person {what}. Ask the manager to bring it to the person: "
+        raise RiverError(f"only a person may {what}. Ask the manager to bring it to the person: "
                          + _ask_line(conn, f"Please {what}: <which set, to what, why>"))
 
 
@@ -713,7 +714,7 @@ def set_change(conn, name, add=(), remove=(), note=None, manager_may_grant=None,
     check_name(name)
     if re.match(r"^[gG]\d+$", name):
         raise RiverError(f"{name} looks like a grant id (maxpm secret revoke g12): give the set another name")
-    _person_only(conn, actor, "changes a credential set")
+    _person_only(conn, actor, "change a credential set")
     for n in list(add) + list(remove):
         check_name(n)
     with core.tx(conn):
@@ -797,7 +798,7 @@ def _set_name(conn, set_id):
 
 def grant(conn, set_name, scope, value, until=None, note=None, actor=None):
     """Grant a set to one scope, until a revoke or until (a time a person types: 7d, 2026-12-01). Only a person."""
-    _person_only(conn, actor, "grants a credential set")
+    _person_only(conn, actor, "grant a credential set")
     s = _set(conn, set_name)
     v = _scope_value(conn, scope, value)
     end = core.iso(core.parse_when(until, core.setting(conn, "timezone"))) if until else None
@@ -819,7 +820,7 @@ def grant(conn, set_name, scope, value, until=None, note=None, actor=None):
 def revoke(conn, grant_id=None, set_name=None, scope=None, value=None, actor=None):
     """End grants: one by its id (g12), or the set's grants to one scope, or all grants of the set. The next use is
     refused. Only a person."""
-    _person_only(conn, actor, "revokes a credential set's grant")
+    _person_only(conn, actor, "revoke a credential set's grant")
     if grant_id is not None:
         gid = str(grant_id).lstrip("gG#")
         if not gid.isdigit():
