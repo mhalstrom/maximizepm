@@ -14,7 +14,7 @@ import { openWaiting, closeWaiting } from "../components/waitDialog.js";
 import { openSettings } from "../components/settingsDialog.js";
 import { makeDictation } from "../components/dictate.js";
 import { viewOf } from "../components/viewSettings.js";
-import { openInPanel, openList, wirePanel, panelFor } from "../components/sidePanel.js";
+import { openInPanel, openList, wirePanel, panelFor, openChanges } from "../components/sidePanel.js";
 import { openTask } from "../components/taskContext.js";
 import { openBrowser } from "../components/browserTool.js";
 import { checkPaths } from "../components/artLinks.js";
@@ -201,6 +201,16 @@ function rowHover(s) {
 function provIcon(p) {
   return tagged(p) ? `<span class="prov prov-ic prov-${esc(p.id)}" title="Runs in ${esc(p.label)}" aria-label="${esc(p.label)}">${esc(p.label.slice(0, 1))}</span>` : "";
 }
+// The count of files the session changed against GitHub main (#5855); its head's Changes button shows it too.
+const changesOf = (name) => +(((S && S.changes) || {})[name] || 0);
+function changesChip(s) {
+  const n = changesOf(s.name);
+  return n ? `<span class="sp-count srow-changes" title="${n} file${n === 1 ? "" : "s"} changed: Changes">±${n}</span>` : "";
+}
+export function markChanges(name) {
+  const n = changesOf(name);
+  for (const el of document.querySelectorAll("[data-changes-count]")) el.textContent = n ? String(n) : "";
+}
 export function sessionRow(s) {
   // The assistant (#5110) goes through what waits on the person: its tag names its job, as the manager's does.
   const role = s.role === "manager" ? `<span class="mgr-tag">Manager</span>` : s.role === "expert" ? `<span class="mgr-tag expert-tag">Expert</span>`
@@ -210,7 +220,7 @@ export function sessionRow(s) {
   // data-agent: a drop target for an item row (#5102 step 2): the item goes into this session's queue.
   return `<div class="srow${["prompt", "answer"].includes(s.state) || (s.waiting || []).length ? " needs" : ""}${isPinned(s) ? " pinned" : ""}" data-session="${esc(s.name)}" data-agent="${esc(s.name)}" data-state="${esc(s.state)}">
     <div class="srow-main" tabindex="0" role="button" title="${esc(rowHover(s))}" aria-label="Open session ${esc(head || s.name)}">
-      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${shellChip(s)}${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
+      <div class="srow-h">${role}${head ? `<b class="srow-t">${esc(head)}</b>` : ""}${provIcon(s.provider)}<span class="spacer"></span>${changesChip(s)}${shellChip(s)}${waitBadge(s)}<span class="dot ${DOT[s.state] || "away"}" title="${esc(s.state_label)}"></span><span class="sago" data-at="${esc(s.at || "")}">${s.at ? ago(s.at) : ""}</span></div>
       <div class="sub">${esc(clip(line2, 120))}</div>
       <span class="srow-acts">${pinButton(s)}${endButton(s, { icon: true, cls: "srow-end" })}</span>
       ${s.role === "expert" && s.cache ? `<div class="sid cache-line">${cacheBadge(s.cache)}</div>` : ""}
@@ -232,7 +242,7 @@ function renderList(el, list, picked, empty) {
     return;
   }
   delete el.dataset.empty;
-  const sigs = list.map(s => JSON.stringify(s));
+  const sigs = list.map(s => JSON.stringify(s) + "|" + changesOf(s.name));  // the count of #5855 too
   if (rows.length !== list.length || rows.some((r, i) => r.dataset.session !== list[i].name)) {
     el.innerHTML = list.map(sessionRow).join("");
     [...el.children].forEach((r, i) => { r.dataset.sig = sigs[i]; });
@@ -247,6 +257,7 @@ function renderList(el, list, picked, empty) {
   }
   el.querySelectorAll(".sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
   el.querySelectorAll("[data-session]").forEach(r => r.classList.toggle("on", r.dataset.session === picked));
+  markChanges(picked);
 }
 
 export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
@@ -257,13 +268,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts" };
   let push = "off";  // notify_status: the states whose Push is on in the Status view (#5852)
   const seenAt = {};  // agent: the last session_seen this page sent for it (ms), so a poll sends it once per turn end
-  // The reply sheet of the Status view (#5853): the session it sends to, and its microphone (made with the view).
-  let replyTo = null, replyDict = null;
-  function closeReply() {
-    if (replyDict) replyDict.stop();
-    replyTo = null;
-    $("#statusReply").classList.add("hidden");
-  }
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null, lastRead = null;
   // The messages that maxpm serve holds for this session until its turn ends (#5587), under the chat.
   let waiting = [];
@@ -287,6 +291,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const l = e.target.closest("[data-sp-open]"); if (l) { if (l.closest("#sessMenu")) headMore(false); return openList(l.dataset.spOpen); }
     const br = e.target.closest("[data-sp-browser]");
     if (br) { if (br.closest("#sessMenu")) headMore(false); return openBrowser(agent).catch(() => {}); }  // #4631
+    const chg = e.target.closest("[data-sp-changes]");
+    if (chg) { if (chg.closest("#sessMenu")) headMore(false); return openChanges(agent); }  // #5855
     if (e.target.closest("#sessYou, #sessArts")) return;  // these views open an item in the drawer, as their tabs did
     const o = e.target.closest("[data-open]");
     if (!o || !/^\d+$/.test(o.dataset.open) || e.metaKey || e.ctrlKey) return;
@@ -534,7 +540,6 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   function markPane() {
     markYou(pane === "you");
     $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
-    if (pane !== "status") closeReply();
     drawStatus();
   }
   // Scrolling up reads the earlier lines (#5120), a page at a time, across compactions and into the transcript of the
@@ -1061,49 +1066,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   setInterval(refresh, 3000);
   // The Status view (#5852): a row opens its session, with what waits for the person first, as a row of the list does;
   // Push turns the notices of that state on or off.
-  // Under a row (#5853): Answer opens what waits in its dialog; Esc goes to its tmux pane; Reply opens the sheet.
-  const rForm = $("#stReplyForm"), byName = (n) => list.find(x => x.name === n);
-  rForm.innerHTML = composerHtml("stR", { placeholder: "Message", label: "Message for the session", attachTitle: "Attach files", sendTitle: "Send" });
-  const rText = $("#stRText"), rState = () => composerState(rForm, rText.value.trim());
-  replyDict = makeDictation({ button: $("#stRMic"), input: rText, status: $("#stReplyDictate"), changed: rState });
-  function openReply(name) {
-    replyTo = name;
-    const s = byName(name) || {};
-    $("#stReplyName").textContent = s.title || name;
-    $("#statusReply").classList.remove("hidden");
-    replyDict.showFor(true);
-    rState();
-    rText.focus();
-  }
-  rText.addEventListener("input", rState);
-  rText.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); rForm.requestSubmit(); } });
-  rForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (replyDict.listening()) await replyDict.finish();
-    const to = replyTo, text = rText.value.trim();
-    if (!to || !text) return;
-    const s = byName(to) || {};
-    try {
-      // While its turn runs, maxpm serve holds the message and types it when the turn has ended (#5587).
-      const r = await typeAction("session_send", { agent: to, text, hold: s.status === "working" });
-      toast(r && r.waiting ? `${s.title || to}: it gets it when its turn ends` : `Sent to ${s.title || to}`);
-      rText.value = ""; rState(); closeReply();
-    } catch (err) { return toast(err.message, true); }
-    await refresh();
-  });
-  $("#stReplyClose").addEventListener("click", closeReply);
-  $("#stReplyChat").addEventListener("click", () => { const n = replyTo; closeReply(); if (n) pick(n); });
-  async function sendEsc(name) {
-    try { await typeAction("terminal_keys", { agent: name, keys: [{ key: "Escape" }] }); } catch (err) { return toast(err.message, true); }
-    toast(`Esc sent to ${(byName(name) || {}).title || name}`);
-    await refresh();
-  }
   $("#statusList").addEventListener("click", (e) => {
     const p = e.target.closest("[data-status-push]"); if (p) return setPush(p.dataset.statusPush);
-    const an = e.target.closest("[data-st-answer]");
-    if (an) { const s = byName(an.dataset.stAnswer); return s && showWaiting(s); }
-    const es = e.target.closest("[data-st-esc]"); if (es) return sendEsc(es.dataset.stEsc);
-    const rp = e.target.closest("[data-st-reply]"); if (rp) return openReply(rp.dataset.stReply);
     const r = e.target.closest("[data-status-go]"); if (!r) return;
     pick(r.dataset.statusGo);
     const s = list.find(x => x.name === r.dataset.statusGo);

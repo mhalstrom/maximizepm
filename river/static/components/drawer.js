@@ -100,6 +100,7 @@ export function itemDrawerHtml(it, { S, me }) {
       ${it.status === "open" && !it.backlog && ["work", "fixes"].includes(it.kind) ? `<button class="btn" data-do="backlog" title="Move it to the backlog">To backlog</button>` : ""}
       ${!closed ? `<button class="btn" data-do="drop">Drop</button>` : `<button class="btn" data-do="reopen">Reopen</button>`}
       <button class="btn" data-do="save">Save details</button>
+      <button class="btn" data-do="changes" title="${it.kind === "deploy" ? "The commits this release ships" : "The commits that name #" + it.id}">Changes</button>
       ${agentButton(it, S)}
     </div>
     <div class="sec"><h4>Details</h4><div class="form">

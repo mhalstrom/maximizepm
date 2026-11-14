@@ -276,15 +276,15 @@ def _is_local(url):
     return (urllib.parse.urlparse(url).hostname or "") in ("127.0.0.1", "localhost", "::1")
 
 
-def page_url(conn, item_id=None, terminal=None, person=None, art=None, browser=False):
+def page_url(conn, item_id=None, terminal=None, person=None, art=None, browser=False, changes=False):
     """The MaximizePM page: on an item (/?item=<id>), or on the session of an agent that waits on a prompt or asked
     a question (/sessions/<name>, where the person answers it, #4653), or on one of its artifacts
     (/sessions/<name>/artifacts/<id>, #4689), or on its Browser (/sessions/<name>/browser, a sign-in step that is the
-    person's, #5849); ?as=<person> for the person it is for."""
+    person's, #5849), or on its Changes (/sessions/<name>/changes, #5855); ?as=<person> for the person it is for."""
     import urllib.parse
     base = f"http://127.0.0.1:{SERVE_PORT['port'] or core.serve_port_now(conn)}/"
-    path = (f"sessions/{urllib.parse.quote(terminal, safe='')}" + (f"/artifacts/{art}" if art else "/browser" if browser
-                                                                   else "")) if terminal else ""
+    tail = f"/artifacts/{art}" if art else "/browser" if browser else "/changes" if changes else ""
+    path = f"sessions/{urllib.parse.quote(terminal, safe='')}{tail}" if terminal else ""
     q = urllib.parse.urlencode([(k, v) for k, v in (("item", item_id if not terminal else None), ("as", person)) if v])
     return base + path + (f"?{q}" if q else "")
 

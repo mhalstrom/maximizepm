@@ -491,6 +491,11 @@ button.srow-it { cursor: pointer; }
 /* The two lists of the panel (#4685): first, without an X. */
 .sp-tab-list { padding: var(--sp-0) var(--sp-3); font-weight: 500; }
 .sp-tab-list + .sp-tab:not(.sp-tab-list) { margin-left: var(--sp-2); }
+/* The count of changed files (#5855): on the Changes tab, its head button, and the session row. */
+.sp-count { margin-left: var(--sp-1); padding: 0 var(--sp-1); border-radius: var(--r-pill); background: var(--bg);
+  color: var(--muted); font-size: var(--fs-xs); font-weight: 500; font-variant-numeric: tabular-nums; }
+.sp-count:empty { display: none; }
+.srow-changes { margin: 0 var(--sp-1) 0 0; }
 /* An item in a panel tab (#4685): the drawer's content, to read. */
 .sp-item { padding: var(--sp-5) var(--sp-6); font-size: var(--fs-m); }
 .sp-item .spi-top { display: flex; align-items: center; gap: var(--sp-3); }

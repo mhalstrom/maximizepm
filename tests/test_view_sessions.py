@@ -1498,7 +1498,8 @@ try {
 '''
         result = drive_page(self, driver)
         self.assertEqual(result["path"], f"/sessions/ag/items/{self.it}")
-        self.assertEqual(result["tabs"], ["Items", "Artifacts", "Browser", f"◇ #{self.it} header"])
+        # Changes (#5855): the fixed tab beside Browser, with no count while the session's folder is not known
+        self.assertEqual(result["tabs"], ["Items", "Artifacts", "Browser", "Changes", f"◇ #{self.it} header"])
 
 
 class PanelOneTab(Base):

@@ -24,6 +24,8 @@ for _name in ["CLAUDE_CODE_BRIDGE_SESSION_ID"] + [(_got[m].identity or {}).get("
         os.environ.pop(_name, None)
 
 core.tmux_path = lambda: None
+from river import review as _review  # noqa: E402
+_review.COUNT_AGAIN = float("inf")  # the page state starts no git count of the sessions' folders (#5855)
 core.LOGIN_PATH_RUNNER = lambda: None  # a test never starts the person's login shell (#5611); a test sets its own
 dictation.BUILD = False  # a test never builds the dictation helper into ~/.maximizepm/bin
 from river.agents import codex as codex_adapter  # noqa: E402

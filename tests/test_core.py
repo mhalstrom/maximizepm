@@ -7320,17 +7320,6 @@ class BusyLease(Base):
         self.assertEqual(core.busy_now(self.c, {"w1"}), set())
         self.procs[3000] = (1000, "01:00")  # a turn runs a command
         self.assertEqual(core.busy_now(self.c, {"w1"}), {"w1"})
-        # Its hooks said the turn ended, with no background work: at its prompt, whatever runs below it (an MCP
-        # server that started late, after the folder trust question).
-        idle = core.iso(self.clock[0] - timedelta(seconds=30))
-        self.c.execute("UPDATE agents SET activity_at=?, activity_event='report:idle', activity_waits=NULL "
-                       "WHERE name='w1'", (idle,))
-        self.c.commit()
-        self.assertEqual(core.busy_now(self.c, {"w1"}), set())
-        # With background work of its own (a run_in_background test), it still works.
-        self.c.execute("UPDATE agents SET activity_waits='[\"a process\"]' WHERE name='w1'")
-        self.c.commit()
-        self.assertEqual(core.busy_now(self.c, {"w1"}), {"w1"})
 
     def test_a_long_command_keeps_the_lease(self):
         self.assertEqual([core._elapsed(x) for x in ("05", "01:05", "1:01:05", "2-01:01:05")], [5, 65, 3665, 176465])

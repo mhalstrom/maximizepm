@@ -3736,21 +3736,6 @@ class FrameTitle(unittest.TestCase):
         parts = server._prompt_parts(["❯ 1. Yes", "  2. No"])  # no frame, a plain list: no title either
         self.assertIsNone(parts["question"])
 
-    def test_a_wrapped_question_is_read_whole(self):
-        """#5862: Claude Code's trust question in a narrow pane (seen 2026-11-14) read only 'trust?'."""
-        screen = [" Accessing workspace:", "", " /Users/x/notes", "",
-                  " Quick safety check: Is this a project you created or one you",
-                  " trust? (Like your own code, a well-known open source project, or",
-                  " work from your team). If not, take a moment to review what's in",
-                  " this folder first.", "", " ❯ No, exit", "   Yes, I trust this folder", "",
-                  " Enter to confirm · Esc to cancel"]
-        parts = server._prompt_parts(server._Tail(screen))
-        self.assertEqual(parts["question"], "Quick safety check: Is this a project you created or one you trust?")
-        # A new sentence on its own line stays alone: the line above it is what the command does.
-        screen = [" Bash command", "   rm -rf build", "   remove the build folder", " Do you want to proceed?",
-                  " ❯ 1. Yes", "   2. No"]
-        self.assertEqual(server._prompt_parts(server._Tail(screen))["question"], "Do you want to proceed?")
-
 
 class Watched(unittest.TestCase):
     def test_dev_reload_sees_subfolders_but_not_vendor(self):

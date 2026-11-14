@@ -41,14 +41,14 @@
         <span id="sessItem" class="sess-item"></span>
         <span class="spacer"></span>
         <span class="sess-lists" role="group" aria-label="Open in the side panel">
-          <button class="btn sess-tab" type="button" data-sp-open="items" aria-pressed="false" title="Items it worked on">Items</button><button class="btn sess-tab" type="button" data-sp-open="artifacts" aria-pressed="false" title="Files and pages it made">Artifacts</button><button class="btn sess-tab" type="button" data-sp-browser aria-pressed="false" title="This project's browser">Browser</button>
+          <button class="btn sess-tab" type="button" data-sp-open="items" aria-pressed="false" title="Items it worked on">Items</button><button class="btn sess-tab" type="button" data-sp-open="artifacts" aria-pressed="false" title="Files and pages it made">Artifacts</button><button class="btn sess-tab" type="button" data-sp-browser aria-pressed="false" title="This project's browser">Browser</button><button class="btn sess-tab" type="button" data-sp-changes aria-pressed="false" title="The diff of this session">Changes<span class="sp-count" data-changes-count></span></button>
         </span>
         <span class="sess-more">
           <button class="iconbtn" type="button" id="sessMore" aria-expanded="false" aria-controls="sessMenu" title="Session actions" aria-label="More of this session">⋯</button>
           <div class="sess-menu" id="sessMenu" aria-label="This session">
             <div id="sessMenuItem" class="sess-mgrp sess-mitem"></div>
             <!-- On a phone the head has no room for the tab pair: Items, Artifacts and Browser are rows here (#5402). -->
-            <div class="sess-mgrp sess-mlists"><button class="btn sess-ml" type="button" data-sp-open="items">Items</button><button class="btn sess-ml" type="button" data-sp-open="artifacts">Artifacts</button><button class="btn sess-ml" type="button" data-sp-browser>Browser</button></div>
+            <div class="sess-mgrp sess-mlists"><button class="btn sess-ml" type="button" data-sp-open="items">Items</button><button class="btn sess-ml" type="button" data-sp-open="artifacts">Artifacts</button><button class="btn sess-ml" type="button" data-sp-browser>Browser</button><button class="btn sess-ml" type="button" data-sp-changes>Changes<span class="sp-count" data-changes-count></span></button></div>
             <div id="sessOpen" class="sess-mgrp"></div>
             <div id="sessGive" class="sess-mgrp give-row"></div>
             <div id="sessPlan" class="sess-mgrp"></div>

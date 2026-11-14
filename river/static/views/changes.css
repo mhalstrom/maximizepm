@@ -1,0 +1,52 @@
+/* The Changes view (#5855, components/changesView.js): the base and layout switches, the file list, each file's diff
+   with its line numbers, the comment boxes, and the item dialog. Tokens only (#5028). A phone shows one column, and
+   each file's lines scroll sideways inside the file, never the page (p57). */
+.cv { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); min-width: 0; }
+.cv-bar { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
+.cv-base.on, .cv-lay.on { color: var(--ink); font-weight: 600; border-color: var(--accent); }
+.cv-shared { padding: var(--sp-2) var(--sp-3); border-radius: var(--r-s); background: var(--wait-bg); }
+.cv-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.cv-sum { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; }
+.cv-plus { color: var(--ready); font-variant-numeric: tabular-nums; }
+.cv-minus { color: var(--warn); font-variant-numeric: tabular-nums; }
+.cv-note { padding: var(--sp-2) 0; }
+.cv-list { display: flex; flex-direction: column; border: var(--hair) solid var(--line); border-radius: var(--r-m); }
+.cv-li { display: flex; gap: var(--sp-3); align-items: baseline; padding: var(--sp-2) var(--sp-3); color: var(--ink);
+  text-decoration: none; border-bottom: var(--hair) solid var(--line); min-width: 0; }
+.cv-li:last-child { border-bottom: 0; }
+.cv-li:hover { background: var(--bg); }
+.cv-li .cv-path { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.cv-path, .cv-sha, .cv-t { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.cv-commit { margin-top: var(--sp-4); font-weight: 600; overflow-wrap: anywhere; }
+.cv-sha { color: var(--muted); font-weight: 400; }
+.cv-file { border: var(--hair) solid var(--line); border-radius: var(--r-m); min-width: 0; scroll-margin-top: var(--sp-3); }
+.cv-fhead { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; padding: var(--sp-2) var(--sp-3);
+  background: var(--bg); border-bottom: var(--hair) solid var(--line); border-radius: var(--r-m) var(--r-m) 0 0; }
+.cv-fhead .cv-path { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.cv-file > .cv-note { padding: var(--sp-2) var(--sp-3); }
+.cv-scroll { overflow-x: auto; }
+.cv-t { border-collapse: collapse; width: 100%; font-size: var(--fs-s); line-height: 1.5; }
+.cv-t td { padding: 0 var(--sp-2); vertical-align: top; }
+.cv-n { width: 1%; text-align: right; color: var(--muted); white-space: nowrap; user-select: none; cursor: pointer;
+  font-variant-numeric: tabular-nums; }
+.cv-c { white-space: pre; cursor: pointer; }
+.cv-split .cv-c { width: 50%; }
+.cv-sign { display: inline-block; width: 1ch; color: var(--muted); user-select: none; }
+.cv-add { background: var(--ready-bg); }
+.cv-del { background: var(--warn-bg); }
+.cv-none { background: var(--bg); }
+.cv-on { box-shadow: inset var(--hair-2) 0 0 var(--accent); background: var(--prog-bg); }
+.cv-hunk td { color: var(--muted); background: var(--bg); padding: var(--sp-1) var(--sp-2); white-space: pre; }
+.cv-crow td { padding: var(--sp-2) var(--sp-3); white-space: normal; font-family: inherit; font-size: var(--fs-m); }
+.cv-comment { border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-2) var(--sp-3);
+  background: var(--panel); max-width: var(--w-form); overflow-wrap: anywhere; }
+.cv-form { display: flex; flex-direction: column; gap: var(--sp-2); max-width: var(--w-form); }
+.cv-form textarea { width: 100%; min-height: var(--h-text-min); }
+.cv-form .actions { display: flex; gap: var(--sp-2); }
+#changesDlg { --dlg-w: min(calc(var(--w-form) * 2), 96vw); }
+#changesDlg .cv { padding: 0; }
+@media (max-width: 759px) {  /* a phone: Open in editor needs VS Code on this device; the controls at the size of a tap */
+  .cv-editor { display: none; }
+  .cv-acts .btn, .cv-bar .btn { min-height: var(--tap); }
+  .cv-li { min-height: var(--tap); align-items: center; }
+}

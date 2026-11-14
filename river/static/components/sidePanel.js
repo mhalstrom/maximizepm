@@ -42,6 +42,8 @@ const bySession = {};  // name -> {tabs, on}
 const LISTS = { items: "Items", artifacts: "Artifacts" };
 const isList = (x) => x === "items" || x === "artifacts";
 const isBrowser = (target) => String(target || "").startsWith("tool:browser:");
+const isChanges = (target) => String(target || "").startsWith("tool:changes:");  // the fixed tab Changes (#5855)
+const fixedTool = (target) => isBrowser(target) || isChanges(target);
 // A page of maxpm serve itself (the relay's address, #4711) stays in a frame; any other outside page goes to the browser.
 const ownPage = (target) => target === location.origin || target.startsWith(location.origin + "/");
 const isWeb = (target) => /^https?:\/\//i.test(target) && !LOCAL.test(target) && !ownPage(target);
@@ -100,10 +102,13 @@ function save() {
 function renderTabs() {
   // The two lists and the project's browser first, without an X (#4685, #5628); then a tab for each thing opened.
   const br = isBrowser((tabs.find(t => t.id === on) || {}).target);
+  const ch = isChanges((tabs.find(t => t.id === on) || {}).target);
+  const count = +(((S && S.changes) || {})[session] || 0);  // changed files against GitHub main (#5855)
   $("#spTabs").innerHTML = Object.entries(LISTS).map(([k, title]) => `<span class="sp-tab sp-tab-list${on === k ? " on" : ""}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${on === k}" data-sp-list="${k}">${title}</button></span>`).join("")
     + `<span class="sp-tab sp-tab-list${br ? " on" : ""}"><button type="button" class="sp-tab-l" role="tab" aria-selected="${br}" data-sp-brtab>Browser</button></span>`
-    + tabs.filter(t => !isBrowser(t.target)).map(t => { const k = kindOf(t.target);
+    + `<span class="sp-tab sp-tab-list${ch ? " on" : ""}"><button type="button" class="sp-tab-l" role="tab" aria-selected="${ch}" data-sp-chtab title="The diff of this session">Changes${count ? ` <span class="sp-count">${count}</span>` : ""}</button></span>`
+    + tabs.filter(t => !fixedTool(t.target)).map(t => { const k = kindOf(t.target);
     const tip = itemOf(t.target) ? t.title || label(t.target) : t.target;  // who opened it last, on the label (#5000)
     return `<span class="sp-tab${t.id === on ? " on" : ""}" title="${esc(tip)}">`
     + `<button type="button" class="sp-tab-l" role="tab" aria-selected="${t.id === on}" data-sp-tab="${t.id}" title="${esc(tip + (t.by ? `\nopened by ${t.by}` : ""))}"${t.by ? ` data-by="${esc(t.by)}"` : ""}><span class="sp-k sp-k-${k}" aria-label="${k}">${KIND_MARK[k]}</span> ${esc(t.title || label(t.target))}</button>`
@@ -192,6 +197,14 @@ async function show(t) {
   // A site tab kept from before #5628: the browser opens it, and the tab goes.
   tabs = tabs.filter(x => x.id !== t.id);
   openBrowserTab(t.target);
+}
+
+// The fixed tab Changes (#5855): what the panel's session changed, against a base the person picks.
+export function openChanges(name = session) {
+  if (name && name !== session) panelFor(name);
+  const s = session;
+  if (!s) return;
+  openTool("changes:" + s, "Changes", (box) => import("./changesView.js").then(m => m.renderChanges(box, { session: s })));
 }
 
 // The fixed tab Browser (#5628): the browser of the session's project, at url when one is given (it opens there).
@@ -902,6 +915,7 @@ export function wirePanel() {
     const x = e.target.closest("[data-close]"); if (x) return close(+x.dataset.close);
     const l = e.target.closest("[data-sp-list]"); if (l) return showList(l.dataset.spList);
     if (e.target.closest("[data-sp-brtab]")) return openBrowserTab();
+    if (e.target.closest("[data-sp-chtab]")) return openChanges();
     // data-sp-tab, not data-tab: the page's own click handler reads data-tab as a tab of the page (#4652).
     const t = e.target.closest("[data-sp-tab]"); if (t) show(tabs.find(z => z.id === +t.dataset.spTab));
   });

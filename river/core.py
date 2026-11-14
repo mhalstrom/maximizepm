@@ -146,6 +146,11 @@ DEFAULT_SETTINGS = {
     # No project gets push_first in silence (#1682): the setup recommends a value (look_setup) and the person
     # confirms it; a project where nobody chose has ask_first.
     "result_look": "ask_first",
+    # When a person reviews the changes of a project's sessions (#5855, mark 2026-11-14, layer 2 of the plan: review
+    # is the bottleneck): off (the default: the Changes view and its comments only), push (a session's push or PR
+    # merge waits until a person approves its HEAD in the Changes view), or release (a cut release waits until a
+    # person approves the release's changes). Set it per project: maxpm config set review_at push --project <p>.
+    "review_at": "off",
     # Canvases (#4648): the largest version in bytes (a page carries its images and scripts inline), and how
     # many versions of a canvas maxpm keeps (a new version then removes the oldest, but never version 1).
     "canvas_max": "5000000",
@@ -1251,6 +1256,19 @@ CREATE TABLE IF NOT EXISTS secret_requests (
   grant_id    INTEGER,
   sites       TEXT,
   source      TEXT
+);
+
+-- A person's mark on changes in the Changes view (#5855): target is agent:<name> (a session's folder) or item:<id>;
+-- sha the commit marked (HEAD of the session's folder); kind approved, changes (Request changes) or reviewed (the
+-- base of 'Since my last review'). Readers: push_guard (review_at push: a push waits until the newest mark of its
+-- HEAD is approved), review.session_diff (the view shows the state and the last review).
+CREATE TABLE IF NOT EXISTS diff_approvals (
+  id          INTEGER PRIMARY KEY,
+  target      TEXT NOT NULL,
+  sha         TEXT NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'approved',
+  approved_by TEXT,
+  approved_at TEXT NOT NULL
 );
 
 -- The prompts that people sent to a session from the Sessions tab's message box (#4855): Up and Down in the box
@@ -2491,6 +2509,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
+    elif key == "review_at" and value not in ("off", "push", "release"):
+        raise RiverError("review_at is off, push or release")
     elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
@@ -8349,8 +8369,26 @@ def _release_cut(conn, dep_id, actor, why, rev=None):
            + "; a later ship request joins the next deploy item")
     if rev:
         _add_note(conn, dep_id, f"[maxpm] release cut at {iso(now())}: {rev}")
+    _review_wait(conn, dep_id)
     _hook(conn, "release-cut", dep["target"], dep_id, actor)
     return True
+
+
+def _review_wait(conn, dep_id):
+    """review_at release (#5855): a cut release waits until a person approves its changes in the Changes view
+    (review.mark approved ends the wait). Inside a tx. The person gets one alert with the link."""
+    from . import review, notify
+    dep = _item(conn, dep_id)
+    if review.release_review(conn, dep_id) != "release" or dep["blocked_reason"]:
+        return
+    conn.execute("UPDATE items SET blocked_reason=?, blocked_at=?, blocked_set_by=? WHERE id=?",
+                 ("waits for a person to approve the release's changes (Changes)", iso(now()), review.REVIEW_BY, dep_id))
+    _event(conn, dep_id, "maxpm", "the release waits for a person's review of its changes (review_at release)")
+    people = [r["name"] for r in conn.execute("SELECT name FROM agents WHERE kind='human' ORDER BY last_seen DESC")]
+    if people:
+        _send(conn, "alert", "maxpm", f"Release #{dep_id} ({dep['target']}) waits for your review of its changes. "
+              f"Open it, then Changes, then Approve or Request changes: {notify.page_url(conn, item_id=dep_id)}",
+              to=people[0], item_id=dep_id)
 
 
 def _cut_on_claim(conn, it, actor):
@@ -12788,7 +12826,7 @@ def _process_list():
 CLI_SERVERS_GRACE = timedelta(seconds=60)  # what an agent CLI starts this soon after its own start: its servers
 
 
-def busy_now(conn, names=None, skip=(), at_prompt=True):
+def busy_now(conn, names=None, skip=()):
     """The agents (among names; else every AI agent) in whose session a command runs now: the agent CLI process
     runs on this computer, and a process below it started after the agent's last river command (a test run, a
     build, a merge). The servers the CLI started with are older, and so is a maxpm wait, which renews last_seen
@@ -12798,17 +12836,12 @@ def busy_now(conn, names=None, skip=(), at_prompt=True):
     hook that asks, #4293) and the ones below them do not count. One ps call; an empty set with no ps (a sandbox that blocks it).
     Two kinds of process are no work (#5861): the wake listener (maxpm report --wake, a Claude Code hook that waits
     for a message from each turn end on, #5686), and what the CLI started in its first CLI_SERVERS_GRACE (its MCP
-    servers). A session with no item runs no river command, so both are newer than its last one.
-    An agent whose hooks said last that its turn ended (report:idle) with no background work of its own, after its
-    last river command, is at its prompt: not busy, whatever runs below it (an MCP server that started late).
-    at_prompt=False leaves that rule out: the Stop hook asks what runs below the session to record that report."""
+    servers). A session with no item runs no river command, so both are newer than its last one."""
     limit = parse_duration(setting(conn, "busy_max"))
     t, host = now(), this_host()
-    rows = [r for r in conn.execute("SELECT name, pid, last_seen, activity_at, activity_event, activity_waits FROM agents "
-                                    "WHERE kind='ai' AND pid IS NOT NULL AND host=?", (host,)).fetchall()
-            if (names is None or r["name"] in names) and t - parse_iso(r["last_seen"]) < limit
-            and not (at_prompt and r["activity_event"] == "report:idle" and not r["activity_waits"] and r["activity_at"]
-                     and parse_iso(r["activity_at"]) >= parse_iso(r["last_seen"]))]
+    rows = [r for r in conn.execute("SELECT name, pid, last_seen FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
+                                    (host,)).fetchall()
+            if (names is None or r["name"] in names) and t - parse_iso(r["last_seen"]) < limit]
     if not rows:
         return set()
     text = _PROCS.get()  # taken before the write lock of the transaction that runs now (tx)
@@ -15196,8 +15229,7 @@ def hook_report(conn, agent_id, payload, env=None):
         if state == "idle":
             found = rep["waits"]
             if found is None:  # the input does not say: a process below the session, not this hook (busy_now)
-                found = ["a process"] if agent in busy_now(conn, [agent], skip={os.getpid(), os.getppid()},
-                                                           at_prompt=False) else []
+                found = ["a process"] if agent in busy_now(conn, [agent], skip={os.getpid(), os.getppid()}) else []
             waits = json.dumps(found) if found else None
         conn.execute("UPDATE agents SET activity_at=?, activity_event=?, activity_prompt=?, activity_waits=? WHERE name=?",
                      (t, f"report:{state}" if state else a["activity_event"], prompt, waits, agent))
@@ -15239,6 +15271,12 @@ def push_guard(conn, agent, command):
     pat = setting(conn, "push_guard", agent=agent)
     if not pat or not command or not re.search(pat, command):
         return None
+    # review_at push (#5855): a git push or a PR merge waits until the person approves the session's HEAD.
+    if re.search(r"\bgit\b[^|;&\n]*\bpush\b|\bgh\s+pr\s+merge\b", command):
+        from . import review
+        held = review.push_held(conn, agent, command)
+        if held:
+            return held
     alerts = conn.execute(f"SELECT m.id, m.from_agent, m.body FROM messages m WHERE {_TO_ME} AND m.kind='alert' "
                           "AND m.read_at IS NULL AND m.from_agent<>? ORDER BY m.id", (agent, agent, agent)).fetchall()
     # A block that another agent or a person set: the agent's own block (it waits on an outside step) holds nothing.

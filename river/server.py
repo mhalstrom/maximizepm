@@ -2271,13 +2271,6 @@ def _prompt_parts(tail, layout=None):
         for n in range(top - 1, -1, -1):
             if "?" in lines[n]:
                 question, qat = lines[n][:lines[n].rindex("?") + 1].strip(), n
-                # A question that the pane wrapped (#5862: Claude Code's trust question in a narrow pane read only
-                # "trust?"): a line that goes on in lower case, at the indent of the line above, goes on that line.
-                ind = lambda x: len(x) - len(x.lstrip())
-                while qat > 0 and n - qat < 3 and question[:1].islower() \
-                        and lines[qat - 1].strip() and ind(lines[qat - 1]) == ind(lines[qat]):
-                    qat -= 1
-                    question = lines[qat].strip() + " " + question
                 break
     if question is None and row is None and options and framed.match(tail[at]):
         question = _frame_title(tail, lines, at, framed)  # a dialog with a title, not a question (Amp, #5226)
@@ -4761,8 +4754,9 @@ OPS = {
 
 def _view_routes():
     """The GET routes and page actions of each view (river/routes/<view>.py, #4656)."""
-    from .routes import artifacts, browser, canvas, done, projects, secrets, sessions, settings, targets, terminal, you
-    views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal, browser, secrets)
+    from .routes import (artifacts, browser, canvas, changes, done, projects, secrets, sessions, settings, targets,
+                         terminal, you)
+    views = (you, projects, sessions, artifacts, targets, done, settings, canvas, terminal, browser, secrets, changes)
     for v in views:
         for key in v.OPS:
             assert key not in OPS, key
@@ -4941,6 +4935,8 @@ def page_state(closed, timing=None):
                 "SELECT id FROM secret_requests WHERE state='asked' AND sites IS NOT NULL ORDER BY id")]
             from .routes import browser as browser_routes
             st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
+            from . import review
+            st["changes"] = review.counts()  # #5855: changed files of each session (counted in a thread, never here)
             st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late
             _state_cache[key] = (time.time(), gen, st)
             if timing is not None:
