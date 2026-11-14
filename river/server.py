@@ -5288,7 +5288,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "a bad request"})
             if not isinstance(req, dict) or not isinstance(req.get("argv"), list):
                 return self._send(400, {"error": "a bad request"})
-            ans = run_command(req)
+            # #5845: the runner's own requests to serve come from serve's child, so the session proof (#5823) found
+            # no session above them. The caller's connection stays open until the runner answers: its peer data
+            # goes under a one-time token that only this serve and the runner know, and a request of the runner
+            # with that token is checked against the caller's connection, from the kernel, as before.
+            srv = getattr(getattr(self, "server", None), "server_address", None)
+            token = secrets.token_hex(16)
+            if srv and len(self.client_address) > 1:
+                CALLERS[token] = (self.client_address[1], srv[1], str(req.get("ppid") or ""))
+                req["caller"] = token
+            try:
+                ans = run_command(req)
+            finally:
+                CALLERS.pop(token, None)
             if ans.get("busy"):
                 return self._send(503, {"error": "every runner is busy"})
             if ans.get("refused"):
@@ -5332,7 +5344,8 @@ class Handler(BaseHTTPRequestHandler):
                     # #5823: a credential check confirms the session from the process that holds this connection.
                     from . import vault
                     srv = getattr(getattr(self, "server", None), "server_address", None)
-                    vault.PEER.value = (vault.RELAY_PAGE if relay.page_request(self.headers) else
+                    caller = CALLERS.get(self.headers.get("X-Maxpm-Caller") or "")  # a runner's request (#5845)
+                    vault.PEER.value = (vault.RELAY_PAGE if relay.page_request(self.headers) else caller or
                                         (self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid"))
                                         if srv and len(self.client_address) > 1 else (None, None, None))
                     result = op(conn, body.get("args", {}), actor)
@@ -5496,6 +5509,9 @@ def stop_loop_process(wait=2.0):
 RUNNERS_MAX = 3
 RUN_TOKEN = secrets.token_hex(16)  # in the serve file: only a process that can read it hands serve a command
 RUNNERS = []
+# #5845: token -> the peer data of a caller's /api/run connection while a runner runs its command; the runner sends
+# the token with its own requests (X-Maxpm-Caller), and the session proof looks at the caller's connection.
+CALLERS = {}
 
 
 class _Runner:

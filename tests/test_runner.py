@@ -226,6 +226,55 @@ class ServeRoute(unittest.TestCase):
             self.assertEqual(out["code"], code, ans)
         self.assertEqual(out["body"]["out"], "x")
 
+    def test_a_runner_s_request_is_checked_against_the_caller_s_connection(self):
+        """#5845: every maxpm browser command of a session ran in a runner, and the runner's own request to serve
+        came from serve's child: the session proof found no session, and no saved sign-in loaded. The caller's peer
+        data goes under a one-time token; the runner's request with it is checked against the caller's connection."""
+        import types
+        from river import vault
+        seen = {}
+
+        def run(req):
+            seen["caller"] = server.CALLERS.get(req.get("caller"))
+            # the runner's own request to serve, with the token (cli.ask_server sends it)
+            raw = json.dumps({"op": "probe_peer", "args": {}, "actor": None}).encode()
+            a, out = server.Handler.__new__(server.Handler), {}
+            a.path, a.client_address = "/api/action", ("127.0.0.1", 9)
+            a.server = types.SimpleNamespace(server_address=("127.0.0.1", 8765))
+            a.headers = {"Host": "127.0.0.1:8765", "Content-Length": str(len(raw)), "X-Maxpm-Caller": req["caller"]}
+            a.rfile = io.BytesIO(raw)
+            a._send = lambda code, b, ctype=None, headers=None: out.update(code=code, body=b)
+            a._refuse = lambda: False
+            with mock.patch.dict(server.OPS, {"probe_peer": lambda c, x, w: list(vault.PEER.value)}):
+                a.do_POST()
+            seen["action"] = out
+            return {"code": 0, "out": "", "err": ""}
+
+        h, out = self.handler({"argv": ["browser", "status"], "ppid": 42})
+        h.server = types.SimpleNamespace(server_address=("127.0.0.1", 8765))
+        with mock.patch.object(server, "run_command", run):
+            h.do_POST()
+        self.assertEqual(seen["caller"], (5, 8765, "42"))
+        self.assertEqual(seen["action"]["body"]["result"], [5, 8765, "42"])  # the caller's, not the runner's port 9
+        self.assertEqual(server.CALLERS, {})  # the token ends with the command
+
+    def test_the_cli_in_a_runner_sends_the_caller_token(self):
+        from river import cli, core
+        got = {}
+
+        class Opener:
+            def open(self, req, timeout=None):
+                got.update(req.header_items())
+                raise OSError("no serve here")
+        self.addCleanup(setattr, core, "CALLER_TOKEN", None)
+        core.CALLER_TOKEN = "t0k"
+        conn = mock.MagicMock()
+        with mock.patch("urllib.request.build_opener", lambda *a: Opener()), \
+                mock.patch.object(core, "serve_port_now", lambda c: 1), mock.patch.object(core, "db_path", lambda: "x"):
+            with self.assertRaises(core.RiverError):
+                cli.ask_server(conn, "browser", {}, retries=0)
+        self.assertEqual(got.get("X-maxpm-caller"), "t0k")
+
     def test_no_runner_is_free(self):
         r = server._Runner("x")
         r.lock.acquire()

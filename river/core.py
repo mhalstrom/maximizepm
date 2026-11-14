@@ -1787,6 +1787,9 @@ def queue_note():
 RESIDENT = {}
 # The parent process of the command that a runner runs now: the caller's shell or agent CLI (agent_process).
 CALLER_PPID = None
+# The one-time token of that command (#5845): cli.ask_server sends it, so serve checks the session of the caller's
+# connection, not of its own runner. Never in the environment of a process that the command starts.
+CALLER_TOKEN = None
 
 
 class _ResidentConnection(sqlite3.Connection):

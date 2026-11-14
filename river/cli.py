@@ -3077,8 +3077,10 @@ def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     def post(proxy=None):
         # X-Maxpm-Pid: where serve looks first for the process that holds this connection (#5823); only a hint,
         # serve confirms it from the kernel.
-        req = urllib.request.Request(f"http://{host}/api/action", data=body,
-                                     headers={"Content-Type": "application/json", "X-Maxpm-Pid": str(os.getpid())})
+        headers = {"Content-Type": "application/json", "X-Maxpm-Pid": str(os.getpid())}
+        if core.CALLER_TOKEN:  # in a runner of serve (#5845): serve checks the session of the caller's connection
+            headers["X-Maxpm-Caller"] = core.CALLER_TOKEN
+        req = urllib.request.Request(f"http://{host}/api/action", data=body, headers=headers)
         if proxy:
             if proxy.username:
                 cred = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}".encode()
