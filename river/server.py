@@ -5557,8 +5557,12 @@ class Handler(BaseHTTPRequestHandler):
                     from . import vault
                     srv = getattr(getattr(self, "server", None), "server_address", None)
                     caller = CALLERS.get(self.headers.get("X-Maxpm-Caller") or "")  # a runner's request (#5845)
+                    # A request that tailscale serve forwarded (_refuse passed its login, #5863) is the person's when
+                    # no process of this user holds its connection: vault.session_of checks that (#5869).
+                    ts = self.headers.get("Tailscale-User-Login")
                     vault.PEER.value = (vault.RELAY_PAGE if relay.page_request(self.headers) else caller or
-                                        (self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid"))
+                                        ((vault.TAILNET_PAGE, self.client_address[1], srv[1], ts) if ts else
+                                         (self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid")))
                                         if srv and len(self.client_address) > 1 else (None, None, None))
                     result = op(conn, body.get("args", {}), actor)
                 finally:

@@ -607,6 +607,9 @@ GRANT_KINDS = ("work", "operational", "review", "fixes", "deploy", "monitor")
 IDENTITY = None  # tests: fn(conn, actor) -> {'name', 'person'} in place of the process tree
 PEER = threading.local()  # serve: (client port, serve port, the pid the CLI says) of the request that runs now
 RELAY_PAGE = "relay-page"  # PEER.value of a request from the page through the relay (relay.page_request, #5840)
+# PEER.value (TAILNET_PAGE, client port, serve port, login) of a request that tailscale serve forwarded from an allowed
+# tailnet login (mcp.tailnet_refusal passed it, #5863, #5869).
+TAILNET_PAGE = "tailnet-page"
 # The programs of agent CLIs (the adapters' DETECT process, river/agents) and node, which runs pi, Gemini and the Codex
 # wrapper. Claude Code's process has its version as its name (2.1.325): VERSION_NAME.
 AGENT_PROGRAMS = {"claude", "codex", "copilot", "cursor-agent", "gemini", "goose", "grok", "hermes", "opencode", "amp",
@@ -622,6 +625,8 @@ def _chain_now(conn):
     p = getattr(PEER, "value", None)
     if p is None:
         return peer.chain(os.getpid())
+    if p[0] == TAILNET_PAGE:
+        p = (p[1], p[2], None)
     if p[0] is None or p[1] is None:  # serve does not know the connection: no answer, never serve's own tree
         return None
     hints = [p[2]] + [r["pid"] for r in conn.execute(
@@ -650,6 +655,17 @@ def session_of(conn, actor):
             raise RiverError(f"the page through the relay acts as a person, not as the session {actor}")
         return {"name": actor, "person": True, "how": "the page through the relay"}
     ch = _chain_now(conn)
+    p = getattr(PEER, "value", None)
+    if not ch and isinstance(p, tuple) and p[0] == TAILNET_PAGE and p[1] and p[2]:
+        from . import peer
+        if peer.lookable(p[1], p[2]):
+            # The page over Tailscale (#5869: mark's Fill on his iPhone): Tailscale's network extension (or
+            # tailscaled), which runs as root, holds the connection, so no process of this user does. A session that
+            # writes the header Tailscale-User-Login itself holds its own connection: it gets the chain above and is
+            # that session. Limit: a process of another user of this computer also holds no connection of ours.
+            if actor and not core._is_person(conn, actor):
+                raise RiverError(f"the page over Tailscale acts as a person, not as the session {actor}")
+            return {"name": actor, "person": True, "how": f"the page over Tailscale ({p[3]})"}
     if not ch:
         raise RiverError("MaximizePM cannot read which session runs this command (a sandbox hides its processes): "
                          "run it with maxpm serve running; the command goes through serve, which checks it")

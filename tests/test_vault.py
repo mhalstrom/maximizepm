@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import os
 import stat
 import sys
@@ -450,6 +451,46 @@ class Identity(Base):
         self.assertTrue(relay.page_request({"X-Maxpm-Relay": relay.PAGE_SECRET}))
         self.assertFalse(relay.page_request({"X-Maxpm-Relay": "guess"}))
         self.assertIn("relay.page_request(self.headers)", Path(server.__file__).read_text(encoding="utf-8"))
+
+    def test_the_page_over_tailscale_is_the_person(self):
+        """#5869: mark's Fill on his iPhone over Tailscale was refused ('cannot read which session'): Tailscale's
+        network extension runs as root and holds the connection, so no process of this user does. A session that
+        writes the header itself holds its own connection, and the check finds that session."""
+        vault.PEER.value = (vault.TAILNET_PAGE, 61000, 8765, "mark@example.com")
+        self.addCleanup(setattr, vault.PEER, "value", None)
+        holder = {"pid": None}
+        for name, fn in (("holder", lambda lp, rp, hints=(): holder["pid"]), ("lookable", lambda lp, rp: True)):
+            p = mock.patch(f"river.peer.{name}", fn)
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertEqual(self.who("mark"), {"name": "mark", "person": True,
+                                            "how": "the page over Tailscale (mark@example.com)"})
+        self.assertIn("acts as a person, not as the session dev", self.refused("dev"))
+        holder["pid"] = 900  # a session wrote Tailscale-User-Login itself: its own process holds the connection
+        self.chain = [(900, 500, "curl", 1), (500, 1, "2.1.325", 111)]
+        self.assertEqual(self.who(None)["name"], "dev")
+        self.assertIn("runs in the session dev, not mark", self.refused("mark"))
+        holder["pid"], self.chain = None, None
+        with mock.patch("river.peer.lookable", lambda lp, rp: False):  # the kernel does not tell: refused
+            self.assertIn("cannot read which session", self.refused("mark"))
+
+    def test_serve_marks_a_request_that_tailscale_forwarded(self):
+        from river import server
+        from tests.test_tailnet import Fake, NAME, use
+        seen = {}
+        server.OPS["peer_probe"] = lambda c, a, who: seen.update(peer=vault.PEER.value) or {}
+        self.addCleanup(server.OPS.pop, "peer_probe")
+        use(self, Fake())
+        raw = json.dumps({"op": "peer_probe", "actor": "mark", "args": {}}).encode()
+        h = server.Handler.__new__(server.Handler)
+        h.path, h.client_address, h.rfile, out = "/api/action", ("127.0.0.1", 61000), io.BytesIO(raw), {}
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+        h.headers = {"Content-Length": str(len(raw)), "Host": NAME, "Origin": f"https://{NAME}",
+                     "Tailscale-User-Login": "mark@example.com", "X-Forwarded-For": "100.64.0.2"}
+        h._send = lambda code, body, ctype=None: out.update(code=code, body=body)
+        h.do_POST()
+        self.assertEqual(out["code"], 200, out)
+        self.assertEqual(seen["peer"], (vault.TAILNET_PAGE, 61000, 8765, "mark@example.com"))
 
     def test_the_session_above_the_command_is_who_asks(self):
         self.chain = [(900, 800, "Python", 1), (800, 500, "zsh", 1), (500, 400, "2.1.325", 111), (400, 1, "tmux", 1)]

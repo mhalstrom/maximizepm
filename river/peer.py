@@ -150,6 +150,14 @@ def _linux_holds(pid, inode):
     return False
 
 
+def lookable(local_port, remote_port):
+    """Whether this process can look for the holder of the connection at all: libproc loads (macOS), or the kernel
+    lists the connection (Linux). Only then does a holder of None mean that no process of this user holds it."""
+    if sys.platform == "darwin":
+        return _lib() is not None
+    return _linux_inode(local_port, remote_port) is not None
+
+
 def holder(local_port, remote_port, hints=()):
     """The pid of the process that holds the TCP connection from local_port (the client's) to remote_port (serve's):
     the hinted pids first (the pid that the CLI says, the recorded agents' pids: the Claude Code sandbox proxy runs
