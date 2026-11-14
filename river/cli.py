@@ -4506,7 +4506,7 @@ def _unanswered_line(m, r):
     return (f"UNANSWERED blocked #{m['id']} {m['kind']} from {m['from_agent']}, {age}"
             + (f" (#{m['item_id']})" if m["item_id"] else "") + f": {body[:100]}" + ("..." if len(body) > 100 else "")
             + f"  answer: {r} " + (f"answer {m['id']} \"...\"" if m["kind"] == "question"
-                                   else f"send note --reply {m['id']} \"...\""))
+                                   else f"send note --reply {m['id']} \"...\", or {r} accept {m['id']} --message"))
 
 
 def render_manage(b):
@@ -6921,6 +6921,8 @@ def render(a, res):
             else:
                 more = f" (native: {m['native_status']})" if m.get("native_status") else ""
             print(f"sent #{m['id']} {m['kind']} to {to}" + (", blocked" if m.get("blocked") else "") + more)
+            if m.get("gone_note"):
+                print(f"  {m['gone_note']}")
             if m.get("held_note"):
                 print(f"  {m['held_note']}")
             if m.get("then"):

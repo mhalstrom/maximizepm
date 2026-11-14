@@ -6673,7 +6673,8 @@ class Manager(Base):
                 cli.render_manage(w)
             text = out.getvalue().splitlines()
             self.assertEqual(text[0], f"UNANSWERED blocked #{a['id']} alert from w1, 2m (#{x}): w2 is stuck  "
-                                      f"answer: maxpm --as boss send note --reply {a['id']} \"...\"")
+                                      f"answer: maxpm --as boss send note --reply {a['id']} \"...\", or "
+                                      f"maxpm --as boss accept {a['id']} --message")
             self.assertTrue(text[-1].startswith("Act on what is new: 1 blocked message not answered"), text[-1])
             # The manager reads it in its inbox: read, still not answered.
             core.inbox(self.c, "boss")
@@ -6696,6 +6697,33 @@ class Manager(Base):
             m = core.message_show(self.c, a["id"])
             self.assertEqual((bool(m["answered_at"]), core.unanswered(self.c, "boss")), (True, []))
             self.assertTrue(core.delivery_text(m).startswith("answered "))
+
+    def test_a_blocked_message_from_a_session_that_ended_is_no_longer_unanswered(self):
+        # #5815: maximizepm-ea76 sent a blocked alert and ended; send --reply refused ('not registered'), answer
+        # refused (an alert), and every watch listed it as UNANSWERED.
+        from river import cli
+        core.manage(self.c, self.dir.name, "boss")
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)
+        for w in ("w8", "w9"):
+            core.register(self.c, w)
+        a8 = core.send(self.c, "alert", "w8 needs a key", to="boss", actor="w8", blocked=True)["id"]
+        a9 = core.send(self.c, "alert", "w9 needs a key", to="boss", actor="w9", blocked=True)["id"]
+        core.manage_watch(self.c, "boss", step="0s", sleep=lambda s: None)  # delivered, not answered
+        self.assertEqual([m["id"] for m in core.unanswered(self.c, "boss")], [a8, a9])
+        core.unregister(self.c, "w9")
+        self.assertEqual([m["id"] for m in core.unanswered(self.c, "boss")], [a8])
+        # A reply to a sender that ended goes into the thread and answers the alert.
+        core.unregister(self.c, "w8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "boss", "-q", "send", "note", "--reply", str(a8), "the key is in the store now"])
+        self.assertIn(f"w8 is not registered any more (its session ended): the reply is in the thread of #{a8}",
+                      out.getvalue())
+        self.assertTrue(core.message_show(self.c, a8)["answered_at"])
+        self.assertEqual([m["body"] for m in core.thread(self.c, a8)["messages"]][-1], "the key is in the store now")
+        # A reply to a name that never was a sender still refuses, and so does --to a name that is not registered.
+        with self.assertRaisesRegex(core.RiverError, "is not registered"):
+            core.send(self.c, "note", "hi", to="w8", actor="boss")
 
     def test_a_wait_delivers_a_message_and_the_receiver_reads_it(self):
         # #5685: inbox --wait prints a message: delivered. The receiver reads it with its own command.

@@ -15617,11 +15617,15 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
                          f"leave it out and add --blocked")
     if not body or not body.strip():
         raise RiverError("a message needs text")
+    gone = False
     with tx(conn):
         if reply_to is not None:
             parent = _message(conn, reply_to)
             if to is None:
                 to = parent["from_agent"] if parent["from_agent"] != actor else parent["to_agent"]
+                # The sender's session ended and unregistered (#5815): the reply goes into the thread, and the
+                # message counts as answered, so the manager's watch stops listing it as UNANSWERED.
+                gone = not conn.execute("SELECT 1 FROM agents WHERE name=?", (to,)).fetchone()
             if item is None:
                 item = parent["item_id"]
         if item is not None:
@@ -15636,7 +15640,7 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
             if to is None:
                 raise RiverError("no manager session is active now (maxpm who); a session becomes the manager with "
                                  "maxpm manage, or send it to a person")
-        if to is not None:
+        if to is not None and not gone:
             _agent(conn, to)
         manager = _is_manager(conn, to)
         # What MaximizePM knows without the flag: the sender released or blocked the item just before.
@@ -15671,6 +15675,9 @@ def send(conn, kind, body, to=None, item=None, reply_to=None, actor=None, level=
             if st == "sent":
                 _mark_delivered(conn, [held["alert"]], "native")
     res = message_show(conn, mid)
+    if gone:
+        res["gone_note"] = (f"{to} is not registered any more (its session ended): the reply is in the thread of "
+                            f"#{reply_to}, and #{reply_to} counts as answered")
     if held:
         res["held_note"] = (f"held for the manager {held['manager']}: it answers you, or sends the question on to {to}; "
                             f"{to} gets it by itself after {held['hold']} (question_hold)")
@@ -16072,7 +16079,9 @@ def _mark_answered(conn, ids):
 
 # A blocked message that waits for its receiver's answer (#5685): delivered, not answered, not closed.
 _UNANSWERED = ("m.blocked IS NOT NULL AND m.kind IN ('alert','question') AND m.delivered_at IS NOT NULL "
-               "AND m.answered_at IS NULL AND m.closed_at IS NULL AND m.state NOT IN ('answered','accepted','declined')")
+               "AND m.answered_at IS NULL AND m.closed_at IS NULL AND m.state NOT IN ('answered','accepted','declined') "
+               # Not from a session that ended and unregistered: nobody waits for the answer (#5815).
+               "AND (m.from_agent='maxpm' OR m.from_agent IN (SELECT name FROM agents))")
 
 
 def unanswered(conn, actor):
