@@ -1144,6 +1144,10 @@ CREATE TABLE IF NOT EXISTS secrets (
   allow_hosts     TEXT,
   allow_env       INTEGER NOT NULL DEFAULT 0,
   var             TEXT,
+  -- When a session asks for it (#5842, mark 2026-11-14): 'ask' (the person answers each request, the default) or
+  -- 'allow' (the manager grants it with no question). Readers: vault (_all_allow: requests, grants, refusal alerts),
+  -- the Credentials panel and the sign-in modal.
+  ask             TEXT NOT NULL DEFAULT 'ask',
   -- A sign-in (#5826, river/signin.py): kind 'signin', the site and the account; the value is the password, an
   -- authenticator key (if any) is in the store under '<name>#totp'. two_step: who passes a 2-step check, the person
   -- (the default) or the agents (serve makes the code). fail_at, fail_why: the one try failed; serve fills no more
@@ -1168,8 +1172,9 @@ CREATE TABLE IF NOT EXISTS secret_log (
 );
 -- Credential sets (#5822, river/vault.py): a person groups secrets into named sets and grants a set to a project, a
 -- goal, a kind of task, one task or one agent. A session may use a secret only when a grant of one of its sets
--- covers the session (vault.allowed). Readers: maxpm secret sets|grants, and every get. manager_may_grant: the
--- person's mark that the manager may grant this set (read by the manager's grants, #5828).
+-- covers the session (vault.allowed). Readers: maxpm secret sets|grants, and every get. manager_may_grant: no
+-- longer read (#5842): the manager may grant a set when each of its credentials is secrets.ask 'allow'; _migrate
+-- copied the old mark onto the credentials of each marked set.
 CREATE TABLE IF NOT EXISTS secret_sets (
   id                 INTEGER PRIMARY KEY,
   name               TEXT NOT NULL UNIQUE,
@@ -1934,6 +1939,12 @@ def _migrate(conn):
         conn.execute("ALTER TABLE secrets ADD COLUMN allow_hosts TEXT")
         conn.execute("ALTER TABLE secrets ADD COLUMN allow_env INTEGER NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE secrets ADD COLUMN var TEXT")
+    # Ask or allow, per credential (#5842): the credentials of a set that the person marked 'the manager may grant'
+    # are 'allow', so the manager grants what it granted before; every other credential asks the person.
+    if "ask" not in {r["name"] for r in conn.execute("PRAGMA table_info(secrets)")}:
+        conn.execute("ALTER TABLE secrets ADD COLUMN ask TEXT NOT NULL DEFAULT 'ask'")
+        conn.execute("UPDATE secrets SET ask='allow' WHERE name IN (SELECT m.name FROM secret_set_members m "
+                     "JOIN secret_sets s ON s.id=m.set_id WHERE s.manager_may_grant=1)")
     # Requests for sign-ins from a session's browser (#5840).
     if "sites" not in {r["name"] for r in conn.execute("PRAGMA table_info(secret_requests)")}:
         conn.execute("ALTER TABLE secret_requests ADD COLUMN sites TEXT")

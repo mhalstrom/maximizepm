@@ -1,7 +1,7 @@
 // The permission modal for sign-ins (#5840, mark 2026-11-14: 'naw I wanted a permissions modal for this'). A session
 // asks for the person's sign-ins of some sites (maxpm secret request --signin <sites> --from <session>); the request
 // goes to the person at once, and the page shows it here over whatever tab is open: who asks, for which task, why,
-// and each site with its account, ticked. Allow saves the ticked sites' cookies from that browser and grants them
+// and each site with its account, ticked, and 'Do not ask again for this site' (#5842). Allow saves the ticked sites' cookies from that browser and grants them
 // (op secret, action approve, only); Deny refuses. Esc or a click outside closes it for this page load; the request
 // still waits in Settings, Credentials.
 import { $, esc, toast, act, getJson } from "../lib.js";
@@ -39,9 +39,12 @@ function where(r) {
 function draw(r) {
   const task = r.task ? `${esc(r.covers)}: ${esc(r.task)}` : esc(r.covers);
   const acc = r.accounts || {};
-  const rows = (r.sites || []).map(s => `<label class="cred-check"><input type="checkbox" data-signin-site value="${esc(s)}"`
+  // #5842: beside each tick, 'Do not ask again for this site': Allow saves that site's sign-in as 'Allow without
+  // asking', so the manager grants the next request for it with no modal (Settings, Credentials changes it back).
+  const rows = (r.sites || []).map(s => `<div class="signin-site"><label class="cred-check"><input type="checkbox" data-signin-site value="${esc(s)}"`
     + `${(r.ticked || []).includes(s) ? " checked" : ""}> <b>${esc(s)}</b>`
-    + `${(acc[s] || []).length ? ` <span class="muted t-s">${acc[s].map(esc).join(", ")}</span>` : ""}</label>`).join("");
+    + `${(acc[s] || []).length ? ` <span class="muted t-s">${acc[s].map(esc).join(", ")}</span>` : ""}</label>`
+    + `<label class="cred-check t-s"><input type="checkbox" data-signin-always value="${esc(s)}"> Do not ask again for this site</label></div>`).join("");
   host.querySelector(".box").innerHTML = `
     <div class="signin-head"><h2 id="signinTitle">Allow sign-ins?</h2>${iconButton("✕", "Close", { data: { "signin-close": 1 } })}</div>
     <div class="cred-req">
@@ -62,9 +65,10 @@ host.addEventListener("click", async (e) => {
   if (!id) return;
   const only = [...host.querySelectorAll("input[data-signin-site]:checked")].map(i => i.value);
   if (t.dataset.signinOk && !only.length) return toast("Tick the sites to allow, or press Deny", true);
+  const always = [...host.querySelectorAll("input[data-signin-always]:checked")].map(i => i.value).filter(s => only.includes(s));
   try {
     if (t.dataset.signinOk) {
-      await act("secret", { action: "approve", request: id, only });
+      await act("secret", { action: "approve", request: id, only, always });
       toast(`Allowed ${only.join(", ")}`);
     } else {
       await act("secret", { action: "refuse", request: id, note: "denied in the sign-in modal" });

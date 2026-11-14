@@ -14,6 +14,9 @@
 .cred { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: flex-start; justify-content: space-between; }
 .cred-main { flex: 1; min-width: var(--w-l); }
 .cred-level { display: flex; gap: var(--sp-2); align-items: center; }
+.cred-sel { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); }  /* When asked, Level (#5842) */
+/* The sign-in modal: each site's tick, and beside it 'Do not ask again for this site' (#5842); wraps on a phone. */
+.signin-site { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--sp-5); }
 .cred-grants { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-2) 0; }
 .cred-grant { display: inline-flex; align-items: center; gap: var(--sp-1); }
 .cred-grantform { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }

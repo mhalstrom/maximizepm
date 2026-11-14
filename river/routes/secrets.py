@@ -13,7 +13,7 @@ from ..core import RiverError
 
 # What the Credentials panel shows of a credential: names, levels, use; never a value.
 SHOWN = ("name", "kind", "site", "account", "two_step", "fail_why", "level", "var", "allow_env", "allow_commands",
-         "allow_hosts", "used_at", "used_by", "uses", "sets", "note", "project")
+         "allow_hosts", "used_at", "used_by", "uses", "sets", "note", "project", "ask")
 
 
 def credentials(h, path):
@@ -94,9 +94,11 @@ def from_browser(conn, a, who):
 def approve_signins(conn, a, who):
     """Allow of a sign-in request (#5840): for each ticked site, the cookies of the request's source browser are saved
     as a saved sign-in (r<id>-<site>), and approve grants exactly those, as a set of their own, to the request's task
-    or session. One step, by serve, as the person's act; a site with no cookies there refuses the whole Allow."""
+    or session. One step, by serve, as the person's act; a site with no cookies there refuses the whole Allow.
+    always: the ticked sites whose new saved sign-in is 'Allow without asking' from now on (#5842, the modal's 'Do
+    not ask again for this site'). The manager's approve grants the saved sign-ins that the person allows without
+    asking, and saves nothing new."""
     from .. import browser, signin
-    vault._person_only(conn, who, "allow a sign-in request")
     r = vault.request_info(conn, vault._request(conn, a.get("request")))
     if r["state"] not in ("open", "asked"):
         raise RiverError(f"request {r['request']} is {r['state']}")
@@ -106,6 +108,13 @@ def approve_signins(conn, a, who):
     wrong = [s for s in pick if s not in r["sites"]]
     if wrong:
         raise RiverError(f"{', '.join(wrong)}: not asked in {r['request']} (it asks for {', '.join(r['sites'])})")
+    if not vault.session_of(conn, who)["person"]:
+        asked = [s for s in pick if not vault.free_signin(conn, s)]
+        if asked:  # vault.approve refuses anyone but the manager; for the manager, name the sites that ask
+            vault._person_only(conn, who, f"allow the sign-ins of {', '.join(asked)} (Ask me)")
+        return {**vault.approve(conn, r["id"], [vault.free_signin(conn, s) for s in pick], who, a.get("note")),
+                "saved": []}
+    always = {vault.norm_site(s) for s in (a.get("always") or []) if s.strip()}
     project, _, session = (r["source"] or "").partition("/")
     if not conn.execute("SELECT 1 FROM projects WHERE name=?", (project,)).fetchone():
         raise RiverError(f"request {r['request']} names no project of a browser: ask again with --from")
@@ -121,6 +130,8 @@ def approve_signins(conn, a, who):
     names = []
     for site, cookies in got.items():
         names.append(vault.cookies_save(conn, f"{r['request']}-{site}", site, cookies, who)["secret"])
+        if site in always:
+            vault.set_ask(conn, names[-1], "allow", who)
     return {**vault.approve(conn, r["id"], names, who, a.get("note")), "saved": names}
 
 
@@ -173,6 +184,8 @@ def act(conn, a, who):
     if action == "level":  # #5825
         return vault.set_level(conn, name, a.get("level"), a.get("add_commands") or (), a.get("remove_commands") or (),
                                a.get("add_hosts") or (), a.get("remove_hosts") or (), a.get("env"), a.get("var"), who)
+    if action == "asking":  # #5842: 'ask' (Ask me) or 'allow' (Allow without asking)
+        return vault.set_ask(conn, name, a.get("ask"), who)
     if action == "delete":
         return vault.delete(conn, name, who)
     if action == "list":

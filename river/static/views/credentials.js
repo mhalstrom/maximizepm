@@ -1,5 +1,5 @@
 // The Credentials panel of Settings (#5829, design: canvas credential-vault). It shows each credential by its name,
-// never its value: kind, site and account, level, sets, last use. Each set shows what it holds and its grants. The
+// never its value: kind, site and account, when asked (#5842), level, sets, last use. Each set shows what it holds and its grants. The
 // person adds a sign-in (the password field goes to the Keychain through maxpm serve and never comes back to the page),
 // changes a level, makes a set, grants a set and revokes a grant. GET /api/credentials reads; op "secret" changes.
 import { $, esc, toast, act, ago, getJson } from "../lib.js";
@@ -77,20 +77,28 @@ function credRow(r) {
   const where = r.kind === "signin" ? [r.site, r.account].filter(Boolean).map(esc).join(" · ") : r.var ? esc(r.var) : "";
   const used = r.used_at ? `used ${ago(r.used_at)}${r.used_by ? " by " + esc(r.used_by) : ""}` : "never used";
   const levels = (C.levels || []).map(l => `<option${l === r.level ? " selected" : ""}>${esc(l)}</option>`).join("");
+  const asks = ASKS.map(([v, text]) => `<option value="${v}"${v === (r.ask || "ask") ? " selected" : ""}>${text}</option>`).join("");
   return `<div class="cred">
     <div class="cred-main"><b>${esc(r.name)}</b> ${chip("c-p", esc(KIND[r.kind] || r.kind || "token"))}
       ${(r.sets || []).map(s => chip("c-goal", esc(s), "In this set")).join(" ")}
       ${r.fail_why ? chip("c-human", "sign-in failed", "Last sign-in failed") : ""}
       <div class="muted t-s">${where ? where + " · " : ""}${used}${r.fail_why ? " · " + esc(r.fail_why) : ""}</div></div>
-    <label class="cred-level t-s">Level <select data-cred-level="${esc(r.name)}" title="Who may use it">${levels}</select></label>
+    <div class="cred-sel">
+      <label class="cred-level t-s">When asked <select data-cred-ask="${esc(r.name)}" title="When a session asks">${asks}</select></label>
+      <label class="cred-level t-s">Level <select data-cred-level="${esc(r.name)}" title="Who may use it">${levels}</select></label>
+    </div>
   </div>`;
 }
+
+// #5842 (mark 2026-11-14): one plain setting per credential. Ask me: the person answers each request for it (the
+// checklist or the sign-in modal). Allow without asking: the manager grants it with no question.
+const ASKS = [["ask", "Ask me"], ["allow", "Allow without asking"]];
 
 function setRow(s) {
   const grants = (C.grants || []).filter(g => g.set === s.name);
   const scopes = (C.scopes || []).map(x => `<option>${esc(x)}</option>`).join("");
   return `<div class="cred-set">
-    <div><b>${esc(s.name)}</b>${s.manager_may_grant ? " " + chip("c-p", "manager may grant") : ""}
+    <div><b>${esc(s.name)}</b>
       <span class="muted t-s">${s.secrets.length ? s.secrets.map(esc).join(", ") : "holds nothing yet"}</span></div>
     <div class="cred-grants">${grants.map(g => `<span class="cred-grant">${chip("c-ready", esc(g.covers || `${g.scope} ${g.value}`))}`
       + `${g.until ? `<span class="muted t-s"> until ${esc(g.until.slice(0, 10))}</span>` : ""}`
@@ -132,14 +140,13 @@ function forms() {
   <div class="cred-sub">New set</div>
   <div class="form cred-form">
     <label>Name<input id="setName" placeholder="stripe-live" autocomplete="off"></label>
-    <label class="cred-check"><input type="checkbox" id="setManager"> The manager may grant it</label>
     <div class="actions">${button("Make set", { id: "credMakeSet" })}</div>
   </div>`;
 }
 
 // #5840: the sign-in that the person made in a session's Browser pane (its cookies of one site) goes into a set from
 // here, as maxpm secret cookies does in a terminal. The list holds the session browsers that serve runs now. A set
-// name that does not exist yet makes the set (without "the manager may grant").
+// name that does not exist yet makes the set.
 function browserForm() {
   const list = C.browsers || [];
   if (!list.length) return `<div class="cred-sub">Save a browser's sign-in</div>`
@@ -177,6 +184,12 @@ panel.addEventListener("change", async (e) => {
   const t = e.target;
   if (t.dataset.credLevel) {
     try { await act("secret", { action: "level", name: t.dataset.credLevel, level: t.value }); toast(`${t.dataset.credLevel} is ${t.value} now`); }
+    catch (err) { /* act showed the error */ }
+    return renderCredentials(true);
+  }
+  if (t.dataset.credAsk) {
+    const text = (ASKS.find(([v]) => v === t.value) || [])[1];
+    try { await act("secret", { action: "asking", name: t.dataset.credAsk, ask: t.value }); toast(`${t.dataset.credAsk}: ${text}`); }
     catch (err) { /* act showed the error */ }
     return renderCredentials(true);
   }
@@ -225,7 +238,7 @@ panel.addEventListener("click", async (e) => {
   if (t.id === "credMakeSet") {
     const name = $("#setName").value.trim();
     if (!name) return toast("Type the set's name", true);
-    try { await act("secret", { action: "set", name, manager_may_grant: $("#setManager").checked }); toast(`Made the set ${name}`); }
+    try { await act("secret", { action: "set", name }); toast(`Made the set ${name}`); }
     catch (err) { return; }
     return renderCredentials(true);
   }

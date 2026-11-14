@@ -355,6 +355,34 @@ class SigninRequests(Base):
         self.assertEqual(routes_secrets.act(self.c, {"action": "refuse", "request": r["id"]}, "mark")["state"],
                          "refused")
 
+    def test_do_not_ask_again_lets_the_manager_grant_the_next_request(self):
+        # #5842: 'Do not ask again for this site' in the modal makes the saved sign-in 'Allow without asking'
+        from river.routes import secrets as routes_secrets
+        r = self.ask()
+        routes_secrets.act(self.c, {"action": "approve", "request": r["id"], "only": ["github.com", "example.org"],
+                                    "always": ["github.com"]}, "mark")
+        asks = {x["name"]: x["ask"] for x in vault.listing(self.c)["secrets"]}
+        self.assertEqual((asks[f"r{r['id']}-github.com"], asks[f"r{r['id']}-example.org"]), ("allow", "ask"))
+        core.register(self.c, "manager-1")
+        self.c.execute("UPDATE agents SET role='manager' WHERE name='manager-1'")
+        with mock.patch.object(core, "active_manager", lambda conn, but=None: "manager-1"):
+            mixed = self.ask()  # example.org still asks: the whole request goes to the person, as before
+            self.assertEqual((mixed["state"], mixed["to"]), ("asked", "mark"))
+            routes_secrets.act(self.c, {"action": "refuse", "request": mixed["id"]}, "mark")
+            r2 = self.ask(("github.com",))
+        self.assertEqual((r2["state"], r2["to"]), ("open", "manager-1"))
+        body = self.c.execute("SELECT body FROM messages WHERE to_agent='manager-1' ORDER BY id DESC").fetchone()[0]
+        self.assertIn(f"maxpm secret approve r{r2['id']}", body)
+        self.assertEqual([x[0] for x in self.c.execute(  # no modal for the person
+            "SELECT id FROM secret_requests WHERE state='asked' AND sites IS NOT NULL")], [])
+        with self.assertRaises(RiverError):
+            routes_secrets.act(self.c, {"action": "approve", "request": r2["id"]}, "dev")
+        out = routes_secrets.act(self.c, {"action": "approve", "request": r2["id"]}, "manager-1")
+        self.assertEqual((out["state"], out["chosen"], out["saved"]), ("granted", [f"r{r['id']}-github.com"], []))
+        vault.set_ask(self.c, f"r{r['id']}-github.com", "ask", actor="mark")  # mark changes it back in the panel
+        r3 = self.ask(("github.com",))
+        self.assertEqual((r3["state"], r3["to"]), ("asked", "mark"))
+
     def test_the_panel_read_names_the_accounts_of_each_site(self):
         from river import browser
         from river.routes import secrets as routes_secrets

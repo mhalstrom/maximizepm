@@ -1233,6 +1233,10 @@ def build_parser(only=None):
     x.add_argument("--session", required=True, help="the session whose browser is signed in")
     x.add_argument("--set", dest="set_name", help="the set it goes into")
     x.add_argument("--project", help="the project of that browser (default: the session's item's)")
+    x = ses.add_parser("asking", help="when a session asks for a credential (a person only): ask (you answer each "
+                       "request; the default) or allow (the manager grants it with no question)")
+    x.add_argument("name")
+    x.add_argument("ask", choices=("ask", "allow"))
     x = ses.add_parser("level", help="a secret's protection (a person only): locked (only the named commands), "
                        "hidden (any command; the default), open (the value shows in output)")
     x.add_argument("name")
@@ -1264,7 +1268,8 @@ def build_parser(only=None):
     x.add_argument("--remove", action="append", default=[], metavar="SECRET", help="take a secret out (repeat it)")
     x.add_argument("--note", help="what the set is for")
     x.add_argument("--manager-may-grant", dest="manager_may_grant", choices=("on", "off"),
-                   help="on: the manager may grant this set")
+                   help="on: each credential in the set is 'Allow without asking'; off: each one is 'Ask me' "
+                        "(maxpm secret asking sets one)")
     x.add_argument("--delete", action="store_true", help="delete the set and its grants (its secrets stay)")
     ses.add_parser("sets", help="the sets, their secrets, and how many grants each has")
 
@@ -5594,6 +5599,8 @@ def _secret_cmd(conn, a, actor):
         return _secret_op(conn, {"action": "level", "name": a.name, "level": a.level, "add_commands": a.command,
                                   "remove_commands": a.no_command, "add_hosts": a.host, "remove_hosts": a.no_host,
                                   "env": None if a.env is None else a.env == "on", "var": a.var}, actor)
+    if cmd == "asking":
+        return _secret_op(conn, {"action": "asking", "name": a.name, "ask": a.ask}, actor)
     if cmd == "env":
         key = a.key or _env_key(a.name)
         data, _ = _secret_value(conn, a.name, actor, f"env: {a.file} {key}", "env")
@@ -5680,6 +5687,10 @@ def render_secret(a, res):
               + ("; env may write it into a file" if res["env"] or res["level"] == "open" else "; env is off")
               + (f"; run puts it in {res['var']}" if res["var"] else "")
               + ("" if res["changed"] else " (no change)"))
+    elif cmd == "asking":
+        print(f"secret {res['secret']}: "
+              + ("Allow without asking (the manager grants it with no question)" if res["ask"] == "allow"
+                 else "Ask me (you answer each request for it)") + ("" if res["changed"] else " (no change)"))
     elif cmd == "env":
         print(f"{'replaced' if res['replaced'] else 'added'} {res['key']} in {res['file']} from secret {res['secret']}")
     elif cmd == "delete":
@@ -5695,6 +5706,7 @@ def render_secret(a, res):
                   f"{r['updated_by'] or 'a person'}; {used}" + (f"; sets {', '.join(r['sets'])}" if r.get("sets")
                                                                  else "; in no set")
                   + (f"; sign-in {r['account']} on {r['site']}" if r.get("kind") == "signin" else "")
+                  + ("; allowed without asking" if r.get("ask") == "allow" else "")
                   + (f" (stopped: {r['fail_why']})" if r.get("fail_why") else "")
                   + (f"  ({r['note']})" if r["note"] else ""))
     elif cmd == "log":

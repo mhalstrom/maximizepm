@@ -230,12 +230,16 @@ class Grants(Base):
         iid = self.hold("deploy")
         with self.assertRaises(RiverError) as e:
             vault.grant(self.c, "stripe-live", "item", str(iid), actor="manager-1")
-        self.assertIn("did not mark the set stripe-live", str(e.exception))
+        self.assertIn("answers each request for stripe-key (Ask me): only a person may grant the set stripe-live",
+                      str(e.exception))
         vault.set_change(self.c, "stripe-live", manager_may_grant=True, actor="mark")
+        self.assertEqual(vault.listing(self.c)["secrets"][0]["ask"], "allow")  # the mark is on each credential
         with self.assertRaises(RiverError):
             vault.set_change(self.c, "stripe-live", manager_may_grant=False, actor="manager-1")  # the mark is the person's
+        with self.assertRaises(RiverError):
+            vault.set_ask(self.c, "stripe-key", "ask", actor="manager-1")
         self.refused("dev")
-        self.assertIn("the manager may grant", self.alerts("manager-1")[0])
+        self.assertIn("the person allows it without asking", self.alerts("manager-1")[0])
         g = vault.grant(self.c, "stripe-live", "item", str(iid), actor="manager-1")
         self.assertEqual(g["granted_by"], "manager-1")
         self.assertEqual(self.use("dev"), b"sk_live_1")
@@ -472,8 +476,12 @@ class CredentialsPanel(Base):
         act(self.c, {"action": "signin", "name": "google-mark", "site": "https://accounts.google.com/x",
                      "account": "me@gmail.com", "value_b64": base64.b64encode("pässwörd-123".encode()).decode()}, "mark")
         vault.put(self.c, "cf-token", TOKEN, None)
-        act(self.c, {"action": "set", "name": "google", "manager_may_grant": True}, "mark")
+        act(self.c, {"action": "set", "name": "google"}, "mark")
         act(self.c, {"action": "set", "name": "google", "add": ["google-mark"]}, "mark")
+        out = act(self.c, {"action": "asking", "name": "google-mark", "ask": "allow"}, "mark")  # #5842: When asked
+        self.assertEqual((out["ask"], out["changed"]), ("allow", True))
+        with self.assertRaises(RiverError):
+            act(self.c, {"action": "asking", "name": "google-mark", "ask": "maybe"}, "mark")
         g = act(self.c, {"action": "grant", "name": "google", "scope": "project", "value": "site", "until": None}, "mark")
         act(self.c, {"action": "level", "name": "cf-token", "level": "locked"}, "mark")
         h = self.Handler("/api/credentials")
@@ -488,6 +496,7 @@ class CredentialsPanel(Base):
         self.assertEqual((rows["google-mark"]["kind"], rows["google-mark"]["account"], rows["google-mark"]["sets"]),
                          ("signin", "me@gmail.com", ["google"]))
         self.assertEqual(rows["cf-token"]["level"], "locked")
+        self.assertEqual((rows["google-mark"]["ask"], rows["cf-token"]["ask"]), ("allow", "ask"))
         self.assertEqual([(s["name"], s["manager_may_grant"]) for s in body["sets"]], [("google", True)])
         self.assertEqual([x["grant"] for x in body["grants"]], [g["grant"]])
         self.assertEqual(body["levels"], list(vault.LEVELS))
@@ -631,7 +640,8 @@ class Requests(Base):
     def test_checklist_for_a_set_that_is_not_marked(self):
         r = vault.request(self.c, "stripe-live", "refunds need the live key", "dev")
         self.assertEqual((r["state"], r["to"], r["covers"]), ("open", "manager-1", f"task #{self.iid}"))
-        self.assertIn("not marked 'the manager may grant'", self.last("manager-1"))
+        self.assertIn("The person answers each request for stripe-key, stripe-webhook (Ask me): put a checklist",
+                      self.last("manager-1"))
         p = vault.propose(self.c, r["request"], ["stripe-key", "stripe-webhook", "db-url"], ["stripe-key"],
                           actor="manager-1")
         self.assertEqual(p["state"], "asked")
@@ -665,6 +675,37 @@ class Requests(Base):
         self.assertEqual(res["grants"][0]["granted_by"], "manager-1")
         vault.get(self.c, "stripe-key", "dev")
         self.assertEqual(vault.check(self.c, "dev")["uses"][0]["action"], "use")
+
+    def test_the_manager_approves_only_the_credentials_allowed_without_asking(self):
+        # #5842: the setting is per credential, so a set can hold one of each
+        vault.set_ask(self.c, "stripe-key", "allow", actor="mark")
+        r = vault.request(self.c, "stripe-live", "refunds", "dev")
+        body = self.last("manager-1")
+        self.assertIn(f"allows stripe-key without asking: maxpm secret approve {r['request']} --only stripe-key", body)
+        self.assertIn("each request for stripe-webhook (Ask me)", body)
+        with self.assertRaises(RiverError) as e:
+            vault.approve(self.c, r["request"], ["stripe-key", "stripe-webhook"], actor="manager-1")
+        self.assertIn("stripe-webhook (Ask me)", str(e.exception))
+        with self.assertRaises(RiverError):
+            vault.approve(self.c, r["request"], ["stripe-key"], actor="dev")  # never the session itself
+        a = vault.approve(self.c, r["request"], ["stripe-key"], actor="manager-1")
+        self.assertEqual((a["state"], a["chosen"], a["decided_by"]), ("granted", ["stripe-key"], "manager-1"))
+        self.assertEqual(vault.get(self.c, "stripe-key", "dev"), b"v-stripe-key")
+        with self.assertRaises(RiverError):
+            vault.get(self.c, "stripe-webhook", "dev")
+        self.assertIn(f"granted by manager-1: {a['grant']}", vault.grant_summary(self.c)[0])  # the person's daily list
+        rc, out = self.run_cli(["--as", "mark", "secret", "asking", "stripe-key", "ask"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Ask me", out)
+
+    def test_an_old_queue_keeps_the_managers_sets(self):
+        # #5842: a set marked 'the manager may grant' before makes each of its credentials 'Allow without asking'
+        self.c.execute("ALTER TABLE secrets DROP COLUMN ask")
+        self.c.execute("UPDATE secret_sets SET manager_may_grant=1 WHERE name='stripe-live'")
+        core._migrate(self.c)
+        asks = {r["name"]: r["ask"] for r in vault.listing(self.c)["secrets"]}
+        self.assertEqual(asks, {"stripe-key": "allow", "stripe-webhook": "allow", "db-url": "ask"})
+        self.assertTrue(vault.sets(self.c)["sets"][0]["manager_may_grant"])
 
     def test_refuse_and_cli(self):
         r = vault.request(self.c, "stripe-live", "refunds", "dev")
