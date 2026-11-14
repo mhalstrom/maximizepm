@@ -107,12 +107,11 @@ def approve_signins(conn, a, who):
     if wrong:
         raise RiverError(f"{', '.join(wrong)}: not asked in {r['request']} (it asks for {', '.join(r['sites'])})")
     project, _, session = (r["source"] or "").partition("/")
-    b = browser.find(project, session or None)
-    if b is None or not (b.running() or b.proxy is not None):
-        raise RiverError(f"the browser of {session or project} is not running now: open it in its Browser pane, "
-                         "sign in, then Allow again")
-    if not b.running():  # serve started again: attach to the Chrome that the earlier serve left running
-        b.start()
+    if not conn.execute("SELECT 1 FROM projects WHERE name=?", (project,)).fetchone():
+        raise RiverError(f"request {r['request']} names no project of a browser: ask again with --from")
+    b = browser.get(project, session or None, conn)
+    if not b.running():  # it stopped (browser_idle_end) or serve started again: its profile on disk keeps the
+        b.start()        # sign-in, so start it (or attach to the Chrome that the earlier serve left running)
     got = {}
     for site in pick:
         got[site] = signin.site_cookies(b, site)
