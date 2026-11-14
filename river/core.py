@@ -422,6 +422,14 @@ DEFAULT_SETTINGS = {
     # queue off (a project, or global): the project uses sessions only (#5851). Its maxpm go gives no item, goal or
     # wait: the session becomes a session with no item, and the page shows New session, not the queue's Start.
     "queue": "on",
+    # workspace (a project, or global; #5856): where a session that changes code works. shared: the project folder,
+    # as before. worktree: a git worktree of its own, <parent>/<folder>.worktrees/<session>, on the branch
+    # maxpm/<session>. setup: a worktree, then workspace_setup runs in it before the agent (with MAXPM_WORKSPACE and
+    # MAXPM_PROJECT_DIR set): the project's own script copies .env files, picks ports, starts a dev server. The manager,
+    # deployers, reviewers and context sessions work in the project folder. maxpm serve removes a worktree when its
+    # session has ended and its branch is merged or has no commit (workspace_sweep); else maxpm workspace list says why.
+    "workspace": "shared",
+    "workspace_setup": "",
     # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
     # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
     # (warm, with the minutes left, or cold) and what the next message costs. When it is cold and its context holds
@@ -968,6 +976,22 @@ CREATE TABLE IF NOT EXISTS expert_proposals (
   decided_at  TEXT,
   decided_by  TEXT,
   why         TEXT                       -- a start that failed, or why it was dismissed
+);
+
+-- The git worktree of a session (setting workspace, #5856). Read by maxpm serve's workspace_sweep (it removes a worktree
+-- whose session ended and whose branch is merged) and by maxpm workspace list.
+CREATE TABLE IF NOT EXISTS workspaces (
+  id          INTEGER PRIMARY KEY,
+  agent       TEXT NOT NULL,
+  project_id  INTEGER REFERENCES projects(id),
+  repo        TEXT NOT NULL,              -- the project folder it came from
+  path        TEXT NOT NULL,              -- the worktree
+  branch      TEXT NOT NULL,
+  base        TEXT,                       -- the commit it started from
+  created_at  TEXT NOT NULL,
+  checked_at  TEXT,
+  kept_why    TEXT,                       -- why the sweep keeps it (uncommitted changes, unmerged commits)
+  removed_at  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS review_steps (
@@ -2512,6 +2536,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
+    elif key == "workspace" and value not in ("shared", "worktree", "setup"):
+        raise RiverError("workspace is shared (the project folder), worktree (a git worktree for each session), or "
+                         "setup (a worktree, then the command in workspace_setup)")
     elif key == "review_at" and value not in ("off", "push", "release"):
         raise RiverError("review_at is off, push or release")
     elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
@@ -3231,6 +3258,12 @@ def projects_for_dir(conn, cwd):
                 best, depth = [r["name"]], d
             elif d == depth:
                 best.append(r["name"])
+    if not best:
+        # A session's own worktree (#5856) lies beside the project folder: the same place in the repository counts.
+        for w in conn.execute("SELECT path, repo FROM workspaces WHERE removed_at IS NULL ORDER BY id DESC"):
+            wt = Path(w["path"])
+            if here == wt or wt in here.parents:
+                return projects_for_dir(conn, Path(w["repo"]) / here.relative_to(wt))
     return best
 
 
@@ -20366,6 +20399,7 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
              "chat": chat}
 
     brief["unsynced"] = unsynced(conn, actor)
+    brief["workspace"] = workspace_of(conn, actor)  # its own git worktree (#5856), or None
     stop = stop_request(conn, actor)
     if stop:
         holds = [item_show(conn, r["id"]) for r in conn.execute(
@@ -21248,6 +21282,48 @@ def plain_make(conn, name, why, folder=None):
                      "waiting_in=NULL, wait_token=NULL WHERE name=?", (note, iso(now()), name))
         _event(conn, None, name, f"{name} is a session with no item: {why}")
     return agent_status(conn, name)
+
+
+# ---------------------------------------------------------------- workspaces
+# A git worktree for each session (setting workspace, #5856). server._workspace makes it at a start, and
+# server.workspace_sweep removes it when its session has ended and its branch is merged.
+
+def workspace_add(conn, agent, project_id, repo, path, branch, base):
+    """Record the worktree that a session works in."""
+    with tx(conn):
+        conn.execute("INSERT INTO workspaces (agent, project_id, repo, path, branch, base, created_at) "
+                     "VALUES (?,?,?,?,?,?,?)", (agent, project_id, repo, path, branch, base, iso(now())))
+        _event(conn, None, "maxpm", f"{agent} works in the worktree {path} (branch {branch})")
+
+
+def workspace_of(conn, agent):
+    """The worktree that a session works in (the newest that is not removed), or None."""
+    r = conn.execute("SELECT * FROM workspaces WHERE agent=? AND removed_at IS NULL ORDER BY id DESC LIMIT 1",
+                     (agent,)).fetchone()
+    return dict(r) if r else None
+
+
+def workspace_list(conn, removed=False):
+    """The worktrees of sessions: each with its session's state (gone: the session ended) and why the sweep keeps it."""
+    out = []
+    for r in conn.execute("SELECT w.*, p.name AS project FROM workspaces w LEFT JOIN projects p ON p.id=w.project_id "
+                          + ("" if removed else "WHERE w.removed_at IS NULL ") + "ORDER BY w.id DESC").fetchall():
+        a = conn.execute("SELECT * FROM agents WHERE name=?", (r["agent"],)).fetchone()
+        out.append({**dict(r), "state": _agent_state(conn, a) if a else "gone"})
+    return out
+
+
+def workspace_mark(conn, wid, removed=False, kept_why=None, actor="maxpm"):
+    """After a look of the sweep: removed, or kept with the reason."""
+    t = iso(now())
+    with tx(conn):
+        w = conn.execute("SELECT agent, path, kept_why FROM workspaces WHERE id=?", (wid,)).fetchone()
+        conn.execute("UPDATE workspaces SET checked_at=?, kept_why=?, removed_at=? WHERE id=?",
+                     (t, None if removed else kept_why, t if removed else None, wid))
+        if removed:
+            _event(conn, None, actor, f"the worktree {w['path']} of {w['agent']} is removed")
+        elif kept_why != w["kept_why"]:
+            _event(conn, None, actor, f"the worktree {w['path']} of {w['agent']} stays: {kept_why}")
 
 
 def expert_make(conn, name, topic, project=None, actor=None):

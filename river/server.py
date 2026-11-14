@@ -191,6 +191,7 @@ def _start_for_item(conn, t, runner, actor, why, by="the page"):
     core.register(conn, name, note=f"{core.STARTED_NOTE} #{t['item']['id']}")
     try:
         core.push(conn, t["item"]["id"], name, f"from {by}: {why}", actor)
+        t = _workspace(conn, t, name, core._project(conn, t["project"])["id"])
         _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, "MAXPM_FOCUS": f"item:{t['item']['id']}", **t["env"]}, runner)
     except Exception as e:
@@ -323,11 +324,111 @@ def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=
                                   prompt, plain=True)}
     core.plain_make(conn, name, f"started by {actor or 'the page'} in {path}", folder=str(path))
     try:
+        if project:
+            t = _workspace(conn, t, name, project["id"])
         _started(conn, name, t)
         _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner)
     except Exception as e:
         _undo_start(conn, name, e, actor=actor)
-    return {**t, "session_name": name, "folder": str(path)}
+    return {**t, "session_name": name, "folder": t["path"]}
+
+
+def _workspace(conn, t, name, project_id, make=True):
+    """The folder a session that changes code starts in (setting workspace, #5856). shared: t as it is. worktree or
+    setup: the session's own git worktree, made now from the project folder's HEAD at
+    <parent>/<folder>.worktrees/<name> on the branch maxpm/<name> (a start in a subfolder starts in the same subfolder
+    of it); a session that has one keeps it. setup: t['setup'] is the project's workspace_setup command, which
+    _open_terminal runs in the worktree before the agent. The session gets MAXPM_WORKSPACE and MAXPM_PROJECT_DIR.
+    make=False (a resumed chat): only a worktree that the session has already."""
+    mode = core.setting(conn, "workspace", project_id=project_id)
+    if mode == "shared":
+        return t
+    project = core._project_name(conn, project_id)
+    setup = core.setting(conn, "workspace_setup", project_id=project_id).strip()
+    if mode == "setup" and not setup:
+        raise RiverError(f"workspace is setup for project {project}, and workspace_setup names no command: maxpm "
+                         f"config set workspace_setup '<command>' --project {project}, or maxpm config set workspace "
+                         f"worktree --project {project}")
+    have = core.workspace_of(conn, name)
+    if have and Path(have["path"]).is_dir():
+        wt, root = Path(have["path"]), Path(have["repo"])
+        rel = Path(t["path"]).resolve().relative_to(root) if Path(t["path"]).resolve().is_relative_to(root) else Path()
+    elif not make:
+        return t
+    else:
+        top = _git(t["path"], "rev-parse", "--show-toplevel", check=False)
+        if not top:
+            raise RiverError(f"workspace is {mode} for project {project}, and {t['path']} is no git repository, so it has "
+                             f"no worktrees: maxpm config set workspace shared --project {project}")
+        root = Path(top).resolve()
+        rel = Path(t["path"]).resolve().relative_to(root)
+        wt = root.parent / f"{root.name}.worktrees" / name
+        branch = f"maxpm/{name}"
+        base = _git(root, "rev-parse", "HEAD")
+        _git(root, "worktree", "add", "-b", branch, str(wt), "HEAD")
+        core.workspace_add(conn, name, project_id, str(root), str(wt), branch, base)
+    env = {**t.get("env", {}), "MAXPM_WORKSPACE": str(wt), "MAXPM_PROJECT_DIR": str(root)}
+    return {**t, "path": str(wt / rel), "workspace": str(wt), "env": env,
+            **({"setup": setup} if mode == "setup" else {})}
+
+
+def workspace_sweep(conn):
+    """One pass of maxpm serve (#5856): each worktree whose session has ended (gone, stopped, or no longer
+    registered) goes when nothing in it would be lost: no uncommitted change, and its branch merged into the project
+    folder's HEAD (or with no commit of its own). git worktree remove, then git branch -d. Else it stays, with the
+    reason (maxpm workspace list), and is looked at again after WORKSPACE_LOOK. Returns {path: removed | why kept}."""
+    out, t = {}, core.now()
+    for w in core.workspace_list(conn):
+        if w["state"] not in ("gone", "stopped"):
+            continue
+        if w["checked_at"] and w["kept_why"] and t - core.parse_iso(w["checked_at"]) < WORKSPACE_LOOK:
+            continue
+        try:
+            why = _workspace_remove(w)
+        except RiverError as e:
+            why = str(e)
+        core.workspace_mark(conn, w["id"], removed=why is None, kept_why=why)
+        out[w["path"]] = why or "removed"
+    return out
+
+
+WORKSPACE_LOOK = core.timedelta(minutes=10)
+
+
+def _workspace_remove(w, force=False):
+    """Remove one worktree and its branch; None when done (or its folder is gone). Without force, the reason it
+    stays when something would be lost: uncommitted changes, or commits that the project folder's HEAD lacks."""
+    wt, repo = Path(w["path"]), Path(w["repo"])
+    if not wt.is_dir():
+        _git(repo, "worktree", "prune", check=False)
+        return None
+    if not force:
+        dirty = _git(wt, "status", "--porcelain", check=False)
+        if dirty:
+            n = len(dirty.splitlines())
+            return f"{n} uncommitted change{'s' if n != 1 else ''}"
+        ahead = _git(repo, "rev-list", "--count", f"HEAD..{w['branch']}", check=False)
+        if ahead and ahead != "0":
+            return f"{ahead} commit{'s' if ahead != '1' else ''} on {w['branch']} not in {repo.name}'s HEAD"
+    _git(repo, "worktree", "remove", *(["--force"] if force else []), str(wt))
+    _git(repo, "branch", "-D" if force else "-d", w["branch"], check=False)
+    return None
+
+
+def workspace_drop(conn, agent, force=False, actor=None):
+    """maxpm workspace drop <session> (#5856): remove a session's worktree now. Its session must have ended. Without
+    force it keeps one with uncommitted changes or unmerged commits, and says so; force removes them too."""
+    w = next((x for x in core.workspace_list(conn) if x["agent"] == agent), None)
+    if w is None:
+        raise RiverError(f"{agent} has no worktree; maxpm workspace list shows them")
+    if w["state"] not in ("gone", "stopped"):
+        raise RiverError(f"{agent} still runs in {w['path']}; end it first (End on the Sessions tab, or maxpm stop {agent})")
+    why = _workspace_remove(w, force)
+    if why:
+        raise RiverError(f"{w['path']} has {why}; merge or commit them, or remove them too: maxpm workspace drop "
+                         f"{agent} --force")
+    core.workspace_mark(conn, w["id"], removed=True, actor=actor or "maxpm")
+    return {"removed": w["path"], "branch": w["branch"]}
 
 
 def deploy_now(conn, target, review=False, runner=None, agent=None, actor=None, model=None, effort=None,
@@ -395,6 +496,8 @@ def _open_focused(conn, p, focus, runner, agent, model=None, effort=None, option
             named = f"{p['name']}-{secrets.token_hex(2)}"
         core.register(conn, named, note=f"{core.STARTED_NOTE} {focus}")
     try:
+        if kind in ("help", "unblock"):  # sessions that change code; deploy, review and context work in the project folder
+            t = _workspace(conn, t, named, p["id"])
         _started(conn, named, t)
         _open_terminal(t, {"MAXPM_FOCUS": focus, "MAXPM_AGENT": named, **t["env"]}, runner)
     except Exception:
@@ -540,6 +643,8 @@ def start_expert(conn, name, topic=None, project=None, resume=False, runner=None
         t = core._launch_agent_cmd(conn, p["id"], agent, model, effort, options, name, prompt=first)
         t = {**t, "env": {"MAXPM_AGENT": name, **t["env"]}}
     t.update(project=p["name"], path=p["path"], session_title=name, task=task["id"])
+    # Its own worktree (#5856); a resumed chat only in the worktree it had, as its chat belongs to that folder.
+    t = _workspace(conn, t, name, p["id"], make=not t.get("resumed"))
     _started(conn, name, t)
     _open_terminal(t, t["env"], runner)
     with core.tx(conn):
@@ -631,7 +736,13 @@ def _open_terminal(t, env, runner=None):
     if os.environ.get("MAXPM_DB"):
         env = {"MAXPM_DB": str(core.db_path()), **env}
     assign = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-    if "|" in t["command"] and assign:
+    if t.get("setup"):
+        # The project's own setup of a new worktree (workspace setup, #5856), with the session's variables, before the
+        # agent. A failed setup is printed; the agent starts anyway, and the person and the agent see the output.
+        failed = shlex.quote("maxpm: the workspace setup failed (workspace_setup); the agent starts anyway")
+        line = (f"cd {shlex.quote(t['path'])} && " + (f"export {assign} && " if assign else "")
+                + f"{{ {{ {t['setup']} ; }} || printf '%s\\n' {failed} ; }} && {t['command']}")
+    elif "|" in t["command"] and assign:
         # A variable before a pipeline goes to its first command only: Amp's 'printf <prompt> | amp' ran with no
         # MAXPM_AGENT, MAXPM_FOCUS or MAXPM_DB (#5239). export reaches every command of the line.
         line = f"cd {shlex.quote(t['path'])} && export {assign} && {t['command']}"
@@ -4160,13 +4271,15 @@ _light_at = {}  # actor -> when a typing op last ran core.activity for them
 REPO = PKG.parent
 
 
-def _git(repo, *args, timeout=60):
+def _git(repo, *args, timeout=60, check=True):
+    """One git command in a folder: its stdout, stripped. A failure raises RiverError with git's words; check=False
+    returns what it printed (the worktrees of #5856 read a status that may fail)."""
     import subprocess
     try:
         r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as e:
         raise RiverError(f"git {args[0]}: {e}")
-    if r.returncode:
+    if r.returncode and check:
         raise RiverError(f"git {args[0]}: {(r.stderr or r.stdout).strip()}")
     return r.stdout.strip()
 
@@ -4727,6 +4840,8 @@ OPS = {
     "open_agent_on": lambda c, a, who: open_agent_on(c, int(a["id"]), agent=a.get("agent"), person=a.get("person"), actor=who,
                                                      **_launch_args(a)),
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
+    # maxpm workspace drop (#5856): git writes the repository's worktree list, which an agent's sandbox may block.
+    "workspace_drop": lambda c, a, who: workspace_drop(c, a["agent"], bool(a.get("force")), who),
     # New session (#5851): an agent in a folder with no item; maxpm launch --session hands it to serve from a sandbox.
     "start_session": lambda c, a, who: start_session(c, a.get("folder"), agent=a.get("agent"), actor=who,
                                                      prompt=a.get("prompt"), **_launch_args(a)),

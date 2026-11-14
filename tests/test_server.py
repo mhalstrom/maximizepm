@@ -1089,6 +1089,73 @@ class LaunchAgent(unittest.TestCase):
         with self.assertRaisesRegex(RiverError, "whole path"):
             server.start_session(self.c, "web", runner=sent.append)
 
+    def test_a_worktree_for_each_session_and_the_sweep_removes_it_when_merged(self):
+        """#5856: workspace worktree gives each session its own git worktree and branch; the sweep keeps one with
+        unmerged commits and removes it once merged; setup runs the project's command before the agent."""
+        import subprocess
+        root = os.path.join(os.path.realpath(self.dir.name), "web")
+        os.makedirs(root)
+
+        def git(*a, cwd=root):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "first")
+        core.project_add(self.c, "web", path=root)
+        add = lambda title: core.item_add(self.c, "web", title)["id"]
+        sent = []
+        server.dispatch_item(self.c, add("shared folder"), runner=sent.append)
+        self.assertIn(f"cd {root} && ", sent[-1])  # shared, the default: the project folder
+        core.config_set(self.c, "workspace", "worktree", project="web")
+        t = server.dispatch_item(self.c, add("own worktree"), runner=sent.append)
+        name = t["session_name"]
+        wt = os.path.join(os.path.dirname(root), "web.worktrees", name)
+        self.assertIn(f"cd {wt} && ", sent[-1])
+        self.assertIn(f"MAXPM_WORKSPACE={wt}", sent[-1])
+        self.assertEqual(git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt), f"maxpm/{name}")
+        # Its maxpm go runs in the worktree, beside the project folder: the worktree counts as the project's folder.
+        from river import cli
+        import contextlib, io
+        b = core.go(self.c, wt, name, focus=f"item:{t['item']['id']}")
+        self.assertEqual((b["projects"], b["item"]["id"]), (["web"], t["item"]["id"]))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn(f"WORKTREE: you work in {wt}, on the branch maxpm/{name} of {root}", out.getvalue())
+        core.release(self.c, t["item"]["id"], "the test goes on", name)
+        self.assertEqual(server.workspace_sweep(self.c), {})  # its session runs
+        Path(wt, "cart.txt").write_text("cart\n")
+        git("add", "cart.txt", cwd=wt)
+        git("commit", "-q", "-m", "the cart", cwd=wt)
+        core.unregister(self.c, name)
+        self.assertEqual(server.workspace_sweep(self.c), {wt: f"1 commit on maxpm/{name} not in web's HEAD"})
+        with self.assertRaisesRegex(RiverError, "--force"):
+            server.workspace_drop(self.c, name)
+        git("merge", "-q", "--ff-only", f"maxpm/{name}")  # the work goes to main
+        self.c.execute("UPDATE workspaces SET checked_at=NULL")
+        self.c.commit()
+        self.assertEqual(server.workspace_sweep(self.c), {wt: "removed"})
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(git("branch", "--list", f"maxpm/{name}"), "")
+        # setup: the project's command, in the worktree, before the agent.
+        core.config_set(self.c, "workspace", "setup", project="web")
+        z = add("with setup")
+        with self.assertRaisesRegex(RiverError, "workspace_setup names no command"):
+            server.dispatch_item(self.c, z, runner=sent.append)
+        core.config_set(self.c, "workspace_setup", "./setup.sh", project="web")
+        t = server.dispatch_item(self.c, z, runner=sent.append)
+        self.assertIn(f"&& {{ {{ ./setup.sh ; }} || printf '%s\\n' 'maxpm: the workspace setup failed", sent[-1])
+        self.assertTrue(sent[-1].endswith(t["command"]))
+        # A project folder that is no git repository has no worktrees: the start says which setting to change.
+        plain = os.path.join(os.path.realpath(self.dir.name), "notes")
+        os.makedirs(plain)
+        core.project_add(self.c, "notes", path=plain)
+        core.config_set(self.c, "workspace", "worktree")
+        with self.assertRaisesRegex(RiverError, "no git repository"):
+            server.dispatch_item(self.c, core.item_add(self.c, "notes", "a note")["id"], runner=sent.append)
+        with self.assertRaisesRegex(RiverError, "shared"):
+            core.config_set(self.c, "workspace", "own")
+
     def test_go_where_the_queue_is_off_gives_a_session_with_no_item(self):
         """#5851: queue off for a project: its maxpm go gives no item, goal or wait, and says how to turn it on."""
         from river import cli

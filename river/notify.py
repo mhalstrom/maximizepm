@@ -541,6 +541,7 @@ def loop(stop, interval_s=None):
                 server.auto_operational,  # an operational task starts in a new session; old lists get a cleanup
                 server.auto_context,  # goal_context on: a goal with ready work gets a context session (a base)
                 server.auto_tidy,  # every tidy_every: close the tmux panes of sessions that are done
+                server.workspace_sweep,  # the worktree of an ended session goes when its branch is merged (#5856)
                 server.auto_end_orphans,  # and end the tmux servers the tests left behind with no socket
                 server.browser_sweep,  # a session's Chrome whose session ended or that idled browser_idle_end (#5636)
                 space.serve_pass,  # over db_max_size or folder_max_size: the oldest removable data goes (#5711)

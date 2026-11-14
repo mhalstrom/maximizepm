@@ -1890,6 +1890,13 @@ def build_parser(only=None):
                         "as its first prompt, or none; no maxpm go, no queue work")
     x.add_argument("--folder", help="with --session: the folder it opens in (default: this folder)")
     x.add_argument("--dry-run", action="store_true", help="say what it would start; open nothing")
+    x = sub.add_parser("workspace", help="the git worktree of each session (setting workspace): list them, or remove one")
+    xs = x.add_subparsers(dest="wcmd")
+    y = xs.add_parser("list", help="the worktrees, their sessions, and why maxpm serve keeps one after its session ended")
+    y.add_argument("--all", action="store_true", help="also the removed ones")
+    y = xs.add_parser("drop", help="remove the worktree and branch of a session that has ended")
+    y.add_argument("session", help="the session's name")
+    y.add_argument("--force", action="store_true", help="also with uncommitted changes or commits that are not merged")
     x = sub.add_parser("expert", help="expert sessions: a session the person talks with for hours or days; it takes no "
                        "queue work, and MaximizePM never ends it as it ends a worker")
     xs = x.add_subparsers(dest="ecmd")
@@ -3945,6 +3952,14 @@ def dispatch(conn, a, actor):
             return core.goal_done(conn, a.name, a.result, actor, a.drop_open)
         if g == "reopen":
             return core.goal_reopen(conn, a.name, actor)
+    if c == "workspace":
+        if a.wcmd == "drop":
+            args = {"agent": a.session, "force": a.force}
+            if in_sandbox():  # git writes the repository's worktree list, outside the sandbox
+                return ask_server(conn, "workspace_drop", args, actor)
+            from . import server
+            return server.workspace_drop(conn, a.session, a.force, actor)
+        return core.workspace_list(conn, removed=getattr(a, "all", False))
     if c == "expert":
         return _expert_cmd(conn, a, actor)
     if c == "launch":
@@ -4993,6 +5008,11 @@ def render_go(b):
         out += [f"  #{q['id']} to {q['to_agent']}: {' '.join(q['body'].split())[:160]}" for q in b["asked_open"]] + [""]
     if b.get("focus_note"):
         out += [b["focus_note"], ""]
+    if b.get("workspace"):
+        w = b["workspace"]
+        out += [f"WORKTREE: you work in {w['path']}, on the branch {w['branch']} of {w['repo']}. Commit there, and merge "
+                f"the branch the way the project's rules say. When your session has ended and the branch is in the "
+                f"HEAD of {w['repo']}, maxpm serve removes the worktree; unmerged work stays.", ""]
     if b.get("help_prompt"):
         out += [b["help_prompt"], "",
                 f"Your own agent name is {me}; take over a person's item only with their yes: {r} takeover <id> --note \"<how>\"."]
@@ -7017,6 +7037,19 @@ def render(a, res):
         return
     if c == "queue":
         _print_queue(res)
+        return
+    if c == "workspace":
+        if isinstance(res, dict):
+            print(f"removed {res['removed']} and its branch {res['branch']}")
+        elif not res:
+            print("No worktrees. The setting workspace (worktree or setup) gives each session one.")
+        for w in res if isinstance(res, list) else ():
+            gone = w["removed_at"] or w["state"] in ("gone", "stopped")
+            print(f"{w['agent']} ({w['project'] or 'no project'}, {'removed' if w['removed_at'] else w['state']}): "
+                  f"{w['path']}, branch {w['branch']}"
+                  + (f"\n    kept: {w['kept_why']} (maxpm workspace drop {w['agent']} --force removes it)"
+                     if w["kept_why"] and not w["removed_at"] else "")
+                  + ("" if gone else "\n    its session runs"))
         return
     if c == "expert":
         return render_expert(res)
