@@ -476,6 +476,11 @@ STATE = {"state": "detect", "session_id": "identity"}
 # input area, the loading line and the footer included (ui.collapseDrawerDuringApproval, on by default), and the
 # trust and sign-in dialogs take the place of the input area. Else the watcher reads working, then idle: the input
 # line stays on the screen while Gemini works (a person can type the next prompt).
+# The trust question for a folder that --include-directories adds (#5818): Gemini asks it at each start for the queue
+# folder, also with --skip-trust (that trusts only the main folder), until the folder has a rule in Gemini's own
+# trustedFolders.json: its option "2. Yes, and remember the directories as trusted" writes one. No flag or setting of
+# one launch avoids it without replacing Gemini's own trust file or turning folder trust off (p140).
+TRUST_ADDED = r"Do you trust the following folders being added to this workspace\?"
 DETECT = {
     # The gemini command is a node script (#!/usr/bin/env node): tmux names the pane's process node, and ps shows
     # 'node /opt/homebrew/bin/gemini' (and a child 'node --max-old-space-size=... /opt/homebrew/bin/gemini'). The
@@ -492,6 +497,7 @@ DETECT = {
         r"Allow execution of",                       # a shell command ("Allow execution of [Shell]?"), an MCP tool
         r"Apply this change\?",                      # a file edit
         r"Do you trust the files in this folder\?",  # folder trust, at the start
+        TRUST_ADDED,                                 # the queue folder (--include-directories), at each start
         r"How would you like to authenticate for this project\?",  # sign-in, at the start
         r"Answer Questions",                          # ask_user: Gemini asks the person questions
         r"Ready to start implementation\?",          # exit_plan_mode
@@ -503,6 +509,10 @@ DETECT = {
     # The menu row of the selected option: "● 1. Allow once" (BaseSelectionList's selectedIndicator); the others
     # are "  2. Allow for this session". The frame and the rule are those of DETECT_LAYOUT.
     "menu": "●",
+    # #5818: a first prompt (--prompt-interactive) runs while the added folder's trust question waits. Gemini then
+    # draws that question under the tool question, but the keys answer the tool question first
+    # (pane_blocked_trust_dirs_tool.txt): the page must show the tool question.
+    "behind": TRUST_ADDED,
 }
 
 # ---------------------------------------------------------------------------------------------------------------

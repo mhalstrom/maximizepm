@@ -340,6 +340,21 @@ class Screen(unittest.TestCase):
         self.assertEqual(self.read("pane_blocked_auth.txt")[1]["options"], [
             ("1. Sign in with Google", True), ("2. Use Gemini API Key", False), ("3. Vertex AI", False)])
 
+    def test_the_trust_question_of_the_added_queue_folder(self):
+        # #5818: real screens of Gemini CLI 0.68.0 started with --skip-trust --include-directories <queue folder>.
+        trust = [("1. Yes", True), ("2. Yes, and remember the directories as trusted", False), ("3. No", False)]
+        for name in ("pane_blocked_trust_dirs.txt", "pane_blocked_trust_dirs_after_tool.txt"):
+            state, p = self.read(name)
+            self.assertEqual((state, p["question"], p["options"]),
+                             ("blocked", "Do you trust the following folders being added to this workspace?", trust),
+                             name)
+        # A first prompt's tool question waits above it, and Enter answers the tool question (the command ran, the
+        # trust question stayed): the page shows the tool question, so its answer goes where the keys go.
+        state, p = self.read("pane_blocked_trust_dirs_tool.txt")
+        self.assertEqual((state, p["question"]), ("blocked", "Allow execution of [Shell]?"))
+        self.assertEqual(p["options"], [("1. Allow once", True), ("2. Allow for this session", False),
+                                        ("3. No, suggest changes (esc)", False)])
+
     def test_the_tell_instead_option_is_on_each_tool_menu(self):
         for name in ("pane_blocked_shell.txt", "pane_blocked_edit.txt"):
             opts = [o for o, _ in self.read(name)[1]["options"]]

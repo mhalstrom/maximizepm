@@ -288,6 +288,9 @@ CHAT_KEYS = {"compressed": bool, "file_tools": (list, tuple), "ref": str, "cache
 #                      (OpenCode: "Allow once   Always allow   Reject      ⇆ select  enter confirm"); Left and Right
 #                      move in it. Its selected option shows by colour only, so the page takes the first one as
 #                      selected (OpenCode selects it at each new request). "": no such menu (#5281),
+#      "behind":       a regex of a question that the CLI draws under another question while the keys answer the one
+#                      above it (Gemini's added folder trust under a tool question, #5818); the page then reads the
+#                      question above. "": none,
 #    }
 # The pane watcher of maxpm serve (server.watch_prompts) reads each agent's pane with its DETECT: a blocked screen
 # alerts the person (with its question and options) for every agent; for an agent whose STATE["state"] is
@@ -299,7 +302,8 @@ HOOK_REPORT_KEYS = {"state": (str, type(None)), "event": str, "session_id": (str
                     "waits": (list, type(None)), "prompt": (str, type(None)), "again": bool, "run": (str, type(None))}
 DETECT_KEYS = {"process": str, "process_args": str, "idle": str, "working": str, "blocked": (list, tuple),
                "tell_instead": (str, type(None)), "image_paste": (str, type(None)),
-               "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str}
+               "menu": str, "other": str, "item": str, "frame": str, "rule": str, "hint": str, "row": str,
+               "behind": str}
 DETECT_LAYOUT = {
     "menu": "❯›",
     "other": "",
@@ -311,6 +315,7 @@ DETECT_LAYOUT = {
     "hint": r"\b(enter|esc|return|tab)\b.*\bto (confirm|cancel|select|continue|go back)\b|\[[yY]/[nN]\]"
             r"|^\s*enter \w+ ·.*\besc \w+|←/→ to adjust",
     "row": "",
+    "behind": "",
 }
 
 # 8. Input. tmux paste is the same for every agent; the image paste rule and the "tell it instead" text are in

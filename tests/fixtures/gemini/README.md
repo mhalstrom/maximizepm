@@ -7,6 +7,11 @@ For the tests of `river/agents/gemini.py`: Gemini CLI 0.68.0 (`@google/gemini-cl
   shell command that writes, a file edit, folder trust, sign-in). The pane's process (`pane_current_command`) is
   `node`; `ps` on its terminal shows `node /opt/homebrew/bin/gemini`. The folder path in the footer is neutral
   (`~/projects/gemdemo`).
+- `pane_blocked_trust_dirs*.txt` (#5818): the trust question of a folder that `--include-directories` adds (the queue
+  folder, here `/tmp/claude/demo/.maximizepm`), from a start with `--skip-trust`: alone; under the tool question of a
+  first prompt (`--prompt-interactive "make a file please"`), where Enter answered the tool question; and alone again
+  after that answer. Made as below, with `-e HOME=<demo folder>`, a `settings.json` in the empty Gemini home that
+  selects `gemini-api-key` (no sign-in dialog), and `--skip-trust --include-directories <demo folder>/.maximizepm`.
 - `session-2026-11-14T00-15-006c1604.jsonl`: the log that the same session wrote to
   `~/.gemini/tmp/<project>/chats/session-<YYYY-MM-DDTHH-MM>-<first 8 of the id>.jsonl`: a reply, a cancelled turn, a
   read-only shell command (Gemini ran `ls` with no question), a refused edit, an allowed shell command, then

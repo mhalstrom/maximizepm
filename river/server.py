@@ -1883,7 +1883,8 @@ def _layout(detect=None):
                                "mark": item(d["menu"]),
                                "other": d["other"] and item(d["other"]),
                                "rule": re.compile(d["rule"]), "hint": re.compile(d["hint"], re.I),
-                               "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell)}
+                               "row": d["row"] and re.compile(d["row"]), "tell": re.compile(tell),
+                               "behind": d["behind"] and re.compile(d["behind"])}
     return got
 
 
@@ -2324,7 +2325,26 @@ def _prompt_found(tail, rx, layout=None):
         return None  # more under it: the spinner, the input box, the status line, or the next tool call
     if not any(rx.search(x) for x in tail[min(parts["start"], end - 1):]):
         return None
+    if lay.get("behind") and parts["question"] and lay["behind"].search(parts["question"]):
+        return _prompt_above(tail, parts, rx, lay) or parts
     return parts
+
+
+def _prompt_above(tail, parts, rx, lay):
+    """The prompt that shows above a 'behind' question's box (DETECT['behind']), or None (#5818). Gemini draws the
+    trust question of an added folder under a waiting tool question, but Enter answers the tool question: the page
+    read the trust question, and its 'Yes' would have allowed the command."""
+    rows = list(getattr(tail, "above", ())) + list(tail)
+    n = len(rows) - len(tail) + parts["start"]
+    framed = re.compile(f"^\\s*[{lay['box']}]")
+    while n > 0 and framed.match(rows[n - 1]) and not _CORNER.match(rows[n]):
+        n -= 1
+    rows = rows[:n]
+    if not rows:
+        return None
+    up = _Tail(rows[-PROMPT_LINES:])
+    up.above = rows[-PROMPT_LINES - PROMPT_ABOVE:-PROMPT_LINES] if len(rows) > PROMPT_LINES else []
+    return _prompt_found(up, rx, lay)
 
 
 def _footer(line, layout=None):
