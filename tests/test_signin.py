@@ -369,7 +369,9 @@ class SigninRequests(Base):
         with contextlib.redirect_stdout(out):
             cli.run(["--as", "dev", "secret", "request", "--signin", "github.com", "--from", "boss",
                      "--from-project", "site", "--reason", "check the repo page"])
-        self.assertIn("r1", out.getvalue())
+        self.assertIn("r1 asked: dev asks for the person's sign-ins of github.com from the browser of site/boss",
+                      out.getvalue())
+        self.assertNotIn("None", out.getvalue())
         self.assertEqual(vault.requests(self.c)["requests"][0]["source"], "site/boss")
 
 

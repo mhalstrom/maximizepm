@@ -5736,7 +5736,10 @@ def render_secret(a, res):
 def _request_line(r):
     """One request (#5834): its id, state, who asked for what, and the checklist."""
     marks = ", ".join(("[x] " if n in r["ticked"] else "[ ] ") + n for n in r["offered"])
-    return (f"{r['request']} {r['state']}: {r['asked_by']} asks for {r['set_name']} for {r['covers']}"
+    # #5840: a request for sign-ins names its sites and the browser they come from, not a set
+    what = (f"the person's sign-ins of {', '.join(r['sites'])} from the browser of {r['source']}" if r.get("sites")
+            else r["set_name"])
+    return (f"{r['request']} {r['state']}: {r['asked_by']} asks for {what} for {r['covers']}"
             + (f" ({r['reason']})" if r.get("reason") else "") + (f"; checklist {marks}" if marks else "")
             + (f"; allowed {', '.join(r['chosen'])}" if r["chosen"] else "")
             + (f"; by {r['decided_by'] or 'a person'}" if r["state"] in ("granted", "refused") else ""))
