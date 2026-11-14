@@ -6,7 +6,8 @@ import { $, esc, toast, act, ago, getJson } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { button, iconButton } from "../components/button.js";
 import { empty } from "../components/empty.js";
-import { S } from "../page.js";
+import { openBrowser } from "../components/browserTool.js";
+import { S, nav } from "../page.js";
 
 let C = null, readAt = 0, reading = false;
 const AGAIN = 20000;  // ms: the panel reads the credentials again at most this often while Settings shows
@@ -27,9 +28,15 @@ export async function renderCredentials(force) {
 const KIND = { signin: "sign-in", token: "token", cookies: "saved sign-in" };
 const put = (el, html) => { if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; } };
 
+// #5849: the credential that the person changes now: {name, kind}, and for a saved sign-in the browser it opened.
+let editing = null;
+
 function draw() {
   const rows = C.credentials || [];
   drawRequests();
+  // A password typed in the edit box stays: the list is not drawn again while it holds text.
+  const typed = $("#credNewPw");
+  if (typed && typed.value) return;
   put($("#credList"), rows.map(credRow).join("")
     || empty("No credentials yet. Add a sign-in below, or run maxpm secret put &lt;name&gt; in a terminal."));
   put($("#credSets"), (C.sets || []).map(setRow).join("") || empty("No sets yet. A set holds credentials that you grant together."));
@@ -88,8 +95,84 @@ function credRow(r) {
     <div class="cred-sel">
       <label class="cred-level t-s">When asked <select data-cred-ask="${esc(r.name)}" title="When a session asks">${asks}</select></label>
       <label class="cred-level t-s">Level <select data-cred-level="${esc(r.name)}" title="Who may use it">${levels}</select></label>
+      ${r.kind === "signin" ? button("Change password", { data: { "cred-pw": r.name } })
+        : r.kind === "cookies" ? button("Sign in again", { data: { "cred-renew": r.name } }) : ""}
     </div>
+    ${editing && editing.name === r.name ? editBox(r) : ""}
   </div>`;
+}
+
+// #5849 (mark 2026-11-14: 'How do we handle it when those credentials need to be updated?'). Change password: the new
+// one replaces the old in place (name, sets, level, 'When asked' and grants stay) and a stopped fill may run again.
+// Sign in again: the site opens in a session's browser; the person signs in there; Save the new sign-in replaces the
+// saved one in place.
+function editBox(r) {
+  if (r.kind === "signin") {
+    return `<div class="cred-edit form">
+      <label>New password for ${esc(r.account || r.name)}<input id="credNewPw" type="password" autocomplete="new-password"></label>
+      <div class="actions">${button("Save password", { kind: "primary", data: { "cred-pw-save": r.name } })}
+        ${button("Cancel", { data: { "cred-edit-cancel": 1 } })}</div></div>`;
+  }
+  const list = C.browsers || [];
+  if (!list.length) {
+    return `<div class="cred-edit muted t-s">No session browser runs now. Start a session (or open its Browser), then
+      press Sign in again. ${button("Cancel", { data: { "cred-edit-cancel": 1 } })}</div>`;
+  }
+  const pick = editing.session || (list.find(b => b.session === r.used_by) || list[0]).session;
+  const opts = list.map(b => `<option value="${esc(b.session)}|${esc(b.project)}"${b.session === pick ? " selected" : ""}>`
+    + `${esc(b.session)} · ${esc(b.project)}</option>`).join("");
+  return `<div class="cred-edit form">
+    <label>Sign in to ${esc(r.site)} in the browser of<select id="credRenewBrowser">${opts}</select></label>
+    <div class="muted t-s">${editing.opened ? `Sign in to ${esc(r.site)} in that session's Browser, then press Save the new sign-in.`
+      : "Open the sign-in page: it shows in that session's Browser on the Sessions tab."}</div>
+    <div class="actions">${button("Open the sign-in page", { kind: editing.opened ? "" : "primary", data: { "cred-renew-open": r.name } })}
+      ${button("Save the new sign-in", { kind: editing.opened ? "primary" : "", data: { "cred-renew-save": r.name } })}
+      ${button("Cancel", { data: { "cred-edit-cancel": 1 } })}</div></div>`;
+}
+
+async function editClick(t) {
+  const row = (name) => (C.credentials || []).find(c => c.name === name);
+  if (t.dataset.credPw || t.dataset.credRenew) {
+    const name = t.dataset.credPw || t.dataset.credRenew;
+    editing = editing && editing.name === name ? null : { name };
+    return draw(), true;
+  }
+  if (t.dataset.credEditCancel) { editing = null; const f = $("#credNewPw"); if (f) f.value = ""; return draw(), true; }
+  if (t.dataset.credPwSave) {
+    const f = $("#credNewPw");
+    if (!f || !f.value) return toast("Type the new password", true), true;
+    const value_b64 = b64(f.value);
+    f.value = "";  // the password leaves the page now; nothing shows it again
+    try { await act("secret", { action: "signin", name: t.dataset.credPwSave, value_b64 }); }
+    catch (err) { return true; }
+    toast(`Saved the new password of ${t.dataset.credPwSave}`);
+    editing = null;
+    renderCredentials(true);
+    return true;
+  }
+  if (t.dataset.credRenewOpen || t.dataset.credRenewSave) {
+    const name = t.dataset.credRenewOpen || t.dataset.credRenewSave, r = row(name);
+    const [session, project] = ($("#credRenewBrowser") || {}).value ? $("#credRenewBrowser").value.split("|") : [];
+    if (!r || !session) return toast("Choose the browser", true), true;
+    editing = { ...editing, session };
+    if (t.dataset.credRenewOpen) {
+      try {
+        await nav.openSession(session);
+        await openBrowser(session, `https://${r.site}/`);
+      } catch (err) { return toast(`The browser did not open: ${err.message}`, true), true; }
+      editing = { name, session, opened: true };
+      toast(`Sign in to ${r.site} in the Browser of ${session}, then come back to Settings and press Save the new sign-in`);
+      return true;
+    }
+    try {
+      const out = await act("secret", { action: "cookies", name, site: r.site, session, agent: session, project });
+      toast(`Saved the new sign-in ${name}: ${out.cookies} cookies of ${out.site}`);
+    } catch (err) { return true; }
+    editing = null;
+    renderCredentials(true);
+    return true;
+  }
+  return false;
 }
 
 // #5842 (mark 2026-11-14): one plain setting per credential. Ask me: the person answers each request for it (the
@@ -204,6 +287,7 @@ panel.addEventListener("change", async (e) => {
 panel.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
   if (!t) return;
+  if (await editClick(t)) return;  // #5849: Change password, Sign in again
   if (t.dataset.reqOk || t.dataset.reqRefuse) {  // #5833: the person's answer to a checklist
     const id = +(t.dataset.reqOk || t.dataset.reqRefuse);
     const only = [...panel.querySelectorAll(`input[data-req-pick="${id}"]:checked`)].map(i => i.value);

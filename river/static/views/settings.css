@@ -27,7 +27,10 @@
 .cred { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: flex-start; justify-content: space-between; }
 .cred-main { flex: 1; min-width: var(--w-l); }
 .cred-level { display: flex; gap: var(--sp-2); align-items: center; }
-.cred-sel { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); }  /* When asked, Level (#5842) */
+.cred-sel { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); align-items: center; }  /* When asked, Level (#5842) */
+/* #5849: the box under a credential that changes it (Change password, Sign in again): the whole row's width. */
+.cred-edit { flex: 1 1 100%; max-width: var(--w-form); margin-top: var(--sp-2); }
+.cred-edit .actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); }
 /* The sign-in modal: each site's tick, and beside it 'Do not ask again for this site' (#5842); wraps on a phone. */
 .signin-site { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--sp-5); }
 .cred-grants { display: flex; flex-wrap: wrap; gap: var(--sp-3); margin: var(--sp-2) 0; }

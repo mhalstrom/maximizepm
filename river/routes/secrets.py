@@ -129,7 +129,12 @@ def approve_signins(conn, a, who):
                              "Allow again")
     names = []
     for site, cookies in got.items():
-        names.append(vault.cookies_save(conn, f"{r['request']}-{site}", site, cookies, who)["secret"])
+        # #5849: a saved sign-in of this site exists already: the new one replaces it in place, so its name, sets,
+        # level, 'When asked' and grants stay; else a new one, r<id>-<site>
+        old = conn.execute("SELECT name FROM secrets WHERE kind='cookies' AND site=? ORDER BY created_at LIMIT 1",
+                           (site,)).fetchone()
+        names.append(vault.cookies_save(conn, old["name"] if old else f"{r['request']}-{site}", site, cookies,
+                                        who)["secret"])
         if site in always:
             vault.set_ask(conn, names[-1], "allow", who)
     return {**vault.approve(conn, r["id"], names, who, a.get("note")), "saved": names}

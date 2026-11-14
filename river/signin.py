@@ -86,6 +86,11 @@ def soon(b, url=None):
     if not getattr(b, "owner", None):
         return
     host = (urlsplit(url or "").hostname or "").lower().removeprefix("www.")
+    if url is not None and b.__dict__.get("cookie_loaded"):  # #5849: a saved sign-in that the site no longer takes
+        try:
+            expired(b, url)
+        except Exception as e:  # noqa: BLE001 - a page that went away: the next page load looks again
+            print(f"maxpm: browser sign-in expiry check: {e.__class__.__name__}: {e}", file=sys.stderr)
     if url is not None and not any(host == s or host.endswith("." + s) for s in _sites()):
         return
     if RUNNER:
@@ -93,6 +98,51 @@ def soon(b, url=None):
         return
     threading.Thread(target=lambda: (time.sleep(SETTLE), check(b)), daemon=True,
                      name=f"browser-signin-{b.project}").start()
+
+
+EXPIRED_AGAIN = 12 * 3600  # seconds: one alert for an expired saved sign-in, then none for this long
+
+
+def expired(b, url, conn=None):
+    """#5849: a session's browser that loaded a saved sign-in (cookies) of a site arrives at that site's sign-in page:
+    the site no longer takes the saved sign-in. One alert to the manager (with no manager, to the person), none again
+    for EXPIRED_AGAIN. Returns the names it said, for the tests."""
+    from .browser import SIGNIN
+    u = urlsplit(url or "")
+    host = (u.hostname or "").lower().removeprefix("www.")
+    if u.scheme != "https" or not host or not SIGNIN.search(host + u.path):
+        return []
+    loaded = b.__dict__.get("cookie_loaded") or set()
+    mine = conn is None
+    conn = conn or core.connect()
+    try:
+        said = []
+        for name, site in vault.cookie_sites(conn):
+            if name not in loaded or not _on(host, site):
+                continue
+            since = core.iso(core.now() - core.timedelta(seconds=EXPIRED_AGAIN))
+            if conn.execute("SELECT 1 FROM secret_log WHERE name=? AND action='expired' AND at>?",
+                            (name, since)).fetchone():
+                continue
+            # mark 2026-11-14: 'if the credential requires re-sign in, then we need to raise it to the manager. And
+            # then. Do next steps.' The manager gets it (its steps: maxpm guide manager, 'A sign-in that expired');
+            # with no manager active, the person.
+            manager = core.active_manager(conn)
+            people = vault._people(conn)
+            to = manager or (people[0] if people else None)
+            from . import notify
+            with core.tx(conn):
+                vault._log(conn, name, b.owner, "expired", f"{host} showed its sign-in page in the browser of {b.owner}")
+                if to:
+                    nxt = ("Next steps: maxpm guide manager, section 'A sign-in that expired'." if manager else
+                           f"Renew it: Settings, Credentials, {name}, Sign in again. {notify.page_url(conn)}settings")
+                    core._send(conn, "alert", "maxpm", f"The saved sign-in {name} for {site} no longer works: "
+                               f"{host} asked {b.owner} to sign in. {nxt}", to=to)
+            said.append(name)
+        return said
+    finally:
+        if mine:
+            conn.close()
 
 
 def check(b, conn=None):

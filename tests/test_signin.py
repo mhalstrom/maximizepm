@@ -434,6 +434,57 @@ class SigninRequests(Base):
         routes_secrets.act(self.c, {"action": "approve", "request": r["id"]}, "mark")
         self.assertIsNone(self.c.execute("SELECT blocked_reason FROM items WHERE id=?", (self.item,)).fetchone()[0])
 
+    def test_a_new_allow_replaces_the_saved_sign_in_of_the_site_in_place(self):
+        """#5849: a second Allow for a site updates the saved sign-in that exists (its name, sets, 'When asked' and
+        grants stay), instead of a new one."""
+        from river.routes import secrets as routes_secrets
+        vault.cookies_save(self.c, "gh-cookies", "github.com", [{"name": "old", "value": "o", "domain": "github.com",
+                                                                 "path": "/"}], "mark", "gh-saved")
+        g = vault.grant(self.c, "gh-saved", "agent", "boss", actor="mark")
+        r = self.ask(("github.com",))
+        out = routes_secrets.act(self.c, {"action": "approve", "request": r["id"]}, "mark")
+        self.assertEqual(out["saved"], ["gh-cookies"])
+        self.assertEqual([x["name"] for x in vault.listing(self.c)["secrets"] if x["kind"] == "cookies"], ["gh-cookies"])
+        got = vault.unpack_cookies(vault.Files().get(self.c, "gh-cookies"))
+        self.assertEqual(sorted(c["name"] for c in got), ["_gh_sess", "user_session"])  # the new sign-in
+        self.assertEqual([x["grant"] for x in vault.grants(self.c, "gh-saved")["grants"]], [g["grant"]])  # stays
+
+
+class ExpiredSignIns(Base):
+    """#5849: a session's browser that loaded a saved sign-in arrives at the site's sign-in page: one alert to the
+    person with where to renew it, then none for EXPIRED_AGAIN."""
+
+    def test_one_alert_when_the_site_asks_to_sign_in_again(self):
+        vault.cookies_save(self.c, "gh-cookies", "github.com", GH, "mark", "gh-set")
+        b = CookieBrowser(owner="dev")
+        b.cookie_loaded = {"gh-cookies"}
+        self.assertEqual(signin.expired(b, "https://github.com/", self.c), [])  # not a sign-in page
+        self.assertEqual(signin.expired(b, "https://gitlab.com/users/sign_in", self.c), [])  # another site
+        self.assertEqual(signin.expired(b, "https://github.com/login?return_to=x", self.c), ["gh-cookies"])
+        self.assertEqual(signin.expired(b, "https://github.com/login", self.c), [])  # once
+        body = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' ORDER BY id DESC").fetchone()[0]
+        self.assertIn("The saved sign-in gh-cookies for github.com no longer works", body)
+        self.assertIn("Settings, Credentials, gh-cookies, Sign in again", body)
+        other = CookieBrowser(owner="dev")  # a browser that never loaded it says nothing
+        self.assertEqual(signin.expired(other, "https://github.com/login", self.c), [])
+
+    def test_the_manager_gets_it_when_one_is_active(self):
+        """mark 2026-11-14: 'if the credential requires re-sign in, then we need to raise it to the manager'."""
+        vault.cookies_save(self.c, "gh-cookies", "github.com", GH, "mark", "gh-set")
+        core.register(self.c, "boss")
+        b = CookieBrowser(owner="dev")
+        b.cookie_loaded = {"gh-cookies"}
+        with mock.patch.object(core, "active_manager", lambda conn, but=None: "boss"):
+            self.assertEqual(signin.expired(b, "https://github.com/login", self.c), ["gh-cookies"])
+        to, body = self.c.execute("SELECT to_agent, body FROM messages ORDER BY id DESC").fetchone()
+        self.assertEqual(to, "boss")
+        self.assertIn("maxpm guide manager, section 'A sign-in that expired'", body)
+        from river import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["guide", "manager"])
+        self.assertIn("**A sign-in that expired**", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

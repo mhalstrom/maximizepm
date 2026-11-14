@@ -268,6 +268,21 @@ Stop when the user tells you to, and tell the user what you did.
   propose r<id> --offer <credentials> --tick <the ones you expect them to
   allow>`; their OK grants exactly what they tick. The person gets a daily list of your grants;
   `maxpm secret check <session>` shows what a session holds and used.
+- **A sign-in that expired** (an alert from maxpm: a site asked a session to
+  sign in again although its saved sign-in loaded): the task that needs it may
+  go on with its other parts; tell its session. Then renew it, with one step
+  for the person:
+  1. A saved sign-in: tell the session to open the site's sign-in page in its
+     browser and do every click up to the password or passkey.
+  2. Ask the person once, with `maxpm ask --blocked`: "Sign in to <site> in the
+     Browser of <session> (only the password or passkey), then Settings,
+     Credentials, <name>, Sign in again, Save the new sign-in." A password
+     sign-in instead: "Settings, Credentials, <name>, Change password."
+  3. The saved sign-in keeps its name, sets and grants. When the person says it
+     is done, tell the session to go on.
+  Only the person types a password or uses a passkey. A site that refuses a
+  copied sign-in (it asks for the passkey in every new browser) is a question
+  for the person, not a renewal.
 
 ## Your tools
 
