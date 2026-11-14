@@ -1032,9 +1032,32 @@ def _tmux_open(t, env, line):
     _tmux("set-option", "-p", "-t", pane, "@maxpm_db", _queue_db())  # only this queue tidies the pane (#5054)
     if env.get("MAXPM_AGENT"):
         _tmux("set-option", "-p", "-t", pane, "@maxpm_agent", env["MAXPM_AGENT"])
-    _tmux("send-keys", "-t", pane, "-l", line)
+    _tmux("send-keys", "-t", pane, "-l", _typed_line(line))
     _tmux("send-keys", "-t", pane, "Enter")
     return pane
+
+
+TYPED_MAX = 500  # bytes: a longer command line goes into a file, and the pane gets a short line that reads it
+
+
+def _typed_line(line):
+    """The line to type into a new pane's shell for this command line (#5884). The keys arrive while the login shell
+    may still start: its terminal is then in line mode, where macOS keeps at most 1024 bytes of one line (MAX_CANON)
+    and drops the rest, the closing quote and the Enter too. 3 of 10 launches with a prompt of 600 characters
+    stopped at zsh's 'cmdand quote>', and no agent started. A long line goes into a file only its user reads; the
+    pane's own shell reads it with '.' (sh, dash, bash, zsh, ksh, fish), so its aliases and PATH still apply, and the
+    file's first line removes it."""
+    if len(line.encode()) <= TYPED_MAX:
+        return line
+    import secrets
+    import shlex
+    folder = Path(core.river_dir(), "launch")
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"launch-{secrets.token_hex(6)}.sh"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"/bin/rm -f -- {shlex.quote(str(path))}\n{line}\n")
+    return f". {shlex.quote(str(path))}"
 
 
 def _pane_texts(panes):

@@ -1562,7 +1562,11 @@ class FakeTmux:
         elif cmd == "set-option" and "-w" in a and "@maxpm_tile" in a:
             self.windows[opt("-t")]["tile"] = "" if "-u" in a else "1"
         elif cmd == "send-keys":
-            pane["keys"].append(a[-1])
+            # keys: what the pane's shell runs. A long launch line comes as '. <file>' (#5884): the shell reads the
+            # command line from the file. typed: the text as it came.
+            pane.setdefault("typed", []).append(a[-1])
+            path = shlex.split(a[-1])[1] if a[-1].startswith(". ") and "/launch/launch-" in a[-1] else None
+            pane["keys"].append(Path(path).read_text(encoding="utf-8").split("\n", 1)[1].rstrip("\n") if path else a[-1])
         elif cmd == "rename-window":
             self.windows[opt("-t")]["name"] = a[-1]
         elif cmd == "join-pane":
@@ -1616,6 +1620,29 @@ class LaunchInTmux(unittest.TestCase):
         self.c.close()
         os.environ.pop("MAXPM_DB", None)
         self.dir.cleanup()
+
+    def test_a_long_command_line_goes_through_a_file_and_the_pane_gets_a_short_line(self):
+        """#5884: keys typed while the login shell starts meet a terminal in line mode, which keeps 1024 bytes of a
+        line on macOS: a launch with a long prompt stopped at zsh's 'cmdand quote>'. The pane gets a short line."""
+        prompt = 'click link "Main page", then open https://en.wikipedia.org/wiki/Special:Random ' * 8
+        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#1 long",
+                               "command": f"claude {shlex.quote(prompt)}"}, {"MAXPM_AGENT": "shop-aaaa"})
+        typed = self.tmux.panes[-1]["typed"][0]
+        self.assertLess(len(typed.encode()), server.TYPED_MAX)
+        self.assertTrue(typed.startswith(". "), typed)
+        path = Path(shlex.split(typed)[1])
+        self.assertEqual(path.parent, Path(core.river_dir(), "launch"))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)  # the prompt is for the user's eyes only
+        first, line = path.read_text(encoding="utf-8").split("\n", 1)
+        self.assertEqual(first, f"/bin/rm -f -- {shlex.quote(str(path))}")  # it removes itself when the shell reads it
+        self.assertEqual(shlex.split(line)[-1], prompt)
+        self.assertIn("MAXPM_AGENT=shop-aaaa ", line)
+        # A short line is typed as it is: the person sees the command in the pane.
+        server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#2 short",
+                               "command": "sleep 60"}, {})
+        pane = self.tmux.panes[-1]
+        self.assertEqual(pane["typed"], pane["keys"][:1] + ["Enter"])
+        self.assertTrue(pane["keys"][0].startswith(f"cd {shlex.quote(self.dir.name)} && "), pane["keys"][0])
 
     def test_claim_next_and_a_drawer_open_name_the_session_before_it_starts(self):
         """#5201: Claim next started a session in a pane with no @maxpm_agent; until its maxpm go registered it and the
@@ -3481,8 +3508,10 @@ class LaunchInTmux(unittest.TestCase):
                 pass  # a sandbox blocks the socket: then no server started either
         self.addCleanup(end_server)  # before the start: a start that fails halfway may have started the server
         try:
+            # #1's line is longer than TYPED_MAX: it goes through a file (#5884), and sleep runs only when the shell
+            # got the whole line, the closing quote too.
             server._open_terminal({"project": "shop", "path": self.dir.name, "session_title": "#1 first: a | b",
-                                   "command": "sleep 60"}, {"MAXPM_AGENT": "shop-aaaa"})
+                                   "command": f": '{'x' * 1500}' && sleep 60"}, {"MAXPM_AGENT": "shop-aaaa"})
         except RiverError as e:
             self.skipTest(f"tmux cannot run here: {e}")  # a sandbox blocks its socket
         for name, command in (("#2 second", "sleep 60"), ("needs you", "true")):
@@ -3497,6 +3526,7 @@ class LaunchInTmux(unittest.TestCase):
             self.fail(f"the panes did not get there: {got}")
         # A pane river just opened shows a shell: for START_GRACE it starts, and no tidy closes it (#1011).
         got = panes(lambda p: p["starting"] if p["name"] == "needs you" else p["running"] == "sleep")
+        self.assertEqual(list(Path(core.river_dir(), "launch").iterdir()), [])  # #1's file removed itself
         self.assertEqual(([p["ended"] for p in got.values()], server.tmux_view(None, tidy=True)["closed"]),
                          ([False, False, False], []))
         self.addCleanup(setattr, server, "START_GRACE", server.START_GRACE)
