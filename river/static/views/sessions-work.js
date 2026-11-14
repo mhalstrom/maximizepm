@@ -4,19 +4,22 @@
 // finished (the tmux panes of sessions that are done). Drawn from the page's state (S) on each refresh.
 import { $, esc, act, toast, ago, clip, shortTitle } from "../lib.js";
 import { chip } from "../components/chip.js";
-import { agentStart } from "../components/agentStart.js";
+import { agentStart, newSession, queueOn, queueAnywhere } from "../components/agentStart.js";
 import { button } from "../components/button.js";
 import { S } from "../page.js";
 
 const put = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };
 
-// Start an agent, with the open slots (max_sessions less the sessions that run) and the ready items for agents.
+// Start an agent, with the open slots (max_sessions less the sessions that run) and the ready items for agents; and
+// New session (#5851), an agent in a folder with no item. With the queue off everywhere, only New session.
 export function renderStart() {
   if (!S) return;
-  const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)).length;
+  const q = queueAnywhere(S);
+  const ready = S.items.filter(i => i.ready && i.doer !== "human" && !["deploy", "review"].includes(i.kind)
+    && queueOn(S, i.project)).length;
   const slots = S.capacity ? S.capacity.spare_slots : 0;
-  const line = `<span class="muted t-s" title="Open slots and ready items">${slots} open slot${slots === 1 ? "" : "s"} · ${ready} ready</span>`;
-  put($("#sessStart"), line + (ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
+  const line = q ? `<span class="muted t-s" title="Open slots and ready items">${slots} open slot${slots === 1 ? "" : "s"} · ${ready} ready</span>` : "";
+  put($("#sessStart"), line + newSession(S, !(q && ready)) + (q && ready ? agentStart(S.launch_agents, { label: "Start an agent", cls: "primary", attrs: 'data-launch="1"',
     title: "Start an agent on the top ready item" }) : ""));
 }
 

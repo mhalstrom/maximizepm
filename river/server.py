@@ -287,6 +287,49 @@ def open_needs_you(conn, runner=None, agent=None, person=None, model=None, effor
     return {**t, "session_name": name}
 
 
+def start_session(conn, folder=None, runner=None, agent=None, actor=None, model=None, effort=None, options=None,
+                  prompt=None):
+    """Sessions tab, New session (#5851): open an agent in any folder with no item, so the person talks with it on
+    the page (its chat, Send, its prompts). folder: any folder on this computer; none: the first project that has
+    one. The project whose folder holds it (the deepest) gives the launch settings; a folder of no project, the
+    global ones. Its first prompt is prompt, or none: no maxpm go and no queue skill. It is a session with no item
+    (core.plain_make): no queue work, no worker slot, and the worker rules never end it."""
+    import secrets
+    if folder:
+        path = Path(str(folder)).expanduser()
+        if not path.is_absolute():
+            raise RiverError(f"folder {folder!r}: give the whole path, for example ~/Projects/web")
+        if not path.is_dir():
+            raise RiverError(f"no folder {path} on this computer")
+        path = path.resolve()
+    else:
+        p = next((core._project(conn, x["name"]) for x in core.project_list(conn)
+                  if core._project(conn, x["name"])["path"]), None)
+        if p is None:
+            raise RiverError("name the folder for the session: no project has a folder yet")
+        path = Path(p["path"])
+    names = core.projects_for_dir(conn, str(path))
+    project = core._project(conn, names[0]) if names else None
+    if prompt is not None and not str(prompt).strip():
+        prompt = None
+    _can_open_terminal(runner, f"cd {path} && claude")
+    base = re.sub(r"[^a-z0-9]+", "-", (project["name"] if project else path.name).lower()).strip("-")[:24] or "session"
+    name = f"{base}-{secrets.token_hex(2)}"
+    while conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+        name = f"{base}-{secrets.token_hex(2)}"
+    title = core._short_title(" ".join(str(prompt).split()) if prompt else path.name)
+    t = {"project": project["name"] if project else None, "path": str(path), "session_title": title or name,
+         **core._launch_agent_cmd(conn, project["id"] if project else None, agent, model, effort, options, title or name,
+                                  prompt, plain=True)}
+    core.plain_make(conn, name, f"started by {actor or 'the page'} in {path}", folder=str(path))
+    try:
+        _started(conn, name, t)
+        _open_terminal(t, {"MAXPM_AGENT": name, **t["env"]}, runner)
+    except Exception as e:
+        _undo_start(conn, name, e, actor=actor)
+    return {**t, "session_name": name, "folder": str(path)}
+
+
 def deploy_now(conn, target, review=False, runner=None, agent=None, actor=None, model=None, effort=None,
                options=None):
     """Targets tab, Deploy now (or Review and deploy): when the deploy item (or its review) is ready and
@@ -2758,7 +2801,7 @@ def fresh_sessions(conn, runner=None):
         return out
     t, cands, quiet = core.now(), {}, set()
     for a in conn.execute("SELECT name, last_seen, registered_at, role FROM agents WHERE kind='ai' AND stop_at IS NULL "
-                          "AND COALESCE(role, '') NOT IN ('manager', 'planner', 'expert', 'assistant')").fetchall():
+                          "AND COALESCE(role, '') NOT IN ('manager', 'planner', 'expert', 'assistant', 'plain')").fetchall():
         idle = t - core.parse_iso(a["last_seen"])
         if a["last_seen"] == a["registered_at"] or idle < after:
             continue  # it never connected (the manager finds that), or it ran a river command just now
@@ -4657,6 +4700,9 @@ OPS = {
     "open_agent_on": lambda c, a, who: open_agent_on(c, int(a["id"]), agent=a.get("agent"), person=a.get("person"), actor=who,
                                                      **_launch_args(a)),
     "open_needs_you": lambda c, a, who: open_needs_you(c, agent=a.get("agent"), person=a.get("person"), **_launch_args(a)),
+    # New session (#5851): an agent in a folder with no item; maxpm launch --session hands it to serve from a sandbox.
+    "start_session": lambda c, a, who: start_session(c, a.get("folder"), agent=a.get("agent"), actor=who,
+                                                     prompt=a.get("prompt"), **_launch_args(a)),
     "run_hooks": lambda c, a, who: {"started": hooks_soon(c, str(a["token"]), a.get("cwd"))},
     # Operations checks (#5430): run one now (maxpm ops run), and the beat of a project's own job (maxpm ops beat).
     "ops_run": ops_run_op,

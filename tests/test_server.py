@@ -1031,6 +1031,79 @@ class LaunchAgent(unittest.TestCase):
         self.c.commit()
         self.assertIsNone(core.assistant_of(self.c, "mark"))
 
+    def test_new_session_opens_an_agent_in_any_folder_with_no_item(self):
+        """#5851: New session starts the agent in the folder with the person's prompt alone, or none (no go, no
+        queue skill); it is a session with no item: no queue work, no worker slot, never ended by the worker rules."""
+        from river import cli
+        import contextlib, io
+        web = os.path.join(os.path.realpath(self.dir.name), "web")
+        other = os.path.join(os.path.realpath(self.dir.name), "notes")
+        os.makedirs(os.path.join(web, "src"))
+        os.makedirs(other)
+        core.project_add(self.c, "web", path=web)
+        core.item_add(self.c, "web", "build the cart")
+        core.config_set(self.c, "max_sessions", "1")
+        core.config_set(self.c, "claude_skill_prompt", "on")
+        sent = []
+        old, server.TERMINAL_RUNNER = server.TERMINAL_RUNNER, sent.append
+        self.addCleanup(setattr, server, "TERMINAL_RUNNER", old)
+        t = server.OPS["start_session"](self.c, {"folder": os.path.join(web, "src"), "prompt": "fix the header"}, "mark")
+        name = t["session_name"]
+        self.assertTrue(name.startswith("web-"), name)
+        self.assertIn(f"cd {web}/src && ", sent[-1])
+        self.assertEqual(t["project"], "web")
+        self.assertNotIn(" go", t["command"])
+        self.assertNotIn("append-system-prompt", t["command"])
+        self.assertIn("'fix the header'", t["command"])
+        r = server.start_session(self.c, other, runner=sent.append)
+        self.assertIsNone(r["project"])
+        self.assertTrue(r["session_name"].startswith("notes-"))
+        self.assertIn(f"cd {other} && ", sent[-1])
+        self.assertIn(f"MAXPM_AGENT={r['session_name']} claude --name notes --remote-control notes", sent[-1])
+        for n in (name, r["session_name"]):
+            self.assertEqual(core._agent(self.c, n)["role"], "plain")
+        # No worker slot, no queue work: the Start button still has its slot, and go gives no item.
+        self.assertEqual(core.live_sessions(self.c), 0)
+        b = core.go(self.c, os.path.join(web, "src"), name)
+        self.assertEqual((b["role"], b["item"]), ("plain", None))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn("Role: SESSION", out.getvalue())
+        self.assertIn("do not run maxpm wait", out.getvalue())
+        # Idle at its prompt for hours: the worker rules (idle_end) leave it alone.
+        self.c.execute("UPDATE agents SET last_seen='2026-01-01T00:00:00Z', talked_at='2026-01-01T00:00:00Z'")
+        self.c.commit()
+        self.assertEqual(server.fresh_sessions(self.c, runner=sent.append)["ended"], {})
+        self.assertEqual(core.end_quiet_experts(self.c), {})
+        # session_idle_end set: a session with no talk and no work for that long ends.
+        core.config_set(self.c, "session_idle_end", "1h")
+        self.assertEqual(set(core.end_quiet_experts(self.c)), {name, r["session_name"]})
+        with self.assertRaisesRegex(RiverError, "no folder"):
+            server.start_session(self.c, os.path.join(self.dir.name, "missing"), runner=sent.append)
+        with self.assertRaisesRegex(RiverError, "whole path"):
+            server.start_session(self.c, "web", runner=sent.append)
+
+    def test_go_where_the_queue_is_off_gives_a_session_with_no_item(self):
+        """#5851: queue off for a project: its maxpm go gives no item, goal or wait, and says how to turn it on."""
+        from river import cli
+        import contextlib, io
+        core.project_add(self.c, "web", path=self.dir.name)
+        core.item_add(self.c, "web", "build the cart")
+        core.config_set(self.c, "queue", "off", project="web")
+        b = core.go(self.c, self.dir.name)
+        self.assertEqual((b["role"], b["item"], b["queue_off"]), ("plain", None, ["web"]))
+        self.assertEqual(core._agent(self.c, b["agent"])["role"], "plain")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.render_go(b)
+        self.assertIn("maxpm config set queue on --project web", out.getvalue())
+        # A start for an item (Dispatch, its focus) still works there; and the queue on again gives work.
+        core.config_set(self.c, "queue", "on", project="web")
+        self.assertEqual(core.go(self.c, self.dir.name)["role"], "worker")
+        with self.assertRaisesRegex(RiverError, "on or off"):
+            core.config_set(self.c, "queue", "maybe")
+
     def test_deploy_now_without_an_owner_opens_a_deployer(self):
         core.target_add(self.c, "web")
         core.project_add(self.c, "site", target="web", path=self.dir.name)

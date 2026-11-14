@@ -3,7 +3,7 @@ import { chip, prioNumChip, doerChip, projectChip, personChip } from "./componen
 import { itemOrder } from "./components/itemRow.js";
 import { makeDrawer, itemDrawerHtml } from "./components/drawer.js";
 import { makeDialog, ASK_AGAIN_MS } from "./components/dialog.js";
-import { agentStart } from "./components/agentStart.js";
+import { agentStart, newSession } from "./components/agentStart.js";
 import { chooseLaunch, launchArgs } from "./components/launchDialog.js";
 import { archiveProject, restoreProject } from "./components/archiveProject.js";
 import { openTerminal } from "./components/terminalDialog.js";
@@ -284,6 +284,17 @@ document.addEventListener("click", async (e) => {
     return; }
   if (t.dataset.terminal) return openTerminal(t.dataset.terminal);
   if (t.dataset.qremove) { await act("queue_remove", { agent: t.dataset.qremove, ref: t.dataset.ref }).catch(() => {}); return; }
+  // New session (#5851): an agent in a folder with no item; its chat opens on the Sessions tab.
+  const ns = t.closest("[data-new-session]"); if (ns) {
+    if (ns.dataset.busy) return; ns.dataset.busy = "1"; setTimeout(() => delete ns.dataset.busy, 4000);
+    const ch = await chooseLaunch(S, { title: "New session", go: "Start", pickFolder: true });
+    if (!ch) { delete ns.dataset.busy; return; }
+    try {
+      const r = await act("start_session", { folder: ch.folder, prompt: ch.prompt.trim() || undefined, ...launchArgs(ch) });
+      toast(`Started ${r.agent} in ${r.folder.replace(/^\/(Users|home)\/[^/]+/, "~")}`);
+      if (r.session_name) nav.openSession(r.session_name);
+    } catch (e) { /* toast shown */ }
+    return; }
   const la = t.closest("[data-launch]"); if (la) {
     if (la.dataset.busy) return; la.dataset.busy = "1"; setTimeout(() => delete la.dataset.busy, 4000);
     const ch = await chooseLaunch(S, { title: "Start an agent", go: "Start", pickWork: true });
@@ -587,6 +598,18 @@ function renderSetup(st) {
   const extra = (ok, title, sub, fix) => { const [b, line] = head(ok, title, sub); return `<div class="step"><div class="mark ${ok ? "ok" : "opt"}">${ok ? "✓" : "·"}</div>
     <div>${b}${line ? `<div class="sub">${line}</div>` : ""}${!ok && fix ? `<div class="fix">${fix}</div>` : ""}</div></div>`; };
   const out = [];
+  // How you work (#5851): the first choice. Just sessions turns the queue off for every project (setting queue);
+  // a queue that has items already counts as a choice made.
+  const qset = ((S && S.settings && S.settings.overrides) || []).find(x => x.key === "queue" && x.scope === "global");
+  const justSessions = !!qset && qset.value === "off";
+  const used = ((S && S.items) || []).length > 0 || closedTotal() > 0;
+  out.push(step(!!qset || used, "How you work",
+    qset || used ? `<select id="suMode" aria-label="How you work"><option value="off" ${justSessions ? "selected" : ""}>Just sessions</option>
+        <option value="on" ${justSessions ? "" : "selected"}>Sessions and a queue</option></select>
+        <span class="muted">${justSessions ? "You start agents in your folders and talk with them." : "Agents also take items from your list, in order."}</span>`
+      : "Just sessions: start agents in your folders, watch them, and talk with them. Sessions and a queue: you also keep a list of work, and agents take it in order. You can change it later, also for one project.",
+    `<button class="btn primary" data-su="mode" data-mode="off">Just sessions</button>
+     <button class="btn" data-su="mode" data-mode="on">Sessions and a queue</button>`));
   out.push(step(st.people.length > 0, "Tell MaximizePM your name",
     st.people.length ? "You're here as " + st.people.map(esc).join(", ") + ". Pick your name at the top right if it isn't chosen."
       : "So MaximizePM can show you what needs you, and let you know.",
@@ -650,19 +673,27 @@ function renderSetup(st) {
   const tasks = (S && S.items || []).filter(i => !["deploy", "review"].includes(i.kind));
   const closedN = closedTotal();
   const folderProjects = (S && S.projects || []).filter(p => p.path);
+  const started = (S && S.agents || []).some(a => a.kind !== "human") || closedN > 0 || tasks.some(i => ["in_progress", "held", "done"].includes(i.status));
+  if (justSessions) {
+    // Just sessions (#5851): no item; the person starts an agent in a folder and talks with it.
+    out.push(step(started, "Start a session",
+      started ? "An agent runs. Talk with it on Sessions: its chat, and the questions it asks you."
+        : "An agent opens in your folder. You talk with it on Sessions, and answer the questions it asks.",
+      ready.length ? newSession(S, true) : `<span class="muted">Needs an agent first.</span>`));
+  } else {
   out.push(step(tasks.length + closedN > 0, "Add a first item",
     tasks.length || closedN ? `${tasks.length} item${tasks.length === 1 ? "" : "s"} on the list${closedN ? `, ${closedN} done` : ""}.`
       : "Something small an agent can do in your project, so you can see how it goes.",
     folderProjects.length ? `<select id="suTaskProject">${folderProjects.map(p => `<option>${esc(p.name)}</option>`).join("")}</select>
       <input id="suTaskTitle" placeholder="for example: add a README that says what this project does" style="flex:1 1 280px">
       <button class="btn primary" data-su="task">Add item</button>` : `<span class="muted">Add a project folder first.</span>`));
-  const started = (S && S.agents || []).some(a => a.kind !== "human") || closedN > 0 || tasks.some(i => ["in_progress", "held", "done"].includes(i.status));
   out.push(step(started, "Start an agent",
     started ? "An agent has picked up work. Watch it on Sessions; finished items show in Plan > Done."
       : "An agent opens in a new Terminal window, takes your item, and gets to work. You'll see it on Sessions.",
     tasks.length && ready.length ? agentStart(S.launch_agents, { label: "Start an agent", cls: "btn primary", attrs: 'data-launch="1"',
         title: "Start the agent in a new Terminal window" })
       : `<span class="muted">Needs an agent and an item first.</span>`));
+  }
   // Extras: nice to have, not needed for a first result.
   const more = howStart ? [howStart] : [];
   if (st.chrome !== false) more.push(chromeStep);
@@ -705,6 +736,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
       await act("config_set", { key: "tracker", value: v, project: b.dataset.project });
     }
     else if (k === "skills") await act("setup_skills", {});
+    else if (k === "mode") await act("config_set", { key: "queue", value: b.dataset.mode });
     else if (k === "task") {
       const title = $("#suTaskTitle").value.trim(); if (!title) return toast("Write the item first", true);
       await act("item_add", { project: $("#suTaskProject").value, title, doer: "ai" });
@@ -732,6 +764,10 @@ $("#setupSteps").addEventListener("keydown", (e) => {
   if (btn) { e.preventDefault(); btn.click(); }
 });
 $("#setupSteps").addEventListener("change", async (e) => {
+  if (e.target.id === "suMode") {  // How you work (#5851): the global queue setting
+    try { await act("config_set", { key: "queue", value: e.target.value }); } catch (err) { /* act() showed the error */ }
+    return openSetup();
+  }
   if (e.target.id === "suOpen") {  // for the person in "You are", else for everyone
     const me = $("#actor").value, value = e.target.value;
     try { await act("config_set", { key: "notify_open", value, agent: me || null }); toast(`A tap on a notification opens ${value === "maxpm" ? "the MaximizePM page" : "the agent's own app"}`); }

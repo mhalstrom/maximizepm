@@ -1885,6 +1885,10 @@ def build_parser(only=None):
                    help="the session's first instruction, after the profile's prompt (go) and a blank line, so the "
                         "session still runs go and registers; at most %d characters. It always opens a new session "
                         "(a session that waits for work would get it only as a message)" % core.CUSTOM_PROMPT_MAX)
+    g.add_argument("--session", action="store_true",
+                   help="a session with no item (the page's New session): the agent opens in --folder with --prompt "
+                        "as its first prompt, or none; no maxpm go, no queue work")
+    x.add_argument("--folder", help="with --session: the folder it opens in (default: this folder)")
     x.add_argument("--dry-run", action="store_true", help="say what it would start; open nothing")
     x = sub.add_parser("expert", help="expert sessions: a session the person talks with for hours or days; it takes no "
                        "queue work, and MaximizePM never ends it as it ends a worker")
@@ -3949,6 +3953,23 @@ def dispatch(conn, a, actor):
             if not sep:
                 raise RiverError(f"--option {o!r} needs the form name=value, for example remote_control=off")
             opts[k.strip()] = v.strip()
+        if a.folder and not a.session:
+            raise RiverError("--folder goes with --session: maxpm launch --session --folder <folder>")
+        if a.session:
+            # A session with no item (#5851), as the page's New session.
+            if a.dry_run:
+                raise RiverError("--dry-run says what an item start would do; a session with no item opens the agent "
+                                 "in the folder with your prompt, or none")
+            folder = str(Path(a.folder or os.getcwd()).expanduser().resolve())
+            if a.prompt is not None:
+                core.custom_prompt(a.prompt)  # refuse here, before the request
+            choice = {"folder": folder, "agent": a.agent, "model": a.model, "effort": a.effort, "options": opts,
+                      "prompt": a.prompt}
+            if in_sandbox():
+                return {**ask_server(conn, "start_session", choice, actor, timeout=40), "via_serve": True, "plain": True}
+            from . import server
+            return {**server.start_session(conn, folder, agent=a.agent, actor=actor, model=a.model, effort=a.effort,
+                                           options=opts or None, prompt=a.prompt), "plain": True}
         if a.dry_run:
             t = core.launch_target(conn, a.project, a.agent, a.item, a.model, a.effort,
                                    spread=a.project is None and a.item is None, options=opts or None, actor=actor,
@@ -4923,7 +4944,25 @@ def render_go(b):
     me = b["agent"]
     r = f"maxpm --as {me}"
     out = []
-    out.append(f"You are MaximizePM agent {me}. Role: {b['role'].upper()}. ({b['why']})")
+    out.append(f"You are MaximizePM agent {me}. Role: {'SESSION' if b['role'] == 'plain' else b['role'].upper()}. "
+               f"({b['why']})")
+    if b["role"] == "plain":
+        # A session with no item (#5851): the person's own talk, no queue loop.
+        off = b.get("queue_off") or []
+        end = b.get("session_idle_end") or "0s"
+        out += ["Work with the person in this session. MaximizePM gives you no item, no goal and no wait: do not run "
+                "maxpm wait or maxpm go again, and stay at your prompt between answers. MaximizePM never ends you as it "
+                "ends a worker; you end when the person ends you"
+                + (f", or after {end} with no talk (session_idle_end)." if core.parse_duration(end).total_seconds()
+                   else ".")]
+        if b.get("holds"):
+            out.append("You hold: " + ", ".join(f"#{h['id']} {h['title']}" for h in b["holds"])
+                       + f". Close each one when it is done: {r} done <id> --output \"...\"")
+        if off:
+            out.append(f"The queue is off in {', '.join(off)}. The person turns it on: maxpm config set queue on "
+                       f"--project {off[0]}")
+        print("\n".join(out).rstrip())
+        return
     if core.queue_note():
         out.append(core.queue_note() + ". Tell the user if that is not what they meant.")
     if os.environ.get("MAXPM_FORK_OF") and b["role"] != "context":
@@ -6976,6 +7015,11 @@ def render(a, res):
         return
     if c == "expert":
         return render_expert(res)
+    if c == "launch" and res.get("plain"):
+        print(f"started {res['agent']} as {res['session_name']} in {res['folder']}, a session with no item"
+              + (f"; tmux pane {res['tmux_pane']}: maxpm view shows it" if res.get("tmux_pane") else "")
+              + ". Talk with it on the Sessions tab, or in its pane.")
+        return
     if c == "launch":
         it = f"#{res['item']['id']} {res['item']['title']}"
         if res.get("dry_run"):
@@ -7349,11 +7393,12 @@ def render(a, res):
         if not res:
             print("(nobody)")
         # Experts last, apart from the workers: they take no queue work (#4955).
-        for ag in sorted(res, key=lambda g: g.get("role") in ("expert", "assistant")):
+        for ag in sorted(res, key=lambda g: g.get("role") in ("expert", "assistant", "plain")):
             holds = ", ".join(f"#{h['id']} {h['title']}" for h in ag["holds"]) or "nothing"
             note = f" — {ag['note']}" if ag["note"] else ""
             kind = ("expert, takes no queue work" if ag.get("role") == "expert" else
                     f"assistant of {ag.get('assistant_for')}, takes no queue work" if ag.get("role") == "assistant"
+                    else "a session with no item, takes no queue work" if ag.get("role") == "plain"
                     else ag["kind"])
             print(f"{ag['name']} ({kind}, {ag['state']}){note}"
                   + (f"\n    session: {ag['session']}" + (f" [{ag['session_ref']}]" if ag.get("session_ref") else "")

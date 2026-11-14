@@ -7,7 +7,7 @@
 import { $, esc, store } from "../lib.js";
 import { makeDialog } from "./dialog.js";
 import { button, iconButton } from "./button.js";
-import { field, two, select } from "./form.js";
+import { field, two, select, textarea } from "./form.js";
 import { modelChoices, OTHER } from "./modelPick.js";
 
 // The note under a custom launch_agents command that lacks {model} or {effort} (#5237). A profile (@<agent>) builds
@@ -99,6 +99,10 @@ function el() {
       const fam = famOf(v.agent);
       store("river.launch.model." + fam, v.model);
       store("river.launch.effort." + fam, v.effort);
+      if (ctx.pickFolder) {
+        if (!v.folder) { const o = $("#lFolderOther"); if (o) o.focus(); return; }  // Other folder… with none typed
+        store("river.launch.folder", v.folderPick);
+      }
       finish(v);
       dlg.close();
     }
@@ -111,6 +115,11 @@ function el() {
       if (other) { other.classList.toggle("hidden", e.target.value !== OTHER); if (e.target.value === OTHER) other.focus(); }
     }
     else if (e.target.id === "lWork") draw({ ...values(), agent: null });  // the new work's agent type picks again
+    else if (e.target.id === "lFolder") {
+      // "Other folder…": any folder on this computer, typed in (#5851).
+      const other = $("#lFolderOther");
+      if (other) { other.classList.toggle("hidden", e.target.value !== OTHER); if (e.target.value === OTHER) other.focus(); }
+    }
     else if (e.target.dataset && e.target.dataset.lopt) e.target.dataset.changed = "1";
   });
   return d;
@@ -125,6 +134,9 @@ function values() {
            model: !q("#lModel") ? "" : q("#lModel").value === OTHER ? q("#lModelOther").value.trim() : q("#lModel").value,
            effort: q("#lEffort") ? q("#lEffort").value : "",
            work: q("#lWork") ? q("#lWork").value : "",
+           folder: !q("#lFolder") ? "" : q("#lFolder").value === OTHER ? q("#lFolderOther").value.trim() : q("#lFolder").value,
+           folderPick: q("#lFolder") ? q("#lFolder").value : "",
+           prompt: q("#lPrompt") ? q("#lPrompt").value : "",
            options: Object.fromEntries([...d.querySelectorAll("[data-lopt][data-changed]")].map(x =>
              [x.dataset.lopt, x.type === "checkbox" ? (x.checked ? "on" : "off") : x.value])) };
 }
@@ -161,7 +173,7 @@ function draw(prev) {
   const rec = it && (it.model || it.effort) ? `#${it.id} recommends ${[it.model, it.effort && it.effort + " effort"].filter(Boolean).join(", ")}.` : "";
   const noPlace = placeholderNote(agent, opt);
   const note = [other, rec, limits, noPlace].filter(Boolean).join(" ");
-  const work = ctx.pickWork ? field("Work", `<select id="lWork">
+  const work = ctx.pickFolder ? folderFields(prev) : ctx.pickWork ? field("Work", `<select id="lWork">
           <option value="">${S.start_next ? `Next: #${S.start_next.id} ${esc(S.start_next.title)} (${esc(S.start_next.why || S.start_next.project)})` : "Nothing is ready"}</option>
           ${projects.length > 1 ? `<optgroup label="Project (its most important ready item)">${projects.map(p => `<option value="p:${esc(p)}" ${workSel === "p:" + p ? "selected" : ""}>${esc(p)}</option>`).join("")}</optgroup>` : ""}
           <optgroup label="Item">${rows.slice(0, 30).map(i => `<option value="i:${i.id}" ${workSel === "i:" + i.id ? "selected" : ""}>#${i.id} ${esc(i.title)}</option>`).join("")}</optgroup>
@@ -208,8 +220,27 @@ export function optionFields(opt) {
         <option value="" ${!o.value ? "selected" : ""}>the agent's own</option>${o.choices.map(c => `<option ${c === o.value ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>`).join("")}</div>`;
 }
 
+// New session (#5851): the folder (a project's, or any other one typed in) and the session's first prompt (none: the
+// agent waits at its own prompt). The last folder stays in this browser.
+function folderFields(prev) {
+  const home = (p) => p.replace(/^\/(Users|home)\/[^/]+/, "~");
+  const seen = new Set(), rows = [];
+  for (const p of (S.projects || [])) if (p.path && !p.archived && !seen.has(p.path)) { seen.add(p.path); rows.push(p); }
+  const last = prev ? prev.folderPick : store("river.launch.folder") || "";
+  const pick = rows.some(p => p.path === last) || last === OTHER ? last : rows.length ? rows[0].path : OTHER;
+  const typed = prev && prev.folderPick === OTHER ? prev.folder : "";
+  const sel = `<select id="lFolder">${rows.map(p => `<option value="${esc(p.path)}" ${p.path === pick ? "selected" : ""}>${esc(p.name)} (${esc(home(p.path))})</option>`).join("")}
+      <option value="${OTHER}" ${pick === OTHER ? "selected" : ""}>Other folder…</option></select>
+    <input id="lFolderOther" class="${pick === OTHER ? "" : "hidden"}" value="${esc(typed)}" autocomplete="off" spellcheck="false"
+      placeholder="~/Projects/web" aria-label="Other folder">`;
+  return field("Folder", sel)
+    + field("First prompt", textarea({ id: "lPrompt", rows: 3, placeholder: "Optional: what the agent does first" },
+      prev ? prev.prompt : ""));
+}
+
 // Open the dialog. c: {title, go (button label), what (the work, as text), item (limits and recommendation),
-// pickWork (Start: choose the work)}. Resolves to {agent, model, effort, work, options} or null (cancel).
+// pickWork (Start: choose the work), pickFolder (New session: a folder and a first prompt, no item)}. Resolves to
+// {agent, model, effort, work, folder, prompt, options} or null (cancel).
 export function chooseLaunch(state, c) {
   S = state; ctx = c || {};
   el();

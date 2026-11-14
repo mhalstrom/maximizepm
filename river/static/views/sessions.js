@@ -28,6 +28,7 @@ import { makeSlashList } from "../components/slashList.js";
 import { markYou } from "./you.js";
 import { S } from "../page.js";
 import { renderGive } from "./sessions-work.js";
+import { queueAnywhere } from "../components/agentStart.js";
 import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
 
 const PICKED = "river.session";
@@ -416,7 +417,8 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const workers = list.filter(x => !["manager", "expert", "assistant"].includes(x.role));
     workers.sort((a, b) => isPinned(b) - isPinned(a));
     renderList(side, workers, agent,
-      `<div class="muted">No other agent session runs now. Start one with Start an agent, or run <code>claude</code> and <code>maxpm go</code> in a project folder.</div>`);
+      `<div class="muted">No other agent session runs now. Start one with New session${queueAnywhere(S)
+        ? ", or Start an agent for the next ready item" : ""}.</div>`);
     drawState();
     proposeCard();
     fit();

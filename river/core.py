@@ -401,6 +401,14 @@ DEFAULT_SETTINGS = {
     # no idle_end, no hand-over. maxpm serve ends it when nobody typed or sent it a prompt for expert_idle_end
     # (0s: never), and tells the senders of what it did not read.
     "expert_idle_end": "7d",
+    # A session with no item (role plain, #5851): a person starts an agent in a folder from the page (New session, or
+    # maxpm launch --session) and talks with it. It takes no queue work, holds no lease or worker slot, and MaximizePM
+    # never ends it by the worker rules (idle_end, wait_max, hand-over). It ends when a person ends it, when its
+    # process ends, or after session_idle_end with no prompt typed or sent to it (0s: never).
+    "session_idle_end": "0s",
+    # queue off (a project, or global): the project uses sessions only (#5851). Its maxpm go gives no item, goal or
+    # wait: the session becomes a session with no item, and the page shows New session, not the queue's Start.
+    "queue": "on",
     # The prompt cache of an expert (#5023): a person talks with an expert for hours, and after a pause the model reads
     # its whole context again at the cache write price, not the read price. The Sessions tab shows each expert's cache
     # (warm, with the minutes left, or cold) and what the next message costs. When it is cold and its context holds
@@ -2391,7 +2399,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         setting_default(key)  # an agent's setting (#5169), else RiverError
     if key.endswith(("_ttl", "_after", "_before", "_interval", "_window")) or key in (
             "wait_max", "wait_step", "human_wait_max", "goal_lease", "wait_too_long", "manage_every", "manage_settle", "manage_wait_high", "manage_wait_low", "manage_rewake", "manage_unanswered", "connect_within",
-            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
+            "prompt_wait", "idle_end", "browser_idle_end", "browser_window_idle", "expert_idle_end", "session_idle_end","revive_within", "question_popup_max", "question_hold", "question_wait_end", "tidy_every", "busy_max", "shells_every", "sample_every", "sample_keep", "ops_idle_work", "ops_deadman_every", "ops_note_every", "ops_reopen_within", "ops_storm_window", "ops_repair_window", "ops_outside_repair_window", "ops_watch_every", "ops_proof_timeout", "ops_maps_timeout", "ops_noise_max", "ops_release_window", "serve_reload_min", "review_timeout", "hook_timeout", "deploy_timeout", "similar_days"):
         if not (key == "archive_after" and value.strip().lower() == "off"):  # #5712
             parse_duration(value)
     elif key in ("db_max_size", "folder_max_size", "archive_max_size"):
@@ -2477,7 +2485,7 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("auto_continue is tree, on, or off")
     elif key == "result_look" and value not in ("ask_first", "push_first"):
         raise RiverError("result_look is ask_first or push_first")
-    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal",
+    elif key in ("fresh_sessions", "serve_runners", "serve_loop_process", "serve_reload", "update_check", "tmux_adopt", "revive_sessions", "relay_keep_awake", "ops_confirm", "ops_watch_cron", "web_terminal", "queue",
                  "web_terminal_relay") and value not in ("on", "off"):
         raise RiverError(f"{key} is on or off")
     elif key == "manager_autocompact":
@@ -8616,9 +8624,10 @@ def target_handoff(conn, name, to, why):
 
 
 def live_sessions(conn):
-    """How many agent sessions are live now (not gone, not stopped), for max_sessions. An assistant (#5110) takes no
-    queue work, so it uses no slot."""
-    return sum(1 for r in conn.execute("SELECT * FROM agents WHERE kind='ai' AND COALESCE(role, '')<>'assistant'")
+    """How many agent sessions are live now (not gone, not stopped), for max_sessions. An assistant (#5110) and a
+    session with no item (#5851) take no queue work, so they use no slot."""
+    return sum(1 for r in conn.execute("SELECT * FROM agents WHERE kind='ai' AND COALESCE(role, '') NOT IN "
+                                       "('assistant', 'plain')")
                if _agent_state(conn, r) not in ("gone", "stopped"))
 
 
@@ -12580,7 +12589,7 @@ def _sweep(conn):
     expired = conn.execute(
         "SELECT id, assignee FROM items WHERE status='in_progress' AND lease_expires_at < ?", (t,)).fetchall()
     busy = busy_now(conn, {r["assignee"] for r in expired}) if expired else set()
-    experts = ({x["name"] for x in conn.execute("SELECT name FROM agents WHERE role IN ('expert', 'assistant')")}
+    experts = ({x["name"] for x in conn.execute("SELECT name FROM agents WHERE role IN ('expert', 'assistant', 'plain')")}
                if expired else set())
     for r in expired:
         if r["assignee"] in experts:
@@ -13327,7 +13336,8 @@ def _live_state(conn, a):
     # expert_idle_end with no talk (end_quiet_experts), or when a person ends it (#4955). An assistant (#5110) goes
     # through the person's list with them, for as long as they talk: only the person ends it. Its process says when it
     # ended; with no process known (it never ran maxpm go), time says it, so a session that never started is gone.
-    if "role" in a.keys() and (a["role"] == "expert" or (a["role"] == "assistant" and a["pid"])):
+    # A session with no item (#5851) is the same: its hooks record its process at its first prompt.
+    if "role" in a.keys() and (a["role"] == "expert" or (a["role"] in ("assistant", "plain") and a["pid"])):
         return "active"
     age = now() - parse_iso(a["last_seen"])
     if age > parse_duration(setting(conn, "gone_after", agent=a["name"])):
@@ -15134,7 +15144,7 @@ def hook_report(conn, agent_id, payload, env=None):
         elif state == "working":
             prompt = waits = None
         if typed is not None and _talk(typed):
-            conn.execute("UPDATE agents SET talked_at=? WHERE name=? AND role='expert'", (t, agent))
+            conn.execute("UPDATE agents SET talked_at=? WHERE name=? AND role IN ('expert', 'plain')", (t, agent))
             if not typed.strip().startswith("<"):  # tags: a message of another session, not a person
                 answered = answered_in_chat(conn, agent, typed.strip(), t)
                 conn.execute("UPDATE agents SET person_said_at=? WHERE name=?", (t, agent))
@@ -15252,7 +15262,8 @@ def silent_holders(conn, told_too=False):
     bg = parse_duration(setting(conn, "busy_max"))
     rows = [r for r in conn.execute("SELECT name, activity_at, activity_event, activity_prompt, activity_told, activity_waits, "
                                     "last_seen FROM agents WHERE kind='ai' AND activity_at IS NOT NULL AND stop_at IS NULL "
-                                    "AND waiting_since IS NULL AND COALESCE(role, '') NOT IN ('expert', 'assistant')").fetchall()
+                                    "AND waiting_since IS NULL AND COALESCE(role, '') NOT IN ('expert', 'assistant', "
+                                    "'plain')").fetchall()
             if (told_too or r["activity_told"] != r["activity_at"])
             and t - max(parse_iso(r["activity_at"]), parse_iso(r["last_seen"])) >= limit
             and not (r["activity_waits"] and t - parse_iso(r["activity_at"]) < bg)]
@@ -17729,7 +17740,8 @@ def sample_sessions(conn, at=None):
     if gap < every * 0.9:  # a pass a little early (notify_interval does not divide sample_every) still samples
         return 0
     secs = int(round(min(max(gap, 0), every * SAMPLE_GAP_MAX)))
-    live = [a for a in conn.execute("SELECT * FROM agents WHERE kind='ai' AND COALESCE(role, '')<>'assistant'")
+    live = [a for a in conn.execute("SELECT * FROM agents WHERE kind='ai' AND COALESCE(role, '') NOT IN "
+                                    "('assistant', 'plain')")
             if _agent_state(conn, a) not in ("gone", "stopped")]
     held = {}
     for it in conn.execute("SELECT id, project_id, assignee FROM items WHERE status IN ('in_progress','held') "
@@ -18137,7 +18149,7 @@ def capacity(conn, ann=None):
     agents = [agent_status(conn, r["name"]) for r in conn.execute("SELECT name FROM agents")]
     # Planner sessions change the plan and take no work, so they are not slots.
     ai_active = [a for a in agents if a["kind"] == "ai" and a["state"] == "active"
-                 and a.get("role") not in ("planner", "expert", "assistant")]  # these take no queue work (#4955, #5110)
+                 and a.get("role") not in ("planner", "expert", "assistant", "plain")]  # no queue work (#4955, #5110, #5851)
     ai_busy = [a for a in ai_active if a["holds"]]
     ai_idle = [a for a in ai_active if not a["holds"]]
     # Waiting sessions (maxpm wait) take new work by themselves within seconds, and end after wait_max.
@@ -18767,7 +18779,10 @@ def build_command(platform, opts, model=None, effort=None, name=None):
     ad = _adapters().find(platform)
     if ad is None or not ad.supports("launch"):
         raise RiverError(f"no command builder for {platform}")
-    return shell_command(with_hooks(ad, ad.build_command(name, None, model, effort, opts, opts.get("prompt"))))
+    words = ad.build_command(name, None, model, effort, opts, opts.get("prompt"))
+    if not opts.get("prompt") and isinstance(words, list):
+        words = [w for w in words if w not in ("", None)]  # no first prompt (#5851): the CLI starts at its own prompt
+    return shell_command(with_hooks(ad, words))
 
 
 # maxpm launch --prompt: a first instruction for one session. It follows the profile's prompt, so the session
@@ -19378,7 +19393,7 @@ def _start_next(conn):
 
 
 def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=None, name=None, prompt=None,
-                      fork_of=None, autocompact=None):
+                      fork_of=None, autocompact=None, plain=False):
     """The chosen launch_agents entry as a command: a profile builds it from its options (options: the
     launch dialog's choices) and gives the session its name, a custom command gets {model} and {effort}
     filled in. The session also gets MAXPM_MODEL. prompt (maxpm launch --prompt) follows the profile's
@@ -19408,7 +19423,12 @@ def _launch_agent_cmd(conn, project_id, agent, model=None, effort=None, options=
     prompt = custom_prompt(prompt) if prompt is not None else None
     if prof:
         opts = profile_options(conn, prof[0], prof[1], project_id, options)
-        if prompt:
+        if plain:
+            # A session with no item (#5851): the person's prompt alone, or none; no maxpm go and no queue skill.
+            opts = {**opts, "prompt": prompt or ""}
+            if "skill_prompt" in opts:
+                opts["skill_prompt"] = "off"
+        elif prompt:
             opts = {**opts, "prompt": join_prompt(opts["prompt"], prompt)}
         # What MaximizePM adds to the start, each only where the adapter takes it (agents.LAUNCH_KEYS): the skill in
         # the system prompt, a fork of a goal's warm base (fork_base), the hooks file, the manager's autocompact.
@@ -19807,8 +19827,8 @@ def _policy_roles(role):
     """The policy roles that apply to a session with this briefing role."""
     if role in ("manager", "expert"):
         return {role}
-    if role == "assistant":
-        return set()  # the assistant of a person takes no queue work: only the queue and project policies
+    if role in ("assistant", "plain"):
+        return set()  # an assistant or a session with no item takes no queue work: only the queue and project policies
     return {"worker"} | ({role} if role in POLICY_ROLES else set())
 
 
@@ -20069,7 +20089,8 @@ def policies_for(conn, projects=(), role=None, cwd=None):
 
 # ---------------------------------------------------------------- go
 
-ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "manager", "context", "expert", "assistant", "idle")
+ROLES = ("deployer", "reviewer", "owner", "worker", "unblocker", "manager", "context", "expert", "assistant", "plain",
+         "idle")
 
 
 def _owned_goal(conn, actor, names):
@@ -20280,6 +20301,21 @@ def _go(conn, cwd, actor=None, project=None, role=None, session=None, focus=None
                          (actor,))],
                      why=f"you are the assistant of {person}: you go through what waits on them, with them, and take "
                          f"no queue work")
+        return brief
+    # A session with no item (#5851): one that a person started in a folder (New session), or any go in projects whose
+    # queue is off, with no role and no focus named. It works with the person; go gives it no item, goal or wait.
+    queue_off = [n for n in names if setting(conn, "queue", project_id=_project(conn, n)["id"]) == "off"]
+    if role in (None, "plain") and (me["role"] == "plain" or role == "plain"
+                                    or (not focus and queue_off and len(queue_off) == len(names))):
+        if me["role"] != "plain":
+            plain_make(conn, actor, "the queue is off in " + area if queue_off else "maxpm go --role plain")
+        brief.update(role="plain", item=None, queue_off=queue_off,
+                     holds=[item_show(conn, r["id"]) for r in conn.execute(
+                         "SELECT id FROM items WHERE assignee=? AND status IN ('in_progress','held') ORDER BY id",
+                         (actor,))],
+                     session_idle_end=setting(conn, "session_idle_end", agent=actor),
+                     why="a session with no item: you work with the person, and the queue gives you no work"
+                         + (f" (the queue is off in {', '.join(queue_off)})" if queue_off else ""))
         return brief
     brief["model"] = agent_model(conn, actor)
     brief["model_skipped"] = skipped = []
@@ -20623,7 +20659,7 @@ def _set_role_note(conn, actor, role, item_id):
         # maxpm manage still makes a manager.
         conn.execute("UPDATE agents SET note=?, role=?, waiting_since=CASE WHEN ? THEN waiting_since END, "
                      "waiting_in=CASE WHEN ? THEN waiting_in END WHERE name=? AND (COALESCE(role, '') NOT IN "
-                     "('expert', 'assistant') OR ?='manager')", (note, role, keep, keep, actor, role))
+                     "('expert', 'assistant', 'plain') OR ?='manager')", (note, role, keep, keep, actor, role))
 
 
 def focus_role(focus):
@@ -20645,7 +20681,7 @@ def _just_closed(conn, item_id, project):
     t = now()
     for a in conn.execute("SELECT name FROM agents WHERE kind='ai' AND stop_at IS NULL AND last_seen>=? AND "
                           "COALESCE(role, '') NOT IN ('waiting', 'manager', 'planner', 'expert', 'assistant', "
-                          "'context') AND NOT EXISTS (SELECT 1 FROM items WHERE assignee=agents.name AND "
+                          "'plain', 'context') AND NOT EXISTS (SELECT 1 FROM items WHERE assignee=agents.name AND "
                           "status='in_progress') ORDER BY last_seen DESC, name", (iso(t - WAIT_SHARE),)).fetchall():
         recent = conn.execute("SELECT at, change FROM events WHERE actor=? ORDER BY id DESC LIMIT 10",
                               (a["name"],)).fetchall()  # done writes 'what changed' after 'done'
@@ -21106,6 +21142,22 @@ def assistant_of(conn, person):
     return None
 
 
+def plain_make(conn, name, why, folder=None):
+    """Make an agent a session with no item (#5851): role plain. A person started it in a folder to talk with it
+    (New session, maxpm launch --session), or its maxpm go ran where the queue is off. Like an assistant it takes no
+    queue work, holds no worker slot (live_sessions, capacity), and the worker rules (idle_end, wait_max, hand-over)
+    never end it: a person ends it, its process ends, or session_idle_end passes with no talk (end_quiet_experts).
+    A name that is not registered is registered."""
+    note = "session with no item" + (f" in {folder}" if folder else "")
+    if not conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+        register(conn, name, note=note)
+    with tx(conn):
+        conn.execute("UPDATE agents SET role='plain', note=?, talked_at=COALESCE(talked_at, ?), waiting_since=NULL, "
+                     "waiting_in=NULL, wait_token=NULL WHERE name=?", (note, iso(now()), name))
+        _event(conn, None, name, f"{name} is a session with no item: {why}")
+    return agent_status(conn, name)
+
+
 def expert_make(conn, name, topic, project=None, actor=None):
     """Make an agent an expert session: role expert, its topic, the project whose folder it works in. A name that is
     not registered is registered (maxpm expert start names the new session). The agent keeps what it holds."""
@@ -21456,6 +21508,17 @@ def end_quiet_experts(conn):
             continue
         why = f"an expert with no talk for {setting(conn, 'expert_idle_end', agent=a['name'])} (expert_idle_end)"
         _expert_let_go(conn, a["name"], why)
+        if end_idle(conn, a["name"], why):
+            out[a["name"]] = why
+    # A session with no item (#5851) ends only when session_idle_end is set: no prompt typed or sent to it, and no
+    # work reported by its hooks, for that long.
+    for a in conn.execute("SELECT * FROM agents WHERE role='plain' AND kind='ai'").fetchall():
+        limit = parse_duration(setting(conn, "session_idle_end", agent=a["name"]))
+        last = max(parse_iso(x) for x in (a["talked_at"], a["activity_at"], a["last_seen"]) if x)
+        if not limit.total_seconds() or t - last < limit:
+            continue
+        why = f"a session with no talk and no work for {setting(conn, 'session_idle_end', agent=a['name'])} " \
+              f"(session_idle_end)"
         if end_idle(conn, a["name"], why):
             out[a["name"]] = why
     return out
