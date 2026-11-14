@@ -7307,6 +7307,20 @@ class BusyLease(Base):
         it = core.item_show(self.c, x)
         return it["status"], it["assignee"]
 
+    def test_the_wake_listener_and_the_servers_of_the_cli_are_no_work(self):
+        """#5861: a session with no item runs no river command, so every process below its CLI is newer than its
+        last one. Its MCP servers (started with the CLI) and the wake listener (maxpm report --wake) are no work; a
+        command that a turn starts is."""
+        cmds = {2000: "node mcp.mjs", 4000: "python3 -S /x/maxpm report --wake claude", 3000: "bash -c pytest"}
+        core.PROC_RUNNER = lambda: "".join(f"{pid:>6} {ppid:>6} {age:>12} {cmds.get(pid, 'claude')}\n"
+                                           for pid, (ppid, age) in self.procs.items())
+        self.c.execute("UPDATE agents SET last_seen=? WHERE name='w1'", (core.iso(self.clock[0] - timedelta(hours=2, seconds=10)),))
+        self.c.commit()
+        self.procs[4000] = (1000, "05:00")  # the listener from the last turn end on
+        self.assertEqual(core.busy_now(self.c, {"w1"}), set())
+        self.procs[3000] = (1000, "01:00")  # a turn runs a command
+        self.assertEqual(core.busy_now(self.c, {"w1"}), {"w1"})
+
     def test_a_long_command_keeps_the_lease(self):
         self.assertEqual([core._elapsed(x) for x in ("05", "01:05", "1:01:05", "2-01:01:05")], [5, 65, 3665, 176465])
         x = self.add("shop", "run every check")

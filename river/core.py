@@ -12765,14 +12765,17 @@ def _elapsed(text):
 
 
 def _process_list():
-    """The output of one ps call (pid, parent, and age of every process), or None with no ps (a sandbox that
-    blocks it)."""
+    """The output of one ps call (pid, parent, age and command of every process), or None with no ps (a sandbox
+    that blocks it)."""
     import subprocess
     try:
         return PROC_RUNNER() if PROC_RUNNER else subprocess.run(
-            ["ps", "-A", "-o", "pid=,ppid=,etime="], capture_output=True, text=True, timeout=5).stdout
+            ["ps", "-A", "-o", "pid=,ppid=,etime=,command="], capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+CLI_SERVERS_GRACE = timedelta(seconds=60)  # what an agent CLI starts this soon after its own start: its servers
 
 
 def busy_now(conn, names=None, skip=()):
@@ -12782,7 +12785,10 @@ def busy_now(conn, names=None, skip=()):
     itself. On macOS Claude Code also runs `caffeinate -i -t 300` below it while a turn runs (it restarts it every
     4 minutes and ends it 30 seconds after the turn): that counts too, and rightly, since the session works; at
     its prompt it has none (#4294). Only within busy_max of the last river command. The processes in skip (the
-    hook that asks, #4293) and the ones below them do not count. One ps call; an empty set with no ps (a sandbox that blocks it)."""
+    hook that asks, #4293) and the ones below them do not count. One ps call; an empty set with no ps (a sandbox that blocks it).
+    Two kinds of process are no work (#5861): the wake listener (maxpm report --wake, a Claude Code hook that waits
+    for a message from each turn end on, #5686), and what the CLI started in its first CLI_SERVERS_GRACE (its MCP
+    servers). A session with no item runs no river command, so both are newer than its last one."""
     limit = parse_duration(setting(conn, "busy_max"))
     t, host = now(), this_host()
     rows = [r for r in conn.execute("SELECT name, pid, last_seen FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?",
@@ -12795,7 +12801,7 @@ def busy_now(conn, names=None, skip=()):
         text = _process_list()
     if not text:
         return set()
-    below, started = {}, {}
+    below, started, listeners = {}, {}, set()
     for line in text.splitlines():
         f = line.split()
         try:
@@ -12804,15 +12810,18 @@ def busy_now(conn, names=None, skip=()):
             continue
         below.setdefault(ppid, []).append(pid)
         started[pid] = t - timedelta(seconds=age)
+        if " report --wake " in " " + " ".join(f[3:]) + " ":
+            listeners.add(pid)
     out = set()
     for r in rows:
         if r["pid"] not in started:
             continue  # the agent CLI ended
-        after = parse_iso(r["last_seen"]) + timedelta(seconds=1)  # ps counts whole seconds
+        after = max(parse_iso(r["last_seen"]) + timedelta(seconds=1),  # ps counts whole seconds
+                    started[r["pid"]] + CLI_SERVERS_GRACE)
         todo, seen = list(below.get(r["pid"], ())), set()
         while todo:
             pid = todo.pop()
-            if pid in seen or pid in skip:
+            if pid in seen or pid in skip or pid in listeners:
                 continue
             seen.add(pid)
             if started[pid] > after:

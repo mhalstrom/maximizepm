@@ -1859,7 +1859,8 @@ try {
   const m = await import("/components/endSession.js");
   const ex = m.endHtml({ name: "fab", role: "expert", state: "expert", holds: [{ id: 7, title: "the pricing talk" }] });
   const none = m.endHtml({ name: "w", role: "worker", state: "idle", holds: [], can_kill: false });
-  post({ head, ask, picked, chip, again, nowHidden, nowShown, ex, none, sizes,
+  const plain = m.endHtml({ name: "p", role: "plain", state: "idle", holds: [], can_kill: false });
+  post({ head, ask, picked, chip, again, nowHidden, nowShown, ex, none, plain, sizes,
          op: m.endOp({ name: "fab", role: "expert" }, { how: "expert", reason: "", done: true }) });
 } catch (e) { post({ error: String(e.stack || e) }); }
 """
@@ -1880,6 +1881,10 @@ try {
         self.assertIn("The talk is done: close its task", r["ex"])
         self.assertIn('data-end-go="expert"', r["ex"])
         self.assertNotIn("end-now", r["none"])
+        # A session with no item (#5861): no task to commit or release; it ends at its prompt.
+        self.assertIn("ends a few minutes after its turn ends", r["plain"])
+        self.assertNotIn("commits its finished work", r["plain"])
+        self.assertIn('data-end-go="stop"', r["plain"])
         self.assertEqual(r["op"], ["expert_end", {"name": "fab", "done": True}])
 
 

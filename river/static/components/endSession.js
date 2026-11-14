@@ -2,6 +2,8 @@
 // says what happens before the person ends it:
 // - a worker or the manager: a stop request (op stop_agent). It commits its finished work, releases its task with a
 //   note, and ends; a session that waits for work ends at once. The optional reason goes to the session.
+// - a session with no item (#5851): the same stop request; it has no task to release, and maxpm serve ends it when it
+//   sits at its prompt (#5861). The files it changed stay in its folder.
 // - an expert: maxpm expert end (op expert_end). It ends now; its notes stay, and its task goes back to the queue,
 //   or closes when the person says the talk is done.
 // - End now (op kill_agent): only for a session that does not answer, with a process on this computer, or (a session
@@ -21,6 +23,7 @@ export function endButton(s, { icon = false, cls = "" } = {}) {
   const title = ending ? `${s.name} is ending: it was asked to stop. End it now if it does not answer`
     : s.role === "expert" ? `End the expert ${s.name}: its notes stay`
     : s.role === "assistant" ? `End your assistant ${s.name}: what you decided with it stays in the queue`
+    : s.role === "plain" ? `End ${s.name}`
     : `End ${s.name}: it commits finished work, releases its task, and ends`;
   return icon ? button(END_SVG, { kind: "icon", cls, title, label: `End ${s.name}`, data: { end: s.name } })
     : button(ending ? "Ending…" : "End", { cls, title, data: { end: s.name } });
@@ -63,8 +66,8 @@ export function endHtml(s) {
   const nowBtn = s.can_kill ? button("End now…", { title: "Only for a session that does not answer", data: { "end-now-ask": "1" } }) : "";
   let what, go;
   if (s.state === "stopping") {
-    what = `<p>${name} was asked to stop${s.stop_by ? ` by ${esc(s.stop_by)}` : ""}${s.stop_reason ? `: ${esc(s.stop_reason)}` : ""}. It ends after
-      its next maxpm command, when it has committed and released its task.</p>`
+    what = `<p>${name} was asked to stop${s.stop_by ? ` by ${esc(s.stop_by)}` : ""}${s.stop_reason ? `: ${esc(s.stop_reason)}` : ""}. ${
+      s.role === "plain" ? "It ends when it sits at its prompt." : "It ends after its next maxpm command, when it has committed and released its task."}</p>`
       + (s.can_kill ? "<p>If it does not answer, end it now.</p>"
         : `<p class="muted">It has no process on this computer that MaximizePM can end: if it does not answer, close it in its terminal.</p>`);
     go = "";
@@ -73,6 +76,10 @@ export function endHtml(s) {
       + (held ? `<p>Its task ${taskList(s)} <span data-task-fate>${fate(false)}</span>.</p>
           <label class="end-check"><input type="checkbox" data-end-done> The talk is done: close its task</label>` : "<p>It holds no task.</p>");
     go = button("End expert", { kind: "primary", data: { "end-go": "expert" } });
+  } else if (s.role === "plain" && !held) {
+    what = `<p>${name} ends a few minutes after its turn ends, when it sits at its prompt. The files it changed stay in its
+      folder.</p>`;
+    go = button("End session", { kind: "primary", data: { "end-go": "stop" } });
   } else {
     what = `<p>MaximizePM asks ${name} to stop. It commits its finished work, ${held ? `releases ${taskList(s)} with a note,` : "releases what it holds,"}
       and ends. A session that waits for work ends at once.</p>`;
