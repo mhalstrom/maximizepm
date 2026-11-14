@@ -705,13 +705,20 @@ function renderSetup(st) {
   if (st.chrome !== false) more.push(chromeStep);
   // Your phone (#5863): this page on the phone over Tailscale, free for one person; the relay stays an option (#5860).
   const tn = st.tailnet || {};
+  // Serve or HTTPS is not on for the tailnet (#5865): tailscale serve waits for the person's approval at a link.
+  const en = tn.enable, said = en && en.text ? ` Tailscale says: “${esc(en.text)}”` : "";
   more.push(extra(!!tn.serving, "Your phone",
     tn.serving ? `Open <a href="${esc(tn.url)}" target="_blank" rel="noopener">${esc(tn.url)}</a> on your phone with Tailscale on, or scan the code.
         Only ${esc((tn.logins || []).join(", ") || "you")} can use it.<div class="su-qr">${tn.qr || ""}</div>`
       : !tn.installed ? "See your sessions and answer them from your phone, free, over Tailscale: a private network of your own devices. Install Tailscale here and on your phone, and sign in on both with the same account."
       : !tn.running ? "Tailscale is installed. Open it and sign in, then check again."
+      : en && en.url ? `Turn on Serve for your tailnet, once: open <a href="${esc(en.url)}" target="_blank" rel="noopener">${esc(en.url)}</a>,
+        sign in to Tailscale and approve it, then check again.${said}`
+      : en ? `Tailscale waits for a step of yours.${said} Run <code>${esc(tn.command)}</code> in a terminal to see it.`
       : `Tailscale runs here as ${esc(tn.name || "this computer")}. Turn the page on for your own devices: it runs <code>${esc(tn.command)}</code>.`,
     !tn.installed ? `<a class="btn primary" href="https://tailscale.com/download" target="_blank" rel="noopener">Download Tailscale</a>
+        <button class="btn" data-su="recheck">Check again</button>`
+      : en && en.url ? `<a class="btn primary" href="${esc(en.url)}" target="_blank" rel="noopener">Open Tailscale</a>
         <button class="btn" data-su="recheck">Check again</button>`
       : tn.running ? `<button class="btn primary" data-su="tailnet">Turn it on</button><button class="btn" data-su="recheck">Check again</button>`
       : `<button class="btn" data-su="recheck">Check again</button>`));
@@ -760,7 +767,10 @@ $("#setupSteps").addEventListener("click", async (e) => {
       await act("item_add", { project: $("#suTaskProject").value, title, doer: "ai" });
     }
     else if (k === "recheck") { /* openSetup below checks again */ }
-    else if (k === "tailnet") { await act("tailnet_serve", {}); toast("Your phone can open this page now: scan the code"); }
+    else if (k === "tailnet") {
+      const r = await act("tailnet_serve", {});
+      toast(r && r.enable ? "Tailscale asks for your approval: open the link in Your phone" : "Your phone can open this page now: scan the code");
+    }
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }
     else if (k === "agent") await act("setup_agent_add", { label: b.dataset.label });
     else if (k === "ntfy") {

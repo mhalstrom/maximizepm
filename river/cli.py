@@ -4411,7 +4411,21 @@ def dispatch(conn, a, actor):
         return core.capacity(conn)
     if c == "phone":  # the page over Tailscale (#5863)
         from . import tailnet
-        return tailnet.serve_on(conn, actor) if a.on else tailnet.status(conn)
+        if not a.on:
+            return tailnet.status(conn)
+        res = tailnet.serve_on(conn, actor)
+        # Serve or HTTPS is not on for the tailnet (#5865): tailscale serve waits for the person at a link. In a
+        # terminal, show the link now and wait here for the approval; an agent, --json and MCP get the step at once.
+        if res.get("enable") and not a.json and sys.stdin.isatty() and sys.stdout.isatty():
+            print(phone_step(res["enable"], res["command"]))
+            print(f"\nThis waits for your approval, at most {PHONE_WAIT // 60} minutes (Ctrl-C ends the wait; "
+                  "tailscale serve still finishes after your approval).", flush=True)
+            try:
+                res = tailnet.wait_enabled(conn, PHONE_WAIT)
+            except KeyboardInterrupt:
+                res = tailnet.status(conn)
+            res["step_shown"] = True
+        return res
     if c == "config":
         if a.ccmd == "get":
             if a.key:
@@ -6815,6 +6829,18 @@ def render_ops(a, res):
         print(f"    {e['at']} {e['state']}" + (f": {e['note']}" if e["note"] and e["note"] != e["state"] else ""))
 
 
+PHONE_WAIT = 600  # seconds that maxpm phone --on in a terminal waits for the person's approval at Tailscale
+
+
+def phone_step(enable, command):
+    """The step that tailscale serve waits for (#5865): Serve or HTTPS is not on for the tailnet yet."""
+    said = f"Tailscale says: {enable['text']}\n" if enable.get("text") else ""
+    if not enable.get("url"):
+        return f"{said}tailscale serve waits for a step of yours; run it in a terminal to see it: {command}"
+    return (f"{said}Turn on Serve for your tailnet, once: open this link, sign in to Tailscale, and approve it:\n"
+            f"  {enable['url']}\nThen tailscale serve finishes by itself; maxpm phone shows the address and its QR code.")
+
+
 def render(a, res):
     c = a.cmd
     if c == "schedule":
@@ -7458,6 +7484,9 @@ def render(a, res):
         elif not res["running"]:
             print("Tailscale is installed but not signed in or not running here: open it and sign in, then run "
                   "maxpm phone again.")
+        elif res.get("enable"):
+            print("Not approved yet. After you approve it at the link above, run maxpm phone again."
+                  if res.get("step_shown") else phone_step(res["enable"], res["command"]))
         elif not res["serving"]:
             print(f"Tailscale runs here as {res['name']}. To reach this page from your phone, run once:\n"
                   f"  {res['command']}\n(or maxpm phone --on). It answers on your tailnet only.")

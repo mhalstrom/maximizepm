@@ -13,6 +13,7 @@ the address for the setup guide and maxpm phone (a byte-mode QR encoder, so the 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -21,6 +22,10 @@ from pathlib import Path
 # The Tailscale CLI: on the PATH, or inside the Mac app.
 APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 RUNNER = None  # tests: a function(argv) -> (returncode, stdout)
+SPAWN = None  # tests: a function(argv, out) -> a Popen-like (poll, wait, terminate) that writes its output to out
+LINK_WAIT_S = 15  # seconds that serve_on waits for tailscale serve to end or to print the link of its step
+_LINK = re.compile(r"https://\S+")
+_PENDING = {"proc": None, "out": None}  # the tailscale serve that waits for the person's approval
 CACHE_S = 60  # seconds that a read of tailscale status stays good
 _SELF = {"at": 0.0, "value": None}
 
@@ -123,20 +128,121 @@ def status(conn):
     me = self_info(fresh=True) if cli() or RUNNER else None
     on = serving(port) if me and me.get("running") else None
     url = f"https://{me['name']}/" if me and me.get("name") else None
+    step = enable_step()  # read also when it serves: a tailscale serve that ended leaves _PENDING
     return {"installed": bool(cli() or RUNNER), "running": bool(me and me.get("running")), "name": me and me.get("name"),
             "serving": bool(on), "command": serve_command(port), "url": url,
-            "qr": qr_svg(url) if url else None, "logins": sorted(allowed_logins(conn))}
+            "qr": qr_svg(url) if url else None, "logins": sorted(allowed_logins(conn)),
+            "enable": None if on else step}
+
+
+class _Done:
+    """A tailscale serve that already ended (tests through RUNNER): its exit code, its output in the file."""
+
+    def __init__(self, code):
+        self.returncode = code
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def terminate(self):
+        pass
+
+
+def _spawn(args, out):
+    """Start the Tailscale CLI with its output in the file out. It runs in a session of its own and writes to a file,
+    not a pipe: when Serve is not on for the tailnet, it waits until the person turns it on and only then sets the
+    serve setting, also after maxpm phone or a restart of maxpm serve ended (#5865)."""
+    if SPAWN is not None:
+        return SPAWN(args, out)
+    if RUNNER is not None:
+        code, text = RUNNER(args)
+        Path(out).write_text(text)
+        return _Done(code)
+    with open(out, "w") as f:
+        return subprocess.Popen([cli(), *args], stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+
+
+def _read(out):
+    try:
+        return Path(out).read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _said(text):
+    """What tailscale serve printed, in one line, with no link and no blank lines."""
+    return " ".join(x.strip() for x in text.splitlines() if x.strip() and not _LINK.fullmatch(x.strip()))
+
+
+def enable_step():
+    """{url, text} while a tailscale serve that this process started waits for the person to turn on Serve (or
+    HTTPS) for the tailnet at a login.tailscale.com link (the last link it printed is the step now); else None."""
+    p = _PENDING["proc"]
+    if p is None or p.poll() is not None:
+        _PENDING.update(proc=None)
+        return None
+    text = _read(_PENDING["out"])
+    links = _LINK.findall(text)
+    return {"url": links[-1] if links else None, "text": _said(text)}
+
+
+def _failed(conn, code, text):
+    from . import core
+    return core.RiverError(f"tailscale serve did not start (exit {code}): {_said(text) or 'it said nothing'}; "
+                           f"run it in a terminal: {serve_command(core.serve_port_now(conn))}")
 
 
 def serve_on(conn, actor=None):
     """The person's click in the setup guide: tailscale serve --bg <serve_port>. It changes only this computer's
-    Tailscale serve setting, and `tailscale serve --bg <port> off` turns it off."""
+    Tailscale serve setting, and `tailscale serve --bg <port> off` turns it off. When Serve or HTTPS is not on for
+    the tailnet, tailscale serve prints a login.tailscale.com link and waits for the person there: the result then
+    holds that step (enable), and the command goes on in the background until the person approves it (#5865)."""
     from . import core
     port = core.serve_port_now(conn)
-    code, out = _run(["serve", "--bg", str(port)], timeout=20)
+    if not (cli() or RUNNER or SPAWN):
+        raise core.RiverError("Tailscale is not on this computer: install it (tailscale.com/download) and sign in, "
+                              "then run maxpm phone again")
+    if enable_step() is None:  # one tailscale serve at a time: a second click shows the same step
+        out = str(core.db_path().with_name("tailscale-serve.out"))
+        _PENDING.update(proc=_spawn(["serve", "--bg", str(port)], out), out=out)
+    p, out = _PENDING["proc"], _PENDING["out"]
+    end = time.monotonic() + LINK_WAIT_S
+    while p.poll() is None and not _LINK.search(_read(out)) and time.monotonic() < end:
+        time.sleep(0.1)
     forget()
-    if code != 0:
-        raise core.RiverError(f"tailscale serve did not start (exit {code}); run it in a terminal: {serve_command(port)}")
+    code, text = p.poll(), _read(out)
+    if code is None and not _LINK.search(text):
+        p.terminate()
+        _PENDING.update(proc=None)
+        raise core.RiverError(f"tailscale serve still ran after {LINK_WAIT_S} seconds and gave no link"
+                              f"{' (it said: ' + _said(text) + ')' if _said(text) else ''}; run it in a terminal to "
+                              f"see what it waits for: {serve_command(port)}")
+    if code is not None:
+        _PENDING.update(proc=None)
+        if code != 0:
+            raise _failed(conn, code, text)
+    return status(conn)
+
+
+def wait_enabled(conn, timeout):
+    """maxpm phone --on in a terminal: wait until the person approved the step and tailscale serve ended, at most
+    timeout seconds; then the status (with enable when it still waits)."""
+    p = _PENDING["proc"]
+    if p is not None:
+        try:
+            code = p.wait(timeout)
+        except subprocess.TimeoutExpired:
+            code = None
+        if code is not None:
+            text = _read(_PENDING["out"])
+            _PENDING.update(proc=None)
+            forget()
+            if code != 0:
+                raise _failed(conn, code, text)
     return status(conn)
 
 

@@ -169,6 +169,101 @@ class Status(DbCase):
             core.config_set(self.c, "tailnet_logins", "two words")
 
 
+LINK = "https://login.tailscale.com/f/serve?node=n1abc"
+
+
+class Waiting:
+    """tailscale serve --bg when Serve is not on for the tailnet: it prints the link and waits for the person's
+    approval there (as seen 2026-11-14: exit 1 after 20 s, and no word of the link, #5865)."""
+    TEXT = f"\nServe is not enabled on your tailnet.\nTo enable, visit:\n\n         {LINK}\n\n"
+
+    def __init__(self, fake, text=TEXT, code=None):
+        self.fake, self.text, self.code, self.returncode, self.starts, self.stopped = fake, text, code, None, [], False
+
+    def __call__(self, args, out):
+        self.starts.append(args)
+        with open(out, "w") as f:
+            f.write(self.text)
+        self.returncode = self.code
+        return self
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        import subprocess
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("tailscale", timeout)
+        return self.returncode
+
+    def terminate(self):
+        self.stopped, self.returncode = True, -15
+
+    def approve(self):
+        self.returncode, self.fake.serving = 0, True
+
+
+def spawn(test, proc, link_wait=None):
+    old = (tailnet.SPAWN, tailnet.LINK_WAIT_S)
+    tailnet.SPAWN = proc
+    if link_wait is not None:
+        tailnet.LINK_WAIT_S = link_wait
+    test.addCleanup(lambda: (setattr(tailnet, "SPAWN", old[0]), setattr(tailnet, "LINK_WAIT_S", old[1]),
+                             tailnet._PENDING.update(proc=None)))
+    return proc
+
+
+class EnableStep(DbCase):
+    """Serve or HTTPS is not on for the tailnet: the person gets the link and the step, never a bare exit 1 (#5865)."""
+
+    def test_turn_it_on_gives_the_link_and_finishes_after_the_approval(self):
+        f = use(self, Fake())
+        w = spawn(self, Waiting(f))
+        st = tailnet.serve_on(self.c, "mark")
+        self.assertEqual(st["enable"], {"url": LINK, "text": "Serve is not enabled on your tailnet. To enable, visit:"})
+        self.assertFalse(st["serving"])
+        self.assertEqual(tailnet.status(self.c)["enable"]["url"], LINK)  # the page's next read shows it too
+        tailnet.serve_on(self.c, "mark")  # a second click: the same step, no second tailscale serve
+        self.assertEqual(len(w.starts), 1)
+        self.assertEqual(tailnet.wait_enabled(self.c, 0)["enable"]["url"], LINK)  # not approved yet
+        w.approve()
+        st = tailnet.status(self.c)
+        self.assertTrue(st["serving"])
+        self.assertIsNone(st["enable"])
+        self.assertIsNone(tailnet._PENDING["proc"])
+
+    def test_a_failure_says_what_tailscale_said(self):
+        f = use(self, Fake())
+        spawn(self, Waiting(f, text="error: serve config denied\n", code=1))
+        with self.assertRaisesRegex(core.RiverError, r"exit 1\): error: serve config denied; run it in a terminal"):
+            tailnet.serve_on(self.c, "mark")
+        self.assertIsNone(tailnet._PENDING["proc"])
+
+    def test_a_tailscale_serve_that_says_nothing_is_stopped(self):
+        f = use(self, Fake())
+        w = spawn(self, Waiting(f, text=""), link_wait=0.2)
+        with self.assertRaisesRegex(core.RiverError, "gave no link; run it in a terminal to see what it waits for"):
+            tailnet.serve_on(self.c, "mark")
+        self.assertTrue(w.stopped)
+
+    def test_maxpm_phone_on_prints_the_step(self):
+        from river import cli
+        f = use(self, Fake())
+        w = spawn(self, Waiting(f))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["-q", "phone", "--on"])  # not a terminal: the step at once, no wait
+        got = out.getvalue()
+        self.assertIn(f"  {LINK}\n", got)
+        self.assertIn("Turn on Serve for your tailnet, once", got)
+        self.assertIn("Tailscale says: Serve is not enabled on your tailnet.", got)
+        w.approve()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["-q", "phone"])
+        self.assertIn(f"https://{NAME}/", out.getvalue())
+
+
 class Refusal(DbCase):
     TS = {"Host": NAME, "Tailscale-User-Login": "mark@example.com", "X-Forwarded-For": "100.64.0.2",
           "X-Forwarded-Proto": "https"}
@@ -266,6 +361,27 @@ try {
 
     def test_phone(self):
         self.run_at("390,844")
+
+    ENABLE = DRIVE_HEAD + r"""
+try {
+  await until(() => !q("#setup").classList.contains("hidden") && q("#setupSteps details.more"), "the setup guide");
+  q("#setupSteps details.more").open = true;
+  const step = () => [...document.querySelectorAll("#setupSteps .step")].find(s => /Your phone/.test(s.textContent));
+  step().querySelector('[data-su="tailnet"]').click();
+  await until(() => step() && step().querySelector('a[href^="https://login.tailscale.com/"]'), "the Tailscale link");
+  const s = step();
+  post({ links: [...s.querySelectorAll('a[href^="https://login.tailscale.com/"]')].map(a => a.textContent.trim()),
+         text: s.textContent, wide: document.documentElement.scrollWidth <= innerWidth });
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+
+    def test_the_step_shows_the_tailscale_link_at_phone_width(self):
+        f = use(self, Fake())
+        spawn(self, Waiting(f))
+        got = drive_page(self, self.ENABLE, size="390,844")
+        self.assertEqual(got["links"], [LINK, "Open Tailscale"], got)
+        self.assertIn("Serve is not enabled on your tailnet", got["text"])
+        self.assertTrue(got["wide"], got)
 
 
 if __name__ == "__main__":
