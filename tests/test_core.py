@@ -9197,6 +9197,37 @@ class Activity(Base):
         self.assertEqual((m["from_agent"], m["native_status"], core.message_show(self.c, q3)["state"]),
                          ("mark", "in the chat", "answered"))
 
+    def test_a_turn_end_in_a_talk_with_the_person_or_again_soon_alerts_nobody(self):
+        """#5812, #5773: maximizepm-0ede asked mark a question (held for the manager, then forwarded); mark answered
+        in its chat and went on talking with it, and each turn end sent the manager a blocked 'stands still' alert,
+        again after the manager read the last one (six in an hour)."""
+        q = core.send(self.c, "question", "Click Sign in now?", to="mark", item=self.item, actor="w")["id"]
+        core.forward(self.c, q, "mark asked to be told", "boss")
+        self.assertEqual(core.waits_on_person(self.c, ["w"]), {"w": q})
+        self.assertIsNone(self.event("Stop")["alert"])  # it waits on the forwarded question
+        self.event("UserPromptSubmit", prompt="done, I signed in")
+        self.assertEqual(core.message_show(self.c, q)["state"], "answered")
+        for _ in range(3):  # it answers the person and ends its turn: the person sees it
+            self.clock[0] += timedelta(seconds=40)
+            self.event("UserPromptSubmit", prompt="and now?")
+            self.assertIsNone(self.event("Stop")["alert"])
+        self.assertEqual(self.alerts(), [])
+        # The person went away: the next turn end alerts once, and not again in activity_silence, read or not.
+        self.clock[0] += timedelta(minutes=11)
+        self.assertIsNotNone(self.event("Stop")["alert"])
+        self.c.execute("UPDATE messages SET read_at=? WHERE to_agent='boss'", (core.iso(core.now()),))
+        for _ in range(3):
+            self.clock[0] += timedelta(seconds=30)
+            self.event("UserPromptSubmit", prompt="[maxpm note from boss] go on")
+            self.assertIsNone(self.event("Stop")["alert"])
+        self.clock[0] += timedelta(minutes=10)
+        self.assertIsNotNone(self.event("Stop")["alert"])
+        # A new hold of another item alerts at its first turn end.
+        other = self.add("shop", "Fix the header")
+        core.release(self.c, self.item, "w")
+        core.claim(self.c, other, "w")
+        self.assertIsNotNone(self.event("Stop")["alert"])
+
     def test_the_stop_hook_asks_serve_to_type_a_held_message(self):
         """#5587: a message that the person sent during the turn waits (pending_sends); the turn's Stop hook asks
         maxpm serve to type it at the idle prompt (op pending_deliver), with a short limit, and a serve that does not

@@ -285,7 +285,8 @@ DEFAULT_SETTINGS = {
     # each tool call, prompt, permission prompt and turn end to river (maxpm report --hook claude, #4288). A session that holds
     # an item and reported nothing for activity_silence, and does not wait in maxpm wait, on a person's answer,
     # or on a background command, alerts the active manager; a permission prompt or a turn end with an item in
-    # hand alerts it at once. 0s: no silence alert.
+    # hand alerts it at once: not within activity_silence after the person typed in its chat, and once in
+    # activity_silence for the same item (#5812). 0s: no silence alert.
     "activity_silence": "10m",
     # MaximizePM's own probes (#5440, maxpm ops probe): a cmd check runs them like any plugin. idle-work: ready agent
     # work and no live session for ops_idle_work; lease-loop: an item whose lease ran out ops_lease_loop times (count
@@ -14749,6 +14750,27 @@ def _talk(prompt):
     return bool(text) and not text.startswith(("<task-notification", "[maxpm "))
 
 
+TURN_END_NOTE = "it ended its turn while it holds"  # the text of the turn-end alert after ACTIVITY_NOTE
+
+
+def _turn_end_told(conn, agent, item, said_at):
+    """Inside a tx. True when a turn end of the agent with item in hand is no news for the manager (#5812, #5773): the
+    person typed in the agent's chat in the last activity_silence (the turn end answers the person, who sees the
+    session), or the manager got a turn-end alert about this item in this hold within activity_silence (read or
+    not: the session ends its turn again after each note of the manager or line of the person, and each alert
+    woke the manager again). A stand that lasts gets the silence alert of activity_watch."""
+    window = parse_duration(setting(conn, "activity_silence", item_id=item, agent=agent))
+    t = now()
+    if window and said_at and t - parse_iso(said_at) < window:
+        return True
+    claimed = conn.execute("SELECT claimed_at FROM items WHERE id=?", (item,)).fetchone()["claimed_at"]
+    since = max(filter(None, [claimed, iso(t - window) if window else None]), default=None)
+    head = f"{agent} {ACTIVITY_NOTE}: {TURN_END_NOTE}"
+    return bool(conn.execute(
+        "SELECT 1 FROM messages WHERE kind='alert' AND from_agent=? AND item_id=? AND substr(body, 1, ?)=? "
+        "AND created_at>=?", (agent, item, len(head), head, since or "")).fetchone())
+
+
 def _activity_item(conn, agent):
     """The item whose holder the stand-still and silence alerts are about; a test-tier task waits by design (#5565)."""
     return conn.execute("SELECT id, title FROM items WHERE assignee=? AND status='in_progress' "
@@ -14768,7 +14790,8 @@ def hook_report(conn, agent_id, payload, env=None):
     that ends, while the agent holds an item alerts the active manager at once (_activity_alert): not a turn end
     while the agent waits on a person's answer (maxpm ask), has a stop request, or waits on its own background
     work (the report's waits: a background command or subagent, a wakeup; recorded in activity_waits until its
-    next working report, #4293). That work wakes the session, and its next turn end is judged again. A prompt that
+    next working report, #4293). That work wakes the session, and its next turn end is judged again. Nor a turn end
+    in a talk with the person, or a repeat within activity_silence (_turn_end_told). A prompt that
     a person typed (working with a prompt) closes the questions it answers and moves the clock of maxpm wait.
     Returns {"agent", "event", "state", "prompt": bool, "alert": message id or None, "answered", "remind"}."""
     from . import agents
@@ -14786,8 +14809,8 @@ def hook_report(conn, agent_id, payload, env=None):
     state, typed = rep["state"], rep["prompt"]
     t, alert, answered, remind = iso(now()), None, [], None
     with tx(conn):
-        a = conn.execute("SELECT activity_prompt, activity_waits, activity_event, stop_at, role FROM agents WHERE name=?",
-                         (agent,)).fetchone()
+        a = conn.execute("SELECT activity_prompt, activity_waits, activity_event, stop_at, role, person_said_at "
+                         "FROM agents WHERE name=?", (agent,)).fetchone()
         prompt, waits = a["activity_prompt"], a["activity_waits"]
         if state == "blocked" and rep["call"]:
             prompt = json.dumps(rep["call"])
@@ -14817,9 +14840,10 @@ def hook_report(conn, agent_id, payload, env=None):
                                 + (f"; it asks to run {call}" if call else "")
                                 + f" ({(rep['message'] or '')[:160]}). Answer it in its terminal or "
                                   f"its session, or tell the person.")
-        elif held and state == "idle" and not waits and not a["stop_at"] and agent not in waits_on_person(conn, [agent]):
+        elif held and state == "idle" and not waits and not a["stop_at"] and agent not in waits_on_person(conn, [agent]) \
+                and not _turn_end_told(conn, agent, held["id"], a["person_said_at"]):
             alert = _activity_alert(conn, agent, held["id"],
-                                f"it ended its turn while it holds #{held['id']} {held['title'][:80]}: it sits at its "
+                                f"{TURN_END_NOTE} #{held['id']} {held['title'][:80]}: it sits at its "
                                 f"prompt and runs no maxpm wait. Look at its terminal or session.")
         if alert:
             conn.execute("UPDATE agents SET activity_told=? WHERE name=?", (t, agent))
