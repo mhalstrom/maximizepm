@@ -119,6 +119,9 @@ DEFAULT_SETTINGS = {
     # no notice of the queue sends already (an open question or prompt alert of that session), and nothing while a
     # manager is active: the manager sees prompts and questions first.
     "notify_status": "off",
+    # The page over Tailscale (#5863, river/tailnet.py): the Tailscale logins whose phone or computer may use the page
+    # that tailscale serve forwards, a comma list. Empty: only the login that owns this computer in the tailnet.
+    "tailnet_logins": "",
     "ntfy_url": "https://ntfy.sh",
     # Where a tap on a notification opens (#4673): maxpm (the MaximizePM page: the item's drawer, the session in
     # the Sessions tab for its question or prompt, the Board's Needs you for a batch) or agent (the agent's own app:
@@ -2532,6 +2535,8 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("ntfy_topic uses letters, digits, '-' and '_' (up to 64); maxpm notify setup ntfy makes one")
     elif key == "notify_channels" and not all(re.match(r"^[a-z0-9_-]+$", c) for c in _channels(value)):
         raise RiverError("notify_channels is a comma list of channel names, for example: mac,ntfy (empty sends nothing)")
+    elif key == "tailnet_logins" and not all(re.match(r"^[^\s,]{1,200}$", x) for x in _channels(value)):
+        raise RiverError("tailnet_logins is a comma list of Tailscale logins, for example: you@example.com,you@github")
     elif key == "notify_status" and value != "off" and not (
             _channels(value) and set(_channels(value)) <= set(SESSION_STATUSES)):
         raise RiverError("notify_status is off or a comma list of " + ", ".join(SESSION_STATUSES)

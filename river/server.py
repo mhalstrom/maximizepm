@@ -4375,6 +4375,22 @@ def _block_state(path):
     return "current" if AGENT_SNIPPET in text else "old" if core.names_product(text) else "missing"
 
 
+def _tailnet_status(conn):
+    """tailnet.status for the setup guide; a failure of the Tailscale CLI shows the step as not installed."""
+    from . import tailnet
+    try:
+        return tailnet.status(conn)
+    except Exception:  # the guide opens anyway
+        return {"installed": False, "running": False, "serving": False, "url": None, "qr": None,
+                "command": tailnet.serve_command(core.serve_port_now(conn)), "logins": []}
+
+
+def tailnet_serve(conn, actor=None):
+    """The person's click on Turn it on in Your phone: tailscale serve --bg <serve_port> (tailnet.serve_on)."""
+    from . import tailnet
+    return tailnet.serve_on(conn, actor)
+
+
 def setup_status(conn):
     """What the setup guide shows: each check, and whether it is done."""
     import shutil
@@ -4424,6 +4440,8 @@ def setup_status(conn):
         "notify_phone": notify.phone_note(conn),
         "maxpm_cmd": command_status(),
         "chrome": chrome_path() is not None,  # the Browser pane needs it (#5624)
+        # Your phone (#5863): this page over Tailscale, its address and QR code (river/tailnet.py).
+        "tailnet": _tailnet_status(conn),
     }
 
 
@@ -4647,6 +4665,8 @@ DICTATE_OPS = ("dictate_start", "dictate_audio", "dictate_stop")
 
 OPS = {
     "canvas_open": canvas_open,
+    # The setup guide's Your phone (#5863): the person's click runs tailscale serve --bg <serve_port>.
+    "tailnet_serve": lambda c, a, who: tailnet_serve(c, who),
     # Canvases (#4648): the same operations as maxpm canvas and the MCP tool canvas, for the page and for any
     # agent that speaks HTTP (POST /api/action {"op": "canvas_put", "args": {...}, "actor": "<agent>"}).
     "canvas_put": lambda c, a, who: core.canvas_put(c, a["name"], a.get("text"), who, a.get("kind"), a.get("title"),
@@ -5369,7 +5389,13 @@ class Handler(BaseHTTPRequestHandler):
         # Same-origin check: of the pages on this computer, only river's own acts (a river command sends no Origin).
         origin = self.headers.get("Origin")
         host = self.headers.get("Host", "")
-        if origin and origin not in (f"http://{host}",):
+        same = {f"http://{host}"}
+        if self.headers.get("Tailscale-User-Login"):  # the page over Tailscale (#5863): _refuse checked the request
+            from . import tailnet
+            me = tailnet.self_info() or {}
+            if me.get("name"):
+                same.add(f"https://{me['name']}")
+        if origin and origin not in same:
             return self._send(403, {"error": "cross-origin request refused"})
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")

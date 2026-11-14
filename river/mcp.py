@@ -443,12 +443,49 @@ def local_refusal(client_ip, headers, what="/mcp"):
     h = {k.lower(): v for k, v in headers.items()}
     if client_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
         return f"only this computer may call {what}"
+    if "tailscale-user-login" in h:  # tailscale serve forwarded it from the person's tailnet (#5863)
+        return tailnet_refusal(h, what)
     if any(x in h for x in PROXY_HEADERS):
         return f"{what} has no sign-in yet, so it refuses requests through a tunnel or proxy"
     if _host_only(h.get("host")) not in LOCAL_HOSTS:
         return f"{what} answers only on 127.0.0.1 or localhost"
     origin = h.get("origin")
     if origin and _host_only(origin.split("://", 1)[-1].split("/", 1)[0]) not in LOCAL_HOSTS:
+        return "cross-origin request refused"
+    return None
+
+
+# The headers that tailscale serve may add besides its own (Tailscale-User-*): any other proxy header means a proxy
+# in front of it, and the request is refused.
+TAILNET_PROXY_OK = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto")
+
+
+def tailnet_refusal(h, what):
+    """Why a request that tailscale serve forwarded (it has Tailscale-User-Login) is refused, or None (#5863). It
+    passes only when its host is this computer's tailnet name (Host, or X-Forwarded-Host with a local Host), its
+    login is one the person allowed (tailnet.login_ok: the setting tailnet_logins, else the owner of this computer),
+    and an Origin is that name too. Tailscale removes that header from a client's request and adds none to a Funnel
+    (public) request or a tagged device's, so a request with it came from a person of the tailnet. A local program
+    could write the header, but it can call maxpm serve directly anyway. /mcp stays on this computer only: its
+    connectors come over Funnel (#5860), which has no login."""
+    from . import tailnet
+    if what == "/mcp":
+        return "/mcp answers only on this computer, not over Tailscale"
+    if any(x in h for x in PROXY_HEADERS if x not in TAILNET_PROXY_OK):
+        return f"{what} refuses a request through another proxy in front of Tailscale"
+    me = tailnet.self_info()
+    name = me and me.get("name")
+    if not name:
+        return f"{what}: this computer's Tailscale name is not known (tailscale status --json says none)"
+    host, fwd = _host_only(h.get("host")), _host_only(h.get("x-forwarded-host")) if h.get("x-forwarded-host") else None
+    if not (host == name and fwd in (None, name)) and not (host in LOCAL_HOSTS and fwd == name):
+        return f"{what} answers over Tailscale only at {name}"
+    login = (h.get("tailscale-user-login") or "").strip()
+    if not tailnet.login_ok(login):
+        return (f"{login or 'a login'} may not use {what} over Tailscale: the person adds it with "
+                f"maxpm config set tailnet_logins <login>,<login>")
+    origin = h.get("origin")
+    if origin and _host_only(origin.split("://", 1)[-1].split("/", 1)[0]) not in (name, *LOCAL_HOSTS):
         return "cross-origin request refused"
     return None
 

@@ -703,6 +703,18 @@ function renderSetup(st) {
   // Extras: nice to have, not needed for a first result.
   const more = howStart ? [howStart] : [];
   if (st.chrome !== false) more.push(chromeStep);
+  // Your phone (#5863): this page on the phone over Tailscale, free for one person; the relay stays an option (#5860).
+  const tn = st.tailnet || {};
+  more.push(extra(!!tn.serving, "Your phone",
+    tn.serving ? `Open <a href="${esc(tn.url)}" target="_blank" rel="noopener">${esc(tn.url)}</a> on your phone with Tailscale on, or scan the code.
+        Only ${esc((tn.logins || []).join(", ") || "you")} can use it.<div class="su-qr">${tn.qr || ""}</div>`
+      : !tn.installed ? "See your sessions and answer them from your phone, free, over Tailscale: a private network of your own devices. Install Tailscale here and on your phone, and sign in on both with the same account."
+      : !tn.running ? "Tailscale is installed. Open it and sign in, then check again."
+      : `Tailscale runs here as ${esc(tn.name || "this computer")}. Turn the page on for your own devices: it runs <code>${esc(tn.command)}</code>.`,
+    !tn.installed ? `<a class="btn primary" href="https://tailscale.com/download" target="_blank" rel="noopener">Download Tailscale</a>
+        <button class="btn" data-su="recheck">Check again</button>`
+      : tn.running ? `<button class="btn primary" data-su="tailnet">Turn it on</button><button class="btn" data-su="recheck">Check again</button>`
+      : `<button class="btn" data-su="recheck">Check again</button>`));
   const missing = Object.entries(st.skills).filter(([, v]) => v !== "installed").map(([k]) => k);
   if (st.claude_home) more.push(extra(missing.length === 0, "Claude Code skills",
     missing.length ? "Teach Claude Code MaximizePM's full workflow (missing: " + missing.join(", ") + ")." : "maxpm and maxpm-manager are installed.",
@@ -748,6 +760,7 @@ $("#setupSteps").addEventListener("click", async (e) => {
       await act("item_add", { project: $("#suTaskProject").value, title, doer: "ai" });
     }
     else if (k === "recheck") { /* openSetup below checks again */ }
+    else if (k === "tailnet") { await act("tailnet_serve", {}); toast("Your phone can open this page now: scan the code"); }
     else if (k === "maxpmcmd") { const r = await act("setup_maxpm_cmd", {}); toast(r.note || "Added the maxpm command. Agents in new terminals can use it now."); }
     else if (k === "agent") await act("setup_agent_add", { label: b.dataset.label });
     else if (k === "ntfy") {

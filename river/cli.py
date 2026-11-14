@@ -2216,6 +2216,8 @@ def build_parser(only=None):
     x.add_argument("resume", nargs=argparse.REMAINDER, metavar="-- RESUME",
                    help="after --: the command that resumes this session")
     sub.add_parser("capacity", help="how many agent sessions the graph can use now")
+    ph = sub.add_parser("phone", help="reach this MaximizePM from your phone over Tailscale: its address and QR code")
+    ph.add_argument("--on", action="store_true", help="turn it on: run tailscale serve --bg <serve_port>")
 
     c = sub.add_parser("config", help="settings")
     cs = c.add_subparsers(dest="ccmd", required=True)
@@ -4392,6 +4394,9 @@ def dispatch(conn, a, actor):
         return {"ok": True}
     if c == "capacity":
         return core.capacity(conn)
+    if c == "phone":  # the page over Tailscale (#5863)
+        from . import tailnet
+        return tailnet.serve_on(conn, actor) if a.on else tailnet.status(conn)
     if c == "config":
         if a.ccmd == "get":
             if a.key:
@@ -7411,6 +7416,23 @@ def render(a, res):
                   + "".join(f"\n    {x}" for x in shells_lines(ag.get("shells"))))
             for t in ag.get("touching", []):
                 print(f"    touches: #{t['id']} {', '.join(t['paths'])}")
+        return
+    if c == "phone":
+        from . import tailnet
+        if not res["installed"]:
+            print("Tailscale is not on this computer. Install it (tailscale.com/download), sign in, and install it on "
+                  "your phone with the same account. Then run maxpm phone again.")
+        elif not res["running"]:
+            print("Tailscale is installed but not signed in or not running here: open it and sign in, then run "
+                  "maxpm phone again.")
+        elif not res["serving"]:
+            print(f"Tailscale runs here as {res['name']}. To reach this page from your phone, run once:\n"
+                  f"  {res['command']}\n(or maxpm phone --on). It answers on your tailnet only.")
+        else:
+            print(f"Open this on your phone (Tailscale on, the same account):\n  {res['url']}\n")
+            print(tailnet.qr_text(res["url"]))
+            print(f"\nWho may use it: {', '.join(res['logins']) or 'the owner of this computer'} "
+                  f"(maxpm config set tailnet_logins <logins>).")
         return
     if c == "capacity":
         print(f"Ready for agents: {len(res['ready_for_agents'])}   ready for humans: {len(res['ready_for_humans'])}   "
