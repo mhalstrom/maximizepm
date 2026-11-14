@@ -7484,6 +7484,8 @@ def render(a, res):
         elif not res["running"]:
             print("Tailscale is installed but not signed in or not running here: open it and sign in, then run "
                   "maxpm phone again.")
+        elif not res.get("https", True) and not res["serving"]:
+            print(tailnet.NO_HTTPS.replace("turn the page on again", "run maxpm phone --on again") + ".")
         elif res.get("enable"):
             print("Not approved yet. After you approve it at the link above, run maxpm phone again."
                   if res.get("step_shown") else phone_step(res["enable"], res["command"]))

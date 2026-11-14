@@ -49,8 +49,9 @@ def _run(args, timeout=5):
 
 
 def read_self():
-    """{name, login, running} of this computer in its tailnet, now: name is its MagicDNS name (no dot at the end),
-    login the login of the user who owns it. None when the CLI is missing or says nothing it can read."""
+    """{name, login, running, https} of this computer in its tailnet, now: name is its MagicDNS name (no dot at the
+    end), login the login of the user who owns it, https whether the tailnet gives it HTTPS certificates (CertDomains;
+    with none, tailscale serve waits with no word, #5865). None when the CLI is missing or says nothing it can read."""
     code, out = _run(["status", "--json"])
     if code != 0:
         return None
@@ -61,7 +62,7 @@ def read_self():
     s = d.get("Self") or {}
     user = (d.get("User") or {}).get(str(s.get("UserID"))) or {}
     return {"name": (s.get("DNSName") or "").rstrip(".").lower() or None, "login": user.get("LoginName"),
-            "running": d.get("BackendState") == "Running"}
+            "running": d.get("BackendState") == "Running", "https": bool(d.get("CertDomains"))}
 
 
 def self_info(fresh=False):
@@ -120,9 +121,14 @@ def serve_command(port):
     return f"tailscale serve --bg {port}"
 
 
+DNS_ADMIN = "https://login.tailscale.com/admin/dns"
+NO_HTTPS = (f"HTTPS certificates are off for your tailnet. Open {DNS_ADMIN}, go to HTTPS Certificates and press "
+            "Enable; then turn the page on again")
+
+
 def status(conn):
-    """What the setup step and maxpm phone show: installed, running, the name, whether it serves the page, the command
-    that turns it on, the address, and its QR code (SVG)."""
+    """What the setup step and maxpm phone show: installed, running, the name, whether the tailnet gives HTTPS
+    certificates, whether it serves the page, the command that turns it on, the address, and its QR code (SVG)."""
     from . import core
     port = core.serve_port_now(conn)
     me = self_info(fresh=True) if cli() or RUNNER else None
@@ -130,6 +136,7 @@ def status(conn):
     url = f"https://{me['name']}/" if me and me.get("name") else None
     step = enable_step()  # read also when it serves: a tailscale serve that ended leaves _PENDING
     return {"installed": bool(cli() or RUNNER), "running": bool(me and me.get("running")), "name": me and me.get("name"),
+            "https": bool(on or (me and me.get("https"))), "https_admin": DNS_ADMIN,
             "serving": bool(on), "command": serve_command(port), "url": url,
             "qr": qr_svg(url) if url else None, "logins": sorted(allowed_logins(conn)),
             "enable": None if on else step}
@@ -206,6 +213,9 @@ def serve_on(conn, actor=None):
     if not (cli() or RUNNER or SPAWN):
         raise core.RiverError("Tailscale is not on this computer: install it (tailscale.com/download) and sign in, "
                               "then run maxpm phone again")
+    me = self_info(fresh=True)
+    if me and me.get("running") and not me.get("https") and not serving(port):
+        raise core.RiverError(NO_HTTPS)  # tailscale serve would wait with no word (seen 2026-11-14, #5865)
     if enable_step() is None:  # one tailscale serve at a time: a second click shows the same step
         out = str(core.db_path().with_name("tailscale-serve.out"))
         _PENDING.update(proc=_spawn(["serve", "--bg", str(port)], out), out=out)

@@ -12,7 +12,7 @@ from river import core, mcp, server, tailnet
 from tests.test_view_sessions import Base, drive_page, DRIVE_HEAD
 
 NAME = "mac.tail1a2b.ts.net"
-STATUS = {"BackendState": "Running", "Self": {"DNSName": NAME + ".", "UserID": 7},
+STATUS = {"BackendState": "Running", "Self": {"DNSName": NAME + ".", "UserID": 7}, "CertDomains": [NAME],
           "User": {"7": {"LoginName": "mark@example.com", "DisplayName": "Mark"}}}
 
 
@@ -136,7 +136,8 @@ class DbCase(unittest.TestCase):
 class Status(DbCase):
     def test_read_self_and_the_steps_of_status(self):
         f = use(self, Fake())
-        self.assertEqual(tailnet.read_self(), {"name": NAME, "login": "mark@example.com", "running": True})
+        self.assertEqual(tailnet.read_self(), {"name": NAME, "login": "mark@example.com", "running": True,
+                                               "https": True})
         st = tailnet.status(self.c)
         self.assertEqual((st["installed"], st["running"], st["serving"], st["url"], st["logins"]),
                          (True, True, False, f"https://{NAME}/", ["mark@example.com"]))
@@ -245,6 +246,24 @@ class EnableStep(DbCase):
         with self.assertRaisesRegex(core.RiverError, "gave no link; run it in a terminal to see what it waits for"):
             tailnet.serve_on(self.c, "mark")
         self.assertTrue(w.stopped)
+
+    def test_https_certificates_off_gives_the_admin_link_before_tailscale_serve(self):
+        # Seen 2026-11-14: CertDomains was null, and tailscale serve --bg waited with no word.
+        from river import cli
+        f = use(self, Fake(status={**STATUS, "CertDomains": None}))
+        w = spawn(self, Waiting(f))
+        st = tailnet.status(self.c)
+        self.assertEqual((st["https"], st["https_admin"]), (False, "https://login.tailscale.com/admin/dns"))
+        with self.assertRaisesRegex(core.RiverError, "HTTPS certificates are off for your tailnet. Open "
+                                    "https://login.tailscale.com/admin/dns, go to HTTPS Certificates and press Enable"):
+            tailnet.serve_on(self.c, "mark")
+        self.assertEqual(w.starts, [])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["-q", "phone"])
+        self.assertIn("press Enable; then run maxpm phone --on again.", out.getvalue())
+        f.serving = True  # serve was set before: the page answers, whatever CertDomains says
+        self.assertTrue(tailnet.status(self.c)["https"])
 
     def test_maxpm_phone_on_prints_the_step(self):
         from river import cli
@@ -381,6 +400,23 @@ try {
         got = drive_page(self, self.ENABLE, size="390,844")
         self.assertEqual(got["links"], [LINK, "Open Tailscale"], got)
         self.assertIn("Serve is not enabled on your tailnet", got["text"])
+        self.assertTrue(got["wide"], got)
+
+    NO_HTTPS = DRIVE_HEAD + r"""
+try {
+  await until(() => !q("#setup").classList.contains("hidden") && q("#setupSteps details.more"), "the setup guide");
+  q("#setupSteps details.more").open = true;
+  const s = [...document.querySelectorAll("#setupSteps .step")].find(s => /Your phone/.test(s.textContent));
+  post({ links: [...s.querySelectorAll('a[href="https://login.tailscale.com/admin/dns"]')].map(a => a.textContent.trim()),
+         on: !!s.querySelector('[data-su="tailnet"]'), wide: document.documentElement.scrollWidth <= innerWidth });
+} catch (e) { post({ error: String(e.stack || e) }); }
+"""
+
+    def test_https_certificates_off_shows_the_admin_link_at_phone_width(self):
+        use(self, Fake(status={**STATUS, "CertDomains": None}))
+        got = drive_page(self, self.NO_HTTPS, size="390,844")
+        self.assertEqual(got["links"], ["https://login.tailscale.com/admin/dns", "Open Tailscale"], got)
+        self.assertFalse(got["on"], got)
         self.assertTrue(got["wide"], got)
 
 

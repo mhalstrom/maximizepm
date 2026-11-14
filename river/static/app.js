@@ -712,11 +712,15 @@ function renderSetup(st) {
         Only ${esc((tn.logins || []).join(", ") || "you")} can use it.<div class="su-qr">${tn.qr || ""}</div>`
       : !tn.installed ? "See your sessions and answer them from your phone, free, over Tailscale: a private network of your own devices. Install Tailscale here and on your phone, and sign in on both with the same account."
       : !tn.running ? "Tailscale is installed. Open it and sign in, then check again."
+      : tn.https === false ? `HTTPS certificates are off for your tailnet. Open <a href="${esc(tn.https_admin)}" target="_blank" rel="noopener">${esc(tn.https_admin)}</a>,
+        go to HTTPS Certificates and press Enable, then check again.`
       : en && en.url ? `Turn on Serve for your tailnet, once: open <a href="${esc(en.url)}" target="_blank" rel="noopener">${esc(en.url)}</a>,
         sign in to Tailscale and approve it, then check again.${said}`
       : en ? `Tailscale waits for a step of yours.${said} Run <code>${esc(tn.command)}</code> in a terminal to see it.`
       : `Tailscale runs here as ${esc(tn.name || "this computer")}. Turn the page on for your own devices: it runs <code>${esc(tn.command)}</code>.`,
     !tn.installed ? `<a class="btn primary" href="https://tailscale.com/download" target="_blank" rel="noopener">Download Tailscale</a>
+        <button class="btn" data-su="recheck">Check again</button>`
+      : tn.running && tn.https === false ? `<a class="btn primary" href="${esc(tn.https_admin)}" target="_blank" rel="noopener">Open Tailscale</a>
         <button class="btn" data-su="recheck">Check again</button>`
       : en && en.url ? `<a class="btn primary" href="${esc(en.url)}" target="_blank" rel="noopener">Open Tailscale</a>
         <button class="btn" data-su="recheck">Check again</button>`
