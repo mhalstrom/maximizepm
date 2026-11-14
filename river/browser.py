@@ -3066,6 +3066,10 @@ def shape(action, res=None, error=None):
     if error is not None:
         out["error"] = {"code": getattr(error, "code", None) or "error", "message": str(error),
                         "candidates": getattr(error, "candidates", None) or []}
+    elif action == "run" and res.get("failed"):  # #5777: the failed step is the run's error
+        f = res["failed"]
+        out["error"] = {"code": f["code"], "message": f"step {f['step']} ({f['line']}): {f['message']}",
+                        "candidates": f.get("candidates") or []}
     return out
 
 

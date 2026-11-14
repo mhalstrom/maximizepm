@@ -2736,7 +2736,7 @@ def _browser_cmd(conn, a, actor):
         return {"sets": sorted(out.values(), key=lambda s: -s["id"])}
     if getattr(a, "json", False):  # #5678: the one reply shape (browser.shape), as op browser_call and the MCP tool
         from .browser import shape
-        action = "batch" if b == "batch" else None
+        action = b if b in ("batch", "run") else None  # #5777: their replies carry no _action
         try:
             res = _browser_ask(conn, a, actor)
             action = action or res.pop("_action")

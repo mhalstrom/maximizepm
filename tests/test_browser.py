@@ -2745,6 +2745,24 @@ class RunWalk(Base):
         self.assertEqual(code, 2)
         self.assertTrue(out.startswith("step 2 (click Nope) failed after 1 steps: not_found: no element is \"Nope\""), out)
         self.assertIn("[page] 3 buttons, 1 field", out)
+        # #5777: --json gives the one reply shape (browser.shape) of action run, as the HTTP door does.
+
+        def as_json(*words, stdin=""):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()), \
+                    mock.patch.object(sys, "stdin", io.StringIO(stdin)):
+                try:
+                    code = cli.run(["-q", "--as", "ag1", "--json", "browser", *words, "--project", "web"])
+                except SystemExit as e:
+                    code = e.code
+            return code, json.loads(out.getvalue())
+        code, r = as_json("run", "q=python", stdin=walk)
+        self.assertEqual((code, r["ok"], r["action"], r["error"]), (0, True, "run", None))
+        self.assertEqual(r["data"]["result"], [{"title": f"python result {n}"} for n in (1, 2, 3)])
+        code, r = as_json("run", "--lines", f"open {url}\nclick Nope\nclick Go")
+        self.assertEqual((code, r["ok"], r["action"], r["data"]["done"]), (2, False, "run", 1))
+        self.assertEqual(r["error"]["code"], "not_found")
+        self.assertTrue(r["error"]["message"].startswith("step 2 (click Nope): "), r["error"])
         # The person takes control after step 2: steps 3 to 5 do not happen.
         real, n = routes.act, [0]
 
