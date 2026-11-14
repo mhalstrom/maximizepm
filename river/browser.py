@@ -1393,6 +1393,11 @@ class Browser:
                 # #5676: the size a session set by command, which holds until the person uses the pane
                 "forced": {k: self.forced[k] for k in ("w", "h", "name", "by")} if self.forced else None,
                 "dialog": dialog_info(self.dialog),  # a box of the page that waits for an answer (#5674)
+                # #5845: whether the session's last command was confirmed as its own (#5823); saved sign-ins load
+                # only while it is, so a session that finds no sign-in reads why here
+                "signin_proof": (None if not self.owner or "signin_confirmed" not in self.__dict__ else
+                                 "confirmed" if self.signin_confirmed else
+                                 self.__dict__.get("signin_unconfirmed_why") or "not confirmed"),
                 # #5707: Record is on: the person's actions become steps
                 "steps_rec": {"by": self.psteps.by, "steps": len(self.psteps.steps)} if self.psteps else None,
                 # The tab strip (#5632): each tab with its icon (from Chrome's Favicons, a data address) and the
