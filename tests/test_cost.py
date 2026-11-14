@@ -166,6 +166,10 @@ class Route(Base):
         self.assertIn(b"dev,claude-opus-5-5", got["raw"])
         self.assertEqual(self.get("/api/cost?period=never")["code"], 400)
 
+    def test_the_page_answers_at_cost(self):
+        from river import server
+        self.assertIn("cost", server.PAGE_VIEWS)  # /cost gets the page, which opens the Cost view
+
 
 if __name__ == "__main__":
     unittest.main()
