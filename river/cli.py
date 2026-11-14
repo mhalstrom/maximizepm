@@ -1199,6 +1199,13 @@ def build_parser(only=None):
                    help="change the site, account or 2-step only; ask for no password")
     x.add_argument("--project")
     x.add_argument("--note")
+    x = ses.add_parser("cookies", help="save a session browser's sign-in of one site (its cookies) into a set (a "
+                       "person only): the sessions that a grant of the set covers start signed in there")
+    x.add_argument("name", help="for example github-cookies")
+    x.add_argument("--site", required=True, help="the site: github.com (its subdomains too)")
+    x.add_argument("--session", required=True, help="the session whose browser is signed in")
+    x.add_argument("--set", dest="set_name", help="the set it goes into")
+    x.add_argument("--project", help="the project of that browser (default: the session's item's)")
     x = ses.add_parser("level", help="a secret's protection (a person only): locked (only the named commands), "
                        "hidden (any command; the default), open (the value shows in output)")
     x.add_argument("name")
@@ -5505,6 +5512,11 @@ def _secret_cmd(conn, a, actor):
             raise RiverError(f"{argv[0]} ended with exit {rc}; it read the secret {a.name} {where}")
         return {"secret": a.name, "piped_to": shlex.join(argv), "exit": rc, "where": where,
                 "masked": prot["level"] != "open"}
+    if cmd == "cookies":  # the browsers run in maxpm serve: always through it
+        return ask_server(conn, "secret", {"action": "cookies", "name": vault.check_name(a.name), "site": a.site,
+                                           "session": a.session, "agent": a.session, "set": a.set_name,
+                                           "project": a.project, "cwd": os.getcwd()}, actor=actor,
+                          timeout=30)
     if cmd == "signin":
         args = {"action": "signin", "name": vault.check_name(a.name), "site": a.site, "account": a.account,
                 "two_step": a.two_step, "reset": a.reset, "project": a.project, "note": a.note}
@@ -5572,6 +5584,10 @@ def render_secret(a, res):
     elif cmd in ("pipe", "run"):
         print(f"gave secret {res['secret']} to {res['piped_to']} {res['where']} (exit 0"
               + ("; its value is masked as *** in the output)" if res["masked"] else ")"))
+    elif cmd == "cookies":
+        print(f"saved the sign-in of {res['site']} ({res['cookies']} cookies) as {res['secret']}"
+              + (f" in the set {res['set']}: the sessions that a grant of it covers start signed in there"
+                 if res["set"] else f"; put it in a set: maxpm secret set <set> --add {res['secret']}"))
     elif cmd == "signin":
         print(f"{'saved' if res['made'] else 'changed'} sign-in {res['secret']}: {res['account']} on {res['site']}; "
               + ("the agents pass a 2-step check from its key" if res["two_step"] == "agents" and res["totp"] else

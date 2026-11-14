@@ -447,6 +447,12 @@ def _act(conn, a, who):
             b.signin_confirmed = vault.session_of(conn, who)["name"] == owner
         except RiverError:
             b.signin_confirmed = False
+        if b.running():  # #5827: a grant that ended takes its saved sign-in out before this action
+            from .. import signin
+            try:
+                signin.enforce_cookies(b, conn)
+            except RiverError:
+                pass
     if action == "steps":  # #5680: this browser's walk so far
         if a.get("clear"):
             b.walk = []
@@ -698,7 +704,8 @@ def _act(conn, a, who):
         if not person:
             raise RiverError("only a person saves a browser's sign-ins for the project: the Browser pane has the "
                              "button Save sign-ins for the project")
-        return browser.save_signins(b)
+        from .. import vault  # #5827: a site with a saved sign-in in a set goes only to the sessions it is granted to
+        return browser.save_signins(b, skip=[s for _, s in vault.cookie_sites(conn)])
     if action == "freeze":  # Annotate's background (#5660): a PNG of the tab and the size of its view in CSS pixels,
         # read together: a frame that the pane shows can be older than the pane's last resize
         view = b.evaluate("[innerWidth, innerHeight]", 5)

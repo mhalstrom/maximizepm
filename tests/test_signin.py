@@ -52,7 +52,7 @@ class FakeBrowser:
         return {}
 
 
-class SignIn(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
@@ -81,6 +81,9 @@ class SignIn(unittest.TestCase):
     def grant(self):
         vault.grant(self.c, "gh-set", "project", "site", actor="mark")
 
+
+
+class SignIn(Base):
     def test_account_then_password_on_the_real_site(self):
         self.grant()
         b = FakeBrowser([page("https://github.com/login", user=True), page("https://github.com/session", pw=True),
@@ -212,6 +215,95 @@ class SignIn(unittest.TestCase):
         self.assertEqual([r["name"] for r in vault.signins_for(self.c, "accounts.google.com")], ["google-mark"])
         vault.delete(self.c, "google-mark")
         self.assertIsNone(vault.Files().get(self.c, "google-mark#totp"))
+
+
+class CookieBrowser(FakeBrowser):
+    """A browser with a cookie jar: Storage.getCookies, Storage.setCookies, Network.deleteCookies."""
+
+    def __init__(self, jar=(), pages=(), owner="dev"):
+        super().__init__(list(pages) or [page("https://github.com/")], owner)
+        self.jar = [dict(c) for c in jar]
+        self.attached = False
+
+    def call(self, method, params=None, session=None, timeout=None):
+        if method == "Storage.getCookies":
+            return {"cookies": [dict(c) for c in self.jar]}
+        if method == "Storage.setCookies":
+            for c in params["cookies"]:
+                self.jar = [x for x in self.jar if (x["name"], x["domain"]) != (c["name"], c["domain"])] + [dict(c)]
+            return {}
+        raise AssertionError(method)
+
+    def page(self, method, params=None, timeout=None):
+        if method == "Network.deleteCookies":
+            self.jar = [x for x in self.jar if (x["name"], x["domain"]) != (params["name"], params["domain"])]
+            return {}
+        return super().page(method, params, timeout)
+
+
+GH = [{"name": "user_session", "value": "s3ss10n", "domain": "github.com", "path": "/", "secure": True},
+      {"name": "_gh_sess", "value": "abc", "domain": ".github.com", "path": "/", "secure": True}]
+OTHER = [{"name": "sid", "value": "x", "domain": "example.org", "path": "/"}]
+
+
+class SavedSignIns(Base):
+    """#5827: the cookies of one site in a set, loaded by grant, saved back after a sign-in, removed on revoke."""
+
+    def save(self, cookies=GH):
+        return vault.cookies_save(self.c, "gh-cookies", "github.com", cookies, "mark", "gh-set")
+
+    def names(self, b):
+        return sorted(c["name"] for c in b.jar)
+
+    def test_a_grant_loads_the_sign_in_and_a_revoke_takes_it_out(self):
+        self.save()
+        b = CookieBrowser(OTHER)
+        self.assertEqual(signin.enforce_cookies(b, self.c), {"loaded": [], "removed": ["gh-cookies"]})  # no grant
+        self.assertEqual(self.names(b), ["sid"])
+        g = vault.grant(self.c, "gh-set", "project", "site", actor="mark")
+        self.assertEqual(signin.enforce_cookies(b, self.c)["loaded"], ["gh-cookies"])
+        self.assertEqual(self.names(b), ["_gh_sess", "sid", "user_session"])
+        self.assertIn("browser sign-in loaded (2 cookies of github.com)", vault.log(self.c, "gh-cookies")["log"][0]["detail"])
+        self.assertEqual(signin.enforce_cookies(b, self.c), {"loaded": [], "removed": []})  # once
+        vault.revoke(self.c, g["grant"], actor="mark")
+        self.assertEqual(signin.enforce_cookies(b, self.c)["removed"], ["gh-cookies"])
+        self.assertEqual(self.names(b), ["sid"])  # the other site's cookies stay
+
+    def test_the_project_profile_copy_brings_no_sign_in_of_a_set_without_a_grant(self):
+        self.save()
+        b = CookieBrowser(GH + OTHER)  # its first start copied the project's profile
+        signin.enforce_cookies(b, self.c)
+        self.assertEqual(self.names(b), ["sid"])
+        from river import browser
+        self.assertEqual([c["name"] for c in browser._skip(GH + OTHER, ["github.com"])], ["sid"])
+
+    def test_an_unconfirmed_owner_gets_no_sign_in(self):
+        self.save()
+        vault.grant(self.c, "gh-set", "project", "site", actor="mark")
+        b = CookieBrowser()
+        b.signin_confirmed = False
+        self.assertEqual(signin.enforce_cookies(b, self.c)["loaded"], [])
+        self.assertEqual(b.jar, [])
+
+    def test_a_new_sign_in_is_saved_back(self):
+        self.save([{"name": "user_session", "value": "old", "domain": "github.com", "path": "/"}])
+        self.grant()
+        b = CookieBrowser(GH, [page("https://github.com/login", pw=True, user=True), page("https://github.com/")])
+        self.assertEqual(signin.check(b, self.c), ["password"])
+        got = vault.unpack_cookies(vault.Files().get(self.c, "gh-cookies"))
+        self.assertEqual(sorted(c["value"] for c in got), ["abc", "s3ss10n"])
+        self.assertEqual(vault.log(self.c, "gh-cookies")["log"][0]["actor"], "maxpm")
+
+    def test_cookies_go_to_no_command_and_only_a_person_saves_them(self):
+        self.save()
+        self.grant()
+        with self.assertRaises(RiverError) as e:
+            vault.get(self.c, "gh-cookies", "dev", "pipe: cat", "pipe", ["cat"])
+        self.assertIn("no command gets them", str(e.exception))
+        with self.assertRaises(RiverError):
+            vault.cookies_save(self.c, "x-cookies", "github.com", GH, "dev")
+        packed = vault.pack_cookies([{"name": "n", "value": "v\n"}])
+        self.assertEqual(vault.unpack_cookies(packed), [{"name": "n", "value": "v\n"}])
 
 
 if __name__ == "__main__":

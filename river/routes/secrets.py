@@ -61,6 +61,19 @@ def act(conn, a, who):
     if action == "get":
         data = vault.get(conn, name, who, a.get("use"), a.get("how"), a.get("argv"))
         return {"secret": name, "value_b64": base64.b64encode(data).decode(), **vault.protection(conn, name)}
+    if action == "cookies":  # #5827: a session browser's sign-in of one site into a set; serve holds the browsers
+        from .. import signin
+        from . import browser as routes_browser
+        if not a.get("session"):
+            raise RiverError("name the session whose browser is signed in: --session <agent>")
+        b = routes_browser._browser_of(conn, a, who)
+        if not b.running():
+            raise RiverError(f"the browser of {a['session']} is not running: sign in there first")
+        site = vault.norm_site(a.get("site"))
+        cookies = signin.site_cookies(b, site)
+        if not cookies:
+            raise RiverError(f"the browser of {a['session']} has no cookies of {site}: sign in there first")
+        return vault.cookies_save(conn, name, site, cookies, who, a.get("set"))
     if action == "signin":  # #5826
         dec = lambda k: base64.b64decode(a[k]) if a.get(k) else None  # noqa: E731
         return vault.signin_save(conn, name, a.get("site"), a.get("account"), dec("value_b64"), dec("totp_b64"),

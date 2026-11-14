@@ -148,7 +148,7 @@ def _person_controls(b):
 def _steps(conn, b):
     """Up to STEPS_MAX steps of one sign-in: the account, the password, a 2-step code. Returns what it did, for the
     tests: a list of steps, or the failure."""
-    done = []
+    done, last = [], None
     tries = b.__dict__.setdefault("signin_tries", {})  # name -> when its password went in
     for _ in range(STEPS_MAX):
         if _person_controls(b):
@@ -156,7 +156,10 @@ def _steps(conn, b):
         f = _fields(b)
         host = _host(f.get("url")) if f else None
         if not f or not host or not (f["pw"] or f["otp"] or f["user"]):
+            if done and done[-1] in ("password", "code") and last:  # the form is gone: the sign-in worked
+                save_back(conn, b, last)
             return done
+        last = host
         if not b.__dict__.get("signin_confirmed"):  # #5823: the owner's own last request was confirmed
             return done
         me = {"name": b.owner, "person": False}
@@ -318,6 +321,83 @@ def scrub_text(b, text, read=False):
             if form in text:
                 text = text.replace(form, "***")
     return text
+
+
+# ---- saved sign-ins in sets (#5827): the cookies of one site, loaded into a session's browser by its grants
+
+def _on(domain, site):
+    d = (domain or "").lstrip(".").lower()
+    return d == site or d.endswith("." + site)
+
+
+def _context(b):
+    return {"browserContextId": b.context} if getattr(b, "attached", False) and getattr(b, "context", None) else {}
+
+
+def site_cookies(b, site):
+    """The cookies of one site in this browser, as Storage.setCookies takes them."""
+    from .browser import cookie_params
+    got = b.call("Storage.getCookies", _context(b)).get("cookies") or []
+    return cookie_params([c for c in got if _on(c.get("domain"), site)])
+
+
+def _drop(b, site):
+    """Delete this browser's cookies of one site (a grant that ended)."""
+    for c in site_cookies(b, site):  # a method of a page (the shown tab), not of the browser
+        b.page("Network.deleteCookies", {"name": c["name"], "domain": c.get("domain"), "path": c.get("path") or "/"})
+
+
+def enforce_cookies(b, conn=None):
+    """Match this session browser's sign-in cookies to its grants: a saved sign-in that a grant gives it now and that
+    is not loaded goes in (Storage.setCookies); one that it may not use (no grant, a revoke, the end of its goal or
+    task, a request under another name) comes out, also when the project's profile copy brought its cookies.
+    At the browser's start before the first page, and at each later action and page load of the session."""
+    if not getattr(b, "owner", None):
+        return None
+    mine = conn is None
+    conn = conn or core.connect()
+    try:
+        sites = vault.cookie_sites(conn)
+        if not sites:
+            return None
+        loaded = b.__dict__.setdefault("cookie_loaded", set())
+        first = not b.__dict__.get("cookie_checked")
+        me = {"name": b.owner, "person": False}
+        confirmed = bool(b.__dict__.get("signin_confirmed"))
+        out = {"loaded": [], "removed": []}
+        for name, site in sites:
+            ok = confirmed and vault.allowed(conn, name, b.owner, me)["ok"]
+            if ok and name not in loaded:
+                cookies = vault.unpack_cookies(vault.backend().get(conn, name))
+                if cookies:
+                    b.call("Storage.setCookies", {"cookies": cookies, **_context(b)})
+                loaded.add(name)
+                out["loaded"].append(name)
+                with core.tx(conn):
+                    conn.execute("UPDATE secrets SET used_at=?, used_by=?, uses=uses+1 WHERE name=?",
+                                 (core.iso(core.now()), b.owner, name))
+                    vault._log(conn, name, b.owner, "use", f"browser sign-in loaded ({len(cookies)} cookies of {site})")
+            elif not ok and (name in loaded or first):
+                _drop(b, site)
+                loaded.discard(name)
+                out["removed"].append(name)
+        b.cookie_checked = True
+        return out
+    finally:
+        if mine:
+            conn.close()
+
+
+def save_back(conn, b, host):
+    """After a sign-in that worked: the site's new cookies replace the saved sign-in of a set that the session has a
+    grant for, so the next session starts signed in."""
+    me = {"name": b.owner, "person": False}
+    for name, site in vault.cookie_sites(conn):
+        if (host == site or host.endswith("." + site)) and vault.allowed(conn, name, b.owner, me)["ok"]:
+            cookies = site_cookies(b, site)
+            if cookies:
+                vault.cookies_save(conn, name, site, cookies, by_serve=True)
+                b.__dict__.setdefault("cookie_loaded", set()).add(name)
 
 
 def note(conn, owner, host):

@@ -177,6 +177,9 @@ def get(conn, name, actor=None, use=None, how=None, argv=None):
         raise RiverError(f"no secret {name}: maxpm secret list shows the names; a person saves one with "
                          f"maxpm secret put {name} (it asks for the value)")
     ok = _require(conn, name, actor, "use", use)
+    if how and row["kind"] == "cookies":
+        raise RiverError(f"{name} holds saved sign-in cookies: maxpm serve loads them into a granted session's "
+                         f"browser; no command gets them")
     if how:
         why = check_level(row, how, argv or [])
         if why:
@@ -497,6 +500,59 @@ def signin_failed(conn, name, why):
     with core.tx(conn):
         conn.execute("UPDATE secrets SET fail_at=?, fail_why=? WHERE name=?", (core.iso(core.now()), why, name))
         _log(conn, name, "maxpm", "signin-failed", why)
+
+
+# ---- saved browser sign-ins (#5827): the cookies of one site, as a secret of kind 'cookies' in a set
+
+def pack_cookies(cookies):
+    """The cookies of one site as the store keeps them: JSON, zlib, so a site with many cookies fits MAX_BYTES."""
+    import json
+    import zlib
+    data = zlib.compress(json.dumps(cookies, separators=(",", ":")).encode(), 9)
+    if len(data) > MAX_BYTES:
+        raise RiverError(f"the sign-in cookies of this site are {len(data) // 1024} KB packed, more than "
+                         f"{MAX_BYTES // 1024} KB: nothing was saved")
+    return data
+
+
+def unpack_cookies(data):
+    import json
+    import zlib
+    return json.loads(zlib.decompress(data).decode()) if data else []
+
+
+def cookies_save(conn, name, site, cookies, actor=None, set_name=None, by_serve=False):
+    """Save the cookies of one site under name (a new save replaces them), and put it in set_name. A person saves
+    one (by_serve: serve saves a granted one back after a new sign-in, #5827). Replies with names and a count."""
+    check_name(name)
+    site = norm_site(site)
+    row = conn.execute("SELECT kind FROM secrets WHERE name=?", (name,)).fetchone()
+    if row and row["kind"] != "cookies":
+        raise RiverError(f"the secret {name} is a {row['kind']}, not saved sign-in cookies: give them another name")
+    if not by_serve and not session_of(conn, actor)["person"]:
+        raise RiverError("only a person saves a browser's sign-in into a set. Ask the manager: "
+                         + _ask_line(conn, f"Please save the sign-in of {site} into a set"))
+    data = pack_cookies(cookies)  # bytes as they are: put()'s clean() would cut a last line end of the packed data
+    who = "maxpm" if by_serve else actor
+    backend().put(conn, name, data)
+    at = core.iso(core.now())
+    with core.tx(conn):
+        if row:
+            conn.execute("UPDATE secrets SET updated_at=?, updated_by=?, site=? WHERE name=?", (at, who, site, name))
+        else:
+            conn.execute("INSERT INTO secrets (name, created_by, created_at, updated_by, updated_at, uses, kind, site) "
+                         "VALUES (?,?,?,?,?,0,'cookies',?)", (name, who, at, who, at, site))
+        _log(conn, name, who, "replace" if row else "put",
+             f"browser sign-in {'saved back' if by_serve else 'saved'} ({len(cookies)} cookies of {site})")
+    if set_name:
+        set_change(conn, set_name, add=[name], actor=actor)
+    return {"secret": name, "site": site, "cookies": len(cookies), "set": set_name}
+
+
+def cookie_sites(conn):
+    """The saved sign-ins: [(name, site)]."""
+    return [(r["name"], r["site"]) for r in conn.execute(
+        "SELECT name, site FROM secrets WHERE kind='cookies' AND site IS NOT NULL ORDER BY name")]
 
 
 # ---- sets and grants (#5822)

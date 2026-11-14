@@ -848,6 +848,12 @@ class Browser:
             if not self._attach_old():
                 self._launch()
             self._connect()
+        if self.owner:  # #5827: the saved sign-ins of its grants before the first page; none that it may not use
+            from . import signin
+            try:
+                signin.enforce_cookies(self)
+            except RiverError as e:
+                print(f"maxpm: browser sign-ins of {self.owner}: {e}", file=sys.stderr)
 
     def _start_attached(self, port, window):
         """Attach to that Chrome. A change of its mode (window) goes through attached_mode, which holds the lock."""
@@ -5165,23 +5171,33 @@ def cookie_params(cookies):
     return keep
 
 
-def save_signins(b):
+def _skip(cookies, skip):
+    """The cookies of the sites in skip left out (#5827: a site with a saved sign-in in a set)."""
+    def on(d, s):
+        d = (d or "").lstrip(".").lower()
+        return d == s or d.endswith("." + s)
+    return [c for c in cookies if not any(on(c.get("domain"), s) for s in skip)]
+
+
+def save_signins(b, skip=()):
     """Save sign-ins for the project (#5633): the cookies of a session's browser go into the project's profile, so
     the sessions that start later begin signed in. Chrome writes both profiles itself (Storage.getCookies from the
     session's Chrome, Storage.setCookies into a Chrome on the project's profile); a project Chrome that this started
     closes again, and writes its cookies to disk as it closes. Local storage stays in the session's profile.
     In a Chrome that serve did not start (#5634), the cookies of the session's context go into that Chrome's default
-    context, whose profile is the shared one."""
+    context, whose profile is the shared one. skip: sites whose sign-in is saved in a set (#5827); their cookies go
+    only to the sessions that a grant covers."""
     if not b.owner or (b.attached and not b.context):
         raise RiverError("only the browser of a session saves sign-ins for its project")
     if not b.running():
         raise RiverError("the browser is not running: open a page first")
     if b.attached:
-        keep = cookie_params(b.call("Storage.getCookies", {"browserContextId": b.context}).get("cookies") or [])
+        keep = _skip(cookie_params(b.call("Storage.getCookies", {"browserContextId": b.context}).get("cookies") or []),
+                     skip)
         if keep:
             b.call("Storage.setCookies", {"cookies": keep})
         return {**b.info(), "saved": len(keep)}
-    keep = cookie_params(b.call("Storage.getCookies").get("cookies") or [])
+    keep = _skip(cookie_params(b.call("Storage.getCookies").get("cookies") or []), skip)
     project = get(b.project)
     started = not project.running()
     try:
