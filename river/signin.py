@@ -14,6 +14,7 @@ scrub() takes the values that serve filled, and the values of the password field
 browser eval, text, html, extract and snapshot reply."""
 
 import base64
+import json
 import os
 import sys
 import threading
@@ -273,6 +274,47 @@ def scrub(b, out):
             return [walk(v) for v in x]
         return x
     return walk(out)
+
+
+# #5831: the CDP address of a session (its Playwright) gets Chrome's messages through serve's relay
+# (browser.cdp_session), not through the replies that scrub() cleans. Each message from Chrome passes scrub_text on its
+# way. The values of the page's password fields cost a script call, so the relay reads them again at most once in
+# LIVE_AGAIN, and within LIVE_FRESH for the reply to a call that reads the page (CDP_READS).
+LIVE_AGAIN = 1.0
+LIVE_FRESH = 0.2
+CDP_READS = {"Runtime.evaluate", "Runtime.callFunctionOn", "Runtime.getProperties", "Runtime.awaitPromise",
+             "Debugger.evaluateOnCallFrame", "DOM.getOuterHTML", "DOM.describeNode", "DOM.getAttributes",
+             "DOM.resolveNode", "DOMSnapshot.captureSnapshot", "DOMSnapshot.getSnapshot", "Accessibility.getFullAXTree",
+             "Accessibility.getPartialAXTree", "Accessibility.queryAXTree", "Page.getResourceContent",
+             "Network.getRequestPostData", "Network.getResponseBody", "DOMStorage.getDOMStorageItems",
+             "IndexedDB.requestData", "CacheStorage.requestCachedResponse"}
+
+
+def _live(b, within):
+    """The values of the page's password fields, read again when the last read is older than within seconds."""
+    now = time.monotonic()
+    seen = b.__dict__.get("signin_live")
+    if seen is None or now - seen[0] > within:
+        got = ()
+        try:
+            if b.running() and not getattr(b, "dialog", None):  # a page's open box holds every script call
+                got = tuple(v for v in (b.evaluate(VALUES_JS, 1) or ()) if isinstance(v, str))
+        except Exception:
+            pass
+        seen = b.signin_live = (now, got)
+    return seen[1]
+
+
+def scrub_text(b, text, read=False):
+    """One CDP message from Chrome, as JSON text, with each value that serve filled in this browser and each value of
+    the page's password fields as ***, in the plain and the JSON-escaped form. read: the reply to a call that reads the
+    page (its values are read again within LIVE_FRESH)."""
+    values = set(b.__dict__.get("signin_values") or ()) | set(_live(b, LIVE_FRESH if read else LIVE_AGAIN))
+    for v in sorted((v for v in values if isinstance(v, str) and len(v) >= vault.MASK_MIN), key=len, reverse=True):
+        for form in {v, json.dumps(v)[1:-1], json.dumps(v, ensure_ascii=False)[1:-1]}:
+            if form in text:
+                text = text.replace(form, "***")
+    return text
 
 
 def note(conn, owner, host):

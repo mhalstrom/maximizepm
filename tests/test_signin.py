@@ -3,6 +3,7 @@
 import base64
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -160,6 +161,29 @@ class SignIn(unittest.TestCase):
         b.field_values = ["typed-by-person"]
         out = signin.scrub(b, {"value": "a hunter2-pw b", "rows": [{"x": "typed-by-person"}], "n": 3})
         self.assertEqual(out, {"value": "a *** b", "rows": [{"x": "***"}], "n": 3})
+
+    def test_scrub_text_cleans_a_cdp_message_and_reads_the_fields_seldom(self):
+        # #5831: Runtime.evaluate('document.querySelector("input[type=password]").value') through a session's CDP
+        # address returned the password that serve filled.
+        b = FakeBrowser([])
+        b.signin_values = {'pa"ss\\wörd'}
+        b.field_values = ["typed-by-person"]
+        calls = []
+        real = b.evaluate
+        b.evaluate = lambda expr, timeout=None: (calls.append(expr), real(expr, timeout))[1]
+        filled = json.dumps({"id": 7, "result": {"result": {"type": "string", "value": 'pa"ss\\wörd'}}})
+        self.assertNotIn("wörd", signin.scrub_text(b, filled))  # the JSON-escaped form
+        raw = json.dumps({"id": 8, "result": {"value": 'pa"ss\\wörd'}}, ensure_ascii=False)
+        self.assertEqual(json.loads(signin.scrub_text(b, raw))["result"]["value"], "***")  # Chrome's raw UTF-8
+        ev = json.dumps({"method": "Network.requestWillBeSent", "params": {"postData": "pw=typed-by-person"}})
+        self.assertEqual(json.loads(signin.scrub_text(b, ev))["params"]["postData"], "pw=***")
+        self.assertEqual(len(calls), 1)  # one read of the fields for the three messages (LIVE_AGAIN)
+        b.field_values = ["typed-later"]
+        b.signin_live = (b.signin_live[0] - 0.5, b.signin_live[1])  # half a second later
+        self.assertIn("typed-later", signin.scrub_text(b, '{"id":9,"result":"typed-later"}'))  # not read again yet
+        self.assertEqual(signin.scrub_text(b, '{"id":10,"result":"typed-later"}', read=True),
+                         '{"id":10,"result":"***"}')  # a read of the page: the fields are read again
+        self.assertEqual(signin.scrub_text(FakeBrowser([]), '{"id":1,"result":"abc"}'), '{"id":1,"result":"abc"}')
 
     def test_cli_saves_a_signin_with_a_key(self):
         out, err = io.StringIO(), io.StringIO()

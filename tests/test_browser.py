@@ -3590,6 +3590,51 @@ class CdpAddress(Base):
         self.assertEqual([m["method"] for m in up.sent], ["Page.captureScreenshot"])
         self.assertTrue(up.closed)
 
+    def test_the_relay_gives_a_session_no_password(self):
+        # #5831: a session's Playwright read the password that serve filled, through Runtime.evaluate.
+        import queue
+        b = browser.get("web", "ag1")
+        b.signin_values = {"filled-pw-123"}
+        fields = ["typed-pw-456"]
+        b.running = lambda: True
+        b.evaluate = lambda expr, timeout=None: list(fields)
+
+        class Upstream:
+            def __init__(self):
+                self.events, self.closed = queue.Queue(), False
+
+            def send(self, text):  # the page answers with what its password fields hold
+                m = json.loads(text)
+                self.events.put(json.dumps({"id": m["id"], "result": {"result": {"type": "string",
+                                                                                  "value": "filled-pw-123 typed-pw-456"}}}))
+
+            def recv(self):
+                got = self.events.get()
+                if got is None:
+                    raise EOFError
+                return got
+
+            def close(self):
+                self.closed = True
+                self.events.put(None)
+
+        up = Upstream()
+        mine, theirs = socket.socketpair()
+        self.addCleanup(mine.close)
+        self.addCleanup(theirs.close)
+        t = threading.Thread(target=browser.cdp_session, args=(self.c, b, "ag1", theirs.makefile("rb"), theirs, up))
+        t.start()
+        rf = mine.makefile("rb")
+        ask = {"id": 3, "method": "Runtime.evaluate", "sessionId": "S",
+               "params": {"expression": 'document.querySelector("input[type=password]").value'}}
+        mine.sendall(browser.ws_frame(0x1, json.dumps(ask).encode()))
+        self.assertEqual(json.loads(browser.ws_read(rf)[2])["result"]["result"]["value"], "*** ***")
+        up.events.put(json.dumps({"method": "Network.requestWillBeSent", "params": {"postData": "p=filled-pw-123"}}))
+        self.assertEqual(json.loads(browser.ws_read(rf)[2])["params"]["postData"], "p=***")
+        mine.sendall(browser.ws_frame(0x8, b""))
+        t.join(5)
+        self.assertFalse(t.is_alive())
+
     def test_the_route_needs_the_token_and_a_websocket(self):
         h = FakeHandler("/cdp/ag1?project=web&token=nope")
         h.headers = {"Upgrade": "websocket", "Sec-WebSocket-Key": "x"}

@@ -2036,7 +2036,9 @@ def cdp_session(conn, b, agent, rfile, sock, upstream, on_input=None):
     on_input: called at each input that passes (the page shows the browser in the session's side panel). The
     session's input goes to the panel too (relay_input), and with the setting browser_shot_cursor on, a screenshot of
     the shown tab has the pointer drawn in (#5616)."""
+    from . import signin
     wlock, worlds, tabs, shots = threading.Lock(), set(), {}, set()
+    reads = set()  # #5831: the ids of the session's calls that read the page: their replies get fresh field values
 
     def out(op, data):
         with wlock:
@@ -2064,7 +2066,13 @@ def cdp_session(conn, b, agent, rfile, sock, upstream, on_input=None):
                     if i in shots:
                         shots.discard(i)
                         cursor_off(b)
-                out(0x1, text.encode())
+                read = False
+                if reads and text.startswith('{"id":'):
+                    m = re.match(r'\{"id":(\d+)', text)
+                    read = bool(m) and int(m.group(1)) in reads
+                    if read:
+                        reads.discard(int(m.group(1)))
+                out(0x1, signin.scrub_text(b, text, read).encode())  # #5831: no password reaches the session
         except (EOFError, OSError):
             pass
         for step in (lambda: out(0x8, b""), lambda: sock.shutdown(socket.SHUT_RDWR)):
@@ -2114,6 +2122,8 @@ def cdp_session(conn, b, agent, rfile, sock, upstream, on_input=None):
                         shots.add(msg["id"])
                 except Exception:  # the panel's view never stops the session's input
                     pass
+            if method in signin.CDP_READS and isinstance(msg.get("id"), int):
+                reads.add(msg["id"])
             upstream.send(json.dumps(msg))
     except (EOFError, OSError):
         pass
