@@ -1,0 +1,10 @@
+<!-- The Status view of the Sessions tab (#5852): every running session of every project in one list, in four groups by
+     its state: Needs you, Done, Working, Idle. The Status row of the session list opens it; so does /status.
+     maxpm serve puts it into sessions.html, at view: status. -->
+<div class="panel sess-main sess-status hidden" id="sessStatus">
+  <div class="sess-head">
+    <button class="btn" type="button" id="statusBack" title="All running sessions" aria-label="All running sessions">‹<span class="sb-word"> Sessions</span></button>
+    <h2 class="sess-h2" title="All sessions by state">Status</h2>
+  </div>
+  <div class="status-body"><div id="statusList"></div></div>
+</div>

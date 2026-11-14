@@ -114,6 +114,11 @@ DEFAULT_SETTINGS = {
     "notify_channels": "",
     "notify_interval": "30s",
     "notify_batch_window": "60s",
+    # The status inbox (#5852): which states of a session send a push notice on notify_channels when a session
+    # enters them: a comma list of needs_you, done, working, idle; or off (the default). needs_you sends only what
+    # no notice of the queue sends already (an open question or prompt alert of that session), and nothing while a
+    # manager is active: the manager sees prompts and questions first.
+    "notify_status": "off",
     "ntfy_url": "https://ntfy.sh",
     # Where a tap on a notification opens (#4673): maxpm (the MaximizePM page: the item's drawer, the session in
     # the Sessions tab for its question or prompt, the Board's Needs you for a batch) or agent (the agent's own app:
@@ -860,6 +865,7 @@ CREATE TABLE IF NOT EXISTS agents (
   expert_project TEXT,                       -- the project whose folder it starts in (maxpm expert start)
   talked_at      TEXT,                       -- the last prompt that someone typed or sent to it (its hooks)
   person_said_at TEXT,                       -- the last prompt that a person typed in its chat (its hooks; #5629)
+  seen_at        TEXT,                       -- the last time a person had its chat open on the page (status inbox, #5852)
   assistant_for  TEXT,                       -- an assistant session (role assistant): the person whose list it goes through (#5110)
   registered_at  TEXT NOT NULL,
   last_seen      TEXT NOT NULL
@@ -2074,7 +2080,7 @@ def _migrate(conn):
         conn.execute("ALTER TABLE agents ADD COLUMN model TEXT")
     if "agent_type" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN agent_type TEXT")
-    for col in ("expert_topic", "expert_project", "talked_at", "assistant_for", "person_said_at"):
+    for col in ("expert_topic", "expert_project", "talked_at", "assistant_for", "person_said_at", "seen_at"):
         if col not in acols:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     for col in ("stop_at", "stop_by", "stop_reason", "platform", "native_address", "host", "pid_cmd", "manage_seen", "busy_at",
@@ -2506,6 +2512,10 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         raise RiverError("ntfy_topic uses letters, digits, '-' and '_' (up to 64); maxpm notify setup ntfy makes one")
     elif key == "notify_channels" and not all(re.match(r"^[a-z0-9_-]+$", c) for c in _channels(value)):
         raise RiverError("notify_channels is a comma list of channel names, for example: mac,ntfy (empty sends nothing)")
+    elif key == "notify_status" and value != "off" and not (
+            _channels(value) and set(_channels(value)) <= set(SESSION_STATUSES)):
+        raise RiverError("notify_status is off or a comma list of " + ", ".join(SESSION_STATUSES)
+                         + ", for example: needs_you,done")
     sc = _scope(conn, project, item, agent, kind)
     if key == "release_approval" and not sc.startswith("project:"):
         raise RiverError("release_approval is set for each project from its needs, never for all of them: "
@@ -13457,6 +13467,21 @@ def session_pin(conn, agent, actor=None, on=True):
             conn.execute("DELETE FROM session_pins WHERE person=? AND agent=?", (actor, agent))
     return {"agent": agent, "person": actor, "pinned": on,
             "pinned_by": agent_status(conn, agent)["pinned_by"]}
+
+
+# The four states of a session in the status inbox (#5852), in the order of the list.
+SESSION_STATUSES = ("needs_you", "done", "working", "idle")
+
+
+def session_seen(conn, agent, actor=None):
+    """A person has the session's chat open on the page (#5852): a turn that ended before now is seen, so the session
+    moves from done to idle in the status inbox. The time is one second ahead: the transcript times have fractions,
+    and a turn end in the same second as the look is seen too."""
+    _agent(conn, agent)
+    t = iso(now() + timedelta(seconds=1))
+    with tx(conn):
+        conn.execute("UPDATE agents SET seen_at=? WHERE name=?", (t, agent))
+    return {"agent": agent, "seen_at": t}
 
 
 def _rel_path(path, root, cwd=None):

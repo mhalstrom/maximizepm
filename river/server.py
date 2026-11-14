@@ -56,7 +56,7 @@ def static_file(path, root=None):
 # The page's addresses (#4653): a path for each view, for example /sessions/<session>/artifacts/<artifact id>,
 # with ?as=<person> and ?item=<id>. Each one gets the page, with a <base> that points back to the page's root, so
 # its relative addresses (app.js, api/state) work at any depth, here and on the relay's tunnel.
-PAGE_VIEWS = ("sessions", "you", "plan", "artifacts", "settings", "terminal")
+PAGE_VIEWS = ("sessions", "you", "status", "plan", "artifacts", "settings", "terminal")  # status: #5852
 # The tabs before Sessions and Plan (#5102, design #4657): nothing forwards; each answers "not found" with a link to /.
 OLD_VIEWS = ("board", "projects", "targets", "capacity", "graph", "done")
 OLD_VIEW_PAGE = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1'>"

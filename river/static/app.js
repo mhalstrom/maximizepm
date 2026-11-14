@@ -390,6 +390,7 @@ const TABS = ["sessions", "plan", "settings", "terminal"];
 //   /  (Sessions: the You view when something waits on you, else the session chosen last, #5102)   /sessions
 //   /sessions/<session>   /sessions/<session>/artifacts/<artifact id>
 //   /you (the You view of Sessions, #5102)   /artifacts (the Artifacts view of Sessions, #5102)
+//   /status (the Status view of Sessions: every session by its state, #5852)
 //   /sessions/<session>/items/<id> (an item in the side panel, #4685)
 //   /artifacts/<artifact id> (opens it beside its session)   /plan/<view>?project=&goal=   /settings
 // plus ?as=<person>, ?item=<id> while an item's drawer is open, and ?terminal=<agent> (once: it opens that agent's
@@ -407,7 +408,7 @@ function readUrl() {
   const rel = location.pathname.startsWith(ROOT) ? location.pathname.slice(ROOT.length) : "";
   const parts = rel.split("/").filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const q = new URLSearchParams(location.search), it = q.get("item");
-  const pane = parts[0] === "you" ? "you" : parts[0] === "artifacts" ? "arts" : null;
+  const pane = parts[0] === "you" ? "you" : parts[0] === "status" ? "status" : parts[0] === "artifacts" ? "arts" : null;
   const r = { tab: TABS.includes(parts[0]) ? parts[0] : "sessions", session: null, art: null, root: !parts.length,
               pane, as: q.get("as"), terminal: q.get("terminal"), item: /^\d+$/.test(it || "") ? +it : null };
   if (r.tab === "sessions" && !pane) { r.session = parts[1] || null; if (parts[2] === "artifacts") r.art = parts[3] || null;
@@ -421,7 +422,7 @@ function readUrl() {
 }
 function urlItem() { return readUrl().item; }
 function pageUrl(item = drawer.isOpen() ? openItem : null, tabName = tab) {
-  const pane = tabName === "sessions" ? { you: "you", arts: "artifacts" }[view.pane] : null;
+  const pane = tabName === "sessions" ? { you: "you", status: "status", arts: "artifacts" }[view.pane] : null;
   let p = pane || (tabName === "sessions" && !view.session ? "" : tabName);
   if (tabName === "sessions" && view.session && !pane) {
     p += "/" + encodeURIComponent(view.session);
@@ -815,6 +816,7 @@ async function openFromUrl() {
     if (r.plan) { setPlan(r.plan.view, r.plan); planDraw(); }
     if (r.tab !== tab) await setTab(r.tab, false);
     if (r.pane === "you") sessionsTab.showYou(false);
+    if (r.pane === "status") sessionsTab.showStatus(false);
     if (r.pane === "arts") sessionsTab.showArts(false);
     // The first page (#5102 step 5, design #4657): the You view when something waits on the person.
     if (r.root && !r.item) { firstPage = true; await needsYou.pollNeedsYou().catch(() => {}); firstYou(); }
@@ -1017,7 +1019,8 @@ setInterval(() => {
   firstPage = r.root && r.item == null;  // before the session list writes the address of the session it shows
   {
     try { if (r.plan) setPlan(r.plan.view, r.plan); setTab(r.tab, false); if (r.tab === "sessions" && r.session) sessionsTab.pick(r.session, false);
-      if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
+      if (r.pane === "you") sessionsTab.showYou(false); if (r.pane === "status") sessionsTab.showStatus(false);
+      if (r.pane === "arts" && !r.art) sessionsTab.showArts(false); } catch (e) { /* the state draws it */ }
   }
 }
 refresh().finally(() => { booting = false; }).then(openFromUrl).then(maybeSetup).catch((e) => {

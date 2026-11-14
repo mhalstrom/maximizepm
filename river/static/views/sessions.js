@@ -30,6 +30,7 @@ import { S } from "../page.js";
 import { renderGive } from "./sessions-work.js";
 import { queueAnywhere } from "../components/agentStart.js";
 import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
+import { statusRowHtml, statusHtml, togglePush } from "./status.js";
 
 const PICKED = "river.session";
 const FOLD = "river.sessFold";  // "1": the person folded the list of sessions (#5626)
@@ -250,10 +251,12 @@ function renderList(el, list, picked, empty) {
 
 export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) {
   let list = [], busy = false, again = false, proposals = [], listRead = false;
-  // A pane in place of a session's chat (#5102): "you" (what waits on the person) or "arts" (the artifacts of all
-  // sessions); null while a session shows.
+  // A pane in place of a session's chat (#5102): "you" (what waits on the person), "status" (every session by its
+  // state, #5852) or "arts" (the artifacts of all sessions); null while a session shows.
   let pane = null;
-  const PANES = { you: "#sessYou", arts: "#sessArts" };
+  const PANES = { you: "#sessYou", status: "#sessStatus", arts: "#sessArts" };
+  let push = "off";  // notify_status: the states whose Push is on in the Status view (#5852)
+  const seenAt = {};  // agent: the last session_seen this page sent for it (ms), so a poll sends it once per turn end
   let agent = null, cursor = null, timer = null, gen = 0, lastCache = null, lastRead = null;
   // The messages that maxpm serve holds for this session until its turn ends (#5587), under the chat.
   let waiting = [];
@@ -363,7 +366,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   $("#sessLayout").addEventListener("focusout", fitAfter);
   const phoneChat = (yes) => { $("#sessLayout").classList.toggle("phone-chat", !!yes); headMore(false); fit(); };
   $("#sessBack").addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
-  for (const b of ["#youBack", "#artsBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
+  for (const b of ["#youBack", "#statusBack", "#artsBack"]) $(b).addEventListener("click", () => { phoneChat(false); window.scrollTo(0, 0); });
   // The ⋯ of the session head (#4903; at every width since #5115): a card under it at the right with Open session,
   // Give work, Settings, the links to Plan and End (on a phone also the item). A choice, Esc, or a click outside closes it.
   const more = makeMenu($("#sessMore"), main, { cls: "head-more", onChange: () => fit(),
@@ -381,6 +384,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       const j = await getJson("api/sessions");
       list = j.sessions; listRead = true;
       proposals = j.proposals || [];
+      push = j.notify_status || "off";
       forgetDrafts(list);
       draw();
     } catch (e) {
@@ -419,10 +423,41 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     renderList(side, workers, agent,
       `<div class="muted">No other agent session runs now. Start one with New session${queueAnywhere(S)
         ? ", or Start an agent for the next ready item" : ""}.</div>`);
+    drawStatus();
     drawState();
     proposeCard();
     fit();
     autoWait();
+  }
+
+  // The Status row of the list and the Status view (#5852), from the same read as the rows. The view draws only while
+  // it shows; its HTML goes in only when it changed, so a row keeps its hover and focus.
+  function drawStatus() {
+    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status"));
+    if (pane === "status") putHtml($("#statusList"), statusHtml(list, push));
+    document.querySelectorAll("#sessStatusRow .sago, #statusList .sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
+  }
+  // The person has this session's chat open while its turn has ended (#5852): it is seen, and moves from Done to Idle.
+  // Once for each turn end (its row's time), and only while the page shows.
+  function markSeen(s) {
+    if (!s || s.status !== "done" || document.hidden || !isShown()) return;
+    const at = Date.parse(s.at || "") || 0;
+    if (seenAt[s.name] === at) return;
+    seenAt[s.name] = at;
+    s.status = "idle";
+    drawStatus();
+    fetch("api/action", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "session_seen", args: { agent: s.name }, actor: actor() }) }).catch(() => {});
+  }
+  // Push of one state on or off: the setting notify_status for every project.
+  async function setPush(key) {
+    const value = togglePush(push, key);
+    push = value; drawStatus();
+    try {
+      await act("config_set", { key: "notify_status", value });
+      toast(value === "off" ? "No push notices for session states" : "Push notices for: " + value.replace(/_/g, " ").replace(/,/g, ", "));
+    } catch (_) { /* act showed why */ }
+    await refresh();
   }
 
   // Pin or unpin a worker (#5007), from its row or the ⋯ menu (#5400). The rows and the menu change at once, not at
@@ -463,6 +498,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
       drawPend(j.pending || []);
       cursor = j.cursor;
       const s = list.find(x => x.name === agent) || {};
+      markSeen(list.find(x => x.name === agent));
       lastRead = { agent, provider: j.provider, state: j.state, state_label: j.state_label, terminal: j.terminal };
       drawState();
       waitLine(j);
@@ -491,6 +527,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   function markPane() {
     markYou(pane === "you");
     $("#sessArtsRow .srow").classList.toggle("on", pane === "arts");
+    drawStatus();
   }
   // Scrolling up reads the earlier lines (#5120), a page at a time, across compactions and into the transcript of the
   // session it was resumed from; the lines in sight stay where they are.
@@ -986,6 +1023,7 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   });
   bar.addEventListener("click", async (e) => {
     if (e.target.closest("[data-you]")) return showPane("you");
+    if (e.target.closest("[data-status]")) return showPane("status");
     if (e.target.closest("[data-arts]")) return showPane("arts");
     const end = e.target.closest("[data-end]");
     if (end) { e.preventDefault(); return endIt(end.dataset.end); }  // End does not open the session
@@ -1001,8 +1039,9 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);  // what waits for the person comes first; Dismiss shows the chat
   });
   bar.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-arts]")) {
-      e.preventDefault(); return showPane(e.target.closest("[data-you]") ? "you" : "arts");
+    if ((e.key === "Enter" || e.key === " ") && e.target.closest("[data-you], [data-status], [data-arts]")) {
+      e.preventDefault();
+      return showPane(e.target.closest("[data-you]") ? "you" : e.target.closest("[data-status]") ? "status" : "arts");
     }
     const r = (e.key === "Enter" || e.key === " ") && !e.target.closest("[data-pin], [data-end]") && e.target.closest(".srow-main")
       && e.target.closest("[data-session]");
@@ -1012,6 +1051,16 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     if (s && popsUp(s).length) showWaiting(s);
   });
   setInterval(refresh, 3000);
+  // The Status view (#5852): a row opens its session, with what waits for the person first, as a row of the list does;
+  // Push turns the notices of that state on or off.
+  $("#statusList").addEventListener("click", (e) => {
+    const p = e.target.closest("[data-status-push]"); if (p) return setPush(p.dataset.statusPush);
+    const r = e.target.closest("[data-status-go]"); if (!r) return;
+    pick(r.dataset.statusGo);
+    const s = list.find(x => x.name === r.dataset.statusGo);
+    if (s && popsUp(s).length) showWaiting(s);
+  });
   return { refresh: () => { refresh(); fit(); }, pick, showYou: (byPerson = true) => showPane("you", byPerson),
+           showStatus: (byPerson = true) => showPane("status", byPerson),
            showArts: (byPerson = true) => showPane("arts", byPerson), pane: () => pane };
 }

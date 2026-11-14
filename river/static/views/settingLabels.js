@@ -73,7 +73,7 @@ export const LABELS = {
   canvas_network: "What a canvas may load",
   // Notifications
   notify_channels: "Channels", notify_interval: "Check for notifications every", notify_batch_window: "Group notifications within",
-  notify_open: "A tap opens", ntfy_url: "ntfy server", ntfy_topic: "ntfy topic", ntfy_token: "ntfy token", ntfy_priority: "ntfy priority",
+  notify_open: "A tap opens", notify_status: "Push when a session enters", ntfy_url: "ntfy server", ntfy_topic: "ntfy topic", ntfy_token: "ntfy token", ntfy_priority: "ntfy priority",
   ntfy_click: "Phone link when no relay", timezone: "Time zone",
   // Advanced
   serve_port: "Port of the page", serve_reload: "Restart serve after a code change", serve_reload_min: "Least time between restarts",

@@ -54,6 +54,48 @@ STATES = {"working": "working", "prompt": "waits at a prompt", "answer": "waits 
           "ended": "ended before its first maxpm command"}
 
 
+def status_of(card, seen=None):
+    """The state of a session in the status inbox (#5852), one of core.SESSION_STATUSES, from its card: needs_you (a
+    prompt, a question to a person, anything in its ! badge), working (a turn runs, it starts or ends, or its turn
+    ended while background work runs that wakes it), done (its turn ended after the person last had its chat open:
+    seen, the later of seen_at and its last typed prompt), else idle (it waits, and the person has seen that)."""
+    key, label = card["state"], card.get("state_label") or ""
+    if key in ("prompt", "answer") or card.get("waiting"):
+        return "needs_you"
+    if key in ("working", "starting", "stopping") or (key == "idle" and label.startswith("idle: waits on ")):
+        return "working"
+    if key in ("idle", "expert") and card.get("last"):
+        end = core._ts(card.get("at") or "")
+        if end and (seen is None or end > seen):
+            return "done"
+    return "idle"
+
+
+def _seen(a):
+    """The time the person last saw a session (status_of): seen_at (the page) or its last typed prompt."""
+    got = [t for t in (core._ts(a.get("seen_at") or ""), core._ts(a.get("person_said_at") or "")) if t]
+    return max(got) if got else None
+
+
+def _project_of(conn, a, holds, cwd):
+    """The project a session works in, for the status inbox (#5852): its item's, an expert's, its folder's (cwd:
+    from its transcript), else the project of the item it finished last; None when none says it."""
+    if holds and holds[0].get("project"):
+        return holds[0]["project"]
+    if a.get("expert_project"):
+        return a["expert_project"]
+    if cwd:
+        try:
+            got = core.projects_for_dir(conn, cwd)
+        except (OSError, ValueError):
+            got = []
+        if got:
+            return got[0]
+    r = conn.execute("SELECT p.name FROM items i JOIN projects p ON p.id=i.project_id WHERE i.status='done' AND "
+                     "i.assignee=? ORDER BY i.closed_at DESC LIMIT 1", (a["name"],)).fetchone()
+    return r["name"] if r else None
+
+
 def _zstd():
     try:
         from compression import zstd  # Python 3.14 and later
@@ -844,6 +886,9 @@ def views(conn, terminals=None, root=None, croot=None, prompts=None, ended_panes
                 "at": tail["entries"][-1]["at"] if tail["entries"] else a.get("last_seen")}
         if a.get("role") == "expert":  # its prompt cache: what the next message costs (#5023)
             card["cache"] = cache_state(conn, a["name"], found=(kind, path)) if path else None
+        # The status inbox (#5852): its state of four, and its project, so one list sorts every project's sessions.
+        card["status"] = status_of(card, _seen(a))
+        card["project"] = _project_of(conn, a, card["holds"], tail.get("cwd"))
         cards.append(card)
         seen.update((k, card) for k in keys)
     order = {"prompt": 0, "answer": 1, "working": 2, "expert": 2, "starting": 3, "stopping": 4, "idle": 5, "ended": 6}

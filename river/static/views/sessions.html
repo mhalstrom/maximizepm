@@ -14,6 +14,8 @@
         <div id="sessYouRow"></div>
         <div id="sessAssist" class="slist-rows" aria-label="Your assistant"></div>
       </div>
+      <!-- The Status row (#5852): how many sessions need you, are done, work, or are idle; it opens the Status view. -->
+      <div id="sessStatusRow" class="slist-status" aria-label="Status"></div>
       <!-- The Artifacts row (#5102 step 3): what all the sessions made; it opens the Artifacts view. -->
       <div id="sessArtsRow" class="slist-arts" aria-label="Artifacts"><div class="srow srow-arts" data-arts="1">
         <div class="srow-main" tabindex="0" role="button" title="What all sessions made or named" aria-label="Artifacts of all sessions">
@@ -64,6 +66,7 @@
       </div>
     </div>
     <!-- view: you -->
+    <!-- view: status -->
     <!-- view: artifacts -->
     <aside class="panel sess-panel hidden" id="sessPanel" aria-label="Side panel">
       <div class="sp-grip" id="spGrip" title="Drag to resize the side panel"></div>

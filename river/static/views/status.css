@@ -1,0 +1,18 @@
+/* The Status view of Sessions (#5852): in place of a session's chat, every session in four groups by state; the
+   list scrolls. Its row in the session list sits under You, like Artifacts. */
+.sess-status.hidden { display: none; }
+.slist-status { flex: none; }
+.slist-status .srow-status .srow-t { font-weight: 700; }
+.sess-status .status-body { flex: 1 1 0; min-height: 0; overflow-y: auto; border-top: var(--hair) solid var(--line); padding: var(--sp-3) var(--sp-1); }
+.sess-status .status-body > * { max-width: 60rem; margin-left: auto; margin-right: auto; }
+.st-group { margin-bottom: var(--sp-6); }
+.st-gh { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-base); margin: 0 0 var(--sp-2); }
+.st-gh .st-push { font-size: var(--fs-s); }
+.st-none { padding: var(--sp-1) var(--sp-3); }
+button.st-row { display: flex; flex-direction: column; gap: var(--sp-0); border: 0; border-top: var(--hair) solid var(--line); background: none; padding: var(--sp-3); min-width: 0; min-height: var(--tap); border-radius: 0; }
+button.st-row:hover { background: var(--bubble); }
+.st-h { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.st-h b.st-t { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-h .chip { flex: none; }
+.st-h .sago { color: var(--muted); font-size: var(--fs-s); flex: none; }
+.st-sub { color: var(--muted); font-size: var(--fs-s); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
