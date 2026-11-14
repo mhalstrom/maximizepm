@@ -5869,11 +5869,61 @@ def reap_orphans():
         n += 1
 
 
+SERVE_WAIT = 10  # seconds between two tries of a serve that waits for its port; the tests make it short
+
+
+def other_serve(port: int) -> dict | None:
+    """The maxpm serve that answers on this port: its /api/queue (db, pid), or None when nothing answers or the
+    answer is not a maxpm serve's. No proxy: the address is this computer."""
+    import urllib.request
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{port}/api/queue", timeout=2) as r:
+            data = json.loads(r.read())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and "pid" in data else None
+
+
+def _bind(port: int):
+    """The listening server on 127.0.0.1:port, or None when this start should end (#5874).
+    A second serve on a taken port crashed: the launchd job (KeepAlive) started it again every 30 s, 3176 times,
+    while a serve started by hand held the port, and each crash wrote a traceback to serve.log. Now, when a maxpm
+    serve answers there, a serve in a terminal says so and ends (exit 0); a serve with no terminal (launchd,
+    systemd, a background command) waits and takes the port when the other one ends. Any other program on the
+    port, at the first try, is an error that names the setting."""
+    import errno
+    said = False
+    while True:
+        try:
+            return _Server(("127.0.0.1", port), Handler)
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+            other = other_serve(port)
+            if not other and said:  # the serve it waits for is ending: its socket is open, but it answers no more
+                time.sleep(SERVE_WAIT)
+                continue
+            if not other:
+                raise RiverError(f"port {port} is taken by a program that is not maxpm serve; end it, or use "
+                                 f"another port: maxpm config set serve_port <port>") from None
+            where = f"a maxpm serve (pid {other['pid']}, database {other.get('db')}) answers on port {port}"
+            if sys.stdin is not None and sys.stdin.isatty():
+                print(f"{where}: open http://127.0.0.1:{port}/. To restart it: maxpm serve --restart", flush=True)
+                return None
+            if not said:
+                print(f"{where}; this serve waits and starts when that one ends", flush=True)
+                said = True
+            time.sleep(SERVE_WAIT)
+
+
 def serve(port: int, open_browser=False, dev=False):
     reaped = reap_orphans()  # before the first child of this start (#5715)
     if reaped:
         print(f"reaped {reaped} ended child processes of the last start", flush=True)
-    httpd = _Server(("127.0.0.1", port), Handler)
+    httpd = _bind(port)
+    if httpd is None:
+        return
     url = f"http://127.0.0.1:{port}/"
     DEV["on"] = dev
     print(f"MaximizePM on {url} (database {core.db_path()}){' [dev: restarts on code change]' if dev else ''}",

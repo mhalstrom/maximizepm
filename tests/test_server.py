@@ -5368,6 +5368,77 @@ class ServerBind(unittest.TestCase):
             httpd.server_close()
 
 
+class ServeOnATakenPort(unittest.TestCase):
+    """#5874: a second maxpm serve on a taken port crashed with a traceback, and launchd started it again every
+    30 s. Now it ends (in a terminal) or waits for the port (no terminal); another program is an error."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        patcher = mock.patch.dict(os.environ, {"MAXPM_DB": os.path.join(self.dir.name, "t.db")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        wait = server.SERVE_WAIT
+        server.SERVE_WAIT = 0.05
+        self.addCleanup(setattr, server, "SERVE_WAIT", wait)
+
+    def _first(self):
+        httpd = server._Server(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd
+
+    def _stdin(self, tty):
+        fake = mock.Mock()
+        fake.isatty.return_value = tty
+        return mock.patch.object(sys, "stdin", fake)
+
+    def test_a_serve_with_no_terminal_waits_and_takes_the_port_when_the_other_ends(self):
+        first = self._first()
+        port = first.server_port
+        self.assertEqual(server.other_serve(port)["pid"], os.getpid())
+        got, out, tries = {}, io.StringIO(), []
+        ask = server.other_serve
+
+        def counted(p):
+            tries.append(p)
+            return ask(p)
+
+        def second():
+            with contextlib.redirect_stdout(out):
+                got["httpd"] = server._bind(port)
+        with self._stdin(False), mock.patch.object(server, "other_serve", counted):
+            t = threading.Thread(target=second, daemon=True)
+            t.start()
+            timing.wait_for(lambda: len(tries) >= 3, what="three tries for the port")
+            self.assertTrue(t.is_alive())  # it waits; no crash
+            self.assertIn(f"answers on port {port}; this serve waits", out.getvalue())
+            self.assertEqual(out.getvalue().count("waits"), 1)  # said once, not at each try
+            first.shutdown()
+            first.server_close()
+            t.join(5)
+        self.assertFalse(t.is_alive())
+        try:
+            self.assertEqual(got["httpd"].server_port, port)
+        finally:
+            got["httpd"].server_close()
+
+    def test_a_serve_in_a_terminal_says_where_the_other_one_is_and_ends(self):
+        first = self._first()
+        self.addCleanup(first.server_close)
+        self.addCleanup(first.shutdown)
+        out = io.StringIO()
+        with self._stdin(True), contextlib.redirect_stdout(out):
+            self.assertIsNone(server._bind(first.server_port))
+        self.assertIn(f"open http://127.0.0.1:{first.server_port}/", out.getvalue())
+
+    def test_another_program_on_the_port_is_an_error_that_names_the_setting(self):
+        import socket
+        s = socket.socket()
+        self.addCleanup(s.close)
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        with self._stdin(False), self.assertRaisesRegex(RiverError, "not maxpm serve.*serve_port"):
+            server._bind(s.getsockname()[1])
 
 
 class CanvasOps(unittest.TestCase):
