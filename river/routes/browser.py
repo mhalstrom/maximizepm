@@ -460,6 +460,8 @@ def _act(conn, a, who):
             raise browser.BrowserError(str(e), "not_controller")
         if person:
             b.person_at = time.time()
+        else:
+            b.agent_at = time.time()  # #5814: a passkey request after a session's action opens no window
         if not person and action in INPUTS:
             first_input(project, who)
     if person and a.get("pane") and action in CHANGES:

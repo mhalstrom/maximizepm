@@ -1021,6 +1021,14 @@ class Passkey(Base):
             log.append((method, [c["name"] for c in params["cookies"]]))
             return {}
         b.call = call
+        b.state["pid"] = 4242  # the Chrome that start() runs
+
+        def app(script):  # never the real osascript: it would hide a real app
+            log.append(("hide", int(script.split("ProcessIdentifier(")[1].split(")")[0])))
+            return "true"
+        old = browser.APP_RUNNER
+        browser.APP_RUNNER = app
+        self.addCleanup(setattr, browser, "APP_RUNNER", old)
         b.panes["p1"] = {"size": (800, 600), "dsf": 2, "screen": (1512, 982), "at": time.time()}
         b.pane_seen("p1", "300,120,800,600")
         b.driver = "p1"
@@ -1031,7 +1039,7 @@ class Passkey(Base):
         b.person_at = time.time()
         b.passkey("get")
         self.assertEqual(log, [("start", True, (300, 120, 800, 600)), ("Storage.setCookies", ["sid"]),
-                               ("open", st["url"])])
+                               ("open", st["url"])])  # no switch of the person's desktop
         self.assertTrue(b.state["window_by"]["passkey"])
         b.passkey("get")  # the request again, in the window: it runs there
         self.assertEqual(len(log), 3)
@@ -1039,7 +1047,8 @@ class Passkey(Base):
         st["url"] = "https://myaccount.google.com/"  # after the touch the page goes on
         with mock.patch.object(browser, "PASSKEY_SETTLE", 0):
             b.passkey("done")
-        self.assertEqual(log, [("start", False, None), ("Storage.setCookies", ["sid"]), ("open", st["url"])])
+        self.assertEqual(log, [("hide", 4242), ("start", False, None), ("Storage.setCookies", ["sid"]),
+                               ("open", st["url"])])  # hidden first, at once; then back into the panel
         self.assertIsNone(b.passkey_at)
         self.assertNotIn("window_by", b.state)
 
@@ -1049,7 +1058,7 @@ class Passkey(Base):
         b.passkey("get")
         log.clear()
         b.passkey("ended")
-        self.assertEqual(log[0], ("start", False, None))
+        self.assertEqual(log[:2], [("hide", 4242), ("start", False, None)])
         log.clear()
         b.person_at = time.time()
         b.passkey("get")  # a page that asks again at its load: no window again
@@ -1063,8 +1072,37 @@ class Passkey(Base):
         b.person_at = time.time()
         with mock.patch.object(browser, "PASSKEY_WINDOW_MAX", 0.2):
             b.passkey("get")
-            timing.wait_for(lambda: b.passkey_at is None, what="the window's close after PASSKEY_WINDOW_MAX")
-        self.assertEqual(log[-3][:2], ("start", False))
+            timing.wait_for(lambda: log[-1][0] == "open" and ("start", False, None) in log,
+                            what="the window's close after PASSKEY_WINDOW_MAX")
+        self.assertEqual(log[-4:-2], [("hide", 4242), ("start", False, None)])
+        self.assertIsNone(b.passkey_at)
+
+    def test_a_session_s_action_after_the_person_s_input_opens_no_window(self):
+        b, st, log = self.fake()
+        b.person_at = time.time()
+        b.agent_at = time.time()  # a session ran maxpm browser eval while the person watched (seen 2026-11-13 17:03)
+        b.passkey("get")
+        self.assertEqual(log, [])
+        self.assertIsNone(b.passkey_at)
+
+    def test_a_window_whose_page_asks_for_no_passkey_closes_soon(self):
+        b, st, log = self.fake()
+        b.person_at = time.time()
+        with mock.patch.object(browser, "PASSKEY_START", 0.2):
+            b.passkey("get")
+            timing.wait_for(lambda: log[-1][0] == "open" and ("start", False, None) in log,
+                            what="the close after PASSKEY_START")
+        self.assertEqual(log[-4:-2], [("hide", 4242), ("start", False, None)])
+        log.clear()
+        b.person_at = time.time() + 61  # later, on another page: the person asks again, and the page asks there
+        st["url"] = "https://accounts.google.com/challenge/pk?again"
+        with mock.patch.object(browser, "PASSKEY_START", 0.2), mock.patch.object(browser, "PASSKEY_WINDOW_MAX", 0.6):
+            b.passkey("get")
+            b.passkey("get")  # the request again, in the window
+            self.assertIsNotNone(b.passkey_at)
+            timing.wait_for(lambda: log[-1][0] == "open" and ("start", False, None) in log,
+                            what="the close after PASSKEY_WINDOW_MAX")
+        self.assertIsNone(b.passkey_at)
 
     def test_a_place_is_four_numbers_in_range(self):
         self.assertEqual(browser.parse_place("300.4,120,800,600"), (300, 120, 800, 600))

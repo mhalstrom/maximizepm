@@ -75,7 +75,9 @@ CLOSE_WAIT = 5       # seconds that a close waits for Chrome to end by itself (i
 # the page in a window over the panel. In that window the request runs, and the script says done or ended. Autofill
 # requests (mediation conditional) run as they are.
 PASSKEY_BINDING = "__maxpmPasskey"
-PASSKEY_PERSON = 60      # seconds: a request opens the window only this soon after the person's own input in the panel
+PASSKEY_PERSON = 30      # seconds: a request opens the window only this soon after the person's own input in the panel,
+                         # and only when no session acted on the page after that input
+PASSKEY_START = 20       # seconds: the window closes when its page asks for no passkey in this time
 PASSKEY_SKIP = 60        # seconds: after a step with no passkey (Cancel, the time limit), the same page opens no window
 PASSKEY_DONE_WAIT = 8    # seconds after the touch for the page to go to its next page before the window closes
 PASSKEY_SETTLE = 1.0     # seconds more for that page to set its cookies
@@ -97,6 +99,31 @@ PASSKEY_JS = """(() => {
     } });
   }
 })();"""
+
+# The window of a passkey step hides the moment the step ends (mark 2026-11-13: 'we immediately hide it as soon as its
+# done'): that Chrome is hidden as an app, at once, with no animation and no Dock picture; it starts again headless after.
+# AppKit through osascript (JavaScript for Automation): hiding an app needs no permission. The person's desktop does not
+# change (mark 2026-11-13: 'we are not going to switch desktops').
+APP_RUNNER = None    # tests: fn(script) -> its output
+HIDE_JS = ("ObjC.import('AppKit'); const a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(%d); "
+           "String(!!a && a.hide)")
+
+
+def _app_script(script):
+    if APP_RUNNER:
+        return APP_RUNNER(script)
+    if sys.platform != "darwin":
+        return ""
+    try:
+        r = subprocess.run(["osascript", "-l", "JavaScript", "-e", script], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def hide_app(pid):
+    """Hide the app with this pid (all its windows) at once. True when macOS took it."""
+    return bool(pid) and _app_script(HIDE_JS % int(pid)) == "true"
 
 
 def parse_place(text):
@@ -733,7 +760,9 @@ class Browser:
         self.watched = 0.0   # when the panel last asked for a frame: someone watches (browser_pace watch)
         self.watching = 0    # frame polls that wait now
         self.person_at = 0.0 # the person's last input in the panel (a click, a key, an address, Take control; #5629)
+        self.agent_at = 0.0  # a session's last action that may change the page (#5814)
         self.passkey_at = None    # #5814: when the window of a passkey step opened (None: no such window)
+        self.passkey_asked = False  # the page in that window asked for the passkey
         self.passkey_skip = None  # (url, time) of a passkey step that ended with no passkey: no window again there
         self.inputs = Inputs(self)  # the person's input, to Chrome in order without a wait in the request (#5651)
         self.refit_ws = None  # the CDP connection of the Chrome whose density was set again after a load (#5651)
@@ -1474,43 +1503,59 @@ class Browser:
         now = time.time()
         if kind in ("get", "create"):
             if self._windowed():  # a window shows already: the request runs there
+                if self.passkey_at:
+                    self.passkey_asked = True
                 return
             url = self.info()["url"]
             if self.passkey_skip and self.passkey_skip[0] == url and now - self.passkey_skip[1] < PASSKEY_SKIP:
                 return
-            if now - self.person_at > PASSKEY_PERSON:
+            if now - self.person_at > PASSKEY_PERSON or self.agent_at >= self.person_at:
                 self.said = getattr(self, "said", []) + [
                     "the page asks for a passkey: only the person signs in; ask them in the panel"]
                 return
-            self.passkey_at = now
+            self.passkey_at, self.passkey_asked = now, False
             self.state["window_by"] = {"who": "A passkey step", "person": True, "passkey": True, "at": core.iso(core.now())}
             self._switch_keep(True, url)
             threading.Thread(target=self._passkey_limit, args=(now,), daemon=True,
                              name=f"browser-passkey-limit-{self.project}").start()
         elif kind in ("done", "ended") and self.passkey_at and self._windowed():
             url = self.info()["url"]
-            if kind == "done":  # the page sends the signed answer and goes on: give it that time, then close
+            hide_app(self.state.get("pid"))  # the step ended: out of sight now
+            if kind == "done":  # the page sends the signed answer and goes on, hidden: give it that time, then close
                 end = time.time() + PASSKEY_DONE_WAIT
                 while time.time() < end and self.running() and self.info()["url"] == url:
                     time.sleep(0.2)
                 time.sleep(PASSKEY_SETTLE)
             else:
                 self.passkey_skip = (url, now)
-            self.passkey_back()
+            self.passkey_back(hidden=True)
 
     def _passkey_limit(self, at):
-        time.sleep(PASSKEY_WINDOW_MAX)
+        """The window never stays: it closes when its page asks for no passkey within PASSKEY_START, and in any case
+        after PASSKEY_WINDOW_MAX."""
+        time.sleep(min(PASSKEY_START, PASSKEY_WINDOW_MAX))
+        if self.passkey_at == at and not self.passkey_asked:
+            self.passkey_skip = (self.info()["url"] if self.running() else "", time.time())
+            self.passkey_back()
+            return
+        time.sleep(max(0, PASSKEY_WINDOW_MAX - PASSKEY_START))
         if self.passkey_at == at:
             self.passkey_skip = (self.info()["url"] if self.running() else "", time.time())
             self.passkey_back()
 
-    def passkey_back(self):
-        """Close the window of a passkey step: the panel goes on, headless, at the window's page, with its cookies."""
+    def passkey_back(self, hidden=False):
+        """Close the window of a passkey step: the panel goes on, headless, at the window's page, with its cookies.
+        hidden: the window is hidden already."""
         if not self.passkey_at:
+            return
+        if not self._windowed():  # the person pressed Back to the panel already
+            self.passkey_at = None
             return
         url = self.info()["url"] if self.running() else ""
         self.passkey_at = None
         self.state.pop("window_by", None)
+        if not hidden:
+            hide_app(self.state.get("pid"))  # out of sight at once; the start below takes a second or two
         self._switch_keep(False, url)
         _notify(self)
 
