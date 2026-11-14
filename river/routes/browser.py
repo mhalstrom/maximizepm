@@ -444,9 +444,12 @@ def _act(conn, a, who):
     if not person and owner:  # #5823: serve fills sign-ins (#5826) only while the owner's own requests are confirmed
         from .. import vault
         try:
-            b.signin_confirmed = vault.session_of(conn, who)["name"] == owner
-        except RiverError:
+            s = vault.session_of(conn, who)
+            b.signin_confirmed = s["name"] == owner
+            b.signin_unconfirmed_why = None if b.signin_confirmed else f"the command came from {s['name']} ({s['how']})"
+        except RiverError as e:
             b.signin_confirmed = False
+            b.signin_unconfirmed_why = str(e)[:200]  # #5845: the secret log says why a granted sign-in did not load
         if b.running():  # #5827: a grant that ended takes its saved sign-in out before this action
             from .. import signin
             try:

@@ -374,8 +374,10 @@ def enforce_cookies(b, conn=None):
                 # (#5823): say so once for this Chrome, so a session that finds no sign-in can read why
                 skipped.add(name)
                 with core.tx(conn):
+                    why = b.__dict__.get("signin_unconfirmed_why")
                     vault._log(conn, name, b.owner, "refused", "browser sign-in not loaded: MaximizePM could not "
-                               f"confirm that the browser's last command came from {b.owner} itself")
+                               f"confirm that the browser's last command came from {b.owner} itself"
+                               + (f": {why}" if why else ""))
             if ok and name not in loaded:
                 cookies = vault.unpack_cookies(vault.backend().get(conn, name))
                 if cookies:
