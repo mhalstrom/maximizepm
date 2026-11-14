@@ -6,6 +6,7 @@ reaches the browser through its own CDP address, GET /cdp/<agent> (#5405)."""
 import hmac
 import shlex
 import sqlite3
+import sys
 import threading
 import time
 from urllib.parse import urlsplit
