@@ -326,8 +326,9 @@ Separate: #5180 makes WSL 2 the one way to run maxpm on Windows (decision 3 abov
   agent has the resume part. Codex's model cache reader and flag reader (`codex_models`, `codex_flags`,
   `CODEX_FLAGS`) moved from core into `codex.py`. The hook file of a start is the hook file of that start's adapter.
 - Kept on purpose: `core._PROFILE_MIGRATION` (the agents of the one-time change of launch_agents into profiles: fixed
-  history), `server.KNOWN_AGENTS` (the commands that the setup guide offers), the Claude desktop and ChatGPT desktop
-  writers of `maxpm setup-agent`, and the `root`/`croot` test folders of `sessions.transcript`.
+  history), the Claude desktop and ChatGPT desktop writers of `maxpm setup-agent`, and the `root`/`croot` test
+  folders of `sessions.transcript`. The setup guide offers every agent that MaximizePM can start, from the adapters
+  (`server.known_agents`, #5225).
 
 ## Tests in maxpm (step 5)
 

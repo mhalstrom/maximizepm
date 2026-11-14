@@ -4288,31 +4288,21 @@ def update_apply(repo=REPO, restart=_restart_soon):
     return {**update_status(repo, fetch=False), "updated": True, "from": st["head"], "commits": st["commits"]}
 
 
-# Agent CLIs the setup guide offers for the Start button. Claude Code and Codex are launch profiles: MaximizePM
-# builds their commands from their adapters' options (core.platform_spec). The others get an explicit first prompt,
-# so they work even where the agent does not read the project's instruction file.
-KNOWN_AGENTS = [
-    ("Claude Code", "claude", "@claude-code"),
-    ("Codex", "codex", "@codex"),
-    ("Grok", "grok", 'grok "run maxpm go in this folder and follow the briefing"'),
-    ("OpenCode", "opencode", 'opencode --prompt "run maxpm go in this folder and follow the briefing"'),
-    ("Gemini", "gemini", 'gemini -i "run maxpm go in this folder and follow the briefing"'),
-    # pi opens its terminal UI with a message argument as the first prompt; it reads AGENTS.md (#4924).
-    ("pi", "pi", 'pi "run maxpm go in this folder and follow the briefing"'),
-]
-
-
-def _agent_cmd(cmd):
-    """A KNOWN_AGENTS command with {maxpm_dir} filled in for this computer."""
-    import shlex
-    d = core.river_dir()
-    return cmd.replace("{maxpm_dir}", shlex.quote(d))
+def known_agents():
+    """The agent CLIs the setup guide offers for the Start button (#5225): every registered agent that MaximizePM can
+    start (core.agent_types), as (label, program, launch profile '@<platform>'). MaximizePM builds each command from
+    its adapter's options (core.platform_spec), with a first prompt that runs maxpm go."""
+    out = []
+    for p in core.agent_types():
+        spec = core.platform_spec(p)
+        out.append((spec["label"], spec["exe"], "@" + p))
+    return out
 
 
 def _shown_cmd(conn, cmd):
     """What an entry runs, as the setup guide shows it: a profile's command with its current options."""
     prof = core.parse_profile(cmd)
-    return core.build_command(prof[0], core.profile_options(conn, *prof)) if prof else _agent_cmd(cmd)
+    return core.build_command(prof[0], core.profile_options(conn, *prof)) if prof else cmd
 
 
 def _block_state(path):
@@ -4341,10 +4331,12 @@ def setup_status(conn):
             folders.setdefault(p["path"], []).append(p["name"])
     skills = Path(adapters.get("claude").setup["skills_dir"]).expanduser()
     agents = core.parse_launch_agents(core.setting(conn, "launch_agents"))
-    have = {label for label, _ in agents}
+    known = known_agents()
+    # An entry added before #5225 under an old label (Grok, pi) or as a plain command still counts as that agent.
+    have = {label for label, _ in agents} | {core.entry_exe(c) for _, c in agents}
     # Agent programs as a new terminal finds them (the app itself has only Finder's short PATH).
     # Agents start in a new tmux pane, whose login shell must find their programs.
-    exes = sorted({exe for _, exe, _ in KNOWN_AGENTS} | {core.entry_exe(c) for _, c in agents})
+    exes = sorted({exe for _, exe, _ in known} | {core.entry_exe(c) for _, c in agents})
     term = _login_shell_which(exes)
     return {
         "done": core.setting(conn, "setup_done") == "on",
@@ -4361,8 +4353,8 @@ def setup_status(conn):
         "tmux_install": core.tmux_install(),
         # Each Start button agent, and whether its program is on this computer (the first word of its command).
         "start_agents": [{"label": label, "found": bool(term.get(core.entry_exe(cmd)))} for label, cmd in agents],
-        "agent_clis": [{"label": label, "found": bool(term.get(exe)), "added": label in have,
-                        "command": _shown_cmd(conn, cmd)} for label, exe, cmd in KNOWN_AGENTS],
+        "agent_clis": [{"label": label, "found": bool(term.get(exe)), "added": label in have or exe in have,
+                        "command": _shown_cmd(conn, cmd)} for label, exe, cmd in known],
         # The options of each launch profile the Start button uses, for toggles (Settings > Setup).
         "launch_profiles": core.launch_profiles(conn),
         "notify_channels": core._channels(core.setting(conn, "notify_channels")),
@@ -4521,12 +4513,15 @@ def setup_skills():
 
 
 def setup_agent_add(conn, label, actor=None):
-    """Add one of KNOWN_AGENTS to launch_agents (the Start button's list)."""
-    cmd = next((_agent_cmd(c) for lab, _, c in KNOWN_AGENTS if lab == label), None)
+    """Add one of known_agents to launch_agents (the Start button's list), as its launch profile (@<platform>). An
+    entry that starts the same program (one added before #5225 as 'pi=pi "run maxpm go ..."') stays, and no second
+    one comes."""
+    known = known_agents()
+    exe, cmd = next(((x, c) for lab, x, c in known if lab == label), (None, None))
     if cmd is None:
-        raise RiverError(f"unknown agent {label!r}")
+        raise RiverError(f"unknown agent {label!r}; the agents: {', '.join(lab for lab, _, _ in known)}")
     agents = core.parse_launch_agents(core.setting(conn, "launch_agents"))
-    if label not in {a for a, _ in agents}:
+    if label not in {a for a, _ in agents} and exe not in {core.entry_exe(c) for _, c in agents}:
         # The first agent is the Start button's default: when its program is not on this computer (the
         # default Claude Code on a Mac that has only Codex), the agent added now becomes the default.
         first = core.entry_exe(agents[0][1]) if agents else None

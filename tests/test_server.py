@@ -3809,11 +3809,20 @@ class SetupGuide(unittest.TestCase):
         shown = {a["label"]: a["command"] for a in server.setup_status(self.c)["agent_clis"]}
         self.assertEqual(shown["Codex"], codex)
         self.assertEqual(shown["Claude Code"], "claude go --remote-control")
-        # pi takes its first prompt as a plain argument (#4924).
-        self.assertEqual(shown["pi"], 'pi "run maxpm go in this folder and follow the briefing"')
-        self.assertEqual(server.setup_agent_add(self.c, "pi"), ["Claude Code", "Codex", "pi"])
-        with self.assertRaises(RiverError):
+        # #5225: every registered agent that MaximizePM can start, with its adapter's label and launch profile.
+        self.assertEqual([a["label"] for a in server.setup_status(self.c)["agent_clis"]],
+                         [core.platform_spec(p)["label"] for p in core.agent_types()])
+        self.assertIn("Grok CLI", shown)
+        self.assertEqual(server.setup_agent_add(self.c, "Pi"), ["Claude Code", "Codex", "Pi"])
+        self.assertEqual(dict(core.parse_launch_agents(core.setting(self.c, "launch_agents")))["Pi"], "@pi")
+        self.assertEqual(shown["Pi"], core.build_command("pi", core.profile_options(self.c, "pi")))
+        with self.assertRaisesRegex(RiverError, "the agents: Claude Code, Codex"):
             server.setup_agent_add(self.c, "nope")
+        # An entry added before #5225 under an old label still counts: no second Grok, and the guide shows it added.
+        core.config_set(self.c, "launch_agents", "Claude Code=@claude-code; Grok=grok \"run maxpm go in this folder\"")
+        self.assertEqual(server.setup_agent_add(self.c, "Grok CLI"), ["Claude Code", "Grok"])
+        added = {a["label"]: a["added"] for a in server.setup_status(self.c)["agent_clis"]}
+        self.assertEqual((added["Grok CLI"], added["Codex"]), (True, False))
 
     def test_dismiss_is_a_setting(self):
         core.config_set(self.c, "setup_done", "on")
