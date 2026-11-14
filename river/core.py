@@ -154,6 +154,11 @@ DEFAULT_SETTINGS = {
     # 10/8, 172.16/12, 192.168/16, 169.254/16), so a page cannot reach maxpm serve, a test database or the Docker API.
     # The hosts it may open anyway, as host or host:port, separated by spaces or commas (localhost:5173).
     "browser_allow": "",
+    # The accounts that agents may use in the project's browser (#5811), as site=account pairs separated by spaces or
+    # commas (google.com=me@gmail.com github.com=me). The person says it once; a session's reply names the account on
+    # that site, so the session picks it in an account chooser and asks no more. The global pairs and the project's
+    # own pairs both hold. A password, a passkey or a 2-step code stays the person's. maxpm browser accounts adds one.
+    "browser_accounts": "",
     # Where the browser of a project comes from (#5406): empty, maxpm serve starts its own (above); cdp:<port>, the
     # panel attaches to a Chrome that runs already with its debugging port on 127.0.0.1:<port> (a project's shared
     # test browser), and shows a tab of its own in it. browser_allow and the private-address rule do not hold for such
@@ -2291,6 +2296,9 @@ def config_set(conn, key, value, project=None, item=None, agent=None, actor=None
         count_window(value, key)
     elif key == "browser_source":
         browser_cdp_port(value)
+    elif key == "browser_accounts":
+        from .browser import parse_accounts
+        parse_accounts(value, strict=True)
     elif key == "browser_mcp":
         from .browser import mcp_command
         mcp_command(value)

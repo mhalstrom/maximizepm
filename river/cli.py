@@ -862,7 +862,8 @@ browser_evaluate fails as a timeout or "Execution context was destroyed".
 
 The browser opens no loopback or private address (your dev server): the person allows one for the project with
 maxpm config set browser_allow "localhost:5173" --project <name>.
-Only the person signs in: never type a password. Never solve a CAPTCHA: ask the person. A site that refuses a
+Only the person signs in: never type a password. The person names once which account agents may use on a site:
+maxpm browser accounts add <site> <account>; a reply then names it there. Never solve a CAPTCHA: ask the person. A site that refuses a
 headless browser: the person presses Open as a window (run window only when they asked in your chat).
 The person's marked-up pages come to your chat as [maxpm annotations a<id> ...] with the commands to answer them."""
 BROWSER_ROLES = {"link", "button", "textbox", "searchbox", "checkbox", "radio", "switch", "combobox", "listbox", "slider",
@@ -1092,6 +1093,12 @@ def build_parser(only=None):
     x.add_argument("--site", help="one site: its host, or the end of it (wikipedia.org)")
     x.add_argument("--since", default="7d", help="a duration back from now (7d, 24h) or a time; default 7d")
     x.add_argument("-n", type=int, default=core.FALLBACKS_SHOW, help="how many of the newest cases to print")
+    x = brs.add_parser("accounts", help="the accounts that agents may use on which sites, as the person said (#5811): "
+                       "list, add <site> <account>, remove <site> [<account>]")
+    x.add_argument("change", nargs="?", choices=["add", "remove"], help="add or remove a pair; none lists them")
+    x.add_argument("site", nargs="?", help="the site: google.com also holds accounts.google.com")
+    x.add_argument("account", nargs="?", help="the account name, as the site shows it (me@gmail.com)")
+    x.add_argument("--project", help="this project only; default: every project")
     cv = sub.add_parser("canvas", help="canvases: pages that a session makes and maxpm keeps (HTML, Markdown, SVG), "
                         "with versions and the comments people write on them")
     cvs = cv.add_subparsers(dest="cvcmd", required=True)
@@ -2635,6 +2642,14 @@ def _browser_cmd(conn, a, actor):
     b = a.bcmd
     if b == "fallbacks":  # #5692: the queue's own table, no need of maxpm serve
         return core.browser_fallbacks(conn, a.site, a.since, a.n)
+    if b == "accounts":  # #5811: a setting, no need of maxpm serve
+        from . import browser
+        if not a.change:
+            return browser.account_list(conn, a.project)
+        if not a.site:
+            raise RiverError(f"name the site: maxpm browser accounts {a.change} <site>"
+                             + (" <account>" if a.change == "add" else " [<account>]"))
+        return browser.account_change(conn, a.site, a.account, a.project, a.change == "remove", actor)
     if b in ("annotations", "annotation"):  # the queue's own table (#5655): no need of maxpm serve
         from . import annotate
         if b == "annotation":
@@ -5673,6 +5688,14 @@ def render_browser(a, res):
         return render_annotations(a, res)
     if b == "fallbacks":
         return render_fallbacks(res)
+    if b == "accounts":  # #5811
+        if not any(s["accounts"] for s in res["scopes"]):
+            print("no accounts listed: maxpm browser accounts add <site> <account> (as the person said)")
+        for s in res["scopes"]:
+            where = "every project" if s["scope"] == "global" else s["scope"].replace("project:", "project ")
+            for x in s["accounts"]:
+                print(f"  {x['site']}  {x['account']}  ({where})")
+        return
     if b == "batch":
         for s in res["steps"]:
             st = s["step"]

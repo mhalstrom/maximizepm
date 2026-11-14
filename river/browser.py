@@ -376,6 +376,104 @@ def allowed(host, port, allow):
     return host in allow or f"{host}:{port}" in allow
 
 
+# ---------------------------------------------------------------- accounts that agents may use (#5811)
+
+# A sign-in page by its address: a host or path part such as login, signin, auth, sso, oauth or accounts.
+SIGNIN = re.compile(r"(^|[./_-])(log-?in|sign-?in|sign_in|auth|sso|oauth2?|accounts?)([./_?-]|$)", re.I)
+
+
+def parse_accounts(text, strict=False):
+    """The pairs of browser_accounts: [(site, account)], split by spaces or commas; the site in lower case, without
+    www. and a scheme. strict: an entry that is no site=account pair raises RiverError (config set)."""
+    out = []
+    for x in re.split(r"[\s,]+", text or ""):
+        site, eq, acct = x.strip().partition("=")
+        site = re.sub(r"^[a-z]+://", "", site.strip().lower()).split("/")[0].removeprefix("www.")
+        if not (eq and site and acct.strip()):
+            if x.strip() and strict:
+                raise RiverError(f"browser_accounts holds site=account pairs, not {x.strip()!r}: for example "
+                                 f"google.com=me@gmail.com github.com=me")
+            continue
+        if (site, acct.strip()) not in out:
+            out.append((site, acct.strip()))
+    return out
+
+
+def on_site(host, site):
+    return host == site or host.endswith("." + site)
+
+
+def accounts(conn, project=None):
+    """The pairs that agents may use in a project's browser: the global ones, then the project's own."""
+    rows = conn.execute("SELECT value FROM settings WHERE key='browser_accounts' AND scope IN ('global', ?) "
+                        "ORDER BY scope != 'global'", (f"project:{project}",)).fetchall()
+    out = []
+    for r in rows:
+        out += [p for p in parse_accounts(r[0]) if p not in out]
+    return out
+
+
+def account_note(conn, project, url, opened=False):
+    """The line of a session's reply when it arrives at a page (#5811): on a sign-in page (or a page it opened), the
+    accounts that the person allowed on its site; on a sign-in page of a site with none, how to record the one the
+    person names. None otherwise, so the pages of a site where the session is signed in add no line."""
+    u = urlsplit(url or "")
+    host = (u.hostname or "").lower()
+    if u.scheme not in ("http", "https") or not host:
+        return None
+    signin = bool(SIGNIN.search(host + u.path))
+    if not (signin or opened):
+        return None
+    mine = [a for s, a in accounts(conn, project) if on_site(host, s)]
+    if mine:
+        return (f"accounts agents may use on {host}: {', '.join(mine)} (the person allowed it: pick it in an account "
+                f"chooser; a password, passkey or 2-step code stays the person's)")
+    if signin:
+        site = host.removeprefix("www.")
+        first, _, rest = site.partition(".")
+        if rest.count(".") >= 1 and SIGNIN.fullmatch(first):  # accounts.google.com: the site is google.com
+            site = rest
+        return (f"a sign-in page on {host}, and no account is listed for it: ask the person once which account agents "
+                f"may use, then maxpm browser accounts add {site} <account>")
+    return None
+
+
+def account_change(conn, site, account=None, project=None, remove=False, actor=None):
+    """maxpm browser accounts add|remove (#5811): one pair into or out of browser_accounts, at the global scope or a
+    project's; the other pairs stay. remove with no account removes every pair of the site."""
+    scope = core._scope(conn, project=project)
+    r = conn.execute("SELECT value FROM settings WHERE scope=? AND key='browser_accounts'", (scope,)).fetchone()
+    pairs = parse_accounts(r[0] if r else "")
+    site = parse_accounts(f"{site}=x", strict=True)[0][0]
+    if remove:
+        left = [p for p in pairs if not (p[0] == site and account in (None, p[1]))]
+        if left == pairs:
+            raise RiverError(f"no account is listed for {site}" + (f" as {account}" if account else "")
+                             + (f" in project {project}" if project else " for every project")
+                             + ": maxpm browser accounts lists them")
+        pairs = left
+    else:
+        if not account or not account.strip() or re.search(r"[\s,=]", account):
+            raise RiverError("name the account: maxpm browser accounts add <site> <account> (no spaces, commas or =)")
+        if (site, account) not in pairs:
+            pairs.append((site, account))
+    value = " ".join(f"{s}={a}" for s, a in pairs)
+    if value:
+        core.config_set(conn, "browser_accounts", value, project=project, actor=actor)
+    else:
+        core.config_unset(conn, "browser_accounts", project=project, actor=actor)
+    return account_list(conn, project)
+
+
+def account_list(conn, project=None):
+    """maxpm browser accounts: the pairs at the global scope and at each project's, or at one project's."""
+    q = "SELECT scope, value FROM settings WHERE key='browser_accounts'"
+    rows = conn.execute(q + (" AND scope IN ('global', ?)" if project else "") + " ORDER BY scope != 'global', scope",
+                        ((f"project:{core._project(conn, project)['name']}",) if project else ())).fetchall()
+    return {"scopes": [{"scope": r["scope"], "accounts": [{"site": s, "account": a} for s, a in parse_accounts(r["value"])]}
+                       for r in rows]}
+
+
 def resolve(host, port, allow):
     """The addresses to connect to for host:port, or RiverError when it is a loopback or private address that
     browser_allow does not name. The proxy connects to the address it checked, so a DNS name that changes its

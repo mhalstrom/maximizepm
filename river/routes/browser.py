@@ -522,6 +522,10 @@ def _act(conn, a, who):
             _fallback_after(conn, b, who, fb)
         if b.said:
             out["notes"] = b.said
+        if not person and (action == "open" or out.get("navigated")):  # #5811: the accounts it may use here
+            line = browser.account_note(conn, project, out.get("url"), opened=action == "open")
+            if line:
+                out["notes"] = list(out.get("notes") or []) + [line]
         if pre is not None and not out.get("dialog"):  # a new page: its outline; else what changed on this one
             if out.get("navigated"):
                 out["outline"] = browser.outline(b)["lines"]

@@ -1624,6 +1624,62 @@ FORM = (b"<title>Form</title><h1>Sign up</h1><label>Name <input id=name></label>
         b"<script>host.attachShadow({mode: 'open'}).innerHTML = '<button>In shadow</button>'</script>")
 
 
+class Accounts(Base):
+    """#5811: the person names once which account agents may use on a site; a session's reply names it there."""
+
+    def run_cli(self, *words):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.run(["-q", *words])
+        return out.getvalue()
+
+    def test_pairs_parse_and_a_bad_value_is_refused(self):
+        self.assertEqual(browser.parse_accounts("https://www.Google.com=me@gmail.com, github.com=me x.com=me x.com=me"),
+                         [("google.com", "me@gmail.com"), ("github.com", "me"), ("x.com", "me")])
+        with self.assertRaisesRegex(RiverError, "site=account pairs, not 'google.com'"):
+            core.config_set(self.c, "browser_accounts", "google.com")
+
+    def test_add_list_and_remove_keep_the_other_pairs(self):
+        browser.account_change(self.c, "google.com", "me@gmail.com")
+        browser.account_change(self.c, "google.com", "two@gmail.com")
+        browser.account_change(self.c, "github.com", "me", project="web")
+        browser.account_change(self.c, "google.com", "me@gmail.com")  # twice: one pair
+        self.assertEqual(core.setting(self.c, "browser_accounts"), "google.com=me@gmail.com google.com=two@gmail.com")
+        self.assertEqual(browser.accounts(self.c, "web"),
+                         [("google.com", "me@gmail.com"), ("google.com", "two@gmail.com"), ("github.com", "me")])
+        self.assertEqual(browser.accounts(self.c, "other"), [("google.com", "me@gmail.com"), ("google.com", "two@gmail.com")])
+        browser.account_change(self.c, "google.com", "two@gmail.com", remove=True)
+        browser.account_change(self.c, "github.com", project="web", remove=True)  # no account: every pair of the site
+        self.assertEqual(browser.accounts(self.c, "web"), [("google.com", "me@gmail.com")])
+        self.assertIsNone(self.c.execute("SELECT 1 FROM settings WHERE scope='project:web'").fetchone())
+        with self.assertRaisesRegex(RiverError, "no account is listed for x.com for every project"):
+            browser.account_change(self.c, "x.com", remove=True)
+        with self.assertRaisesRegex(RiverError, "name the account"):
+            browser.account_change(self.c, "x.com", "")
+
+    def test_the_command(self):
+        self.assertIn("no accounts listed", self.run_cli("browser", "accounts"))
+        self.run_cli("browser", "accounts", "add", "google.com", "me@gmail.com")
+        self.run_cli("browser", "accounts", "add", "github.com", "me", "--project", "web")
+        out = self.run_cli("browser", "accounts")
+        self.assertIn("google.com  me@gmail.com  (every project)", out)
+        self.assertIn("github.com  me  (project web)", out)
+        self.run_cli("browser", "accounts", "remove", "github.com", "--project", "web")
+        self.assertNotIn("github.com", self.run_cli("browser", "accounts"))
+
+    def test_the_reply_names_the_account_on_a_sign_in_page_or_says_how_to_record_one(self):
+        browser.account_change(self.c, "google.com", "me@gmail.com")
+        note = browser.account_note
+        self.assertIn("accounts agents may use on accounts.google.com: me@gmail.com",
+                      note(self.c, "web", "https://accounts.google.com/v3/signin/identifier"))
+        self.assertIn("on mail.google.com: me@gmail.com", note(self.c, "web", "https://mail.google.com/", opened=True))
+        self.assertIsNone(note(self.c, "web", "https://mail.google.com/mail/u/0"))  # signed in: no line on each page
+        self.assertIn("maxpm browser accounts add notion.so <account>", note(self.c, "web", "https://www.notion.so/login"))
+        self.assertIn("maxpm browser accounts add acme.io <account>", note(self.c, "web", "https://sso.acme.io/"))
+        for url in ("https://example.com/author/x", "about:blank", "https://example.com/"):
+            self.assertIsNone(note(self.c, "web", url, opened=True), url)
+
+
 class AgentActions(Base):
     """#5663: maxpm browser for an agent in a real Chrome: a snapshot with refs, click, fill, select and check by ref,
     the wait for the next page that a click led to, a ref of an earlier page, and a batch."""

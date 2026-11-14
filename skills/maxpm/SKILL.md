@@ -493,7 +493,8 @@ Each project has one browser; the user watches and uses it in your side panel.
   `snapshot`, `find <words>`, `text`.
 - Act by name: `click "Comments"`, `fill "Month" 2026-10`, `click "Delete" --in "Invoice 1042"`.
 - One controller at a time, and the user's input wins: while the user holds it, wait.
-- Only the user signs in: never type a password.
+- Only the user signs in: never type a password. Use the account a reply names
+  (`maxpm browser accounts add <site> <account>`).
 - The rest (pointer actions, extract, run, control): `maxpm browser -h`.
 
 ## Secrets
