@@ -267,7 +267,9 @@ def chat_path(session_ref, folder=None, root=None):
 # found by its session id (agent_sessions). Gemini's context cache costs no more to write than plain input.
 CHAT = {"compressed": False, "file_tools": ["write_file", "replace"], "ref": "session", "cache_write": False}
 
-_IGNORED_USER = ("<session_context>", "<hook_context>")
+# Gemini's own user lines: its context at the start, a hook's context, and the workspace update after the person
+# trusts an added folder (#5820: getDirectoryContextString, with no marker; it held the whole folder tree).
+_IGNORED_USER = ("<session_context>", "<hook_context>", "- **Workspace Directories:**")
 _DONE = ("success", "error", "cancelled")
 
 

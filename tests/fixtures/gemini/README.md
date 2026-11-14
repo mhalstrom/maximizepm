@@ -17,6 +17,9 @@ For the tests of `river/agents/gemini.py`: Gemini CLI 0.68.0 (`@google/gemini-cl
   read-only shell command (Gemini ran `ls` with no question), a refused edit, an allowed shell command, then
   `gemini --resume <id>` and one more prompt, which Gemini appended to the same file. Paths are neutral
   (`/Users/demo/...`).
+- `session-2026-11-14T03-33-88c45dca.jsonl` (#5820): the log of a start made as for `pane_blocked_trust_dirs.txt`,
+  then `1. Yes` at the trust question and the prompt `say hello`. After the answer Gemini wrote a user line that
+  starts `- **Workspace Directories:**` (the folders and their tree). Paths are neutral (`/Users/demo/...`).
 - `session-2026-11-11T07-50-a64cec76.jsonl`, `session-2026-11-11T07-55-5d0c1b2a.jsonl`, `session-cancelled.jsonl`:
   written by hand (#5174) for records the real session did not make: `displayContent`, `$rewindTo`, an error line,
   the summary, an image. Their shapes come from a real log of Gemini CLI 0.64 and from the 0.68.0 source of the chat

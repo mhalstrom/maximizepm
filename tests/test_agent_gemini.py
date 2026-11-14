@@ -264,6 +264,25 @@ class Chat(unittest.TestCase):
         self.assertEqual(gemini.CHAT["file_tools"], ["write_file", "replace"])
 
 
+class WorkspaceUpdate(unittest.TestCase):
+    """#5820: a real Gemini CLI 0.68.0 log (the stand-in model, paths made neutral): a start with --skip-trust
+    --include-directories <queue folder>, '1. Yes' at the added folder's trust question, then 'say hello'."""
+
+    LOG = FIX / "session-2026-11-14T03-33-88c45dca.jsonl"
+
+    def test_the_workspace_update_is_no_prompt_of_the_person(self):
+        got = lines(self.LOG)
+        self.assertTrue(any('"- **Workspace Directories:**' in x for x in got))  # Gemini wrote it as a user line
+        entries, turn = gemini.parse_chat(got)
+        self.assertEqual([(e["role"], e["text"]) for e in entries], [
+            ("user", "say hello"), ("assistant", "Hello. This folder has a small Python file and a README.")])
+        self.assertEqual(turn, "idle")
+        each = [x for line in got for x in gemini.parse_chat_line(json.loads(line))[0]]
+        self.assertEqual([e["role"] for e in each], ["user", "assistant"])
+        self.assertEqual(gemini.chat_title(got), "say hello")
+        self.assertEqual(gemini.chat_cwd(got), "/Users/demo/projects/gemdemo")
+
+
 class RealLog(unittest.TestCase):
     """The log of a real Gemini CLI 0.68.0 session (#5216): a reply, a turn cancelled with Esc, a read-only shell
     command that ran without a question, an edit the person refused, a shell command the person allowed, then the
