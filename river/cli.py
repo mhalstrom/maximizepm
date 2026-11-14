@@ -3036,7 +3036,10 @@ def ask_server(conn, op, args, actor=None, timeout=5, retries=3):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # this computer: no proxy by itself
 
     def post(proxy=None):
-        req = urllib.request.Request(f"http://{host}/api/action", data=body, headers={"Content-Type": "application/json"})
+        # X-Maxpm-Pid: where serve looks first for the process that holds this connection (#5823); only a hint,
+        # serve confirms it from the kernel.
+        req = urllib.request.Request(f"http://{host}/api/action", data=body,
+                                     headers={"Content-Type": "application/json", "X-Maxpm-Pid": str(os.getpid())})
         if proxy:
             if proxy.username:
                 cred = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}".encode()
@@ -5510,8 +5513,7 @@ def _secret_cmd(conn, a, actor):
                     totp_b64=base64.b64encode(key).decode() if key else None)
         return _secret_op(conn, args, actor)
     if cmd == "level":
-        from .routes import secrets
-        return secrets.act(conn, {"action": "level", "name": a.name, "level": a.level, "add_commands": a.command,
+        return _secret_op(conn, {"action": "level", "name": a.name, "level": a.level, "add_commands": a.command,
                                   "remove_commands": a.no_command, "add_hosts": a.host, "remove_hosts": a.no_host,
                                   "env": None if a.env is None else a.env == "on", "var": a.var}, actor)
     if cmd == "env":
@@ -5526,8 +5528,6 @@ def _secret_cmd(conn, a, actor):
     if cmd == "delete":
         return _secret_op(conn, {"action": "delete", "name": a.name}, actor)
     if cmd in ("set", "sets", "grant", "revoke", "grants"):
-        # Names and scopes only, in the queue's database: no Keychain, so no trip through maxpm serve.
-        from .routes import secrets
         args = {"action": cmd, "name": getattr(a, "name", None)}
         if cmd == "set":
             args.update(add=a.add, remove=a.remove, note=a.note, delete=a.delete,
@@ -5545,7 +5545,8 @@ def _secret_cmd(conn, a, actor):
                 args.update(grant=a.name, name=None)
         elif cmd == "grants":
             args.update(ended=a.ended, for_agent=a.for_agent)
-        return secrets.act(conn, args, actor)
+        # In a sandbox through serve, which confirms the session from the kernel (#5823); here the CLI reads its own.
+        return _secret_op(conn, args, actor)
     raise RiverError(f"secret: no command {cmd}")
 
 

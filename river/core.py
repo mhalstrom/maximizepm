@@ -837,6 +837,7 @@ CREATE TABLE IF NOT EXISTS agents (
   pid            INTEGER,                    -- the agent CLI process that runs maxpm, its host, and its command line
   host           TEXT,
   pid_cmd        TEXT,
+  pid_start      INTEGER,                    -- the kernel's start time of pid (#5823): the credential check reads it
   platform       TEXT,                       -- the agent CLI (a native_message label) and the session's address in it
   native_address TEXT,
   stop_at        TEXT,                       -- maxpm stop: when, who, and why; the session ends after it
@@ -2019,6 +2020,8 @@ def _migrate(conn):
             conn.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
     if "pid" not in acols:
         conn.execute("ALTER TABLE agents ADD COLUMN pid INTEGER")
+    if "pid_start" not in acols:  # #5823: the start time of agents.pid, so a reused pid is not the session
+        conn.execute("ALTER TABLE agents ADD COLUMN pid_start INTEGER")
     # What the session works on and does now, in its own short words (maxpm now, #5086).
     for col in ("headline", "headline_at", "doing", "doing_at"):
         if col not in acols:
@@ -12021,17 +12024,31 @@ def set_process(conn, name, pid, cmd, host=None, env=None):
     So the session that MAXPM_AGENT names records only its own name, and takes its pid back from rows that hold it.
     With no MAXPM_AGENT, a process (the same pid and command) that another agent of this host holds stays that
     agent's; a row with the pid and another command is an old process whose pid came again, and loses it. Returns
-    whether it recorded."""
+    whether it recorded.
+    #5823: it keeps the process's start time (pid_start), which the credential check compares; and an agent whose
+    recorded process still runs (the same pid and start) keeps it, so a session that sets MAXPM_AGENT to another
+    session's name cannot take that session's place in the check."""
+    from . import peer
     me = (os.environ if env is None else env).get("MAXPM_AGENT")
     if me and me != name:
         return False
     host = host or this_host()
+    here = host == this_host()
+    info = peer.info(pid) if here else None
+    start = info[3] if info else None
     with tx(conn):
         if not me and conn.execute("SELECT 1 FROM agents WHERE pid=? AND host=? AND name!=? AND pid_cmd IS ?",
                                    (pid, host, name, cmd)).fetchone():
             return False
-        conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL WHERE pid=? AND host=? AND name!=?", (pid, host, name))
-        conn.execute("UPDATE agents SET pid=?, pid_cmd=?, host=? WHERE name=?", (pid, cmd, host, name))
+        old = conn.execute("SELECT pid, pid_start, host FROM agents WHERE name=?", (name,)).fetchone()
+        if here and old and old["pid"] and old["pid"] != pid and old["host"] == host and old["pid_start"]:
+            run = peer.info(old["pid"])
+            if run and run[3] == old["pid_start"]:
+                return False
+        conn.execute("UPDATE agents SET pid=NULL, pid_cmd=NULL, pid_start=NULL WHERE pid=? AND host=? AND name!=?",
+                     (pid, host, name))
+        conn.execute("UPDATE agents SET pid=?, pid_cmd=?, host=?, pid_start=? WHERE name=?",
+                     (pid, cmd, host, start, name))
     return True
 
 

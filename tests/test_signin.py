@@ -27,6 +27,7 @@ class FakeBrowser:
         self.pages, self.i = pages, 0
         self.owner, self.project, self.state = owner, "site", {}
         self.typed, self.shots, self.field_values = [], 0, []
+        self.signin_confirmed = True  # the owner's own requests were confirmed (#5823)
 
     def running(self):
         return True
@@ -125,6 +126,13 @@ class SignIn(unittest.TestCase):
         vault.signin_save(self.c, "gh", reset=True, actor="mark")
         self.assertEqual(signin.check(FakeBrowser([page("https://github.com/login", pw=True), page("https://github.com/")]),
                                       self.c), ["password"])
+
+    def test_no_fill_while_the_owner_is_not_confirmed(self):
+        self.grant()
+        b = FakeBrowser([page("https://github.com/login", pw=True, user=True)])
+        b.signin_confirmed = False  # its last request came under another session's name
+        self.assertEqual(signin.check(b, self.c), [])
+        self.assertEqual(b.typed, [])
 
     def test_robot_check_types_nothing(self):
         self.grant()

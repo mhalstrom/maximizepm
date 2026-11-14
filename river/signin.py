@@ -157,7 +157,10 @@ def _steps(conn, b):
         host = _host(f.get("url")) if f else None
         if not f or not host or not (f["pw"] or f["otp"] or f["user"]):
             return done
-        creds = [r for r in vault.signins_for(conn, host) if vault.allowed(conn, r["name"], b.owner)["ok"]]
+        if not b.__dict__.get("signin_confirmed"):  # #5823: the owner's own last request was confirmed
+            return done
+        me = {"name": b.owner, "person": False}
+        creds = [r for r in vault.signins_for(conn, host) if vault.allowed(conn, r["name"], b.owner, me)["ok"]]
         if not creds:
             return done
         # The sign-in of the account that the page shows already, else the first one of the most exact site.
@@ -320,7 +323,8 @@ def scrub_text(b, text, read=False):
 def note(conn, owner, host):
     """The line for a session's reply on a sign-in page (browser.account_note): the sign-ins that serve fills for it
     on this site."""
-    mine = [r for r in vault.signins_for(conn, host) if owner and vault.allowed(conn, r["name"], owner)["ok"]]
+    me = {"name": owner, "person": False}
+    mine = [r for r in vault.signins_for(conn, host) if owner and vault.allowed(conn, r["name"], owner, me)["ok"]]
     if not mine:
         return None
     r = mine[0]

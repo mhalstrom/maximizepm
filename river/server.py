@@ -5278,8 +5278,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not typing:
                     core.activity(conn, actor, sync=False)
                 try:
+                    # #5823: a credential check confirms the session from the process that holds this connection.
+                    from . import vault
+                    srv = getattr(getattr(self, "server", None), "server_address", None)
+                    vault.PEER.value = ((self.client_address[1], srv[1], self.headers.get("X-Maxpm-Pid"))
+                                        if srv and len(self.client_address) > 1 else (None, None, None))
                     result = op(conn, body.get("args", {}), actor)
                 finally:
+                    vault.PEER.value = None
                     hooks_soon(conn, core.hook_token())  # a release event of this action: its hook runs after the answer
                 if body.get("op") in LIGHT_OPS and time.time() - _light_at.get(actor, 0) < LIGHT_GAP:
                     return self._send(200, {"ok": True, "result": result})

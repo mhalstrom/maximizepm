@@ -34,6 +34,11 @@ server.STATE_TTL = 0  # each /api/state of a test builds anew; StateCache tests 
 from river.agents import opencode as opencode_adapter  # noqa: E402
 opencode_adapter.MODELS_RUNNER = lambda: ""  # never the installed OpenCode (opencode models): its described models stand
 from river import release as _release  # noqa: E402
+from river import vault as _vault  # noqa: E402
+
+# The tests run inside an agent session (or a person's shell), so the process tree would name that session: a credential
+# check trusts the --as name here (#5823). The tests of the process-tree check (tests.test_vault.Identity) set None.
+_vault.IDENTITY = lambda conn, actor: {"name": actor, "person": not actor or core._is_person(conn, actor), "how": "test"}
 
 
 def _no_network(url, timeout):

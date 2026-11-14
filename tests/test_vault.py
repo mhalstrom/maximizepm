@@ -311,6 +311,98 @@ class Grants(Base):
         self.assertEqual(vault.grants(self.c, ended=True)["grants"], [])
 
 
+class Identity(Base):
+    """#5823: a credential check confirms the session from the processes above the command, never from --as."""
+
+    def setUp(self):
+        super().setUp()
+        old = vault.IDENTITY
+        vault.IDENTITY = None
+        self.addCleanup(setattr, vault, "IDENTITY", old)
+        core.register(self.c, "mark", human=True)
+        core.register(self.c, "dev")
+        core.register(self.c, "other")
+        self.c.execute("UPDATE agents SET pid=500, pid_start=111, host=? WHERE name='dev'", (core.this_host(),))
+        self.c.execute("UPDATE agents SET pid=600, pid_start=222, host=? WHERE name='other'", (core.this_host(),))
+        self.chain = None
+        p = mock.patch("river.peer.chain", lambda pid: self.chain)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def who(self, actor):
+        return vault.session_of(self.c, actor)
+
+    def refused(self, actor):
+        with self.assertRaises(RiverError) as e:
+            self.who(actor)
+        return str(e.exception)
+
+    def test_the_session_above_the_command_is_who_asks(self):
+        self.chain = [(900, 800, "Python", 1), (800, 500, "zsh", 1), (500, 400, "2.1.325", 111), (400, 1, "tmux", 1)]
+        self.assertEqual(self.who("dev")["name"], "dev")
+        self.assertEqual(self.who(None), {"name": "dev", "person": False, "how": "process 500 (2.1.325)"})
+        self.assertIn("runs in the session dev, not other", self.refused("other"))
+        self.assertIn("not mark", self.refused("mark"))  # a session cannot type a person's name
+
+    def test_a_reused_pid_is_not_the_session(self):
+        self.chain = [(900, 500, "Python", 1), (500, 1, "2.1.325", 999)]  # pid 500 again, another start
+        self.assertIn("recorded no session for that process", self.refused("dev"))
+
+    def test_a_person_has_no_agent_above(self):
+        self.chain = [(900, 800, "Python", 1), (800, 700, "zsh", 1), (700, 1, "login", 1)]
+        self.assertTrue(self.who(None)["person"])
+        self.assertTrue(self.who("mark")["person"])
+        self.assertIn("no process of the session dev", self.refused("dev"))
+
+    def test_an_unrecorded_agent_and_an_unread_chain_are_refused(self):
+        self.chain = [(900, 800, "Python", 1), (800, 1, "codex", 5)]
+        self.assertIn("run maxpm go in the session first", self.refused("mark"))
+        self.chain = None  # a sandbox hides the parents
+        self.assertIn("cannot read which session", self.refused(None))
+
+    def test_serve_reads_the_holder_of_the_connection(self):
+        seen = {}
+
+        def holder(lport, rport, hints):
+            seen["args"] = (lport, rport, list(hints))
+            return 500
+        self.chain = [(500, 1, "2.1.325", 111)]  # the sandbox proxy inside the session's own process
+        with mock.patch("river.peer.holder", holder):
+            vault.PEER.value = (51000, 7766, "900")
+            try:
+                self.assertEqual(self.who("dev")["name"], "dev")
+            finally:
+                vault.PEER.value = None
+        self.assertEqual(seen["args"][:2], (51000, 7766))
+        self.assertEqual(seen["args"][2][0], "900")  # the CLI's pid first, then the recorded sessions'
+        self.assertIn(500, seen["args"][2])
+
+    def test_grants_follow_the_confirmed_session(self):
+        vault.BACKEND.put(self.c, "k", b"v")
+        self.c.execute("INSERT INTO secrets (name, created_at) VALUES ('k', 'x')")
+        self.chain = [(700, 1, "login", 1)]
+        vault.set_change(self.c, "s", add=["k"])  # a person
+        vault.grant(self.c, "s", "agent", "other")
+        self.chain = [(900, 500, "Python", 1), (500, 1, "2.1.325", 111)]
+        with self.assertRaises(RiverError) as e:
+            vault.get(self.c, "k", "other")  # dev types the name of the session that has the grant
+        self.assertIn("runs in the session dev", str(e.exception))
+        with self.assertRaises(RiverError):
+            vault.grant(self.c, "s", "agent", "dev", actor="mark")  # dev types the person's name
+        self.chain = [(900, 600, "Python", 1), (600, 1, "codex", 222)]
+        self.assertEqual(vault.get(self.c, "k", "other"), b"v")
+
+    def test_set_process_keeps_the_start_and_a_live_session_keeps_its_process(self):
+        me = os.getpid()
+        core.set_process(self.c, "dev", me, "python", env={})
+        r = self.c.execute("SELECT pid, pid_start FROM agents WHERE name='dev'").fetchone()
+        self.assertEqual(r["pid"], me)
+        from river import peer
+        self.assertEqual(r["pid_start"], (peer.info(me) or (0, 0, "", None))[3])
+        if r["pid_start"] is not None:  # the kernel answers here: another process cannot take dev's place
+            self.assertFalse(core.set_process(self.c, "dev", os.getppid(), "zsh", env={"MAXPM_AGENT": "dev"}))
+
+
 class Levels(Base):
     """Protection levels (#5825): locked, hidden (the default), open."""
 

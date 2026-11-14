@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from . import core
@@ -505,11 +506,67 @@ GRANT_SCOPES = ("project", "goal", "kind", "item", "agent")
 GRANT_KINDS = ("work", "operational", "review", "fixes", "deploy", "monitor")
 
 
+IDENTITY = None  # tests: fn(conn, actor) -> {'name', 'person'} in place of the process tree
+PEER = threading.local()  # serve: (client port, serve port, the pid the CLI says) of the request that runs now
+# The programs of agent CLIs (the adapters' DETECT process, river/agents) and node, which runs pi, Gemini and the Codex
+# wrapper. Claude Code's process has its version as its name (2.1.325): VERSION_NAME.
+AGENT_PROGRAMS = {"claude", "codex", "copilot", "cursor-agent", "gemini", "goose", "grok", "hermes", "opencode", "amp",
+                  "aider", "pi", "node"}
+VERSION_NAME = re.compile(r"^\d+\.\d+\.\d+")
+
+
+def _chain_now(conn):
+    """The processes that run this request, from the kernel: in serve, those above the process that holds the
+    request's connection (the CLI's pid first, then the recorded sessions': the Claude Code sandbox's proxy runs
+    inside the session's own process); in the CLI, its own. None when the kernel does not tell."""
+    from . import peer
+    p = getattr(PEER, "value", None)
+    if p is None:
+        return peer.chain(os.getpid())
+    if p[0] is None or p[1] is None:  # serve does not know the connection: no answer, never serve's own tree
+        return None
+    hints = [p[2]] + [r["pid"] for r in conn.execute(
+        "SELECT pid FROM agents WHERE kind='ai' AND pid IS NOT NULL AND host=?", (core.this_host(),))]
+    pid = peer.holder(p[0], p[1], hints)
+    return peer.chain(pid) if pid else None
+
+
 def session_of(conn, actor):
-    """Who asks, for every grant check and grant change: {'name', 'person'}. Until sessions prove who they are
-    (#5823), it is the name that the command gives (--as, MAXPM_AGENT); no name, or a person's name, is a person.
-    #5823 replaces this function only."""
-    return {"name": actor, "person": not actor or core._is_person(conn, actor)}
+    """Who asks, for every grant check and grant change (#5823, measured in #5821): {'name', 'person', 'how'}.
+    MaximizePM never trusts the name a command types. It reads the processes above the command from the kernel:
+    - a recorded session's process (agents.pid, and its start time) is above it: it is that session; a --as name of
+      another session or a person is refused;
+    - an agent program is above it, of no recorded session: refused until the session's maxpm go records it;
+    - neither: a person (no name, or a person's name); a session's name is refused.
+    The kernel does not tell (a sandbox): refused, never the typed name. Limit: a command that leaves the tree on
+    purpose (setsid, nohup in a shell that ends) has launchd above it and counts as a person; so does a session's
+    command outside its sandbox that reads the Keychain itself (#5824)."""
+    if IDENTITY is not None:
+        return IDENTITY(conn, actor)
+    ch = _chain_now(conn)
+    if not ch:
+        raise RiverError("MaximizePM cannot read which session runs this command (a sandbox hides its processes): "
+                         "run it with maxpm serve running; the command goes through serve, which checks it")
+    host = core.this_host()
+    rows = {r["pid"]: r for r in conn.execute(
+        "SELECT name, pid, pid_start FROM agents WHERE kind='ai' AND host=? AND pid IN (%s)" % ",".join("?" * len(ch)),
+        [host] + [c[0] for c in ch])}
+    for pid, _ppid, comm, start in ch:
+        r = rows.get(pid)
+        if r and (r["pid_start"] is None or r["pid_start"] == start):
+            if actor and actor != r["name"]:
+                raise RiverError(f"this command runs in the session {r['name']}, not {actor}: MaximizePM confirms the "
+                                 f"session from its processes, not from --as. Run it as maxpm --as {r['name']} ...")
+            return {"name": r["name"], "person": False, "how": f"process {pid} ({comm})"}
+    agent = next((c for c in ch if c[2].lower() in AGENT_PROGRAMS or VERSION_NAME.match(c[2])), None)
+    if agent:
+        raise RiverError(f"this command runs under {agent[2]} (pid {agent[0]}), and MaximizePM has recorded no "
+                         f"session for that process: run maxpm go in the session first (it records the session's "
+                         f"process), then this command again")
+    if actor and not core._is_person(conn, actor):
+        raise RiverError(f"no process of the session {actor} runs this command: a session runs it itself; a person "
+                         f"runs it with no --as, or --as <person>")
+    return {"name": actor, "person": True, "how": "no agent program above it"}
 
 
 def _ask_line(conn, what, item_id=None):
@@ -576,10 +633,11 @@ def _scope_text(conn, scope, value):
     return f"{scope} {value}"
 
 
-def allowed(conn, name, actor):
+def allowed(conn, name, actor, who=None):
     """Whether actor may use (or replace, or delete) the secret name: {'ok', 'by', 'sets', 'why'}. 'by' says what
-    allowed it (a person, the saver, grant g<id>); 'why' says what is missing."""
-    who = session_of(conn, actor)
+    allowed it (a person, the saver, grant g<id>); 'why' says what is missing. who: the session as serve knows it
+    itself (the owner of a browser that it fills, #5826); else session_of confirms it."""
+    who = who or session_of(conn, actor)
     if who["person"]:
         return {"ok": True, "by": None, "sets": []}
     sets = conn.execute("SELECT s.id, s.name FROM secret_set_members m JOIN secret_sets s ON s.id=m.set_id "

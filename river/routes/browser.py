@@ -441,6 +441,12 @@ def _act(conn, a, who):
     # shows; a page walk uses the project's own browser, so a check never starts a Chrome for a session.
     owner = None if action == "walk" else (a.get("session") or a.get("agent") or None) if person else who
     b = browser.get(project, owner, conn)
+    if not person and owner:  # #5823: serve fills sign-ins (#5826) only while the owner's own requests are confirmed
+        from .. import vault
+        try:
+            b.signin_confirmed = vault.session_of(conn, who)["name"] == owner
+        except RiverError:
+            b.signin_confirmed = False
     if action == "steps":  # #5680: this browser's walk so far
         if a.get("clear"):
             b.walk = []
@@ -536,8 +542,8 @@ def _act(conn, a, who):
         if not person and (action == "open" or out.get("navigated")):  # #5811: the accounts it may use here
             from .. import signin  # #5826: a granted sign-in of this site, which serve fills itself
             host = (urlsplit(out.get("url") or "").hostname or "").lower()
-            line = signin.note(conn, who, host) or browser.account_note(conn, project, out.get("url"),
-                                                                        opened=action == "open")
+            line = (getattr(b, "signin_confirmed", False) and signin.note(conn, who, host)) or browser.account_note(
+                conn, project, out.get("url"), opened=action == "open")
             if line:
                 out["notes"] = list(out.get("notes") or []) + [line]
         if pre is not None and not out.get("dialog"):  # a new page: its outline; else what changed on this one
