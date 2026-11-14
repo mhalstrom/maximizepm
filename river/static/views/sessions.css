@@ -390,6 +390,9 @@ button.srow-it { cursor: pointer; }
    the page and take no click; the pointer moves by transform only, so it glides (browserTool.js sets the time). */
 .br-over { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .br-ptr { position: absolute; left: 0; top: 0; transition-property: transform; transition-timing-function: ease-out; }
+/* #5893: a pointer with no move for a while fades (its parts, so the move's own transition stays as it is) */
+.br-ptr > * { transition: opacity .6s ease-out; }
+.br-ptr.br-ptr-idle > * { opacity: 0; }
 .br-arrow { display: block; width: calc(var(--sp-6) + var(--sp-1)); height: calc(var(--sp-7) - var(--sp-1)); margin: calc(-1 * var(--hair)) 0 0 calc(-1 * var(--hair)); fill: var(--ptr); stroke: var(--ptr-edge); stroke-width: 1.6; stroke-linejoin: round; }
 .br-tag { position: absolute; left: var(--sp-5); top: calc(var(--sp-7) - var(--sp-2)); white-space: nowrap; font-size: var(--fs-xs); line-height: 1.5; padding: 0 var(--sp-2); border-radius: var(--r-pill); background: var(--ptr-mark); color: var(--ptr-edge); }
 .br-ring { position: absolute; left: 0; top: 0; width: var(--sp-7); height: var(--sp-7); margin: calc(var(--sp-7) / -2) 0 0 calc(var(--sp-7) / -2); box-sizing: border-box; border: var(--hair-2) solid var(--ptr-mark); border-radius: 50%; opacity: 0; }

@@ -283,6 +283,7 @@ function render(box, project, session) {
     img.style.height = Math.floor(v.h * s) + "px";
     v.scale = s;
     sizeLine();
+    keepPtr();  // #5893
   }
   img.addEventListener("load", () => { const keep = img.src; urls = urls.filter(u => u === keep || URL.revokeObjectURL(u)); });
   const ann = makeAnnotate({ box, stage, img, view: v, project, session, call, typeAction,
@@ -313,19 +314,41 @@ function render(box, project, session) {
   const handTo = (j) => panelSession() || j.before || "";
 
   // The driving session's pointer and keys over the frame (#5616), in the stage's pixels.
-  let last = null, presses = null, hideTyped = null;
+  // #5893 (mark: 'why does the agent mouse keep bopping around sometimes?'): it glides only for a new move of the
+  // session (its count n changed); a change of the layout (the panel's or the list's edge dragged, the frame's scale)
+  // moves it at once. After PTR_IDLE ms with no move it fades: a new page may now lie under its last point.
+  const PTR_IDLE = 8000;
+  let last = null, lastN = null, shownP = null, presses = null, hideTyped = null, idleT = null;
   const spot = (x, y) => { const s = stage.getBoundingClientRect(), r = img.getBoundingClientRect();
     return v.w && r.width ? [r.left - s.left + x * r.width / v.w, r.top - s.top + y * r.height / v.h] : null; };
+  function placePtr(xy, glide) {
+    // A long jump glides longer; the steps of a click of maxpm browser come close together and follow at once.
+    const d = last ? Math.hypot(xy[0] - last[0], xy[1] - last[1]) : 0;
+    ptr.style.transitionDuration = glide && last ? Math.round(Math.min(450, Math.max(60, d * 1.2))) + "ms" : "0ms";
+    ptr.style.transform = `translate(${xy[0]}px, ${xy[1]}px)`;
+    last = xy;
+  }
+  // The layout changed (layout(), the stage's size): the pointer goes to its point's new place at once. While it
+  // glides, last is already the end of the glide, so a frame that changes nothing leaves the glide alone.
+  function keepPtr() {
+    const xy = shownP && spot(shownP.x, shownP.y);
+    if (xy && last && Math.hypot(xy[0] - last[0], xy[1] - last[1]) > 0.5) placePtr(xy, false);
+  }
   function draw(j) {
     const p = j.pointer, c = j.controller, xy = p && spot(p.x, p.y);
-    if (!xy || (c && c.kind === "person")) { ptr.classList.add("hidden"); last = null; }
+    if (!xy || (c && c.kind === "person")) { ptr.classList.add("hidden"); last = lastN = shownP = null; }
     else {
-      // A long jump glides longer; the steps of a click of maxpm browser come close together and follow at once.
-      const d = last ? Math.hypot(xy[0] - last[0], xy[1] - last[1]) : 0;
-      ptr.style.transitionDuration = last ? Math.round(Math.min(450, Math.max(60, d * 1.2))) + "ms" : "0ms";
-      ptr.style.transform = `translate(${xy[0]}px, ${xy[1]}px)`;
+      const moved = p.n !== lastN || (shownP && p.who !== shownP.who);
+      placePtr(xy, moved && lastN !== null);
+      if (moved) {  // a new move: the pointer shows fully again, and fades after PTR_IDLE with no other move
+        clearTimeout(idleT);
+        const left = PTR_IDLE - (p.age || 0) * 1000;
+        ptr.classList.toggle("br-ptr-idle", left <= 0);
+        if (left > 0) idleT = setTimeout(() => ptr.classList.add("br-ptr-idle"), left);
+      }
+      lastN = p.n; shownP = p;
       ptr.querySelector(".br-tag").textContent = p.who || "";
-      ptr.classList.remove("hidden"); last = xy;
+      ptr.classList.remove("hidden");
       if (presses !== null && p.press > presses && p.px != null) {
         const r = spot(p.px, p.py);
         ring.style.translate = `${r[0]}px ${r[1]}px`;  // not transform: the pulse's scale would scale the move too

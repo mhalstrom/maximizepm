@@ -769,6 +769,8 @@ class Watch(Base):
         self.assertAlmostEqual(sum(self.sleeps[:browser.GLIDE_STEPS - 1]), browser.GLIDE_TIME * (13 / 14), 3)
         d = browser.drawn(b)["pointer"]
         self.assertEqual((d["x"], d["y"], d["press"], d["px"], d["py"], d["who"]), (400, 300, 1, 400, 300, "ag1"))
+        self.assertTrue(0 <= d["age"] < 5)  # #5893: seconds since the last move; the pane fades an old pointer
+        self.assertNotIn("at", d)
         # Another tab shows: nothing is drawn over it.
         b.target = "T2"
         self.assertNotIn("pointer", browser.drawn(b))

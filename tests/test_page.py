@@ -1110,6 +1110,63 @@ try {
 } catch (e) { post({ error: String(e && e.stack || e) }); }'''
         return self.drive(driver, "/sessions/ag", steps={"second": lambda: put(16)}, size=size)
 
+    def _pointer(self, size):
+        """#5893: the session's pointer glides only for a new move of the session; when the stage changes size (an edge
+        dragged) it goes to its point's new place at once; a pointer with no move for PTR_IDLE fades."""
+        import base64
+        import time as _time
+        from unittest import mock
+        from river import browser
+        project = browser.project_of(self.c, agent="ag")
+        b = browser.get(project, "ag")
+        self.addCleanup(browser.BROWSERS.clear)
+        b.ws = object()  # running, with no Chrome: the test gives the frame and the pointer
+        b.targets = {"T1": {"url": "https://example.com/", "title": "Example", "opener": None}}
+        b.target = "T1"
+        with b.cond:
+            b.seq += 1
+            b.frame = {"seq": b.seq, "data": base64.b64encode(gray_jpeg(8)).decode(), "w": 800, "h": 600}
+        browser.note_pointer(b, "ag", 400, 300)
+
+        def old():  # a move that came 20 s ago (a pane that opens later sees it so)
+            b.pointer = {**b.pointer, "x": 50, "y": 50, "n": b.pointer["n"] + 1, "at": _time.time() - 20}
+            browser._notify(b)
+        no = mock.patch.object(browser, "no_chrome", lambda: "no Chrome in this test")
+        no.start()
+        self.addCleanup(no.stop)
+        driver = r'''try {
+  await until(() => window.__appReady && q("#sessTitle").textContent === "ag", "session ag shown");
+  const { openBrowser } = await import("./components/browserTool.js");
+  await openBrowser("ag");
+  const ptr = () => q(".br-ptr"), tf = () => ptr().style.transform, dur = () => ptr().style.transitionDuration;
+  await until(() => ptr() && !ptr().classList.contains("hidden") && tf(), "the pointer");
+  await sleep(300);
+  const t1 = tf(), out = { first: dur() };
+  const st = q(".br-stage"); st.style.marginRight = Math.round(st.getBoundingClientRect().width / 2) + "px";
+  await until(() => tf() !== t1, "the pointer follows the layout");
+  out.layout = dur();
+  const t2 = tf();
+  await fetch("/__step/move");
+  await until(() => tf() !== t2, "the new move");
+  out.move = dur() !== "0ms";
+  out.idle = ptr().classList.contains("br-ptr-idle");
+  await fetch("/__step/old");
+  await until(() => ptr().classList.contains("br-ptr-idle"), "an old move fades");
+  out.faded = true;
+  out.wide = document.documentElement.scrollWidth > innerWidth;
+  post(out);
+} catch (e) { post({ error: String(e && e.stack || e) }); }'''
+        return self.drive(driver, "/sessions/ag", size=size,
+                          steps={"move": lambda: browser.note_pointer(b, "ag", 100, 100), "old": old})
+
+    def test_the_pointer_glides_only_for_a_move_at_desktop_width(self):
+        self.assertEqual(self._pointer("1280,900"),
+                         {"first": "0ms", "layout": "0ms", "move": True, "idle": False, "faded": True, "wide": False})
+
+    def test_the_pointer_glides_only_for_a_move_at_phone_width(self):
+        self.assertEqual(self._pointer("390,844"),
+                         {"first": "0ms", "layout": "0ms", "move": True, "idle": False, "faded": True, "wide": False})
+
     def test_the_pane_shows_binary_frames_at_desktop_width(self):
         self.assertEqual(self._frames("1280,900"), {"blob": True, "msg": True, "drawn": True, "wide": False})
 

@@ -3076,7 +3076,8 @@ def fill_secret(b, text, submit=True):
 def note_pointer(b, who, x, y, press=False, target=None):
     p = b.pointer or {}
     n = {"x": round(float(x), 1), "y": round(float(y), 1), "who": who, "target": target or b.target,
-         "n": p.get("n", 0) + 1, "press": p.get("press", 0), "px": p.get("px"), "py": p.get("py")}
+         "n": p.get("n", 0) + 1, "press": p.get("press", 0), "px": p.get("px"), "py": p.get("py"),
+         "at": time.time()}  # #5893: the pane fades a pointer that has not moved for a while
     if press:
         n.update(press=n["press"] + 1, px=n["x"], py=n["y"])
         if b.typed:  # a press can move the focus to another field: the next key looks at its field again
@@ -3110,7 +3111,8 @@ def drawn(b):
     out = {}
     p = b.pointer
     if p and p["target"] == b.target:
-        out["pointer"] = {k: v for k, v in p.items() if k != "target"}
+        out["pointer"] = {k: v for k, v in p.items() if k not in ("target", "at")}
+        out["pointer"]["age"] = round(time.time() - p.get("at", time.time()), 1)  # #5893: seconds since its last move
     t = b.typed
     if t and t["target"] == b.target:
         out["typed"] = {"who": t["who"], "text": t["text"], "secret": t["secret"], "n": t["n"],
