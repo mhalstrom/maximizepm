@@ -1,11 +1,14 @@
 <!-- The settings tab of the page (#4656). maxpm serve puts it into index.html, at view: settings. -->
 <section id="tab-settings" class="hidden">
-  <!-- Credentials (#5829, design: canvas credential-vault), first: the settings table under it is long. Each credential
-       by name (never its value), its level and last use; the sets and their grants; Add a sign-in (the password field
-       goes to the Keychain through maxpm serve and never comes back), New set, Grant, Revoke. views/credentials.js
-       draws it from GET /api/credentials. -->
-  <div class="panel" id="credPanel">
-    <h2 title="Passwords and tokens">Credentials</h2>
+  <!-- #5848 (mark 2026-11-14: 'It needs to have tabs, and it needs to be laid out a little better'): a strip of tabs,
+       each shows only its own group. Credentials first; the settings table shows the keys of the chosen group
+       (views/settings.js GROUPS); Policies and People are tabs of their own. The tab last used stays chosen. -->
+  <div class="set-tabs" id="setTabs" role="tablist" aria-label="Groups of settings"></div>
+  <!-- Credentials (#5829, design: canvas credential-vault). Each credential by name (never its value), its level and
+       last use; the sets and their grants; Add a sign-in (the password field goes to the Keychain through maxpm serve
+       and never comes back), New set, Grant, Revoke. views/credentials.js draws it from GET /api/credentials. -->
+  <div class="panel set-pane" id="credPanel" data-set-pane="credentials">
+    <h2>Credentials</h2>
     <div class="muted t-s">The values stay in this Mac's Keychain. This page shows only their names.</div>
     <!-- #5833: the requests that wait for the person, each a checklist with the manager's picks ticked, first. -->
     <div id="credRequests"></div>
@@ -14,21 +17,26 @@
     <div id="credSets"></div>
     <div id="credForms"></div>
   </div>
-  <div class="panel">
-    <details class="muted t-s" style="margin-bottom:var(--sp-3)"><summary>Help</summary>The most specific value wins: item, then agent, then project, then global, then the built-in default.<br>
+  <!-- One group of settings keys: its heading and line, its rows, and the form that saves one of its keys. -->
+  <div class="panel set-pane" id="setPanel" data-set-pane="keys">
+    <h2 id="setGroupName"></h2>
+    <div class="muted t-s set-note" id="setGroupNote"></div>
+    <details class="muted t-s set-help" id="setHelpAgents"><summary>How the Start button builds a command</summary>
       <b>launch_agents</b> lists the agents the Start button offers, as <code>Label=command</code> entries separated by <code>;</code>. The first is the default.
       <code>@claude-code</code> and <code>@codex</code> are launch profiles: MaximizePM builds the command from their options, the <b>claude_*</b> and <b>codex_*</b> settings (Remote Control, permission or sandbox mode, more arguments, the first prompt; the setup guide has toggles for them). <code>@codex sandbox=read-only</code> sets an option for that entry alone. For example:
       <code>Claude Code=@claude-code; Plan first=@claude-code permission_mode=plan; Codex=@codex; Grok=grok "run maxpm go in this folder and follow the briefing"</code>.
       Any other command is custom: <code>{model}</code> and <code>{effort}</code> take the launch dialog's choice, and with no choice the flag before them drops out.</details>
-    <div style="margin-bottom:var(--sp-3)"><button class="btn" id="openSetup">Open setup guide</button></div>
+    <div class="set-setup" id="setSetupRow"><button class="btn" id="openSetup">Open setup guide</button></div>
     <div id="settingsTable"></div>
-    <div class="form" style="margin-top:var(--sp-5);max-width:var(--w-form)">
+    <div class="cred-sub">Change a setting</div>
+    <div class="muted t-s">The most specific value wins: item, then agent, then project, then every project, then the default.</div>
+    <div class="form set-form">
       <div class="two">
-        <label>Key<select id="setKey"></select></label>
+        <label>Setting<select id="setKey"></select></label>
         <label>Value<input id="setValue" placeholder="45m, 7d, 2"></label>
       </div>
       <div class="two">
-        <label>Scope<select id="setScope"><option value="global">global</option><option value="project">project</option><option value="agent">agent</option><option value="item">item</option></select></label>
+        <label>For<select id="setScope"><option value="global">every project</option><option value="project">one project</option><option value="agent">one agent</option><option value="item">one item</option></select></label>
         <label>Name or id<input id="setScopeName" placeholder="website / alex / 42"></label>
       </div>
       <button class="btn primary" id="setGo">Save setting</button>
@@ -36,9 +44,11 @@
   </div>
   <!-- Policies (#5308): the rules sessions follow, each with its scope, source and reason; maxpm go, manage and the
        expert briefing print the ones that apply. -->
-  <div class="panel" id="policiesPanel">
-    <h2 title="Rules that sessions follow">Policies</h2>
+  <div class="panel set-pane" id="policiesPanel" data-set-pane="policies">
+    <h2>Policies</h2>
+    <div class="muted t-s set-note">The rules that sessions follow. Each briefing prints the ones that apply.</div>
     <div id="policies"></div>
+    <div class="cred-sub">Add a policy</div>
     <div class="form policy-form">
       <label>Rule<textarea id="polText" rows="2" placeholder="Run the tests before each commit"></textarea></label>
       <label>Reason<input id="polReason" placeholder="why the rule exists"></label>
@@ -54,9 +64,11 @@
     </div>
   </div>
   <!-- People (#5102, design #4657): the people of this queue, and Register a person (the Board's form). -->
-  <div class="panel" id="peoplePanel">
-    <h2 title="People who answer and decide">People</h2>
+  <div class="panel set-pane" id="peoplePanel" data-set-pane="people">
+    <h2>People</h2>
+    <div class="muted t-s set-note">The people who answer and decide.</div>
     <div id="people"></div>
+    <div class="cred-sub">Register a person</div>
     <div class="form people-form">
       <div class="two"><input id="regName" placeholder="name"><input id="regNote" placeholder="note (optional)"></div>
       <button class="btn" id="regGo">Register a person</button>

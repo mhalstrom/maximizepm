@@ -11,10 +11,12 @@ import { S } from "../page.js";
 let C = null, readAt = 0, reading = false;
 const AGAIN = 20000;  // ms: the panel reads the credentials again at most this often while Settings shows
 
-// Read the credentials when Settings shows: at once with force (after a change), else at most once in AGAIN.
+// Read the credentials when Settings shows its Credentials tab (#5848): at once with force (after a change), else at
+// most once in AGAIN.
 export async function renderCredentials(force) {
   const tab = $("#tab-settings");
-  if (!tab || tab.classList.contains("hidden") || reading || (!force && C && Date.now() - readAt < AGAIN)) return;
+  if (!tab || tab.classList.contains("hidden") || $("#credPanel").classList.contains("hidden") || reading
+      || (!force && C && Date.now() - readAt < AGAIN)) return;
   reading = true;
   try { C = await getJson("api/credentials"); readAt = Date.now(); }
   catch (e) { $("#credList").innerHTML = empty(`The credentials could not be read: ${esc(e.message)}`); return; }

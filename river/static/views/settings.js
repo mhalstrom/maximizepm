@@ -1,28 +1,101 @@
 // The Settings tab (#4656): every key, its default and its overrides, and the form that sets one; Policies (#5308):
 // the rules sessions follow, and Add policy; and People (#5102): the people of this queue and Register a person.
+// #5848 (mark 2026-11-14): a strip of tabs; each shows only its own group. The settings keys go into groups by
+// GROUPS (the first group whose test takes a key; Advanced takes the rest), so a new key always shows somewhere.
 import { $, esc, toast, act, ago, store, hooks } from "../lib.js";
 import { chip } from "../components/chip.js";
-import { iconButton } from "../components/button.js";
+import { button, iconButton } from "../components/button.js";
 import { makeTable } from "../components/table.js";
 import { S } from "../page.js";
+import { renderCredentials } from "./credentials.js";
 
-// Settings: one row per key; an override chip's × removes that override.
-let settingsTable = null;
+const AGENT_CLIS = /^(aider|amp|claude|codex|copilot|cursor|gemini|goose|grok|hermes|opencode|pi)_/;
+const has = (...keys) => (k) => keys.includes(k);
+// [tab key, tab name, one line for its heading, test of a settings key (none: not a group of keys)]
+export const GROUPS = [
+  ["credentials", "Credentials", ""],
+  ["agents", "Agents", "Which agents the Start button opens, their models, and the options of each agent program.",
+    (k) => AGENT_CLIS.test(k) || k.startsWith("agent_for.") || k.startsWith("default_") && k !== "default_prerequisite_mode"
+      || has("launch_agents", "agent_rules", "effort_levels", "model_ladder", "model_prices", "prompt_pattern",
+             "prompt_wait")(k)],
+  ["sessions", "Sessions", "How long sessions hold work, wait and stay idle; the manager, experts and questions.",
+    (k) => /^(lease_|hold_|idle_|wait_|goal_|base_|revive_|expert_|manage_|manager_|question_|web_terminal)/.test(k)
+      || has("max_leases", "max_sessions", "busy_max", "gone_after", "away_after", "owner_ttl", "reserve_ttl",
+             "auto_continue", "fresh_sessions", "native_message", "human_wait_max", "tmux_adopt", "shells_every")(k)],
+  ["work", "Work", "Reviews, releases, deploys, and how items are added, checked and cleaned up.",
+    (k) => /^(review|release_|similar_|list_cleanup_)/.test(k)
+      || has("auto_review", "deploy_timeout", "result_look", "tracker", "push_guard", "due_warn_before",
+             "replan_threshold", "keep_prereq_limit", "default_prerequisite_mode", "stale_after", "unpushed_after",
+             "conflict_max_lines", "hook_timeout")(k)],
+  ["monitoring", "Monitoring", "The checks that watch your projects, and what a fault does.",
+    (k) => k.startsWith("ops_") || has("health_person_minutes", "activity_silence")(k)],
+  ["browser", "Browser", "The browser of each session, and the canvases it shows.",
+    (k) => /^(browser_|canvas_)/.test(k)],
+  ["notifications", "Notifications", "Where MaximizePM sends what needs you, and how often.",
+    (k) => /^(notify_|ntfy_)/.test(k) || k === "timezone"],
+  ["policies", "Policies", ""],
+  ["people", "People", ""],
+  ["advanced", "Advanced", "maxpm serve, storage limits and upkeep.", () => true],
+];
+const KEY_GROUPS = GROUPS.filter(g => g[3]);
+export const groupOf = (key) => KEY_GROUPS.find(g => g[3](key))[0];
+
+let current = store("river.settingsTab");
+if (!GROUPS.some(g => g[0] === current)) current = "credentials";  // Credentials first (#5848)
+
+// The strip and the pane of the chosen tab.
+function renderTabs() {
+  const html = GROUPS.map(([k, name]) => button(esc(name), { cls: "set-tab", pressed: current === k, data: { "set-tab": k },
+    attrs: `role="tab" aria-selected="${current === k}"` })).join("");
+  const el = $("#setTabs"); if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
+  const keys = KEY_GROUPS.some(g => g[0] === current);
+  document.querySelectorAll("#tab-settings .set-pane").forEach(p =>
+    p.classList.toggle("hidden", p.dataset.setPane !== (keys ? "keys" : current)));
+}
+
+// Settings: one row per key of the chosen group; an override chip's × removes that override.
+let settingsTable = null, tableGroup = null;
 export function renderSettings() {
+  renderTabs();
+  const g = KEY_GROUPS.find(x => x[0] === current);
+  if (!g) return;
+  $("#setGroupName").textContent = g[1];
+  $("#setGroupNote").textContent = g[2];
+  $("#setHelpAgents").classList.toggle("hidden", current !== "agents");
+  $("#setSetupRow").classList.toggle("hidden", current !== "agents");
   const d = S.settings.defaults, o = S.settings.overrides;
+  const keys = Object.keys(d).filter(k => groupOf(k) === current).sort();
   settingsTable ||= makeTable($("#settingsTable"), { key: "settings", index: "key", sort: [{ column: "key", dir: "asc" }],
     placeholder: "No settings.",
     columns: [
-      { title: "Key", field: "key", width: 200 },
+      { title: "Setting", field: "key", width: 200 },
       { title: "Default", field: "default", width: 240, cssClass: "muted wrap" },
-      { title: "Overrides", field: "overrides", cssClass: "wrap", html: (r) => r.ov.map(x => chip("c-p", `${esc(x.scope)} = ${esc(x.value)} <span class="link" data-unset="${esc(r.key)}" data-scope="${esc(x.scope)}">×</span>`)).join(" ") },
+      { title: "Set to", field: "overrides", cssClass: "wrap", html: (r) => r.ov.map(x => chip("c-p", `${esc(x.scope)} = ${esc(x.value)} <span class="link" data-unset="${esc(r.key)}" data-scope="${esc(x.scope)}">×</span>`)).join(" ") },
     ] });
   const now = S.settings.now || {};  // a size limit shows the size now (#5711)
-  settingsTable.set(Object.keys(d).map(k => {
+  settingsTable.set(keys.map(k => {
     const ov = o.filter(x => x.key === k);
     return { key: k, default: String(d[k]) + (now[k] ? ` · ${now[k]}` : ""), overrides: ov.map(x => `${x.scope}=${x.value}`).join(" "), ov };
   }));
+  // The form's list holds the keys of this group; the key chosen before stays when it is in the group.
+  const sel = $("#setKey"), sig = keys.join("|");
+  if (sel.dataset.sig !== sig || tableGroup !== current) {
+    const keep = sel.value;
+    sel.innerHTML = keys.map(k => `<option>${esc(k)}</option>`).join("");
+    if (keys.includes(keep)) sel.value = keep;
+    sel.dataset.sig = sig;
+    tableGroup = current;
+  }
 }
+
+$("#setTabs").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-set-tab]");
+  if (!t || t.dataset.setTab === current) return;
+  current = t.dataset.setTab;
+  store("river.settingsTab", current);
+  renderSettings();
+  if (current === "credentials") renderCredentials(true);
+});
 
 // Policies: each rule with its kind and scope, source and reason. Global ones ship with MaximizePM and change only by
 // a release; a user one has ✕, which retires it (deletes it: no tombstone).

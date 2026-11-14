@@ -8,6 +8,20 @@
    and the form under them, not 6 and 13 px right of it. */
 #tab-settings > .panel > details > summary { padding-left: 0; }
 #openSetup { margin-left: var(--btn-inset); }
+/* #5848: the strip of tabs over the panes, as Plan's view buttons; the chosen one is marked, and each pane has its
+   heading, one plain line, then its content. */
+.set-tabs { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin: 0 0 var(--sp-4); }
+.set-tab.on { color: var(--ink); font-weight: 600; border-color: var(--accent); }
+.set-pane > h2 { margin-bottom: var(--sp-1); }
+.set-note { margin-bottom: var(--sp-4); }
+.set-help { margin-bottom: var(--sp-3); }
+.set-setup { margin-bottom: var(--sp-4); }
+.set-form { margin-top: var(--sp-3); max-width: var(--w-form); }
+@media (max-width: 759px) {  /* a phone: one row of tabs that scrolls sideways, each at the size of a tap */
+  .set-tabs { flex-wrap: nowrap; overflow-x: auto; margin-left: calc(-1 * var(--sp-6)); margin-right: calc(-1 * var(--sp-6));
+    padding: 0 var(--sp-6) var(--sp-1); scrollbar-width: none; }
+  .set-tab { flex: none; min-height: var(--tap); }
+}
 /* Credentials (#5829): rows wrap at phone width (p57), so the level and the grant form go under the name. */
 .cred-sub { font-weight: 600; margin: var(--sp-6) 0 var(--sp-2); }
 .cred, .cred-set { padding: var(--sp-3) 0; border-bottom: var(--hair) solid var(--line); }

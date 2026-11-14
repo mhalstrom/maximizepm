@@ -78,8 +78,7 @@ function renderSelects() {
     if (a.value !== asWanted) { a.value = asWanted; store("river.actor", asWanted); inbox.actorChanged().catch(() => {}); }
     asWanted = null;
   }
-  fillSelect("#setKey", Object.keys(S.settings.defaults), false);
-  fillSelect("#goalProject", names, false);
+  fillSelect("#goalProject", names, false);  // #setKey: views/settings.js fills it with the chosen tab's keys (#5848)
   const openGoals = (S.goals || []).filter(g => g.status === "open");
   { const el = $("#addGoal"), cur = el.value, proj = $("#addProject").value;
     const list = openGoals.filter(g => g.project === proj).concat(openGoals.filter(g => g.project !== proj));

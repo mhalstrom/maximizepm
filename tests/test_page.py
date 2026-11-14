@@ -189,9 +189,20 @@ try {
   q('#planSide [data-scope-project=""]').click();
   await until(() => !location.search.includes("project="), "All projects");
   q("#hdrMore").click(); q("#settingsBtn").click();
-  await until(() => q("#settingsTable").textContent.includes("lease_ttl") && location.pathname === "/settings"
-    && !q("header").classList.contains("more"), "the settings from the ⋯, at /settings, the menu closed");
+  // #5848: Settings has tabs; Credentials is the first, and each tab shows only its own group.
+  await until(() => location.pathname === "/settings" && !q("header").classList.contains("more")
+    && q("#setTabs [data-set-tab]"), "the settings from the ⋯, at /settings, the menu closed");
+  q('#setTabs [data-set-tab="sessions"]').click();
+  await until(() => q("#settingsTable").textContent.includes("lease_ttl")
+    && !q("#settingsTable").textContent.includes("ntfy_topic") && !q("#setPanel").classList.contains("hidden")
+    && q("#credPanel").classList.contains("hidden"), "Settings > Sessions shows only its keys");
+  check([...q("#setKey").options].some(o => o.value === "lease_ttl")
+    && ![...q("#setKey").options].some(o => o.value === "ntfy_topic"), "the form lists the keys of the tab");
+  q('#setTabs [data-set-tab="people"]').click();
+  await until(() => !q("#peoplePanel").classList.contains("hidden") && q("#setPanel").classList.contains("hidden"),
+    "Settings > People");
   check(q("#people").textContent.includes("mark"), "Settings > People");
+  q('#setTabs [data-set-tab="credentials"]').click();  // as a person leaves it: the first tab
   // The links both ways (#5102 step 7): the drawer's project opens Plan > Items with that scope.
   window.riverOpen(ITEM);
   await until(() => q('#drawer [data-plan-go="items"]'), "the drawer's link to its project in Plan");
