@@ -6,6 +6,7 @@
 // collect, and Send to agent sends them as one message with file and line. Reviewed marks the commit for 'Since my
 // last review'; Approve and Request changes answer the project setting review_at (a push or a release waits for
 // Approve). Open in editor opens the file in VS Code. No editing here. Data: GET /api/diff; ops review_send, review_mark.
+// Classes and data keys start with chg- (cv- is the canvas view's, sessions.css).
 
 import { esc, store, toast, act, getJson } from "../lib.js";
 import { button } from "./button.js";
@@ -24,13 +25,13 @@ function ctxOf(src) {
 
 export async function renderChanges(box, src) {
   const ctx = ctxOf(src);
-  box.classList.add("cv-host");
-  box.innerHTML = `<div class="cv muted t-m">Reading the changes…</div>`;
+  box.classList.add("chg-host");
+  box.innerHTML = `<div class="chg muted t-m">Reading the changes…</div>`;
   const q = src.session ? `session=${encodeURIComponent(src.session)}&base=${ctx.base}` : `item=${src.item}`;
   try { ctx.data = await getJson("api/diff?" + q); }
-  catch (e) { box.innerHTML = `<div class="cv muted">${esc(e.message)}</div>`; return; }
+  catch (e) { box.innerHTML = `<div class="chg muted">${esc(e.message)}</div>`; return; }
   draw(box, src, ctx);
-  if (!box._cvWired) { wire(box, src); box._cvWired = true; }
+  if (!box._chgWired) { wire(box, src); box._chgWired = true; }
 }
 
 // One file's lines as rows: [{t, old, new, text}] for one column, [[left, right]] for side by side.
@@ -48,41 +49,40 @@ function pairs(lines) {
 
 function fileHtml(f, fi, root, ctx, split) {
   const rows = ctx.rows;
+  const on = (r) => ctx.sel && ctx.sel.fi === fi && r >= ctx.sel.from && r <= ctx.sel.to ? " chg-on" : "";
+  const kind = (l) => l[0] === "+" ? "chg-add" : l[0] === "-" ? "chg-del" : "";
   const cell = (l, side) => {
-    if (!l) return `<td class="cv-n"></td><td class="cv-c cv-none"></td>`;
+    if (!l) return `<td class="chg-n"></td><td class="chg-c chg-none"></td>`;
     const n = side === "old" ? l[1] : l[2];
     const r = rows.push({ fi, file: f.path, n, side, text: l[3] }) - 1;
-    const cls = l[0] === "+" ? "cv-add" : l[0] === "-" ? "cv-del" : "";
-    const on = ctx.sel && ctx.sel.fi === fi && r >= ctx.sel.from && r <= ctx.sel.to ? " cv-on" : "";
-    return `<td class="cv-n ${cls}${on}" data-r="${r}">${n ?? ""}</td><td class="cv-c ${cls}${on}" data-r="${r}">${esc(l[3])}</td>`;
+    const cls = kind(l) + on(r);
+    return `<td class="chg-n ${cls}" data-r="${r}">${n ?? ""}</td><td class="chg-c ${cls}" data-r="${r}">${esc(l[3])}</td>`;
   };
   const body = [];
   for (const h of f.hunks) {
-    body.push(`<tr class="cv-hunk"><td colspan="${split ? 4 : 3}">${esc(h.head)}</td></tr>`);
+    body.push(`<tr class="chg-hunk"><td colspan="${split ? 4 : 3}">${esc(h.head)}</td></tr>`);
     if (split) for (const [a, b] of pairs(h.lines)) {
       const startR = rows.length;
       body.push(`<tr>${cell(a, "old")}${cell(b, "new")}</tr>`);
       body.push(commentsAt(ctx, fi, startR, rows.length, split));
     } else for (const l of h.lines) {
-      const r0 = rows.length;
       const side = l[0] === "-" ? "old" : "new";
       const n = side === "old" ? l[1] : l[2];
       const r = rows.push({ fi, file: f.path, n, side, text: l[3] }) - 1;
-      const cls = l[0] === "+" ? "cv-add" : l[0] === "-" ? "cv-del" : "";
-      const on = ctx.sel && ctx.sel.fi === fi && r >= ctx.sel.from && r <= ctx.sel.to ? " cv-on" : "";
-      body.push(`<tr><td class="cv-n ${cls}${on}" data-r="${r}">${l[1] ?? ""}</td><td class="cv-n ${cls}${on}" data-r="${r}">${l[2] ?? ""}</td>`
-        + `<td class="cv-c ${cls}${on}" data-r="${r}"><span class="cv-sign">${l[0] === " " ? "" : l[0]}</span>${esc(l[3])}</td></tr>`);
-      body.push(commentsAt(ctx, fi, r0, rows.length, split));
+      const cls = kind(l) + on(r);
+      body.push(`<tr><td class="chg-n ${cls}" data-r="${r}">${l[1] ?? ""}</td><td class="chg-n ${cls}" data-r="${r}">${l[2] ?? ""}</td>`
+        + `<td class="chg-c ${cls}" data-r="${r}"><span class="chg-sign">${l[0] === " " ? " " : l[0]}</span>${esc(l[3])}</td></tr>`);
+      body.push(commentsAt(ctx, fi, r, r + 1, split));
     }
   }
   const status = { added: "new", deleted: "deleted", renamed: "renamed" }[f.status];
-  const editor = root && f.status !== "deleted" ? `<a class="link cv-editor" href="vscode://file/${esc(encodeURI(root + "/" + f.path))}" title="Open this file in VS Code">Open in editor</a>` : "";
-  return `<section class="cv-file" id="cv-f-${fi}">
-    <div class="cv-fhead"><span class="cv-path">${esc(f.path)}</span>${status ? chip("c-p", status) : ""}${f.untracked ? chip("c-p", "not in git") : ""}
-      <span class="cv-plus">+${f.add}</span><span class="cv-minus">−${f.del}</span><span class="spacer"></span>${editor}</div>
-    ${f.binary ? `<div class="muted t-m cv-note">A binary file.</div>` : ""}
-    ${f.hunks.length ? `<div class="cv-scroll"><table class="cv-t${split ? " cv-split" : ""}">${body.join("")}</table></div>` : ""}
-    ${f.cut ? `<div class="muted t-m cv-note">The rest of this file is not shown: the diff is too long. ${editor}</div>` : ""}
+  const editor = root && f.status !== "deleted" ? `<a class="link chg-editor" href="vscode://file/${esc(encodeURI(root + "/" + f.path))}" title="Open this file in VS Code">Open in editor</a>` : "";
+  return `<section class="chg-file" id="chg-f-${fi}">
+    <div class="chg-fhead"><span class="chg-path">${esc(f.path)}</span>${status ? chip("c-p", status) : ""}${f.untracked ? chip("c-p", "not in git") : ""}
+      <span class="chg-plus">+${f.add}</span><span class="chg-minus">−${f.del}</span><span class="spacer"></span>${editor}</div>
+    ${f.binary ? `<div class="muted t-m chg-note">A binary file.</div>` : ""}
+    ${f.hunks.length ? `<div class="chg-scroll"><table class="chg-t${split ? " chg-split" : ""}">${body.join("")}</table></div>` : ""}
+    ${f.cut ? `<div class="muted t-m chg-note">The rest of this file is not shown: the diff is too long. ${editor}</div>` : ""}
   </section>`;
 }
 
@@ -91,14 +91,14 @@ function commentsAt(ctx, fi, from, to, split) {
   const span = split ? 4 : 3;
   let html = "";
   ctx.comments.forEach((c, i) => {
-    if (c.fi === fi && c.r >= from && c.r < to) html += `<tr class="cv-crow"><td colspan="${span}"><div class="cv-comment">
-      <div class="t-s muted">${esc(c.file)}:${c.line}${c.end && c.end !== c.line ? "–" + c.end : ""}</div><div>${esc(c.text)}</div>
-      ${button("Remove", { cls: "link", data: { "cv-del": i } })}</div></td></tr>`;
+    if (c.fi === fi && c.r >= from && c.r < to) html += `<tr class="chg-crow"><td colspan="${span}"><div class="chg-comment">
+      <div class="t-s muted chg-where">${esc(c.file)}:${c.line}${c.end && c.end !== c.line ? "–" + c.end : ""}</div><div>${esc(c.text)}</div>
+      ${button("Remove", { cls: "link", data: { "chg-del": i } })}</div></td></tr>`;
   });
   if (ctx.sel && ctx.sel.fi === fi && ctx.sel.to >= from && ctx.sel.to < to)
-    html += `<tr class="cv-crow"><td colspan="${span}"><form class="cv-form">
-      <textarea class="cv-text" rows="3" placeholder="A comment on this line for the agent"></textarea>
-      <div class="actions">${button("Add comment", { kind: "primary", type: "submit" })}${button("Cancel", { data: { "cv-cancel": 1 } })}</div>
+    html += `<tr class="chg-crow"><td colspan="${span}"><form class="chg-form">
+      <textarea class="chg-text" rows="3" placeholder="A comment on this line for the agent"></textarea>
+      <div class="actions">${button("Add comment", { kind: "primary", type: "submit" })}${button("Cancel", { data: { "chg-cancel": 1 } })}</div>
     </form></td></tr>`;
   return html;
 }
@@ -113,39 +113,39 @@ function draw(box, src, ctx) {
   let fi = 0;
   const fileBlocks = src.session
     ? files.map(f => fileHtml(f, fi++, root, ctx, split)).join("")
-    : (d.commits || []).map(c => `<div class="cv-commit"><span class="cv-sha">${esc(c.sha.slice(0, 8))}</span> ${esc(c.subject)}</div>`
+    : (d.commits || []).map(c => `<div class="chg-commit"><span class="chg-sha">${esc(c.sha.slice(0, 8))}</span> ${esc(c.subject)}</div>`
         + c.files.map(f => fileHtml(f, fi++, c.root, ctx, split)).join("")).join("");
-  const list = files.map((f, i) => `<a class="cv-li" href="#cv-f-${i}" data-goto="${i}"><span class="cv-path">${esc(f.path)}</span>`
-    + `<span class="cv-plus">+${f.add}</span><span class="cv-minus">−${f.del}</span></a>`).join("");
+  const list = files.map((f, i) => `<a class="chg-li" href="#chg-f-${i}" data-goto="${i}"><span class="chg-path">${esc(f.path)}</span>`
+    + `<span class="chg-plus">+${f.add}</span><span class="chg-minus">−${f.del}</span></a>`).join("");
   const state = d.state === "approved" ? chip("c-ready", "approved") : d.state === "changes" ? chip("c-waiting", "changes requested") : "";
   const gate = { push: "This project waits for Approve before a push.", release: "This project waits for Approve before a release." }[d.review_at] || "";
   const head = src.session
-    ? `<div class="cv-bar" role="group" aria-label="Compare against">${BASES.map(([k, t]) =>
-        button(t, { cls: "cv-base", pressed: ctx.base === k, data: { "cv-base": k } })).join("")}</div>
+    ? `<div class="chg-bar" role="group" aria-label="Compare against">${BASES.map(([k, t]) =>
+        button(t, { cls: "chg-base", pressed: ctx.base === k, data: { "chg-base": k } })).join("")}</div>
        <div class="t-m muted">Against ${esc(d.against || "")}. ${d.commits_ahead != null ? `${d.commits_ahead} commit${d.commits_ahead === 1 ? "" : "s"} not on GitHub.` : ""}</div>
-       ${(d.shared || []).length ? `<div class="t-m cv-shared">This folder is shared with ${d.shared.map(esc).join(", ")}: the diff holds every session's changes here. The workspace setting gives each session its own folder and its own diff (#5856).</div>` : ""}`
+       ${(d.shared || []).length ? `<div class="t-m chg-shared">This folder is shared with ${d.shared.map(esc).join(", ")}: the diff holds every session's changes here. The workspace setting gives each session its own folder and its own diff (#5856).</div>` : ""}`
     : `<div class="t-m"><b>#${d.item}</b> ${esc(d.title)}</div>
        <div class="t-m muted">${d.kind === "deploy" ? `What release #${d.item} ships: the commits of ${d.items.length} item${d.items.length === 1 ? "" : "s"}.` : "The commits whose message names #" + d.item + ", also after the push."}</div>
-       ${d.waits ? `<div class="t-m cv-shared">This release waits for your Approve.</div>` : ""}`;
+       ${d.waits ? `<div class="t-m chg-shared">This release waits for your Approve.</div>` : ""}`;
   const n = ctx.comments.length;
-  const actions = `<div class="cv-acts">
-    ${n ? button(`Send to agent (${n})`, { kind: "primary", data: { "cv-send": 1 }, title: "One message, with file and line" }) : ""}
-    ${button("Request changes", { data: { "cv-mark": "changes" }, title: "Send the comments; the push stays held" })}
-    ${button("Approve", { data: { "cv-mark": "approved" }, title: gate ? "The push or release waits for this" : "Mark these changes approved" })}
-    ${src.session ? button("Reviewed", { data: { "cv-mark": "reviewed" }, title: "Start 'Since my last review' here" }) : ""}
+  const actions = `<div class="chg-acts">
+    ${n ? button(`Send to agent (${n})`, { kind: "primary", data: { "chg-send": 1 }, title: "One message, with file and line" }) : ""}
+    ${button("Request changes", { data: { "chg-mark": "changes" }, title: "Send the comments; the push stays held" })}
+    ${button("Approve", { data: { "chg-mark": "approved" }, title: gate ? "The push or release waits for this" : "Mark these changes approved" })}
+    ${src.session ? button("Reviewed", { data: { "chg-mark": "reviewed" }, title: "Start 'Since my last review' here" }) : ""}
     <span class="spacer"></span>
-    ${phone() ? "" : `<span class="cv-bar" role="group" aria-label="Layout">${button("Side by side", { cls: "cv-lay", pressed: split, data: { "cv-lay": "split" } })}${button("One column", { cls: "cv-lay", pressed: !split, data: { "cv-lay": "unified" } })}</span>`}
+    ${phone() ? "" : `<span class="chg-bar" role="group" aria-label="Layout">${button("Side by side", { cls: "chg-lay", pressed: split, data: { "chg-lay": "split" } })}${button("One column", { cls: "chg-lay", pressed: !split, data: { "chg-lay": "unified" } })}</span>`}
   </div>`;
-  box.innerHTML = `<div class="cv">${head}
-    <div class="cv-sum t-m">${files.length} file${files.length === 1 ? "" : "s"} <span class="cv-plus">+${add}</span> <span class="cv-minus">−${del}</span> ${state} ${gate ? `<span class="muted">${esc(gate)}</span>` : ""}</div>
+  box.innerHTML = `<div class="chg">${head}
+    <div class="chg-sum t-m">${files.length} file${files.length === 1 ? "" : "s"} <span class="chg-plus">+${add}</span> <span class="chg-minus">−${del}</span> ${state} ${gate ? `<span class="muted">${esc(gate)}</span>` : ""}</div>
     ${actions}
-    ${files.length ? `<nav class="cv-list">${list}</nav>` : `<div class="muted cv-note">No changes ${src.session ? "against " + esc(d.against || "this base") : "named #" + d.item + " in a commit yet"}.</div>`}
-    ${d.cut ? `<div class="t-m muted cv-note">The diff is long: some lines are not shown.</div>` : ""}
-    ${d.untracked_more ? `<div class="t-m muted cv-note">And ${d.untracked_more.count} more new files that git does not know: ${
-      d.untracked_more.folders.map(([f, k]) => `<span class="cv-path">${esc(f)}</span> ${k}`).join(", ")}. Add them to .gitignore if they are not work.</div>` : ""}
+    ${files.length ? `<div class="chg-list" role="list" aria-label="Changed files">${list}</div>` : `<div class="muted chg-note">No changes ${src.session ? "against " + esc(d.against || "this base") : "named #" + d.item + " in a commit yet"}.</div>`}
+    ${d.cut ? `<div class="t-m muted chg-note">The diff is long: some lines are not shown.</div>` : ""}
+    ${d.untracked_more ? `<div class="t-m muted chg-note">And ${d.untracked_more.count} more new files that git does not know: ${
+      d.untracked_more.folders.map(([f, k]) => `<span class="chg-path">${esc(f)}</span> ${k}`).join(", ")}. Add them to .gitignore if they are not work.</div>` : ""}
     ${fileBlocks}</div>`;
   box.scrollTop = keep;
-  const ta = box.querySelector(".cv-text");
+  const ta = box.querySelector(".chg-text");
   if (ta) ta.focus({ preventScroll: true });
 }
 
@@ -155,18 +155,18 @@ function wire(box, src) {
   box.addEventListener("click", async (e) => {
     const t = e.target;
     const go = t.closest("[data-goto]");
-    if (go) { e.preventDefault(); const f = box.querySelector("#cv-f-" + go.dataset.goto); if (f) f.scrollIntoView({ block: "start" }); return; }
-    const b = t.closest("[data-cv-base]");
-    if (b) { ctx.base = b.dataset.cvBase; ctx.sel = null; return renderChanges(box, src); }
-    const l = t.closest("[data-cv-lay]");
-    if (l) { store(LAYOUT, l.dataset.cvLay); ctx.sel = null; return redraw(); }
-    if (t.closest("[data-cv-cancel]")) { ctx.sel = null; return redraw(); }
-    const del = t.closest("[data-cv-del]");
-    if (del) { ctx.comments.splice(+del.dataset.cvDel, 1); return redraw(); }
-    if (t.closest("[data-cv-send]")) return send(box, src, ctx, false);
-    const m = t.closest("[data-cv-mark]");
+    if (go) { e.preventDefault(); const f = box.querySelector("#chg-f-" + go.dataset.goto); if (f) f.scrollIntoView({ block: "start" }); return; }
+    const b = t.closest("[data-chg-base]");
+    if (b) { ctx.base = b.dataset.chgBase; ctx.sel = null; return renderChanges(box, src); }
+    const l = t.closest("[data-chg-lay]");
+    if (l) { store(LAYOUT, l.dataset.chgLay); ctx.sel = null; return redraw(); }
+    if (t.closest("[data-chg-cancel]")) { ctx.sel = null; return redraw(); }
+    const del = t.closest("[data-chg-del]");
+    if (del) { ctx.comments.splice(+del.dataset.chgDel, 1); return redraw(); }
+    if (t.closest("[data-chg-send]")) return send(box, src, ctx, false);
+    const m = t.closest("[data-chg-mark]");
     if (m) {
-      const kind = m.dataset.cvMark;
+      const kind = m.dataset.chgMark;
       if (kind === "changes") return send(box, src, ctx, true);
       try {
         await act("review_mark", { kind, session: src.session, item: src.item, sha: src.session ? ctx.data.head : null });
@@ -184,9 +184,9 @@ function wire(box, src) {
     }
   });
   box.addEventListener("submit", (e) => {
-    if (!e.target.closest(".cv-form")) return;
+    if (!e.target.closest(".chg-form")) return;
     e.preventDefault();
-    const text = box.querySelector(".cv-text").value.trim();
+    const text = box.querySelector(".chg-text").value.trim();
     if (!text) return toast("Write the comment first", true);
     const a = ctx.rows[ctx.sel.from], z = ctx.rows[ctx.sel.to];
     const quote = ctx.rows.slice(ctx.sel.from, ctx.sel.to + 1).map(x => x.text).join(" ").trim();
@@ -195,8 +195,8 @@ function wire(box, src) {
     redraw();
   });
   box.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.target.closest(".cv-text")) e.target.form.requestSubmit();
-    if (e.key === "Escape" && e.target.closest(".cv-text")) { e.stopPropagation(); ctx.sel = null; redraw(); }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.target.closest(".chg-text")) e.target.form.requestSubmit();
+    if (e.key === "Escape" && e.target.closest(".chg-text")) { e.stopPropagation(); ctx.sel = null; redraw(); }
   });
 }
 
@@ -220,14 +220,13 @@ export function openItemChanges(id) {
     el = document.createElement("div");
     el.id = "changesDlg";
     el.className = "hidden";
-    el.innerHTML = `<div class="box"><div class="dlg-head"><h2>Changes</h2>${button("✕", { kind: "icon", label: "Close", data: { "cv-close": 1 } })}</div><div class="cv-dbody"></div></div>`;
+    el.innerHTML = `<div class="box"><div class="dlg-head"><h2>Changes</h2>${button("✕", { kind: "icon", label: "Close", data: { "chg-close": 1 } })}</div><div class="chg-dbody"></div></div>`;
     document.body.append(el);
     dlg = makeDialog(el);
-    el.addEventListener("click", (e) => { if (e.target.closest("[data-cv-close]")) dlg.close(); });
+    el.addEventListener("click", (e) => { if (e.target.closest("[data-chg-close]")) dlg.close(); });
   }
   dlg.open();
-  const body = el.querySelector(".cv-dbody");
-  body._cvWired = false;
+  const body = el.querySelector(".chg-dbody");
   const fresh = body.cloneNode(false);  // a new body: its listeners are for this item only
   body.replaceWith(fresh);
   return renderChanges(fresh, { item: id });

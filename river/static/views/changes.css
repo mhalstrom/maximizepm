@@ -1,55 +1,54 @@
 /* The Changes view (#5855, components/changesView.js): the base and layout switches, the file list, each file's diff
    with its line numbers, the comment boxes, and the item dialog. Tokens only (#5028). A phone shows one column, and
-   each file's lines scroll sideways inside the file, never the page (p57). */
-.cv { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); min-width: 0; }
-.cv-bar { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
-.cv-base.on, .cv-lay.on { color: var(--ink); font-weight: 600; border-color: var(--accent); }
-.cv-shared { padding: var(--sp-2) var(--sp-3); border-radius: var(--r-s); background: var(--wait-bg); }
-.cv-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
-.cv-sum { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; }
-.cv-plus { color: var(--ready); font-variant-numeric: tabular-nums; }
-.cv-minus { color: var(--warn); font-variant-numeric: tabular-nums; }
-.cv-note { padding: var(--sp-2) 0; }
-.cv-list { display: flex; flex-direction: column; border: var(--hair) solid var(--line); border-radius: var(--r-m);
+   each file's lines scroll sideways inside the file, never the page (p57). The prefix is chg- (cv- is the canvas view). */
+.chg { display: flex; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4); min-width: 0; }
+.chg-bar { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
+.chg-base.on, .chg-lay.on { color: var(--ink); font-weight: 600; border-color: var(--accent); }
+.chg-shared { padding: var(--sp-2) var(--sp-3); border-radius: var(--r-s); background: var(--wait-bg); }
+.chg-acts { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.chg-sum { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; }
+.chg-plus { color: var(--ready); font-variant-numeric: tabular-nums; }
+.chg-minus { color: var(--warn); font-variant-numeric: tabular-nums; }
+.chg-note { padding: var(--sp-2) 0; }
+.chg-list { display: flex; flex-direction: column; flex-wrap: nowrap; border: var(--hair) solid var(--line); border-radius: var(--r-m);
   max-height: var(--h-pre); overflow-y: auto; font-size: var(--fs-m); }  /* a long list scrolls; the diff stays near */
-.cv-li { display: flex; gap: var(--sp-3); align-items: baseline; padding: var(--sp-1) var(--sp-3); color: var(--ink);
+.chg-li { display: flex; flex: none; gap: var(--sp-3); align-items: baseline; padding: var(--sp-1) var(--sp-3); color: var(--ink);
   text-decoration: none; border-bottom: var(--hair) solid var(--line); min-width: 0; }
-.cv-li:last-child { border-bottom: 0; }
-.cv-li:hover { background: var(--bg); }
-.cv-li .cv-path { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.cv-path, .cv-sha, .cv-t { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.cv-commit { margin-top: var(--sp-4); font-weight: 600; overflow-wrap: anywhere; }
-.cv-sha { color: var(--muted); font-weight: 400; }
-.cv-file { border: var(--hair) solid var(--line); border-radius: var(--r-m); min-width: 0; scroll-margin-top: var(--sp-3); }
-.cv-fhead { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; padding: var(--sp-2) var(--sp-3);
+.chg-li:last-child { border-bottom: 0; }
+.chg-li:hover { background: var(--bg); }
+.chg-li .chg-path { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.chg-path, .chg-sha, .chg-t, .chg-where { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.chg-commit { margin-top: var(--sp-4); font-weight: 600; overflow-wrap: anywhere; }
+.chg-sha { color: var(--muted); font-weight: 400; }
+.chg-file { border: var(--hair) solid var(--line); border-radius: var(--r-m); min-width: 0; scroll-margin-top: var(--sp-3); }
+.chg-fhead { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); align-items: baseline; padding: var(--sp-2) var(--sp-3);
   background: var(--bg); border-bottom: var(--hair) solid var(--line); border-radius: var(--r-m) var(--r-m) 0 0; }
-.cv-fhead .cv-path { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
-.cv-file > .cv-note { padding: var(--sp-2) var(--sp-3); }
-.cv-scroll { overflow-x: auto; }
-.cv-t { border-collapse: collapse; width: 100%; font-size: var(--fs-s); line-height: 1.5; }
-.cv-t td { padding: 0 var(--sp-2); vertical-align: top; }
-.cv-n { width: 1%; text-align: right; color: var(--muted); white-space: nowrap; user-select: none; cursor: pointer;
+.chg-fhead .chg-path { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.chg-file > .chg-note { padding: var(--sp-2) var(--sp-3); }
+.chg-scroll { overflow-x: auto; }
+.chg-t { border-collapse: collapse; width: 100%; font-size: var(--fs-s); line-height: 1.5; }
+.chg-t td { padding: 0 var(--sp-2); vertical-align: top; }
+.chg-n { width: 1%; text-align: right; color: var(--muted); white-space: nowrap; user-select: none; cursor: pointer;
   font-variant-numeric: tabular-nums; }
-.cv-c { white-space: pre; cursor: pointer; }
-.cv-split .cv-c { width: 50%; }
-.cv-sign { display: inline-block; width: 1ch; color: var(--muted); user-select: none; }
-.cv-add { background: var(--ready-bg); }
-.cv-del { background: var(--warn-bg); }
-.cv-none { background: var(--bg); }
-.cv-on { box-shadow: inset var(--hair-2) 0 0 var(--accent); background: var(--prog-bg); }
-.cv-hunk td { color: var(--muted); background: var(--bg); padding: var(--sp-1) var(--sp-2); white-space: pre; }
-.cv-crow td { padding: var(--sp-2) var(--sp-3); white-space: normal; font-size: var(--fs-m);
+.chg-c { white-space: pre; cursor: pointer; }
+.chg-split .chg-c { width: 50%; }
+.chg-sign { display: inline-block; width: 2ch; color: var(--muted); user-select: none; }
+.chg-add { background: var(--ready-bg); }
+.chg-del { background: var(--warn-bg); }
+.chg-none { background: var(--bg); }
+.chg-on { box-shadow: inset var(--hair-2) 0 0 var(--accent); background: var(--prog-bg); }
+.chg-hunk td { color: var(--muted); background: var(--bg); padding: var(--sp-1) var(--sp-2); white-space: pre; }
+.chg-crow td { padding: var(--sp-2) var(--sp-3); white-space: normal; font-size: var(--fs-m);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }  /* the page's font, not the code's */
-.cv-crow .cv-comment > .t-s { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.cv-comment { border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-2) var(--sp-3);
+.chg-comment { border: var(--hair) solid var(--line); border-radius: var(--r-s); padding: var(--sp-2) var(--sp-3);
   background: var(--panel); max-width: var(--w-form); overflow-wrap: anywhere; }
-.cv-form { display: flex; flex-direction: column; gap: var(--sp-2); max-width: var(--w-form); }
-.cv-form textarea { width: 100%; min-height: var(--h-text-min); }
-.cv-form .actions { display: flex; gap: var(--sp-2); }
+.chg-form { display: flex; flex-direction: column; gap: var(--sp-2); max-width: var(--w-form); }
+.chg-form textarea { width: 100%; min-height: var(--h-text-min); }
+.chg-form .actions { display: flex; gap: var(--sp-2); }
 #changesDlg { --dlg-w: min(calc(var(--w-form) * 2), 96vw); }
-#changesDlg .cv { padding: 0; }
+#changesDlg .chg { padding: 0; }
 @media (max-width: 759px) {  /* a phone: Open in editor needs VS Code on this device; the controls at the size of a tap */
-  .cv-editor { display: none; }
-  .cv-acts .btn, .cv-bar .btn { min-height: var(--tap); }
-  .cv-li { min-height: var(--tap); align-items: center; }
+  .chg-editor { display: none; }
+  .chg-acts .btn, .chg-bar .btn { min-height: var(--tap); }
+  .chg-li { min-height: var(--tap); align-items: center; }
 }
