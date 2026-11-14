@@ -31,7 +31,7 @@ export function renderPolicies() {
   const html = P.map(p => `<div class="policy"><div class="policy-body">${chip(p.kind === "global" ? "c-human" : "c-p", esc(p.pid))} ${chip("", esc(p.scope))} ${esc(p.text)}`
     + `<div class="muted t-s">${esc(p.reason)} · ${esc(p.source)}${p.adds_to ? " · adds to " + esc(p.adds_to) : ""}${p.items.length ? " · " + p.items.map(i => "#" + i.id).join(" ") : ""}`
     + `${p.kind === "global" ? " · ships with MaximizePM" : ""}</div></div>`
-    + (p.kind === "user" ? iconButton("✕", `Retire ${p.pid}`, { data: { retirePolicy: p.id } }) : "") + `</div>`).join("")
+    + (p.kind === "user" ? iconButton("✕", `Retire ${p.pid}`, { data: { "retire-policy": p.id } }) : "") + `</div>`).join("")
     || `<div class="muted">No policies yet. A policy is a rule for the sessions: maxpm policy add "&lt;rule&gt;" --reason "&lt;why&gt;".</div>`;
   const el = $("#policies"); if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
   const opts = (sel, list, first) => {

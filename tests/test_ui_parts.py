@@ -155,6 +155,16 @@ class TimeTexts(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
+class DataKeys(unittest.TestCase):
+    def test_no_data_key_of_a_part_is_camel_case(self):
+        # button({data: {credRevoke: 1}}) writes data-credRevoke; HTML lowers the name, so dataset.credRevoke was empty
+        # and Revoke, Grant (#5829) and Retire a policy did nothing (#5833). A key is kebab-case: "cred-revoke".
+        bad = [f"{p.relative_to(STATIC)}:{n}" for p in sorted(STATIC.rglob("*.js")) if "vendor" not in p.parts
+               for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+               if re.search(r"data: *\{[^}]*\b[a-z]+[A-Z][A-Za-z]*\s*:", line)]
+        self.assertEqual(bad, [])
+
+
 class Dialogs(unittest.TestCase):
     def test_every_dialog_of_the_part_is_a_modal_dialog(self):
         # The page's keys and refreshes wait while a [role=dialog] shows; the End dialog had no role (#5403).

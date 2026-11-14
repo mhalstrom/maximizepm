@@ -27,10 +27,47 @@ const put = (el, html) => { if (el.dataset.sig !== html) { el.innerHTML = html; 
 
 function draw() {
   const rows = C.credentials || [];
+  drawRequests();
   put($("#credList"), rows.map(credRow).join("")
     || empty("No credentials yet. Add a sign-in below, or run maxpm secret put &lt;name&gt; in a terminal."));
   put($("#credSets"), (C.sets || []).map(setRow).join("") || empty("No sets yet. A set holds credentials that you grant together."));
   put($("#credForms"), forms());
+}
+
+// #5833 (mark 2026-11-14): a request at the person is a checklist of credentials by name, the manager's picks ticked,
+// with its task and reason; the rest of the credentials under "More credentials", unticked. OK grants exactly the
+// ticked ones (op secret, action approve, only). A request still at the manager shows as one line.
+// A box that the person changed keeps its ticks while the panel reads again: drawn once per request and state.
+function drawRequests() {
+  const host = $("#credRequests");
+  const reqs = (C.requests || []).filter(r => r.state === "asked" || r.state === "open");
+  const sig = reqs.map(r => `${r.id}:${r.state}:${(r.offered || []).join(",")}:${(r.ticked || []).join(",")}`).join("|");
+  if (host.dataset.sig === sig) return;
+  host.dataset.sig = sig;
+  host.innerHTML = reqs.map(reqBox).join("");
+}
+
+function pick(id, name, on) {
+  return `<label class="cred-check"><input type="checkbox" data-req-pick="${id}" value="${esc(name)}"${on ? " checked" : ""}> ${esc(name)}</label>`;
+}
+
+function reqBox(r) {
+  const task = r.task ? `${esc(r.covers)}: ${esc(r.task)}` : esc(r.covers);
+  if (r.state === "open") {
+    return `<div class="cred-req is-open t-s"><b>${esc(r.asked_by)}</b> asks the manager for ${esc(r.set_name)} (${task})`
+      + `${r.reason ? `: ${esc(r.reason)}` : ""}</div>`;
+  }
+  const offered = r.offered || [], ticked = new Set(r.ticked || []);
+  const more = (C.credentials || []).map(c => c.name).filter(n => !offered.includes(n));
+  return `<div class="cred-req" data-req="${r.id}">
+    <div><b>${esc(r.proposed_by || "MaximizePM")}</b> asks you to allow credentials for ${esc(r.asked_by)} (${task})</div>
+    ${r.reason ? `<div class="muted t-s">Reason: ${esc(r.reason)}</div>` : ""}
+    <div class="cred-picks">${offered.map(n => pick(r.id, n, ticked.has(n))).join("")}</div>
+    ${more.length ? `<details class="t-s"><summary>More credentials</summary><div class="cred-picks">`
+      + more.map(n => pick(r.id, n, false)).join("") + `</div></details>` : ""}
+    <div class="actions">${button("OK", { kind: "primary", data: { "req-ok": r.id } })}
+      ${button("Refuse", { data: { "req-refuse": r.id } })}</div>
+  </div>`;
 }
 
 function credRow(r) {
@@ -54,14 +91,15 @@ function setRow(s) {
       <span class="muted t-s">${s.secrets.length ? s.secrets.map(esc).join(", ") : "holds nothing yet"}</span></div>
     <div class="cred-grants">${grants.map(g => `<span class="cred-grant">${chip("c-ready", esc(g.covers || `${g.scope} ${g.value}`))}`
       + `${g.until ? `<span class="muted t-s"> until ${esc(g.until.slice(0, 10))}</span>` : ""}`
-      + iconButton("✕", `Revoke ${g.grant}`, { data: { credRevoke: g.id } }) + `</span>`).join("")
+      // A data key is kebab-case: HTML lowers an attribute's name, so data-credRevoke would read as dataset.credrevoke.
+      + iconButton("✕", `Revoke ${g.grant}`, { data: { "cred-revoke": g.id } }) + `</span>`).join("")
       || `<span class="muted t-s">No grant: no session can use it.</span>`}</div>
     <div class="cred-grantform" data-set="${esc(s.name)}">
       <select class="cred-scope" title="Grant to what">${scopes}</select>
       <input class="cred-value" placeholder="project, goal, kind, #task or agent" list="credChoices-${esc(s.name)}">
       <datalist id="credChoices-${esc(s.name)}">${choices(C.scopes ? C.scopes[0] : "project")}</datalist>
       <input class="cred-until" placeholder="until (optional: 7d, 2026-12-01)">
-      ${button("Grant", { data: { credGrant: s.name } })}
+      ${button("Grant", { data: { "cred-grant": s.name } })}
     </div>
   </div>`;
 }
@@ -115,6 +153,21 @@ panel.addEventListener("change", async (e) => {
 panel.addEventListener("click", async (e) => {
   const t = e.target.closest("button");
   if (!t) return;
+  if (t.dataset.reqOk || t.dataset.reqRefuse) {  // #5833: the person's answer to a checklist
+    const id = +(t.dataset.reqOk || t.dataset.reqRefuse);
+    const only = [...panel.querySelectorAll(`input[data-req-pick="${id}"]:checked`)].map(i => i.value);
+    if (t.dataset.reqOk && !only.length) return toast("Tick the credentials to allow, or press Refuse", true);
+    try {
+      if (t.dataset.reqOk) {
+        await act("secret", { action: "approve", request: id, only });
+        toast(`Allowed ${only.join(", ")}`);
+      } else {
+        await act("secret", { action: "refuse", request: id });
+        toast("Refused");
+      }
+    } catch (err) { return; }
+    return renderCredentials(true);
+  }
   if (t.dataset.credRevoke) {
     if (!confirm("Revoke this grant? Sessions that it covers lose the set at their next use.")) return;
     try { await act("secret", { action: "revoke", grant: +t.dataset.credRevoke }); toast("Revoked"); } catch (err) { /* shown */ }

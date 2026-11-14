@@ -22,6 +22,18 @@
 .cred-form { max-width: var(--w-form); }
 .cred-form .cred-check { display: flex; flex-direction: row; gap: var(--sp-2); align-items: center; }
 .cred-form .cred-check input { width: auto; flex: none; margin: 0; }
+/* A request at the person (#5833): a checklist box over the list; one at the manager is one quiet line. */
+.cred-req { margin: var(--sp-4) 0; padding: var(--sp-4) var(--sp-5); border-radius: var(--r-m); background: var(--human-bg);
+  border: var(--hair) solid var(--line); }
+.cred-req.is-open { background: none; padding: var(--sp-2) 0; border: none; margin: var(--sp-2) 0; }
+.cred-picks { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-6); margin: var(--sp-3) 0; }
+.cred-req .cred-check { display: flex; gap: var(--sp-2); align-items: center; min-height: var(--sp-7); }
+.cred-req .cred-check input { width: auto; flex: none; margin: 0; }
+.cred-req .actions { display: flex; gap: var(--sp-3); }
+@media (max-width: 759px) {  /* a phone: each tick on its own line, at the size of a tap */
+  .cred-picks { flex-direction: column; gap: 0; }
+  .cred-req .cred-check { min-height: var(--tap); }
+}
 @media (max-width: 759px) {  /* a phone: each field of a grant on its own line, full width */
   .cred-grantform > input, .cred-grantform > select { flex: 1 1 100%; width: 100%; max-width: none; }
 }
