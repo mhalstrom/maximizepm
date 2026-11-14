@@ -1277,7 +1277,9 @@ class SessionBrowsers(Base):
                 mock.patch.object(browser.Browser, "close", lambda b: closed.append((b.project, b.owner))):
             self.assertEqual(browser.sweep(self.c), [("web", "old")])
         self.assertEqual(closed, [("web", "old")])
-        self.assertEqual(browser.sweep(self.c), [])  # its Chrome ended (pid 4242 is not alive here)
+        # Its Chrome ended. pid_alive stays a fake here: on a GitHub runner pid 4242 can be a live process (#5713).
+        with mock.patch.object(core, "pid_alive", lambda pid: False):
+            self.assertEqual(browser.sweep(self.c), [])
 
     def test_the_panel_s_frames_come_from_its_session_s_browser(self):
         browser.get("web", "ag1").seq = 7

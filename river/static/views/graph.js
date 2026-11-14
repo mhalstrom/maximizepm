@@ -44,9 +44,16 @@ export function miniGraph(items) {
 }
 const graphView = makePanZoom($("#graph"));
 export async function renderGraph(force) {
-  if (!planShown("graph") || !window.mermaid || !S) return;  // no state yet (the page shows the tab before it, #4888)
+  if (!planShown("graph") || !S) return;  // no state yet (the page shows the tab before it, #4888)
   const proj = scope.project, withDone = $("#graphDone").checked;
   $("#graphTitle").textContent = scope.goal ? `${proj} · goal ${scope.goal}` : proj || "All projects";
+  // Mermaid comes from a CDN. When it did not load, the title still follows the scope and the graph says why it is
+  // empty (#5713: a CDN miss on a GitHub runner left the title at All projects).
+  if (!window.mermaid) {
+    if (graphSig !== "no-mermaid") graphView.show(`<div class="muted">The graph drawing library did not load. Reload the page to try again.</div>`, null);
+    graphSig = "no-mermaid";
+    return;
+  }
   const items = S.items.filter(i => (withDone || !["done", "dropped"].includes(i.status)));
   const G = scope.goal;
   const { show, total, hidden } = graphItems(items, proj || G ? items.filter(i => (!proj || i.project === proj) && inGoal(i)) : null);

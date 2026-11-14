@@ -4642,6 +4642,7 @@ def click(b, selector=None, x=None, y=None, who=None, wait=None, button="left", 
 MOD_NAMES = ("shift", "ctrl", "alt", "meta")
 HOVER_SETTLE = 0.05  # seconds after a hover for a menu that the page opens on the move
 SCROLL_STEP = 600    # pixels of one scroll down or up
+SCROLL_WAIT = 1.0    # seconds at most that a scroll waits for the page's scrollend
 DRAG_STEPS = 10      # moves between the press and the release of a drag
 
 
@@ -4695,9 +4696,14 @@ def scroll(b, target=None, amount=None, who=None, wait=None, x=None, y=None, at=
     who = driver(b, who)
     glide(b, who, x, y)
     mark = nav_mark(b)
+    # #5713: Chrome scrolls after the wheel event returns, as an animation; a fixed pause read the place before the
+    # scroll on a slow GitHub runner (y 0 after a scroll down). The page's scrollend says when the scroll stopped; a
+    # wheel that moves nothing (the end of the page) sends none, so SCROLL_WAIT caps the wait.
+    b.evaluate("window.__maxpmScrollEnd = new Promise(r => { addEventListener('scrollend', () => r(true), "
+               f"{{once: true, capture: true}}); setTimeout(() => r(false), {int(SCROLL_WAIT * 1000)}); }}); 0", 5)
     b.page("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": float(x), "y": float(y), "deltaX": float(dx),
                                         "deltaY": float(dy)})
-    _pause(HOVER_SETTLE)
+    b.evaluate("window.__maxpmScrollEnd", 5)
     out = done(b, wait or "none", mark)
     sx, sy, end = b.evaluate("[scrollX, scrollY, Math.max(0, document.documentElement.scrollHeight - innerHeight)]", 5)
     return {**out, "scrolled": {"x": round(sx), "y": round(sy), "end": round(end)}}

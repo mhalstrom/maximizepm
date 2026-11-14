@@ -746,7 +746,9 @@ try {
   await until(() => window.__appReady, "app.js loaded");
   q('nav button[data-tab="plan"]').click(); q('[data-plan-view="items"]').click();
   await until(() => q("#projects [data-ptable], #projects [data-fold]"), "the project cards");
-  if (!q("#projects .tabulator-row")) { const f = q("#projects [data-fold]"); if (f) f.click(); }
+  // A closed project opens with its fold. An open one builds its table in a later frame: a click on its fold
+  // before the rows came closed it, and no row ever showed (#5713).
+  const f = q('#projects [data-fold][aria-expanded="false"]'); if (f) f.click();
   await until(() => q("#projects .tabulator-responsive-collapse"), "a collapsed row");
   const text = (id) => { const r = [...document.querySelectorAll("#projects .tabulator-row")].find(x => x.querySelector(".id, [tabulator-field=id]") && x.textContent.includes(id));
     const c = r && r.querySelector(".tabulator-responsive-collapse"); return c ? c.textContent.replace(/\s+/g, " ") : null; };
