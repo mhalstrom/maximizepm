@@ -269,6 +269,23 @@ class SavedSignIns(Base):
         self.assertEqual(signin.enforce_cookies(b, self.c)["removed"], ["gh-cookies"])
         self.assertEqual(self.names(b), ["sid"])  # the other site's cookies stay
 
+    def test_a_new_chrome_loads_the_sign_in_again(self):
+        """#5840: realquicksite-c711 closed and opened its browser; the new Chrome had no Gmail cookies, and the load
+        skipped them because the old Chrome's 'loaded' mark stayed. start() forgets the marks of the last Chrome."""
+        from river import browser
+        b = browser.Browser("site", "dev")
+        b.cookie_loaded, b.cookie_checked = {"gh-cookies"}, True  # what the last Chrome loaded
+        seen = []
+        with mock.patch.object(browser, "setting_of", lambda *a, **k: None), \
+                mock.patch.object(browser, "Proxy", lambda *a, **k: object()), \
+                mock.patch.object(browser.Browser, "_attach_old", lambda self: True), \
+                mock.patch.object(browser.Browser, "_connect", lambda self: setattr(self, "ws", object())), \
+                mock.patch.object(signin, "enforce_cookies",
+                                  lambda bb, conn=None: seen.append((bb.__dict__.get("cookie_loaded"),
+                                                                     bb.__dict__.get("cookie_checked")))):
+            b.start()
+        self.assertEqual(seen, [(None, None)])
+
     def test_the_project_profile_copy_brings_no_sign_in_of_a_set_without_a_grant(self):
         self.save()
         b = CookieBrowser(GH + OTHER)  # its first start copied the project's profile

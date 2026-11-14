@@ -850,6 +850,10 @@ class Browser:
             self._connect()
         if self.owner:  # #5827: the saved sign-ins of its grants before the first page; none that it may not use
             from . import signin
+            # #5840: a new Chrome (or one attached again) holds none of the sign-ins that the last one loaded: forget
+            # them, or a close and open of the browser never loads them again (realquicksite-c711, Gmail).
+            self.__dict__.pop("cookie_loaded", None)
+            self.__dict__.pop("cookie_checked", None)
             try:
                 signin.enforce_cookies(self)
             except RiverError as e:
