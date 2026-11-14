@@ -45,6 +45,8 @@ class FakeRqs:
             return 201, {"key": KEY, "key_id": "k1", "app_name": "MaximizePM", "email": "person@example.com"}
         if headers.get("Authorization") != f"Bearer {KEY}":
             return 401, {"error": "invalid_key", "message": "The key is missing, wrong or removed."}
+        if path == "/api/v1/keys/revoke":
+            return 200, {"revoked": True, "key_id": "k1"}
         tool = path.rsplit("/", 1)[1]
         if tool == "read_responses":
             sub = body["subdomain"]
@@ -184,8 +186,31 @@ class Connect(Base):
         self.assertEqual(stat.S_IMODE(core.rqs_key_path(self.c).stat().st_mode), 0o600)
         text = self.cli("realquicksite", "disconnect")
         self.assertIn("key file is deleted", text)
-        self.assertIn("https://my.realquicksite.com/#apps", text)
+        self.assertIn("realquicksite removed the key", text)
+        self.assertNotIn("#apps", text)
         self.assertFalse(core.rqs_key_path(self.c).exists())
+        (call,) = [c for c in self.fake.calls if c["url"].endswith("/api/v1/keys/revoke")]
+        self.assertEqual((call["method"], call["headers"]["Authorization"]), ("POST", f"Bearer {KEY}"))
+
+    def test_disconnect_removes_the_key_on_realquicksite_or_says_where_to(self):
+        # #5798: 200 and 401 (a key that realquicksite does not know) leave nothing there; a network error or
+        # another answer: the file goes all the same, and the person clicks Remove on the setup screen.
+        def answer(status):
+            def http(method, url, body, headers):
+                if status is None:
+                    raise core.RiverError("cannot reach realquicksite: timed out")
+                return status, {"error": "invalid_key"} if status == 401 else {}
+            return http
+        for status, revoked in ((401, True), (500, False), (None, False)):
+            self.connect()
+            core.RQS_HTTP = answer(status)
+            got = core.rqs_disconnect(self.c)
+            self.assertEqual((got["disconnected"], got["revoked"]), (True, revoked), status)
+            self.assertFalse(core.rqs_key_path(self.c).exists(), status)
+            self.assertEqual("https://my.realquicksite.com/#apps" in got["next"], not revoked, got["next"])
+        self.assertIn("timed out", got["next"])
+        got = core.rqs_disconnect(self.c)
+        self.assertEqual((got["disconnected"], got["revoked"], got["next"]), (False, False, "MaximizePM was not connected"))
 
     def test_the_first_click_connects_then_publishes(self):
         got = server.OPS["canvas_publish"](self.c, {"name": str(self.cv), "version": 1}, "mark")

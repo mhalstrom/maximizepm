@@ -1161,7 +1161,7 @@ def build_parser(only=None):
     rqs = rq.add_subparsers(dest="rqcmd", required=True)
     rqs.add_parser("status", help="connected or not, and the account (never the key)")
     rqs.add_parser("connect", help="print the address that connects MaximizePM to realquicksite (maxpm serve must run)")
-    rqs.add_parser("disconnect", help="delete the key file (then click Remove on the realquicksite setup screen)")
+    rqs.add_parser("disconnect", help="remove the key on realquicksite and delete the key file")
 
     se = sub.add_parser("secret", help="secrets saved by name (a token, a client secret, a key file) and passed to a "
                         "command or a .env file; no command prints a value (#5757)")

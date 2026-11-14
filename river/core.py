@@ -17277,14 +17277,28 @@ def rqs_status(conn):
 
 
 def rqs_disconnect(conn):
-    """Delete the key file. realquicksite has no call that removes a key with the key itself, so the person removes
-    it on the setup screen too (the reply says where)."""
+    """Remove the key on realquicksite (POST /api/v1/keys/revoke with the key, #5798), then delete the key file.
+    200 (also for a key removed before) or 401 (the key is not valid there): realquicksite holds nothing more for
+    MaximizePM. With no answer (a network error) or another one, the file goes all the same, and the reply tells the
+    person to click Remove on the setup screen."""
     p = rqs_key_path(conn)
-    had = p.exists()
+    had, f, why = p.exists(), _rqs_file(conn), "the key file holds no key"
+    revoked = False
+    if f:
+        try:
+            status, _ = _rqs_http("POST", f"{RQS_HOST}/api/v1/keys/revoke", {}, f["key"])
+            revoked, why = status in (200, 401), f"realquicksite answered {status}"
+        except RiverError as e:
+            why = str(e)
     p.unlink(missing_ok=True)
-    return {"disconnected": had, "setup": RQS_SETUP,
-            "next": f"realquicksite lists MaximizePM under Connected apps until you click Remove there: {RQS_SETUP}"
-            if had else "MaximizePM was not connected"}
+    if not had:
+        nxt = "MaximizePM was not connected"
+    elif revoked:
+        nxt = "realquicksite removed the key: MaximizePM is not under its Connected apps any more"
+    else:
+        nxt = (f"realquicksite did not remove the key ({why}): it lists MaximizePM under Connected apps until you "
+               f"click Remove there: {RQS_SETUP}")
+    return {"disconnected": had, "revoked": revoked, "setup": RQS_SETUP, "next": nxt}
 
 
 def _rqs_time(s):
