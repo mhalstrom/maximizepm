@@ -27,7 +27,7 @@ import { makeMenu } from "../components/menu.js";
 import { makeSlashList } from "../components/slashList.js";
 import { markYou } from "./you.js";
 import { S } from "../page.js";
-import { renderGive } from "./sessions-work.js";
+import { renderGive, showAll, showingAll } from "./sessions-work.js";
 import { queueAnywhere } from "../components/agentStart.js";
 import { loadAgents, agentOf, mainAgent } from "../components/agents.js";
 import { statusRowHtml, statusHtml, togglePush } from "./status.js";
@@ -39,6 +39,7 @@ const FOLD = "river.sessFold";  // "1": the person folded the list of sessions (
 const TAB = "river.sessTab";  // the tab of the list (#5883)
 const TABS = { agents: "Agents", arts: "Artifacts", browsers: "Browsers" };
 const TAB_PANE = { arts: "arts", browsers: "browsers" };  // a tab whose view shows beside the list
+const SL_WIDTH = "river.sessListW", SL_MIN = 240;  // the width the person dragged the list to (#5886), and its least
 
 // The list of sessions folds to a thin strip, so the chat and the side panel get its width (#5626, mark: 'we need to be
 // able to collape the running session left panel'). The button at the list's top, or Cmd+\ (Ctrl+\ off a Mac), folds
@@ -62,6 +63,21 @@ function wireFold() {
     if ($("#tab-sessions").classList.contains("hidden") || window.innerWidth < 760) return;
     e.preventDefault(); set(!lay.classList.contains("side-folded"), true);
   });
+  // Drag the right edge of the list to resize it (#5886, mark 2026-11-14: 'make the left hand bar resizeable by
+  // dragging'), as the side panel's left edge; this browser keeps the width; a double click gives the default back.
+  const grip = $("#slGrip"), side = lay.querySelector(".sess-side");
+  const width = (w) => w ? document.documentElement.style.setProperty("--sl-w", w + "px")
+    : document.documentElement.style.removeProperty("--sl-w");
+  const keep = +store(SL_WIDTH); if (keep >= SL_MIN) width(keep);
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); grip.setPointerCapture(e.pointerId);
+    const left = side.getBoundingClientRect().left;
+    const move = (ev) => width(Math.round(Math.max(SL_MIN, Math.min(window.innerWidth * 0.5, ev.clientX - left))));
+    const up = () => { grip.removeEventListener("pointermove", move); grip.removeEventListener("pointerup", up);
+      store(SL_WIDTH, String(Math.round(side.getBoundingClientRect().width))); };
+    grip.addEventListener("pointermove", move); grip.addEventListener("pointerup", up);
+  });
+  grip.addEventListener("dblclick", () => { width(0); store(SL_WIDTH, ""); });
 }
 // Fill a part of the head only when its HTML changed: a poll (2 s) then replaces no control under the pointer.
 const putHtml = (el, h) => { if (el && el.dataset.sig !== h) { el.innerHTML = h; el.dataset.sig = h; } };  // the session the person chose last
@@ -466,7 +482,11 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
   // The Sessions row of the list (#5852, #5886: with the browsers that run) and the Status view, from the same read as
   // the rows. The view draws only while it shows; its HTML goes in only when it changed, so a row keeps its hover and focus.
   function drawStatus() {
-    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status", (S && S.browsers) || 0));
+    // Active | All at its right (#5886): All also lists the ended sessions under the running ones.
+    const all = showingAll(), seg = `<span class="sess-show" role="group" aria-label="Which sessions">${
+      button("Active", { cls: "sess-seg", pressed: !all, data: { "sess-show": "active" }, title: "Running sessions" })}${
+      button("All", { cls: "sess-seg", pressed: all, data: { "sess-show": "all" }, title: "Also the ended ones" })}</span>`;
+    putHtml($("#sessStatusRow"), statusRowHtml(list, pane === "status", (S && S.browsers) || 0) + seg);
     if (pane === "status") putHtml($("#statusList"), statusHtml(list, push));
     document.querySelectorAll("#sessStatusRow .sago, #statusList .sago").forEach(x => { x.textContent = x.dataset.at ? ago(x.dataset.at) : ""; });
   }
@@ -1099,8 +1119,10 @@ export function makeSessions({ isShown, onPick = () => {}, onPane = () => {} }) 
     const b = e.target.closest("[data-term]"); if (b) openTerminal(b.dataset.term);
     const st = e.target.closest("[data-settings]"); if (st) openSettings(st.dataset.settings, { done: refresh });
   });
-  // A tab, a row of the Artifacts or Browsers tab, or the ⚙ of the foot (#5883); true when it was one.
+  // A tab, a row of the Artifacts or Browsers tab, the ⚙ of the foot (#5883), or Active | All (#5886); true when it was one.
   function listControl(t) {
+    const sh = t.closest("[data-sess-show]");
+    if (sh) { showAll(sh.dataset.sessShow === "all"); setTab("agents"); drawStatus(); return true; }
     const tb = t.closest("[data-sess-tab]");
     if (tb) {
       const k = tb.dataset.sessTab;

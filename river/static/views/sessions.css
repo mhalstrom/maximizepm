@@ -2,7 +2,12 @@
 /* Sessions tab (#4592, #4597): the running sessions in a left bar, the chosen one on the right. */
 /* The tab fills the window under the header, edge to edge, as the side bar of a chat app (#4604). */
 main:has(> #tab-sessions:not(.hidden)) { padding: 0; max-width: none; }
-.sess-layout { display: grid; grid-template-columns: minmax(var(--w-sess-min), var(--w-sess-max)) minmax(0, 1fr); gap: 0; min-height: var(--h-box-min); }
+/* --sl-w: the width the person dragged the list to (#5886, sessions.js wireFold); none: the default range. */
+.sess-layout { display: grid; grid-template-columns: var(--sl-w, minmax(var(--w-sess-min), var(--w-sess-max))) minmax(0, 1fr); gap: 0; min-height: var(--h-box-min); }
+.sess-layout > .sess-side { position: relative; }
+.sl-grip { position: absolute; right: calc(-1 * var(--sp-1)); top: 0; bottom: 0; width: var(--sp-3); cursor: col-resize; z-index: 2; }
+.sl-grip:hover { background: var(--accent); opacity: .3; }
+@media (max-width: 759px) { .sl-grip { display: none; } }
 .sess-layout > .panel { margin-bottom: 0; min-height: 0; display: flex; flex-direction: column; border-radius: 0; box-shadow: none; border-width: 0; }
 .sess-layout > .sess-side { border-right-width: var(--hair); padding: var(--sp-5); }
 .sess-layout > .sess-main { padding: var(--sp-5) calc(var(--sp-6) + var(--sp-1)) calc(var(--sp-5) + var(--sp-0)); }
@@ -276,7 +281,7 @@ button.srow-it { cursor: pointer; }
 .mgr-none .srow-it { align-items: flex-start; }
 .mgr-none .srow-it .btn { font-size: var(--fs-s); }
 /* The side panel of the Sessions tab (#4619): left bar | chat | panel. */
-.sess-layout.with-panel { grid-template-columns: minmax(var(--w-sess-min), var(--w-sess-max)) minmax(0, 1fr) var(--sp-w, var(--w-panel)); }
+.sess-layout.with-panel { grid-template-columns: var(--sl-w, minmax(var(--w-sess-min), var(--w-sess-max))) minmax(0, 1fr) var(--sp-w, var(--w-panel)); }
 .sess-panel { position: relative; border-left-width: var(--hair) !important; padding: var(--sp-4) var(--sp-5); gap: var(--sp-3); }
 .sess-panel.hidden { display: none; }
 .sp-grip { position: absolute; left: calc(-1 * var(--sp-1)); top: 0; bottom: 0; width: var(--sp-3); cursor: col-resize; z-index: 2; }
@@ -593,6 +598,14 @@ button.srow-it { cursor: pointer; }
 .stats-narrow .stat { padding: var(--sp-1) var(--sp-2); min-width: 0; }
 .stats-narrow .stat .n { font-size: var(--fs-l); }
 .stats-narrow .stat .l { font-size: var(--fs-xs); overflow-wrap: anywhere; }
+/* The Sessions line with Active | All at its right (#5886): two joined buttons; the chosen one is filled. */
+#sessStatusRow { display: flex; align-items: center; gap: var(--sp-2); }
+#sessStatusRow > .srow { flex: 1 1 auto; }
+.sess-show { flex: none; display: inline-flex; }
+.sess-show .sess-seg { border-radius: 0; padding: var(--sp-0) var(--sp-3); font-size: var(--fs-s); }
+.sess-show .sess-seg:first-child { border-radius: var(--r-s) 0 0 var(--r-s); }
+.sess-show .sess-seg:last-child { border-radius: 0 var(--r-s) var(--r-s) 0; margin-left: calc(-1 * var(--hair)); }
+.sess-show .sess-seg.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 /* The tabs Agents, Artifacts, Browsers (#5883): a line of three equal tabs; the chosen one is underlined. Each tab's list
    scrolls under them; Cost and the ⚙ stay at the foot. */
 .sess-tabs { flex: none; display: flex; border-bottom: var(--hair) solid var(--line); margin: 0 0 var(--sp-3); }

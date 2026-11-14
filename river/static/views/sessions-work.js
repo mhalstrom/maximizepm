@@ -2,7 +2,7 @@
 // Start an agent and Capacity at the top of the list (where the new session shows), Give work in the
 // ⋯ menu of the head of a session that waits for work (#5115), and at the foot of the list the ended sessions (read only) and Close N
 // finished (the tmux panes of sessions that are done). Drawn from the page's state (S) on each refresh.
-import { $, esc, act, toast, ago, clip, shortTitle } from "../lib.js";
+import { $, esc, act, toast, ago, clip, shortTitle, store } from "../lib.js";
 import { chip } from "../components/chip.js";
 import { agentStart, queueOn, queueAnywhere } from "../components/agentStart.js";
 import { button } from "../components/button.js";
@@ -26,7 +26,12 @@ export function renderStart() {
 }
 
 // The ended sessions (stopped or gone agents with no running session), newest first; a click shows the chat read only.
-let showEnded = false;
+// They show under the running ones while the toggle at the right of the Sessions line says All (#5886, mark
+// 2026-11-14: 'a toggle to the right of the status. Active and All'); this browser keeps the choice.
+const SHOW = "river.sessShow";
+let showEnded = store(SHOW) === "all";
+export const showingAll = () => showEnded;
+export function showAll(on) { showEnded = on; store(SHOW, on ? "all" : "active"); renderFoot(); }
 function ended() {
   const running = new Set(S.sessions || []);
   return (S.agents || []).filter(a => a.kind !== "human" && ["stopped", "gone"].includes(a.state) && !running.has(a.name))
@@ -35,9 +40,7 @@ function ended() {
 export function renderFoot() {
   if (!S) return;
   const E = ended(), done = S.tmux_done || [];
-  put($("#sessFoot"), (E.length ? button(showEnded ? `Hide ended` : `Show ${E.length} ended`, { cls: "plain", pressed: showEnded,
-      data: { "sess-ended": 1 }, title: "Stopped sessions, read only" }) : "")
-    + (done.length ? button(`Close ${done.length} finished`, { data: { "sess-tidy": 1 },
+  put($("#sessFoot"), (done.length ? button(`Close ${done.length} finished`, { data: { "sess-tidy": 1 },
       title: "Close the panes of finished sessions\n"
         + done.map(p => `${p.name}: ${p.why}`).join("\n") }) : ""));
   const box = $("#sessEnded");
@@ -75,7 +78,6 @@ document.addEventListener("change", (e) => { const s = e.target.closest && e.tar
 
 // A click on these controls; true when it was one (the frame then stops).
 export function onClick(t) {
-  if (t.closest("[data-sess-ended]")) { showEnded = !showEnded; renderFoot(); return true; }
   if (t.closest("[data-sess-tidy]")) {
     act("tmux_tidy", {}).then(r => toast(r.closed.length ? `Closed ${r.closed.length} finished: ${r.closed.map(p => p.name).join(", ")}` : "No finished session to close")).catch(() => {});
     return true;

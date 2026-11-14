@@ -1462,8 +1462,8 @@ try {
                                                            "tabs": ["sessions", "plan", "terminal"]})
 
     def test_the_work_controls_of_the_sessions_list(self):
-        """#5102 step 2 (design #4657): Start an agent at the top of the list; Show ended at its foot, with the ended
-        sessions; Give work in the head of a waiting session; the queue and + item in a session's Items list."""
+        """#5102 step 2 (design #4657): Start an agent at the top of the list; All (#5886: Active | All at the right of
+        the Sessions line) shows the ended sessions; Give work in the head of a waiting session; the queue and + item in a session's Items list."""
         core.config_set(self.c, "setup_done", "on")
         footer = core.item_add(self.c, "site", "footer")["id"]
         core.register(self.c, "old", note="built the logo")
@@ -1473,8 +1473,8 @@ try {
             self.c.execute("UPDATE agents SET last_seen='2026-01-01T00:00:00Z' WHERE name='old'")
             self.c.execute("UPDATE agents SET role='waiting', waiting_in='site' WHERE name='wt'")
         driver = r'''try {
-  await until(() => window.__appReady && q("#sessStart [data-launch]") && q("#sessFoot [data-sess-ended]"), "Start an agent and Show ended");
-  q("#sessFoot [data-sess-ended]").click();
+  await until(() => window.__appReady && q("#sessStart [data-launch]") && q('#sessStatusRow [data-sess-show="all"]'), "Start an agent and All");
+  q('#sessStatusRow [data-sess-show="all"]').click();
   await until(() => q('#sessEnded .srow[data-session="old"]'), "the ended session");
   await until(() => q('#sessions .srow[data-session="ag"][data-agent="ag"]'), "a running row is a drop target");
   q('[data-sp-open="items"]').click();
