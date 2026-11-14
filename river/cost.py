@@ -124,10 +124,11 @@ def report(conn, period="today", root=None, extras=True):
                 s["items"].add(item_id)
                 it = items.get(item_id)
                 if it is None:
-                    r = conn.execute("SELECT i.id, i.title, i.status, p.name project FROM items i JOIN projects p "
-                                     "ON p.id=i.project_id WHERE i.id=?", (item_id,)).fetchone()
-                    it = items[item_id] = {"id": item_id, "title": r["title"] if r else "", "status": r["status"]
-                                           if r else None, "project": r["project"] if r else None, **_blank()}
+                    r = conn.execute("SELECT i.id, i.title, i.short, i.status, p.name project FROM items i JOIN "
+                                     "projects p ON p.id=i.project_id WHERE i.id=?", (item_id,)).fetchone()
+                    it = items[item_id] = {"id": item_id, "title": r["title"] if r else "",
+                                           "short": r["short"] if r else None, "status": r["status"] if r else None,
+                                           "project": r["project"] if r else None, **_blank()}
                 _add(it, u, cost)
                 proj = it["project"]
             else:

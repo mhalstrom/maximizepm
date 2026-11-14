@@ -23,7 +23,7 @@ export async function showCost() {
   const box = $("#costView");
   if (!wired) { wire(box); wired = true; }
   const mine = ++reading;
-  if (!data || data.period !== period) box.innerHTML = head() + `<div class="muted t-m cost-note">Reading the chat logs of the sessions… A long period takes a few seconds the first time.</div>`;
+  if (!data || data.period !== period) box.innerHTML = head() + `<div class="muted t-m cost-note">Reading the chat logs of the sessions… A long period can take up to a minute the first time; then it is fast.</div>`;
   try {
     const got = await getJson("api/cost?period=" + period);
     if (mine !== reading) return;
@@ -67,7 +67,7 @@ function rowsHtml(d) {
   const total = d.total.usd || 0;
   const name = (r) => table === "sessions"
     ? `<span class="link" data-cost-session="${esc(r.agent)}" title="Open its chat">${esc(r.agent)}</span>${r.state && !["active", "away"].includes(r.state) ? ` <span class="muted t-s">${esc(r.state)}</span>` : ""}`
-    : table === "items" ? `<span class="link" data-cost-item="${r.id}" title="${esc(r.title)}">#${r.id}</span> ${esc(r.title)} <span class="muted t-s">${esc(r.project || "")}</span>`
+    : table === "items" ? `<span class="link" data-cost-item="${r.id}">#${r.id}</span> <span title="${esc(r.title)}">${esc(r.short || r.title)}</span> <span class="muted t-s">${esc(r.project || "")}</span>`
     : esc(r.project || "no project");
   const extra = (r) => table === "sessions" ? `<td class="cost-model muted t-s">${esc((r.model || "").replace(/^claude-/, ""))}</td>` : "";
   return `<div class="cost-scroll"><table class="cost-t"><thead><tr><th>${TABLES.find(t => t[0] === table)[1].replace(/s$/, "")}</th>${table === "sessions" ? `<th class="cost-model">Model</th>` : ""}
