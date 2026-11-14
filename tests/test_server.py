@@ -1124,6 +1124,12 @@ class LaunchAgent(unittest.TestCase):
         self.assertIn(f"WORKTREE: you work in {wt}, on the branch maxpm/{name} of {root}", out.getvalue())
         core.release(self.c, t["item"]["id"], "the test goes on", name)
         self.assertEqual(server.workspace_sweep(self.c), {})  # its session runs
+        # End asks it to stop: it still runs in the worktree until maxpm serve finishes the stop, so the worktree stays.
+        core.register(self.c, "mark", human=True)
+        core.stop_agent(self.c, name, reason="done", actor="mark")
+        self.assertEqual(server.workspace_sweep(self.c), {})
+        with self.assertRaisesRegex(RiverError, "still runs"):
+            server.workspace_drop(self.c, name)
         Path(wt, "cart.txt").write_text("cart\n")
         git("add", "cart.txt", cwd=wt)
         git("commit", "-q", "-m", "the cart", cwd=wt)

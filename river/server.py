@@ -372,14 +372,26 @@ def _workspace(conn, t, name, project_id, make=True):
             **({"setup": setup} if mode == "setup" else {})}
 
 
+def _session_ended(conn, w):
+    """Whether the session of a worktree has ended: it is no longer registered, or it is gone and its process runs no
+    more. A stop request is not an end: the agent runs in the worktree until maxpm serve finishes the stop (#5856:
+    the first sweep removed a worktree 25 seconds after End, under the running agent)."""
+    a = conn.execute("SELECT pid, host FROM agents WHERE name=?", (w["agent"],)).fetchone()
+    if a is None:
+        return True
+    if a["pid"] and a["host"] == core.this_host() and core.pid_alive(a["pid"]):
+        return False
+    return w["state"] == "gone"
+
+
 def workspace_sweep(conn):
-    """One pass of maxpm serve (#5856): each worktree whose session has ended (gone, stopped, or no longer
-    registered) goes when nothing in it would be lost: no uncommitted change, and its branch merged into the project
-    folder's HEAD (or with no commit of its own). git worktree remove, then git branch -d. Else it stays, with the
-    reason (maxpm workspace list), and is looked at again after WORKSPACE_LOOK. Returns {path: removed | why kept}."""
+    """One pass of maxpm serve (#5856): each worktree whose session has ended (_session_ended) goes when nothing in
+    it would be lost: no uncommitted change, and its branch merged into the project folder's HEAD (or with no commit
+    of its own). git worktree remove, then git branch -d. Else it stays, with the reason (maxpm workspace list), and
+    is looked at again after WORKSPACE_LOOK. Returns {path: removed | why kept}."""
     out, t = {}, core.now()
     for w in core.workspace_list(conn):
-        if w["state"] not in ("gone", "stopped"):
+        if not _session_ended(conn, w):
             continue
         if w["checked_at"] and w["kept_why"] and t - core.parse_iso(w["checked_at"]) < WORKSPACE_LOOK:
             continue
@@ -421,8 +433,9 @@ def workspace_drop(conn, agent, force=False, actor=None):
     w = next((x for x in core.workspace_list(conn) if x["agent"] == agent), None)
     if w is None:
         raise RiverError(f"{agent} has no worktree; maxpm workspace list shows them")
-    if w["state"] not in ("gone", "stopped"):
-        raise RiverError(f"{agent} still runs in {w['path']}; end it first (End on the Sessions tab, or maxpm stop {agent})")
+    if not _session_ended(conn, w):
+        raise RiverError(f"{agent} still runs in {w['path']}; end it first (End on the Sessions tab), and drop the "
+                         f"worktree when it has ended")
     why = _workspace_remove(w, force)
     if why:
         raise RiverError(f"{w['path']} has {why}; merge or commit them, or remove them too: maxpm workspace drop "
