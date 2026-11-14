@@ -306,5 +306,72 @@ class SavedSignIns(Base):
         self.assertEqual(vault.unpack_cookies(packed), [{"name": "n", "value": "v\n"}])
 
 
+class SigninRequests(Base):
+    """#5840: a session asks for the person's sign-ins of sites from another session's browser; the person gets it at
+    once (the page's modal), and Allow saves the ticked sites' cookies and grants them to the task in one step."""
+
+    def setUp(self):
+        super().setUp()
+        from river import browser
+        core.register(self.c, "boss")
+        self.addCleanup(lambda saved=dict(browser.BROWSERS): (browser.BROWSERS.clear(), browser.BROWSERS.update(saved)))
+        src = CookieBrowser(GH + OTHER, owner="boss")
+        src.proxy = None
+        browser.BROWSERS[("site", "boss")] = src
+
+    def ask(self, sites=("github.com", "example.org")):
+        return vault.signin_request(self.c, list(sites), "site/boss", "check the repo page", "dev")
+
+    def test_allow_saves_the_ticked_sites_and_grants_them_to_the_task(self):
+        from river.routes import secrets as routes_secrets
+        r = self.ask()
+        self.assertEqual((r["state"], r["sites"], r["ticked"], r["to"], r["scope"], r["value"]),
+                         ("asked", ["github.com", "example.org"], ["github.com", "example.org"], "mark", "item",
+                          str(self.item)))
+        body = self.c.execute("SELECT body FROM messages WHERE to_agent='mark' ORDER BY id DESC").fetchone()[0]
+        self.assertIn("asks for your sign-ins of github.com, example.org from the browser of boss (site)", body)
+        # The page's state lists it, so the modal opens over any tab
+        self.assertEqual([x[0] for x in self.c.execute(
+            "SELECT id FROM secret_requests WHERE state='asked' AND sites IS NOT NULL")], [r["id"]])
+        with self.assertRaises(RiverError):  # only a person allows
+            routes_secrets.act(self.c, {"action": "approve", "request": r["id"], "only": ["github.com"]}, "dev")
+        out = routes_secrets.act(self.c, {"action": "approve", "request": r["id"], "only": ["github.com"]}, "mark")
+        self.assertEqual((out["state"], out["saved"]), ("granted", [f"r{r['id']}-github.com"]))
+        b = CookieBrowser(owner="dev")
+        self.assertEqual(signin.enforce_cookies(b, self.c)["loaded"], [f"r{r['id']}-github.com"])
+        self.assertEqual(sorted(c["name"] for c in b.jar), ["_gh_sess", "user_session"])  # not example.org's
+        other = CookieBrowser(owner="boss")  # the grant covers the task, not every session
+        self.assertEqual(signin.enforce_cookies(other, self.c)["loaded"], [])
+
+    def test_a_site_with_no_sign_in_there_refuses_the_whole_allow_and_deny_refuses(self):
+        from river.routes import secrets as routes_secrets
+        r = self.ask(("github.com", "gitlab.com"))
+        with self.assertRaises(RiverError) as e:
+            routes_secrets.act(self.c, {"action": "approve", "request": r["id"]}, "mark")
+        self.assertIn("has no sign-in of gitlab.com", str(e.exception))
+        self.assertEqual([s["name"] for s in vault.listing(self.c)["secrets"]], ["gh"])  # nothing was saved
+        with self.assertRaises(RiverError):
+            routes_secrets.act(self.c, {"action": "approve", "request": r["id"], "only": ["evil.com"]}, "mark")
+        self.assertEqual(routes_secrets.act(self.c, {"action": "refuse", "request": r["id"]}, "mark")["state"],
+                         "refused")
+
+    def test_the_panel_read_names_the_accounts_of_each_site(self):
+        from river import browser
+        from river.routes import secrets as routes_secrets
+        browser.account_change(self.c, "github.com", "mark-gh", actor="mark")
+        self.ask()
+        reqs = vault.requests(self.c)["requests"]
+        routes_secrets.signin_accounts(self.c, reqs)
+        self.assertEqual(reqs[0]["accounts"], {"github.com": ["mark-gh"], "example.org": []})
+
+    def test_the_cli_asks_with_signin_and_from(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.run(["--as", "dev", "secret", "request", "--signin", "github.com", "--from", "boss",
+                     "--from-project", "site", "--reason", "check the repo page"])
+        self.assertIn("r1", out.getvalue())
+        self.assertEqual(vault.requests(self.c)["requests"][0]["source"], "site/boss")
+
+
 if __name__ == "__main__":
     unittest.main()

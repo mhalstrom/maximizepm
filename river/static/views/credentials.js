@@ -58,9 +58,12 @@ function reqBox(r) {
       + `${r.reason ? `: ${esc(r.reason)}` : ""}</div>`;
   }
   const offered = r.offered || [], ticked = new Set(r.ticked || []);
-  const more = (C.credentials || []).map(c => c.name).filter(n => !offered.includes(n));
+  // #5840: a request for sign-ins offers its sites only; OK saves their cookies from the browser and grants them
+  const signins = (r.sites || []).length > 0;
+  const more = signins ? [] : (C.credentials || []).map(c => c.name).filter(n => !offered.includes(n));
   return `<div class="cred-req" data-req="${r.id}">
-    <div><b>${esc(r.proposed_by || "MaximizePM")}</b> asks you to allow credentials for ${esc(r.asked_by)} (${task})</div>
+    <div>${signins ? `<b>${esc(r.asked_by)}</b> asks to use your sign-ins of these sites for ${task}`
+      : `<b>${esc(r.proposed_by || "MaximizePM")}</b> asks you to allow credentials for ${esc(r.asked_by)} (${task})`}</div>
     ${r.reason ? `<div class="muted t-s">Reason: ${esc(r.reason)}</div>` : ""}
     <div class="cred-picks">${offered.map(n => pick(r.id, n, ticked.has(n))).join("")}</div>
     ${more.length ? `<details class="t-s"><summary>More credentials</summary><div class="cred-picks">`
@@ -125,12 +128,45 @@ function forms() {
     <label>Add to set<select id="credSet"><option value="">no set</option>${sets}</select></label>
     <div class="actions">${button("Save sign-in", { kind: "primary", id: "credSave" })}</div>
   </div>
+  ${browserForm()}
   <div class="cred-sub">New set</div>
   <div class="form cred-form">
     <label>Name<input id="setName" placeholder="stripe-live" autocomplete="off"></label>
     <label class="cred-check"><input type="checkbox" id="setManager"> The manager may grant it</label>
     <div class="actions">${button("Make set", { id: "credMakeSet" })}</div>
   </div>`;
+}
+
+// #5840: the sign-in that the person made in a session's Browser pane (its cookies of one site) goes into a set from
+// here, as maxpm secret cookies does in a terminal. The list holds the session browsers that serve runs now. A set
+// name that does not exist yet makes the set (without "the manager may grant").
+function browserForm() {
+  const list = C.browsers || [];
+  if (!list.length) return `<div class="cred-sub">Save a browser's sign-in</div>`
+    + `<div class="muted t-s">No session browser runs now. Sign in to the site in a session's Browser pane first.</div>`;
+  const opts = list.map(b => `<option value="${esc(b.session)}|${esc(b.project)}">${esc(b.session)} · ${esc(b.project)}</option>`).join("");
+  const sets = (C.sets || []).map(s => `<option value="${esc(s.name)}">`).join("");
+  return `<div class="cred-sub">Save a browser's sign-in</div>
+  <div class="form cred-form" id="credCookies">
+    <div class="two"><label>Browser of<select id="ckBrowser">${opts}</select></label>
+      <label>Site<input id="ckSite" placeholder="google.com" autocomplete="off"></label></div>
+    <div class="two"><label>Name<input id="ckName" placeholder="gmail-mark" autocomplete="off"></label>
+      <label>Set<input id="ckSet" placeholder="a set, new or old" list="ckSets" autocomplete="off"></label></div>
+    <datalist id="ckSets">${sets}</datalist>
+    <div class="actions">${button("Save browser sign-in", { kind: "primary", id: "ckSave" })}</div>
+  </div>`;
+}
+
+async function saveCookies() {
+  const name = $("#ckName").value.trim(), site = $("#ckSite").value.trim(), set = $("#ckSet").value.trim();
+  const [session, project] = $("#ckBrowser").value.split("|");
+  if (!name || !site) return toast("Fill in the site and the name", true);
+  try {
+    const r = await act("secret", { action: "cookies", name, site, session, agent: session, project, set: set || null });
+    toast(`Saved ${name}: ${r.cookies} cookies of ${r.site}` + (set ? ` in ${set}` : ""));
+  } catch (err) { return; }
+  ["#ckName", "#ckSite", "#ckSet"].forEach(s => { $(s).value = ""; });
+  renderCredentials(true);
 }
 
 // UTF-8 text as base64, as op "secret" takes a value.
@@ -185,6 +221,7 @@ panel.addEventListener("click", async (e) => {
     return renderCredentials(true);
   }
   if (t.id === "credSave") return saveSignin();
+  if (t.id === "ckSave") return saveCookies();
   if (t.id === "credMakeSet") {
     const name = $("#setName").value.trim();
     if (!name) return toast("Type the set's name", true);

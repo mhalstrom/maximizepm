@@ -36,6 +36,7 @@ import { renderLog, renderEvents } from "./views/done.js";
 import { renderHealth } from "./views/health.js";
 import * as settings from "./views/settings.js";
 import { renderCredentials } from "./views/credentials.js";
+import { signinAsks } from "./views/signinAsk.js";
 import { makeMenu } from "./components/menu.js";
 hooks.refresh = refresh;
 Object.assign(nav, { openDrawer: (id, fresh) => openDrawer(id, fresh), setTab: (n, push) => setTab(n, push), openReady: () => openReady(),
@@ -260,6 +261,7 @@ async function refresh() {
   canvasState(S.canvases);  // an open canvas follows its newest version (#4768)
   canvasOpens(S.canvas_opens, (name) => nav.openSession(name));  // maxpm canvas open (#4783)
   browserOpens(S.browser_opens);  // maxpm browser open: the browser shows in that session's panel (#4631)
+  signinAsks(S.signin_asks);  // a session asks for the person's sign-ins: the permission modal (#5840)
   renderGraph(false); renderLog(false); renderHealth(false); ops.renderOps(false); needsYou.pollNeedsYou().then(firstYou).catch(() => {}); inbox.pollInbox().catch(() => {});
   $("#stamp").textContent = "updated " + new Date().toLocaleTimeString();
   const boot = $("#bootNote"); if (boot) boot.remove();

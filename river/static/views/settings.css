@@ -30,6 +30,11 @@
 .cred-req .cred-check { display: flex; gap: var(--sp-2); align-items: center; min-height: var(--sp-7); }
 .cred-req .cred-check input { width: auto; flex: none; margin: 0; }
 .cred-req .actions { display: flex; gap: var(--sp-3); }
+/* The permission modal for sign-ins (#5840): its head, and the box of the request without a margin of its own. */
+#signinDlg { --dlg-w: var(--w-dlg-s); }
+.signin-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-3); }
+.signin-head h2 { margin: 0; }
+#signinDlg .cred-req { margin: var(--sp-4) 0 0; }
 @media (max-width: 759px) {  /* a phone: each tick on its own line, at the size of a tap */
   .cred-picks { flex-direction: column; gap: 0; }
   .cred-req .cred-check { min-height: var(--tap); }

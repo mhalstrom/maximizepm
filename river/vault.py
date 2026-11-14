@@ -953,7 +953,7 @@ def request_info(conn, r):
     import json
     d = dict(r)
     d["request"] = f"r{r['id']}"
-    for k in ("offered", "ticked", "chosen"):
+    for k in ("offered", "ticked", "chosen", "sites"):
         d[k] = json.loads(r[k]) if r[k] else []
     d["covers"] = _scope_text(conn, r["scope"], r["value"])
     it = conn.execute("SELECT title, short FROM items WHERE id=?", (r["item_id"],)).fetchone() if r["item_id"] else None
@@ -968,6 +968,46 @@ def _checklist(conn, rid, offered, ticked, reason, task, who):
             f"Tick or untick them on the page and press OK: {notify.page_url(conn)}settings\n"
             f"Or here: maxpm secret approve r{rid} (the ticked ones), --only <names> (your own pick), "
             f"or maxpm secret refuse r{rid} --note \"<why>\"")
+
+
+def signin_request(conn, sites, source, reason, actor=None, item=None):
+    """A session asks for the person's sign-ins of some sites (#5840, mark 2026-11-14: 'a permissions modal'): the
+    cookies of each site in the browser source ('project/session'), where the person signed in. It goes to the person
+    at once: the page shows it as a modal over any tab, each site ticked. Allow (routes/secrets.py) saves the ticked
+    sites' cookies and grants them to the task the session holds, else to the session; Deny refuses."""
+    import json
+    who = session_of(conn, actor)
+    if who["person"]:
+        raise RiverError("a session asks for sign-ins; a person saves one in the Credentials panel")
+    if not (reason or "").strip():
+        raise RiverError("say why the task needs it: maxpm secret request --signin <site> --from <session> "
+                         "--reason \"<why>\"")
+    sites = list(dict.fromkeys(norm_site(s) for s in sites if (s or "").strip()))
+    if not sites:
+        raise RiverError("name the sites: --signin google.com,cloudflare.com")
+    project, _, session = (source or "").partition("/")
+    if not project:
+        raise RiverError("name the browser where the person is signed in: --from <session> (and --from-project)")
+    core._project(conn, project)
+    people = _people(conn)
+    if not people:
+        raise RiverError("no person is registered to ask (maxpm register <name> --human)")
+    name = who["name"]
+    held = core._item(conn, item) if item else core._held_item(conn, name)
+    scope, value = ("item", str(held["id"])) if held else ("agent", name)
+    task = f"#{held['id']}" if held else name
+    from . import notify
+    with core.tx(conn):
+        cur = conn.execute("INSERT INTO secret_requests (item_id, scope, value, reason, asked_by, asked_at, offered, "
+                           "ticked, state, sites, source) VALUES (?,?,?,?,?,?,?,?,'asked',?,?)",
+                           (held["id"] if held else None, scope, value, reason.strip(), name, core.iso(core.now()),
+                            json.dumps(sites), json.dumps(sites), json.dumps(sites), f"{project}/{session}"))
+        rid = cur.lastrowid
+        where = f"the browser of {session} ({project})" if session else f"the browser of project {project}"
+        core._send(conn, "alert", "maxpm", f"{name} asks for your sign-ins of {', '.join(sites)} from {where} for "
+                   f"{task} (request r{rid}). Reason: {reason.strip()}. The page shows it now: Allow or Deny. "
+                   f"{notify.page_url(conn)}", to=people[0], item_id=held["id"] if held else None)
+    return {**request_info(conn, _request(conn, rid)), "to": people[0]}
 
 
 def request(conn, set_name, reason, actor=None, item=None):

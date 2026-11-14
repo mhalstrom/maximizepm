@@ -481,6 +481,26 @@ class CredentialsPanel(Base):
         routes_secrets.credentials(h, h.path)
         self.assertEqual(h.sent[1]["grants"], [])
 
+    def test_the_read_lists_the_session_browsers_that_run(self):
+        """#5840: the panel saves a session browser's sign-in; it offers only the browsers that serve runs now."""
+        from river import browser
+
+        class B:
+            def __init__(self, on, proxy=None):
+                self.on, self.proxy = on, proxy
+
+            def running(self):
+                return self.on
+
+        self.addCleanup(lambda saved=dict(browser.BROWSERS): (browser.BROWSERS.clear(), browser.BROWSERS.update(saved)))
+        browser.BROWSERS.clear()
+        browser.BROWSERS.update({("site", "dev-2"): B(True), ("site", "dev-1"): B(False, proxy=object()),
+                                 ("site", "gone"): B(False), ("site", None): B(True)})
+        h = self.Handler("/api/credentials")
+        routes_secrets.credentials(h, h.path)
+        self.assertEqual(h.sent[1]["browsers"], [{"session": "dev-1", "project": "site"},
+                                                 {"session": "dev-2", "project": "site"}])
+
 
 class Levels(Base):
     """Protection levels (#5825): locked, hidden (the default), open."""

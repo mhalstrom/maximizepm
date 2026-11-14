@@ -25,10 +25,31 @@ def credentials(h, path):
         out = {"credentials": rows, "sets": vault.sets(conn)["sets"], "grants": vault.grants(conn)["grants"],
                "requests": vault.requests(conn)["requests"],  # #5834: the checklists that wait (#5833 draws them)
                "levels": list(vault.LEVELS), "scopes": list(vault.GRANT_SCOPES), "kinds": list(vault.GRANT_KINDS),
-               "store": vault.backend().name}
+               "store": vault.backend().name, "browsers": session_browsers()}
+        signin_accounts(conn, out["requests"])
     finally:
         conn.close()
     return h._send(200, out)
+
+
+def signin_accounts(conn, reqs):
+    """Each sign-in request gets 'accounts': {site: [the accounts that maxpm browser accounts lists there]}, so the
+    modal names the account whose sign-in the person gives (#5840)."""
+    from .. import browser
+    for r in reqs:
+        if r.get("sites"):
+            pairs = browser.accounts(conn, (r.get("source") or "").partition("/")[0] or None)
+            r["accounts"] = {s: [a for site, a in pairs if browser.on_site(s, site) or browser.on_site(site, s)]
+                             for s in r["sites"]}
+
+
+def session_browsers():
+    """The session browsers that serve runs now, as [{'session', 'project'}] (#5840): the Credentials panel saves
+    the sign-in of one of them into a set (action cookies), so the person types no terminal command."""
+    from .. import browser  # here, not at the top: the CLI calls act() and needs no browser code
+    return [{"session": owner, "project": project}
+            for (project, owner), b in sorted(list(browser.BROWSERS.items()), key=lambda kv: (kv[0][1] or "", kv[0][0]))
+            if owner and (b.running() or b.proxy is not None)]
 
 
 GET = [(lambda path: path == "/api/credentials", credentials)]
@@ -70,6 +91,38 @@ def from_browser(conn, a, who):
     return text.encode()
 
 
+def approve_signins(conn, a, who):
+    """Allow of a sign-in request (#5840): for each ticked site, the cookies of the request's source browser are saved
+    as a saved sign-in (r<id>-<site>), and approve grants exactly those, as a set of their own, to the request's task
+    or session. One step, by serve, as the person's act; a site with no cookies there refuses the whole Allow."""
+    from .. import browser, signin
+    vault._person_only(conn, who, "allow a sign-in request")
+    r = vault.request_info(conn, vault._request(conn, a.get("request")))
+    if r["state"] not in ("open", "asked"):
+        raise RiverError(f"request {r['request']} is {r['state']}")
+    pick = r["ticked"] if a.get("only") is None else [vault.norm_site(s) for s in a["only"] if s.strip()]
+    if not pick:
+        raise RiverError(f"nothing is ticked: tick the sites to allow, or Deny (maxpm secret refuse {r['request']})")
+    wrong = [s for s in pick if s not in r["sites"]]
+    if wrong:
+        raise RiverError(f"{', '.join(wrong)}: not asked in {r['request']} (it asks for {', '.join(r['sites'])})")
+    project, _, session = (r["source"] or "").partition("/")
+    b = browser.find(project, session or None)
+    if b is None or not (b.running() or b.proxy is not None):
+        raise RiverError(f"the browser of {session or project} is not running now: open it in its Browser pane, "
+                         "sign in, then Allow again")
+    got = {}
+    for site in pick:
+        got[site] = signin.site_cookies(b, site)
+        if not got[site]:
+            raise RiverError(f"the browser of {session or project} has no sign-in of {site}: sign in there, then "
+                             "Allow again")
+    names = []
+    for site, cookies in got.items():
+        names.append(vault.cookies_save(conn, f"{r['request']}-{site}", site, cookies, who)["secret"])
+    return {**vault.approve(conn, r["id"], names, who, a.get("note")), "saved": names}
+
+
 def act(conn, a, who):
     action = a.get("action")
     name = a.get("name")
@@ -84,9 +137,13 @@ def act(conn, a, who):
         return {"secret": name, "value_b64": base64.b64encode(data).decode(), **vault.protection(conn, name)}
     # Requests and their checklists (#5834)
     if action == "request":
+        if a.get("sites"):  # #5840: sign-ins from a session's browser, at the person at once
+            return vault.signin_request(conn, a["sites"], a.get("source"), a.get("reason"), who, a.get("item"))
         return vault.request(conn, name, a.get("reason"), who, a.get("item"))
     if action == "propose":
         return vault.propose(conn, a.get("request"), a.get("offer") or [], a.get("tick") or [], a.get("reason"), who)
+    if action == "approve" and vault._request(conn, a.get("request"))["sites"]:
+        return approve_signins(conn, a, who)
     if action == "approve":
         return vault.approve(conn, a.get("request"), a.get("only"), who, a.get("note"))
     if action == "refuse":

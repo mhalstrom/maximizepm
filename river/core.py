@@ -1207,6 +1207,9 @@ CREATE INDEX IF NOT EXISTS secret_grants_set ON secret_grants(set_id);
 -- by name), ticked (the ones it expects the person to allow). The person's OK grants exactly chosen, as a set of its
 -- own (set_id) to the scope. state: open (at the manager), asked (at the person), granted, refused, withdrawn.
 -- Readers: maxpm secret requests|approve|refuse|check, GET /api/credentials (the page's checklist, #5833).
+-- A request for sign-ins (#5840, mark 2026-11-14: 'a permissions modal'): sites (JSON, the sites asked for) and
+-- source (project/session: the browser where the person is signed in); it goes to the person at once, the page shows
+-- it as a modal, and Allow saves the ticked sites' cookies from source and grants them (routes/secrets.py).
 CREATE TABLE IF NOT EXISTS secret_requests (
   id          INTEGER PRIMARY KEY,
   item_id     INTEGER,
@@ -1226,7 +1229,9 @@ CREATE TABLE IF NOT EXISTS secret_requests (
   chosen      TEXT,
   note        TEXT,
   set_id      INTEGER,
-  grant_id    INTEGER
+  grant_id    INTEGER,
+  sites       TEXT,
+  source      TEXT
 );
 
 -- The prompts that people sent to a session from the Sessions tab's message box (#4855): Up and Down in the box
@@ -1929,6 +1934,10 @@ def _migrate(conn):
         conn.execute("ALTER TABLE secrets ADD COLUMN allow_hosts TEXT")
         conn.execute("ALTER TABLE secrets ADD COLUMN allow_env INTEGER NOT NULL DEFAULT 0")
         conn.execute("ALTER TABLE secrets ADD COLUMN var TEXT")
+    # Requests for sign-ins from a session's browser (#5840).
+    if "sites" not in {r["name"] for r in conn.execute("PRAGMA table_info(secret_requests)")}:
+        conn.execute("ALTER TABLE secret_requests ADD COLUMN sites TEXT")
+        conn.execute("ALTER TABLE secret_requests ADD COLUMN source TEXT")
     # Sign-in credentials (#5826).
     if "site" not in {r["name"] for r in conn.execute("PRAGMA table_info(secrets)")}:
         conn.execute("ALTER TABLE secrets ADD COLUMN kind TEXT NOT NULL DEFAULT 'token'")

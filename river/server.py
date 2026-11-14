@@ -4883,6 +4883,9 @@ def page_state(closed, timing=None):
             part("sessions")
             st["relay"] = relay.status()
             st["canvas_opens"] = canvas_opens()  # maxpm canvas open: the page opens the canvas (#4783)
+            # #5840: the sign-in requests at the person: the page shows each as a modal over any tab
+            st["signin_asks"] = [r[0] for r in conn.execute(
+                "SELECT id FROM secret_requests WHERE state='asked' AND sites IS NOT NULL ORDER BY id")]
             from .routes import browser as browser_routes
             st["browser_opens"] = browser_routes.browser_opens()  # maxpm browser open: the panel shows it (#4631)
             st["loop"] = core.serve_loop(conn)  # the page says when the loop of this server is late

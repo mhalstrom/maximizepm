@@ -1200,8 +1200,14 @@ def build_parser(only=None):
     x.add_argument("--project")
     x.add_argument("--note")
     # Requests (#5834): a session asks; the manager grants a marked set or proposes a checklist; the person approves.
-    x = ses.add_parser("request", help="ask the manager for a set for your task: maxpm secret request <set> --reason")
-    x.add_argument("name", help="the set")
+    x = ses.add_parser("request", help="ask the manager for a set for your task: maxpm secret request <set> --reason; "
+                                       "or the person's sign-ins of sites: --signin <sites> --from <session>")
+    x.add_argument("name", nargs="?", help="the set")
+    x.add_argument("--signin", help="#5840: the sites whose sign-in you need, comma separated (google.com,"
+                                    "cloudflare.com): the person gets a modal on the page, Allow or Deny")
+    x.add_argument("--from", dest="source", help="with --signin: the session whose browser is signed in")
+    x.add_argument("--from-project", dest="source_project",
+                   help="with --signin: the project of that browser (default: the session's item's)")
     x.add_argument("--reason", required=True, help="why the task needs it")
     x.add_argument("--item", help="the task (default: the one you hold)")
     x = ses.add_parser("propose", help="the manager: put a request to the person as a checklist of credentials")
@@ -5538,6 +5544,19 @@ def _secret_cmd(conn, a, actor):
         args = {"action": cmd, "name": getattr(a, "name", None), "request": getattr(a, "request", None)}
         if cmd == "request":
             args.update(reason=a.reason, item=a.item)
+            if a.signin:
+                if not a.source:
+                    raise RiverError("name the session whose browser is signed in: --from <session>")
+                from . import browser
+                project = browser.project_of(conn, a.source_project, a.source)
+                args.update(sites=names(a.signin), source=f"{project}/{a.source}")
+            elif not a.name:
+                raise RiverError("name the set: maxpm secret request <set> --reason \"<why>\" (or --signin <sites> "
+                                 "--from <session>)")
+        elif cmd == "approve" and vault._request(conn, a.request)["sites"]:
+            # #5840: Allow of a sign-in request reads the cookies of a browser, which runs in maxpm serve
+            return ask_server(conn, "secret", {**args, "only": names(a.only) if a.only is not None else None,
+                                               "note": a.note}, actor=actor, timeout=30)
         elif cmd == "propose":
             args.update(offer=names(a.offer), tick=names(a.tick), reason=a.reason)
         elif cmd == "approve":
