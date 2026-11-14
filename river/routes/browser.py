@@ -453,6 +453,8 @@ def _act(conn, a, who):
             # (client port, serve port, the pid the CLI said, the action), so a failed lookup can be traced
             b.signin_unconfirmed_why = (str(e)[:160] + f" [peer {getattr(vault.PEER, 'value', None)}, "
                                         f"action {a.get('action') or 'status'}]")
+            print(f"maxpm: browser of {owner}: the session proof failed: {b.signin_unconfirmed_why}",
+                  file=sys.stderr, flush=True)
         if b.running():  # #5827: a grant that ended takes its saved sign-in out before this action
             from .. import signin
             try:
