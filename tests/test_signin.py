@@ -301,6 +301,11 @@ class SavedSignIns(Base):
         b.signin_confirmed = False
         self.assertEqual(signin.enforce_cookies(b, self.c)["loaded"], [])
         self.assertEqual(b.jar, [])
+        # #5845: the log says why, once for this Chrome, so a session that finds no sign-in can read it
+        signin.enforce_cookies(b, self.c)
+        why = [x for x in vault.log(self.c, "gh-cookies")["log"] if x["action"] == "refused"]
+        self.assertEqual(len(why), 1)
+        self.assertIn("could not confirm that the browser's last command came from dev", why[0]["detail"])
 
     def test_a_new_sign_in_is_saved_back(self):
         self.save([{"name": "user_session", "value": "old", "domain": "github.com", "path": "/"}])

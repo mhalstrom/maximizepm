@@ -365,8 +365,17 @@ def enforce_cookies(b, conn=None):
         me = {"name": b.owner, "person": False}
         confirmed = bool(b.__dict__.get("signin_confirmed"))
         out = {"loaded": [], "removed": []}
+        skipped = b.__dict__.setdefault("cookie_skipped", set())
         for name, site in sites:
-            ok = confirmed and vault.allowed(conn, name, b.owner, me)["ok"]
+            granted = vault.allowed(conn, name, b.owner, me)["ok"]
+            ok = confirmed and granted
+            if granted and not confirmed and name not in skipped:
+                # #5845: a grant covers the session, but its browser's last command was not confirmed as its own
+                # (#5823): say so once for this Chrome, so a session that finds no sign-in can read why
+                skipped.add(name)
+                with core.tx(conn):
+                    vault._log(conn, name, b.owner, "refused", "browser sign-in not loaded: MaximizePM could not "
+                               f"confirm that the browser's last command came from {b.owner} itself")
             if ok and name not in loaded:
                 cookies = vault.unpack_cookies(vault.backend().get(conn, name))
                 if cookies:

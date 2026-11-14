@@ -854,6 +854,7 @@ class Browser:
             # them, or a close and open of the browser never loads them again (realquicksite-c711, Gmail).
             self.__dict__.pop("cookie_loaded", None)
             self.__dict__.pop("cookie_checked", None)
+            self.__dict__.pop("cookie_skipped", None)
             try:
                 signin.enforce_cookies(self)
             except RiverError as e:
